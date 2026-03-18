@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -95,22 +96,36 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Handle the daily schedule step."""
+        errors: dict[str, str] = {}
+        _TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
         if user_input is not None:
-            self._data.update(user_input)
-            return self.async_create_entry(
-                title="Climate Advisor",
-                data=self._data,
-            )
+            for field in ("wake_time", "sleep_time", "briefing_time"):
+                value = user_input.get(field, "")
+                if not _TIME_RE.match(value):
+                    errors[field] = "invalid_time_format"
+
+            if not errors:
+                self._data.update(user_input)
+                return self.async_create_entry(
+                    title="Climate Advisor",
+                    data=self._data,
+                )
+
+        _text_selector = selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+        )
 
         return self.async_show_form(
             step_id="schedule",
             data_schema=vol.Schema(
                 {
-                    vol.Required("wake_time", default="06:30"): selector.TimeSelector(),
-                    vol.Required("sleep_time", default="22:30"): selector.TimeSelector(),
-                    vol.Required("briefing_time", default="06:00"): selector.TimeSelector(),
+                    vol.Required("wake_time", default="06:30"): _text_selector,
+                    vol.Required("sleep_time", default="22:30"): _text_selector,
+                    vol.Required("briefing_time", default="06:00"): _text_selector,
                 }
             ),
+            errors=errors,
         )
 
     @staticmethod

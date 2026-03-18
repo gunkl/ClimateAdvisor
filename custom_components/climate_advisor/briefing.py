@@ -113,10 +113,10 @@ def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time) -> list[
         "🏠 All Day — Keep the house sealed up",
         "  • Keep ALL windows and doors closed.",
         "  • Close blinds on sun-facing windows, especially west-facing after noon.",
-        "  • The AC will maintain your comfort at {:.0f}°F.".format(comfort_cool),
+        f"  • The AC will maintain your comfort at {comfort_cool:.0f}°F.",
         "",
         "🌆 Evening",
-        "  If outdoor temps drop below {:.0f}°F after sunset, you'll get a".format(comfort_cool),
+        f"  If outdoor temps drop below {comfort_cool:.0f}°F after sunset, you'll get a",
         "  notification that it's safe to open windows and turn off the AC.",
         "  ✅ Automation will handle the AC shutoff if you open windows.",
     ]

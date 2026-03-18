@@ -1,0 +1,35 @@
+name: Validate and Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r requirements_test.txt
+
+      - name: Run pre-deploy validation
+        run: python tools/validate.py
+
+      - name: Run linting (ruff)
+        run: ruff check .
+        continue-on-error: true
+
+      - name: Run unit tests
+        run: pytest tests/ -v --tb=short

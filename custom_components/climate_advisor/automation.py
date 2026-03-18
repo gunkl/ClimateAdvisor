@@ -144,15 +144,16 @@ class AutomationEngine:
         if state:
             self._pre_pause_mode = state.state
 
-        if self._pre_pause_mode in ("heat", "cool"):
+        if self._pre_pause_mode and self._pre_pause_mode != "off":
             self._paused_by_door = True
             await self._set_hvac_mode("off")
 
             # Notify
             friendly_name = entity_id.split(".")[-1].replace("_", " ").title()
+            service_name = self.notify_service.split(".")[-1] if "." in self.notify_service else self.notify_service
             await self.hass.services.async_call(
                 "notify",
-                self.notify_service.replace("notify.", ""),
+                service_name,
                 {
                     "message": (
                         f"🚪 HVAC paused — {friendly_name} has been open for "
@@ -203,9 +204,10 @@ class AutomationEngine:
             _LOGGER.info("Occupancy returned — restoring comfort setpoint")
 
         # Notify with estimated recovery time
+        service_name = self.notify_service.split(".")[-1] if "." in self.notify_service else self.notify_service
         await self.hass.services.async_call(
             "notify",
-            self.notify_service.replace("notify.", ""),
+            service_name,
             {
                 "message": "🏠 Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes.",
                 "title": "Climate Advisor",

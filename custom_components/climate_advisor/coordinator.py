@@ -27,6 +27,8 @@ from .const import (
     DOMAIN,
     DOOR_WINDOW_PAUSE_SECONDS,
     OCCUPANCY_SETBACK_MINUTES,
+    DAY_TYPE_HOT,
+    DAY_TYPE_COLD,
     ATTR_DAY_TYPE,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
@@ -181,7 +183,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         outdoor_entity = self.config.get("outdoor_temp_entity")
         if outdoor_entity:
             outdoor_state = self.hass.states.get(outdoor_entity)
-            current_outdoor = float(outdoor_state.state) if outdoor_state else attrs.get("temperature", 65)
+            if outdoor_state:
+                try:
+                    current_outdoor = float(outdoor_state.state)
+                except ValueError:
+                    _LOGGER.warning(
+                        "Outdoor temp sensor %s has non-numeric state %r; using weather attribute fallback",
+                        outdoor_entity,
+                        outdoor_state.state,
+                    )
+                    current_outdoor = outdoor_state.attributes.get("temperature", 65)
+            else:
+                current_outdoor = attrs.get("temperature", 65)
         else:
             current_outdoor = attrs.get("temperature", 65)
 
@@ -189,7 +202,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         indoor_entity = self.config.get("indoor_temp_entity")
         if indoor_entity:
             indoor_state = self.hass.states.get(indoor_entity)
-            current_indoor = float(indoor_state.state) if indoor_state else None
+            if indoor_state:
+                try:
+                    current_indoor = float(indoor_state.state)
+                except ValueError:
+                    _LOGGER.warning(
+                        "Indoor temp sensor %s has non-numeric state %r; treating as unavailable",
+                        indoor_entity,
+                        indoor_state.state,
+                    )
+                    current_indoor = None
+            else:
+                current_indoor = None
         else:
             climate_state = self.hass.states.get(self.config["climate_entity"])
             current_indoor = (
@@ -276,9 +300,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing = briefing
 
         # Send notification
+        _notify_svc = self.config["notify_service"]
+        _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
         await self.hass.services.async_call(
             "notify",
-            self.config["notify_service"].replace("notify.", ""),
+            _notify_name,
             {
                 "message": briefing,
                 "title": "🏠 Your Home Climate Plan for Today",
@@ -381,5 +407,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
 def _parse_time(time_str: str) -> time:
     """Parse a time string like '06:30' into a time object."""
-    parts = time_str.split(":")
-    return time(int(parts[0]), int(parts[1]))
+    try:
+        parts = time_str.split(":")
+        if len(parts) < 2:
+            raise ValueError(f"Expected HH:MM format, got {time_str!r}")
+        return time(int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError, AttributeError):
+        _LOGGER.warning(
+            "Could not parse time %r — defaulting to 06:00",
+            time_str,
+        )
+        return time(6, 0)

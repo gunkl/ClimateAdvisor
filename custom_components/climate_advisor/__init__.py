@@ -118,6 +118,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data))
 
+    # Restore persisted state from last run (before setup registers listeners)
+    await coordinator.async_restore_state()
+
     # Set up scheduled events and listeners
     await coordinator.async_setup()
 

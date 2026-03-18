@@ -25,6 +25,7 @@ from .automation import AutomationEngine
 from .briefing import generate_briefing
 from .classifier import ForecastSnapshot, DayClassification, classify_day
 from .learning import LearningEngine, DailyRecord
+from .state import StatePersistence
 from .const import (
     CONF_SENSOR_POLARITY_INVERTED,
     DOMAIN,
@@ -71,6 +72,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._resolved_sensors: list[str] = []
 
         # Sub-components
+        self._state_persistence = StatePersistence(Path(hass.config.config_dir))
         self.learning = LearningEngine(Path(hass.config.config_dir))
         self.automation_engine = AutomationEngine(
             hass=hass,
@@ -89,9 +91,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing: str = ""
         self._door_open_timers: dict[str, Any] = {}
 
+        # Startup retry state — gentle backoff when weather entity isn't ready
+        self._startup_retries_remaining: int = 5
+        self._startup_retry_delay: int = 30  # seconds; doubles each attempt
+
         # Temperature history for dashboard chart (cleared at end of day)
         self._outdoor_temp_history: list[tuple[str, float]] = []
         self._indoor_temp_history: list[tuple[str, float]] = []
+
+        # HVAC runtime tracking
+        self._hvac_on_since: datetime | None = None
 
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
@@ -160,6 +169,161 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         _LOGGER.info("Climate Advisor coordinator setup complete")
 
+    async def async_restore_state(self) -> None:
+        """Restore operational state from disk after startup."""
+        state = await self.hass.async_add_executor_job(
+            self._state_persistence.load
+        )
+        if not state:
+            _LOGGER.debug("No persisted state found — starting fresh")
+            return
+
+        today_str = dt_util.now().strftime("%Y-%m-%d")
+        state_date = state.get("date", "")
+        yesterday_str = (
+            dt_util.now() - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+        # If the state is from yesterday, recover the DailyRecord to learning
+        if state_date == yesterday_str and state.get("today_record"):
+            try:
+                recovered = DailyRecord(**state["today_record"])
+                self.learning.record_day(recovered)
+                _LOGGER.info("Recovered yesterday's record during startup")
+            except (TypeError, KeyError) as err:
+                _LOGGER.warning("Failed to recover yesterday's record: %s", err)
+
+        if state_date != today_str:
+            _LOGGER.debug(
+                "Persisted state is from %s (today is %s) — starting fresh",
+                state_date,
+                today_str,
+            )
+            return
+
+        # Same-day restore
+        _LOGGER.info("Restoring same-day state from %s", state.get("last_saved"))
+
+        # Classification
+        cls_data = state.get("classification")
+        if cls_data:
+            try:
+                wot = cls_data.get("window_open_time")
+                wct = cls_data.get("window_close_time")
+                self._current_classification = DayClassification(
+                    day_type=cls_data["day_type"],
+                    trend_direction=cls_data["trend_direction"],
+                    trend_magnitude=cls_data.get("trend_magnitude", 0),
+                    today_high=cls_data["today_high"],
+                    today_low=cls_data["today_low"],
+                    tomorrow_high=cls_data["tomorrow_high"],
+                    tomorrow_low=cls_data["tomorrow_low"],
+                    hvac_mode=cls_data.get("hvac_mode", ""),
+                    pre_condition=cls_data.get("pre_condition", False),
+                    pre_condition_target=cls_data.get("pre_condition_target"),
+                    windows_recommended=cls_data.get("windows_recommended", False),
+                    window_open_time=(
+                        time.fromisoformat(wot) if wot else None
+                    ),
+                    window_close_time=(
+                        time.fromisoformat(wct) if wct else None
+                    ),
+                    setback_modifier=cls_data.get("setback_modifier", 0.0),
+                )
+            except (KeyError, ValueError, TypeError) as err:
+                _LOGGER.warning("Failed to restore classification: %s", err)
+
+        # Temperature history
+        temp_hist = state.get("temp_history", {})
+        self._outdoor_temp_history = [
+            (ts, t) for ts, t in temp_hist.get("outdoor", [])
+        ]
+        self._indoor_temp_history = [
+            (ts, t) for ts, t in temp_hist.get("indoor", [])
+        ]
+
+        # Today's record
+        record_data = state.get("today_record")
+        if record_data:
+            try:
+                self._today_record = DailyRecord(**record_data)
+            except (TypeError, KeyError) as err:
+                _LOGGER.warning("Failed to restore today's record: %s", err)
+
+        # Briefing state
+        briefing = state.get("briefing_state", {})
+        self._briefing_sent_today = briefing.get("sent_today", False)
+        self._last_briefing = briefing.get("last_text", "")
+
+        # Automation state
+        auto_state = state.get("automation_state", {})
+        if auto_state:
+            self.automation_engine.restore_state(auto_state)
+
+        _LOGGER.info("State restore complete")
+
+    def _build_state_dict(self) -> dict[str, Any]:
+        """Serialize current operational state for persistence."""
+        c = self._current_classification
+        cls_dict = None
+        if c:
+            cls_dict = {
+                "day_type": c.day_type,
+                "trend_direction": c.trend_direction,
+                "trend_magnitude": c.trend_magnitude,
+                "today_high": c.today_high,
+                "today_low": c.today_low,
+                "tomorrow_high": c.tomorrow_high,
+                "tomorrow_low": c.tomorrow_low,
+                "hvac_mode": c.hvac_mode,
+                "pre_condition": c.pre_condition,
+                "pre_condition_target": c.pre_condition_target,
+                "windows_recommended": c.windows_recommended,
+                "window_open_time": (
+                    c.window_open_time.isoformat() if c.window_open_time else None
+                ),
+                "window_close_time": (
+                    c.window_close_time.isoformat() if c.window_close_time else None
+                ),
+                "setback_modifier": c.setback_modifier,
+            }
+
+        record_dict = None
+        if self._today_record:
+            from dataclasses import asdict
+            record_dict = asdict(self._today_record)
+
+        return {
+            "date": dt_util.now().strftime("%Y-%m-%d"),
+            "last_saved": dt_util.now().isoformat(),
+            "classification": cls_dict,
+            "temp_history": {
+                "outdoor": list(self._outdoor_temp_history),
+                "indoor": list(self._indoor_temp_history),
+            },
+            "automation_state": self.automation_engine.get_serializable_state(),
+            "today_record": record_dict,
+            "briefing_state": {
+                "sent_today": self._briefing_sent_today,
+                "last_text": self._last_briefing,
+            },
+        }
+
+    async def _async_save_state(self) -> None:
+        """Persist current operational state to disk."""
+        state_dict = self._build_state_dict()
+        await self.hass.async_add_executor_job(
+            self._state_persistence.save, state_dict
+        )
+
+    def _flush_hvac_runtime(self) -> None:
+        """Flush accumulated HVAC runtime to today's record."""
+        if self._hvac_on_since and self._today_record:
+            now = dt_util.now()
+            elapsed = (now - self._hvac_on_since).total_seconds() / 60.0
+            self._today_record.hvac_runtime_minutes += elapsed
+            self._hvac_on_since = now  # Reset to now for continued tracking
+
     def _resolve_monitored_sensors(self) -> list[str]:
         """Resolve all monitored sensor entity IDs.
 
@@ -213,6 +377,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._current_classification = classify_day(forecast)
             await self.automation_engine.apply_classification(self._current_classification)
 
+            # Reset startup retry state on success
+            if self._startup_retries_remaining < 5:
+                _LOGGER.debug("Weather entity available; startup retry cleared")
+                self._startup_retries_remaining = 5
+                self._startup_retry_delay = 30
+
             # Record temperature history for dashboard chart
             now_str = dt_util.now().isoformat()
             self._outdoor_temp_history.append(
@@ -222,13 +392,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._indoor_temp_history.append(
                     (now_str, forecast.current_indoor_temp)
                 )
+
+                # Track comfort violations (~30 min per update cycle)
+                if self._today_record:
+                    comfort_low = self.config.get("comfort_heat", 70)
+                    comfort_high = self.config.get("comfort_cool", 75)
+                    if (
+                        forecast.current_indoor_temp < comfort_low
+                        or forecast.current_indoor_temp > comfort_high
+                    ):
+                        self._today_record.comfort_violations_minutes += 30.0
+
+            # Save state after classification update
+            await self._async_save_state()
         else:
-            # Weather entity not ready yet (common at startup) — retry sooner
-            # than the normal 30-min interval
-            _LOGGER.debug("Scheduling retry in 60s for weather entity")
-            async_call_later(
-                self.hass, 60, lambda _: self.async_request_refresh()
-            )
+            # Weather entity not ready yet (common after HA restart).
+            # Retry with gentle backoff: 30s → 60s → 120s → 240s → 480s
+            # Total wait ≈ 15 min before falling back to normal 30-min poll.
+            if self._startup_retries_remaining > 0:
+                delay = self._startup_retry_delay
+                self._startup_retries_remaining -= 1
+                self._startup_retry_delay = min(delay * 2, 480)
+                _LOGGER.debug(
+                    "Weather entity not ready; retry %d remaining in %ds",
+                    self._startup_retries_remaining + 1,
+                    delay,
+                )
+                async_call_later(
+                    self.hass, delay, lambda _: self.async_request_refresh()
+                )
+            else:
+                _LOGGER.warning(
+                    "Weather entity still unavailable after startup retries; "
+                    "will try again at next scheduled update"
+                )
 
         # Build the data dict that sensors will read
         c = self._current_classification
@@ -452,6 +649,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         self._briefing_sent_today = True
         _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
+        await self._async_save_state()
 
     @callback
     async def _async_morning_wakeup(self, now: datetime) -> None:
@@ -467,13 +665,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_end_of_day(self, now: datetime) -> None:
         """Finalize the day's record and reset for tomorrow."""
         if self._today_record:
+            # Compute avg indoor temp from history
+            if self._indoor_temp_history:
+                self._today_record.avg_indoor_temp = round(
+                    sum(t for _, t in self._indoor_temp_history)
+                    / len(self._indoor_temp_history),
+                    1,
+                )
+            # Flush any accumulated HVAC runtime
+            self._flush_hvac_runtime()
             self.learning.record_day(self._today_record)
             _LOGGER.info("Day record saved for learning")
 
         self._today_record = None
         self._briefing_sent_today = False
+        self._hvac_on_since = None
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
+        await self._async_save_state()
 
     @callback
     async def _async_door_window_changed(self, event: Event) -> None:
@@ -509,6 +718,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     if self._today_record:
                         self._today_record.door_window_pause_events += 1
 
+                        # Track window compliance during recommended window period
+                        c = self._current_classification
+                        if (
+                            c
+                            and c.windows_recommended
+                            and c.window_open_time
+                            and c.window_close_time
+                            and not self._today_record.windows_opened
+                        ):
+                            now_time = dt_util.now().time()
+                            if c.window_open_time <= now_time <= c.window_close_time:
+                                self._today_record.windows_opened = True
+                                self._today_record.window_open_actual_time = (
+                                    dt_util.now().isoformat()
+                                )
+
+                        await self._async_save_state()
+
             cancel = async_call_later(
                 self.hass, debounce_sec, _debounce_expired
             )
@@ -528,7 +755,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 not self._is_sensor_open(s) for s in self._resolved_sensors
             )
             if all_closed:
+                # Track window close time if we were tracking compliance
+                if (
+                    self._today_record
+                    and self._today_record.windows_opened
+                    and self._today_record.window_close_actual_time is None
+                ):
+                    self._today_record.window_close_actual_time = (
+                        dt_util.now().isoformat()
+                    )
                 await self.automation_engine.handle_all_doors_windows_closed()
+                await self._async_save_state()
 
     @callback
     async def _async_thermostat_changed(self, event: Event) -> None:
@@ -551,6 +788,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             await self.automation_engine.handle_manual_override_during_pause()
 
+        # HVAC runtime tracking via hvac_action (preferred) or mode
+        new_action = new_state.attributes.get("hvac_action", "").lower()
+        old_action = old_state.attributes.get("hvac_action", "").lower()
+        running_actions = {"heating", "cooling"}
+
+        if new_action and old_action:
+            # Use hvac_action when available (more accurate)
+            was_running = old_action in running_actions
+            is_running = new_action in running_actions
+        else:
+            # Fall back to mode-based tracking
+            idle_modes = {"off", "unavailable", "unknown", ""}
+            was_running = old_state.state not in idle_modes
+            is_running = new_state.state not in idle_modes
+
+        if not was_running and is_running:
+            # HVAC just turned on
+            self._hvac_on_since = dt_util.now()
+        elif was_running and not is_running:
+            # HVAC just turned off — flush runtime
+            self._flush_hvac_runtime()
+            self._hvac_on_since = None
+            await self._async_save_state()
+
         # Detect manual override: temperature changed but not by us
         new_temp = new_state.attributes.get("temperature")
         old_temp = old_state.attributes.get("temperature")
@@ -560,6 +821,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # changes were initiated by the integration vs. manual
             self._today_record.manual_overrides += 1
             _LOGGER.debug("Possible manual override detected: %s -> %s", old_temp, new_temp)
+            await self._async_save_state()
 
     def _compute_next_action(self, c: DayClassification | None) -> str:
         """Compute the next recommended human action for display."""
@@ -656,6 +918,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def async_shutdown(self) -> None:
         """Clean up on shutdown."""
+        # Flush HVAC runtime and save state before cleanup
+        self._flush_hvac_runtime()
+        await self._async_save_state()
+
         # Cancel any pending debounce timers
         for cancel in self._door_open_timers.values():
             cancel()

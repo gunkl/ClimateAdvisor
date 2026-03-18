@@ -345,6 +345,23 @@ class AutomationEngine:
 
         _LOGGER.info("Morning wake-up — restoring comfort setpoint")
 
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """Restore automation state from persisted data.
+
+        Grace timers are cleared on restart (natural reset point).
+        Only pause state is restored so HVAC resumes correctly.
+        """
+        self._paused_by_door = state.get("paused_by_door", False)
+        self._pre_pause_mode = state.get("pre_pause_mode")
+        # Grace timers cannot be restored — clear on restart
+        self._grace_active = False
+        self._last_resume_source = None
+        _LOGGER.info(
+            "Restored automation state: paused=%s, pre_pause_mode=%s",
+            self._paused_by_door,
+            self._pre_pause_mode,
+        )
+
     def get_serializable_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot of the engine's internal state."""
         return {

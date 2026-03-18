@@ -46,6 +46,9 @@ DEFAULT_AUTOMATION_GRACE_SECONDS = 3600  # 60 minutes
 OCCUPANCY_SETBACK_MINUTES = 15
 MAX_CONTINUOUS_RUNTIME_HOURS = 3
 
+# State persistence
+STATE_FILE = "climate_advisor_state.json"
+
 # Learning system
 LEARNING_DB_FILE = "climate_advisor_learning.json"
 SUGGESTION_COOLDOWN_DAYS = 7  # Don't repeat the same suggestion within a week

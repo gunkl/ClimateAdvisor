@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Climate Advisor Setup",
+        "description": "Configure your Climate Advisor integration. Select the entities it should monitor and control.",
+        "data": {
+          "weather_entity": "Weather Entity (for forecasts)",
+          "climate_entity": "Thermostat / Climate Entity",
+          "outdoor_temp_entity": "Outdoor Temperature Sensor (optional, falls back to weather entity)",
+          "indoor_temp_entity": "Indoor Temperature Sensor (optional, falls back to climate entity)",
+          "comfort_heat": "Heating Comfort Setpoint (°F)",
+          "comfort_cool": "Cooling Comfort Setpoint (°F)",
+          "setback_heat": "Heating Away/Sleep Setpoint (°F)",
+          "setback_cool": "Cooling Away/Sleep Setpoint (°F)",
+          "notify_service": "Notification Service (e.g. notify.mobile_app_phone)"
+        }
+      },
+      "sensors": {
+        "title": "Door & Window Sensors",
+        "description": "Select any door or window contact sensors you'd like Climate Advisor to monitor. These will pause HVAC when left open.",
+        "data": {
+          "door_window_sensors": "Door/Window Sensors"
+        }
+      },
+      "schedule": {
+        "title": "Daily Schedule",
+        "description": "Set your household schedule so Climate Advisor knows when to warm up, cool down, and send briefings.",
+        "data": {
+          "wake_time": "Wake-up Time",
+          "sleep_time": "Bedtime",
+          "briefing_time": "Daily Briefing Time"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Climate Advisor Options",
+        "data": {
+          "comfort_heat": "Heating Comfort Setpoint (°F)",
+          "comfort_cool": "Cooling Comfort Setpoint (°F)",
+          "learning_enabled": "Enable Learning & Suggestions",
+          "aggressive_savings": "Prefer savings over comfort"
+        }
+      }
+    }
+  }
+}

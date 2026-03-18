@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.bak.*
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Sensitive files — never commit
+.deploy.env
+*.env
+!.deploy.env.sample
+secrets.yaml
+*.pem
+*.key
+id_rsa
+id_ed25519
+id_ecdsa

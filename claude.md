@@ -35,6 +35,37 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 - Keep briefings scannable in 30 seconds
 - Use friendly language, not technical jargon
 
+### Home Assistant Boundary Rule (CRITICAL)
+
+**Decision**: Climate Advisor MUST NOT modify, write to, or interact with anything in Home Assistant outside the integration's own scope.
+
+**Allowed scope:**
+- Files inside `custom_components/climate_advisor/` (the integration itself)
+- HA service calls to `climate` domain (set_hvac_mode, set_temperature) — these are the integration's core purpose
+- HA service calls to `notify` domain — user-configured notification service
+- One data file: `climate_advisor_learning.json` in the HA config root (learning engine state)
+
+**Everything else is OUT OF SCOPE.** This includes but is not limited to:
+- Modifying other integrations or their config
+- Writing to `configuration.yaml`, `automations.yaml`, `scripts.yaml`, or any other HA config file
+- Calling HA services outside `climate` and `notify` (e.g., `homeassistant.restart`, `input_boolean.turn_on`)
+- Creating files outside the integration directory (except the learning DB above)
+- Modifying HA add-on configurations
+- Deploying files outside `/config/custom_components/climate_advisor/` on the remote server
+
+**Violation protocol:**
+1. If a proposed change would touch anything outside the allowed scope, **STOP and flag it as a BOUNDARY VIOLATION** before writing any code
+2. Explain exactly what the out-of-scope interaction is and why it's being proposed
+3. Ask the user whether to grant an exception
+4. If the user approves, log the exception in `docs/HA-BOUNDARY-EXCEPTIONS.md` with: date, what was allowed, why, and a risk note
+5. Exceptions are temporary — each one should include a resolution plan and be periodically reviewed
+
+**Why this matters:**
+- A broken custom integration should never take down Home Assistant
+- Users trust that installing Climate Advisor won't modify their existing setup
+- Out-of-scope writes can cause data loss, config corruption, or security issues
+- This rule makes the integration safe to install, update, and uninstall cleanly
+
 ### Project Memory
 
 Claude Code's built-in memory system stores project context, tooling locations, and hard-won facts so they don't have to be re-discovered every session. Claude reads memory automatically at session start.

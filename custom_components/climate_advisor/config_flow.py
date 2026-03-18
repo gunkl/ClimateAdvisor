@@ -8,7 +8,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import DOMAIN, DEFAULT_COMFORT_HEAT, DEFAULT_COMFORT_COOL, DEFAULT_SETBACK_HEAT, DEFAULT_SETBACK_COOL

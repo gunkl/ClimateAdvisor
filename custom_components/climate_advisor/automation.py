@@ -6,24 +6,13 @@ based on the day classification and learning state.
 from __future__ import annotations
 
 import logging
-from datetime import time
 from typing import Any
 
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers.event import async_track_time_change, async_track_state_change_event
-from homeassistant.const import STATE_ON, STATE_OFF
+from homeassistant.core import HomeAssistant
 
 from .classifier import DayClassification
 from .const import (
-    DOMAIN,
-    DAY_TYPE_HOT,
-    DAY_TYPE_WARM,
-    DAY_TYPE_MILD,
-    DAY_TYPE_COOL,
-    DAY_TYPE_COLD,
     DOOR_WINDOW_PAUSE_SECONDS,
-    OCCUPANCY_SETBACK_MINUTES,
-    MAX_CONTINUOUS_RUNTIME_HOURS,
 )
 
 _LOGGER = logging.getLogger(__name__)

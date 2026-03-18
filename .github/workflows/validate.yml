@@ -29,7 +29,6 @@ jobs:
 
       - name: Run linting (ruff)
         run: ruff check .
-        continue-on-error: true
 
       - name: Run unit tests
         run: pytest tests/ -v --tb=short

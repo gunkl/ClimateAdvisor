@@ -10,7 +10,6 @@ from datetime import time
 import pytest
 
 from custom_components.climate_advisor.classifier import (
-    DayClassification,
     ForecastSnapshot,
     classify_day,
 )

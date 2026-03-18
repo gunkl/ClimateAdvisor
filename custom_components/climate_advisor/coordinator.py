@@ -25,8 +25,6 @@ from .classifier import ForecastSnapshot, DayClassification, classify_day
 from .learning import LearningEngine, DailyRecord
 from .const import (
     DOMAIN,
-    DOOR_WINDOW_PAUSE_SECONDS,
-    OCCUPANCY_SETBACK_MINUTES,
     DAY_TYPE_HOT,
     DAY_TYPE_COLD,
     ATTR_DAY_TYPE,

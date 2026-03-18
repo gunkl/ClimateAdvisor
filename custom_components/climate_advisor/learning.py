@@ -14,10 +14,8 @@ from typing import Any
 
 from .const import (
     LEARNING_DB_FILE,
-    SUGGESTION_COOLDOWN_DAYS,
     MIN_DATA_POINTS_FOR_SUGGESTION,
     COMPLIANCE_THRESHOLD_LOW,
-    COMPLIANCE_THRESHOLD_HIGH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -177,11 +175,11 @@ class LearningEngine:
             suggestion_key = "short_departures"
             if suggestion_key not in recently_dismissed:
                 suggestions.append(
-                    f"You frequently leave for 30–45 minute periods, which is barely "
-                    f"long enough for the setback to take effect before you return. "
-                    f"Would you like to shorten the setback delay from 15 minutes to "
-                    f"5 minutes for these quick trips, or skip setback for departures "
-                    f"under 1 hour?"
+                    "You frequently leave for 30–45 minute periods, which is barely "
+                    "long enough for the setback to take effect before you return. "
+                    "Would you like to shorten the setback delay from 15 minutes to "
+                    "5 minutes for these quick trips, or skip setback for departures "
+                    "under 1 hour?"
                 )
 
         # --- Pattern: Comfort violations (too cold/hot despite automation) ---

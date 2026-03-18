@@ -223,7 +223,7 @@ def check_secrets(component_dir):
 
 
 def main():
-    print(f"Climate Advisor Pre-Deploy Validation")
+    print("Climate Advisor Pre-Deploy Validation")
     print(f"Component dir: {COMPONENT_DIR}")
     print("=" * 60)
 

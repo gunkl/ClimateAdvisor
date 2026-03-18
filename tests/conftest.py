@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import sys
 import os
-from types import ModuleType
 from unittest.mock import MagicMock
 
 # Ensure the project root is on sys.path so imports from
@@ -54,8 +53,8 @@ if "voluptuous" not in sys.modules:
     sys.modules["voluptuous.error"] = _make_mock_module("voluptuous.error")
 
 # Now safe to import Climate Advisor modules
-import pytest
-from custom_components.climate_advisor.classifier import ForecastSnapshot
+import pytest  # noqa: E402
+from custom_components.climate_advisor.classifier import ForecastSnapshot  # noqa: E402
 
 
 @pytest.fixture

@@ -43,7 +43,7 @@ def generate_briefing(
 
     # Header
     trend_desc = _trend_description(c)
-    lines.append(f"🏠 Your Home Climate Plan for Today")
+    lines.append("🏠 Your Home Climate Plan for Today")
     lines.append(f"{'=' * 40}")
     lines.append("")
     lines.append(f"Today: High {c.today_high:.0f}°F / Low {c.today_low:.0f}°F")
@@ -208,12 +208,12 @@ def _cool_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time) -> list
         "  to take advantage of whatever solar gain the house gets.",
         "  ✅ Handled automatically. You won't notice the difference.",
         "",
-        f"🌆 Evening",
+        "🌆 Evening",
         f"  Heater returns to full {comfort_heat:.0f}°F setpoint after 3:00 PM",
         "  as outdoor temps fall.",
         "  ✅ Automatic.",
         "",
-        f"🌙 Bedtime",
+        "🌙 Bedtime",
         f"  Setpoint drops to {comfort_heat - 4:.0f}°F for sleeping comfort.",
         "  ✅ Automatic.",
     ]
@@ -237,14 +237,14 @@ def _cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time) -> list
     if c.pre_condition and c.trend_direction == "cooling":
         lines.extend([
             "🌡️  Pre-Heating Tonight",
-            f"  Tomorrow is even colder. Starting at 7:00 PM, the system will",
+            "  Tomorrow is even colder. Starting at 7:00 PM, the system will",
             f"  bank extra heat by raising the setpoint to {comfort_heat + (c.pre_condition_target or 3):.0f}°F",
             "  for a couple hours, then coast into the night.",
             "  ✅ Automatic — the house will feel extra cozy this evening.",
             "",
         ])
     lines.extend([
-        f"🌙 Bedtime",
+        "🌙 Bedtime",
         f"  Conservative setback tonight — dropping to {comfort_heat - 3:.0f}°F instead of the",
         f"  usual {setback_heat:.0f}°F, since recovery is harder in extreme cold.",
         "  ✅ Automatic.",

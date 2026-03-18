@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, time
-from typing import Any
 
 from .const import (
     DAY_TYPE_HOT,

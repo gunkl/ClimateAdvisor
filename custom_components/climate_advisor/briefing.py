@@ -203,9 +203,9 @@ def _cool_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time) -> list
         f" the morning — it's too cool outside for windows today, so we're"
         f" staying sealed up.",
         "",
-        f"Between about 11am and 3pm, I'll ease the setpoint back a couple"
-        f" degrees to ride whatever solar gain the house picks up through the"
-        f" windows. You won't notice the difference, but it saves a bit of energy.",
+        "Between about 11am and 3pm, I'll ease the setpoint back a couple"
+        " degrees to ride whatever solar gain the house picks up through the"
+        " windows. You won't notice the difference, but it saves a bit of energy.",
         "",
         f"After 3pm I'll bring it back to {comfort_heat:.0f}°F as the sun drops."
         f" At bedtime, I'll set things to {comfort_heat - 4:.0f}°F for sleeping"

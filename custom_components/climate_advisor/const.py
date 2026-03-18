@@ -26,10 +26,22 @@ TREND_THRESHOLD_SIGNIFICANT = 10
 TREND_THRESHOLD_MODERATE = 5
 
 # Timing
-DOOR_WINDOW_PAUSE_SECONDS = 180  # 3 minutes before pausing HVAC
+DOOR_WINDOW_PAUSE_SECONDS = 180  # deprecated — use CONF_SENSOR_DEBOUNCE instead
 
 # Door/window sensor configuration
 CONF_SENSOR_POLARITY_INVERTED = "sensor_polarity_inverted"
+
+# Debounce and grace period config keys
+CONF_SENSOR_DEBOUNCE = "sensor_debounce_seconds"
+CONF_MANUAL_GRACE_PERIOD = "manual_grace_seconds"
+CONF_MANUAL_GRACE_NOTIFY = "manual_grace_notify"
+CONF_AUTOMATION_GRACE_PERIOD = "automation_grace_seconds"
+CONF_AUTOMATION_GRACE_NOTIFY = "automation_grace_notify"
+
+# Debounce and grace period defaults (seconds)
+DEFAULT_SENSOR_DEBOUNCE_SECONDS = 300  # 5 minutes
+DEFAULT_MANUAL_GRACE_SECONDS = 1800  # 30 minutes
+DEFAULT_AUTOMATION_GRACE_SECONDS = 3600  # 60 minutes
 OCCUPANCY_SETBACK_MINUTES = 15
 MAX_CONTINUOUS_RUNTIME_HOURS = 3
 

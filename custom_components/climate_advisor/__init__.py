@@ -15,7 +15,15 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_AUTOMATION_GRACE_NOTIFY,
+    CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_MANUAL_GRACE_NOTIFY,
+    CONF_MANUAL_GRACE_PERIOD,
+    CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    DEFAULT_AUTOMATION_GRACE_SECONDS,
+    DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DOMAIN,
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -72,6 +80,20 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             config_entry, data=new_data, version=3
         )
         _LOGGER.info("Migration to version 3 complete")
+        # Fall through to v3→v4 migration
+
+    if config_entry.version == 3:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 3 to 4")
+        new_data = {**config_entry.data}
+        new_data.setdefault(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS)
+        new_data.setdefault(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS)
+        new_data.setdefault(CONF_MANUAL_GRACE_NOTIFY, False)
+        new_data.setdefault(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS)
+        new_data.setdefault(CONF_AUTOMATION_GRACE_NOTIFY, True)
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=4
+        )
+        _LOGGER.info("Migration to version 4 complete")
 
     return True
 

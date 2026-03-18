@@ -14,6 +14,7 @@ from typing import Any
 from homeassistant.core import HomeAssistant, callback, Event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.event import (
+    async_call_later,
     async_track_time_change,
     async_track_state_change_event,
 )
@@ -40,6 +41,8 @@ from .const import (
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_WEATHER_SERVICE,
     TEMP_SOURCE_CLIMATE_FALLBACK,
+    CONF_SENSOR_DEBOUNCE,
+    DEFAULT_SENSOR_DEBOUNCE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -438,20 +441,53 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     @callback
     async def _async_door_window_changed(self, event: Event) -> None:
-        """Handle a door/window sensor state change."""
+        """Handle a door/window sensor state change with debounce."""
         entity_id = event.data.get("entity_id", "")
         new_state = event.data.get("new_state")
         if not new_state:
             return
 
         if self._is_sensor_open(entity_id):
-            # Sensor transitioned to open — start HVAC pause flow
-            _LOGGER.debug("Door/window opened: %s — starting timer", entity_id)
-            await self.automation_engine.handle_door_window_open(entity_id)
-            if self._today_record:
-                self._today_record.door_window_pause_events += 1
+            # Sensor transitioned to open — start debounce timer if not already running
+            if entity_id in self._door_open_timers:
+                return  # Timer already pending for this sensor
+
+            debounce_sec = self.config.get(
+                CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS
+            )
+            _LOGGER.debug(
+                "Door/window opened: %s — debounce started (%ds)",
+                entity_id,
+                debounce_sec,
+            )
+
+            @callback
+            async def _debounce_expired(_now: Any, eid: str = entity_id) -> None:
+                """Debounce period elapsed — check if sensor is still open."""
+                self._door_open_timers.pop(eid, None)
+                if self._is_sensor_open(eid):
+                    _LOGGER.debug(
+                        "Debounce expired, sensor still open: %s", eid
+                    )
+                    await self.automation_engine.handle_door_window_open(eid)
+                    if self._today_record:
+                        self._today_record.door_window_pause_events += 1
+
+            cancel = async_call_later(
+                self.hass, debounce_sec, _debounce_expired
+            )
+            self._door_open_timers[entity_id] = cancel
         else:
-            # Sensor transitioned to closed — check if ALL monitored sensors are closed
+            # Sensor transitioned to closed — cancel any pending debounce timer
+            cancel = self._door_open_timers.pop(entity_id, None)
+            if cancel:
+                cancel()
+                _LOGGER.debug(
+                    "Door/window closed during debounce: %s — timer cancelled",
+                    entity_id,
+                )
+
+            # Check if ALL monitored sensors are now closed
             all_closed = all(
                 not self._is_sensor_open(s) for s in self._resolved_sensors
             )
@@ -465,6 +501,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         old_state = event.data.get("old_state")
         if not new_state or not old_state:
             return
+
+        # Detect manual HVAC override during a door/window pause
+        if (
+            self.automation_engine.is_paused_by_door
+            and old_state.state == "off"
+            and new_state.state not in ("off", "unavailable", "unknown")
+        ):
+            _LOGGER.info(
+                "Manual HVAC override detected during door/window pause: %s -> %s",
+                old_state.state,
+                new_state.state,
+            )
+            await self.automation_engine.handle_manual_override_during_pause()
 
         # Detect manual override: temperature changed but not by us
         new_temp = new_state.attributes.get("temperature")
@@ -498,6 +547,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def async_shutdown(self) -> None:
         """Clean up on shutdown."""
+        # Cancel any pending debounce timers
+        for cancel in self._door_open_timers.values():
+            cancel()
+        self._door_open_timers.clear()
+
         for unsub in self._unsub_listeners:
             unsub()
         self._unsub_listeners.clear()

@@ -14,10 +14,18 @@ from homeassistant.helpers import selector
 from .const import (
     DOMAIN,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_SENSOR_DEBOUNCE,
+    CONF_MANUAL_GRACE_PERIOD,
+    CONF_MANUAL_GRACE_NOTIFY,
+    CONF_AUTOMATION_GRACE_PERIOD,
+    CONF_AUTOMATION_GRACE_NOTIFY,
     DEFAULT_COMFORT_HEAT,
     DEFAULT_COMFORT_COOL,
     DEFAULT_SETBACK_HEAT,
     DEFAULT_SETBACK_COOL,
+    DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_AUTOMATION_GRACE_SECONDS,
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_WEATHER_SERVICE,
@@ -59,7 +67,7 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -208,6 +216,39 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_SENSOR_POLARITY_INVERTED, default=False
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_SENSOR_DEBOUNCE, default=DEFAULT_SENSOR_DEBOUNCE_SECONDS
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=900, step=30,
+                            unit_of_measurement="seconds",
+                            mode="slider",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MANUAL_GRACE_PERIOD, default=DEFAULT_MANUAL_GRACE_SECONDS
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=7200, step=60,
+                            unit_of_measurement="seconds",
+                            mode="slider",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MANUAL_GRACE_NOTIFY, default=False
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AUTOMATION_GRACE_PERIOD, default=DEFAULT_AUTOMATION_GRACE_SECONDS
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=7200, step=60,
+                            unit_of_measurement="seconds",
+                            mode="slider",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AUTOMATION_GRACE_NOTIFY, default=True
+                    ): selector.BooleanSelector(),
                 }
             ),
         )
@@ -337,6 +378,44 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SENSOR_POLARITY_INVERTED,
                         default=current.get(CONF_SENSOR_POLARITY_INVERTED, False),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_SENSOR_DEBOUNCE,
+                        default=current.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=900, step=30,
+                            unit_of_measurement="seconds",
+                            mode="slider",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MANUAL_GRACE_PERIOD,
+                        default=current.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=7200, step=60,
+                            unit_of_measurement="seconds",
+                            mode="slider",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MANUAL_GRACE_NOTIFY,
+                        default=current.get(CONF_MANUAL_GRACE_NOTIFY, False),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_AUTOMATION_GRACE_PERIOD,
+                        default=current.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=7200, step=60,
+                            unit_of_measurement="seconds",
+                            mode="slider",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AUTOMATION_GRACE_NOTIFY,
+                        default=current.get(CONF_AUTOMATION_GRACE_NOTIFY, True),
                     ): selector.BooleanSelector(),
                 }
             ),

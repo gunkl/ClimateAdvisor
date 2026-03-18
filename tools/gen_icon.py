@@ -116,7 +116,7 @@ def draw_gear(draw, cx: int, cy: int, r: int):
     teeth = 8
     outer_r = r
     inner_r = int(r * 0.7)
-    tooth_half = math.pi / teeth
+
 
     # Draw gear teeth as small rectangles around a circle
     for i in range(teeth):

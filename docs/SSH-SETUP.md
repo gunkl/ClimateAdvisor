@@ -19,9 +19,9 @@ This guide walks through setting up SSH access from your Windows development mac
 
 ## Step 2: Test the Connection
 
-From PowerShell on your Windows machine:
+From a terminal on your Windows machine:
 
-```powershell
+```bash
 ssh hassio@homeassistant.local
 ```
 
@@ -39,8 +39,8 @@ Type `exit` to disconnect.
 
 If you prefer a dedicated key instead of your default SSH key:
 
-```powershell
-ssh-keygen -t ed25519 -f "$env:USERPROFILE\.ssh\ha_key" -C "climate-advisor-deploy"
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/ha_key -C "climate-advisor-deploy"
 ```
 
 Add the public key to the SSH add-on's **Authorized Keys** config, then set `HA_SSH_KEY=~/.ssh/ha_key` in your `.deploy.env`.
@@ -49,7 +49,7 @@ Add the public key to the SSH add-on's **Authorized Keys** config, then set `HA_
 
 Copy the sample environment file and edit it:
 
-```powershell
+```bash
 cp .deploy.env.sample .deploy.env
 ```
 
@@ -70,8 +70,8 @@ Replace `homeassistant.local` with your HA server's IP address if mDNS doesn't w
 
 Run a dry run to verify everything connects:
 
-```powershell
-.\tools\deploy.ps1 -DryRun
+```bash
+python tools/deploy.py --dry-run
 ```
 
 This runs validation only and shows what would be deployed without making changes.
@@ -101,13 +101,13 @@ This runs validation only and shows what would be deployed without making change
 
 Once set up, deploying is a single command:
 
-```powershell
+```bash
 # Full deploy (validate → backup → copy → restart → verify)
-.\tools\deploy.ps1
+python tools/deploy.py
 
 # Quick deploy without restart (for testing file changes)
-.\tools\deploy.ps1 -SkipRestart
+python tools/deploy.py --skip-restart
 
 # Roll back to previous version if something breaks
-.\tools\deploy.ps1 -Rollback
+python tools/deploy.py --rollback
 ```

@@ -42,7 +42,7 @@ SmartHVAC/
 │   └── SSH-SETUP.md                 # SSH deployment setup guide
 ├── tools/
 │   ├── validate.py              # Pre-deploy validation script
-│   └── deploy.ps1               # Deployment script (PowerShell)
+│   └── deploy.py                # Deployment script (Python)
 ├── README.md                    # User-facing documentation
 ├── agents.md                    # This file — agent guidance
 ├── claude.md                    # Claude-specific workflow guidelines
@@ -74,21 +74,21 @@ mypy custom_components/climate_advisor/
 
 ### Deploying to Home Assistant
 
-```powershell
+```bash
 # Validate before deploying (syntax, manifest, imports, strings)
 python tools/validate.py
 
 # Full deploy (validate → backup → copy → restart → verify)
-.\tools\deploy.ps1
+python tools/deploy.py
 
 # Dry run (validate only, show what would deploy)
-.\tools\deploy.ps1 -DryRun
+python tools/deploy.py --dry-run
 
 # Deploy without restarting HA
-.\tools\deploy.ps1 -SkipRestart
+python tools/deploy.py --skip-restart
 
 # Roll back to previous version
-.\tools\deploy.ps1 -Rollback
+python tools/deploy.py --rollback
 ```
 
 See [docs/SSH-SETUP.md](docs/SSH-SETUP.md) for initial SSH configuration.

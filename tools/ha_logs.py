@@ -92,7 +92,7 @@ def fetch_logs(
             remote_cmd += f" | grep -i '{extra_filter}'"
         remote_cmd += f" | tail -n {lines}"
     else:
-        remote_cmd = f"ha core logs 2>/dev/null"
+        remote_cmd = "ha core logs 2>/dev/null"
         if extra_filter:
             remote_cmd += f" | grep -i '{extra_filter}'"
         remote_cmd += f" | tail -n {lines}"

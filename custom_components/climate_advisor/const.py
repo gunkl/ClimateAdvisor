@@ -37,6 +37,12 @@ MIN_DATA_POINTS_FOR_SUGGESTION = 14  # Need 2 weeks of data before suggesting ch
 COMPLIANCE_THRESHOLD_LOW = 0.3  # Below 30% compliance triggers a suggestion
 COMPLIANCE_THRESHOLD_HIGH = 0.8  # Above 80% means the advice is working
 
+# Temperature source types
+TEMP_SOURCE_SENSOR = "sensor"
+TEMP_SOURCE_INPUT_NUMBER = "input_number"
+TEMP_SOURCE_WEATHER_SERVICE = "weather_service"
+TEMP_SOURCE_CLIMATE_FALLBACK = "climate_fallback"
+
 # Sensor attributes
 ATTR_DAY_TYPE = "day_type"
 ATTR_TREND = "trend_direction"

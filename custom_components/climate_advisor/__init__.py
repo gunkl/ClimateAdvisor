@@ -14,12 +14,55 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    TEMP_SOURCE_SENSOR,
+    TEMP_SOURCE_INPUT_NUMBER,
+    TEMP_SOURCE_WEATHER_SERVICE,
+    TEMP_SOURCE_CLIMATE_FALLBACK,
+)
 from .coordinator import ClimateAdvisorCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = ["sensor"]
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old config entries to new format."""
+    if config_entry.version == 1:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 1 to 2")
+        new_data = {**config_entry.data}
+
+        # Migrate outdoor temp source
+        outdoor_entity = new_data.get("outdoor_temp_entity")
+        if outdoor_entity:
+            if outdoor_entity.startswith("input_number."):
+                new_data["outdoor_temp_source"] = TEMP_SOURCE_INPUT_NUMBER
+            else:
+                new_data["outdoor_temp_source"] = TEMP_SOURCE_SENSOR
+        else:
+            new_data["outdoor_temp_source"] = TEMP_SOURCE_WEATHER_SERVICE
+            new_data.pop("outdoor_temp_entity", None)
+
+        # Migrate indoor temp source
+        indoor_entity = new_data.get("indoor_temp_entity")
+        if indoor_entity:
+            if indoor_entity.startswith("input_number."):
+                new_data["indoor_temp_source"] = TEMP_SOURCE_INPUT_NUMBER
+            else:
+                new_data["indoor_temp_source"] = TEMP_SOURCE_SENSOR
+        else:
+            new_data["indoor_temp_source"] = TEMP_SOURCE_CLIMATE_FALLBACK
+            new_data.pop("indoor_temp_entity", None)
+
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=2
+        )
+        _LOGGER.info("Migration to version 2 complete")
+        return True
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

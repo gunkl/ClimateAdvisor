@@ -11,15 +11,54 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import DOMAIN, DEFAULT_COMFORT_HEAT, DEFAULT_COMFORT_COOL, DEFAULT_SETBACK_HEAT, DEFAULT_SETBACK_COOL
+from .const import (
+    DOMAIN,
+    DEFAULT_COMFORT_HEAT,
+    DEFAULT_COMFORT_COOL,
+    DEFAULT_SETBACK_HEAT,
+    DEFAULT_SETBACK_COOL,
+    TEMP_SOURCE_SENSOR,
+    TEMP_SOURCE_INPUT_NUMBER,
+    TEMP_SOURCE_WEATHER_SERVICE,
+    TEMP_SOURCE_CLIMATE_FALLBACK,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+OUTDOOR_SOURCE_OPTIONS = [
+    selector.SelectOptionDict(value=TEMP_SOURCE_WEATHER_SERVICE, label="Weather service (recommended)"),
+    selector.SelectOptionDict(value=TEMP_SOURCE_SENSOR, label="Dedicated sensor"),
+    selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
+]
+
+INDOOR_SOURCE_OPTIONS = [
+    selector.SelectOptionDict(value=TEMP_SOURCE_CLIMATE_FALLBACK, label="Climate entity (recommended)"),
+    selector.SelectOptionDict(value=TEMP_SOURCE_SENSOR, label="Dedicated sensor"),
+    selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
+]
+
+
+def _needs_entity(source: str) -> bool:
+    """Return True if the source type requires an entity selection."""
+    return source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+
+
+def _entity_selector_for_source(source: str) -> selector.EntitySelector:
+    """Return an EntitySelector appropriate for the given source type."""
+    if source == TEMP_SOURCE_INPUT_NUMBER:
+        return selector.EntitySelector(
+            selector.EntitySelectorConfig(domain="input_number")
+        )
+    # Default: sensor with temperature device class
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
+    )
 
 
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -33,7 +72,7 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._data.update(user_input)
-            return await self.async_step_sensors()
+            return await self.async_step_temperature_sources()
 
         return self.async_show_form(
             step_id="user",
@@ -44,12 +83,6 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Required("climate_entity"): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="climate")
-                    ),
-                    vol.Optional("outdoor_temp_entity"): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
-                    ),
-                    vol.Optional("indoor_temp_entity"): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor", device_class="temperature")
                     ),
                     vol.Required("comfort_heat", default=DEFAULT_COMFORT_HEAT): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=55, max=80, step=1, unit_of_measurement="°F", mode="slider")
@@ -67,6 +100,83 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_temperature_sources(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle temperature source type selection."""
+        if user_input is not None:
+            self._data.update(user_input)
+
+            # Route to entity picker steps if needed
+            if _needs_entity(self._data.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)):
+                return await self.async_step_outdoor_temp_entity()
+            if _needs_entity(self._data.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)):
+                return await self.async_step_indoor_temp_entity()
+            return await self.async_step_sensors()
+
+        return self.async_show_form(
+            step_id="temperature_sources",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "outdoor_temp_source", default=TEMP_SOURCE_WEATHER_SERVICE
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=OUTDOOR_SOURCE_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required(
+                        "indoor_temp_source", default=TEMP_SOURCE_CLIMATE_FALLBACK
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=INDOOR_SOURCE_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_outdoor_temp_entity(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle outdoor temperature entity selection."""
+        if user_input is not None:
+            self._data.update(user_input)
+            # Check if indoor also needs an entity
+            if _needs_entity(self._data.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)):
+                return await self.async_step_indoor_temp_entity()
+            return await self.async_step_sensors()
+
+        source = self._data.get("outdoor_temp_source", TEMP_SOURCE_SENSOR)
+        return self.async_show_form(
+            step_id="outdoor_temp_entity",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("outdoor_temp_entity"): _entity_selector_for_source(source),
+                }
+            ),
+        )
+
+    async def async_step_indoor_temp_entity(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Handle indoor temperature entity selection."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_sensors()
+
+        source = self._data.get("indoor_temp_source", TEMP_SOURCE_SENSOR)
+        return self.async_show_form(
+            step_id="indoor_temp_entity",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("indoor_temp_entity"): _entity_selector_for_source(source),
+                }
+            ),
         )
 
     async def async_step_sensors(
@@ -165,6 +275,36 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ),
                     vol.Required("learning_enabled", default=current.get("learning_enabled", True)): selector.BooleanSelector(),
                     vol.Required("aggressive_savings", default=current.get("aggressive_savings", False)): selector.BooleanSelector(),
+                    vol.Required(
+                        "outdoor_temp_source",
+                        default=current.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=OUTDOOR_SOURCE_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        "outdoor_temp_entity",
+                        description={"suggested_value": current.get("outdoor_temp_entity")},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain=["sensor", "input_number"])
+                    ),
+                    vol.Required(
+                        "indoor_temp_source",
+                        default=current.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=INDOOR_SOURCE_OPTIONS,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        "indoor_temp_entity",
+                        description={"suggested_value": current.get("indoor_temp_entity")},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain=["sensor", "input_number"])
+                    ),
                 }
             ),
         )

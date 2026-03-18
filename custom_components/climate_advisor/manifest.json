@@ -5,6 +5,7 @@
   "config_flow": true,
   "dependencies": ["weather", "climate"],
   "documentation": "https://github.com/yourgithubuser/ha-climate-advisor",
+  "homeassistant": "2024.6.0",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/yourgithubuser/ha-climate-advisor/issues",
   "requirements": [],

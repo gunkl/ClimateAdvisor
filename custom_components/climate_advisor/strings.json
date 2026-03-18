@@ -7,13 +7,33 @@
         "data": {
           "weather_entity": "Weather Entity (for forecasts)",
           "climate_entity": "Thermostat / Climate Entity",
-          "outdoor_temp_entity": "Outdoor Temperature Sensor (optional, falls back to weather entity)",
-          "indoor_temp_entity": "Indoor Temperature Sensor (optional, falls back to climate entity)",
-          "comfort_heat": "Heating Comfort Setpoint (°F)",
-          "comfort_cool": "Cooling Comfort Setpoint (°F)",
-          "setback_heat": "Heating Away/Sleep Setpoint (°F)",
-          "setback_cool": "Cooling Away/Sleep Setpoint (°F)",
+          "comfort_heat": "Heating Comfort Setpoint (\u00b0F)",
+          "comfort_cool": "Cooling Comfort Setpoint (\u00b0F)",
+          "setback_heat": "Heating Away/Sleep Setpoint (\u00b0F)",
+          "setback_cool": "Cooling Away/Sleep Setpoint (\u00b0F)",
           "notify_service": "Notification Service (e.g. notify.mobile_app_phone)"
+        }
+      },
+      "temperature_sources": {
+        "title": "Temperature Sources",
+        "description": "Choose where Climate Advisor reads outdoor and indoor temperature data from.",
+        "data": {
+          "outdoor_temp_source": "Outdoor Temperature Source",
+          "indoor_temp_source": "Indoor Temperature Source"
+        }
+      },
+      "outdoor_temp_entity": {
+        "title": "Outdoor Temperature Entity",
+        "description": "Select the entity that provides outdoor temperature readings.",
+        "data": {
+          "outdoor_temp_entity": "Outdoor Temperature Entity"
+        }
+      },
+      "indoor_temp_entity": {
+        "title": "Indoor Temperature Entity",
+        "description": "Select the entity that provides indoor temperature readings.",
+        "data": {
+          "indoor_temp_entity": "Indoor Temperature Entity"
         }
       },
       "sensors": {
@@ -39,10 +59,14 @@
       "init": {
         "title": "Climate Advisor Options",
         "data": {
-          "comfort_heat": "Heating Comfort Setpoint (°F)",
-          "comfort_cool": "Cooling Comfort Setpoint (°F)",
+          "comfort_heat": "Heating Comfort Setpoint (\u00b0F)",
+          "comfort_cool": "Cooling Comfort Setpoint (\u00b0F)",
           "learning_enabled": "Enable Learning & Suggestions",
-          "aggressive_savings": "Prefer savings over comfort"
+          "aggressive_savings": "Prefer savings over comfort",
+          "outdoor_temp_source": "Outdoor Temperature Source",
+          "outdoor_temp_entity": "Outdoor Temperature Entity",
+          "indoor_temp_source": "Indoor Temperature Source",
+          "indoor_temp_entity": "Indoor Temperature Entity"
         }
       }
     }

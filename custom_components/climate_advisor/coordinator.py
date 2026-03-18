@@ -35,6 +35,10 @@ from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_LEARNING_SUGGESTIONS,
     ATTR_COMPLIANCE_SCORE,
+    TEMP_SOURCE_SENSOR,
+    TEMP_SOURCE_INPUT_NUMBER,
+    TEMP_SOURCE_WEATHER_SERVICE,
+    TEMP_SOURCE_CLIMATE_FALLBACK,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -167,6 +171,90 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_COMPLIANCE_SCORE: compliance.get("comfort_score", 1.0),
         }
 
+    def _get_outdoor_temp(self, weather_attrs: dict) -> float:
+        """Read outdoor temperature based on configured source type."""
+        source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
+
+        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            entity_id = self.config.get("outdoor_temp_entity")
+            if entity_id:
+                state = self.hass.states.get(entity_id)
+                if state:
+                    try:
+                        return float(state.state)
+                    except (ValueError, TypeError):
+                        _LOGGER.warning(
+                            "Outdoor temp entity %s has non-numeric state %r; "
+                            "falling back to weather attribute",
+                            entity_id,
+                            state.state,
+                        )
+
+        # weather_service source or fallback
+        return float(weather_attrs.get("temperature", 65))
+
+    def _get_indoor_temp(self) -> float | None:
+        """Read indoor temperature based on configured source type."""
+        source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+
+        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            entity_id = self.config.get("indoor_temp_entity")
+            if entity_id:
+                state = self.hass.states.get(entity_id)
+                if state:
+                    try:
+                        return float(state.state)
+                    except (ValueError, TypeError):
+                        _LOGGER.warning(
+                            "Indoor temp entity %s has non-numeric state %r; "
+                            "treating as unavailable",
+                            entity_id,
+                            state.state,
+                        )
+            return None
+
+        # climate_fallback source
+        climate_state = self.hass.states.get(self.config["climate_entity"])
+        if climate_state:
+            temp = climate_state.attributes.get("current_temperature")
+            return float(temp) if temp is not None else None
+        return None
+
+    async def _get_forecast_data(self) -> list:
+        """Get forecast data using the weather.get_forecasts service.
+
+        Falls back to the deprecated forecast attribute if the service
+        call is unavailable.
+        """
+        weather_entity = self.config["weather_entity"]
+        try:
+            response = await self.hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": weather_entity, "type": "daily"},
+                blocking=True,
+                return_response=True,
+            )
+            forecasts = (
+                response.get(weather_entity, {}).get("forecast", [])
+                if response
+                else []
+            )
+            if forecasts:
+                return forecasts
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "weather.get_forecasts service call failed for %s; "
+                "falling back to forecast attribute",
+                weather_entity,
+            )
+
+        # Fallback: deprecated forecast attribute
+        weather_state = self.hass.states.get(weather_entity)
+        if weather_state:
+            return weather_state.attributes.get("forecast", [])
+        return []
+
     async def _get_forecast(self) -> ForecastSnapshot | None:
         """Pull forecast data from the weather entity."""
         weather_state = self.hass.states.get(self.config["weather_entity"])
@@ -175,50 +263,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
 
         attrs = weather_state.attributes
-        forecast = attrs.get("forecast", [])
 
-        # Current outdoor temp — prefer dedicated sensor, fall back to weather entity
-        outdoor_entity = self.config.get("outdoor_temp_entity")
-        if outdoor_entity:
-            outdoor_state = self.hass.states.get(outdoor_entity)
-            if outdoor_state:
-                try:
-                    current_outdoor = float(outdoor_state.state)
-                except ValueError:
-                    _LOGGER.warning(
-                        "Outdoor temp sensor %s has non-numeric state %r; using weather attribute fallback",
-                        outdoor_entity,
-                        outdoor_state.state,
-                    )
-                    current_outdoor = outdoor_state.attributes.get("temperature", 65)
-            else:
-                current_outdoor = attrs.get("temperature", 65)
-        else:
-            current_outdoor = attrs.get("temperature", 65)
-
-        # Indoor temp — prefer dedicated sensor, fall back to climate entity
-        indoor_entity = self.config.get("indoor_temp_entity")
-        if indoor_entity:
-            indoor_state = self.hass.states.get(indoor_entity)
-            if indoor_state:
-                try:
-                    current_indoor = float(indoor_state.state)
-                except ValueError:
-                    _LOGGER.warning(
-                        "Indoor temp sensor %s has non-numeric state %r; treating as unavailable",
-                        indoor_entity,
-                        indoor_state.state,
-                    )
-                    current_indoor = None
-            else:
-                current_indoor = None
-        else:
-            climate_state = self.hass.states.get(self.config["climate_entity"])
-            current_indoor = (
-                climate_state.attributes.get("current_temperature")
-                if climate_state
-                else None
-            )
+        current_outdoor = self._get_outdoor_temp(attrs)
+        current_indoor = self._get_indoor_temp()
+        forecast = await self._get_forecast_data()
 
         # Extract today and tomorrow from forecast
         # Forecast structure varies by integration; handle common patterns
@@ -241,7 +289,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tomorrow_high=float(tomorrow_high),
             tomorrow_low=float(tomorrow_low),
             current_outdoor_temp=float(current_outdoor),
-            current_indoor_temp=float(current_indoor) if current_indoor else None,
+            current_indoor_temp=float(current_indoor) if current_indoor is not None else None,
             current_humidity=attrs.get("humidity"),
             timestamp=dt_util.now(),
         )

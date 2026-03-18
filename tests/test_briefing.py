@@ -275,14 +275,46 @@ class TestFreshAirSection:
         result = _generate(c)
         low = result.lower()
         assert "ac" in low
-        assert "3 minutes" in low or "few minutes" in low
+        # Pause threshold appears as the configured debounce duration
+        assert "minutes" in low or "few minutes" in low
 
     def test_heat_mode_mentions_heat_pause(self):
         c = _make_classification("cool", today_high=55, today_low=35)
         result = _generate(c)
         low = result.lower()
         assert "heat" in low
-        assert "3 minutes" in low or "few minutes" in low
+        # Pause threshold appears as the configured debounce duration
+        assert "minutes" in low or "few minutes" in low
+
+    def test_fresh_air_uses_configured_debounce(self):
+        """The pause threshold in the fresh air section should reflect debounce config."""
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            debounce_seconds=180,  # 3 minutes
+        )
+        assert "3 minutes" in result.lower()
+
+    def test_fresh_air_default_debounce_shown(self):
+        """Default debounce (5 minutes) should appear in fresh air section."""
+        c = _make_classification("cool", today_high=55, today_low=35)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            debounce_seconds=300,  # 5 minutes (default)
+        )
+        assert "5 minutes" in result.lower()
 
     def test_off_mode_no_energy_impact(self):
         c = _make_classification("warm", today_high=80, today_low=60)
@@ -445,3 +477,93 @@ class TestConversationalTone:
         result = _generate(c)
         assert "the system will" not in result.lower()
         assert "climate advisor will" not in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# Grace period section tests
+# ---------------------------------------------------------------------------
+
+class TestGracePeriodSection:
+    """Grace period section should only appear when a grace period is active."""
+
+    def test_no_grace_section_by_default(self):
+        """No grace period info when nothing is active."""
+        c = _make_classification("cool", today_high=55, today_low=35)
+        result = _generate(c)
+        assert "grace" not in result.lower()
+        assert "hands-off" not in result.lower()
+        assert "settling period" not in result.lower()
+
+    def test_manual_grace_active_shown(self):
+        """When a manual grace period is active, briefing explains the hands-off window."""
+        c = _make_classification("cool", today_high=55, today_low=35)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            grace_active=True,
+            grace_source="manual",
+            manual_grace_seconds=1800,
+        )
+        low = result.lower()
+        assert "hands-off" in low
+        assert "30 minutes" in low
+        # Door/window sensing is suppressed during grace
+        assert "door" in low or "window" in low
+
+    def test_automation_grace_active_shown(self):
+        """When an automation grace period is active, briefing explains the settling period."""
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            grace_active=True,
+            grace_source="automation",
+            automation_grace_seconds=3600,
+        )
+        low = result.lower()
+        assert "settling period" in low
+        assert "60 minutes" in low
+
+    def test_grace_section_duration_reflects_config(self):
+        """Grace period duration shown should match what was configured."""
+        c = _make_classification("mild", today_high=68, today_low=48)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            grace_active=True,
+            grace_source="manual",
+            manual_grace_seconds=600,  # 10 minutes
+        )
+        assert "10 minutes" in result.lower()
+
+    def test_grace_inactive_with_source_is_suppressed(self):
+        """grace_active=False suppresses section even if grace_source is set."""
+        c = _make_classification("cool", today_high=55, today_low=35)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            grace_active=False,
+            grace_source="manual",
+        )
+        assert "hands-off" not in result.lower()
+        assert "settling period" not in result.lower()

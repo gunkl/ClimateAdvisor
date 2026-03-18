@@ -43,7 +43,11 @@ from .const import (
     TEMP_SOURCE_WEATHER_SERVICE,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     CONF_SENSOR_DEBOUNCE,
+    CONF_MANUAL_GRACE_PERIOD,
+    CONF_AUTOMATION_GRACE_PERIOD,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_AUTOMATION_GRACE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -415,6 +419,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             wake_time=wake_time,
             sleep_time=sleep_time,
             learning_suggestions=suggestions if suggestions else None,
+            debounce_seconds=self.config.get(
+                CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS
+            ),
+            manual_grace_seconds=self.config.get(
+                CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS
+            ),
+            automation_grace_seconds=self.config.get(
+                CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS
+            ),
+            grace_active=self.automation_engine._grace_active,
+            grace_source=self.automation_engine._last_resume_source,
         )
 
         self._last_briefing = briefing

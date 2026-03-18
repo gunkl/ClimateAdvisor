@@ -21,6 +21,9 @@ from .const import (
     DAY_TYPE_MILD,
     DAY_TYPE_COOL,
     DAY_TYPE_COLD,
+    DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_AUTOMATION_GRACE_SECONDS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,6 +41,11 @@ def generate_briefing(
     wake_time: time,
     sleep_time: time,
     learning_suggestions: list[str] | None = None,
+    debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    manual_grace_seconds: int = DEFAULT_MANUAL_GRACE_SECONDS,
+    automation_grace_seconds: int = DEFAULT_AUTOMATION_GRACE_SECONDS,
+    grace_active: bool = False,
+    grace_source: str | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -47,6 +55,11 @@ def generate_briefing(
         setback_heat / setback_cool: User's setback setpoints.
         wake_time / sleep_time: User's schedule.
         learning_suggestions: Any pending suggestions from the learning system.
+        debounce_seconds: How long a door/window must be open before HVAC pauses.
+        manual_grace_seconds: Grace period after a manual HVAC override.
+        automation_grace_seconds: Grace period after Climate Advisor resumes HVAC.
+        grace_active: Whether a grace period is currently active.
+        grace_source: "manual" or "automation" if a grace period is active.
 
     Returns:
         Formatted briefing string suitable for email or notification.
@@ -79,7 +92,21 @@ def generate_briefing(
     lines.append("")
     lines.extend(_leaving_home_section(c, setback_heat, setback_cool))
     lines.append("")
-    lines.extend(_fresh_air_section(c, comfort_heat, comfort_cool))
+    lines.extend(_fresh_air_section(c, comfort_heat, comfort_cool, debounce_seconds))
+
+    # Grace period status — only shown when a grace period is active at briefing time,
+    # or when grace periods are configured to a non-default value worth explaining
+    grace_lines = _grace_period_section(
+        debounce_seconds=debounce_seconds,
+        manual_grace_seconds=manual_grace_seconds,
+        automation_grace_seconds=automation_grace_seconds,
+        grace_active=grace_active,
+        grace_source=grace_source,
+    )
+    if grace_lines:
+        lines.append("")
+        lines.extend(grace_lines)
+
     lines.append("")
     lines.extend(_tonight_preview(c, comfort_heat, comfort_cool, sleep_time))
 
@@ -265,43 +292,94 @@ def _leaving_home_section(c, setback_heat, setback_cool) -> list[str]:
         ]
 
 
-def _fresh_air_section(c, comfort_heat, comfort_cool) -> list[str]:
+def _fresh_air_section(
+    c, comfort_heat: float, comfort_cool: float, debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS
+) -> list[str]:
     """User-centric section about opening windows/doors for fresh air.
 
     Affirms the user's choice first, then explains impact and recovery.
     Varies by HVAC mode since the impact differs significantly.
+    Uses the configured debounce duration so the timing matches actual behavior.
     """
+    debounce_minutes = max(1, debounce_seconds // 60)
+    debounce_desc = (
+        f"{debounce_minutes} minute" if debounce_minutes == 1 else f"{debounce_minutes} minutes"
+    )
+
     if c.hvac_mode == "cool":
         return [
-            "If you want to crack a window for some fresh air, no problem —"
-            " it's your house. I'll keep the AC running for a few minutes in"
-            " case it's just a quick thing, but if it stays open past 3 minutes"
-            " I'll shut the AC off so you're not cooling the outdoors. Once you"
-            " close up, I'll fire the AC back up right away. Just know that on a"
+            f"If you want to crack a window for some fresh air, no problem —"
+            f" it's your house. I'll keep the AC running for a bit in"
+            f" case it's just a quick thing, but if it stays open past {debounce_desc}"
+            f" I'll shut the AC off so you're not cooling the outdoors. Once you"
+            f" close up, I'll fire the AC back up right away. Just know that on a"
             f" day like today it may take a bit longer to pull back down to"
             f" {comfort_cool:.0f}°F, so if you want to minimize the impact, shorter"
-            " is better — and try to keep other windows and doors shut while"
-            " you've got one open.",
+            f" is better — and try to keep other windows and doors shut while"
+            f" you've got one open.",
         ]
     elif c.hvac_mode == "heat":
         return [
-            "If you want to open a window for some fresh air, no problem —"
-            " go for it. I'll keep the heat running for a few minutes in case"
-            " you're just airing things out, but if it stays open past 3 minutes"
-            " I'll turn the heat off so we're not heating the neighborhood. Once"
-            " you close up, the heat kicks right back on. It'll take a little"
-            " extra energy to warm back up, so if you want to minimize the"
-            " impact, a quick burst of fresh air works great — and closing doors"
-            " to the room with the open window helps keep the rest of the house"
-            " comfortable while you do it.",
+            f"If you want to open a window for some fresh air, no problem —"
+            f" go for it. I'll keep the heat running for a bit in case"
+            f" you're just airing things out, but if it stays open past {debounce_desc}"
+            f" I'll turn the heat off so we're not heating the neighborhood. Once"
+            f" you close up, the heat kicks right back on. It'll take a little"
+            f" extra energy to warm back up, so if you want to minimize the"
+            f" impact, a quick burst of fresh air works great — and closing doors"
+            f" to the room with the open window helps keep the rest of the house"
+            f" comfortable while you do it.",
         ]
     else:
         return [
-            "If you want to open a window for some fresh air, go for it —"
-            " the HVAC is off today so there's no energy impact at all."
-            " Enjoy the breeze. If the system does need to kick on as a safety"
-            " net later and a window is still open, I'll give it a few minutes"
-            " and then pause until you close up.",
+            f"If you want to open a window for some fresh air, go for it —"
+            f" the HVAC is off today so there's no energy impact at all."
+            f" Enjoy the breeze. If the system does need to kick on as a safety"
+            f" net later and a window is still open, I'll give it {debounce_desc}"
+            f" and then pause until you close up.",
+        ]
+
+
+def _grace_period_section(
+    debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    manual_grace_seconds: int = DEFAULT_MANUAL_GRACE_SECONDS,
+    automation_grace_seconds: int = DEFAULT_AUTOMATION_GRACE_SECONDS,
+    grace_active: bool = False,
+    grace_source: str | None = None,
+) -> list[str]:
+    """Explain active grace periods and configured timings.
+
+    Only included in the briefing when a grace period is currently active,
+    so users aren't surprised that door/window sensors aren't pausing HVAC.
+    Returns an empty list when there is nothing noteworthy to report.
+    """
+    if not grace_active or not grace_source:
+        return []
+
+    if grace_source == "manual":
+        grace_minutes = max(1, manual_grace_seconds // 60)
+        grace_desc = (
+            f"{grace_minutes} minute" if grace_minutes == 1 else f"{grace_minutes} minutes"
+        )
+        return [
+            f"One heads-up for this morning: you manually turned the HVAC back on"
+            f" earlier, so I'm in a {grace_desc} hands-off window right now. During"
+            f" that window, opening a door or window won't trigger a pause — I'm"
+            f" giving you space to settle in without the system jumping in. Once the"
+            f" window closes, door/window sensing goes back to normal."
+        ]
+    else:
+        # automation grace
+        grace_minutes = max(1, automation_grace_seconds // 60)
+        grace_desc = (
+            f"{grace_minutes} minute" if grace_minutes == 1 else f"{grace_minutes} minutes"
+        )
+        return [
+            f"One heads-up: I just resumed the HVAC after all the doors and windows"
+            f" closed, so I'm in a {grace_desc} settling period. During that time,"
+            f" opening a door or window briefly won't immediately pause things again —"
+            f" this prevents the system from cycling on and off if you're moving in"
+            f" and out. After the settling period, normal door/window sensing resumes."
         ]
 
 

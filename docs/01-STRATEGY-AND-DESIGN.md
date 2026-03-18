@@ -19,7 +19,15 @@ Use outdoor temperature and forecast to decide when HVAC is unnecessary. If the 
 When nobody's home (detected by thermostat presence sensing), drop to a protection temperature. On return, restore comfort. The key tunable is the delay before setback (default 15 min) and the setback depth.
 
 ### Layer 3: Door/Window Awareness
-Pause HVAC when monitored doors/windows are open for more than a threshold (default 3 min). Resume when all close. Even partial sensor coverage catches most waste scenarios.
+Pause HVAC when monitored doors/windows are open for more than a configurable debounce threshold (default 5 min). Resume when all close. Even partial sensor coverage catches most waste scenarios.
+
+**Debounce**: Quick open/close events (e.g., stepping outside briefly) don't trigger a pause — only sustained open states do.
+
+**Grace periods**: After HVAC resumes, a settling period prevents rapid cycling if someone is moving in and out. Two types:
+- *Automation grace* (default 60 min): After Climate Advisor auto-resumes. Prevents the system from immediately re-pausing when someone reopens a door moments after all sensors closed.
+- *Manual grace* (default 30 min): After the user manually turns HVAC back on during a pause. Gives the user space to override without the system jumping back in.
+
+Both grace durations are configurable and can be set to 0 to disable. The daily briefing mentions active grace periods so the user understands if door/window sensing is temporarily suspended.
 
 ### Layer 4: Runaway Protection
 Safety net for the "forgot it was on" scenario. Maximum continuous runtime alerts, daily runtime budgets, and notifications when setpoint is bumped unusually high.

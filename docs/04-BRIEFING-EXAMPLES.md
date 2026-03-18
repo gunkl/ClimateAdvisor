@@ -7,9 +7,10 @@ These are example briefings for each day type, showing the tone, structure, and 
 1. Structured header with today/tomorrow temps, day type, and trend (scannable at a glance)
 2. Conversational body — flowing prose paragraphs covering the day plan, what the system will do, and what the user can do to help
 3. "If you head out" paragraph — occupancy setback behavior
-4. "Fresh air" paragraph — affirms the user's right to open a window anytime, explains what the system will do in response, describes the impact on the day's climate strategy, and suggests how to minimize that impact. Varies by HVAC mode.
-5. "Looking ahead" paragraph — trend-based preview of tonight/tomorrow
-6. Learning suggestions (when available after 14+ days, kept structured for accept/dismiss clarity)
+4. "Fresh air" paragraph — affirms the user's right to open a window anytime, explains what the system will do in response using the actual configured debounce duration, describes the impact on the day's climate strategy, and suggests how to minimize that impact. Varies by HVAC mode.
+5. Grace period status paragraph — only included when a grace period is currently active at briefing time. Explains the hands-off window (manual) or settling period (automation) in plain language so the user understands why door/window sensing is temporarily modified.
+6. "Looking ahead" paragraph — trend-based preview of tonight/tomorrow
+7. Learning suggestions (when available after 14+ days, kept structured for accept/dismiss clarity)
 
 ---
 
@@ -35,7 +36,7 @@ Close up the windows by 5:00 PM to trap the warmth before the sun drops. The hou
 
 If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
 
-If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it a few minutes and then pause until you close up.
+If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 5 minutes and then pause until you close up.
 
 Looking ahead — tomorrow's warmer at 78°F, so I'm going to set back a bit more aggressively tonight. Less heating needed means energy saved while you sleep.
 ```
@@ -60,7 +61,7 @@ You'll want to close things up by 6:00 PM though — I'll be ready to kick on th
 
 If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
 
-If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it a few minutes and then pause until you close up.
+If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 5 minutes and then pause until you close up.
 
 Tomorrow looks pretty similar to today — 82°F for a high. Nothing special planned overnight.
 ```
@@ -87,7 +88,7 @@ If outdoor temps drop below 75°F after sunset, I'll send you a heads-up that it
 
 If you head out, no worries. After about 15 minutes I'll let the house drift up to 80°F to save energy. When you're back, I'll pull it right back down — give it 20 to 30 minutes to feel normal again.
 
-If you want to crack a window for some fresh air, no problem — it's your house. I'll keep the AC running for a few minutes in case it's just a quick thing, but if it stays open past 3 minutes I'll shut the AC off so you're not cooling the outdoors. Once you close up, I'll fire the AC back up right away. Just know that on a day like today it may take a bit longer to pull back down to 75°F, so if you want to minimize the impact, shorter is better — and try to keep other windows and doors shut while you've got one open.
+If you want to crack a window for some fresh air, no problem — it's your house. I'll keep the AC running for a bit in case it's just a quick thing, but if it stays open past 5 minutes I'll shut the AC off so you're not cooling the outdoors. Once you close up, I'll fire the AC back up right away. Just know that on a day like today it may take a bit longer to pull back down to 75°F, so if you want to minimize the impact, shorter is better — and try to keep other windows and doors shut while you've got one open.
 
 Tomorrow looks pretty similar to today — 92°F for a high. Nothing special planned overnight.
 ```
@@ -114,7 +115,7 @@ After 3pm I'll bring it back to 70°F as the sun drops. At bedtime, I'll set thi
 
 If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
 
-If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a few minutes in case you're just airing things out, but if it stays open past 3 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
+If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 5 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
 
 Looking ahead — tomorrow's cooler at 50°F, so I'll bank some extra warmth this evening and go easy on the overnight setback. If the house feels a touch warmer than usual before bed, that's intentional.
 ```
@@ -141,10 +142,34 @@ Tonight I'm using a conservative setback — 67°F instead of the usual 60°F. W
 
 If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
 
-If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a few minutes in case you're just airing things out, but if it stays open past 3 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
+If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 5 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
 
 Looking ahead — tomorrow's cooler at 28°F, so I'll bank some extra warmth this evening and go easy on the overnight setback. If the house feels a touch warmer than usual before bed, that's intentional.
 ```
+
+---
+
+## Example: Active Automation Grace Period
+
+**When shown:** The briefing fires (e.g., 6:00 AM) and an automation grace period is still running because Climate Advisor resumed HVAC after all doors/windows closed sometime before the briefing.
+
+This paragraph appears between the "fresh air" section and the "looking ahead" section:
+
+```
+One heads-up: I just resumed the HVAC after all the doors and windows closed, so I'm in a 60 minute settling period. During that time, opening a door or window briefly won't immediately pause things again — this prevents the system from cycling on and off if you're moving in and out. After the settling period, normal door/window sensing resumes.
+```
+
+---
+
+## Example: Active Manual Grace Period
+
+**When shown:** The briefing fires and a manual grace period is still running because the user manually turned HVAC back on during a pause sometime before the briefing.
+
+```
+One heads-up for this morning: you manually turned the HVAC back on earlier, so I'm in a 30 minute hands-off window right now. During that window, opening a door or window won't trigger a pause — I'm giving you space to settle in without the system jumping in. Once the window closes, door/window sensing goes back to normal.
+```
+
+**Note:** Grace period paragraphs only appear in the briefing when a grace period is actually active at send time. Most mornings they are absent.
 
 ---
 
@@ -180,3 +205,5 @@ Reply ACCEPT or DISMISS to any suggestion, or ignore to keep current behavior.
 - No emoji in the conversational body (emoji only in the structured header and learning suggestions)
 - Key times and temperatures should appear in prominent sentence positions where they naturally draw the eye
 - Scannable in 30 seconds — someone should be able to glance and know what they need to do today
+- Configuration-accurate durations: the fresh air section always shows the actual configured debounce duration, not a hardcoded value. Grace period paragraphs show the actual configured grace duration.
+- Grace periods use plain language: "hands-off window" for manual grace (framed as giving the user space), "settling period" for automation grace (framed as preventing cycling). Avoid the word "grace period" in the body text — it sounds technical.

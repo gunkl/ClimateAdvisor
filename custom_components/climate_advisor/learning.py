@@ -35,6 +35,11 @@ class DailyRecord:
     window_close_time: str | None = None
     hvac_mode_recommended: str = ""
 
+    # Physical window state (independent of recommendations)
+    windows_physically_opened: bool = False
+    window_physical_open_time: str | None = None
+    window_physical_close_time: str | None = None
+
     # What actually happened
     windows_opened: bool = False
     window_open_actual_time: str | None = None

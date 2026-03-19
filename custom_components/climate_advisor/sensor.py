@@ -25,6 +25,8 @@ from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_LEARNING_SUGGESTIONS,
     ATTR_COMPLIANCE_SCORE,
+    ATTR_NEXT_AUTOMATION_ACTION,
+    ATTR_NEXT_AUTOMATION_TIME,
 )
 from .coordinator import ClimateAdvisorCoordinator
 
@@ -46,6 +48,8 @@ async def async_setup_entry(
         ClimateAdvisorBriefingSensor(coordinator, entry),
         ClimateAdvisorComplianceSensor(coordinator, entry),
         ClimateAdvisorStatusSensor(coordinator, entry),
+        ClimateAdvisorNextAutomationSensor(coordinator, entry),
+        ClimateAdvisorNextAutomationTimeSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -123,7 +127,31 @@ class ClimateAdvisorNextActionSensor(ClimateAdvisorBaseSensor):
     """Sensor showing the next recommended human action."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, ATTR_NEXT_ACTION, "Next Action", "mdi:human-greeting")
+        super().__init__(coordinator, entry, ATTR_NEXT_ACTION, "Your Next Action", "mdi:human-greeting")
+
+
+class ClimateAdvisorNextAutomationSensor(ClimateAdvisorBaseSensor):
+    """Sensor showing the next scheduled automation action."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry,
+            ATTR_NEXT_AUTOMATION_ACTION,
+            "Next Automation Action",
+            "mdi:robot",
+        )
+
+
+class ClimateAdvisorNextAutomationTimeSensor(ClimateAdvisorBaseSensor):
+    """Sensor showing when the next automation action will execute."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry,
+            ATTR_NEXT_AUTOMATION_TIME,
+            "Next Automation Time",
+            "mdi:clock-outline",
+        )
 
 
 class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):

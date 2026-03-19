@@ -50,6 +50,9 @@ DEFAULT_AUTOMATION_GRACE_SECONDS = 3600  # 60 minutes
 OCCUPANCY_SETBACK_MINUTES = 15
 MAX_CONTINUOUS_RUNTIME_HOURS = 3
 
+# Economizer (window cooling) threshold
+ECONOMIZER_TEMP_DELTA = 3  # °F — activate when outdoor temp within this delta of comfort_cool
+
 # State persistence
 STATE_FILE = "climate_advisor_state.json"
 
@@ -77,6 +80,8 @@ ATTR_LEARNING_SUGGESTIONS = "pending_suggestions"
 ATTR_COMPLIANCE_SCORE = "compliance_score"
 ATTR_ESTIMATED_SAVINGS = "estimated_savings"
 ATTR_AUTOMATION_ENABLED = "automation_enabled"
+ATTR_NEXT_AUTOMATION_ACTION = "next_automation_action"
+ATTR_NEXT_AUTOMATION_TIME = "next_automation_time"
 
 # API paths for dashboard panel
 API_BASE = "/api/climate_advisor"

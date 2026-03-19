@@ -56,6 +56,8 @@ class DayClassification:
     window_open_time: time | None = None
     window_close_time: time | None = None
     setback_modifier: float = 0.0  # Degrees to adjust setback based on trend
+    window_opportunity_morning: bool = False  # Morning window cooling possible on hot days
+    window_opportunity_evening: bool = False  # Evening window cooling possible on hot days
 
     def __post_init__(self):
         """Compute recommendations based on classification."""
@@ -69,6 +71,12 @@ class DayClassification:
             self.hvac_mode = "cool"
             self.pre_condition = True
             self.pre_condition_target = -2.0  # 2°F below cooling setpoint
+            # Check if morning/evening temps might be favorable for window cooling
+            # If today's low is within 5°F of a typical comfort_cool (75°F), windows could help
+            if self.today_low <= 80:  # Today's low is moderate enough for window opportunity
+                self.window_opportunity_morning = True
+            if self.tomorrow_low <= 80:  # Tomorrow's low suggests cool evening
+                self.window_opportunity_evening = True
         elif self.day_type == DAY_TYPE_WARM:
             self.hvac_mode = "off"
             self.windows_recommended = True

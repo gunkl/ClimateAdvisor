@@ -40,6 +40,8 @@ from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_LEARNING_SUGGESTIONS,
     ATTR_COMPLIANCE_SCORE,
+    ATTR_NEXT_AUTOMATION_ACTION,
+    ATTR_NEXT_AUTOMATION_TIME,
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_WEATHER_SERVICE,
@@ -463,6 +465,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     ):
                         self._today_record.comfort_violations_minutes += 30.0
 
+            # Check economizer opportunity (window cooling on hot days)
+            if self._today_record:
+                windows_open = self._today_record.windows_physically_opened and (
+                    self._today_record.window_physical_close_time is None
+                )
+                await self.automation_engine.check_window_cooling_opportunity(
+                    forecast.current_outdoor_temp,
+                    forecast.current_indoor_temp,
+                    windows_open,
+                )
+
             # Save state after classification update
             await self._async_save_state()
         else:
@@ -492,15 +505,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         suggestions = self.learning.generate_suggestions()
         compliance = self.learning.get_compliance_summary()
 
+        next_auto = self._compute_next_automation_action(c)
         return {
             ATTR_DAY_TYPE: c.day_type if c else "unknown",
             ATTR_TREND: c.trend_direction if c else "unknown",
             ATTR_TREND_MAGNITUDE: c.trend_magnitude if c else 0,
             ATTR_BRIEFING: self._last_briefing,
             ATTR_NEXT_ACTION: self._compute_next_action(c),
-            ATTR_AUTOMATION_STATUS: "active",
+            ATTR_AUTOMATION_STATUS: self._compute_automation_status(),
             ATTR_LEARNING_SUGGESTIONS: suggestions,
             ATTR_COMPLIANCE_SCORE: compliance.get("comfort_score", 1.0),
+            ATTR_NEXT_AUTOMATION_ACTION: next_auto[0],
+            ATTR_NEXT_AUTOMATION_TIME: next_auto[1],
         }
 
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
@@ -821,6 +837,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                                     dt_util.now().isoformat()
                                 )
 
+                        # Always track physical window opens (independent of recommendations)
+                        if not self._today_record.windows_physically_opened:
+                            self._today_record.windows_physically_opened = True
+                            self._today_record.window_physical_open_time = dt_util.now().isoformat()
+
                         await self._async_save_state()
 
             cancel = async_call_later(
@@ -851,6 +872,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._today_record.window_close_actual_time = (
                         dt_util.now().isoformat()
                     )
+                # Track physical close time (independent of recommendations)
+                if (
+                    self._today_record
+                    and self._today_record.windows_physically_opened
+                    and self._today_record.window_physical_close_time is None
+                ):
+                    self._today_record.window_physical_close_time = dt_util.now().isoformat()
                 await self.automation_engine.handle_all_doors_windows_closed()
                 await self._async_save_state()
 
@@ -942,6 +970,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return f"Close windows by {c.window_close_time.strftime('%I:%M %p')}"
 
         if c.day_type == DAY_TYPE_HOT:
+            if c.window_opportunity_morning and now < time(9, 0):
+                return "Check if it's cool enough to open windows this morning"
+            elif c.window_opportunity_evening and now >= time(17, 0):
+                return "Check outdoor temp — may be cool enough to open windows"
             return "Keep windows and blinds closed. AC is handling it."
         elif c.day_type == DAY_TYPE_COLD:
             return "Keep doors closed — help the heater out."

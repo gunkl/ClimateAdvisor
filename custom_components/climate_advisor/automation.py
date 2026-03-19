@@ -19,9 +19,11 @@ from .const import (
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_SENSOR_DEBOUNCE,
+    DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    ECONOMIZER_TEMP_DELTA,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,6 +63,9 @@ class AutomationEngine:
         self._automation_grace_cancel: Any | None = None
         self._grace_active = False
         self._last_resume_source: str | None = None
+
+        # Economizer state
+        self._economizer_active: bool = False
 
     async def _notify(self, message: str, title: str) -> None:
         """Send a notification via the configured service, plus email if enabled."""
@@ -395,6 +400,52 @@ class AutomationEngine:
                 reason="morning wake-up — restoring cool comfort",
             )
 
+    async def check_window_cooling_opportunity(
+        self,
+        outdoor_temp: float,
+        indoor_temp: float | None,
+        windows_physically_open: bool,
+    ) -> bool:
+        """Check if window cooling can supplement or replace AC.
+
+        Returns True if the economizer activated (AC paused), False otherwise.
+        """
+        c = self._current_classification
+        if not c or c.day_type != DAY_TYPE_HOT:
+            return False
+
+        comfort_cool = self.config.get("comfort_cool", 75)
+        delta = self.config.get("economizer_temp_delta", ECONOMIZER_TEMP_DELTA)
+
+        if windows_physically_open and outdoor_temp <= comfort_cool + delta:
+            if not self._economizer_active:
+                self._economizer_active = True
+                await self._set_hvac_mode(
+                    "off",
+                    reason="economizer — outdoor %.0f°F near comfort %s°F, windows open"
+                    % (outdoor_temp, comfort_cool),
+                )
+                _LOGGER.info(
+                    "Economizer activated: outdoor=%.0f°F, comfort_cool=%s°F, delta=%s°F",
+                    outdoor_temp, comfort_cool, delta,
+                )
+            return True
+        elif self._economizer_active:
+            # Outdoor temp too high or windows closed — resume AC
+            self._economizer_active = False
+            await self._set_hvac_mode(
+                "cool",
+                reason="economizer off — outdoor %.0f°F above threshold, resuming AC"
+                % outdoor_temp,
+            )
+            await self._set_temperature_for_mode(
+                c,
+                reason="economizer off — restoring comfort cooling",
+            )
+            _LOGGER.info("Economizer deactivated: outdoor=%.0f°F", outdoor_temp)
+
+        return False
+
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.
 
@@ -403,6 +454,7 @@ class AutomationEngine:
         """
         self._paused_by_door = state.get("paused_by_door", False)
         self._pre_pause_mode = state.get("pre_pause_mode")
+        self._economizer_active = state.get("economizer_active", False)
         # Grace timers cannot be restored — clear on restart
         self._grace_active = False
         self._last_resume_source = None
@@ -420,6 +472,7 @@ class AutomationEngine:
             "grace_active": self._grace_active,
             "last_resume_source": self._last_resume_source,
             "dry_run": self.dry_run,
+            "economizer_active": self._economizer_active,
             "current_classification": (
                 {
                     "day_type": self._current_classification.day_type,

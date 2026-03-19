@@ -84,6 +84,13 @@ class DayClassification:
         elif self.day_type == DAY_TYPE_COLD:
             self.hvac_mode = "heat"
 
+        _LOGGER.debug(
+            "Recommendations — type=%s, mode=%s, windows=%s",
+            self.day_type,
+            self.hvac_mode,
+            self.windows_recommended,
+        )
+
         # Trend modifiers
         if self.trend_direction == "cooling" and self.trend_magnitude >= TREND_THRESHOLD_SIGNIFICANT:
             # Big cold front coming — pre-heat and conservative setback
@@ -99,6 +106,13 @@ class DayClassification:
             self.setback_modifier = 2.0
         elif self.trend_direction == "warming" and self.trend_magnitude >= TREND_THRESHOLD_MODERATE:
             self.setback_modifier = -2.0
+
+        if self.pre_condition or self.setback_modifier != 0:
+            _LOGGER.debug(
+                "Trend modifier — pre_condition=%s, setback_modifier=%.1f°F",
+                self.pre_condition,
+                self.setback_modifier,
+            )
 
 
 def classify_day(forecast: ForecastSnapshot) -> DayClassification:
@@ -125,6 +139,8 @@ def classify_day(forecast: ForecastSnapshot) -> DayClassification:
     else:
         day_type = DAY_TYPE_COLD
 
+    _LOGGER.debug("Day type — today_high=%.0f°F, classified=%s", today_high, day_type)
+
     # Determine trend by comparing tomorrow to today
     high_delta = tomorrow_high - today_high
     low_delta = forecast.tomorrow_low - forecast.today_low
@@ -138,6 +154,16 @@ def classify_day(forecast: ForecastSnapshot) -> DayClassification:
         trend_direction = "stable"
 
     trend_magnitude = abs(avg_delta)
+
+    _LOGGER.debug(
+        "Trend — high_delta=%.1f°F, low_delta=%.1f°F, avg=%.1f°F, "
+        "direction=%s, magnitude=%.1f°F",
+        high_delta,
+        low_delta,
+        avg_delta,
+        trend_direction,
+        trend_magnitude,
+    )
 
     return DayClassification(
         day_type=day_type,

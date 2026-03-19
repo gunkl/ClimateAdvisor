@@ -67,6 +67,15 @@ def generate_briefing(
     c = classification
     lines: list[str] = []
 
+    _LOGGER.debug(
+        "Generating briefing — day_type=%s, trend=%s, "
+        "comfort_heat=%.0f°F, comfort_cool=%.0f°F",
+        c.day_type,
+        c.trend_direction,
+        comfort_heat,
+        comfort_cool,
+    )
+
     # Structured header (kept for quick scanning)
     trend_desc = _trend_description(c)
     lines.append("🏠 Your Home Climate Plan for Today")
@@ -89,6 +98,8 @@ def generate_briefing(
     elif c.day_type == DAY_TYPE_COLD:
         lines.extend(_cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time))
 
+    _LOGGER.debug("Dispatched %s day plan", c.day_type)
+
     lines.append("")
     lines.extend(_leaving_home_section(c, setback_heat, setback_cool))
     lines.append("")
@@ -106,6 +117,7 @@ def generate_briefing(
     if grace_lines:
         lines.append("")
         lines.extend(grace_lines)
+        _LOGGER.debug("Grace section included — source=%s", grace_source)
 
     lines.append("")
     lines.extend(_tonight_preview(c, comfort_heat, comfort_cool, sleep_time))
@@ -120,7 +132,18 @@ def generate_briefing(
         lines.append("")
         lines.append("Reply ACCEPT or DISMISS to any suggestion, or ignore to keep current behavior.")
 
-    return "\n".join(lines)
+    briefing_text = "\n".join(lines)
+    _LOGGER.debug(
+        "Briefing generated — %d chars, %d learning suggestions",
+        len(briefing_text),
+        len(learning_suggestions) if learning_suggestions else 0,
+    )
+    if len(briefing_text) > 250:
+        _LOGGER.debug(
+            "Briefing exceeds 250-char sensor state limit — "
+            "full text available in sensor attribute"
+        )
+    return briefing_text
 
 
 def _trend_description(c: DayClassification) -> str:
@@ -385,6 +408,11 @@ def _grace_period_section(
 
 def _tonight_preview(c, comfort_heat, comfort_cool, sleep_time) -> list[str]:
     """Conversational preview of tonight and tomorrow based on trend."""
+    _LOGGER.debug(
+        "Tonight preview — trend=%s, magnitude=%.1f°F",
+        c.trend_direction,
+        c.trend_magnitude,
+    )
     if c.trend_direction == "warming" and c.trend_magnitude >= 5:
         return [
             f"Looking ahead — tomorrow's warmer at {c.tomorrow_high:.0f}°F, so"

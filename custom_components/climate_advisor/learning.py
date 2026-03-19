@@ -81,6 +81,10 @@ class LearningEngine:
         if self._db_path.exists():
             try:
                 data = json.loads(self._db_path.read_text())
+                _LOGGER.debug(
+                    "Loaded learning state — %d records",
+                    len(data.get("records", [])),
+                )
                 return LearningState(**data)
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.warning("Failed to load learning state, starting fresh: %s", err)
@@ -90,6 +94,7 @@ class LearningEngine:
         """Persist learning state to disk."""
         try:
             self._db_path.write_text(json.dumps(asdict(self._state), indent=2))
+            _LOGGER.debug("Saved learning state — %d records", len(self._state.records))
         except OSError as err:
             _LOGGER.error("Failed to save learning state: %s", err)
 
@@ -102,10 +107,21 @@ class LearningEngine:
         self._state.records.append(asdict(record))
 
         # Keep a rolling window (90 days)
+        pre_trim_count = len(self._state.records)
         cutoff = (datetime.now() - timedelta(days=90)).isoformat()[:10]
         self._state.records = [
             r for r in self._state.records if r.get("date", "") >= cutoff
         ]
+        trimmed = pre_trim_count - len(self._state.records)
+        if trimmed > 0:
+            _LOGGER.debug("Trimmed %d records older than 90 days", trimmed)
+
+        _LOGGER.debug(
+            "Recorded day — date=%s, type=%s, records=%d",
+            record.date,
+            record.day_type,
+            len(self._state.records),
+        )
 
         self._save_state()
 
@@ -117,6 +133,11 @@ class LearningEngine:
         """
         records = self._state.records
         if len(records) < MIN_DATA_POINTS_FOR_SUGGESTION:
+            _LOGGER.debug(
+                "Not enough data for suggestions — %d records, need %d",
+                len(records),
+                MIN_DATA_POINTS_FOR_SUGGESTION,
+            )
             return []
 
         suggestions: list[str] = []
@@ -208,11 +229,13 @@ class LearningEngine:
                     f"exclude it from monitoring?"
                 )
 
+        _LOGGER.debug("Generated %d learning suggestions", len(suggestions))
         return suggestions
 
     def dismiss_suggestion(self, suggestion_key: str) -> None:
         """Mark a suggestion as dismissed so it won't reappear soon."""
         self._state.dismissed_suggestions.append(suggestion_key)
+        _LOGGER.info("Learning suggestion dismissed — key=%s", suggestion_key)
         self._save_state()
 
     def accept_suggestion(self, suggestion_key: str) -> dict[str, Any]:
@@ -236,6 +259,18 @@ class LearningEngine:
             changes["morning_preheat_offset_minutes"] = 15  # Start earlier
         elif suggestion_key == "frequent_door_pauses":
             changes["door_pause_seconds"] = 300  # Extend to 5 minutes
+
+        if changes:
+            _LOGGER.info(
+                "Learning suggestion accepted — key=%s, changes=%s",
+                suggestion_key,
+                changes,
+            )
+        else:
+            _LOGGER.warning(
+                "Suggestion key %r not recognized — no changes applied",
+                suggestion_key,
+            )
 
         self._state.settings_history.append({
             "timestamp": datetime.now().isoformat(),

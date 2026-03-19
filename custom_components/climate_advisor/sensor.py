@@ -49,10 +49,13 @@ async def async_setup_entry(
     ]
 
     async_add_entities(entities)
+    _LOGGER.debug("Registered %d Climate Advisor sensor entities", len(entities))
 
 
 class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
     """Base class for Climate Advisor sensors."""
+
+    _empty_data_warned: bool = False
 
     def __init__(
         self,
@@ -74,6 +77,12 @@ class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
         """Return the sensor value."""
         if self.coordinator.data:
             return self.coordinator.data.get(self._key)
+        if not self._empty_data_warned:
+            _LOGGER.debug(
+                "Coordinator data empty for sensor %s — returning None",
+                self._key,
+            )
+            self._empty_data_warned = True
         return None
 
 
@@ -120,6 +129,8 @@ class ClimateAdvisorNextActionSensor(ClimateAdvisorBaseSensor):
 class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
     """Sensor holding the full daily briefing text."""
 
+    _truncation_warned: bool = False
+
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_BRIEFING, "Daily Briefing", "mdi:email-outline")
 
@@ -128,6 +139,13 @@ class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
         """Return a truncated version for the state (HA has a 255 char limit)."""
         full = self.coordinator.data.get(ATTR_BRIEFING, "") if self.coordinator.data else ""
         if len(full) > 250:
+            if not self._truncation_warned:
+                _LOGGER.warning(
+                    "Briefing truncated — %d chars exceeds 250-char state limit; "
+                    "full text in full_briefing attribute",
+                    len(full),
+                )
+                self._truncation_warned = True
             return full[:247] + "..."
         return full
 

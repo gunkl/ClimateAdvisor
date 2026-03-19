@@ -81,6 +81,11 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             self._data.update(user_input)
+            _LOGGER.debug(
+                "Config flow — weather=%s, climate=%s",
+                user_input.get("weather_entity"),
+                user_input.get("climate_entity"),
+            )
             return await self.async_step_temperature_sources()
 
         return self.async_show_form(
@@ -253,6 +258,12 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the daily schedule step."""
         if user_input is not None:
             self._data.update(user_input)
+            _LOGGER.info(
+                "Config entry created — wake=%s, sleep=%s, briefing=%s",
+                self._data.get("wake_time"),
+                self._data.get("sleep_time"),
+                self._data.get("briefing_time"),
+            )
             return self.async_create_entry(
                 title="Climate Advisor",
                 data=self._data,
@@ -367,6 +378,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         """Step 2: Temperature source selection."""
         if user_input is not None:
             self._updates.update(user_input)
+            _LOGGER.debug(
+                "Options — outdoor_source=%s, indoor_source=%s",
+                user_input.get("outdoor_temp_source"),
+                user_input.get("indoor_temp_source"),
+            )
             return await self.async_step_sensors()
 
         current = self.config_entry.data
@@ -523,6 +539,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             await self.hass.config_entries.async_reload(
                 self.config_entry.entry_id
             )
+            _LOGGER.info("Options updated — reload triggered")
             return self.async_create_entry(title="", data={})
 
         current = self.config_entry.data

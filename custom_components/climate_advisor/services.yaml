@@ -27,3 +27,10 @@ force_reclassify:
 resend_briefing:
   name: Resend briefing
   description: Re-generate and resend the daily briefing notification, even if it was already sent today.
+
+dump_diagnostics:
+  name: Dump diagnostics
+  description: >-
+    Log a comprehensive diagnostic snapshot of Climate Advisor's internal state
+    for troubleshooting. Output is logged at INFO level — check Home Assistant
+    logs to view the result.

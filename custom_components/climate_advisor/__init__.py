@@ -9,6 +9,7 @@ This integration provides:
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -165,8 +166,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator._briefing_sent_today = False
         await coordinator._async_send_briefing(dt_util.now())
 
+    async def handle_dump_diagnostics(call):
+        """Log a comprehensive diagnostic snapshot for troubleshooting."""
+        from homeassistant.util import dt as dt_util
+
+        diag = {
+            "timestamp": dt_util.now().isoformat(),
+            "debug_state": coordinator.get_debug_state(),
+            "chart_data_summary": {
+                "outdoor_points": len(coordinator._outdoor_temp_history),
+                "indoor_points": len(coordinator._indoor_temp_history),
+            },
+            "learning_summary": coordinator.learning.get_compliance_summary(),
+            "config": {
+                k: v for k, v in coordinator.config.items()
+                if k != "notify_service"
+            },
+            "briefing_state": {
+                "sent_today": coordinator._briefing_sent_today,
+                "briefing_length": len(coordinator._last_briefing),
+            },
+        }
+        _LOGGER.info(
+            "Diagnostic dump requested:\n%s",
+            json.dumps(diag, indent=2, default=str),
+        )
+
     hass.services.async_register(DOMAIN, "force_reclassify", handle_force_reclassify)
     hass.services.async_register(DOMAIN, "resend_briefing", handle_resend_briefing)
+    hass.services.async_register(DOMAIN, "dump_diagnostics", handle_dump_diagnostics)
 
     # Register REST API views for the dashboard panel
     for view_cls in API_VIEWS:

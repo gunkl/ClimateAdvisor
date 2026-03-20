@@ -6,6 +6,7 @@ based on the day classification and learning state.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -103,6 +104,12 @@ class AutomationEngine:
         self._fan_override_active: bool = False
         self._fan_override_time: str | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
+        self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
+        self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
+
+        # Resume-from-pause tracking (Issue #47)
+        self._resumed_from_pause: bool = False
+        self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
 
     async def _notify(self, message: str, title: str) -> None:
         """Send a notification via the configured service, plus email if enabled."""
@@ -166,6 +173,7 @@ class AutomationEngine:
             self._manual_override_active = False
             self._manual_override_mode = None
             self._manual_override_time = None
+        self._resumed_from_pause = False
         self.clear_fan_override()
 
     def _get_fan_runtime_minutes(self) -> float:
@@ -273,13 +281,18 @@ class AutomationEngine:
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would set HVAC mode to %s — %s", mode, reason)
             return
-        await self.hass.services.async_call(
-            "climate",
-            "set_hvac_mode",
-            {"entity_id": self.climate_entity, "hvac_mode": mode},
-        )
-        _LOGGER.warning("Set HVAC mode to %s — %s", mode, reason)
-        self._record_action(f"Set HVAC to {mode}", reason)
+        self._hvac_command_pending = True
+        self._hvac_command_time = dt_util.now()
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                "set_hvac_mode",
+                {"entity_id": self.climate_entity, "hvac_mode": mode},
+            )
+            _LOGGER.warning("Set HVAC mode to %s — %s", mode, reason)
+            self._record_action(f"Set HVAC to {mode}", reason)
+        finally:
+            self._hvac_command_pending = False
 
     async def _set_temperature(self, temperature: float, *, reason: str) -> None:
         """Set the thermostat target temperature."""
@@ -411,6 +424,39 @@ class AutomationEngine:
         self._manual_override_time = dt_util.now().isoformat()
         self._start_grace_period("manual")
 
+    async def resume_from_pause(self) -> str | None:
+        """Resume HVAC from contact sensor pause (user-initiated via dashboard).
+
+        Clears the pause, restores the current classification's HVAC mode
+        (not pre_pause_mode, since classification may have changed), and
+        starts a manual override grace period to prevent immediate re-pause.
+
+        Returns the restored mode string, or None if not currently paused.
+        """
+        if not self._paused_by_door:
+            return None
+
+        _LOGGER.info("User resumed HVAC from door/window pause via dashboard")
+        self._paused_by_door = False
+        self._pre_pause_mode = None
+        self._resumed_from_pause = True
+
+        restore_mode = None
+        if self._current_classification:
+            restore_mode = self._current_classification.hvac_mode
+            if restore_mode and restore_mode != "off":
+                await self._set_hvac_mode(
+                    restore_mode,
+                    reason="user resumed from door/window pause",
+                )
+                await self._set_temperature_for_mode(
+                    self._current_classification,
+                    reason="user resumed from door/window pause",
+                )
+
+        self._start_grace_period("manual")
+        return restore_mode
+
     def _start_grace_period(self, source: str) -> None:
         """Start a grace period after HVAC is resumed.
 
@@ -439,7 +485,21 @@ class AutomationEngine:
 
         @callback
         def _grace_expired(_now: Any) -> None:
-            """Grace period has elapsed."""
+            """Grace period has elapsed — re-check sensors before clearing."""
+            # If any contact sensor is still open, re-pause instead of clearing
+            if self._sensor_check_callback and self._sensor_check_callback():
+                _LOGGER.info(
+                    "%s grace expired but sensor(s) still open — re-pausing HVAC",
+                    source,
+                )
+                self._grace_active = False
+                self._last_resume_source = None
+                self._manual_grace_cancel = None
+                self._automation_grace_cancel = None
+                self.clear_manual_override()
+                self.hass.async_create_task(self._re_pause_for_open_sensor())
+                return
+
             self._grace_active = False
             self._last_resume_source = None
             self._manual_grace_cancel = None
@@ -475,6 +535,25 @@ class AutomationEngine:
             self._automation_grace_cancel = None
         self._grace_active = False
         self._last_resume_source = None
+
+    async def _re_pause_for_open_sensor(self) -> None:
+        """Re-pause HVAC because a sensor is still open when grace expired."""
+        state = self.hass.states.get(self.climate_entity)
+        if state and state.state not in ("off", "unavailable", "unknown"):
+            self._pre_pause_mode = state.state
+            self._paused_by_door = True
+            await self._set_hvac_mode(
+                "off",
+                reason="grace expired — door/window still open, re-pausing",
+            )
+            await self._notify(
+                "Grace period expired but a door/window is still open. "
+                "HVAC has been paused again.",
+                "Climate Advisor",
+            )
+        elif state and state.state == "off":
+            # HVAC already off, just set the pause flag
+            self._paused_by_door = True
 
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""

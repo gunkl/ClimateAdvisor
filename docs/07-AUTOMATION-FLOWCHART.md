@@ -118,6 +118,8 @@ graph TD
 
 Sensor state changes are handled by `_async_door_window_changed()` in the coordinator, with pause logic in `handle_door_window_open()` and `handle_all_doors_windows_closed()` in the automation engine.
 
+When the system sets HVAC to `off` as part of a pause, it sets `_hvac_command_pending = True` and records `_hvac_command_time` before issuing the service call. This tells the thermostat state change handler (Section 5) that the mode change is system-initiated, not a user action, preventing false manual override detection.
+
 ```mermaid
 graph TD
     A[Sensor state change] --> B{Sensor is open?}
@@ -134,15 +136,35 @@ graph TD
     K -->|No| M[Store _pre_pause_mode]
     M --> N{pre_pause_mode != off?}
     N -->|No| O[HVAC already off - skip]
-    N -->|Yes| P[_paused_by_door = True\nSet HVAC off\nSend notification]
-    B -->|No| Q[Cancel pending debounce\nfor this sensor]
-    Q --> R{ALL sensors closed?}
-    R -->|No| S[Wait for more sensors]
-    R -->|Yes| T{_paused_by_door?}
-    T -->|No| U[Nothing to restore]
-    T -->|Yes| V[_paused_by_door = False\nRestore _pre_pause_mode\nRestore comfort temp]
-    V --> W[Start automation grace\ndefault 300s]
+    N -->|Yes| P[Set _hvac_command_pending = True\nRecord _hvac_command_time]
+    P --> Q[_paused_by_door = True\nSet HVAC off\nSend notification]
+    B -->|No| R[Cancel pending debounce\nfor this sensor]
+    R --> S{ALL sensors closed?}
+    S -->|No| T[Wait for more sensors]
+    S -->|Yes| U{_paused_by_door?}
+    U -->|No| V[Nothing to restore]
+    U -->|Yes| W[_paused_by_door = False\nRestore _pre_pause_mode\nRestore comfort temp]
+    W --> X[Start automation grace\ndefault 300s]
 ```
+
+### 4a. Resume from Pause (User Action)
+
+Users can click **"Resume HVAC (override pause)"** in the Door/Window Sensors section of the Debug tab. This action is treated as a manual override.
+
+```mermaid
+graph TD
+    A[User clicks Resume HVAC\noverride pause button] --> B[Clear _paused_by_door\n_pre_pause_mode = None]
+    B --> C[Restore classification HVAC mode\ne.g. cool or heat]
+    C --> D[Start manual grace period\ndefault 1800s / 30 min]
+    D --> E[_manual_override_active = True]
+    E --> F[Status: resumed — door/window override]
+```
+
+**Key behaviors:**
+- Restores the current day classification's recommended HVAC mode (e.g. `cool` on a hot day), not a previously stored state.
+- Starts a full manual override grace period (default 30 min). During this window, new contact sensor open events cannot re-pause HVAC.
+- IS recorded as a manual override — `apply_classification` will skip HVAC mode changes until the grace expires or a schedule boundary clears it.
+- Status string `"resumed — door/window override"` is surfaced in the Current Status pane and sensor entity.
 
 ---
 
@@ -150,9 +172,13 @@ graph TD
 
 Thermostat state changes are monitored by `_async_thermostat_changed()` in the coordinator.
 
+The `_hvac_command_pending` flag and `_hvac_command_time` timestamp are set by the system before it issues any HVAC service call (pause, resume, classification apply, etc.). When the thermostat state change event arrives, the handler checks this flag first. If it is set, the change is system-initiated and no override is recorded.
+
 ```mermaid
 graph TD
-    A[Thermostat state change] --> B{is_paused_by_door\nAND new_state != off?}
+    A[Thermostat state change] --> AA{_hvac_command_pending\nset recently?}
+    AA -->|Yes| AB[System-initiated change\nSkip override detection]
+    AA -->|No| B{is_paused_by_door\nAND new_state != off?}
     B -->|Yes| C[handle_manual_override_during_pause]
     C --> D[_paused_by_door = False\n_pre_pause_mode = None]
     D --> E[_manual_override_active = True]
@@ -228,6 +254,8 @@ graph TD
 
 Two grace period types are managed by `_start_grace_period()` in `AutomationEngine`.
 
+When any grace period expires, the system re-checks contact sensor state before resuming normal automation. If any contact sensor is still open, HVAC is re-paused immediately rather than blindly restoring normal operation. This prevents the safety issue of running heating or cooling with a door or window open.
+
 ```mermaid
 graph TD
     A{Grace trigger source?}
@@ -240,9 +268,12 @@ graph TD
     F --> G{should_notify?}
     G -->|Yes| H[Send grace expired notification]
     G -->|No| I[Silent expiry]
-    D --> J{While _grace_active = True}
-    J --> K[Door open detected]
-    K --> L[Skip pause - grace blocks it]
+    F --> J{Any contact sensor\nstill open?}
+    J -->|Yes| K[Re-pause HVAC\n_paused_by_door = True\nSet HVAC off]
+    J -->|No| L[Resume normal automation]
+    D --> M{While _grace_active = True}
+    M --> N[Door open detected]
+    N --> O[Skip pause - grace blocks it]
 ```
 
 ---

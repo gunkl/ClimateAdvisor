@@ -217,11 +217,13 @@ Clearing the override flag at these transitions means the integration will not s
 |---|---|
 | Sensor opens | Debounce timer starts (`DEFAULT_SENSOR_DEBOUNCE_SECONDS = 300s / 5 min`, configurable) |
 | During debounce | No HVAC action taken |
-| Debounce expires (sensor still open) | HVAC mode saved as `pre_pause_mode`; HVAC set to `off`; notification sent |
+| Debounce expires (sensor still open) | `_hvac_command_pending` set; HVAC mode saved as `pre_pause_mode`; HVAC set to `off`; notification sent |
 | Grace period active at debounce expiry | Pause **blocked** — no HVAC change, log message only |
 | HVAC already `off` at pause time | No action (nothing to pause) |
 | All monitored sensors close | Restore HVAC to `pre_pause_mode`; restore comfort temperature; start **automation** grace period |
 | User manually turns HVAC on during pause | Clears pause state; starts **manual** grace period; manual override activated |
+| User clicks "Resume HVAC (override pause)" button | Clears pause state; restores classification's recommended HVAC mode; starts **manual** grace period; status set to `"resumed — door/window override"` |
+| `_hvac_command_pending` flag | Set `True` before any system-issued HVAC service call (including pause set-to-off); prevents `_async_thermostat_changed()` from misidentifying the system's own change as a user manual override. Cleared after the service call completes. `_hvac_command_time` records the timestamp of the command for additional recency checks. |
 
 ---
 
@@ -229,10 +231,12 @@ Clearing the override flag at these transitions means the integration will not s
 
 | Type | Trigger | Default Duration | Configurable? | Effect | Notify on Expiry (default) |
 |---|---|---|---|---|---|
-| Manual | User overrides thermostat (including during a sensor pause) | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | No (`CONF_MANUAL_GRACE_NOTIFY = False`) |
+| Manual | User overrides thermostat (including during a sensor pause) or clicks "Resume HVAC (override pause)" | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | No (`CONF_MANUAL_GRACE_NOTIFY = False`) |
 | Automation | Climate Advisor resumes HVAC after all sensors close | `300s` (5 min) | Yes — `CONF_AUTOMATION_GRACE_PERIOD` | Blocks door/window sensor from immediately re-pausing HVAC | Yes (`CONF_AUTOMATION_GRACE_NOTIFY = True`) |
 
 Both grace periods are cancelled and reset on HA restart. Only one grace timer of each type is active at a time; starting a new one cancels the previous.
+
+**Grace expiry sensor re-check:** When either grace period expires, the system re-checks whether any monitored contact sensor is currently open. If one or more sensors are still open, HVAC is re-paused immediately (`_paused_by_door = True`, HVAC set to `off`) rather than restoring normal automation. This prevents the safety issue of running HVAC with a door or window open after the grace window closes.
 
 ### Startup Override Logic
 

@@ -13,6 +13,7 @@ from .const import (
     API_AUTOMATION_STATE,
     API_BRIEFING,
     API_CANCEL_OVERRIDE,
+    API_RESUME_FROM_PAUSE,
     API_TOGGLE_AUTOMATION,
     API_CHART_DATA,
     API_CONFIG,
@@ -357,6 +358,32 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
         })
 
 
+class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
+    """Resume HVAC from a contact sensor pause (user override)."""
+
+    url = API_RESUME_FROM_PAUSE
+    name = "api:climate_advisor:resume_from_pause"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        ae = coordinator.automation_engine
+        if not ae.is_paused_by_door:
+            return self.json({"status": "ok", "message": "Not currently paused"})
+
+        restored_mode = await ae.resume_from_pause()
+        return self.json({
+            "status": "ok",
+            "message": f"Resumed from pause. HVAC set to {restored_mode or 'N/A'}. "
+                       f"Manual grace period started.",
+            "restored_mode": restored_mode,
+        })
+
+
 class ClimateAdvisorToggleAutomationView(HomeAssistantView):
     """Toggle automation enabled/disabled state."""
 
@@ -392,5 +419,6 @@ API_VIEWS = [
     ClimateAdvisorRespondSuggestionView,
     ClimateAdvisorConfigView,
     ClimateAdvisorCancelOverrideView,
+    ClimateAdvisorResumeFromPauseView,
     ClimateAdvisorToggleAutomationView,
 ]

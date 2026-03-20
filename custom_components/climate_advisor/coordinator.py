@@ -110,6 +110,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_polarity_inverted=config.get(CONF_SENSOR_POLARITY_INVERTED, False),
         )
         self.automation_engine._revisit_callback = self.async_request_refresh
+        self.automation_engine._sensor_check_callback = self._any_sensor_open
 
         # Startup safety — first update checks HVAC state before applying classification
         self._first_run: bool = True
@@ -616,6 +617,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if inverted:
             return state.state == "off"
         return state.state == "on"
+
+    def _is_recent_hvac_command(self, threshold_seconds: float = 3.0) -> bool:
+        """Check if an HVAC command was issued very recently (race guard)."""
+        cmd_time = self.automation_engine._hvac_command_time
+        if cmd_time is None:
+            return False
+        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+
+    def _any_sensor_open(self) -> bool:
+        """Return True if any monitored contact sensor is currently open."""
+        return any(self._is_sensor_open(s) for s in self._resolved_sensors)
 
     def _check_startup_override(
         self, climate_state: Any, classification: Any,
@@ -1254,6 +1266,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             old_state.state != new_state.state
             and new_state.state not in ("unavailable", "unknown")
             and not self.automation_engine._manual_override_active
+            and not self.automation_engine._hvac_command_pending
+            and not self._is_recent_hvac_command()
             and self._current_classification
             and new_state.state != self._current_classification.hvac_mode
         ):
@@ -1406,6 +1420,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.automation_engine.is_paused_by_door:
             return "paused — door/window open"
         if self.automation_engine._grace_active:
+            if self.automation_engine._resumed_from_pause:
+                return "resumed — door/window override"
             source = self.automation_engine._last_resume_source or "automation"
             return f"grace period ({source})"
         if self._occupancy_mode == OCCUPANCY_VACATION:
@@ -1674,6 +1690,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "fan_mode_config": ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
             "economizer_active": ae._economizer_active,
             "economizer_phase": ae._economizer_phase,
+            "resumed_from_pause": ae._resumed_from_pause,
         }
 
     async def async_shutdown(self) -> None:

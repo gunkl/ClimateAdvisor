@@ -64,10 +64,14 @@ class _MockRepairsFlow:
             result["errors"] = errors
         return result
 
-    def async_create_entry(self, *, data):
-        return {"type": "create_entry", "data": data}
+    def async_create_entry(self, *, title="", data):
+        return {"type": "create_entry", "title": title, "data": data}
+
+class _MockConfirmRepairFlow(_MockRepairsFlow):
+    """Minimal stand-in for homeassistant.components.repairs.ConfirmRepairFlow."""
 
 sys.modules["homeassistant.components.repairs"].RepairsFlow = _MockRepairsFlow
+sys.modules["homeassistant.components.repairs"].ConfirmRepairFlow = _MockConfirmRepairFlow
 
 # DataUpdateCoordinator needs to be a real class so coordinator.py can subclass it
 class _MockDataUpdateCoordinator:

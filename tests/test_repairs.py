@@ -102,9 +102,12 @@ class TestAsyncCreateFixFlow:
         flow = asyncio.run(async_create_fix_flow(hass, "weather_entity_not_found", None))
         assert isinstance(flow, WeatherEntityRepairFlow)
 
-    def test_returns_base_flow_for_unknown_issue(self):
+    def test_returns_confirm_flow_for_unknown_issue(self):
+        from homeassistant.components.repairs import ConfirmRepairFlow
+
         hass = _make_hass()
         flow = asyncio.run(async_create_fix_flow(hass, "some_other_issue", None))
+        assert isinstance(flow, ConfirmRepairFlow)
         assert not isinstance(flow, WeatherEntityRepairFlow)
 
 
@@ -190,8 +193,8 @@ class TestWeatherEntityRepairFlow:
         assert new_data["weather_entity"] == "weather.home"
         # Verify issue was deleted
         mock_delete.assert_called_once()
-        # Verify integration was reloaded
-        hass.config_entries.async_reload.assert_awaited_once_with("test_entry_id")
+        # Verify integration reload was deferred via async_create_task
+        hass.async_create_task.assert_called_once()
 
     def test_shows_error_on_invalid_entity(self):
         """Selecting an entity that doesn't exist shows error."""

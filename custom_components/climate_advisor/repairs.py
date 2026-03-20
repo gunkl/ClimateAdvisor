@@ -4,7 +4,7 @@ from __future__ import annotations
 import voluptuous as vol
 
 from homeassistant import data_entry_flow
-from homeassistant.components.repairs import RepairsFlow
+from homeassistant.components.repairs import ConfirmRepairFlow, RepairsFlow
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir, selector
 
@@ -43,9 +43,12 @@ class WeatherEntityRepairFlow(RepairsFlow):
                     entry, data={**entry.data, "weather_entity": weather_entity}
                 )
                 ir.async_delete_issue(self.hass, DOMAIN, "weather_entity_not_found")
-                await self.hass.config_entries.async_reload(entry.entry_id)
+                # Defer reload to avoid tearing down the integration mid-flow
+                self.hass.async_create_task(
+                    self.hass.config_entries.async_reload(entry.entry_id)
+                )
 
-            return self.async_create_entry(data={})
+            return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
             step_id="init",
@@ -65,4 +68,4 @@ async def async_create_fix_flow(
     """Create a fix flow for the given issue."""
     if issue_id == "weather_entity_not_found":
         return WeatherEntityRepairFlow()
-    return RepairsFlow()
+    return ConfirmRepairFlow()

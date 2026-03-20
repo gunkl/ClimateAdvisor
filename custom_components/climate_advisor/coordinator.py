@@ -781,6 +781,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         call is unavailable.
         """
         weather_entity = self.config["weather_entity"]
+        if not self.hass.states.get(weather_entity):
+            return []
         try:
             response = await self.hass.services.async_call(
                 "weather",
@@ -816,6 +818,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         integration does not support hourly forecasts or the call fails.
         """
         weather_entity = self.config["weather_entity"]
+        if not self.hass.states.get(weather_entity):
+            return []
         try:
             response = await self.hass.services.async_call(
                 "weather",

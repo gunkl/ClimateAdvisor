@@ -141,7 +141,7 @@ graph TD
     R -->|Yes| T{_paused_by_door?}
     T -->|No| U[Nothing to restore]
     T -->|Yes| V[_paused_by_door = False\nRestore _pre_pause_mode\nRestore comfort temp]
-    V --> W[Start automation grace\ndefault 3600s]
+    V --> W[Start automation grace\ndefault 300s]
 ```
 
 ---
@@ -232,7 +232,7 @@ Two grace period types are managed by `_start_grace_period()` in `AutomationEngi
 graph TD
     A{Grace trigger source?}
     A -->|Manual override| B[Duration: manual_grace_seconds\ndefault 1800s / 30 min]
-    A -->|Automation resume| C[Duration: automation_grace_seconds\ndefault 3600s / 60 min]
+    A -->|Automation resume| C[Duration: automation_grace_seconds\ndefault 300s / 5 min]
     B --> D[_grace_active = True\nStart countdown timer]
     C --> D
     D --> E{Timer expires}

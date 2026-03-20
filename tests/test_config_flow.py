@@ -52,7 +52,7 @@ FULL_CONFIG = {
     "sensor_debounce_seconds": 300,
     "manual_grace_seconds": 1800,
     "manual_grace_notify": False,
-    "automation_grace_seconds": 3600,
+    "automation_grace_seconds": 300,
     "automation_grace_notify": True,
     "email_notify": True,
     "wake_time": "06:30:00",
@@ -242,7 +242,7 @@ class TestConfigFlowDataAccumulation:
             "sensor_debounce_seconds": 300,
             "manual_grace_seconds": 1800,
             "manual_grace_notify": False,
-            "automation_grace_seconds": 3600,
+            "automation_grace_seconds": 300,
             "automation_grace_notify": True,
         })
 

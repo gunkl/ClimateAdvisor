@@ -230,7 +230,7 @@ Clearing the override flag at these transitions means the integration will not s
 | Type | Trigger | Default Duration | Configurable? | Effect | Notify on Expiry (default) |
 |---|---|---|---|---|---|
 | Manual | User overrides thermostat (including during a sensor pause) | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | No (`CONF_MANUAL_GRACE_NOTIFY = False`) |
-| Automation | Climate Advisor resumes HVAC after all sensors close | `3600s` (60 min) | Yes — `CONF_AUTOMATION_GRACE_PERIOD` | Blocks door/window sensor from immediately re-pausing HVAC | Yes (`CONF_AUTOMATION_GRACE_NOTIFY = True`) |
+| Automation | Climate Advisor resumes HVAC after all sensors close | `300s` (5 min) | Yes — `CONF_AUTOMATION_GRACE_PERIOD` | Blocks door/window sensor from immediately re-pausing HVAC | Yes (`CONF_AUTOMATION_GRACE_NOTIFY = True`) |
 
 Both grace periods are cancelled and reset on HA restart. Only one grace timer of each type is active at a time; starting a new one cancels the previous.
 
@@ -295,7 +295,7 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `VACATION_SETBACK_EXTRA` | `3` | °F | Extra setback depth beyond normal away setback during vacation |
 | `DEFAULT_SENSOR_DEBOUNCE_SECONDS` | `300` | seconds (5 min) | Door/window must stay open this long before HVAC pauses |
 | `DEFAULT_MANUAL_GRACE_SECONDS` | `1800` | seconds (30 min) | Duration of manual grace period after user override |
-| `DEFAULT_AUTOMATION_GRACE_SECONDS` | `3600` | seconds (60 min) | Duration of automation grace period after HVAC resumes |
+| `DEFAULT_AUTOMATION_GRACE_SECONDS` | `300` | seconds (5 min) | Duration of automation grace period after HVAC resumes |
 | `ECONOMIZER_TEMP_DELTA` | `3` | °F | Outdoor temp must be within this delta of comfort_cool for economizer eligibility |
 | `ECONOMIZER_MORNING_START_HOUR` | `6` | hour (24h) | Economizer morning window start |
 | `ECONOMIZER_MORNING_END_HOUR` | `9` | hour (24h) | Economizer morning window end |

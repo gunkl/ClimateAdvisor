@@ -101,7 +101,7 @@ sensor_polarity_inverted: false  # true if sensors report on=closed instead of o
 sensor_debounce_seconds: 300    # how long a door/window must stay open before HVAC pauses (default 5 min, UI: 0–60 min)
 manual_grace_seconds: 1800      # hands-off window after user manually turns HVAC on (default 30 min, UI: 0–240 min)
 manual_grace_notify: false      # send notification when manual grace period expires
-automation_grace_seconds: 3600  # settling period after Climate Advisor auto-resumes HVAC (default 60 min, UI: 0–240 min)
+automation_grace_seconds: 300   # settling period after Climate Advisor auto-resumes HVAC (default 5 min, UI: 0–240 min)
 automation_grace_notify: true   # send notification when automation grace period expires
 # Note: Config UI displays minutes; values are stored internally as seconds
 wake_time: "06:30"
@@ -121,7 +121,7 @@ occupancy_guest_inverted: false
 
 **Manual grace period** (`manual_grace_seconds`): After the user manually turns HVAC back on during a door/window pause, Climate Advisor stays hands-off for this duration. Door/window sensors cannot trigger another pause during this window — the user just overrode the system and should not be immediately overridden back. Default: 30 minutes. Notification on expiry: off by default.
 
-**Automation grace period** (`automation_grace_seconds`): After Climate Advisor itself resumes HVAC (all doors/windows closed), it waits this duration before door/window sensors can trigger another pause. This prevents rapid cycling when someone is moving in and out. Default: 60 minutes. Notification on expiry: on by default so the user knows normal sensing has resumed.
+**Automation grace period** (`automation_grace_seconds`): After Climate Advisor itself resumes HVAC (all doors/windows closed), it waits this duration before door/window sensors can trigger another pause. This prevents rapid cycling when someone is moving in and out. Default: 5 minutes. Notification on expiry: on by default so the user knows normal sensing has resumed.
 
 Setting either grace period to 0 disables it entirely.
 
@@ -167,7 +167,7 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 ### Timing Defaults
 - Sensor debounce: 300 seconds (5 min)
 - Manual grace period: 1800 seconds (30 min)
-- Automation grace period: 3600 seconds (60 min)
+- Automation grace period: 300 seconds (5 min)
 - Occupancy setback delay: 15 minutes
 - Max continuous runtime alert: 3 hours
 

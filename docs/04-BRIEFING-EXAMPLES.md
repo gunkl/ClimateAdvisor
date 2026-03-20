@@ -187,7 +187,7 @@ Looking ahead — tomorrow's cooler at 28°F, so I'll bank some extra warmth thi
 This paragraph appears between the "fresh air" section and the "looking ahead" section:
 
 ```
-One heads-up: I just resumed the HVAC after all the doors and windows closed, so I'm in a 60 minute settling period. During that time, opening a door or window briefly won't immediately pause things again — this prevents the system from cycling on and off if you're moving in and out. After the settling period, normal door/window sensing resumes.
+One heads-up: I just resumed the HVAC after all the doors and windows closed, so I'm in a 5 minute settling period. During that time, opening a door or window briefly won't immediately pause things again — this prevents the system from cycling on and off if you're moving in and out. After the settling period, normal door/window sensing resumes.
 ```
 
 ---

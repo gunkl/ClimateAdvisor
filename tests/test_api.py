@@ -183,7 +183,7 @@ class TestConfigViewDisplayTransform:
         cases = [
             (DEFAULT_SENSOR_DEBOUNCE_SECONDS, 5),
             (DEFAULT_MANUAL_GRACE_SECONDS, 30),
-            (DEFAULT_AUTOMATION_GRACE_SECONDS, 60),
+            (DEFAULT_AUTOMATION_GRACE_SECONDS, 5),
         ]
         for seconds, expected_minutes in cases:
             assert seconds // 60 == expected_minutes

@@ -24,7 +24,7 @@ Pause HVAC when monitored doors/windows are open for more than a configurable de
 **Debounce**: Quick open/close events (e.g., stepping outside briefly) don't trigger a pause — only sustained open states do.
 
 **Grace periods**: After HVAC resumes, a settling period prevents rapid cycling if someone is moving in and out. Two types:
-- *Automation grace* (default 60 min): After Climate Advisor auto-resumes. Prevents the system from immediately re-pausing when someone reopens a door moments after all sensors closed.
+- *Automation grace* (default 5 min): After Climate Advisor auto-resumes. Prevents the system from immediately re-pausing when someone reopens a door moments after all sensors closed.
 - *Manual grace* (default 30 min): After the user manually turns HVAC back on during a pause. Gives the user space to override without the system jumping back in.
 
 Both grace durations are configurable and can be set to 0 to disable. The daily briefing mentions active grace periods so the user understands if door/window sensing is temporarily suspended.

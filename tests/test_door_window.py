@@ -466,8 +466,8 @@ class TestGracePeriodDuration:
     def test_default_manual_grace_is_30_min(self):
         assert DEFAULT_MANUAL_GRACE_SECONDS == 1800
 
-    def test_default_automation_grace_is_60_min(self):
-        assert DEFAULT_AUTOMATION_GRACE_SECONDS == 3600
+    def test_default_automation_grace_is_5_min(self):
+        assert DEFAULT_AUTOMATION_GRACE_SECONDS == 300
 
 
 class TestGracePeriodNotifications:
@@ -532,6 +532,141 @@ class TestTimerCleanup:
 
 
 # ---------------------------------------------------------------------------
+# Grace period expiry callback tests (Issue #38)
+# ---------------------------------------------------------------------------
+
+class TestGracePeriodExpiry:
+    """Tests for the grace period expiry callback behavior.
+
+    The @callback decorator from homeassistant.core is mocked as a MagicMock
+    in the test environment, which swallows the decorated function. We patch
+    it as an identity function so the grace expiry closure is preserved.
+    """
+
+    _PATCHES = [
+        "custom_components.climate_advisor.automation.async_call_later",
+        "custom_components.climate_advisor.automation.callback",
+    ]
+
+    def _run_close_and_capture_callback(self, engine):
+        """Run handle_all_doors_windows_closed and return the grace expiry callback."""
+        with patch(self._PATCHES[0]) as mock_call_later, \
+             patch(self._PATCHES[1], side_effect=lambda f: f):
+            mock_call_later.return_value = MagicMock()
+            asyncio.run(engine.handle_all_doors_windows_closed())
+            assert mock_call_later.call_count == 1
+            duration = mock_call_later.call_args[0][1]
+            grace_callback = mock_call_later.call_args[0][2]
+            return duration, grace_callback
+
+    def test_grace_expiry_callback_clears_state(self):
+        """When the grace timer fires, _grace_active resets and manual override clears."""
+        engine = _make_automation_engine({
+            CONF_AUTOMATION_GRACE_PERIOD: 300,
+            CONF_AUTOMATION_GRACE_NOTIFY: False,
+        })
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+
+        duration, grace_callback = self._run_close_and_capture_callback(engine)
+        assert duration == 300
+
+        # Grace should be active before expiry
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "automation"
+
+        # Fire the expiry callback
+        grace_callback(None)
+
+        # State should be cleared
+        assert engine._grace_active is False
+        assert engine._last_resume_source is None
+        assert engine._manual_grace_cancel is None
+        assert engine._automation_grace_cancel is None
+        assert engine._manual_override_active is False
+
+    def test_grace_expiry_sends_notification_when_enabled(self):
+        """When automation grace notify is on, expiry dispatches a notification."""
+        engine = _make_automation_engine({
+            CONF_AUTOMATION_GRACE_PERIOD: 300,
+            CONF_AUTOMATION_GRACE_NOTIFY: True,
+        })
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+
+        _, grace_callback = self._run_close_and_capture_callback(engine)
+
+        # Fire the expiry callback
+        grace_callback(None)
+
+        # Should have scheduled a notification task
+        engine.hass.async_create_task.assert_called()
+
+    def test_grace_expiry_skips_notification_when_disabled(self):
+        """When automation grace notify is off, expiry sends no notification."""
+        engine = _make_automation_engine({
+            CONF_AUTOMATION_GRACE_PERIOD: 300,
+            CONF_AUTOMATION_GRACE_NOTIFY: False,
+        })
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+
+        _, grace_callback = self._run_close_and_capture_callback(engine)
+
+        # Reset mock so we only track calls after expiry
+        engine.hass.async_create_task.reset_mock()
+
+        # Fire the expiry callback
+        grace_callback(None)
+
+        # Should NOT have scheduled a notification task
+        engine.hass.async_create_task.assert_not_called()
+
+    def test_door_open_during_grace_is_blocked(self):
+        """Opening a door during active grace period does not pause HVAC."""
+        engine = _make_automation_engine()
+        engine._grace_active = True
+        engine._last_resume_source = "automation"
+
+        # Set up a state so the engine could pause if it wanted to
+        state_mock = MagicMock()
+        state_mock.state = "cool"
+        engine.hass.states.get.return_value = state_mock
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is False
+        # No HVAC service call should have been made
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_door_open_after_grace_expires_triggers_pause(self):
+        """After grace expires, a new door open correctly pauses HVAC."""
+        engine = _make_automation_engine({
+            CONF_AUTOMATION_GRACE_PERIOD: 300,
+            CONF_AUTOMATION_GRACE_NOTIFY: False,
+        })
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+
+        _, grace_callback = self._run_close_and_capture_callback(engine)
+
+        # Fire the expiry callback — grace ends
+        grace_callback(None)
+        assert engine._grace_active is False
+
+        # Now a new door open should pause HVAC
+        state_mock = MagicMock()
+        state_mock.state = "cool"
+        engine.hass.states.get.return_value = state_mock
+        engine.hass.services.async_call.reset_mock()
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        engine.hass.services.async_call.assert_called()
+
+
+# ---------------------------------------------------------------------------
 # Config migration v3 → v4 tests
 # ---------------------------------------------------------------------------
 
@@ -554,7 +689,7 @@ class TestConfigMigrationV3ToV4:
         assert new_data[CONF_SENSOR_DEBOUNCE] == 300
         assert new_data[CONF_MANUAL_GRACE_PERIOD] == 1800
         assert new_data[CONF_MANUAL_GRACE_NOTIFY] is False
-        assert new_data[CONF_AUTOMATION_GRACE_PERIOD] == 3600
+        assert new_data[CONF_AUTOMATION_GRACE_PERIOD] == 300
         assert new_data[CONF_AUTOMATION_GRACE_NOTIFY] is True
         # Existing keys preserved
         assert new_data["door_window_sensors"] == ["binary_sensor.front_door"]

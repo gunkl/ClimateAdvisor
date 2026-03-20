@@ -653,11 +653,11 @@ class TestGracePeriodSection:
             sleep_time=DEFAULT_SLEEP,
             grace_active=True,
             grace_source="automation",
-            automation_grace_seconds=3600,
+            automation_grace_seconds=300,
         )
         low = result.lower()
         assert "settling period" in low
-        assert "60 minutes" in low
+        assert "5 minutes" in low
 
     def test_grace_section_duration_reflects_config(self):
         """Grace period duration shown should match what was configured."""

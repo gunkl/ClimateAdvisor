@@ -701,6 +701,9 @@
             <tr><td>Grace Period Active</td><td>${data.grace_active ? 'Yes' : 'No'}</td></tr>
             <tr><td>Last Resume Source</td><td>${data.last_resume_source || 'N/A'}</td></tr>
             <tr><td>Pending Debounce Timers</td><td>${(data.pending_debounce_timers || []).length}</td></tr>
+            <tr><td>Last Action Time</td><td>${data.last_action_time ? new Date(data.last_action_time).toLocaleString() : 'N/A'}</td></tr>
+            <tr><td>Last Action Reason</td><td>${data.last_action_reason || 'N/A'}</td></tr>
+            <tr><td>Manual Override</td><td>${data.manual_override_active ? data.manual_override_mode + ' (active)' : 'No'}</td></tr>
           </table>
         </div>
         ${sensorRows ? `
@@ -719,6 +722,8 @@
               <tr><td>Windows Recommended</td><td>${data.classification.windows_recommended ? 'Yes' : 'No'}</td></tr>
               <tr><td>Window Open Time</td><td>${data.classification.window_open_time || 'N/A'}</td></tr>
               <tr><td>Window Close Time</td><td>${data.classification.window_close_time || 'N/A'}</td></tr>
+              <tr><td>Morning Window Opportunity</td><td>${data.classification.window_opportunity_morning ? 'Yes (' + (data.classification.window_opportunity_morning_start || '') + ' – ' + (data.classification.window_opportunity_morning_end || '') + ')' : 'No'}</td></tr>
+              <tr><td>Evening Window Opportunity</td><td>${data.classification.window_opportunity_evening ? 'Yes (' + (data.classification.window_opportunity_evening_start || '') + '+)' : 'No'}</td></tr>
               <tr><td>Pre-Condition</td><td>${data.classification.pre_condition ? 'Yes (' + data.classification.pre_condition_target + '\u00b0F)' : 'No'}</td></tr>
               <tr><td>Setback Modifier</td><td>${data.classification.setback_modifier || 0}\u00b0F</td></tr>
             </table>

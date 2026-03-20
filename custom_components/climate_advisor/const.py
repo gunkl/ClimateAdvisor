@@ -59,6 +59,10 @@ ECONOMIZER_MORNING_END_HOUR = 9     # 9:00 AM
 ECONOMIZER_EVENING_START_HOUR = 17  # 5:00 PM
 ECONOMIZER_EVENING_END_HOUR = 24    # midnight (end of day)
 
+# Warm-day window timing — open early morning, close before outdoor temps climb
+WARM_WINDOW_OPEN_HOUR = 6    # 6:00 AM
+WARM_WINDOW_CLOSE_HOUR = 10  # 10:00 AM
+
 # Occupancy toggle configuration
 CONF_HOME_TOGGLE = "home_toggle_entity"
 CONF_HOME_TOGGLE_INVERT = "home_toggle_invert"
@@ -115,6 +119,11 @@ ATTR_AUTOMATION_ENABLED = "automation_enabled"
 ATTR_NEXT_AUTOMATION_ACTION = "next_automation_action"
 ATTR_NEXT_AUTOMATION_TIME = "next_automation_time"
 ATTR_OCCUPANCY_MODE = "occupancy_mode"
+ATTR_LAST_ACTION_TIME = "last_action_time"
+ATTR_LAST_ACTION_REASON = "last_action_reason"
+
+# Revisit delay — follow-up check after any HVAC action (seconds)
+REVISIT_DELAY_SECONDS = 300  # 5 minutes
 
 # API paths for dashboard panel
 API_BASE = "/api/climate_advisor"
@@ -200,11 +209,13 @@ CONFIG_METADATA = {
         "label": "Sensor Debounce (minutes)",
         "description": "How long a door/window must stay open before HVAC pauses. Short values react faster but may cause unnecessary pauses for quick trips through a door.",
         "category": "sensors",
+        "display_transform": "seconds_to_minutes",
     },
     "manual_grace_seconds": {
         "label": "Manual Grace Period (minutes)",
         "description": "After you manually turn HVAC back on during a sensor pause, this grace window prevents re-pausing. Gives you time to close up without the system cycling.",
         "category": "sensors",
+        "display_transform": "seconds_to_minutes",
     },
     "manual_grace_notify": {
         "label": "Manual Grace Notifications",
@@ -215,6 +226,7 @@ CONFIG_METADATA = {
         "label": "Automation Grace Period (minutes)",
         "description": "After Climate Advisor resumes HVAC (all doors/windows closed), this grace window prevents immediate re-pausing if a door opens briefly.",
         "category": "sensors",
+        "display_transform": "seconds_to_minutes",
     },
     "automation_grace_notify": {
         "label": "Automation Grace Notifications",

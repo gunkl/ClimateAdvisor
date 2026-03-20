@@ -67,6 +67,8 @@ from .const import (
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_TEMP_DELTA,
+    ATTR_LAST_ACTION_TIME,
+    ATTR_LAST_ACTION_REASON,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -100,6 +102,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             config=config,
             sensor_polarity_inverted=config.get(CONF_SENSOR_POLARITY_INVERTED, False),
         )
+        self.automation_engine._revisit_callback = self.async_request_refresh
+
+        # Startup safety — first update checks HVAC state before applying classification
+        self._first_run: bool = True
 
         # State
         self._current_classification: DayClassification | None = None
@@ -115,6 +121,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Temperature history for dashboard chart (cleared at end of day)
         self._outdoor_temp_history: list[tuple[str, float]] = []
         self._indoor_temp_history: list[tuple[str, float]] = []
+        self._hourly_forecast_temps: list[dict] = []
 
         # Observe-only mode: when disabled, automation still runs but skips actions
         self._automation_enabled: bool = True
@@ -514,7 +521,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             unsub()
         self._unsub_occupancy_listeners.clear()
 
-    @callback
     async def _async_occupancy_toggle_changed(self, event: Event) -> None:
         """Handle an occupancy toggle state change."""
         new_mode = self._compute_occupancy_mode()
@@ -603,8 +609,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._subscribe_door_window_listeners()
 
         forecast = await self._get_forecast()
+        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
         if forecast:
             self._current_classification = classify_day(forecast)
+
+            # Startup safety: if HVAC is already running on first update,
+            # treat it as a manual override to avoid disrupting current state
+            if self._first_run:
+                self._first_run = False
+                climate_state = self.hass.states.get(self.config["climate_entity"])
+                if climate_state and climate_state.state not in (
+                    "off", "unavailable", "unknown",
+                ):
+                    _LOGGER.info(
+                        "First run: HVAC is %s — treating as manual override "
+                        "to avoid disrupting current state",
+                        climate_state.state,
+                    )
+                    self.automation_engine._manual_override_active = True
+                    self.automation_engine._manual_override_mode = (
+                        climate_state.state
+                    )
+                    self.automation_engine._manual_override_time = (
+                        dt_util.now().isoformat()
+                    )
+
             await self.automation_engine.apply_classification(self._current_classification)
 
             # Reset startup retry state on success
@@ -663,9 +692,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._startup_retries_remaining + 1,
                     delay,
                 )
-                async_call_later(
-                    self.hass, delay, lambda _: self.async_request_refresh()
-                )
+                @callback
+                def _schedule_retry(_now: Any) -> None:
+                    self.hass.async_create_task(self.async_request_refresh())
+
+                async_call_later(self.hass, delay, _schedule_retry)
             else:
                 _LOGGER.warning(
                     "Weather entity still unavailable after startup retries; "
@@ -690,6 +721,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_NEXT_AUTOMATION_ACTION: next_auto[0],
             ATTR_NEXT_AUTOMATION_TIME: next_auto[1],
             ATTR_OCCUPANCY_MODE: self._occupancy_mode,
+            ATTR_LAST_ACTION_TIME: self.automation_engine._last_action_time,
+            ATTR_LAST_ACTION_REASON: self.automation_engine._last_action_reason,
         }
 
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
@@ -776,6 +809,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return weather_state.attributes.get("forecast", [])
         return []
 
+    async def _get_hourly_forecast_data(self) -> list:
+        """Get hourly forecast data from the weather entity.
+
+        Returns a list of hourly forecast dicts, or [] if the weather
+        integration does not support hourly forecasts or the call fails.
+        """
+        weather_entity = self.config["weather_entity"]
+        try:
+            response = await self.hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": weather_entity, "type": "hourly"},
+                blocking=True,
+                return_response=True,
+            )
+            return (
+                response.get(weather_entity, {}).get("forecast", [])
+                if response
+                else []
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Hourly forecast not available for %s; using cosine model",
+                weather_entity,
+            )
+            return []
+
     async def _get_forecast(self) -> ForecastSnapshot | None:
         """Pull forecast data from the weather entity."""
         weather_entity = self.config["weather_entity"]
@@ -828,13 +888,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             timestamp=dt_util.now(),
         )
 
-    @callback
     async def _async_send_briefing(self, now: datetime) -> None:
         """Generate and send the daily briefing."""
         if self._briefing_sent_today:
             return
 
         forecast = await self._get_forecast()
+        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
         if not forecast:
             return
 
@@ -868,7 +928,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         wake_time = _parse_time(self.config.get("wake_time", "06:30"))
         sleep_time = _parse_time(self.config.get("sleep_time", "22:30"))
 
-        briefing = generate_briefing(
+        briefing_kwargs = dict(
             classification=classification,
             comfort_heat=self.config["comfort_heat"],
             comfort_cool=self.config["comfort_cool"],
@@ -889,6 +949,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             grace_active=self.automation_engine._grace_active,
             grace_source=self.automation_engine._last_resume_source,
         )
+        briefing = generate_briefing(**briefing_kwargs)
+        briefing_short = generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
         self._last_briefing = briefing
 
@@ -902,31 +964,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self._async_save_state()
             return
 
-        # Send notification
+        # Send push notification — short TLDR summary
         _notify_svc = self.config["notify_service"]
         _notify_name = _notify_svc.split(".")[-1] if "." in _notify_svc else _notify_svc
-        _briefing_payload = {
-            "message": briefing,
-            "title": "🏠 Your Home Climate Plan for Today",
-        }
         await self.hass.services.async_call(
-            "notify", _notify_name, _briefing_payload
+            "notify",
+            _notify_name,
+            {"message": briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
         )
+        # Send email — full briefing
         if self.config.get(CONF_EMAIL_NOTIFY, True):
             await self.hass.services.async_call(
-                "notify", "send_email", _briefing_payload
+                "notify",
+                "send_email",
+                {"message": briefing, "title": "🏠 Your Home Climate Plan for Today"},
             )
 
         self._briefing_sent_today = True
         _LOGGER.info("Daily briefing sent — day type: %s", classification.day_type)
         await self._async_save_state()
 
-    @callback
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
         await self.automation_engine.handle_morning_wakeup()
 
-    @callback
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
         await self.automation_engine.handle_bedtime()
@@ -954,9 +1015,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._hvac_on_since = None
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
+        self._hourly_forecast_temps.clear()
         await self._async_save_state()
 
-    @callback
     async def _async_door_window_changed(self, event: Event) -> None:
         """Handle a door/window sensor state change with debounce."""
         entity_id = event.data.get("entity_id", "")
@@ -979,43 +1040,46 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
 
             @callback
-            async def _debounce_expired(_now: Any, eid: str = entity_id) -> None:
-                """Debounce period elapsed — check if sensor is still open."""
-                self._door_open_timers.pop(eid, None)
-                if self._is_sensor_open(eid):
-                    _LOGGER.debug(
-                        "Debounce expired, sensor still open: %s", eid
-                    )
-                    await self.automation_engine.handle_door_window_open(eid)
-                    if self._today_record:
-                        self._today_record.door_window_pause_events += 1
-                        sensor_key = eid.split(".")[-1]
-                        self._today_record.door_pause_by_sensor[sensor_key] = (
-                            self._today_record.door_pause_by_sensor.get(sensor_key, 0) + 1
+            def _debounce_expired(_now: Any, eid: str = entity_id) -> None:
+                """Debounce period elapsed — schedule async check."""
+                async def _do_debounce() -> None:
+                    self._door_open_timers.pop(eid, None)
+                    if self._is_sensor_open(eid):
+                        _LOGGER.debug(
+                            "Debounce expired, sensor still open: %s", eid
                         )
+                        await self.automation_engine.handle_door_window_open(eid)
+                        if self._today_record:
+                            self._today_record.door_window_pause_events += 1
+                            sensor_key = eid.split(".")[-1]
+                            self._today_record.door_pause_by_sensor[sensor_key] = (
+                                self._today_record.door_pause_by_sensor.get(sensor_key, 0) + 1
+                            )
 
-                        # Track window compliance during recommended window period
-                        c = self._current_classification
-                        if (
-                            c
-                            and c.windows_recommended
-                            and c.window_open_time
-                            and c.window_close_time
-                            and not self._today_record.windows_opened
-                        ):
-                            now_time = dt_util.now().time()
-                            if c.window_open_time <= now_time <= c.window_close_time:
-                                self._today_record.windows_opened = True
-                                self._today_record.window_open_actual_time = (
-                                    dt_util.now().isoformat()
-                                )
+                            # Track window compliance during recommended window period
+                            c = self._current_classification
+                            if (
+                                c
+                                and c.windows_recommended
+                                and c.window_open_time
+                                and c.window_close_time
+                                and not self._today_record.windows_opened
+                            ):
+                                now_time = dt_util.now().time()
+                                if c.window_open_time <= now_time <= c.window_close_time:
+                                    self._today_record.windows_opened = True
+                                    self._today_record.window_open_actual_time = (
+                                        dt_util.now().isoformat()
+                                    )
 
-                        # Always track physical window opens (independent of recommendations)
-                        if not self._today_record.windows_physically_opened:
-                            self._today_record.windows_physically_opened = True
-                            self._today_record.window_physical_open_time = dt_util.now().isoformat()
+                            # Always track physical window opens (independent of recommendations)
+                            if not self._today_record.windows_physically_opened:
+                                self._today_record.windows_physically_opened = True
+                                self._today_record.window_physical_open_time = dt_util.now().isoformat()
 
-                        await self._async_save_state()
+                            await self._async_save_state()
+
+                self.hass.async_create_task(_do_debounce())
 
             cancel = async_call_later(
                 self.hass, debounce_sec, _debounce_expired
@@ -1055,7 +1119,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 await self.automation_engine.handle_all_doors_windows_closed()
                 await self._async_save_state()
 
-    @callback
     async def _async_thermostat_changed(self, event: Event) -> None:
         """Track thermostat changes for learning (detect manual overrides)."""
         new_state = event.data.get("new_state")
@@ -1080,6 +1143,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             await self.automation_engine.handle_manual_override_during_pause()
             self._cancel_all_debounce_timers()
+        elif (
+            old_state.state != new_state.state
+            and new_state.state not in ("unavailable", "unknown")
+            and not self.automation_engine._manual_override_active
+            and self._current_classification
+            and new_state.state != self._current_classification.hvac_mode
+        ):
+            # Mode changed outside of door/window pause to something
+            # different from what classification dictates — manual override
+            _LOGGER.info(
+                "Manual HVAC override detected: %s -> %s (classification wants %s)",
+                old_state.state,
+                new_state.state,
+                self._current_classification.hvac_mode,
+            )
+            self.automation_engine.handle_manual_override()
 
         # HVAC runtime tracking via hvac_action (preferred) or mode
         new_action = new_state.attributes.get("hvac_action", "").lower()
@@ -1262,7 +1341,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         current_hour = now.hour + now.minute / 60.0
 
         predicted_outdoor, predicted_indoor = compute_predicted_temps(
-            self._current_classification, self.config
+            self._current_classification, self.config, self._hourly_forecast_temps
         )
 
         return {
@@ -1311,10 +1390,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "window_close_time": (
                     c.window_close_time.isoformat() if c and c.window_close_time else None
                 ),
+                "window_opportunity_morning": c.window_opportunity_morning if c else None,
+                "window_opportunity_evening": c.window_opportunity_evening if c else None,
+                "window_opportunity_morning_start": (
+                    c.window_opportunity_morning_start.isoformat()
+                    if c and c.window_opportunity_morning_start else None
+                ),
+                "window_opportunity_morning_end": (
+                    c.window_opportunity_morning_end.isoformat()
+                    if c and c.window_opportunity_morning_end else None
+                ),
+                "window_opportunity_evening_start": (
+                    c.window_opportunity_evening_start.isoformat()
+                    if c and c.window_opportunity_evening_start else None
+                ),
+                "window_opportunity_evening_end": (
+                    c.window_opportunity_evening_end.isoformat()
+                    if c and c.window_opportunity_evening_end else None
+                ),
                 "pre_condition": c.pre_condition if c else None,
                 "pre_condition_target": c.pre_condition_target if c else None,
                 "setback_modifier": c.setback_modifier if c else None,
             },
+            "last_action_time": ae._last_action_time,
+            "last_action_reason": ae._last_action_reason,
+            "manual_override_active": ae._manual_override_active,
+            "manual_override_mode": ae._manual_override_mode,
         }
 
     async def async_shutdown(self) -> None:
@@ -1338,6 +1439,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 def compute_predicted_temps(
     classification: DayClassification | None,
     config: dict[str, Any],
+    hourly_forecast: list[dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Compute predicted outdoor and indoor hourly temperatures.
 
@@ -1352,16 +1454,10 @@ def compute_predicted_temps(
 
     c = classification
 
-    # --- Predicted outdoor temps (sinusoidal interpolation) ---
-    predicted_outdoor: list[dict] = []
-    high = c.today_high
-    low = c.today_low
-    mid = (high + low) / 2.0
-    amp = (high - low) / 2.0
-    for h in range(24):
-        # Peak at ~15:00 (3 PM), trough at ~5:00 (5 AM)
-        temp = mid + amp * math.cos(2 * math.pi * (h - 15) / 24)
-        predicted_outdoor.append({"hour": h, "temp": round(temp, 1)})
+    # --- Predicted outdoor temps ---
+    predicted_outdoor = _build_outdoor_curve(
+        high=c.today_high, low=c.today_low, hourly_forecast=hourly_forecast
+    )
 
     # --- Predicted indoor temps (from schedule + setpoints) ---
     predicted_indoor: list[dict] = []
@@ -1423,6 +1519,81 @@ def compute_predicted_temps(
         predicted_indoor.append({"hour": h, "temp": round(temp, 1)})
 
     return predicted_outdoor, predicted_indoor
+
+
+def _cosine_outdoor_curve(high: float, low: float) -> list[dict]:
+    """Sinusoidal outdoor temperature model (peak 3 PM, trough 3 AM).
+
+    This is the original prediction model, now used as a fallback when
+    hourly forecast data is not available from the weather integration.
+    """
+    mid = (high + low) / 2.0
+    amp = (high - low) / 2.0
+    return [
+        {
+            "hour": h,
+            "temp": round(
+                mid + amp * math.cos(2 * math.pi * (h - 15) / 24), 1
+            ),
+        }
+        for h in range(24)
+    ]
+
+
+def _build_outdoor_curve(
+    high: float,
+    low: float,
+    hourly_forecast: list[dict] | None,
+) -> list[dict]:
+    """Build 24 hourly outdoor temperature predictions.
+
+    Uses actual hourly forecast data when available.  Falls back to a
+    sinusoidal interpolation from today_high / today_low when not.
+    """
+    if not hourly_forecast:
+        return _cosine_outdoor_curve(high, low)
+
+    # Parse hourly entries into an integer-hour lookup (today only)
+    today = datetime.now().date()
+    known: dict[int, float] = {}
+    for entry in hourly_forecast:
+        dt_str = entry.get("datetime") or entry.get("time")
+        temp = entry.get("temperature") if entry.get("temperature") is not None else entry.get("temp")
+        if dt_str is None or temp is None:
+            continue
+        try:
+            dt_obj = datetime.fromisoformat(dt_str)
+            if dt_obj.date() != today:
+                continue
+            known[dt_obj.hour] = float(temp)
+        except (ValueError, TypeError):
+            continue
+
+    if not known:
+        return _cosine_outdoor_curve(high, low)
+
+    # Fill all 24 hours: known values, linear interpolation for gaps,
+    # cosine fallback at the edges.
+    cosine = {p["hour"]: p["temp"] for p in _cosine_outdoor_curve(high, low)}
+    known_hours = sorted(known)
+    result: list[dict] = []
+
+    for h in range(24):
+        if h in known:
+            result.append({"hour": h, "temp": round(known[h], 1)})
+        else:
+            before = [k for k in known_hours if k < h]
+            after = [k for k in known_hours if k > h]
+            if before and after:
+                h0, h1 = before[-1], after[0]
+                frac = (h - h0) / (h1 - h0)
+                temp = known[h0] + frac * (known[h1] - known[h0])
+                result.append({"hour": h, "temp": round(temp, 1)})
+            else:
+                # Edge: before all known or after all known → cosine fill
+                result.append({"hour": h, "temp": cosine[h]})
+
+    return result
 
 
 def _parse_time(time_str: str) -> time:

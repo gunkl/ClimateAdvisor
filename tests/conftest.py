@@ -42,6 +42,8 @@ _HA_MODULES = [
     "homeassistant.util",
     "homeassistant.util.dt",
     "homeassistant.components.http",
+    "homeassistant.components.repairs",
+    "homeassistant.helpers.issue_registry",
     "aiohttp",
     "aiohttp.web",
 ]
@@ -49,6 +51,35 @@ _HA_MODULES = [
 for mod_name in _HA_MODULES:
     if mod_name not in sys.modules:
         sys.modules[mod_name] = _make_mock_module(mod_name)
+
+# RepairsFlow needs to be a real class so repairs.py can subclass it
+class _MockRepairsFlow:
+    """Minimal stand-in for homeassistant.components.repairs.RepairsFlow."""
+
+    hass = None
+
+    def async_show_form(self, *, step_id, data_schema, errors=None):
+        result = {"type": "form", "step_id": step_id, "data_schema": data_schema}
+        if errors:
+            result["errors"] = errors
+        return result
+
+    def async_create_entry(self, *, data):
+        return {"type": "create_entry", "data": data}
+
+sys.modules["homeassistant.components.repairs"].RepairsFlow = _MockRepairsFlow
+
+# DataUpdateCoordinator needs to be a real class so coordinator.py can subclass it
+class _MockDataUpdateCoordinator:
+    """Minimal stand-in for homeassistant.helpers.update_coordinator.DataUpdateCoordinator."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def async_request_refresh(self):
+        """Stub for triggering a data refresh."""
+
+sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = _MockDataUpdateCoordinator
 
 # voluptuous is used by config_flow — mock it if not installed
 if "voluptuous" not in sys.modules:

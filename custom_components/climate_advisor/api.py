@@ -277,6 +277,10 @@ class ClimateAdvisorConfigView(HomeAssistantView):
             # Convert lists to counts for display
             if isinstance(value, list):
                 value = f"{len(value)} configured"
+            # Apply display transforms (e.g., seconds → minutes for UI)
+            transform = meta.get("display_transform")
+            if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
+                value = value // 60
 
             settings.append({
                 "key": key,

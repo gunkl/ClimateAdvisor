@@ -16,6 +16,9 @@ class _FakeDataUpdateCoordinator:
     def __init__(self, hass, *args, **kwargs):
         self.hass = hass
 
+    async def async_request_refresh(self):
+        """Stub for triggering a data refresh."""
+
 
 _update_coord_mod.DataUpdateCoordinator = _FakeDataUpdateCoordinator
 

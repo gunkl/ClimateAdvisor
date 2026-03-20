@@ -15,6 +15,13 @@ from custom_components.climate_advisor.const import (
     API_SEND_BRIEFING,
     API_RESPOND_SUGGESTION,
     API_CONFIG,
+    CONFIG_METADATA,
+    CONF_SENSOR_DEBOUNCE,
+    CONF_MANUAL_GRACE_PERIOD,
+    CONF_AUTOMATION_GRACE_PERIOD,
+    DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_AUTOMATION_GRACE_SECONDS,
 )
 from custom_components.climate_advisor.api import (
     _get_coordinator,
@@ -152,3 +159,50 @@ class TestCoordinatorDataContract:
         assert data["day_type"] == "warm"
         assert data["manual_overrides"] == 0
         assert data["door_window_pause_events"] == 0
+
+
+class TestConfigViewDisplayTransform:
+    """Tests for seconds-to-minutes display transform in config settings."""
+
+    SECONDS_KEYS = (
+        CONF_SENSOR_DEBOUNCE,
+        CONF_MANUAL_GRACE_PERIOD,
+        CONF_AUTOMATION_GRACE_PERIOD,
+    )
+
+    def test_seconds_keys_have_display_transform(self):
+        """All seconds-based config keys should declare a display_transform."""
+        for key in self.SECONDS_KEYS:
+            meta = CONFIG_METADATA[key]
+            assert meta.get("display_transform") == "seconds_to_minutes", (
+                f"{key} missing display_transform in CONFIG_METADATA"
+            )
+
+    def test_seconds_to_minutes_conversion_values(self):
+        """Default seconds values should convert to expected minutes."""
+        cases = [
+            (DEFAULT_SENSOR_DEBOUNCE_SECONDS, 5),
+            (DEFAULT_MANUAL_GRACE_SECONDS, 30),
+            (DEFAULT_AUTOMATION_GRACE_SECONDS, 60),
+        ]
+        for seconds, expected_minutes in cases:
+            assert seconds // 60 == expected_minutes
+
+    def test_transform_not_applied_to_non_time_keys(self):
+        """Non-time settings should not have a display_transform."""
+        non_time_keys = [
+            k for k in CONFIG_METADATA
+            if k not in self.SECONDS_KEYS
+        ]
+        for key in non_time_keys:
+            assert "display_transform" not in CONFIG_METADATA[key], (
+                f"{key} should not have display_transform"
+            )
+
+    def test_none_value_safe_with_transform(self):
+        """Seconds-to-minutes transform should not crash on None values."""
+        value = None
+        transform = "seconds_to_minutes"
+        if transform == "seconds_to_minutes" and isinstance(value, (int, float)):
+            value = value // 60
+        assert value is None

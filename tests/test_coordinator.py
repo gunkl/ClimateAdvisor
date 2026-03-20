@@ -3,11 +3,14 @@
 Tests for:
 - _compute_next_action logic: HOT day morning/evening window opportunities
   and default closed-windows fallback.
+- Briefing notification split: push gets TLDR, email gets full (Issue #34).
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 
@@ -18,6 +21,7 @@ if "homeassistant" not in sys.modules:
 
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
+    CONF_EMAIL_NOTIFY,
     DAY_TYPE_HOT,
     DAY_TYPE_COLD,
     ECONOMIZER_MORNING_END_HOUR,
@@ -188,3 +192,162 @@ class TestComputeNextAction:
         c = _make_classification(day_type="mild")
         result = _compute_next_action(c, {}, time(12, 0))
         assert "No action needed" in result
+
+
+# ---------------------------------------------------------------------------
+# Tests: Briefing notification split (Issue #34)
+# ---------------------------------------------------------------------------
+
+FULL_BRIEFING = "Full briefing with lots of detail " * 20  # > 250 chars
+SHORT_BRIEFING = "TLDR summary table"
+
+
+def _side_effect_generate_briefing(**kwargs):
+    """Return different text based on verbosity kwarg."""
+    if kwargs.get("verbosity") == "tldr_only":
+        return SHORT_BRIEFING
+    return FULL_BRIEFING
+
+
+class TestBriefingNotificationSplit:
+    """Tests for push (TLDR) vs email (full) briefing dispatch (Issue #34)."""
+
+    def _make_coordinator_stub(self, config_overrides=None):
+        """Build a minimal coordinator-like object for testing _async_send_briefing."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import (
+            ClimateAdvisorCoordinator,
+        )
+
+        coord = MagicMock()
+        coord.hass = MagicMock()
+        coord.hass.services = MagicMock()
+        coord.hass.services.async_call = AsyncMock()
+
+        config = {
+            "notify_service": "notify.mobile_app_phone",
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+            CONF_EMAIL_NOTIFY: True,
+        }
+        if config_overrides:
+            config.update(config_overrides)
+        coord.config = config
+
+        coord._briefing_sent_today = False
+        coord._last_briefing = ""
+        coord._automation_enabled = True
+        coord._today_record = None
+
+        # Mock automation engine
+        coord.automation_engine = MagicMock()
+        coord.automation_engine._grace_active = False
+        coord.automation_engine._last_resume_source = None
+        coord.automation_engine.apply_classification = AsyncMock()
+
+        # Mock learning engine
+        coord.learning = MagicMock()
+        coord.learning.generate_suggestions.return_value = []
+        coord.learning.get_last_suggestion_keys.return_value = []
+        coord.learning.start_day = MagicMock()
+
+        # Mock state saving
+        coord._async_save_state = AsyncMock()
+
+        # Mock _current_classification
+        coord._current_classification = None
+
+        # Mock forecast methods
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+
+        # Bind the real _async_send_briefing method to our mock
+        coord._async_send_briefing = types.MethodType(
+            ClimateAdvisorCoordinator._async_send_briefing, coord
+        )
+
+        return coord
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_push_gets_tldr_email_gets_full(self, mock_classify, mock_gen):
+        """Push notification receives short TLDR; email receives full briefing."""
+        mock_classify.return_value = _make_classification()
+
+        coord = self._make_coordinator_stub()
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        calls = coord.hass.services.async_call.call_args_list
+        notify_calls = [c for c in calls if c[0][0] == "notify"]
+        assert len(notify_calls) == 2
+
+        # Push (first call) should get short TLDR
+        push_msg = notify_calls[0][0][2]["message"]
+        assert push_msg == SHORT_BRIEFING
+
+        # Email (second call) should get full briefing
+        email_msg = notify_calls[1][0][2]["message"]
+        assert email_msg == FULL_BRIEFING
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_email_disabled_only_push(self, mock_classify, mock_gen):
+        """When email is disabled, only push notification is sent."""
+        mock_classify.return_value = _make_classification()
+
+        coord = self._make_coordinator_stub({CONF_EMAIL_NOTIFY: False})
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        calls = coord.hass.services.async_call.call_args_list
+        notify_calls = [c for c in calls if c[0][0] == "notify"]
+        assert len(notify_calls) == 1
+        assert notify_calls[0][0][2]["message"] == SHORT_BRIEFING
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_last_briefing_stores_full_version(self, mock_classify, mock_gen):
+        """_last_briefing should contain the full briefing, not the TLDR."""
+        mock_classify.return_value = _make_classification()
+
+        coord = self._make_coordinator_stub()
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        assert coord._last_briefing == FULL_BRIEFING
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_dry_run_skips_notifications(self, mock_classify, mock_gen):
+        """In observe-only mode, no notifications are sent."""
+        mock_classify.return_value = _make_classification()
+
+        coord = self._make_coordinator_stub()
+        coord._automation_enabled = False
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        coord.hass.services.async_call.assert_not_called()
+        assert coord._last_briefing == FULL_BRIEFING

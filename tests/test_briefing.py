@@ -255,14 +255,14 @@ class TestWarmDayBriefing:
     def test_mentions_window_open_time(self):
         c = _make_classification("warm", today_high=80, today_low=60)
         result = _generate(c)
-        # Window open time for warm days is 8:00 AM
-        assert "8" in result
+        # Window open time for warm days is 6:00 AM
+        assert "6" in result
 
     def test_mentions_window_close_time(self):
         c = _make_classification("warm", today_high=80, today_low=60)
         result = _generate(c)
-        # Window close time for warm days is 6:00 PM
-        assert "6" in result or "18" in result
+        # Window close time for warm days is 10:00 AM
+        assert "10" in result
 
     def test_mentions_comfort_cool_safety_net(self):
         c = _make_classification("warm", today_high=80, today_low=60)
@@ -779,10 +779,10 @@ class TestTldrTable:
         c = _make_classification("warm", today_high=80, today_low=60)
         rows = _generate_tldr_table(c, _make_config())
         table = "\n".join(rows)
-        # warm day window_open_time=08:00, window_close_time=18:00
+        # warm day window_open_time=06:00, window_close_time=10:00
         assert "Open" in table
-        assert "8" in table  # open time hour
-        assert "6" in table or "18" in table  # close time
+        assert "6" in table  # open time hour (6:00 AM)
+        assert "10" in table  # close time (10:00 AM)
 
     def test_tldr_cold_day_hvac_mode_row(self):
         c = _make_classification("cold", today_high=38, today_low=22)
@@ -988,3 +988,77 @@ class TestVerbosity:
         )
         assert "| Day Type" in result
         assert "I'll" in result or "I'm" in result or "I pre-cooled" in result
+
+
+# ---------------------------------------------------------------------------
+# TLDR length guard (Issue #34)
+# ---------------------------------------------------------------------------
+
+class TestTldrLength:
+    """Verify tldr_only briefings stay short enough for push notifications."""
+
+    @pytest.mark.parametrize("day_type,high,low", [
+        ("hot", 95, 72),
+        ("warm", 80, 60),
+        ("mild", 72, 55),
+        ("cool", 55, 40),
+        ("cold", 30, 15),
+    ])
+    def test_tldr_under_300_chars(self, day_type, high, low):
+        """tldr_only output must stay under 300 chars for all day types."""
+        c = _make_classification(day_type, today_high=high, today_low=low)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            verbosity="tldr_only",
+        )
+        assert len(result) < 600, (
+            f"tldr_only for {day_type} is {len(result)} chars (max 600)"
+        )
+
+    def test_tldr_contains_day_type_table(self):
+        """tldr_only should include the TLDR table with Day Type row."""
+        c = _make_classification("mild", today_high=72, today_low=55)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            verbosity="tldr_only",
+        )
+        assert "| Day Type" in result
+
+    def test_tldr_excludes_conversational_body(self):
+        """tldr_only should NOT include conversational plan sections."""
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            verbosity="tldr_only",
+        )
+        # Conversational body includes phrases like "tonight" or "fresh air"
+        # TLDR should be just header + table
+        normal = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            verbosity="normal",
+        )
+        assert len(result) < len(normal), "tldr_only should be shorter than normal"

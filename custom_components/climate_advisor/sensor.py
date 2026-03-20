@@ -28,6 +28,8 @@ from .const import (
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
+    ATTR_LAST_ACTION_TIME,
+    ATTR_LAST_ACTION_REASON,
 )
 from .coordinator import ClimateAdvisorCoordinator
 
@@ -52,6 +54,8 @@ async def async_setup_entry(
         ClimateAdvisorNextAutomationSensor(coordinator, entry),
         ClimateAdvisorNextAutomationTimeSensor(coordinator, entry),
         ClimateAdvisorOccupancySensor(coordinator, entry),
+        ClimateAdvisorLastActionTimeSensor(coordinator, entry),
+        ClimateAdvisorLastActionReasonSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -170,7 +174,7 @@ class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
         full = self.coordinator.data.get(ATTR_BRIEFING, "") if self.coordinator.data else ""
         if len(full) > 250:
             if not self._truncation_warned:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "Briefing truncated — %d chars exceeds 250-char state limit; "
                     "full text in full_briefing attribute",
                     len(full),
@@ -231,3 +235,48 @@ class ClimateAdvisorOccupancySensor(ClimateAdvisorBaseSensor):
             coordinator, entry,
             ATTR_OCCUPANCY_MODE, "Occupancy Mode", "mdi:home-account"
         )
+
+
+class ClimateAdvisorLastActionTimeSensor(ClimateAdvisorBaseSensor):
+    """Sensor showing when the last HVAC action was taken."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry,
+            ATTR_LAST_ACTION_TIME, "Last Action Time", "mdi:clock-check-outline"
+        )
+
+
+class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
+    """Sensor showing the reason for the last HVAC action."""
+
+    _truncation_warned: bool = False
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry,
+            ATTR_LAST_ACTION_REASON, "Last Action Reason", "mdi:text-box-outline"
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return a truncated version for the state (HA 255 char limit)."""
+        full = self.coordinator.data.get(ATTR_LAST_ACTION_REASON, "") if self.coordinator.data else ""
+        if not full:
+            return None
+        if len(full) > 250:
+            if not self._truncation_warned:
+                _LOGGER.debug(
+                    "Last action reason truncated — %d chars exceeds limit",
+                    len(full),
+                )
+                self._truncation_warned = True
+            return full[:247] + "..."
+        return full
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Store the full reason text as an attribute."""
+        return {
+            "full_reason": self.coordinator.data.get(ATTR_LAST_ACTION_REASON, "") if self.coordinator.data else "",
+        }

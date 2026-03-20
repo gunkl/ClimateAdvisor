@@ -10,6 +10,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
+from homeassistant.util import dt as dt_util
 
 from .classifier import DayClassification
 from .const import (
@@ -34,6 +35,7 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    REVISIT_DELAY_SECONDS,
     VACATION_SETBACK_EXTRA,
 )
 
@@ -81,6 +83,20 @@ class AutomationEngine:
         self._economizer_active: bool = False
         self._economizer_phase: str = "inactive"  # "inactive", "cool-down", "maintain"
 
+        # Action tracking (Issue #37)
+        self._last_action_time: str | None = None
+        self._last_action_reason: str | None = None
+
+        # Revisit scheduling — 5-min follow-up after any HVAC action
+        self._revisit_cancel: Any | None = None
+        self._revisit_callback: Any | None = None  # Set by coordinator
+
+        # Manual override protection — prevents classification from
+        # overriding user's manual thermostat changes
+        self._manual_override_active: bool = False
+        self._manual_override_mode: str | None = None
+        self._manual_override_time: str | None = None
+
     async def _notify(self, message: str, title: str) -> None:
         """Send a notification via the configured service, plus email if enabled."""
         if self.dry_run:
@@ -104,6 +120,62 @@ class AutomationEngine:
         """Whether HVAC is currently paused due to an open door/window."""
         return self._paused_by_door
 
+    def _record_action(self, action: str, reason: str) -> None:
+        """Record an HVAC action with timestamp and reason, and schedule a revisit."""
+        self._last_action_time = dt_util.now().isoformat()
+        self._last_action_reason = f"{action} — {reason}"
+        _LOGGER.info("Action recorded: %s", self._last_action_reason)
+        self._schedule_revisit()
+
+    def _schedule_revisit(self) -> None:
+        """Schedule a follow-up re-evaluation after an HVAC action."""
+        if self._revisit_cancel:
+            self._revisit_cancel()
+            self._revisit_cancel = None
+
+        if not self._revisit_callback:
+            return
+
+        revisit_cb = self._revisit_callback
+
+        @callback
+        def _revisit_fired(_now: Any) -> None:
+            self._revisit_cancel = None
+            _LOGGER.info("Revisit check triggered (5-min follow-up after action)")
+            self.hass.async_create_task(revisit_cb())
+
+        self._revisit_cancel = async_call_later(
+            self.hass, REVISIT_DELAY_SECONDS, _revisit_fired
+        )
+
+    def clear_manual_override(self) -> None:
+        """Clear the manual override flag (called at transition points)."""
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Clearing manual override (was %s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self._manual_override_active = False
+            self._manual_override_mode = None
+            self._manual_override_time = None
+
+    def handle_manual_override(self) -> None:
+        """Handle a manual thermostat change (outside of door/window pause).
+
+        Sets the manual override flag and starts a grace period so that
+        classification does not fight the user's intent.
+        """
+        state = self.hass.states.get(self.climate_entity)
+        self._manual_override_active = True
+        self._manual_override_mode = state.state if state else "unknown"
+        self._manual_override_time = dt_util.now().isoformat()
+        _LOGGER.info(
+            "Manual override activated: mode=%s",
+            self._manual_override_mode,
+        )
+        self._start_grace_period("manual")
+
     async def apply_classification(self, classification: DayClassification) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -111,6 +183,16 @@ class AutomationEngine:
         conditions change significantly mid-day.
         """
         self._current_classification = classification
+
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Manual override active (mode=%s since %s) — skipping "
+                "HVAC mode change",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            return
+
         _LOGGER.info(
             "Applying classification: %s (trend: %s %s°F)",
             classification.day_type,
@@ -149,6 +231,7 @@ class AutomationEngine:
             {"entity_id": self.climate_entity, "hvac_mode": mode},
         )
         _LOGGER.info("Set HVAC mode to %s — %s", mode, reason)
+        self._record_action(f"Set HVAC to {mode}", reason)
 
     async def _set_temperature(self, temperature: float, *, reason: str) -> None:
         """Set the thermostat target temperature."""
@@ -161,6 +244,7 @@ class AutomationEngine:
             {"entity_id": self.climate_entity, "temperature": temperature},
         )
         _LOGGER.info("Set temperature to %s°F — %s", temperature, reason)
+        self._record_action(f"Set temp to {temperature}°F", reason)
 
     async def _set_temperature_for_mode(
         self, c: DayClassification, *, reason: str
@@ -272,6 +356,11 @@ class AutomationEngine:
         _LOGGER.info("Manual HVAC override detected during door/window pause")
         self._paused_by_door = False
         self._pre_pause_mode = None
+        # Record the manual override so classification respects user intent
+        state = self.hass.states.get(self.climate_entity)
+        self._manual_override_active = True
+        self._manual_override_mode = state.state if state else "unknown"
+        self._manual_override_time = dt_util.now().isoformat()
         self._start_grace_period("manual")
 
     def _start_grace_period(self, source: str) -> None:
@@ -307,6 +396,7 @@ class AutomationEngine:
             self._last_resume_source = None
             self._manual_grace_cancel = None
             self._automation_grace_cancel = None
+            self.clear_manual_override()
             _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
 
             if should_notify:
@@ -399,6 +489,7 @@ class AutomationEngine:
 
     async def handle_bedtime(self) -> None:
         """Apply bedtime setback."""
+        self.clear_manual_override()
         c = self._current_classification
         if not c:
             return
@@ -420,6 +511,7 @@ class AutomationEngine:
 
     async def handle_morning_wakeup(self) -> None:
         """Restore comfort for morning wake-up."""
+        self.clear_manual_override()
         c = self._current_classification
         if not c:
             return
@@ -629,13 +721,21 @@ class AutomationEngine:
         self._pre_pause_mode = state.get("pre_pause_mode")
         self._economizer_active = state.get("economizer_active", False)
         self._economizer_phase = state.get("economizer_phase", "inactive")
+        self._last_action_time = state.get("last_action_time")
+        self._last_action_reason = state.get("last_action_reason")
+        self._manual_override_active = state.get("manual_override_active", False)
+        self._manual_override_mode = state.get("manual_override_mode")
+        self._manual_override_time = state.get("manual_override_time")
         # Grace timers cannot be restored — clear on restart
         self._grace_active = False
         self._last_resume_source = None
         _LOGGER.info(
-            "Restored automation state: paused=%s, pre_pause_mode=%s",
+            "Restored automation state: paused=%s, pre_pause_mode=%s, "
+            "last_action=%s, manual_override=%s",
             self._paused_by_door,
             self._pre_pause_mode,
+            self._last_action_reason,
+            self._manual_override_active,
         )
 
     def get_serializable_state(self) -> dict[str, Any]:
@@ -648,6 +748,11 @@ class AutomationEngine:
             "dry_run": self.dry_run,
             "economizer_active": self._economizer_active,
             "economizer_phase": self._economizer_phase,
+            "last_action_time": self._last_action_time,
+            "last_action_reason": self._last_action_reason,
+            "manual_override_active": self._manual_override_active,
+            "manual_override_mode": self._manual_override_mode,
+            "manual_override_time": self._manual_override_time,
             "current_classification": (
                 {
                     "day_type": self._current_classification.day_type,
@@ -662,6 +767,9 @@ class AutomationEngine:
     def cleanup(self) -> None:
         """Remove all active listeners and cancel pending timers."""
         self._cancel_grace_timers()
+        if self._revisit_cancel:
+            self._revisit_cancel()
+            self._revisit_cancel = None
         for unsub in self._active_listeners:
             unsub()
         self._active_listeners.clear()

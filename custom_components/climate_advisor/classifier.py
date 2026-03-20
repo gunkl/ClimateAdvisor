@@ -11,15 +11,19 @@ from .const import (
     DAY_TYPE_MILD,
     DAY_TYPE_COOL,
     DAY_TYPE_COLD,
+    DEFAULT_COMFORT_COOL,
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_MORNING_START_HOUR,
     ECONOMIZER_EVENING_START_HOUR,
+    ECONOMIZER_TEMP_DELTA,
     THRESHOLD_HOT,
     THRESHOLD_WARM,
     THRESHOLD_MILD,
     THRESHOLD_COOL,
     TREND_THRESHOLD_SIGNIFICANT,
     TREND_THRESHOLD_MODERATE,
+    WARM_WINDOW_CLOSE_HOUR,
+    WARM_WINDOW_OPEN_HOUR,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -90,9 +94,12 @@ class DayClassification:
                 self.window_opportunity_evening_end = time(0, 0)  # midnight
         elif self.day_type == DAY_TYPE_WARM:
             self.hvac_mode = "off"
-            self.windows_recommended = True
-            self.window_open_time = time(8, 0)
-            self.window_close_time = time(18, 0)
+            self.window_open_time = time(WARM_WINDOW_OPEN_HOUR, 0)
+            self.window_close_time = time(WARM_WINDOW_CLOSE_HOUR, 0)
+            # Only recommend windows if morning low is cool enough to help —
+            # same delta the HOT-day economizer uses.
+            if self.today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA:
+                self.windows_recommended = True
         elif self.day_type == DAY_TYPE_MILD:
             self.hvac_mode = "off"
             self.windows_recommended = True

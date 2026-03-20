@@ -73,7 +73,7 @@ class TestConfigMetadataStructure:
             assert "category" in meta, f"Entry '{key}' is missing 'category'"
 
     def test_each_entry_has_only_known_fields(self):
-        allowed = {"label", "description", "category"}
+        allowed = {"label", "description", "category", "display_transform"}
         for key, meta in CONFIG_METADATA.items():
             extra = set(meta.keys()) - allowed
             assert not extra, f"Entry '{key}' has unexpected fields: {extra}"

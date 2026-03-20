@@ -238,7 +238,21 @@
   "issues": {
     "weather_entity_not_found": {
       "title": "Weather entity not found",
-      "description": "The configured weather entity `{entity_id}` no longer exists in Home Assistant. This usually happens when a weather integration is renamed or reinstalled.\n\nGo to the Climate Advisor integration options to select the correct weather entity."
+      "description": "The configured weather entity `{entity_id}` no longer exists in Home Assistant. This usually happens when a weather integration is renamed or reinstalled.\n\nClick **Fix** below to select the correct weather entity.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Select weather entity",
+            "description": "The previously configured weather entity `{entity_id}` no longer exists. Select the correct weather entity below.",
+            "data": {
+              "weather_entity": "Weather Service"
+            },
+            "data_description": {
+              "weather_entity": "The weather integration that provides forecasts and outdoor conditions."
+            }
+          }
+        }
+      }
     }
   }
 }

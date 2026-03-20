@@ -186,24 +186,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Climate Advisor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Validate weather entity — create or clear Repairs issue as needed
+    # Validate weather entity — auto-resolve or create fixable Repairs issue
     weather_entity = entry.data.get("weather_entity", "")
     if not hass.states.get(weather_entity):
-        ir.async_create_issue(
-            hass,
-            DOMAIN,
-            "weather_entity_not_found",
-            is_fixable=False,
-            is_persistent=True,
-            severity=ir.IssueSeverity.ERROR,
-            translation_key="weather_entity_not_found",
-            translation_placeholders={"entity_id": weather_entity},
-        )
-        _LOGGER.error(
-            "Weather entity '%s' not found — a repair issue has been created. "
-            "Go to Settings > System > Repairs to fix this",
-            weather_entity,
-        )
+        resolved = _resolve_weather_entity(hass, weather_entity)
+        if resolved and resolved != weather_entity:
+            _LOGGER.info(
+                "Weather entity '%s' not found — auto-resolved to '%s'",
+                weather_entity,
+                resolved,
+            )
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, "weather_entity": resolved}
+            )
+            ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+        else:
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                "weather_entity_not_found",
+                is_fixable=True,
+                is_persistent=True,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="weather_entity_not_found",
+                translation_placeholders={"entity_id": weather_entity},
+            )
+            _LOGGER.error(
+                "Weather entity '%s' not found — open Settings > System > Repairs "
+                "and click Fix to select the correct entity",
+                weather_entity,
+            )
     else:
         ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
 

@@ -353,8 +353,8 @@ def _warm_day_plan(c, comfort_cool, wake_time, sleep_time, fan_mode: str = FAN_M
     if c.windows_recommended and c.window_open_time:
         open_t = c.window_open_time.strftime(_FMT_HOUR)
         lines.append(
-            f"Around {open_t}, open windows on opposite sides for a cross-breeze"
-            f" — natural ventilation keeps things comfortable without the AC."
+            f"Open windows around {open_t} to catch the cool morning air"
+            f" — cross-ventilation keeps things comfortable without the AC."
         )
     else:
         lines.append("HVAC is off this morning — no action needed.")
@@ -369,8 +369,8 @@ def _warm_day_plan(c, comfort_cool, wake_time, sleep_time, fan_mode: str = FAN_M
     if c.window_close_time:
         close_t = c.window_close_time.strftime(_FMT_HOUR)
         lines.append(
-            f"Close up by {close_t} so I can kick on the AC if temps push above"
-            f" {comfort_cool:.0f}°F — it works much better with the house sealed."
+            f"Close up by {close_t} before outdoor temps climb — seal the cool"
+            f" air inside so the AC can take over above {comfort_cool:.0f}°F."
         )
     else:
         lines.append(

@@ -841,21 +841,15 @@ class TestTldrTable:
         assert "Stable" in table
         assert "69" in table
 
-    def test_tldr_is_markdown_table(self):
-        """Output should look like a markdown pipe table."""
+    def test_tldr_is_plain_text_format(self):
+        """Output should use plain-text colon-aligned format, not markdown pipe table."""
         c = _make_classification("hot", today_high=92, today_low=70)
         rows = _generate_tldr_table(c, _make_config())
-        # Every row should start and end with |
-        for row in rows:
-            assert row.startswith("|"), f"Row does not start with |: {row!r}"
-            assert row.endswith("|"), f"Row does not end with |: {row!r}"
-
-    def test_tldr_separator_row_present(self):
-        """There should be exactly one separator row (dashes)."""
-        c = _make_classification("mild", today_high=68)
-        rows = _generate_tldr_table(c, _make_config())
-        sep_rows = [r for r in rows if set(r.strip("|").replace(" ", "")) <= set("-|")]
-        assert len(sep_rows) == 1
+        table = "\n".join(rows)
+        # Must contain colon-delimited rows
+        assert "Day Type:" in table
+        # Must NOT contain markdown pipe syntax
+        assert "|" not in table, f"Pipe chars found in tldr table: {table!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -878,11 +872,11 @@ class TestVerbosity:
             sleep_time=DEFAULT_SLEEP,
             verbosity="tldr_only",
         )
-        # Should have the header
-        assert "Your Home Climate Plan" in result
+        # Should NOT have the header (push notification title handles that)
+        assert "Your Home Climate Plan" not in result
         # Should have the TLDR table
-        assert "Day Type" in result
-        assert "HVAC Mode" in result
+        assert "Day Type:" in result
+        assert "HVAC Mode:" in result
         # Should NOT have conversational body phrases
         assert "I pre-cooled" not in result
         assert "head out" not in result
@@ -900,11 +894,11 @@ class TestVerbosity:
             sleep_time=DEFAULT_SLEEP,
             verbosity="tldr_only",
         )
-        assert "| Day Type" in result
-        assert "| HVAC Mode" in result
-        assert "| Windows" in result
-        assert "| Bedtime Setback" in result
-        assert "| Tomorrow" in result
+        assert "Day Type:" in result
+        assert "HVAC Mode:" in result
+        assert "Windows:" in result
+        assert "Bedtime Setback:" in result
+        assert "Tomorrow:" in result
 
     def test_verbosity_normal_has_tldr_and_body(self):
         """normal verbosity should include both the TLDR table and body text."""
@@ -920,7 +914,7 @@ class TestVerbosity:
             verbosity="normal",
         )
         # TLDR table present
-        assert "| Day Type" in result
+        assert "Day Type:" in result
         # Conversational body present
         assert "I'll" in result or "I'm" in result
 
@@ -986,7 +980,7 @@ class TestVerbosity:
             sleep_time=DEFAULT_SLEEP,
             verbosity="verbose",
         )
-        assert "| Day Type" in result
+        assert "Day Type:" in result
         assert "I'll" in result or "I'm" in result or "I pre-cooled" in result
 
 
@@ -1017,8 +1011,8 @@ class TestTldrLength:
             sleep_time=DEFAULT_SLEEP,
             verbosity="tldr_only",
         )
-        assert len(result) < 600, (
-            f"tldr_only for {day_type} is {len(result)} chars (max 600)"
+        assert len(result) <= 250, (
+            f"tldr_only for {day_type} is {len(result)} chars (max 250)"
         )
 
     def test_tldr_contains_day_type_table(self):
@@ -1034,7 +1028,7 @@ class TestTldrLength:
             sleep_time=DEFAULT_SLEEP,
             verbosity="tldr_only",
         )
-        assert "| Day Type" in result
+        assert "Day Type:" in result
 
     def test_tldr_excludes_conversational_body(self):
         """tldr_only should NOT include conversational plan sections."""
@@ -1062,3 +1056,48 @@ class TestTldrLength:
             verbosity="normal",
         )
         assert len(result) < len(normal), "tldr_only should be shorter than normal"
+
+
+# ---------------------------------------------------------------------------
+# No markdown in briefing output (Issue #21)
+# ---------------------------------------------------------------------------
+
+class TestNoMarkdownInBriefing:
+    """Verify briefing output contains no markdown syntax."""
+
+    @pytest.mark.parametrize("day_type,high,low", [
+        ("hot", 95, 72),
+        ("warm", 80, 60),
+        ("mild", 72, 55),
+        ("cool", 55, 40),
+        ("cold", 30, 15),
+    ])
+    def test_no_pipe_table_in_tldr(self, day_type, high, low):
+        """TLDR table rows must not contain markdown pipe table syntax."""
+        c = _make_classification(day_type, today_high=high, today_low=low)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT, comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT, setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE, sleep_time=DEFAULT_SLEEP,
+            verbosity="tldr_only",
+        )
+        # Check table lines (indented with 2 spaces) don't use pipe syntax
+        table_lines = [l for l in result.splitlines() if l.startswith("  ")]
+        for line in table_lines:
+            assert "|" not in line, f"Pipe char in table line: {line}"
+        # Verify no markdown separator row
+        assert "---" not in result or "===" in result, "Markdown separator found"
+
+    @pytest.mark.parametrize("occupancy", ["home", "away", "guest", "vacation"])
+    def test_no_bold_markers_in_full_briefing(self, occupancy):
+        """Full briefing must not contain markdown bold markers."""
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT, comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT, setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE, sleep_time=DEFAULT_SLEEP,
+            occupancy_mode=occupancy,
+        )
+        assert "**" not in result, f"Bold markers found in output: {result}"

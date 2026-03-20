@@ -47,6 +47,7 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_BRIEFING,
+    ATTR_BRIEFING_SHORT,
     ATTR_NEXT_ACTION,
     ATTR_AUTOMATION_STATUS,
     ATTR_LEARNING_SUGGESTIONS,
@@ -112,6 +113,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._today_record: DailyRecord | None = None
         self._briefing_sent_today = False
         self._last_briefing: str = ""
+        self._last_briefing_short: str = ""
         self._door_open_timers: dict[str, Any] = {}
 
         # Startup retry state — gentle backoff when weather entity isn't ready
@@ -322,6 +324,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         briefing = state.get("briefing_state", {})
         self._briefing_sent_today = briefing.get("sent_today", False)
         self._last_briefing = briefing.get("last_text", "")
+        self._last_briefing_short = briefing.get("last_text_short", "")
 
         # Automation state
         auto_state = state.get("automation_state", {})
@@ -405,6 +408,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "briefing_state": {
                 "sent_today": self._briefing_sent_today,
                 "last_text": self._last_briefing,
+                "last_text_short": self._last_briefing_short,
             },
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -714,6 +718,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_TREND: c.trend_direction if c else "unknown",
             ATTR_TREND_MAGNITUDE: c.trend_magnitude if c else 0,
             ATTR_BRIEFING: self._last_briefing,
+            ATTR_BRIEFING_SHORT: self._last_briefing_short,
             ATTR_NEXT_ACTION: self._compute_next_action(c),
             ATTR_AUTOMATION_STATUS: self._compute_automation_status(),
             ATTR_LEARNING_SUGGESTIONS: suggestions,
@@ -1007,6 +1012,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         briefing_short = generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
         self._last_briefing = briefing
+        self._last_briefing_short = briefing_short
 
         # In observe-only mode, skip sending the notification
         if not self._automation_enabled:

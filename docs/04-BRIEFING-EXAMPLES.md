@@ -5,7 +5,8 @@ These are example briefings for each day type, showing the tone, structure, and 
 ## Structure (every briefing)
 
 1. Structured header with today/tomorrow temps, day type, and trend (scannable at a glance)
-2. Conversational body — flowing prose paragraphs covering the day plan, what the system will do, and what the user can do to help
+2. TLDR summary table — plain-text aligned key/value rows (Day Type, HVAC Mode, Windows, Bedtime Setback, Tomorrow) for quick scanning in push notifications and email
+3. Conversational body — flowing prose paragraphs covering the day plan, what the system will do, and what the user can do to help
 3. "If you head out" paragraph — occupancy setback behavior
 4. "Fresh air" paragraph — affirms the user's right to open a window anytime, explains what the system will do in response using the actual configured debounce duration, describes the impact on the day's climate strategy, and suggests how to minimize that impact. Varies by HVAC mode.
 5. Grace period status paragraph — only included when a grace period is currently active at briefing time. Explains the hands-off window (manual) or settling period (automation) in plain language so the user understands why door/window sensing is temporarily modified.
@@ -25,6 +26,12 @@ These are example briefings for each day type, showing the tone, structure, and 
 Today: High 68°F / Low 48°F
 Tomorrow: High 78°F / Low 58°F
 Day Type: Mild | Trend: Significantly warmer tomorrow (+10°F)
+
+  Day Type:        Mild (68°F)
+  HVAC Mode:       Heat at 70°F
+  Windows:         Open 10 AM – 5 PM
+  Bedtime Setback: 66°F at 10:30 PM
+  Tomorrow:        Significantly warmer tomorrow (+10°F) (78°F)
 
 This is the good stuff — a day where the house practically takes care of itself. I ran the heater to 70°F before sunrise, and now it's off for the day. The weather does the rest.
 
@@ -55,6 +62,12 @@ Today: High 80°F / Low 60°F
 Tomorrow: High 82°F / Low 62°F
 Day Type: Warm | Trend: Stable
 
+  Day Type:        Warm (80°F)
+  HVAC Mode:       Off — windows day
+  Windows:         Open 8 AM – 6 PM
+  Bedtime Setback: No setback
+  Tomorrow:        Stable (82°F)
+
 The HVAC is off this morning — the house held its temperature nicely overnight. Around 8:00 AM, it'll be a great time to open some windows. Opening on opposite sides gives you a nice cross-breeze that keeps things comfortable without the AC.
 
 You'll want to close things up by 6:00 PM though — I'll be ready to kick on the AC if temps push above 75°F, and it works much better with the house sealed up.
@@ -79,6 +92,12 @@ Tomorrow looks pretty similar to today — 82°F for a high. Nothing special pla
 Today: High 95°F / Low 72°F
 Tomorrow: High 92°F / Low 70°F
 Day Type: Hot | Trend: Stable
+
+  Day Type:        Hot (95°F)
+  HVAC Mode:       Cool at 75°F
+  Windows:         Closed all day
+  Bedtime Setback: 78°F at 10:30 PM
+  Tomorrow:        Stable (92°F)
 
 I got a head start on the heat this morning. The AC pre-cooled the house to 73°F while the outdoor air was still cool — that banking strategy saves a lot of energy over the course of the day.
 
@@ -107,6 +126,12 @@ Today: High 55°F / Low 35°F
 Tomorrow: High 50°F / Low 30°F
 Day Type: Cool | Trend: Cooling trend (-5°F)
 
+  Day Type:        Cool (55°F)
+  HVAC Mode:       Heat at 70°F
+  Windows:         Closed all day
+  Bedtime Setback: 66°F at 10:30 PM
+  Tomorrow:        Cooling trend (-5°F) (50°F)
+
 It's a heater day. I'll keep the house at 70°F through the morning — it's too cool outside for windows today, so we're staying sealed up.
 
 Between about 11am and 3pm, I'll ease the setpoint back a couple degrees to ride whatever solar gain the house picks up through the windows. You won't notice the difference, but it saves a bit of energy.
@@ -133,6 +158,12 @@ Looking ahead — tomorrow's cooler at 50°F, so I'll bank some extra warmth thi
 Today: High 38°F / Low 22°F
 Tomorrow: High 28°F / Low 12°F
 Day Type: Cold | Trend: Significant cold front coming (-10°F)
+
+  Day Type:        Cold (38°F)
+  HVAC Mode:       Heat at 70°F
+  Windows:         Closed all day
+  Bedtime Setback: 66°F at 10:30 PM
+  Tomorrow:        Significant cold front coming (-10°F) (28°F)
 
 It's going to be cold out there. The heater runs all day at 70°F, and you can help it out — keep doors and windows closed, minimize how long you hold exterior doors open, and close curtains on the north side. If you have south-facing windows, open those curtains to grab some free solar heat.
 

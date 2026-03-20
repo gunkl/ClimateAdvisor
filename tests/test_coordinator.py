@@ -241,6 +241,7 @@ class TestBriefingNotificationSplit:
 
         coord._briefing_sent_today = False
         coord._last_briefing = ""
+        coord._last_briefing_short = ""
         coord._automation_enabled = True
         coord._today_record = None
 
@@ -351,3 +352,20 @@ class TestBriefingNotificationSplit:
 
         coord.hass.services.async_call.assert_not_called()
         assert coord._last_briefing == FULL_BRIEFING
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_generate_briefing,
+    )
+    @patch("custom_components.climate_advisor.coordinator.classify_day")
+    def test_last_briefing_short_populated_and_shorter(self, mock_classify, mock_gen):
+        """_last_briefing_short is populated after _async_send_briefing and shorter than _last_briefing."""
+        mock_classify.return_value = _make_classification()
+
+        coord = self._make_coordinator_stub()
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        assert coord._last_briefing_short  # non-empty string
+        assert len(coord._last_briefing_short) < len(coord._last_briefing)

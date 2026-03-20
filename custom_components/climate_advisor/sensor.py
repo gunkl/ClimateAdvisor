@@ -21,6 +21,7 @@ from .const import (
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     ATTR_BRIEFING,
+    ATTR_BRIEFING_SHORT,
     ATTR_NEXT_ACTION,
     ATTR_AUTOMATION_STATUS,
     ATTR_LEARNING_SUGGESTIONS,
@@ -163,25 +164,20 @@ class ClimateAdvisorNextAutomationTimeSensor(ClimateAdvisorBaseSensor):
 class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
     """Sensor holding the full daily briefing text."""
 
-    _truncation_warned: bool = False
-
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_BRIEFING, "Daily Briefing", "mdi:email-outline")
 
     @property
     def native_value(self) -> str | None:
-        """Return a truncated version for the state (HA has a 255 char limit)."""
-        full = self.coordinator.data.get(ATTR_BRIEFING, "") if self.coordinator.data else ""
-        if len(full) > 250:
-            if not self._truncation_warned:
-                _LOGGER.debug(
-                    "Briefing truncated — %d chars exceeds 250-char state limit; "
-                    "full text in full_briefing attribute",
-                    len(full),
-                )
-                self._truncation_warned = True
-            return full[:247] + "..."
-        return full
+        """Return the short TLDR briefing as the sensor state."""
+        if not self.coordinator.data:
+            return ""
+        short = self.coordinator.data.get(ATTR_BRIEFING_SHORT, "")
+        if short:
+            return short
+        # Fallback: truncate full briefing if short version not yet available
+        full = self.coordinator.data.get(ATTR_BRIEFING, "")
+        return full[:247] + "..." if len(full) > 250 else full
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

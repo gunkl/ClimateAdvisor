@@ -86,17 +86,7 @@ def generate_briefing(
         verbosity,
     )
 
-    # Structured header (kept for quick scanning)
-    trend_desc = _trend_description(c)
-    lines.append("🏠 Your Home Climate Plan for Today")
-    lines.append(f"{'=' * 40}")
-    lines.append("")
-    lines.append(f"Today: High {c.today_high:.0f}°F / Low {c.today_low:.0f}°F")
-    lines.append(f"Tomorrow: High {c.tomorrow_high:.0f}°F / Low {c.tomorrow_low:.0f}°F")
-    lines.append(f"Day Type: {c.day_type.title()} | Trend: {trend_desc}")
-    lines.append("")
-
-    # TLDR table — always included
+    # TLDR table — used standalone for push notifications, embedded in full briefing
     config = {
         "comfort_heat": comfort_heat,
         "comfort_cool": comfort_cool,
@@ -105,16 +95,27 @@ def generate_briefing(
         "sleep_time": sleep_time,
         "wake_time": wake_time,
     }
-    lines.extend(_generate_tldr_table(c, config))
-    lines.append("")
+    tldr_lines = _generate_tldr_table(c, config)
 
     if verbosity == "tldr_only":
-        briefing_text = "\n".join(lines).rstrip()
+        briefing_text = "\n".join(tldr_lines).rstrip()
         _LOGGER.debug(
             "Briefing generated (tldr_only) — %d chars",
             len(briefing_text),
         )
         return briefing_text
+
+    # Structured header (kept for full briefing / email)
+    trend_desc = _trend_description(c)
+    lines.append("🏠 Your Home Climate Plan for Today")
+    lines.append(f"{'=' * 40}")
+    lines.append("")
+    lines.append(f"Today: High {c.today_high:.0f}°F / Low {c.today_low:.0f}°F")
+    lines.append(f"Tomorrow: High {c.tomorrow_high:.0f}°F / Low {c.tomorrow_low:.0f}°F")
+    lines.append(f"Day Type: {c.day_type.title()} | Trend: {trend_desc}")
+    lines.append("")
+    lines.extend(tldr_lines)
+    lines.append("")
 
     # Conversational body
     if c.day_type == DAY_TYPE_HOT:
@@ -177,7 +178,7 @@ def generate_briefing(
 
 
 def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
-    """Generate a pipe-delimited markdown TLDR summary table.
+    """Generate a plain-text aligned TLDR summary table.
 
     Args:
         c: Today's day classification.
@@ -185,7 +186,7 @@ def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
             sleep_time, wake_time keys.
 
     Returns:
-        List of lines forming a markdown table.
+        List of lines forming a plain-text aligned table.
     """
     comfort_heat = config["comfort_heat"]
     comfort_cool = config["comfort_cool"]
@@ -239,18 +240,15 @@ def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
     trend_desc = _trend_description(c)
     tomorrow_val = f"{trend_desc} ({c.tomorrow_high:.0f}°F)"
 
-    col1 = 16
-    col2 = 30
-    header = f"| {'Setting':<{col1}} | {'Value':<{col2}} |"
-    sep = f"|{'-' * (col1 + 2)}|{'-' * (col2 + 2)}|"
+    label_w = 17
     rows = [
-        f"| {'Day Type':<{col1}} | {day_type_val:<{col2}} |",
-        f"| {'HVAC Mode':<{col1}} | {hvac_val:<{col2}} |",
-        f"| {'Windows':<{col1}} | {windows_val:<{col2}} |",
-        f"| {'Bedtime Setback':<{col1}} | {bedtime_val:<{col2}} |",
-        f"| {'Tomorrow':<{col1}} | {tomorrow_val:<{col2}} |",
+        f"  {'Day Type:':<{label_w}} {day_type_val}",
+        f"  {'HVAC Mode:':<{label_w}} {hvac_val}",
+        f"  {'Windows:':<{label_w}} {windows_val}",
+        f"  {'Bedtime Setback:':<{label_w}} {bedtime_val}",
+        f"  {'Tomorrow:':<{label_w}} {tomorrow_val}",
     ]
-    return [header, sep] + rows
+    return rows
 
 
 def _trend_description(c: DayClassification) -> str:
@@ -459,32 +457,32 @@ def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "
     """
     if occupancy_mode == "vacation":
         return [
-            "**While you're on vacation**, I'm keeping the house at a deeper"
+            "While you're on vacation, I'm keeping the house at a deeper"
             " energy-saving setback to save energy. Comfort temperatures will be"
             " restored when you return.",
         ]
     elif occupancy_mode == "guest":
         return [
-            "**Guests are visiting** — maintaining full comfort temperatures."
+            "Guests are visiting — maintaining full comfort temperatures."
             " Away setbacks are disabled while guest mode is active.",
         ]
     elif occupancy_mode == "away":
         if c.hvac_mode == "cool":
             return [
-                f"**You're currently away.** I've applied setback temperatures,"
+                f"You're currently away. I've applied setback temperatures,"
                 f" letting the house drift up to {setback_cool:.0f}°F to save"
                 f" energy. Comfort will be restored when you return — give it"
                 f" 20 to 30 minutes to feel normal again.",
             ]
         elif c.hvac_mode == "heat":
             return [
-                f"**You're currently away.** I've dropped to {setback_heat:.0f}°F"
+                f"You're currently away. I've dropped to {setback_heat:.0f}°F"
                 f" to save energy. Comfort will be restored when you return —"
                 f" should take 20 to 30 minutes depending on how long you've been gone.",
             ]
         else:
             return [
-                "**You're currently away.** The HVAC is off today, so not much"
+                "You're currently away. The HVAC is off today, so not much"
                 " changes. If it kicks on as a safety net, it'll set back on its own.",
             ]
     else:

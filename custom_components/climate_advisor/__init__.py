@@ -15,6 +15,7 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
 from .api import API_VIEWS
@@ -215,6 +216,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Weather entity '%s' not found — open Settings > System > Repairs "
                 "and click Fix to select the correct entity",
                 weather_entity,
+            )
+            raise ConfigEntryNotReady(
+                f"Weather entity '{weather_entity}' not found"
             )
     else:
         ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")

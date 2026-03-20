@@ -20,3 +20,12 @@ secrets.yaml
 id_rsa
 id_ed25519
 id_ecdsa
+
+# Claude Code workspace
+/.claude/
+
+# IDE
+.vscode/
+
+# Installers
+get-pip.py

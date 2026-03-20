@@ -14,8 +14,8 @@ import logging
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import issue_registry as ir
 
 from .api import API_VIEWS
@@ -187,41 +187,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Climate Advisor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Validate weather entity — auto-resolve or create fixable Repairs issue
-    weather_entity = entry.data.get("weather_entity", "")
-    if not hass.states.get(weather_entity):
-        resolved = _resolve_weather_entity(hass, weather_entity)
-        if resolved and resolved != weather_entity:
-            _LOGGER.info(
-                "Weather entity '%s' not found — auto-resolved to '%s'",
-                weather_entity,
-                resolved,
-            )
-            hass.config_entries.async_update_entry(
-                entry, data={**entry.data, "weather_entity": resolved}
-            )
-            ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+    # Defer weather entity validation until HA is fully started so all
+    # entities are loaded — avoids false "not found" on startup race.
+    async def _validate_weather_entity(_event=None):
+        weather_entity = entry.data.get("weather_entity", "")
+        if not hass.states.get(weather_entity):
+            resolved = _resolve_weather_entity(hass, weather_entity)
+            if resolved and resolved != weather_entity:
+                _LOGGER.info(
+                    "Weather entity '%s' not found — auto-resolved to '%s'",
+                    weather_entity,
+                    resolved,
+                )
+                hass.config_entries.async_update_entry(
+                    entry, data={**entry.data, "weather_entity": resolved}
+                )
+                ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+                await hass.config_entries.async_reload(entry.entry_id)
+            else:
+                ir.async_create_issue(
+                    hass,
+                    DOMAIN,
+                    "weather_entity_not_found",
+                    is_fixable=True,
+                    is_persistent=True,
+                    severity=ir.IssueSeverity.ERROR,
+                    translation_key="weather_entity_not_found",
+                    translation_placeholders={"entity_id": weather_entity},
+                )
+                _LOGGER.error(
+                    "Weather entity '%s' not found — open Settings > System > Repairs "
+                    "and click Fix to select the correct entity",
+                    weather_entity,
+                )
         else:
-            ir.async_create_issue(
-                hass,
-                DOMAIN,
-                "weather_entity_not_found",
-                is_fixable=True,
-                is_persistent=True,
-                severity=ir.IssueSeverity.ERROR,
-                translation_key="weather_entity_not_found",
-                translation_placeholders={"entity_id": weather_entity},
-            )
-            _LOGGER.error(
-                "Weather entity '%s' not found — open Settings > System > Repairs "
-                "and click Fix to select the correct entity",
-                weather_entity,
-            )
-            raise ConfigEntryNotReady(
-                f"Weather entity '{weather_entity}' not found"
-            )
+            ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+
+    if hass.is_running:
+        # Integration reloaded after startup (e.g., from repairs flow) — validate now
+        await _validate_weather_entity()
     else:
-        ir.async_delete_issue(hass, DOMAIN, "weather_entity_not_found")
+        # First startup — wait until all integrations are loaded
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _validate_weather_entity)
 
     coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data))
 

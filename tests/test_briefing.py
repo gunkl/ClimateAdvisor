@@ -1083,7 +1083,7 @@ class TestNoMarkdownInBriefing:
             verbosity="tldr_only",
         )
         # Check table lines (indented with 2 spaces) don't use pipe syntax
-        table_lines = [l for l in result.splitlines() if l.startswith("  ")]
+        table_lines = [line for line in result.splitlines() if line.startswith("  ")]
         for line in table_lines:
             assert "|" not in line, f"Pipe char in table line: {line}"
         # Verify no markdown separator row

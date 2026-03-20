@@ -22,9 +22,9 @@ from unittest.mock import AsyncMock, MagicMock
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 19, 14, 30, 0)
 
-from custom_components.climate_advisor.automation import AutomationEngine
-from custom_components.climate_advisor.classifier import DayClassification
-from custom_components.climate_advisor.const import (
+from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
+from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
+from custom_components.climate_advisor.const import (  # noqa: E402
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
     DAY_TYPE_HOT,

@@ -237,7 +237,10 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
     hass = MagicMock()
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
-    hass.async_create_task = MagicMock()
+    def _consume_coroutine(coro):
+        """Close coroutine to prevent 'never awaited' warnings."""
+        coro.close()
+    hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
 
     config = {

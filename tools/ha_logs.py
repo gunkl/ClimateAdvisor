@@ -30,7 +30,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -111,7 +111,7 @@ def fetch_history(
         sys.exit(1)
 
     base_url = _build_ha_base_url(config)
-    start_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    start_time = datetime.now(UTC) - timedelta(hours=hours_back)
     timestamp = start_time.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
     url = f"{base_url}/api/logbook/{timestamp}"
@@ -170,13 +170,10 @@ def fetch_sensor_history(
         sys.exit(1)
 
     base_url = _build_ha_base_url(config)
-    start_time = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    start_time = datetime.now(UTC) - timedelta(hours=hours_back)
     timestamp = start_time.strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
-    url = (
-        f"{base_url}/api/history/period/{timestamp}"
-        f"?filter_entity_id={urllib.request.quote(entity_id)}"
-    )
+    url = f"{base_url}/api/history/period/{timestamp}?filter_entity_id={urllib.request.quote(entity_id)}"
 
     data = _ha_api_request(url, token)
 
@@ -284,9 +281,7 @@ def main() -> None:
     if sys.platform == "win32":
         os.system("")  # enable ANSI
 
-    parser = argparse.ArgumentParser(
-        description="Fetch Home Assistant logs via SSH or REST API history"
-    )
+    parser = argparse.ArgumentParser(description="Fetch Home Assistant logs via SSH or REST API history")
     # SSH mode args
     parser.add_argument("--lines", "-n", type=int, default=50, help="Number of log lines to fetch (default: 50)")
     parser.add_argument("--all", action="store_true", help="Show all HA log lines, not just climate_advisor")

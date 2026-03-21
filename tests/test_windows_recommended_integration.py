@@ -27,10 +27,8 @@ Key insight on the existing guard:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime, time
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
@@ -38,11 +36,9 @@ from custom_components.climate_advisor.const import (
     DAY_TYPE_HOT,
     DAY_TYPE_MILD,
     DAY_TYPE_WARM,
-    DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     WARM_WINDOW_CLOSE_HOUR,
     WARM_WINDOW_OPEN_HOUR,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,7 +137,7 @@ def _hot_day_classification() -> DayClassification:
 
 def _make_dt(hour: int, minute: int = 0) -> datetime:
     """Return a timezone-aware datetime for today at the given hour/minute."""
-    return datetime(2026, 3, 21, hour, minute, 0, tzinfo=timezone.utc)
+    return datetime(2026, 3, 21, hour, minute, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +195,7 @@ class TestWindowsRecommendedPauseSuppression:
 
         # 8:00 AM is well inside the warm-day window (6–10 AM)
         mock_now = _make_dt(8, 0)
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
@@ -237,9 +231,7 @@ class TestWindowsRecommendedPauseSuppression:
 
         # 12:00 PM is inside the mild-day window
         mock_now = _make_dt(12, 0)
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
@@ -273,17 +265,14 @@ class TestWindowsRecommendedPauseSuppression:
         engine.hass.services.async_call.reset_mock()
 
         mock_now = _make_dt(8, 0)
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util, patch(
-            "custom_components.climate_advisor.automation.async_call_later"
+        with (
+            patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util,
+            patch("custom_components.climate_advisor.automation.async_call_later"),
         ):
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is True, (
-            "HVAC MUST be paused on a hot day when a door/window opens"
-        )
+        assert engine._paused_by_door is True, "HVAC MUST be paused on a hot day when a door/window opens"
         engine.hass.services.async_call.assert_any_call(
             "climate",
             "set_hvac_mode",
@@ -309,18 +298,12 @@ class TestWindowsRecommendedPauseSuppression:
         engine.hass.services.async_call.reset_mock()
 
         mock_now = _make_dt(7, 30)  # inside warm-day window (6–10 AM)
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is False, (
-            "No pause should occur during the planned window period"
-        )
-        assert engine._grace_active is False, (
-            "No grace period should be started when window suppression is active"
-        )
+        assert engine._paused_by_door is False, "No pause should occur during the planned window period"
+        assert engine._grace_active is False, "No grace period should be started when window suppression is active"
 
     # ------------------------------------------------------------------
     # Test 5 — grace expiry with sensor open during window period: no re-pause
@@ -355,15 +338,17 @@ class TestWindowsRecommendedPauseSuppression:
             return MagicMock()
 
         mock_now = _make_dt(8, 0)  # inside warm-day window (6–10 AM)
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=_capture_call_later,
-        ), patch(
-            "custom_components.climate_advisor.automation.callback",
-            side_effect=lambda fn: fn,
-        ), patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=_capture_call_later,
+            ),
+            patch(
+                "custom_components.climate_advisor.automation.callback",
+                side_effect=lambda fn: fn,
+            ),
+            patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util,
+        ):
             mock_dt_util.now.return_value = mock_now
             engine._start_grace_period("automation")
 
@@ -375,9 +360,7 @@ class TestWindowsRecommendedPauseSuppression:
         engine.hass.async_create_task.reset_mock()
 
         # Fire the grace-expired callback; sensor is open; time is in window
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now
             grace_expired_cb(mock_now)
 
@@ -413,15 +396,12 @@ class TestWindowsRecommendedPauseSuppression:
         engine.hass.services.async_call.reset_mock()
 
         mock_now_inside = _make_dt(8, 0)  # inside warm-day window
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now_inside
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
         assert engine._paused_by_door is False, (
-            "Part A: Should NOT pause on warm day inside window period "
-            "when thermostat is 'cool'"
+            "Part A: Should NOT pause on warm day inside window period when thermostat is 'cool'"
         )
 
         # --- Part B: Hot day, suppression inactive ---
@@ -433,17 +413,14 @@ class TestWindowsRecommendedPauseSuppression:
         engine.hass.states.get.return_value = _make_state("cool")
 
         mock_now_hot = _make_dt(8, 0)  # time irrelevant for hot day
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util, patch(
-            "custom_components.climate_advisor.automation.async_call_later"
+        with (
+            patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util,
+            patch("custom_components.climate_advisor.automation.async_call_later"),
         ):
             mock_dt_util.now.return_value = mock_now_hot
             asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is True, (
-            "Part B: Must pause on hot day when sensor opens"
-        )
+        assert engine._paused_by_door is True, "Part B: Must pause on hot day when sensor opens"
 
     # ------------------------------------------------------------------
     # Test 7 — method existence and return value
@@ -458,9 +435,7 @@ class TestWindowsRecommendedPauseSuppression:
         assert hasattr(engine, "_is_within_planned_window_period"), (
             "AutomationEngine must implement _is_within_planned_window_period()"
         )
-        assert callable(engine._is_within_planned_window_period), (
-            "_is_within_planned_window_period must be callable"
-        )
+        assert callable(engine._is_within_planned_window_period), "_is_within_planned_window_period must be callable"
 
     def test_is_within_planned_window_period_returns_true_for_warm_day_inside_window(self):
         """_is_within_planned_window_period() returns True when all conditions met:
@@ -478,9 +453,7 @@ class TestWindowsRecommendedPauseSuppression:
         assert engine._current_classification.hvac_mode == "off"
 
         mock_now = _make_dt(8, 0)  # inside 6–10 AM warm window
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now
             result = engine._is_within_planned_window_period()
 
@@ -516,25 +489,18 @@ class TestWindowsRecommendedPauseSuppression:
 
         # 11:00 AM — outside warm-day window (closed at 10 AM)
         mock_now = _make_dt(11, 0)
-        with patch(
-            "custom_components.climate_advisor.automation.dt_util"
-        ) as mock_dt_util:
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt_util:
             mock_dt_util.now.return_value = mock_now
 
             # Part A: method must report False outside the window
             if hasattr(engine, "_is_within_planned_window_period"):
                 result = engine._is_within_planned_window_period()
                 assert result is False, (
-                    "_is_within_planned_window_period() must return False at 11 AM "
-                    "(warm-day window closes at 10 AM)"
+                    "_is_within_planned_window_period() must return False at 11 AM (warm-day window closes at 10 AM)"
                 )
 
             # Part B: pause must fire (suppression not active, HVAC is 'cool')
-            with patch(
-                "custom_components.climate_advisor.automation.async_call_later"
-            ):
+            with patch("custom_components.climate_advisor.automation.async_call_later"):
                 asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
 
-        assert engine._paused_by_door is True, (
-            "Pause must fire outside the window period when HVAC is active"
-        )
+        assert engine._paused_by_door is True, "Pause must fire outside the window period when HVAC is active"

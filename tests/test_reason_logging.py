@@ -25,12 +25,17 @@ AUTOMATION_LOGGER = "custom_components.climate_advisor.automation"
 # ---------------------------------------------------------------------------
 
 
+def _consume_coroutine(coro):
+    """Close coroutine to prevent 'never awaited' warnings."""
+    coro.close()
+
+
 def _make_automation_engine(config_overrides: dict | None = None) -> AutomationEngine:
     """Create an AutomationEngine with mocked HA dependencies."""
     hass = MagicMock()
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
-    hass.async_create_task = MagicMock()
+    hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
 
     config = {

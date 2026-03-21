@@ -69,6 +69,7 @@ from .const import (
     OCCUPANCY_AWAY,
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
+    OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -143,6 +144,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._occupancy_mode: str = OCCUPANCY_HOME
         self._occupancy_away_since: datetime | None = None
         self._unsub_occupancy_listeners: list[Any] = []
+        self._occupancy_away_timer_cancel: Any | None = None
 
     @property
     def automation_enabled(self) -> bool:
@@ -511,6 +513,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             unsub()
         self._unsub_occupancy_listeners.clear()
 
+    def _cancel_occupancy_away_timer(self) -> None:
+        """Cancel any pending occupancy away setback timer."""
+        if self._occupancy_away_timer_cancel:
+            self._occupancy_away_timer_cancel()
+            self._occupancy_away_timer_cancel = None
+            _LOGGER.debug("Occupancy away timer cancelled")
+
     async def _async_occupancy_toggle_changed(self, event: Event) -> None:
         """Handle an occupancy toggle state change."""
         new_mode = self._compute_occupancy_mode()
@@ -536,6 +545,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Leaving home
             self._occupancy_away_since = now
         elif not was_present and is_present:
+            # Cancel pending away setback timer
+            self._cancel_occupancy_away_timer()
             # Returning home
             if self._occupancy_away_since and self._today_record:
                 elapsed = (now - self._occupancy_away_since).total_seconds() / 60.0
@@ -550,10 +561,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Call appropriate automation handler
         if new_mode == OCCUPANCY_VACATION:
+            self._cancel_occupancy_away_timer()
             await self.automation_engine.handle_occupancy_vacation()
         elif new_mode == OCCUPANCY_AWAY:
-            await self.automation_engine.handle_occupancy_away()
+            delay_seconds = OCCUPANCY_SETBACK_MINUTES * 60
+            _LOGGER.info(
+                "Starting %d-minute occupancy away timer before applying setback",
+                OCCUPANCY_SETBACK_MINUTES,
+            )
+            self._cancel_occupancy_away_timer()
+
+            @callback
+            def _occupancy_away_timer_expired(_now: Any) -> None:
+                self._occupancy_away_timer_cancel = None
+                _LOGGER.info("Occupancy away timer expired — applying setback")
+                self.hass.async_create_task(
+                    self.automation_engine.handle_occupancy_away()
+                )
+
+            self._occupancy_away_timer_cancel = async_call_later(
+                self.hass, delay_seconds, _occupancy_away_timer_expired,
+            )
         elif new_mode in present_modes:
+            self._cancel_occupancy_away_timer()
             await self.automation_engine.handle_occupancy_home()
 
         await self._async_save_state()
@@ -1590,6 +1620,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "economizer_active": ae._economizer_active,
             "economizer_phase": ae._economizer_phase,
             "resumed_from_pause": ae._resumed_from_pause,
+            "occupancy_away_timer_pending": self._occupancy_away_timer_cancel is not None,
         }
 
     async def async_shutdown(self) -> None:
@@ -1597,6 +1628,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Flush HVAC runtime and save state before cleanup
         self._flush_hvac_runtime()
         await self._async_save_state()
+
+        # Cancel any pending occupancy away setback timer
+        self._cancel_occupancy_away_timer()
 
         # Cancel any pending debounce timers
         for cancel in self._door_open_timers.values():

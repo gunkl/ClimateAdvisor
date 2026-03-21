@@ -322,7 +322,7 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `WARM_WINDOW_OPEN_HOUR` | `6` | hour (24h) | Warm-day window open time |
 | `WARM_WINDOW_CLOSE_HOUR` | `10` | hour (24h) | Warm-day window close time |
 | `REVISIT_DELAY_SECONDS` | `300` | seconds (5 min) | Follow-up re-evaluation delay after any HVAC action |
-| `OCCUPANCY_SETBACK_MINUTES` | `15` | minutes | Reserved — occupancy setback lead time |
+| `OCCUPANCY_SETBACK_MINUTES` | `15` | minutes | Delay before applying away setback temperature after departure |
 | `MAX_CONTINUOUS_RUNTIME_HOURS` | `3` | hours | Reserved — maximum continuous HVAC runtime guard |
 | `SUGGESTION_COOLDOWN_DAYS` | `7` | days | Learning engine: minimum days between repeat suggestions |
 | `MIN_DATA_POINTS_FOR_SUGGESTION` | `14` | data points | Learning engine: minimum records before generating suggestions |

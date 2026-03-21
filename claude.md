@@ -100,6 +100,35 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 
 **Violation protocol**: Same as HA Boundary Rule — stop, flag, and ask before proceeding if a proposed change would violate any of these rules.
 
+### Testing Requirements (CRITICAL)
+
+**Decision**: All tests in this project MUST handle Python's async mock infrastructure correctly. Unawaited coroutine warnings are test bugs, not cosmetic noise.
+
+**Why this matters:** Python 3.12+ aggressively warns when `AsyncMock` coroutines are garbage-collected without being awaited. These warnings only appear when running the full test suite (cross-test GC timing), not in isolation — making them easy to miss during development and painful to debug after the fact.
+
+#### Mock HA Async Methods Correctly
+
+- **`hass.async_create_task`** — NEVER use bare `MagicMock()`. Always close coroutines:
+  ```python
+  def _consume_coroutine(coro):
+      coro.close()
+  hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+  ```
+  Reference implementations: `test_door_window.py:255`, `test_resume_from_pause.py:44`
+
+- **`coordinator._async_save_state`** — Stub as `AsyncMock()` directly on the coordinator instance, not by mocking `hass.async_add_executor_job`. Reference: `test_coordinator.py:262`
+
+- **`coordinator.automation_engine`** — Use `MagicMock()` (NOT `AsyncMock()`) for the engine object. `AsyncMock` causes sync methods like `get_serializable_state()` to return coroutines instead of values. Only set individual async handler methods to `AsyncMock()` in tests that `await` them.
+
+- **`@callback` decorator** — Is a `MagicMock` in the test mock layer and swallows decorated functions. If a test needs to invoke a `@callback`-decorated inner function (e.g., timer callbacks), patch it: `patch("...coordinator.callback", side_effect=lambda fn: fn)`
+
+#### Verification
+
+**All new or modified tests MUST pass with warnings-as-errors before completion:**
+```bash
+pytest tests/test_<file>.py -W error::pytest.PytestUnraisableExceptionWarning -W error::RuntimeWarning
+```
+
 ### Project Memory
 
 Claude Code's built-in memory system stores project context, tooling locations, and hard-won facts so they don't have to be re-discovered every session. Claude reads memory automatically at session start.

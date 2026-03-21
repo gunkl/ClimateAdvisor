@@ -536,6 +536,9 @@ class AutomationEngine:
         """Handle everyone leaving — apply setback."""
         c = self._current_classification
         if not c:
+            _LOGGER.warning(
+                "Occupancy away handler skipped — no day classification available"
+            )
             return
 
         if c.hvac_mode == "heat":
@@ -555,6 +558,11 @@ class AutomationEngine:
                     f"occupancy away — cool setback"
                     f" (base {self.config['setback_cool']} - modifier {c.setback_modifier})"
                 ),
+            )
+        else:
+            _LOGGER.info(
+                "Occupancy away — HVAC mode is '%s', no setback needed",
+                c.hvac_mode,
             )
 
     async def handle_occupancy_home(self) -> None:

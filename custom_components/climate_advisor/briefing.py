@@ -27,6 +27,7 @@ from .const import (
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     ECONOMIZER_TEMP_DELTA,
     FAN_MODE_DISABLED,
+    OCCUPANCY_SETBACK_MINUTES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -482,7 +483,7 @@ def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "
         # occupancy_mode == "home" — default hypothetical text
         if c.hvac_mode == "cool":
             return [
-                f"If you head out, no worries. After about 15 minutes I'll let the"
+                f"If you head out, no worries. After about {OCCUPANCY_SETBACK_MINUTES} minutes I'll let the"
                 f" house drift up to {setback_cool:.0f}°F to save energy. When you're"
                 f" back, I'll pull it right back down — give it 20 to 30 minutes to"
                 f" feel normal again.",
@@ -490,7 +491,7 @@ def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "
         elif c.hvac_mode == "heat":
             return [
                 f"If you head out, I'll drop to {setback_heat:.0f}°F after about"
-                f" 15 minutes. When you get back, I'll warm things right up — should"
+                f" {OCCUPANCY_SETBACK_MINUTES} minutes. When you get back, I'll warm things right up — should"
                 f" take 20 to 30 minutes depending on how long you were gone.",
             ]
         else:

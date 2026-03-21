@@ -62,11 +62,16 @@ def _make_climate_state(state: str):
     return mock
 
 
+def _consume_coroutine(coro):
+    """Close coroutine to prevent 'never awaited' warnings."""
+    coro.close()
+
+
 def _make_coordinator():
     """Create a minimal ClimateAdvisorCoordinator for testing _check_startup_override."""
     hass = MagicMock()
     hass.services.async_call = MagicMock()
-    hass.async_create_task = MagicMock()
+    hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
 
     config = {
         "climate_entity": "climate.thermostat",

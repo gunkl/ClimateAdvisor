@@ -536,9 +536,7 @@ class AutomationEngine:
         """Handle everyone leaving — apply setback."""
         c = self._current_classification
         if not c:
-            _LOGGER.warning(
-                "Occupancy away handler skipped — no day classification available"
-            )
+            _LOGGER.warning("Occupancy away handler skipped — no day classification available")
             return
 
         if c.hvac_mode == "heat":

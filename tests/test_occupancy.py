@@ -907,12 +907,15 @@ class TestOccupancyAwayDelay:
         away_mock = AsyncMock()
         coord.automation_engine.handle_occupancy_away = away_mock
 
-        with patch(
-            "custom_components.climate_advisor.coordinator.async_call_later",
-            side_effect=fake_async_call_later,
-        ), patch(
-            "custom_components.climate_advisor.coordinator.callback",
-            side_effect=lambda fn: fn,
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.async_call_later",
+                side_effect=fake_async_call_later,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.callback",
+                side_effect=lambda fn: fn,
+            ),
         ):
             asyncio.run(coord._async_occupancy_toggle_changed(_make_occupancy_event()))
 
@@ -992,9 +995,11 @@ class TestOccupancyAwayDelay:
 
         # Step 2: vacation toggle turns on → mode becomes vacation
         coord.hass.states.get = lambda eid: (
-            _make_state("off") if eid == "input_boolean.home_mode" else
-            _make_state("on") if eid == "input_boolean.vacation" else
-            None
+            _make_state("off")
+            if eid == "input_boolean.home_mode"
+            else _make_state("on")
+            if eid == "input_boolean.vacation"
+            else None
         )
 
         with patch(
@@ -1034,10 +1039,7 @@ class TestOccupancyAwayDelay:
             asyncio.run(engine.handle_occupancy_away())
 
         # No climate service call should have been made
-        climate_calls = [
-            call for call in engine.hass.services.async_call.call_args_list
-            if call[0][0] == "climate"
-        ]
+        climate_calls = [call for call in engine.hass.services.async_call.call_args_list if call[0][0] == "climate"]
         assert len(climate_calls) == 0
 
         # An INFO-level (or any) log message should have been emitted

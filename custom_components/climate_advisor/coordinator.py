@@ -575,12 +575,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             def _occupancy_away_timer_expired(_now: Any) -> None:
                 self._occupancy_away_timer_cancel = None
                 _LOGGER.info("Occupancy away timer expired — applying setback")
-                self.hass.async_create_task(
-                    self.automation_engine.handle_occupancy_away()
-                )
+                self.hass.async_create_task(self.automation_engine.handle_occupancy_away())
 
             self._occupancy_away_timer_cancel = async_call_later(
-                self.hass, delay_seconds, _occupancy_away_timer_expired,
+                self.hass,
+                delay_seconds,
+                _occupancy_away_timer_expired,
             )
         elif new_mode in present_modes:
             self._cancel_occupancy_away_timer()

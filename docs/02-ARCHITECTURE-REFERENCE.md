@@ -74,7 +74,7 @@ One day's tracked data: what was recommended, what actually happened, outcomes (
 | `sensor.climate_advisor_trend` | warming/cooling/stable | (dynamic icon) |
 | `sensor.climate_advisor_next_action` | Human-readable next action | — |
 | `sensor.climate_advisor_daily_briefing` | Truncated briefing (255 char) | full_briefing (complete text) |
-| `sensor.climate_advisor_comfort_score` | 0–100% | pending_suggestions, suggestions list |
+| `sensor.climate_advisor_comfort_score` | 0–100% | `pending_suggestions`, `comfort_violations_minutes_today`, `comfort_range_low`, `comfort_range_high` |
 | `sensor.climate_advisor_status` | active/inactive | — |
 | `sensor.climate_advisor_occupancy_mode` | home/away/vacation/guest | occupancy_entity_states (raw toggle states) |
 

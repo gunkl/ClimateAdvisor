@@ -128,6 +128,15 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 
 - **`@callback` decorator** — Is a `MagicMock` in the test mock layer and swallows decorated functions. If a test needs to invoke a `@callback`-decorated inner function (e.g., timer callbacks), patch it: `patch("...coordinator.callback", side_effect=lambda fn: fn)`
 
+#### Testing Sensor Attributes
+
+**Sensor entity classes (`ClimateAdvisorBaseSensor` subclasses) CANNOT be directly instantiated in test files that use the lightweight HA module stubs** (e.g., `test_fan_control.py`, `test_contact_status.py`). Importing `sensor.py` in that environment causes a metaclass conflict:
+```
+TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases
+```
+
+**Pattern to follow**: Replicate the `extra_state_attributes` logic as a plain helper function in the test file and test that directly. Reference implementations: `test_fan_control.py` (`_fan_sensor_extra_state_attributes` / `TestFanSensorAttributes`), `test_contact_status.py` (`_compute_contact_status`).
+
 #### Verification
 
 **All new or modified tests MUST pass with warnings-as-errors before completion:**
@@ -140,6 +149,14 @@ pytest tests/test_<file>.py -W error::pytest.PytestUnraisableExceptionWarning -W
 This project uses `pre-commit` with ruff, ruff-format, check-yaml, check-json, end-of-file-fixer, and trailing-whitespace hooks. The ruff hook runs with `--fix`, which can modify files during commit.
 
 **After running `ruff check --fix` or `ruff format`**, always re-stage modified files before committing. Otherwise pre-commit will fail because the staged content differs from the working copy.
+
+**Before running pytest**, lint all modified files with the same settings as the pre-commit hook:
+```bash
+python -m ruff check --fix custom_components/climate_advisor/
+python -m ruff format custom_components/climate_advisor/
+python -m ruff check custom_components/climate_advisor/  # confirm clean
+```
+Re-stage any files ruff modified, then run tests. Never run pytest on unlinted code — long f-strings and `format_temp` calls frequently exceed the 120-character limit and will fail at commit instead.
 
 A `tools/validate.py` hook also runs on `custom_components/climate_advisor/` files.
 
@@ -308,6 +325,8 @@ times don't match the classifier recommendations."
 - Identify which modules are affected
 - Create task breakdowns
 
+**Before finalising a plan**, trace the full user scenario end-to-end (e.g., a European user with Celsius configured in HA). Check every boundary where data crosses between the integration and HA — both inbound (reading from HA) and outbound (writing back to HA services). Unit-level thinking misses service call boundaries where wrong-unit or wrong-format data causes silent misbehaviour in production.
+
 **Example:**
 ```
 "I want to add energy cost tracking to the learning engine.
@@ -315,6 +334,15 @@ What modules need changes and what's the best approach?"
 ```
 
 ### 2. Implementation Phase
+
+#### Execution Pattern for Multi-file Changes
+
+For plans touching 4+ files, structure execution as:
+- **Parallel Sonnet executor agents** — one per independent phase or file group, run in a single message with multiple Agent tool calls
+- **Coordinator** — the main Claude instance sequences phases, handles dependencies, and passes results between agents
+- **Verification agent (Sonnet)** — runs `ruff check` then the full test suite after each phase; reports failures back to the coordinator for fixing before the next phase begins
+
+Phases that modify different files with no shared dependencies can run in parallel. Phases with dependencies must be sequential.
 
 **Ask Claude to:**
 - Write implementations following HA conventions

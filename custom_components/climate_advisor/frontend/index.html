@@ -870,7 +870,7 @@
     }
   }
 
-  function renderRecord(rec) {
+  function renderRecord(rec, rangeLow, rangeHigh) {
     if (!rec) return '<p style="color:var(--text-secondary);font-size:0.85rem">No data available.</p>';
     return `
       <table class="kv-table">
@@ -882,7 +882,7 @@
         <tr><td>HVAC Runtime</td><td>${(rec.hvac_runtime_minutes || 0).toFixed(0)} min</td></tr>
         <tr><td>Manual Overrides</td><td>${rec.manual_overrides || 0}</td></tr>
         <tr><td>Door/Window Pauses</td><td>${rec.door_window_pause_events || 0}</td></tr>
-        <tr><td>Comfort Violations</td><td>${(rec.comfort_violations_minutes || 0).toFixed(0)} min</td></tr>
+        <tr title="Time the indoor temperature was outside your comfort range (${rangeLow != null && rangeHigh != null ? `outside ${rangeLow}–${rangeHigh}°F` : 'outside configured range'})"><td>Comfort Violations</td><td>${(rec.comfort_violations_minutes || 0).toFixed(0)} min (${((rec.comfort_violations_minutes || 0) / 1440 * 100).toFixed(0)}% of day)</td></tr>
       </table>
     `;
   }
@@ -936,12 +936,12 @@
       const yesterdayEl = document.getElementById('yesterday-record');
       const tomorrowEl = document.getElementById('tomorrow-plan');
 
-      yesterdayEl.innerHTML = renderRecord(data.yesterday_record);
+      yesterdayEl.innerHTML = renderRecord(data.yesterday_record, data.comfort_range_low, data.comfort_range_high);
 
       if (!data.today_record) {
         todayEl.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">No record yet today (created at briefing time).</p>';
       } else {
-        todayEl.innerHTML = renderRecord(data.today_record);
+        todayEl.innerHTML = renderRecord(data.today_record, data.comfort_range_low, data.comfort_range_high);
       }
 
       tomorrowEl.innerHTML = renderTomorrowPlan(data.tomorrow_plan);
@@ -956,7 +956,7 @@
               <tr><td>Days Recorded</td><td>${comp.days_recorded}</td></tr>
               <tr><td>Window Compliance</td><td>${comp.window_compliance != null ? (comp.window_compliance * 100).toFixed(0) + '%' : 'N/A'}</td></tr>
               <tr><td>Avg HVAC Runtime</td><td>${(comp.avg_daily_hvac_runtime_minutes || 0).toFixed(0)} min/day</td></tr>
-              <tr><td>Comfort Score</td><td>${((comp.comfort_score || 0) * 100).toFixed(0)}%</td></tr>
+              <tr title="% of time the indoor temperature stayed within your comfort range (${data.comfort_range_low != null ? data.comfort_range_low : 70}–${data.comfort_range_high != null ? data.comfort_range_high : 75}°F), averaged over the last 14 days"><td>Comfort Score</td><td>${((comp.comfort_score || 0) * 100).toFixed(0)}%</td></tr>
               <tr><td>Total Manual Overrides</td><td>${comp.total_manual_overrides || 0}</td></tr>
             </table>
           </div>

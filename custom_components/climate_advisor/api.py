@@ -203,6 +203,8 @@ class ClimateAdvisorLearningView(HomeAssistantView):
                 "tomorrow_plan": coordinator.tomorrow_plan,
                 "suggestions": coordinator.learning.generate_suggestions(),
                 "compliance": coordinator.learning.get_compliance_summary(),
+                "comfort_range_low": coordinator.config.get("comfort_heat", 70),
+                "comfort_range_high": coordinator.config.get("comfort_cool", 75),
             }
         )
 

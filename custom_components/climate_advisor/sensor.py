@@ -216,11 +216,15 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Include learning suggestions count."""
+        """Include learning suggestions count and comfort range context."""
         data = self.coordinator.data or {}
         suggestions = data.get(ATTR_LEARNING_SUGGESTIONS, [])
+        today = self.coordinator.today_record
         return {
             "pending_suggestions": len(suggestions),
+            "comfort_violations_minutes_today": today.comfort_violations_minutes if today else 0.0,
+            "comfort_range_low": self.coordinator.config.get("comfort_heat", 70),
+            "comfort_range_high": self.coordinator.config.get("comfort_cool", 75),
         }
 
 

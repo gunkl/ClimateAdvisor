@@ -134,3 +134,24 @@ The `get_compliance_summary()` method returns a dict suitable for sensor attribu
     "pending_suggestions": 2,
 }
 ```
+
+### Metric Definitions
+
+#### Comfort Violations (`comfort_violations_minutes`)
+**Unit:** minutes
+**What it means:** Time during the day when the indoor temperature was outside the configured
+comfort range (`comfort_heat`–`comfort_cool` settings, default 70–75°F).
+**How it accumulates:** The coordinator checks indoor temperature every 30 minutes. Each
+30-minute poll window where the temperature is outside the comfort range adds 30 minutes
+to `comfort_violations_minutes`.
+**Maximum per day:** 1440 minutes (48 polls × 30 min). A reading of 1410 min means the indoor
+temperature was outside the comfort range for 47 out of 48 measurement windows (~98% of the day).
+This is expected when the HVAC is off and the home drifts outside the configured range.
+
+#### Comfort Score (`comfort_score`)
+**Formula:** `1 − (sum of daily violation_minutes / (days_recorded × 1440))`
+**Range:** 0.0 (always outside range) to 1.0 (always within range), reported as a percentage
+**Example:** 3 days, total 2160 violation minutes → `1 − (2160 / 4320)` = 0.50 = 50%
+**Sensor:** `sensor.climate_advisor_comfort_score` reports this as a percentage (0–100%)
+**Trigger:** More than 5 days with over 30 violation minutes triggers the `comfort_violations`
+suggestion, which reduces setback aggressiveness and starts morning pre-heat 15 minutes earlier.

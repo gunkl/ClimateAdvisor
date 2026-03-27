@@ -4,7 +4,15 @@ This document is the authoritative reference for every formula, threshold, and d
 
 For structural context — how these computations fit into the coordinator, automation engine, and classifier modules — see [`docs/02-ARCHITECTURE-REFERENCE.md`](02-ARCHITECTURE-REFERENCE.md).
 
-All temperatures are in **Fahrenheit**.
+### Temperature Units
+
+- All internal thresholds and calculations use **Fahrenheit as the canonical unit** (e.g., `THRESHOLD_HOT = 85`, `comfort_heat = 70`).
+- The `temp_unit` config key controls the display unit (`fahrenheit` or `celsius`, default: `fahrenheit`).
+- Temperatures received from Home Assistant (weather entity forecast highs/lows, indoor/outdoor sensor readings) are **automatically converted to °F** before any classification, trend, or setpoint calculation.
+- Temperatures sent to Home Assistant (thermostat setpoints via `climate.set_temperature`) are **converted back to the user's chosen unit** before the service call.
+- Briefings and log messages display temperatures in the user's chosen unit.
+
+The automation logic table and all threshold constants in this document are expressed in °F. The unit conversion layer is transparent to all downstream logic — automation behavior is identical regardless of which display unit the user has selected.
 
 ---
 
@@ -348,6 +356,12 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `COMPLIANCE_THRESHOLD_LOW` | `0.3` | ratio | Learning engine: below 30% compliance triggers a suggestion |
 | `COMPLIANCE_THRESHOLD_HIGH` | `0.8` | ratio | Learning engine: above 80% compliance means advice is working |
 | `DEFAULT_FAN_MODE` | `disabled` | — | Fan control default (no fan control) |
+
+**User-facing config keys** (set via config flow, stored in the config entry):
+
+| Config Key | Default | Description |
+|---|---|---|
+| `temp_unit` | `fahrenheit` | Temperature unit for display and input (`fahrenheit` or `celsius`). All internal calculations use Fahrenheit as the canonical unit; this setting controls conversion at the HA boundary (inbound sensor readings and outbound thermostat setpoints) and the display unit in briefings and logs. |
 
 **Fan state tracking fields** (runtime coordinator state, not configurable constants):
 

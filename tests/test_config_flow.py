@@ -76,7 +76,10 @@ FULL_CONFIG = {
     "vacation_toggle_invert": False,
     "guest_toggle_entity": None,
     "guest_toggle_invert": False,
+    "temp_unit": "fahrenheit",
 }
+
+FULL_CONFIG_V8 = {k: v for k, v in FULL_CONFIG.items() if k != "temp_unit"}
 
 # v7 config (before migration to v8) — has email_notify instead of per-event toggles
 FULL_CONFIG_V7 = {
@@ -696,6 +699,8 @@ class TestMigrationViaRealFunction:
         assert data.get(CONF_PUSH_BRIEFING) is True
         # email_notify should be removed after v7→v8 migration
         assert "email_notify" not in data
+        # v9 fields (temperature unit)
+        assert data.get("temp_unit") == "fahrenheit"
 
     def test_v4_entry_migrates_to_v5_with_email_notify(self):
         """A v4 entry should gain email_notify=True via v4→v5 migration."""
@@ -710,8 +715,8 @@ class TestMigrationViaRealFunction:
         assert data.get("email_briefing") is True
         assert data.get("push_briefing") is True
 
-    def test_already_v5_entry_migrates_through_to_v8(self):
-        """A v5 entry should migrate through v6, v7, v8."""
+    def test_already_v5_entry_migrates_through_to_v9(self):
+        """A v5 entry should migrate through v6, v7, v8, v9."""
         v5 = dict(FULL_CONFIG_V7)
         entry = _make_config_entry(v5, version=5)
         hass = _make_hass()
@@ -730,6 +735,7 @@ class TestMigrationViaRealFunction:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert 8 in versions_seen
+        assert 9 in versions_seen
 
 
 # ---------------------------------------------------------------------------
@@ -824,6 +830,99 @@ class TestMigrationV7ToV8:
         assert "email_notify" not in final_data
         assert final_data["email_briefing"] is True
         assert final_data["push_briefing"] is True
+
+
+# ---------------------------------------------------------------------------
+# v8→v9 migration — temperature unit preference (Issue #58)
+# ---------------------------------------------------------------------------
+
+
+class TestMigrationV8ToV9:
+    """Tests for config entry migration from version 8 to version 9 (temperature unit)."""
+
+    def _run_v8_to_v9_migration(self, v8_data: dict) -> dict:
+        """Inline replication of v8→v9 migration logic for isolated testing."""
+        new_data = {**v8_data}
+        new_data.setdefault("temp_unit", "fahrenheit")
+        return new_data
+
+    def test_temp_unit_added_with_fahrenheit_default(self):
+        """v8 data without temp_unit gets temp_unit='fahrenheit'."""
+        result = self._run_v8_to_v9_migration(dict(FULL_CONFIG_V8))
+        assert result["temp_unit"] == "fahrenheit"
+
+    def test_existing_temp_unit_not_overwritten(self):
+        """If temp_unit already exists (e.g. celsius), setdefault preserves it."""
+        v8_with_unit = {**FULL_CONFIG_V8, "temp_unit": "celsius"}
+        result = self._run_v8_to_v9_migration(v8_with_unit)
+        assert result["temp_unit"] == "celsius"
+
+    def test_other_fields_preserved(self):
+        """All existing v8 fields survive migration unchanged."""
+        result = self._run_v8_to_v9_migration(dict(FULL_CONFIG_V8))
+        for key in FULL_CONFIG_V8:
+            assert result[key] == FULL_CONFIG_V8[key], f"Field {key!r} changed unexpectedly"
+
+    def test_only_temp_unit_added(self):
+        """Migration adds exactly one key."""
+        result = self._run_v8_to_v9_migration(dict(FULL_CONFIG_V8))
+        new_keys = set(result) - set(FULL_CONFIG_V8)
+        assert new_keys == {"temp_unit"}
+
+    def test_via_real_function_v8_entry(self):
+        """Real async_migrate_entry() adds temp_unit to a v8 entry."""
+        import asyncio
+
+        from custom_components.climate_advisor import async_migrate_entry
+
+        v8 = dict(FULL_CONFIG_V8)
+        entry = _make_config_entry(v8, version=8)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert final_data.get("temp_unit") == "fahrenheit"
+        assert entry.version == 9
+
+    def test_chain_from_v1_includes_temp_unit(self):
+        """v1 entry chains through all migrations and ends up with temp_unit."""
+        import asyncio
+
+        from custom_components.climate_advisor import async_migrate_entry
+
+        # Minimal v1 data (what a v1 entry would have had)
+        v1_data = {
+            "weather_entity": "weather.forecast_home",
+            "climate_entity": "climate.thermostat",
+            "notify_service": "notify.mobile_app",
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "setback_heat": 60,
+            "setback_cool": 80,
+        }
+        entry = _make_config_entry(v1_data, version=1)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert final_data.get("temp_unit") == "fahrenheit"
+        assert entry.version == 9
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from .const import (
     CONF_PUSH_OCCUPANCY_HOME,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_TEMP_UNIT,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -42,6 +43,7 @@ from .const import (
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_HEAT,
+    DEFAULT_TEMP_UNIT,
     DOMAIN,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
@@ -52,6 +54,7 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_WEATHER_SERVICE,
 )
+from .temperature import CELSIUS, FAHRENHEIT, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,6 +91,11 @@ OPTIONS_MENU_OPTIONS = [
     "save",
 ]
 
+TEMP_UNIT_OPTIONS = [
+    {"value": FAHRENHEIT, "label": "Fahrenheit (°F)"},
+    {"value": CELSIUS, "label": "Celsius (°C)"},
+]
+
 
 def _needs_entity(source: str) -> bool:
     """Return True if the source type requires an entity selection."""
@@ -105,14 +113,14 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 8
+    VERSION = 9
 
     def __init__(self) -> None:
         """Initialize the config flow."""
         self._data: dict[str, Any] = {}
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """Handle the initial setup step — core entities and setpoints."""
+        """Handle the initial setup step — core entities and notify service."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -120,11 +128,6 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             notify_svc = user_input.get("notify_service", "")
             if not _NOTIFY_SERVICE_RE.match(notify_svc):
                 errors["notify_service"] = "invalid_notify_service"
-            # Cross-field: setback must be more conservative than comfort
-            if user_input.get("setback_heat", 0) >= user_input.get("comfort_heat", 999):
-                errors["setback_heat"] = "setback_must_be_lower"
-            if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
-                errors["setback_cool"] = "setback_must_be_higher"
 
             if not errors:
                 self._data.update(user_input)
@@ -133,7 +136,7 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     user_input.get("weather_entity"),
                     user_input.get("climate_entity"),
                 )
-                return await self.async_step_temperature_sources()
+                return await self.async_step_unit()
 
         return self.async_show_form(
             step_id="user",
@@ -145,19 +148,90 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("climate_entity"): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="climate")
                     ),
-                    vol.Required("comfort_heat", default=DEFAULT_COMFORT_HEAT): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=55, max=80, step=1, unit_of_measurement="°F", mode="slider")
-                    ),
-                    vol.Required("comfort_cool", default=DEFAULT_COMFORT_COOL): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=68, max=85, step=1, unit_of_measurement="°F", mode="slider")
-                    ),
-                    vol.Required("setback_heat", default=DEFAULT_SETBACK_HEAT): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=45, max=65, step=1, unit_of_measurement="°F", mode="slider")
-                    ),
-                    vol.Required("setback_cool", default=DEFAULT_SETBACK_COOL): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=75, max=90, step=1, unit_of_measurement="°F", mode="slider")
-                    ),
                     vol.Required("notify_service", default="notify.notify"): selector.TextSelector(),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_unit(self, user_input: dict | None = None) -> config_entries.ConfigFlowResult:
+        """Select temperature unit."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return await self.async_step_setpoints()
+        return self.async_show_form(
+            step_id="unit",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TEMP_UNIT, default=DEFAULT_TEMP_UNIT): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=TEMP_UNIT_OPTIONS,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_setpoints(self, user_input: dict | None = None) -> config_entries.ConfigFlowResult:
+        """Configure temperature setpoints."""
+        errors: dict[str, str] = {}
+        unit = self._data.get(CONF_TEMP_UNIT, FAHRENHEIT)
+        is_celsius = unit == CELSIUS
+
+        if user_input is not None:
+            # Cross-field validation (on display values — ordering is unit-invariant)
+            if user_input.get("setback_heat", 0) >= user_input.get("comfort_heat", 999):
+                errors["setback_heat"] = "setback_must_be_lower"
+            if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
+                errors["setback_cool"] = "setback_must_be_higher"
+            if not errors:
+                # Convert display values → stored °F (canonical internal unit)
+                converted = {**user_input}
+                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool"):
+                    if key in converted:
+                        converted[key] = to_fahrenheit(converted[key], unit)
+                self._data.update(converted)
+                return await self.async_step_temperature_sources()
+
+        # Slider ranges and defaults depend on chosen unit
+        if is_celsius:
+            ranges = {
+                "comfort_heat": (13, 27, 21, 0.5),
+                "comfort_cool": (20, 29, 24, 0.5),
+                "setback_heat": (7, 18, 16, 0.5),
+                "setback_cool": (24, 32, 27, 0.5),
+            }
+            unit_label = "°C"
+        else:
+            ranges = {
+                "comfort_heat": (55, 80, DEFAULT_COMFORT_HEAT, 1),
+                "comfort_cool": (68, 85, DEFAULT_COMFORT_COOL, 1),
+                "setback_heat": (45, 65, DEFAULT_SETBACK_HEAT, 1),
+                "setback_cool": (75, 90, DEFAULT_SETBACK_COOL, 1),
+            }
+            unit_label = "°F"
+
+        def _num(key: str) -> selector.NumberSelector:
+            mn, mx, default, step = ranges[key]
+            return selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=mn,
+                    max=mx,
+                    step=step,
+                    unit_of_measurement=unit_label,
+                    mode="slider",
+                )
+            )
+
+        return self.async_show_form(
+            step_id="setpoints",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("comfort_heat", default=ranges["comfort_heat"][2]): _num("comfort_heat"),
+                    vol.Required("comfort_cool", default=ranges["comfort_cool"][2]): _num("comfort_cool"),
+                    vol.Required("setback_heat", default=ranges["setback_heat"][2]): _num("setback_heat"),
+                    vol.Required("setback_cool", default=ranges["setback_cool"][2]): _num("setback_cool"),
                 }
             ),
             errors=errors,
@@ -397,6 +471,11 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     async def async_step_core(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Core entities and temperature setpoints."""
         errors: dict[str, str] = {}
+
+        current = self.config_entry.data
+        unit = current.get(CONF_TEMP_UNIT, FAHRENHEIT)
+        is_celsius = unit == CELSIUS
+
         if user_input is not None:
             # Validate notify_service format
             notify_svc = user_input.get("notify_service", "")
@@ -409,10 +488,40 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 errors["setback_cool"] = "setback_must_be_higher"
 
             if not errors:
+                # Convert display values → stored °F
+                unit_in = user_input.get(CONF_TEMP_UNIT, FAHRENHEIT)
+                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool"):
+                    if key in user_input:
+                        user_input[key] = to_fahrenheit(user_input[key], unit_in)
                 self._updates.update(user_input)
                 return await self.async_step_init()
 
-        current = self.config_entry.data
+        if is_celsius:
+            ranges = {
+                "comfort_heat": (13, 27, 0.5),
+                "comfort_cool": (20, 29, 0.5),
+                "setback_heat": (7, 18, 0.5),
+                "setback_cool": (24, 32, 0.5),
+            }
+            unit_label = "°C"
+            # Pre-fill: convert stored °F to display unit
+            comfort_heat_disp = from_fahrenheit(current.get("comfort_heat", DEFAULT_COMFORT_HEAT), unit)
+            comfort_cool_disp = from_fahrenheit(current.get("comfort_cool", DEFAULT_COMFORT_COOL), unit)
+            setback_heat_disp = from_fahrenheit(current.get("setback_heat", DEFAULT_SETBACK_HEAT), unit)
+            setback_cool_disp = from_fahrenheit(current.get("setback_cool", DEFAULT_SETBACK_COOL), unit)
+        else:
+            ranges = {
+                "comfort_heat": (55, 80, 1),
+                "comfort_cool": (68, 85, 1),
+                "setback_heat": (45, 65, 1),
+                "setback_cool": (75, 90, 1),
+            }
+            unit_label = "°F"
+            # Stored in °F already — use directly
+            comfort_heat_disp = current.get("comfort_heat", DEFAULT_COMFORT_HEAT)
+            comfort_cool_disp = current.get("comfort_cool", DEFAULT_COMFORT_COOL)
+            setback_heat_disp = current.get("setback_heat", DEFAULT_SETBACK_HEAT)
+            setback_cool_disp = current.get("setback_cool", DEFAULT_SETBACK_COOL)
 
         return self.async_show_form(
             step_id="core",
@@ -427,50 +536,59 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         default=current.get("climate_entity"),
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain="climate")),
                     vol.Required(
+                        CONF_TEMP_UNIT,
+                        default=current.get(CONF_TEMP_UNIT, FAHRENHEIT),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=TEMP_UNIT_OPTIONS,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    ),
+                    vol.Required(
                         "comfort_heat",
-                        default=current.get("comfort_heat", DEFAULT_COMFORT_HEAT),
+                        default=comfort_heat_disp,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=55,
-                            max=80,
-                            step=1,
-                            unit_of_measurement="°F",
+                            min=ranges["comfort_heat"][0],
+                            max=ranges["comfort_heat"][1],
+                            step=ranges["comfort_heat"][2],
+                            unit_of_measurement=unit_label,
                             mode="slider",
                         )
                     ),
                     vol.Required(
                         "comfort_cool",
-                        default=current.get("comfort_cool", DEFAULT_COMFORT_COOL),
+                        default=comfort_cool_disp,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=68,
-                            max=85,
-                            step=1,
-                            unit_of_measurement="°F",
+                            min=ranges["comfort_cool"][0],
+                            max=ranges["comfort_cool"][1],
+                            step=ranges["comfort_cool"][2],
+                            unit_of_measurement=unit_label,
                             mode="slider",
                         )
                     ),
                     vol.Required(
                         "setback_heat",
-                        default=current.get("setback_heat", DEFAULT_SETBACK_HEAT),
+                        default=setback_heat_disp,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=45,
-                            max=65,
-                            step=1,
-                            unit_of_measurement="°F",
+                            min=ranges["setback_heat"][0],
+                            max=ranges["setback_heat"][1],
+                            step=ranges["setback_heat"][2],
+                            unit_of_measurement=unit_label,
                             mode="slider",
                         )
                     ),
                     vol.Required(
                         "setback_cool",
-                        default=current.get("setback_cool", DEFAULT_SETBACK_COOL),
+                        default=setback_cool_disp,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=75,
-                            max=90,
-                            step=1,
-                            unit_of_measurement="°F",
+                            min=ranges["setback_cool"][0],
+                            max=ranges["setback_cool"][1],
+                            step=ranges["setback_cool"][2],
+                            unit_of_measurement=unit_label,
                             mode="slider",
                         )
                     ),

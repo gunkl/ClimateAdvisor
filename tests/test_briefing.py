@@ -1178,3 +1178,116 @@ class TestNoMarkdownInBriefing:
             occupancy_mode=occupancy,
         )
         assert "**" not in result, f"Bold markers found in output: {result}"
+
+
+# ---------------------------------------------------------------------------
+# Celsius display tests
+# ---------------------------------------------------------------------------
+
+
+class TestCelsiusBriefing:
+    """Tests that briefing output uses Celsius when temp_unit='celsius'."""
+
+    def test_tldr_table_shows_celsius_not_fahrenheit(self):
+        """TLDR table temperatures appear in °C when unit is celsius."""
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            temp_unit="celsius",
+        )
+        assert "°C" in result
+        assert "°F" not in result
+
+    def test_hot_day_threshold_displayed_in_celsius(self):
+        """Hot day classification shows correct Celsius value in briefing body.
+
+        today_high=90°F → (90-32)*5/9 = 32°C.
+        """
+        c = _make_classification("hot", today_high=90, today_low=72)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            temp_unit="celsius",
+        )
+        # 90°F → 32°C
+        assert "32°C" in result
+
+    def test_trend_delta_displayed_in_celsius(self):
+        """Trend magnitude is shown in °C (scale-only conversion, no offset).
+
+        A warming trend of 9°F → 9*5/9 = 5°C.
+        """
+        c = _make_classification(
+            "mild",
+            today_high=68,
+            today_low=48,
+            tomorrow_high=77,
+            tomorrow_low=57,
+            trend_direction="warming",
+            trend_magnitude=9,
+        )
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            temp_unit="celsius",
+        )
+        # 9°F delta → 5°C delta
+        assert "5°C" in result
+
+    def test_fahrenheit_default_unchanged(self):
+        """Without temp_unit arg, output is identical to passing temp_unit='fahrenheit'.
+
+        This is a regression guard to ensure the default remains Fahrenheit.
+        """
+        c = _make_classification("cool", today_high=55, today_low=35)
+        default_result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+        )
+        explicit_f_result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            temp_unit="fahrenheit",
+        )
+        assert default_result == explicit_f_result
+
+    def test_celsius_output_contains_degree_c_symbol(self):
+        """Basic check: output has °C when celsius unit is specified."""
+        c = _make_classification("mild", today_high=68, today_low=48)
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            temp_unit="celsius",
+        )
+        assert "°C" in result

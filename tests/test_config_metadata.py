@@ -43,6 +43,7 @@ EXPECTED_KEYS = {
     "vacation_toggle_invert",
     "guest_toggle_entity",
     "guest_toggle_invert",
+    "temp_unit",
 }
 
 VALID_CATEGORIES = {"core", "sensors", "fan", "schedule", "advanced", "occupancy", "notifications"}

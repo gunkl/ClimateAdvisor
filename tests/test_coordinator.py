@@ -368,3 +368,182 @@ class TestBriefingNotificationSplit:
 
         assert coord._last_briefing_short  # non-empty string
         assert len(coord._last_briefing_short) < len(coord._last_briefing)
+
+
+# ---------------------------------------------------------------------------
+# Tests: Temperature normalization (Issue #58 — Celsius/Fahrenheit support)
+# ---------------------------------------------------------------------------
+
+
+class TestTemperatureNormalization:
+    """Tests for inbound temperature conversion in coordinator helper methods.
+
+    _get_outdoor_temp() and _get_indoor_temp() must convert sensor/entity
+    values from the user's configured unit into internal Fahrenheit before
+    returning them.
+    """
+
+    def _make_coord_stub(self, config_overrides: dict | None = None):
+        """Build a minimal coordinator-like object for testing temperature helpers."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import (
+            ClimateAdvisorCoordinator,
+        )
+
+        coord = MagicMock()
+        coord.hass = MagicMock()
+        coord.hass.states = MagicMock()
+
+        config = {
+            "climate_entity": "climate.test_thermostat",
+            "outdoor_temp_source": "sensor",
+            "outdoor_temp_entity": "sensor.outdoor_temp",
+            "indoor_temp_source": "climate_fallback",
+            "temp_unit": "fahrenheit",
+        }
+        if config_overrides:
+            config.update(config_overrides)
+        coord.config = config
+
+        # Bind the real methods under test to our mock coordinator
+        coord._get_outdoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_outdoor_temp, coord)
+        coord._get_indoor_temp = types.MethodType(ClimateAdvisorCoordinator._get_indoor_temp, coord)
+        return coord
+
+    def _make_state(self, state_value: str, attributes: dict | None = None) -> MagicMock:
+        """Create a mock HA state object."""
+        mock = MagicMock()
+        mock.state = state_value
+        mock.attributes = attributes or {}
+        return mock
+
+    # ------------------------------------------------------------------
+    # _get_outdoor_temp — sensor source
+    # ------------------------------------------------------------------
+
+    def test_celsius_outdoor_temp_normalized(self):
+        """Sensor returns 25°C; with celsius config, _get_outdoor_temp returns ~77°F."""
+        coord = self._make_coord_stub({"temp_unit": "celsius"})
+        coord.hass.states.get.return_value = self._make_state("25")
+
+        result = coord._get_outdoor_temp({})
+
+        # 25°C × 9/5 + 32 = 77.0°F
+        assert abs(result - 77.0) < 0.01
+
+    def test_fahrenheit_outdoor_temp_passthrough(self):
+        """Sensor returns 77°F; with fahrenheit config, _get_outdoor_temp returns 77.0."""
+        coord = self._make_coord_stub({"temp_unit": "fahrenheit"})
+        coord.hass.states.get.return_value = self._make_state("77")
+
+        result = coord._get_outdoor_temp({})
+
+        assert result == 77.0
+
+    def test_celsius_outdoor_temp_fallback_from_weather_attrs(self):
+        """When sensor entity is absent, weather_attrs temperature is also converted."""
+        coord = self._make_coord_stub(
+            {
+                "temp_unit": "celsius",
+                "outdoor_temp_source": "weather_service",
+            }
+        )
+
+        # weather_attrs carries 20°C → expect 68°F internally
+        result = coord._get_outdoor_temp({"temperature": 20})
+
+        assert abs(result - 68.0) < 0.01
+
+    def test_fahrenheit_outdoor_weather_attrs_passthrough(self):
+        """weather_service source with fahrenheit config passes value through unchanged."""
+        coord = self._make_coord_stub(
+            {
+                "temp_unit": "fahrenheit",
+                "outdoor_temp_source": "weather_service",
+            }
+        )
+
+        result = coord._get_outdoor_temp({"temperature": 68})
+
+        assert result == 68.0
+
+    # ------------------------------------------------------------------
+    # _get_indoor_temp — climate_fallback source
+    # ------------------------------------------------------------------
+
+    def test_celsius_indoor_temp_normalized(self):
+        """Climate entity current_temperature is 22°C; celsius config → ~71.6°F returned."""
+        coord = self._make_coord_stub({"temp_unit": "celsius"})
+        climate_state = self._make_state("heat", {"current_temperature": 22})
+        coord.hass.states.get.return_value = climate_state
+
+        result = coord._get_indoor_temp()
+
+        # 22°C × 9/5 + 32 = 71.6°F
+        assert result is not None
+        assert abs(result - 71.6) < 0.01
+
+    def test_fahrenheit_indoor_temp_passthrough(self):
+        """Climate entity current_temperature is 77°F; fahrenheit config → 77.0 returned."""
+        coord = self._make_coord_stub({"temp_unit": "fahrenheit"})
+        climate_state = self._make_state("heat", {"current_temperature": 77})
+        coord.hass.states.get.return_value = climate_state
+
+        result = coord._get_indoor_temp()
+
+        assert result == 77.0
+
+    def test_indoor_temp_none_when_no_climate_state(self):
+        """When climate entity state is unavailable, _get_indoor_temp returns None."""
+        coord = self._make_coord_stub({"temp_unit": "celsius"})
+        coord.hass.states.get.return_value = None
+
+        result = coord._get_indoor_temp()
+
+        assert result is None
+
+    def test_indoor_temp_none_when_current_temperature_missing(self):
+        """When current_temperature attribute is absent, _get_indoor_temp returns None."""
+        coord = self._make_coord_stub({"temp_unit": "fahrenheit"})
+        climate_state = self._make_state("heat", {})  # no current_temperature key
+        coord.hass.states.get.return_value = climate_state
+
+        result = coord._get_indoor_temp()
+
+        assert result is None
+
+    # ------------------------------------------------------------------
+    # _get_indoor_temp — explicit sensor source
+    # ------------------------------------------------------------------
+
+    def test_celsius_indoor_sensor_source_normalized(self):
+        """Explicit indoor sensor returning 20°C with celsius config → 68°F returned."""
+        coord = self._make_coord_stub(
+            {
+                "temp_unit": "celsius",
+                "indoor_temp_source": "sensor",
+                "indoor_temp_entity": "sensor.indoor_temp",
+            }
+        )
+        coord.hass.states.get.return_value = self._make_state("20")
+
+        result = coord._get_indoor_temp()
+
+        assert result is not None
+        assert abs(result - 68.0) < 0.01
+
+    def test_fahrenheit_indoor_sensor_source_passthrough(self):
+        """Explicit indoor sensor returning 72°F with fahrenheit config → 72.0 returned."""
+        coord = self._make_coord_stub(
+            {
+                "temp_unit": "fahrenheit",
+                "indoor_temp_source": "sensor",
+                "indoor_temp_entity": "sensor.indoor_temp",
+            }
+        )
+        coord.hass.states.get.return_value = self._make_state("72")
+
+        result = coord._get_indoor_temp()
+
+        assert result == 72.0

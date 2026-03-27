@@ -80,6 +80,7 @@ from .const import (
 )
 from .learning import DailyRecord, LearningEngine
 from .state import StatePersistence
+from .temperature import format_temp, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -782,6 +783,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
         """Read outdoor temperature based on configured source type."""
         source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
+        unit = self.config.get("temp_unit", "fahrenheit")
 
         if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
             entity_id = self.config.get("outdoor_temp_entity")
@@ -789,7 +791,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 state = self.hass.states.get(entity_id)
                 if state:
                     try:
-                        return float(state.state)
+                        return to_fahrenheit(float(state.state), unit)
                     except (ValueError, TypeError):
                         _LOGGER.warning(
                             "Outdoor temp entity %s has non-numeric state %r; falling back to weather attribute",
@@ -798,11 +800,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         )
 
         # weather_service source or fallback
-        return float(weather_attrs.get("temperature", 65))
+        return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit)
 
     def _get_indoor_temp(self) -> float | None:
         """Read indoor temperature based on configured source type."""
         source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+        unit = self.config.get("temp_unit", "fahrenheit")
 
         if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
             entity_id = self.config.get("indoor_temp_entity")
@@ -810,7 +813,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 state = self.hass.states.get(entity_id)
                 if state:
                     try:
-                        return float(state.state)
+                        return to_fahrenheit(float(state.state), unit)
                     except (ValueError, TypeError):
                         _LOGGER.warning(
                             "Indoor temp entity %s has non-numeric state %r; treating as unavailable",
@@ -823,7 +826,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         climate_state = self.hass.states.get(self.config["climate_entity"])
         if climate_state:
             temp = climate_state.attributes.get("current_temperature")
-            return float(temp) if temp is not None else None
+            return to_fahrenheit(float(temp), unit) if temp is not None else None
         return None
 
     async def _get_forecast_data(self) -> list:
@@ -948,6 +951,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tomorrow_high = tomorrow_fc.get("temperature", tomorrow_fc.get("tempHigh", current_outdoor))
             tomorrow_low = tomorrow_fc.get("templow", tomorrow_fc.get("tempLow", current_outdoor - 15))
 
+        unit = self.config.get("temp_unit", "fahrenheit")
+        today_high = to_fahrenheit(today_high, unit)
+        today_low = to_fahrenheit(today_low, unit)
+        tomorrow_high = to_fahrenheit(tomorrow_high, unit)
+        tomorrow_low = to_fahrenheit(tomorrow_low, unit)
+
         # The forecast API returns "remaining period" data — as the day
         # progresses, today's high drops to the current temp and today's low
         # becomes tonight's expected low (not this morning's actual low).
@@ -1033,6 +1042,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             automation_grace_seconds=self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS),
             grace_active=self.automation_engine._grace_active,
             grace_source=self.automation_engine._last_resume_source,
+            temp_unit=self.config.get("temp_unit", "fahrenheit"),
         )
         briefing = generate_briefing(**briefing_kwargs)
         briefing_short = generate_briefing(**briefing_kwargs, verbosity="tldr_only")
@@ -1365,11 +1375,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if c.day_type == DAY_TYPE_HOT:
             comfort_cool = self.config.get("comfort_cool", 75)
             threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
+            unit = self.config.get("temp_unit", "fahrenheit")
             if c.window_opportunity_morning and now < time(ECONOMIZER_MORNING_END_HOUR, 0):
                 end_t = time(ECONOMIZER_MORNING_END_HOUR, 0).strftime("%I:%M %p").lstrip("0")
-                return f"Open windows if outdoor temp is below {threshold:.0f}°F (until {end_t})"
+                return f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})"
             elif c.window_opportunity_evening and now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
-                return f"Open windows if outdoor temp is below {threshold:.0f}°F"
+                return f"Open windows if outdoor temp is below {format_temp(threshold, unit)}"
             return "Keep windows and blinds closed. AC is handling it."
         elif c.day_type == DAY_TYPE_COLD:
             return "Keep doors closed — help the heater out."
@@ -1481,12 +1492,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else:
                 events.append((wt, "Morning wake-up check"))
         if now_time < st:
+            unit = self.config.get("temp_unit", "fahrenheit")
             if c.hvac_mode == "heat":
                 bedtime_target = self.config.get("comfort_heat", 70) - 4 + c.setback_modifier
-                events.append((st, f"Bedtime — heat setback to {bedtime_target:.0f}°F"))
+                events.append((st, f"Bedtime — heat setback to {format_temp(bedtime_target, unit)}"))
             elif c.hvac_mode == "cool":
                 bedtime_target = self.config.get("comfort_cool", 75) + 3
-                events.append((st, f"Bedtime — cool setback to {bedtime_target:.0f}°F"))
+                events.append((st, f"Bedtime — cool setback to {format_temp(bedtime_target, unit)}"))
             else:
                 events.append((st, "Bedtime check"))
 

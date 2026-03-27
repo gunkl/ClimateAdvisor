@@ -42,6 +42,7 @@ from .const import (
     CONF_PUSH_OCCUPANCY_HOME,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_TEMP_UNIT,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -193,6 +194,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         new_data.setdefault(CONF_PUSH_OCCUPANCY_HOME, True)
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=8)
         _LOGGER.info("Migration to version 8 complete")
+
+    if config_entry.version == 8:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 8 to 9")
+        new_data = {**config_entry.data}
+        # Add temperature unit preference — fahrenheit default preserves existing behavior
+        new_data.setdefault(CONF_TEMP_UNIT, "fahrenheit")
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=9)
+        _LOGGER.info("Migration to version 9 complete")
 
     return True
 

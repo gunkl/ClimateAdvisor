@@ -35,6 +35,10 @@ DOOR_WINDOW_PAUSE_SECONDS = 180  # deprecated — use CONF_SENSOR_DEBOUNCE inste
 # Door/window sensor configuration
 CONF_SENSOR_POLARITY_INVERTED = "sensor_polarity_inverted"
 
+# Temperature unit preference (stored as canonical fahrenheit internally)
+CONF_TEMP_UNIT = "temp_unit"
+DEFAULT_TEMP_UNIT = "fahrenheit"
+
 # Debounce and grace period config keys
 CONF_SENSOR_DEBOUNCE = "sensor_debounce_seconds"
 CONF_MANUAL_GRACE_PERIOD = "manual_grace_seconds"
@@ -184,7 +188,7 @@ CONFIG_METADATA = {
         "category": "core",
     },
     "comfort_heat": {
-        "label": "Comfort Heat (°F)",
+        "label": "Comfort Heat",
         "description": (
             "Target temperature when heating is active. Lowering saves energy but may feel cooler."
             " Used for morning wake-up and occupancy-home restores."
@@ -192,7 +196,7 @@ CONFIG_METADATA = {
         "category": "core",
     },
     "comfort_cool": {
-        "label": "Comfort Cool (°F)",
+        "label": "Comfort Cool",
         "description": (
             "Target temperature when cooling is active. Raising saves energy but may feel warmer."
             " The economizer uses this as the threshold for window cooling decisions."
@@ -200,7 +204,7 @@ CONFIG_METADATA = {
         "category": "core",
     },
     "setback_heat": {
-        "label": "Setback Heat (°F)",
+        "label": "Setback Heat",
         "description": (
             "Temperature when heating and away from home."
             " Lower values save more energy but take longer to recover when you return."
@@ -208,7 +212,7 @@ CONFIG_METADATA = {
         "category": "core",
     },
     "setback_cool": {
-        "label": "Setback Cool (°F)",
+        "label": "Setback Cool",
         "description": (
             "Temperature when cooling and away from home."
             " Higher values save more energy but take longer to cool down when you return."
@@ -218,6 +222,15 @@ CONFIG_METADATA = {
     "notify_service": {
         "label": "Notification Service",
         "description": "The HA notify service used for alerts and briefings (e.g., notify.mobile_app).",
+        "category": "core",
+    },
+    CONF_TEMP_UNIT: {
+        "label": "Temperature Unit",
+        "description": (
+            "Whether setpoints and displayed temperatures use Fahrenheit or Celsius. "
+            "Setpoints are stored internally in Fahrenheit; changing this unit affects "
+            "how they are displayed and entered in the UI."
+        ),
         "category": "core",
     },
     "outdoor_temp_source": {

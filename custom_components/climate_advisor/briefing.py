@@ -29,6 +29,7 @@ from .const import (
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
 )
+from .temperature import FAHRENHEIT, format_temp, format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ def generate_briefing(
     verbosity: str = "normal",
     fan_mode: str = FAN_MODE_DISABLED,
     occupancy_mode: str = "home",
+    temp_unit: str = FAHRENHEIT,
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -71,6 +73,7 @@ def generate_briefing(
             body), or "verbose" (header + table + full original body).
         fan_mode: Fan control mode — one of the FAN_MODE_* constants.
         occupancy_mode: Current occupancy state — "home", "away", "guest", or "vacation".
+        temp_unit: Display unit — "fahrenheit" or "celsius".
 
     Returns:
         Formatted briefing string suitable for email or notification.
@@ -79,7 +82,7 @@ def generate_briefing(
     lines: list[str] = []
 
     _LOGGER.debug(
-        "Generating briefing — day_type=%s, trend=%s, comfort_heat=%.0f°F, comfort_cool=%.0f°F, verbosity=%s",
+        "Generating briefing — day_type=%s, trend=%s, comfort_heat=%.0f\u00b0F, comfort_cool=%.0f\u00b0F, verbosity=%s",
         c.day_type,
         c.trend_direction,
         comfort_heat,
@@ -96,7 +99,7 @@ def generate_briefing(
         "sleep_time": sleep_time,
         "wake_time": wake_time,
     }
-    tldr_lines = _generate_tldr_table(c, config)
+    tldr_lines = _generate_tldr_table(c, config, temp_unit=temp_unit)
 
     if verbosity == "tldr_only":
         briefing_text = "\n".join(tldr_lines).rstrip()
@@ -109,7 +112,7 @@ def generate_briefing(
     # Structured header (kept for full briefing / email)
     # Note: Today/Tomorrow temps and Day Type are already in the TLDR table,
     # so we only include the title and separator to avoid duplication (Issue #52).
-    lines.append("🏠 Your Home Climate Plan for Today")
+    lines.append("\U0001f3e0 Your Home Climate Plan for Today")
     lines.append(f"{'=' * 40}")
     lines.append("")
     lines.extend(tldr_lines)
@@ -117,24 +120,28 @@ def generate_briefing(
 
     # Conversational body
     if c.day_type == DAY_TYPE_HOT:
-        lines.extend(_hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode=fan_mode))
+        lines.extend(
+            _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode=fan_mode, temp_unit=temp_unit)
+        )
     elif c.day_type == DAY_TYPE_WARM:
-        lines.extend(_warm_day_plan(c, comfort_cool, wake_time, sleep_time, fan_mode=fan_mode))
+        lines.extend(_warm_day_plan(c, comfort_cool, wake_time, sleep_time, fan_mode=fan_mode, temp_unit=temp_unit))
     elif c.day_type == DAY_TYPE_MILD:
-        lines.extend(_mild_day_plan(c, comfort_heat, wake_time, sleep_time))
+        lines.extend(_mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit=temp_unit))
     elif c.day_type == DAY_TYPE_COOL:
-        lines.extend(_cool_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time))
+        lines.extend(_cool_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time, temp_unit=temp_unit))
     elif c.day_type == DAY_TYPE_COLD:
-        lines.extend(_cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time))
+        lines.extend(_cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time, temp_unit=temp_unit))
 
     _LOGGER.debug("Dispatched %s day plan", c.day_type)
 
     lines.append("")
-    lines.extend(_leaving_home_section(c, setback_heat, setback_cool, occupancy_mode=occupancy_mode))
+    lines.extend(
+        _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode=occupancy_mode, temp_unit=temp_unit)
+    )
     lines.append("")
-    lines.extend(_fresh_air_section(c, comfort_heat, comfort_cool, debounce_seconds))
+    lines.extend(_fresh_air_section(c, comfort_heat, comfort_cool, debounce_seconds, temp_unit=temp_unit))
 
-    # Grace period status — only shown when a grace period is active at briefing time,
+    # Grace period status — only shown when a grace period is currently active,
     # or when grace periods are configured to a non-default value worth explaining
     grace_lines = _grace_period_section(
         debounce_seconds=debounce_seconds,
@@ -149,15 +156,15 @@ def generate_briefing(
         _LOGGER.debug("Grace section included — source=%s", grace_source)
 
     lines.append("")
-    lines.extend(_tonight_preview(c, comfort_heat, comfort_cool, sleep_time))
+    lines.extend(_tonight_preview(c, comfort_heat, comfort_cool, sleep_time, temp_unit=temp_unit))
 
     # Learning suggestions (kept structured for accept/dismiss clarity)
     if learning_suggestions:
         lines.append("")
-        lines.append("💡 Suggestions Based on Recent Patterns")
+        lines.append("\U0001f4a1 Suggestions Based on Recent Patterns")
         lines.append("-" * 40)
         for suggestion in learning_suggestions:
-            lines.append(f"  • {suggestion}")
+            lines.append(f"  \u2022 {suggestion}")
         lines.append("")
         lines.append("Reply ACCEPT or DISMISS to any suggestion, or ignore to keep current behavior.")
 
@@ -172,13 +179,14 @@ def generate_briefing(
     return briefing_text
 
 
-def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
+def _generate_tldr_table(c: DayClassification, config: dict, temp_unit: str = FAHRENHEIT) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
     Args:
         c: Today's day classification.
         config: Dict with comfort_heat, comfort_cool, setback_heat, setback_cool,
             sleep_time, wake_time keys.
+        temp_unit: Display unit — "fahrenheit" or "celsius".
 
     Returns:
         List of lines forming a plain-text aligned table.
@@ -188,13 +196,13 @@ def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
     sleep_time = config["sleep_time"]
 
     # --- Day Type row ---
-    day_type_val = f"{c.day_type.title()} ({c.today_high:.0f}°F)"
+    day_type_val = f"{c.day_type.title()} ({format_temp(c.today_high, temp_unit)})"
 
     # --- HVAC Mode row ---
     if c.hvac_mode == "cool":
-        hvac_val = f"Cool at {comfort_cool:.0f}°F"
+        hvac_val = f"Cool at {format_temp(comfort_cool, temp_unit)}"
     elif c.hvac_mode == "heat":
-        hvac_val = f"Heat at {comfort_heat:.0f}°F"
+        hvac_val = f"Heat at {format_temp(comfort_heat, temp_unit)}"
     else:
         hvac_val = "Off — windows day"
 
@@ -203,19 +211,19 @@ def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
     if c.windows_recommended and c.window_open_time and c.window_close_time:
         open_t = c.window_open_time.strftime(_FMT_HOUR)
         close_t = c.window_close_time.strftime(_FMT_HOUR)
-        windows_val = f"Open {open_t} – {close_t}"
+        windows_val = f"Open {open_t} \u2013 {close_t}"
     elif c.window_opportunity_morning and c.window_opportunity_evening:
         m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR).lstrip("0")
         m_end = c.window_opportunity_morning_end.strftime(_FMT_HOUR).lstrip("0")
         e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"{m_start}–{m_end} / {e_start}+ (<{threshold:.0f}°F)"
+        windows_val = f"{m_start}\u2013{m_end} / {e_start}+ (<{format_temp(threshold, temp_unit)})"
     elif c.window_opportunity_morning:
         m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR).lstrip("0")
         m_end = c.window_opportunity_morning_end.strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"{m_start}–{m_end} (<{threshold:.0f}°F)"
+        windows_val = f"{m_start}\u2013{m_end} (<{format_temp(threshold, temp_unit)})"
     elif c.window_opportunity_evening:
         e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR).lstrip("0")
-        windows_val = f"{e_start} onward (<{threshold:.0f}°F)"
+        windows_val = f"{e_start} onward (<{format_temp(threshold, temp_unit)})"
     else:
         windows_val = "Closed all day"
 
@@ -224,16 +232,16 @@ def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
     if c.hvac_mode == "cool":
         # setback for cool days goes up (warmer is fine when sleeping)
         bedtime_temp = comfort_cool + 3  # standard cool setback
-        bedtime_val = f"{bedtime_temp:.0f}°F at {sleep_str}"
+        bedtime_val = f"{format_temp(bedtime_temp, temp_unit)} at {sleep_str}"
     elif c.hvac_mode == "heat":
         bedtime_temp = comfort_heat - 4  # standard heat setback
-        bedtime_val = f"{bedtime_temp:.0f}°F at {sleep_str}"
+        bedtime_val = f"{format_temp(bedtime_temp, temp_unit)} at {sleep_str}"
     else:
         bedtime_val = "No setback"
 
     # --- Tomorrow row ---
-    trend_desc = _trend_description(c)
-    tomorrow_val = f"{trend_desc} ({c.tomorrow_high:.0f}°F)"
+    trend_desc = _trend_description(c, temp_unit=temp_unit)
+    tomorrow_val = f"{trend_desc} ({format_temp(c.tomorrow_high, temp_unit)})"
 
     label_w = 17
     rows = [
@@ -246,26 +254,34 @@ def _generate_tldr_table(c: DayClassification, config: dict) -> list[str]:
     return rows
 
 
-def _trend_description(c: DayClassification) -> str:
+def _trend_description(c: DayClassification, temp_unit: str = FAHRENHEIT) -> str:
     """Human-readable trend description."""
     if c.trend_direction == "warming":
         if c.trend_magnitude >= 10:
-            return f"Significantly warmer tomorrow (+{c.trend_magnitude:.0f}°F)"
-        return f"Warming trend (+{c.trend_magnitude:.0f}°F)"
+            return f"Significantly warmer tomorrow (+{format_temp_delta(c.trend_magnitude, temp_unit)})"
+        return f"Warming trend (+{format_temp_delta(c.trend_magnitude, temp_unit)})"
     elif c.trend_direction == "cooling":
         if c.trend_magnitude >= 10:
-            return f"Significant cold front coming (-{c.trend_magnitude:.0f}°F)"
-        return f"Cooling trend (-{c.trend_magnitude:.0f}°F)"
+            return f"Significant cold front coming (-{format_temp_delta(c.trend_magnitude, temp_unit)})"
+        return f"Cooling trend (-{format_temp_delta(c.trend_magnitude, temp_unit)})"
     return "Stable"
 
 
-def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode: str = FAN_MODE_DISABLED) -> list[str]:
-    """Conversational plan for hot days (85°F+)."""
+def _hot_day_plan(
+    c,
+    comfort_cool,
+    setback_cool,
+    wake_time,
+    sleep_time,
+    fan_mode: str = FAN_MODE_DISABLED,
+    temp_unit: str = FAHRENHEIT,
+) -> list[str]:
+    """Conversational plan for hot days (85\u00b0F+)."""
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
 
     lines = [
-        f"I pre-cooled to {comfort_cool - 2:.0f}°F this morning while outdoor air"
-        f" was still cool — that banking strategy cuts energy use significantly over"
+        f"I pre-cooled to {format_temp(comfort_cool - 2, temp_unit)} this morning while outdoor air"
+        f" was still cool \u2014 that banking strategy cuts energy use significantly over"
         f" the course of the day.",
     ]
 
@@ -279,19 +295,19 @@ def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode
         lines.append("")
         lines.append(
             f"This morning between {m_start} and {m_end}, if outdoor temps are"
-            f" at or below {threshold:.0f}°F, open up for a cross-breeze —"
+            f" at or below {format_temp(threshold, temp_unit)}, open up for a cross-breeze \u2014"
             f" I'll handle the AC transition."
         )
         lines.append("")
         lines.append(
             f"After {m_end}, close up and keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
-            f" {comfort_cool:.0f}°F."
+            f" {format_temp(comfort_cool, temp_unit)}."
         )
         lines.append("")
         lines.append(
             f"From {e_start} onward, if outdoor temps drop back below"
-            f" {threshold:.0f}°F, open up again and I'll cut the AC to let"
+            f" {format_temp(threshold, temp_unit)}, open up again and I'll cut the AC to let"
             f" natural ventilation take over."
         )
     elif has_morning:
@@ -300,14 +316,14 @@ def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode
         lines.append("")
         lines.append(
             f"This morning between {m_start} and {m_end}, if outdoor temps are"
-            f" at or below {threshold:.0f}°F, open up for a cross-breeze —"
+            f" at or below {format_temp(threshold, temp_unit)}, open up for a cross-breeze \u2014"
             f" I'll handle the AC transition."
         )
         lines.append("")
         lines.append(
             f"After {m_end}, close up and keep blinds drawn on sun-facing windows"
             f" (especially west-facing after noon). I'll hold things at"
-            f" {comfort_cool:.0f}°F for the rest of the day."
+            f" {format_temp(comfort_cool, temp_unit)} for the rest of the day."
         )
     elif has_evening:
         e_start = c.window_opportunity_evening_start.strftime(_FMT_HOUR)
@@ -315,11 +331,11 @@ def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode
         lines.append(
             f"Today's a keep-it-sealed kind of day. Close the blinds on sun-facing"
             f" windows (especially west-facing ones after noon) and I'll hold things"
-            f" at {comfort_cool:.0f}°F."
+            f" at {format_temp(comfort_cool, temp_unit)}."
         )
         lines.append("")
         lines.append(
-            f"From {e_start} onward, if outdoor temps drop below {threshold:.0f}°F,"
+            f"From {e_start} onward, if outdoor temps drop below {format_temp(threshold, temp_unit)},"
             f" open up and I'll cut the AC to let natural ventilation take over."
         )
     else:
@@ -327,7 +343,7 @@ def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode
         lines.append(
             f"Today's a keep-it-sealed kind of day. Close the blinds on sun-facing"
             f" windows (especially west-facing ones after noon) and I'll handle"
-            f" the rest at {comfort_cool:.0f}°F."
+            f" the rest at {format_temp(comfort_cool, temp_unit)}."
         )
 
     if fan_mode != FAN_MODE_DISABLED and (has_morning or has_evening):
@@ -338,18 +354,25 @@ def _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode
     return lines
 
 
-def _warm_day_plan(c, comfort_cool, wake_time, sleep_time, fan_mode: str = FAN_MODE_DISABLED) -> list[str]:
-    """Conversational plan for warm days (75-85°F)."""
+def _warm_day_plan(
+    c,
+    comfort_cool,
+    wake_time,
+    sleep_time,
+    fan_mode: str = FAN_MODE_DISABLED,
+    temp_unit: str = FAHRENHEIT,
+) -> list[str]:
+    """Conversational plan for warm days (75-85\u00b0F)."""
     lines = []
 
     if c.windows_recommended and c.window_open_time:
         open_t = c.window_open_time.strftime(_FMT_HOUR)
         lines.append(
             f"Open windows around {open_t} to catch the cool morning air"
-            f" — cross-ventilation keeps things comfortable without the AC."
+            f" \u2014 cross-ventilation keeps things comfortable without the AC."
         )
     else:
-        lines.append("HVAC is off this morning — no action needed.")
+        lines.append("HVAC is off this morning \u2014 no action needed.")
 
     if fan_mode != FAN_MODE_DISABLED:
         lines.append("I'll use the fan to boost cross-ventilation when windows are open.")
@@ -359,23 +382,23 @@ def _warm_day_plan(c, comfort_cool, wake_time, sleep_time, fan_mode: str = FAN_M
     if c.window_close_time:
         close_t = c.window_close_time.strftime(_FMT_HOUR)
         lines.append(
-            f"Close up by {close_t} before outdoor temps climb — seal the cool"
-            f" air inside so the AC can take over above {comfort_cool:.0f}°F."
+            f"Close up by {close_t} before outdoor temps climb \u2014 seal the cool"
+            f" air inside so the AC can take over above {format_temp(comfort_cool, temp_unit)}."
         )
     else:
         lines.append(
-            f"The AC will step in above {comfort_cool:.0f}°F as a safety net if"
+            f"The AC will step in above {format_temp(comfort_cool, temp_unit)} as a safety net if"
             f" needed, but with good airflow you probably won't need it."
         )
 
     return lines
 
 
-def _mild_day_plan(c, comfort_heat, wake_time, sleep_time) -> list[str]:
-    """Conversational plan for mild days (60-74°F)."""
+def _mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit: str = FAHRENHEIT) -> list[str]:
+    """Conversational plan for mild days (60-74\u00b0F)."""
     lines = [
         f"A day where the house practically takes care of itself. I warmed to"
-        f" {comfort_heat:.0f}°F before sunrise — now HVAC is off and the weather"
+        f" {format_temp(comfort_heat, temp_unit)} before sunrise \u2014 now HVAC is off and the weather"
         f" does the rest.",
     ]
 
@@ -392,28 +415,29 @@ def _mild_day_plan(c, comfort_heat, wake_time, sleep_time) -> list[str]:
         lines.append("")
         lines.append(
             f"Close up by {close_t} to trap the warmth. If it dips below"
-            f" {comfort_heat - 2:.0f}°F tonight, I'll bring the heater back on"
+            f" {format_temp(comfort_heat - 2, temp_unit)} tonight, I'll bring the heater back on"
             f" automatically."
         )
 
     return lines
 
 
-def _cool_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time) -> list[str]:
-    """Conversational plan for cool days (45-59°F)."""
+def _cool_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time, temp_unit: str = FAHRENHEIT) -> list[str]:
+    """Conversational plan for cool days (45-59\u00b0F)."""
     return [
-        f"Heater day — too cool outside for windows. I'll hold {comfort_heat:.0f}°F"
+        f"Heater day \u2014 too cool outside for windows. I'll hold {format_temp(comfort_heat, temp_unit)}"
         f" through the morning, ease back a couple degrees midday to ride any solar"
-        f" gain, then return to {comfort_heat:.0f}°F as the sun drops.",
+        f" gain, then return to {format_temp(comfort_heat, temp_unit)} as the sun drops.",
         "",
-        f"At bedtime I'll set back to {comfort_heat - 4:.0f}°F — most people sleep better a little cooler.",
+        f"At bedtime I'll set back to {format_temp(comfort_heat - 4, temp_unit)}"
+        " \u2014 most people sleep better a little cooler.",
     ]
 
 
-def _cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time) -> list[str]:
-    """Conversational plan for cold days (below 45°F)."""
+def _cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time, temp_unit: str = FAHRENHEIT) -> list[str]:
+    """Conversational plan for cold days (below 45\u00b0F)."""
     lines = [
-        "Cold day — heater runs all day. Help it out: close north-side curtains,"
+        "Cold day \u2014 heater runs all day. Help it out: close north-side curtains,"
         " open south-facing ones for free solar heat, and minimize time holding"
         " exterior doors open.",
     ]
@@ -422,22 +446,24 @@ def _cold_day_plan(c, comfort_heat, setback_heat, wake_time, sleep_time) -> list
         target = comfort_heat + (c.pre_condition_target or 3)
         lines.append("")
         lines.append(
-            f"Tomorrow's even colder, so I'm banking extra heat this evening —"
-            f" I'll bump to {target:.0f}°F around 7pm for a couple hours."
+            f"Tomorrow's even colder, so I'm banking extra heat this evening \u2014"
+            f" I'll bump to {format_temp(target, temp_unit)} around 7pm for a couple hours."
             f" If the house feels extra warm before bed, that's on purpose."
         )
 
     lines.append("")
     lines.append(
-        f"Tonight I'm using a conservative setback — {comfort_heat - 3:.0f}°F"
-        f" instead of the usual {setback_heat:.0f}°F. When it's this cold, a"
+        f"Tonight I'm using a conservative setback \u2014 {format_temp(comfort_heat - 3, temp_unit)}"
+        f" instead of the usual {format_temp(setback_heat, temp_unit)}. When it's this cold, a"
         f" deeper setback takes too long to recover from in the morning."
     )
 
     return lines
 
 
-def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "home") -> list[str]:
+def _leaving_home_section(
+    c, setback_heat, setback_cool, occupancy_mode: str = "home", temp_unit: str = FAHRENHEIT
+) -> list[str]:
     """Conversational section about what happens when they leave.
 
     Args:
@@ -445,6 +471,7 @@ def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "
         setback_heat: Heating setback temperature.
         setback_cool: Cooling setback temperature.
         occupancy_mode: Current occupancy state — "home", "away", "guest", or "vacation".
+        temp_unit: Display unit — "fahrenheit" or "celsius".
     """
     if occupancy_mode == "vacation":
         return [
@@ -454,21 +481,21 @@ def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "
         ]
     elif occupancy_mode == "guest":
         return [
-            "Guests are visiting — maintaining full comfort temperatures."
+            "Guests are visiting \u2014 maintaining full comfort temperatures."
             " Away setbacks are disabled while guest mode is active.",
         ]
     elif occupancy_mode == "away":
         if c.hvac_mode == "cool":
             return [
                 f"You're currently away. I've applied setback temperatures,"
-                f" letting the house drift up to {setback_cool:.0f}°F to save"
-                f" energy. Comfort will be restored when you return — give it"
+                f" letting the house drift up to {format_temp(setback_cool, temp_unit)} to save"
+                f" energy. Comfort will be restored when you return \u2014 give it"
                 f" 20 to 30 minutes to feel normal again.",
             ]
         elif c.hvac_mode == "heat":
             return [
-                f"You're currently away. I've dropped to {setback_heat:.0f}°F"
-                f" to save energy. Comfort will be restored when you return —"
+                f"You're currently away. I've dropped to {format_temp(setback_heat, temp_unit)}"
+                f" to save energy. Comfort will be restored when you return \u2014"
                 f" should take 20 to 30 minutes depending on how long you've been gone.",
             ]
         else:
@@ -481,25 +508,29 @@ def _leaving_home_section(c, setback_heat, setback_cool, occupancy_mode: str = "
         if c.hvac_mode == "cool":
             return [
                 f"If you head out, no worries. After about {OCCUPANCY_SETBACK_MINUTES} minutes I'll let the"
-                f" house drift up to {setback_cool:.0f}°F to save energy. When you're"
-                f" back, I'll pull it right back down — give it 20 to 30 minutes to"
+                f" house drift up to {format_temp(setback_cool, temp_unit)} to save energy. When you're"
+                f" back, I'll pull it right back down \u2014 give it 20 to 30 minutes to"
                 f" feel normal again.",
             ]
         elif c.hvac_mode == "heat":
             return [
-                f"If you head out, I'll drop to {setback_heat:.0f}°F after about"
-                f" {OCCUPANCY_SETBACK_MINUTES} minutes. When you get back, I'll warm things right up — should"
+                f"If you head out, I'll drop to {format_temp(setback_heat, temp_unit)} after about"
+                f" {OCCUPANCY_SETBACK_MINUTES} minutes. When you get back, I'll warm things right up \u2014 should"
                 f" take 20 to 30 minutes depending on how long you were gone.",
             ]
         else:
             return [
-                "If you head out, nothing really changes today — the HVAC is off."
+                "If you head out, nothing really changes today \u2014 the HVAC is off."
                 " If it was running as a safety net, it'll set back on its own.",
             ]
 
 
 def _fresh_air_section(
-    c, comfort_heat: float, comfort_cool: float, debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS
+    c,
+    comfort_heat: float,
+    comfort_cool: float,
+    debounce_seconds: int = DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    temp_unit: str = FAHRENHEIT,
 ) -> list[str]:
     """User-centric section about opening windows/doors for fresh air.
 
@@ -512,31 +543,31 @@ def _fresh_air_section(
 
     if c.hvac_mode == "cool":
         return [
-            f"If you want to crack a window for some fresh air, no problem —"
+            f"If you want to crack a window for some fresh air, no problem \u2014"
             f" it's your house. I'll keep the AC running for a bit in"
             f" case it's just a quick thing, but if it stays open past {debounce_desc}"
             f" I'll shut the AC off so you're not cooling the outdoors. Once you"
             f" close up, I'll fire the AC back up right away. Just know that on a"
             f" day like today it may take a bit longer to pull back down to"
-            f" {comfort_cool:.0f}°F, so if you want to minimize the impact, shorter"
-            f" is better — and try to keep other windows and doors shut while"
+            f" {format_temp(comfort_cool, temp_unit)}, so if you want to minimize the impact, shorter"
+            f" is better \u2014 and try to keep other windows and doors shut while"
             f" you've got one open.",
         ]
     elif c.hvac_mode == "heat":
         return [
-            f"If you want to open a window for some fresh air, no problem —"
+            f"If you want to open a window for some fresh air, no problem \u2014"
             f" go for it. I'll keep the heat running for a bit in case"
             f" you're just airing things out, but if it stays open past {debounce_desc}"
             f" I'll turn the heat off so we're not heating the neighborhood. Once"
             f" you close up, the heat kicks right back on. It'll take a little"
             f" extra energy to warm back up, so if you want to minimize the"
-            f" impact, a quick burst of fresh air works great — and closing doors"
+            f" impact, a quick burst of fresh air works great \u2014 and closing doors"
             f" to the room with the open window helps keep the rest of the house"
             f" comfortable while you do it.",
         ]
     else:
         return [
-            f"If you want to open a window for some fresh air, go for it —"
+            f"If you want to open a window for some fresh air, go for it \u2014"
             f" the HVAC is off today so there's no energy impact at all."
             f" Enjoy the breeze. If the system does need to kick on as a safety"
             f" net later and a window is still open, I'll give it {debounce_desc}"
@@ -566,7 +597,7 @@ def _grace_period_section(
         return [
             f"One heads-up for this morning: you manually turned the HVAC back on"
             f" earlier, so I'm in a {grace_desc} hands-off window right now. During"
-            f" that window, opening a door or window won't trigger a pause — I'm"
+            f" that window, opening a door or window won't trigger a pause \u2014 I'm"
             f" giving you space to settle in without the system jumping in. Once the"
             f" window closes, door/window sensing goes back to normal."
         ]
@@ -577,34 +608,34 @@ def _grace_period_section(
         return [
             f"One heads-up: I just resumed the HVAC after all the doors and windows"
             f" closed, so I'm in a {grace_desc} settling period. During that time,"
-            f" opening a door or window briefly won't immediately pause things again —"
+            f" opening a door or window briefly won't immediately pause things again \u2014"
             f" this prevents the system from cycling on and off if you're moving in"
             f" and out. After the settling period, normal door/window sensing resumes."
         ]
 
 
-def _tonight_preview(c, comfort_heat, comfort_cool, sleep_time) -> list[str]:
+def _tonight_preview(c, comfort_heat, comfort_cool, sleep_time, temp_unit: str = FAHRENHEIT) -> list[str]:
     """Conversational preview of tonight and tomorrow based on trend."""
     _LOGGER.debug(
-        "Tonight preview — trend=%s, magnitude=%.1f°F",
+        "Tonight preview \u2014 trend=%s, magnitude=%.1f\u00b0F",
         c.trend_direction,
         c.trend_magnitude,
     )
     if c.trend_direction == "warming" and c.trend_magnitude >= 5:
         return [
-            f"Looking ahead — tomorrow's warmer at {c.tomorrow_high:.0f}°F, so"
+            f"Looking ahead \u2014 tomorrow's warmer at {format_temp(c.tomorrow_high, temp_unit)}, so"
             f" I'm going to set back a bit more aggressively tonight. Less"
             f" heating needed means energy saved while you sleep.",
         ]
     elif c.trend_direction == "cooling" and c.trend_magnitude >= 5:
         return [
-            f"Looking ahead — tomorrow's cooler at {c.tomorrow_high:.0f}°F, so"
+            f"Looking ahead \u2014 tomorrow's cooler at {format_temp(c.tomorrow_high, temp_unit)}, so"
             f" I'll bank some extra warmth this evening and go easy on the"
             f" overnight setback. If the house feels a touch warmer than usual"
             f" before bed, that's intentional.",
         ]
     else:
         return [
-            f"Tomorrow looks pretty similar to today — {c.tomorrow_high:.0f}°F"
+            f"Tomorrow looks pretty similar to today \u2014 {format_temp(c.tomorrow_high, temp_unit)}"
             f" for a high. Nothing special planned overnight.",
         ]

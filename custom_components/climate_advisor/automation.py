@@ -39,6 +39,7 @@ from .const import (
     REVISIT_DELAY_SECONDS,
     VACATION_SETBACK_EXTRA,
 )
+from .temperature import format_temp, format_temp_delta, from_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -262,17 +263,18 @@ class AutomationEngine:
             )
             return
 
+        unit = self.config.get("temp_unit", "fahrenheit")
         _LOGGER.warning(
-            "Applying classification: %s (trend: %s %s°F)",
+            "Applying classification: %s (trend: %s %s)",
             classification.day_type,
             classification.trend_direction,
-            classification.trend_magnitude,
+            format_temp_delta(classification.trend_magnitude, unit),
         )
 
         # Set the base HVAC mode
         cls_reason = (
             f"daily classification — {classification.day_type} day,"
-            f" trend {classification.trend_direction} {classification.trend_magnitude}°F"
+            f" trend {classification.trend_direction} {format_temp_delta(classification.trend_magnitude, unit)}"
         )
         if classification.hvac_mode in ("heat", "cool"):
             await self._set_hvac_mode(classification.hvac_mode, reason=cls_reason)
@@ -306,20 +308,37 @@ class AutomationEngine:
             self._hvac_command_pending = False
 
     async def _set_temperature(self, temperature: float, *, reason: str) -> None:
-        """Set the thermostat target temperature."""
+        """Set the thermostat target temperature.
+
+        Args:
+            temperature: Target temperature in internal Fahrenheit.
+            reason: Human-readable reason for logging.
+        """
+        unit = self.config.get("temp_unit", "fahrenheit")
+        # Convert internal °F to user's unit before sending to HA climate entity
+        service_temp = from_fahrenheit(temperature, unit)
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would set temperature to %s°F — %s", temperature, reason)
+            _LOGGER.info(
+                "[DRY RUN] Would set temperature to %s — %s",
+                format_temp(temperature, unit),
+                reason,
+            )
             return
         await self.hass.services.async_call(
             "climate",
             "set_temperature",
-            {"entity_id": self.climate_entity, "temperature": temperature},
+            {"entity_id": self.climate_entity, "temperature": service_temp},
         )
-        _LOGGER.warning("Set temperature to %s°F — %s", temperature, reason)
-        self._record_action(f"Set temp to {temperature}°F", reason)
+        _LOGGER.warning(
+            "Set temperature to %s — %s",
+            format_temp(temperature, unit),
+            reason,
+        )
+        self._record_action(f"Set temp to {format_temp(temperature, unit)}", reason)
 
     async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str) -> None:
         """Set temperature based on the classification and current period."""
+        unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             target = self.config["comfort_heat"]
         elif c.hvac_mode == "cool":
@@ -327,7 +346,7 @@ class AutomationEngine:
             if c.pre_condition and c.pre_condition_target and c.pre_condition_target < 0:
                 # Pre-cool: target is below comfort
                 target = target + c.pre_condition_target
-                reason = f"{reason} (pre-cool offset {c.pre_condition_target}°F)"
+                reason = f"{reason} (pre-cool offset {format_temp_delta(abs(c.pre_condition_target), unit)})"
         else:
             return
 
@@ -339,12 +358,13 @@ class AutomationEngine:
         For warming trends: more aggressive setback (handled by setback_modifier)
         For cooling trends: pre-heat in the evening
         """
+        unit = self.config.get("temp_unit", "fahrenheit")
         if c.trend_direction == "cooling" and c.pre_condition_target and c.pre_condition_target > 0:
             # Pre-heat: schedule a bump for 7pm
             preheat_target = self.config["comfort_heat"] + c.pre_condition_target
             _LOGGER.info(
-                "Scheduling pre-heat to %s°F for this evening (cold front coming)",
-                preheat_target,
+                "Scheduling pre-heat to %s for this evening (cold front coming)",
+                format_temp(preheat_target, unit),
             )
             # In a full implementation, this would register a time-based listener
             # For now, store the intent for the coordinator to act on
@@ -592,13 +612,15 @@ class AutomationEngine:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
             return
 
+        unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             setback = self.config["setback_heat"] + c.setback_modifier
             await self._set_temperature(
                 setback,
                 reason=(
                     f"occupancy away — heat setback"
-                    f" (base {self.config['setback_heat']} + modifier {c.setback_modifier})"
+                    f" (base {format_temp(self.config['setback_heat'], unit)}"
+                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
         elif c.hvac_mode == "cool":
@@ -607,7 +629,8 @@ class AutomationEngine:
                 setback,
                 reason=(
                     f"occupancy away — cool setback"
-                    f" (base {self.config['setback_cool']} - modifier {c.setback_modifier})"
+                    f" (base {format_temp(self.config['setback_cool'], unit)}"
+                    f" - modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
         else:
@@ -638,14 +661,16 @@ class AutomationEngine:
         if not c:
             return
 
+        unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             setback = self.config["setback_heat"] + c.setback_modifier - VACATION_SETBACK_EXTRA
             await self._set_temperature(
                 setback,
                 reason=(
                     f"vacation mode — deep heat setback"
-                    f" (base {self.config['setback_heat']} + modifier {c.setback_modifier}"
-                    f" - vacation {VACATION_SETBACK_EXTRA})"
+                    f" (base {format_temp(self.config['setback_heat'], unit)}"
+                    f" + modifier {format_temp_delta(c.setback_modifier, unit)}"
+                    f" - vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
                 ),
             )
         elif c.hvac_mode == "cool":
@@ -654,8 +679,9 @@ class AutomationEngine:
                 setback,
                 reason=(
                     f"vacation mode — deep cool setback"
-                    f" (base {self.config['setback_cool']} - modifier {c.setback_modifier}"
-                    f" + vacation {VACATION_SETBACK_EXTRA})"
+                    f" (base {format_temp(self.config['setback_cool'], unit)}"
+                    f" - modifier {format_temp_delta(c.setback_modifier, unit)}"
+                    f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
                 ),
             )
 
@@ -673,20 +699,27 @@ class AutomationEngine:
         if not c:
             return
 
+        unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             bedtime_target = self.config["comfort_heat"] - 4 + c.setback_modifier
             await self._set_temperature(
                 bedtime_target,
                 reason=(
                     f"bedtime — heat setback"
-                    f" (comfort {self.config['comfort_heat']} - 4 + modifier {c.setback_modifier})"
+                    f" (comfort {format_temp(self.config['comfort_heat'], unit)}"
+                    f" - {format_temp_delta(4, unit)}"
+                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
         elif c.hvac_mode == "cool":
             bedtime_target = self.config["comfort_cool"] + 3
             await self._set_temperature(
                 bedtime_target,
-                reason="bedtime — cool setback (comfort {} + 3)".format(self.config["comfort_cool"]),
+                reason=(
+                    f"bedtime — cool setback"
+                    f" (comfort {format_temp(self.config['comfort_cool'], unit)}"
+                    f" + {format_temp_delta(3, unit)})"
+                ),
             )
 
     async def handle_morning_wakeup(self) -> None:
@@ -822,6 +855,7 @@ class AutomationEngine:
                 await self._deactivate_economizer(outdoor_temp)
             return False
 
+        unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", 75)
         delta = self.config.get("economizer_temp_delta", ECONOMIZER_TEMP_DELTA)
         aggressive_savings = self.config.get("aggressive_savings", False)
@@ -852,12 +886,12 @@ class AutomationEngine:
                 self._economizer_phase = "maintain"
                 await self._set_hvac_mode(
                     "off",
-                    reason=f"economizer (savings) — outdoor {outdoor_temp:.0f}°F, ventilation only",
+                    reason=f"economizer (savings) — outdoor {format_temp(outdoor_temp, unit)}, ventilation only",
                 )
                 await self._activate_fan(reason="economizer maintain — fan assists ventilation")
                 _LOGGER.info(
-                    "Economizer (savings): ventilation only, outdoor=%.0f°F",
-                    outdoor_temp,
+                    "Economizer (savings): ventilation only, outdoor=%s",
+                    format_temp(outdoor_temp, unit),
                 )
             return True
 
@@ -868,18 +902,21 @@ class AutomationEngine:
                 self._economizer_phase = "cool-down"
                 await self._set_hvac_mode(
                     "cool",
-                    reason=f"economizer cool-down — indoor {indoor_temp:.0f}°F > comfort {comfort_cool}°F, "
-                    f"outdoor {outdoor_temp:.0f}°F assisting",
+                    reason=(
+                        f"economizer cool-down — indoor {format_temp(indoor_temp, unit)}"
+                        f" > comfort {format_temp(comfort_cool, unit)},"
+                        f" outdoor {format_temp(outdoor_temp, unit)} assisting"
+                    ),
                 )
                 await self._set_temperature(
                     comfort_cool,
-                    reason=f"economizer cool-down — target comfort {comfort_cool}°F",
+                    reason=f"economizer cool-down — target comfort {format_temp(comfort_cool, unit)}",
                 )
                 _LOGGER.info(
-                    "Economizer phase=cool-down: indoor=%.0f°F, target=%s°F, outdoor=%.0f°F",
-                    indoor_temp,
-                    comfort_cool,
-                    outdoor_temp,
+                    "Economizer phase=cool-down: indoor=%s, target=%s, outdoor=%s",
+                    format_temp(indoor_temp, unit),
+                    format_temp(comfort_cool, unit),
+                    format_temp(outdoor_temp, unit),
                 )
             return True
         else:
@@ -888,18 +925,22 @@ class AutomationEngine:
                 self._economizer_phase = "maintain"
                 await self._set_hvac_mode(
                     "off",
-                    reason="economizer maintain — indoor %.0f°F at comfort, "
-                    "ventilation holding" % (indoor_temp if indoor_temp is not None else 0),
+                    reason=(
+                        f"economizer maintain — indoor"
+                        f" {format_temp(indoor_temp if indoor_temp is not None else 0, unit)}"
+                        " at comfort, ventilation holding"
+                    ),
                 )
                 await self._activate_fan(reason="economizer maintain — fan assists ventilation")
                 _LOGGER.info(
-                    "Economizer phase=maintain: indoor=%.0f°F, AC off",
-                    indoor_temp if indoor_temp is not None else 0,
+                    "Economizer phase=maintain: indoor=%s, AC off",
+                    format_temp(indoor_temp if indoor_temp is not None else 0, unit),
                 )
             return True
 
     async def _deactivate_economizer(self, outdoor_temp: float) -> None:
         """Deactivate economizer and resume normal AC operation."""
+        unit = self.config.get("temp_unit", "fahrenheit")
         c = self._current_classification
         self._economizer_active = False
         self._economizer_phase = "inactive"
@@ -907,13 +948,13 @@ class AutomationEngine:
         if c and c.hvac_mode == "cool":
             await self._set_hvac_mode(
                 "cool",
-                reason=f"economizer off — resuming normal AC (outdoor {outdoor_temp:.0f}°F)",
+                reason=f"economizer off — resuming normal AC (outdoor {format_temp(outdoor_temp, unit)})",
             )
             await self._set_temperature_for_mode(
                 c,
                 reason="economizer off — restoring comfort cooling",
             )
-        _LOGGER.info("Economizer deactivated: outdoor=%.0f°F", outdoor_temp)
+        _LOGGER.info("Economizer deactivated: outdoor=%s", format_temp(outdoor_temp, unit))
 
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.

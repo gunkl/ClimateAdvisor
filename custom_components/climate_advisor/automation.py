@@ -502,7 +502,7 @@ class AutomationEngine:
             )
             _adaptive_preheat_active = False
             if confidence == "none" or heating_rate is None or heating_rate <= 0:
-                minutes_needed = default_min
+                minutes_needed = max(min_min, min(max_min, default_min))
             else:
                 minutes_needed = (temp_rise / heating_rate) * 60.0 * safety
                 minutes_needed = max(min_min, min(max_min, minutes_needed))

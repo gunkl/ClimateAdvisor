@@ -911,9 +911,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_advanced(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Learning and behavior settings."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            self._updates.update(user_input)
-            return await self.async_step_init()
+            min_p = user_input.get("min_preheat_minutes", 30)
+            max_p = user_input.get("max_preheat_minutes", 240)
+            default_p = user_input.get("default_preheat_minutes", 120)
+            if min_p > max_p:
+                errors["min_preheat_minutes"] = "preheat_min_exceeds_max"
+            if default_p > max_p:
+                errors["default_preheat_minutes"] = "preheat_default_exceeds_max"
+            if not errors:
+                self._updates.update(user_input)
+                return await self.async_step_init()
 
         current = self.config_entry.data
 
@@ -973,6 +983,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.BooleanSelector(),
                 }
             ),
+            errors=errors,
         )
 
     # ---- Save & Close ----

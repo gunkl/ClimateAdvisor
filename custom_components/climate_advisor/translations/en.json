@@ -292,7 +292,9 @@
     "error": {
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
-      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp"
+      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
+      "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",
+      "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time"
     }
   },
   "issues": {

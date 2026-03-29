@@ -10,6 +10,9 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    API_AI_ACTIVITY,
+    API_AI_REPORTS,
+    API_AI_STATUS,
     API_AUTOMATION_STATE,
     API_BRIEFING,
     API_CANCEL_OVERRIDE,
@@ -303,7 +306,7 @@ class ClimateAdvisorConfigView(HomeAssistantView):
         for key, meta in CONFIG_METADATA.items():
             value = config.get(key)
             # Sanitize: replace notify service names (may reveal personal info)
-            if key == "notify_service":
+            if key == "notify_service" or meta.get("sensitive"):
                 value = "configured" if value else "not set"
             # Convert time objects to strings
             if hasattr(value, "strftime"):
@@ -421,6 +424,106 @@ class ClimateAdvisorToggleAutomationView(HomeAssistantView):
         )
 
 
+class ClimateAdvisorAIStatusView(HomeAssistantView):
+    """API endpoint for AI status and recent request history."""
+
+    url = API_AI_STATUS
+    name = "api:climate_advisor:ai_status"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        if coordinator.claude_client:
+            status = coordinator.claude_client.get_status()
+            history = coordinator.claude_client.get_request_history()
+            # SECURITY: ensure API key is not in the response
+            status.pop("api_key", None)
+            return self.json(
+                {
+                    "status": status,
+                    "recent_requests": history[-10:],
+                }
+            )
+        return self.json(
+            {
+                "status": {"status": "disabled"},
+                "recent_requests": [],
+            }
+        )
+
+
+class ClimateAdvisorAIActivityView(HomeAssistantView):
+    """API endpoint to execute the AI activity report skill."""
+
+    url = API_AI_ACTIVITY
+    name = "api:climate_advisor:ai_activity"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        if not coordinator.claude_client or not coordinator.ai_skills:
+            return self.json({"error": "AI features are disabled"}, status_code=503)
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        hours = data.get("hours", 24)
+        detail_level = data.get("detail_level", "full")
+
+        # Validate inputs from REST API (service call path uses vol.Schema)
+        if not isinstance(hours, (int, float)) or not (1 <= hours <= 168):
+            hours = 24
+        if detail_level not in ("brief", "full"):
+            detail_level = "full"
+
+        result = await coordinator.ai_skills.async_execute(
+            "activity_report",
+            coordinator.hass,
+            coordinator,
+            coordinator.claude_client,
+            hours=hours,
+            detail_level=detail_level,
+        )
+
+        # Store the result for history
+        await coordinator.async_store_ai_report(result)
+
+        if result.get("rate_limited") or (not result.get("success") and "rate" in str(result.get("error", "")).lower()):
+            return self.json({"error": "Rate limit exceeded"}, status_code=429)
+
+        return self.json(result)
+
+
+class ClimateAdvisorAIReportsView(HomeAssistantView):
+    """API endpoint for persisted AI report history."""
+
+    url = API_AI_REPORTS
+    name = "api:climate_advisor:ai_reports"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        return self.json(
+            {
+                "reports": coordinator.get_ai_report_history(),
+            }
+        )
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -435,4 +538,7 @@ API_VIEWS = [
     ClimateAdvisorCancelOverrideView,
     ClimateAdvisorResumeFromPauseView,
     ClimateAdvisorToggleAutomationView,
+    ClimateAdvisorAIStatusView,
+    ClimateAdvisorAIActivityView,
+    ClimateAdvisorAIReportsView,
 ]

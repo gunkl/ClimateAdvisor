@@ -281,6 +281,7 @@
   <button class="tab-btn active" data-tab="status">Status</button>
   <button class="tab-btn" data-tab="debug">Debug</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
+  <button class="tab-btn" data-tab="ai">AI</button>
 </div>
 
 <div id="tab-status" class="tab-content active">
@@ -394,6 +395,58 @@
   </button>
 </div>
 
+<div id="tab-ai" class="tab-content">
+  <!-- AI Status Card -->
+  <div class="card">
+    <h2>AI Status</h2>
+    <div id="ai-status-loading" class="loading">Loading...</div>
+    <div id="ai-status-content" style="display:none">
+      <div class="status-grid" id="ai-status-grid"></div>
+    </div>
+  </div>
+
+  <!-- Activity Report Card -->
+  <div class="card">
+    <h2>Activity Report</h2>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <label style="font-size:0.85rem;color:var(--text-secondary)">Time window:</label>
+      <select id="ai-hours" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text)">
+        <option value="6">Last 6 hours</option>
+        <option value="12">Last 12 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="48">Last 48 hours</option>
+        <option value="168">Last 7 days</option>
+      </select>
+      <label style="font-size:0.85rem;color:var(--text-secondary)">Detail:</label>
+      <select id="ai-detail" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text)">
+        <option value="full" selected>Full</option>
+        <option value="brief">Brief</option>
+      </select>
+      <button class="btn" id="ai-run-report" onclick="runAIReport()">Run Report</button>
+    </div>
+    <div id="ai-report-loading" class="loading" style="display:none">Generating report... this may take 15-30 seconds.</div>
+    <div id="ai-report-content" style="display:none"></div>
+    <div id="ai-report-actions" style="display:none;margin-top:12px">
+      <button class="btn secondary" onclick="copyAIReport()" style="font-size:0.8rem">Copy for Bug Report</button>
+    </div>
+  </div>
+
+  <!-- Report History Card -->
+  <div class="card">
+    <h2>Report History</h2>
+    <div id="ai-history-loading" class="loading">Loading...</div>
+    <div id="ai-history-content" style="display:none"></div>
+  </div>
+
+  <!-- AI Settings Summary Card -->
+  <div class="card">
+    <h2>AI Settings</h2>
+    <div id="ai-settings-content">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   'use strict';
@@ -407,6 +460,7 @@
       document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
       if (btn.dataset.tab === 'status') loadChart();
       if (btn.dataset.tab === 'settings') loadSettings();
+      if (btn.dataset.tab === 'ai') loadAIData();
     });
   });
 
@@ -484,10 +538,11 @@
     return resp.json();
   }
 
-  async function apiPost(path) {
+  async function apiPost(path, body) {
     return apiFetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
   }
 
@@ -1015,8 +1070,9 @@
     fan: 'Fan',
     schedule: 'Schedule',
     advanced: 'Advanced',
+    ai_settings: 'AI Settings (Claude)',
   };
-  const CATEGORY_ORDER = ['core', 'sensors', 'fan', 'schedule', 'advanced'];
+  const CATEGORY_ORDER = ['core', 'sensors', 'fan', 'schedule', 'advanced', 'ai_settings'];
 
   async function loadSettings() {
     try {
@@ -1065,6 +1121,244 @@
     }
   }
 
+  // --- AI Tab Functions ---
+  let _currentAIReport = null;
+
+  async function loadAIData() {
+    loadAIStatus();
+    loadAIHistory();
+    loadAISettings();
+  }
+
+  async function loadAIStatus() {
+    try {
+      const data = await apiFetch('ai_status');
+      const loading = document.getElementById('ai-status-loading');
+      const content = document.getElementById('ai-status-content');
+      const grid = document.getElementById('ai-status-grid');
+      loading.style.display = 'none';
+      content.style.display = 'block';
+
+      const s = data.status || {};
+      const statusColor = {
+        active: 'var(--success)',
+        disabled: 'var(--text-secondary)',
+        error: 'var(--danger)',
+        circuit_open: 'var(--warning)',
+        budget_exceeded: 'var(--warning)',
+        inactive: 'var(--text-secondary)',
+      }[s.status] || 'var(--text-secondary)';
+
+      grid.innerHTML = `
+        <div class="status-item"><span class="label">Status</span><span class="value" style="color:${statusColor}">${(s.status || 'unknown').toUpperCase()}</span></div>
+        <div class="status-item"><span class="label">Model</span><span class="value">${s.model || 'n/a'}</span></div>
+        <div class="status-item"><span class="label">Total Requests</span><span class="value">${s.total_requests || 0}</span></div>
+        <div class="status-item"><span class="label">Errors</span><span class="value" style="color:${(s.error_count || 0) > 0 ? 'var(--danger)' : 'inherit'}">${s.error_count || 0}</span></div>
+        <div class="status-item"><span class="label">Monthly Cost</span><span class="value">$${(s.monthly_cost || 0).toFixed(4)}</span></div>
+        <div class="status-item"><span class="label">Circuit Breaker</span><span class="value">${s.circuit_breaker_state || 'closed'}</span></div>
+        <div class="status-item"><span class="label">Auto Today</span><span class="value">${s.auto_requests_today || 0}</span></div>
+        <div class="status-item"><span class="label">Manual Today</span><span class="value">${s.manual_requests_today || 0}</span></div>
+      `;
+    } catch (e) {
+      document.getElementById('ai-status-loading').textContent = 'Failed to load AI status: ' + e.message;
+    }
+  }
+
+  async function runAIReport() {
+    const hours = parseInt(document.getElementById('ai-hours').value);
+    const detail = document.getElementById('ai-detail').value;
+    const btn = document.getElementById('ai-run-report');
+    const loading = document.getElementById('ai-report-loading');
+    const content = document.getElementById('ai-report-content');
+    const actions = document.getElementById('ai-report-actions');
+
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    loading.style.display = 'block';
+    content.style.display = 'none';
+    actions.style.display = 'none';
+
+    try {
+      const result = await apiPost('ai_activity', { hours, detail_level: detail });
+      _currentAIReport = result;
+      renderAIReport(result);
+      // Refresh history after new report
+      loadAIHistory();
+    } catch (e) {
+      content.style.display = 'block';
+      content.innerHTML = `<p style="color:var(--danger)">Failed to generate report: ${e.message}</p>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Run Report';
+      loading.style.display = 'none';
+    }
+  }
+
+  function renderAIReport(result) {
+    const content = document.getElementById('ai-report-content');
+    const actions = document.getElementById('ai-report-actions');
+    content.style.display = 'block';
+
+    if (!result || !result.success) {
+      const err = result ? result.error : 'Unknown error';
+      const source = result ? result.source : 'error';
+      content.innerHTML = `<p style="color:var(--danger)">Report failed (${source}): ${err}</p>`;
+      return;
+    }
+
+    const data = result.data || {};
+    const source = result.source === 'fallback'
+      ? '<span style="color:var(--warning);font-size:0.8rem">(fallback \u2014 AI unavailable)</span>'
+      : '<span style="color:var(--success);font-size:0.8rem">(AI-generated)</span>';
+
+    const sections = ['summary', 'timeline', 'decisions', 'anomalies', 'diagnostics'];
+    const sectionLabels = {
+      summary: 'Summary',
+      timeline: 'Timeline',
+      decisions: 'Decisions',
+      anomalies: 'Anomalies',
+      diagnostics: 'Diagnostics',
+    };
+
+    let html = `<div style="margin-bottom:8px">${source}</div>`;
+    sections.forEach(key => {
+      const text = data[key] || '';
+      if (!text) return;
+      html += `
+        <div style="margin-bottom:12px">
+          <h3 style="font-size:0.9rem;margin-bottom:4px;color:var(--primary)">${sectionLabels[key]}</h3>
+          <div style="font-size:0.85rem;white-space:pre-wrap;line-height:1.5">${escapeHtml(text)}</div>
+        </div>`;
+    });
+
+    content.innerHTML = html;
+    actions.style.display = 'block';
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function copyAIReport() {
+    if (!_currentAIReport) return;
+    const data = _currentAIReport.data || {};
+    const lines = [
+      '=== Climate Advisor AI Activity Report ===',
+      'Generated: ' + new Date().toISOString(),
+      'Source: ' + (_currentAIReport.source || 'unknown'),
+      '',
+    ];
+    ['summary', 'timeline', 'decisions', 'anomalies', 'diagnostics'].forEach(key => {
+      if (data[key]) {
+        lines.push('--- ' + key.toUpperCase() + ' ---');
+        lines.push(data[key]);
+        lines.push('');
+      }
+    });
+    navigator.clipboard.writeText(lines.join('\n')).then(() => {
+      const btn = document.querySelector('#ai-report-actions .btn');
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 2000);
+    });
+  }
+
+  async function loadAIHistory() {
+    try {
+      const data = await apiFetch('ai_reports');
+      const loading = document.getElementById('ai-history-loading');
+      const content = document.getElementById('ai-history-content');
+      loading.style.display = 'none';
+      content.style.display = 'block';
+
+      const reports = data.reports || [];
+      if (reports.length === 0) {
+        content.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">No reports yet. Run an activity report above.</p>';
+        return;
+      }
+
+      let html = '<div style="display:flex;flex-direction:column;gap:8px">';
+      reports.slice().reverse().forEach((entry, i) => {
+        const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Unknown time';
+        const r = entry.result || {};
+        const source = r.source || 'unknown';
+        const success = r.success ? 'success' : 'failed';
+        const summary = (r.data && r.data.summary) ? r.data.summary.substring(0, 120) + '...' : 'No summary';
+        html += `
+          <div class="setting-row" style="cursor:pointer" onclick="showHistoryReport(${reports.length - 1 - i})">
+            <div class="setting-info">
+              <div class="setting-label" style="font-size:0.85rem">${ts}</div>
+              <div class="setting-description">${escapeHtml(summary)}</div>
+            </div>
+            <div class="setting-value" style="font-size:0.75rem;color:${success === 'success' ? 'var(--success)' : 'var(--danger)'}">${source} / ${success}</div>
+          </div>`;
+      });
+      html += '</div>';
+      content.innerHTML = html;
+    } catch (e) {
+      document.getElementById('ai-history-loading').textContent = 'Failed to load history: ' + e.message;
+    }
+  }
+
+  async function showHistoryReport(index) {
+    try {
+      const data = await apiFetch('ai_reports');
+      const reports = data.reports || [];
+      if (index >= 0 && index < reports.length) {
+        const entry = reports[index];
+        _currentAIReport = entry.result;
+        renderAIReport(entry.result);
+        // Scroll to report
+        document.getElementById('ai-report-content').scrollIntoView({ behavior: 'smooth' });
+      }
+    } catch (e) {
+      console.error('Failed to load history report:', e);
+    }
+  }
+
+  async function loadAISettings() {
+    try {
+      const data = await apiFetch('config');
+      const el = document.getElementById('ai-settings-content');
+      const settings = (data.settings || []).filter(s => s.category === 'ai_settings');
+
+      if (settings.length === 0) {
+        el.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">AI features are not configured.</p>';
+        return;
+      }
+
+      let html = '';
+      settings.forEach(s => {
+        let displayValue = s.value;
+        // Mask API key — never show raw value
+        if (s.key === 'ai_api_key' && s.value && s.value.length > 4) {
+          displayValue = 'configured';
+        } else if (s.value == null) {
+          displayValue = '<span style="color:var(--text-secondary)">not set</span>';
+        }
+        html += `
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-label">${s.label}</div>
+              <div class="setting-description">${s.description}</div>
+            </div>
+            <div class="setting-value">${displayValue}</div>
+          </div>`;
+      });
+      el.innerHTML = html;
+    } catch (e) {
+      document.getElementById('ai-settings-content').innerHTML =
+        '<p style="color:var(--danger)">Failed to load AI settings: ' + e.message + '</p>';
+    }
+  }
+
+  // Expose AI tab functions to window for onclick handlers
+  window.runAIReport = runAIReport;
+  window.copyAIReport = copyAIReport;
+  window.showHistoryReport = showHistoryReport;
+
   // --- Initial load (retry until auth token is available) ---
   function loadAll() {
     loadStatus();
@@ -1073,6 +1367,7 @@
     loadAutomationState();
     loadLearning();
     loadSettings();
+    loadAIData();
   }
 
   let _loadRetries = 0;

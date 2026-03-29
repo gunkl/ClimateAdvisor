@@ -17,6 +17,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
     ATTR_BRIEFING,
     ATTR_BRIEFING_SHORT,
@@ -72,6 +73,7 @@ async def async_setup_entry(
         ClimateAdvisorLastActionReasonSensor(coordinator, entry),
         ClimateAdvisorFanStatusSensor(coordinator, entry),
         ClimateAdvisorContactStatusSensor(coordinator, entry),
+        ClimateAdvisorAIStatusSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -347,3 +349,28 @@ class ClimateAdvisorContactStatusSensor(ClimateAdvisorBaseSensor):
             "paused_by_door": self.coordinator.automation_engine.is_paused_by_door,
             "sensors": details,
         }
+
+
+class ClimateAdvisorAIStatusSensor(ClimateAdvisorBaseSensor):
+    """Sensor showing the AI integration status."""
+
+    def __init__(self, coordinator, entry):
+        """Initialize the AI status sensor."""
+        super().__init__(coordinator, entry, ATTR_AI_STATUS, "AI Status", "mdi:robot")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return AI status details."""
+        if self.coordinator.claude_client:
+            status = self.coordinator.claude_client.get_status()
+            return {
+                "last_request_time": status.get("last_request_time"),
+                "error_count": status.get("error_count", 0),
+                "total_requests": status.get("total_requests", 0),
+                "model_in_use": status.get("model"),
+                "circuit_breaker": status.get("circuit_breaker_state", "closed"),
+                "monthly_cost_estimate": status.get("monthly_cost_estimate", 0.0),
+                "auto_requests_today": status.get("auto_requests_today", 0),
+                "manual_requests_today": status.get("manual_requests_today", 0),
+            }
+        return {"status": "disabled"}

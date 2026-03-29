@@ -103,6 +103,27 @@ FULL_CONFIG_V11 = {
     "weather_bias_enabled": True,
 }
 
+# v12 = v11 + five threshold keys; does NOT contain the nine v13 AI keys
+_AI_KEYS = (
+    "ai_enabled",
+    "ai_api_key",
+    "ai_model",
+    "ai_reasoning_effort",
+    "ai_max_tokens",
+    "ai_temperature",
+    "ai_monthly_budget",
+    "ai_auto_requests_per_day",
+    "ai_manual_requests_per_day",
+)
+FULL_CONFIG_V12 = {
+    **FULL_CONFIG_V11,
+    "min_preheat_minutes": 30,
+    "max_preheat_minutes": 240,
+    "default_preheat_minutes": 120,
+    "preheat_safety_margin": 1.3,
+    "max_setback_depth_f": 8.0,
+}
+
 # v7 config (before migration to v8) — has email_notify instead of per-event toggles
 FULL_CONFIG_V7 = {
     **{k: v for k, v in FULL_CONFIG.items() if not k.startswith(("push_", "email_"))},
@@ -913,7 +934,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 12
+        assert entry.version == 13
 
     def test_chain_from_v1_includes_temp_unit(self):
         """v1 entry chains through all migrations and ends up with temp_unit."""
@@ -945,7 +966,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 12
+        assert entry.version == 13
 
 
 # ---------------------------------------------------------------------------
@@ -1006,7 +1027,7 @@ class TestMigrationV9ToV10:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
-        assert entry.version == 12
+        assert entry.version == 13
 
     def test_chain_from_v1_includes_debounce(self):
         """v1 entry chains through all migrations and ends up with welcome_home_debounce_seconds."""
@@ -1038,7 +1059,7 @@ class TestMigrationV9ToV10:
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 12
+        assert entry.version == 13
 
 
 class TestMigrationV10ToV11:
@@ -1094,7 +1115,7 @@ class TestMigrationV10ToV11:
         assert final_data.get("adaptive_preheat_enabled") is True
         assert final_data.get("adaptive_setback_enabled") is True
         assert final_data.get("weather_bias_enabled") is True
-        assert entry.version == 12
+        assert entry.version == 13
 
 
 class TestMigrationV11ToV12:
@@ -1122,7 +1143,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
-        assert entry.version == 12
+        assert entry.version == 13
 
     def test_v11_to_v12_existing_values_preserved(self):
         """v11 entry with all threshold keys set retains those values after migration."""
@@ -1154,7 +1175,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 90
         assert final_data.get("preheat_safety_margin") == 1.5
         assert final_data.get("max_setback_depth_f") == 6.0
-        assert entry.version == 12
+        assert entry.version == 13
 
     def test_v11_to_v12_invalid_type_replaced(self):
         """v11 entry where min_preheat_minutes is a non-numeric string gets the default."""
@@ -1175,7 +1196,7 @@ class TestMigrationV11ToV12:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("min_preheat_minutes") == 30
-        assert entry.version == 12
+        assert entry.version == 13
 
     def test_v11_to_v12_from_v10_chain(self):
         """v10 entry chains through v11 and v12 migrations; all five threshold keys get defaults."""
@@ -1194,12 +1215,140 @@ class TestMigrationV11ToV12:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 12
+        assert entry.version == 13
         assert final_data.get("min_preheat_minutes") == 30
         assert final_data.get("max_preheat_minutes") == 240
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
+
+
+class TestMigrationV12ToV13:
+    """Tests for config entry migration from version 12 to version 13 (AI settings)."""
+
+    def _run_v12_to_v13_migration(self, v12_data: dict) -> dict:
+        """Inline replication of v12→v13 migration logic for isolated testing."""
+        new_data = {**v12_data}
+        new_data.setdefault("ai_enabled", False)
+        new_data.setdefault("ai_api_key", "")
+        new_data.setdefault("ai_model", "claude-sonnet-4-6")
+        new_data.setdefault("ai_reasoning_effort", "medium")
+        new_data.setdefault("ai_max_tokens", 4096)
+        new_data.setdefault("ai_temperature", 0.3)
+        new_data.setdefault("ai_monthly_budget", 0)
+        new_data.setdefault("ai_auto_requests_per_day", 5)
+        new_data.setdefault("ai_manual_requests_per_day", 20)
+        return new_data
+
+    def test_v12_to_v13_adds_all_nine_ai_keys(self):
+        """v12 data without AI keys gets all nine keys with correct defaults."""
+        result = self._run_v12_to_v13_migration(dict(FULL_CONFIG_V12))
+        assert result["ai_enabled"] is False
+        assert result["ai_api_key"] == ""
+        assert result["ai_model"] == "claude-sonnet-4-6"
+        assert result["ai_reasoning_effort"] == "medium"
+        assert result["ai_max_tokens"] == 4096
+        assert result["ai_temperature"] == 0.3
+        assert result["ai_monthly_budget"] == 0
+        assert result["ai_auto_requests_per_day"] == 5
+        assert result["ai_manual_requests_per_day"] == 20
+
+    def test_v12_to_v13_existing_ai_values_preserved(self):
+        """If AI keys already exist, setdefault must not overwrite them."""
+        v12_with_ai = {
+            **FULL_CONFIG_V12,
+            "ai_enabled": True,
+            "ai_api_key": "sk-ant-test",
+            "ai_model": "claude-opus-4-6",
+            "ai_reasoning_effort": "high",
+            "ai_max_tokens": 8192,
+            "ai_temperature": 0.7,
+            "ai_monthly_budget": 10,
+            "ai_auto_requests_per_day": 3,
+            "ai_manual_requests_per_day": 10,
+        }
+        result = self._run_v12_to_v13_migration(v12_with_ai)
+        assert result["ai_enabled"] is True
+        assert result["ai_api_key"] == "sk-ant-test"
+        assert result["ai_model"] == "claude-opus-4-6"
+        assert result["ai_reasoning_effort"] == "high"
+        assert result["ai_max_tokens"] == 8192
+        assert result["ai_temperature"] == 0.7
+        assert result["ai_monthly_budget"] == 10
+        assert result["ai_auto_requests_per_day"] == 3
+        assert result["ai_manual_requests_per_day"] == 10
+
+    def test_v12_to_v13_preserves_other_fields(self):
+        """All existing v12 fields survive migration unchanged."""
+        result = self._run_v12_to_v13_migration(dict(FULL_CONFIG_V12))
+        for key in FULL_CONFIG_V12:
+            assert result[key] == FULL_CONFIG_V12[key], f"Field {key!r} changed unexpectedly"
+
+    def test_v12_to_v13_adds_exactly_nine_keys(self):
+        """Migration adds exactly the nine AI keys and nothing else."""
+        result = self._run_v12_to_v13_migration(dict(FULL_CONFIG_V12))
+        new_keys = set(result) - set(FULL_CONFIG_V12)
+        assert new_keys == set(_AI_KEYS)
+
+    def test_v12_to_v13_via_real_function(self):
+        """Real async_migrate_entry() adds all AI defaults to a v12 entry."""
+        from custom_components.climate_advisor import async_migrate_entry
+        from custom_components.climate_advisor.const import (
+            DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
+            DEFAULT_AI_ENABLED,
+            DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
+            DEFAULT_AI_MAX_TOKENS,
+            DEFAULT_AI_MODEL,
+            DEFAULT_AI_MONTHLY_BUDGET,
+            DEFAULT_AI_REASONING_EFFORT,
+            DEFAULT_AI_TEMPERATURE,
+        )
+
+        entry = _make_config_entry(dict(FULL_CONFIG_V12), version=12)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert entry.version == 13
+        assert final_data.get("ai_enabled") is DEFAULT_AI_ENABLED
+        assert final_data.get("ai_api_key") == ""
+        assert final_data.get("ai_model") == DEFAULT_AI_MODEL
+        assert final_data.get("ai_reasoning_effort") == DEFAULT_AI_REASONING_EFFORT
+        assert final_data.get("ai_max_tokens") == DEFAULT_AI_MAX_TOKENS
+        assert final_data.get("ai_temperature") == DEFAULT_AI_TEMPERATURE
+        assert final_data.get("ai_monthly_budget") == DEFAULT_AI_MONTHLY_BUDGET
+        assert final_data.get("ai_auto_requests_per_day") == DEFAULT_AI_AUTO_REQUESTS_PER_DAY
+        assert final_data.get("ai_manual_requests_per_day") == DEFAULT_AI_MANUAL_REQUESTS_PER_DAY
+
+    def test_v12_to_v13_from_v11_chain(self):
+        """v11 entry chains through v12 and v13; all nine AI keys get defaults."""
+        from custom_components.climate_advisor import async_migrate_entry
+
+        entry = _make_config_entry(dict(FULL_CONFIG_V11), version=11)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert entry.version == 13
+        assert final_data.get("ai_enabled") is False
+        assert final_data.get("ai_model") == "claude-sonnet-4-6"
+        assert final_data.get("ai_max_tokens") == 4096
 
 
 # ---------------------------------------------------------------------------
@@ -1222,6 +1371,7 @@ class TestOptionsFlowMenu:
             "schedule",
             "notifications",
             "advanced",
+            "ai_settings",
             "save",
         ]
         assert expected == OPTIONS_MENU_OPTIONS

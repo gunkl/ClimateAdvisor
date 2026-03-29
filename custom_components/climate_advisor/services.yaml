@@ -57,3 +57,31 @@ reset_learning_data:
             - "thermal_model"
             - "weather_bias"
             - "suggestions"
+
+ai_activity_report:
+  name: AI Activity Report
+  description: >-
+    Generate an AI-powered analysis of Climate Advisor's recent activity.
+    Requires AI features to be enabled with a valid API key.
+    Falls back to a simplified report if AI is unavailable.
+  fields:
+    hours:
+      name: Hours
+      description: How many hours of history to analyze (1-168).
+      required: false
+      default: 24
+      example: 24
+      selector:
+        number:
+          min: 1
+          max: 168
+    detail_level:
+      name: Detail level
+      description: Brief gives a summary only; full includes timeline, anomalies, and diagnostics.
+      required: false
+      default: "full"
+      selector:
+        select:
+          options:
+            - "brief"
+            - "full"

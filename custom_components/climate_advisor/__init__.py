@@ -23,6 +23,15 @@ from homeassistant.helpers import issue_registry as ir
 
 from .api import API_VIEWS
 from .const import (
+    CONF_AI_API_KEY,
+    CONF_AI_AUTO_REQUESTS_PER_DAY,
+    CONF_AI_ENABLED,
+    CONF_AI_MANUAL_REQUESTS_PER_DAY,
+    CONF_AI_MAX_TOKENS,
+    CONF_AI_MODEL,
+    CONF_AI_MONTHLY_BUDGET,
+    CONF_AI_REASONING_EFFORT,
+    CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_EMAIL_BRIEFING,
@@ -46,6 +55,14 @@ from .const import (
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WELCOME_HOME_DEBOUNCE,
+    DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
+    DEFAULT_AI_ENABLED,
+    DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
+    DEFAULT_AI_MAX_TOKENS,
+    DEFAULT_AI_MODEL,
+    DEFAULT_AI_MONTHLY_BUDGET,
+    DEFAULT_AI_REASONING_EFFORT,
+    DEFAULT_AI_TEMPERATURE,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
@@ -240,6 +257,21 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=12)
         _LOGGER.info("Migration to version 12 complete")
 
+    if config_entry.version == 12:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 12 to 13")
+        new_data = {**config_entry.data}
+        new_data.setdefault(CONF_AI_ENABLED, DEFAULT_AI_ENABLED)
+        new_data.setdefault(CONF_AI_API_KEY, "")
+        new_data.setdefault(CONF_AI_MODEL, DEFAULT_AI_MODEL)
+        new_data.setdefault(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT)
+        new_data.setdefault(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS)
+        new_data.setdefault(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE)
+        new_data.setdefault(CONF_AI_MONTHLY_BUDGET, DEFAULT_AI_MONTHLY_BUDGET)
+        new_data.setdefault(CONF_AI_AUTO_REQUESTS_PER_DAY, DEFAULT_AI_AUTO_REQUESTS_PER_DAY)
+        new_data.setdefault(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY)
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=13)
+        _LOGGER.info("Migration to version 13 complete")
+
     return True
 
 
@@ -392,6 +424,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         handle_reset_learning_data,
         schema=RESET_LEARNING_SCHEMA,
     )
+
+    AI_ACTIVITY_SCHEMA = vol.Schema(
+        {
+            vol.Optional("hours", default=24): vol.All(vol.Coerce(int), vol.Range(min=1, max=168)),
+            vol.Optional("detail_level", default="full"): vol.In(["brief", "full"]),
+        }
+    )
+
+    async def handle_ai_activity_report(call):
+        """Handle the ai_activity_report service call."""
+        if not coordinator.claude_client or not coordinator.ai_skills:
+            _LOGGER.warning("AI activity report requested but AI features are disabled")
+            return
+        hours = call.data.get("hours", 24)
+        detail_level = call.data.get("detail_level", "full")
+        result = await coordinator.ai_skills.async_execute(
+            "activity_report",
+            hass,
+            coordinator,
+            coordinator.claude_client,
+            hours=hours,
+            detail_level=detail_level,
+        )
+        # Store the result for dashboard retrieval
+        await coordinator.async_store_ai_report(result)
+
+    hass.services.async_register(DOMAIN, "ai_activity_report", handle_ai_activity_report, schema=AI_ACTIVITY_SCHEMA)
 
     # Register REST API views for the dashboard panel
     for view_cls in API_VIEWS:

@@ -94,7 +94,7 @@ class TestAPIViewList:
     """Test the API_VIEWS registry."""
 
     def test_correct_count(self):
-        assert len(API_VIEWS) == 12
+        assert len(API_VIEWS) == 15
 
     def test_all_are_callable(self):
         for view_cls in API_VIEWS:

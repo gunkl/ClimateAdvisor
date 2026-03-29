@@ -53,9 +53,18 @@ EXPECTED_KEYS = {
     "default_preheat_minutes",
     "preheat_safety_margin",
     "max_setback_depth_f",
+    "ai_enabled",
+    "ai_api_key",
+    "ai_model",
+    "ai_reasoning_effort",
+    "ai_max_tokens",
+    "ai_temperature",
+    "ai_monthly_budget",
+    "ai_auto_requests_per_day",
+    "ai_manual_requests_per_day",
 }
 
-VALID_CATEGORIES = {"core", "sensors", "fan", "schedule", "advanced", "occupancy", "notifications"}
+VALID_CATEGORIES = {"core", "sensors", "fan", "schedule", "advanced", "occupancy", "notifications", "ai_settings"}
 
 
 class TestConfigMetadataHasAllKeys:
@@ -91,7 +100,7 @@ class TestConfigMetadataStructure:
             assert "category" in meta, f"Entry '{key}' is missing 'category'"
 
     def test_each_entry_has_only_known_fields(self):
-        allowed = {"label", "description", "category", "display_transform"}
+        allowed = {"label", "description", "category", "display_transform", "sensitive"}
         for key, meta in CONFIG_METADATA.items():
             extra = set(meta.keys()) - allowed
             assert not extra, f"Entry '{key}' has unexpected fields: {extra}"

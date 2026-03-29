@@ -12,6 +12,17 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    AI_MODELS,
+    AI_REASONING_OPTIONS,
+    CONF_AI_API_KEY,
+    CONF_AI_AUTO_REQUESTS_PER_DAY,
+    CONF_AI_ENABLED,
+    CONF_AI_MANUAL_REQUESTS_PER_DAY,
+    CONF_AI_MAX_TOKENS,
+    CONF_AI_MODEL,
+    CONF_AI_MONTHLY_BUDGET,
+    CONF_AI_REASONING_EFFORT,
+    CONF_AI_TEMPERATURE,
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_EMAIL_BRIEFING,
@@ -36,6 +47,14 @@ from .const import (
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WELCOME_HOME_DEBOUNCE,
+    DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
+    DEFAULT_AI_ENABLED,
+    DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
+    DEFAULT_AI_MAX_TOKENS,
+    DEFAULT_AI_MODEL,
+    DEFAULT_AI_MONTHLY_BUDGET,
+    DEFAULT_AI_REASONING_EFFORT,
+    DEFAULT_AI_TEMPERATURE,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
@@ -90,6 +109,7 @@ OPTIONS_MENU_OPTIONS = [
     "schedule",
     "notifications",
     "advanced",
+    "ai_settings",
     "save",
 ]
 
@@ -115,7 +135,7 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 12
+    VERSION = 13
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -984,6 +1004,140 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 }
             ),
             errors=errors,
+        )
+
+    # ---- AI Settings ----
+
+    async def async_step_ai_settings(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """AI Settings — Claude API configuration."""
+        errors: dict[str, str] = {}
+        current = self.config_entry.data
+
+        if user_input is not None:
+            ai_enabled = user_input.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED)
+            new_key = user_input.get(CONF_AI_API_KEY, "")
+            existing_key = current.get(CONF_AI_API_KEY, "")
+
+            # If AI enabled but no key provided and no existing key, require one
+            if ai_enabled and not new_key and not existing_key:
+                errors[CONF_AI_API_KEY] = "ai_key_required"
+
+            # Validate temperature range
+            ai_temp = user_input.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE)
+            if not (0.0 <= float(ai_temp) <= 1.0):
+                errors[CONF_AI_TEMPERATURE] = "ai_temperature_out_of_range"
+
+            # Validate max_tokens range
+            ai_max_tokens = int(user_input.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS))
+            if not (256 <= ai_max_tokens <= 8192):
+                errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
+
+            if not errors and new_key and new_key != existing_key and ai_enabled:
+                try:
+                    from .claude_api import ClaudeAPIClient
+
+                    test_config = {**current, **user_input}
+                    client = ClaudeAPIClient(test_config)
+                    success, _message = await client.async_test_connection()
+                    if not success:
+                        errors["base"] = "ai_connection_failed"
+                except Exception:  # noqa: BLE001
+                    errors["base"] = "ai_connection_failed"
+
+            if not errors:
+                # If the user left the key field blank, preserve the existing key
+                merged = {**user_input}
+                if not new_key:
+                    if existing_key:
+                        merged[CONF_AI_API_KEY] = existing_key
+                    else:
+                        merged.pop(CONF_AI_API_KEY, None)
+
+                # Apply int() conversion for number fields
+                for key in (
+                    CONF_AI_MAX_TOKENS,
+                    CONF_AI_MONTHLY_BUDGET,
+                    CONF_AI_AUTO_REQUESTS_PER_DAY,
+                    CONF_AI_MANUAL_REQUESTS_PER_DAY,
+                ):
+                    if key in merged:
+                        merged[key] = int(merged[key])
+
+                self._updates.update(merged)
+                return await self.async_step_init()
+
+        # Build masked key status placeholder for description
+        existing_key = current.get(CONF_AI_API_KEY, "")
+        if existing_key:
+            key_status = "••••" + existing_key[-4:] if len(existing_key) > 4 else "••••"
+        else:
+            key_status = "Not configured"
+
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_AI_ENABLED,
+                    default=current.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED),
+                ): selector.BooleanSelector(),
+                vol.Optional(CONF_AI_API_KEY, default=""): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_AI_MODEL,
+                    default=current.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": m, "label": m} for m in AI_MODELS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_AI_REASONING_EFFORT,
+                    default=current.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": r, "label": r.capitalize()} for r in AI_REASONING_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_AI_MAX_TOKENS,
+                    default=current.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=256, max=8192, step=256, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_AI_TEMPERATURE,
+                    default=current.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER)
+                ),
+                vol.Optional(
+                    CONF_AI_MONTHLY_BUDGET,
+                    default=current.get(CONF_AI_MONTHLY_BUDGET, DEFAULT_AI_MONTHLY_BUDGET),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_AI_AUTO_REQUESTS_PER_DAY,
+                    default=current.get(CONF_AI_AUTO_REQUESTS_PER_DAY, DEFAULT_AI_AUTO_REQUESTS_PER_DAY),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=50, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_AI_MANUAL_REQUESTS_PER_DAY,
+                    default=current.get(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="ai_settings",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"key_status": key_status},
         )
 
     # ---- Save & Close ----

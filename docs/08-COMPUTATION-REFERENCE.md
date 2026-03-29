@@ -402,6 +402,23 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 |---|---|---|
 | `temp_unit` | `fahrenheit` | Temperature unit for display and input (`fahrenheit` or `celsius`). All internal calculations use Fahrenheit as the canonical unit; this setting controls conversion at the HA boundary (inbound sensor readings and outbound thermostat setpoints) and the display unit in briefings and logs. |
 
+**AI settings** (set via config flow, affect AI feature behavior):
+
+| Constant Name | Default Value | Unit | Description |
+|---|---|---|---|
+| `DEFAULT_AI_ENABLED` | `False` | — | AI features disabled by default; user must opt in |
+| `DEFAULT_AI_MODEL` | `"claude-sonnet-4-6"` | — | Claude model used for all AI requests |
+| `DEFAULT_AI_REASONING_EFFORT` | `"medium"` | — | Reasoning effort level passed to the Claude API |
+| `DEFAULT_AI_MAX_TOKENS` | `4096` | tokens | Maximum tokens per AI response |
+| `DEFAULT_AI_TEMPERATURE` | `0.3` | — | Sampling temperature for AI responses (lower = more deterministic) |
+| `DEFAULT_AI_MONTHLY_BUDGET` | `0` | USD | Monthly spend cap; `0` means no cap |
+| `DEFAULT_AI_AUTO_REQUESTS_PER_DAY` | `5` | requests/day | Maximum automated AI requests per day |
+| `DEFAULT_AI_MANUAL_REQUESTS_PER_DAY` | `20` | requests/day | Maximum user-triggered AI requests per day |
+| `AI_CIRCUIT_BREAKER_THRESHOLD` | `5` | failures | Consecutive failures before the circuit breaker trips |
+| `AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | seconds (5 min) | Cooldown duration after circuit breaker trips before retrying |
+| `AI_REQUEST_HISTORY_CAP` | `50` | entries | Maximum in-memory request history entries (prevents unbounded growth) |
+| `AI_REPORT_HISTORY_CAP` | `10` | entries | Maximum persisted AI reports in `climate_advisor_ai_reports.json` |
+
 **Fan state tracking fields** (runtime coordinator state, not configurable constants):
 
 | Field | Initial Value | Description |

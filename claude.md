@@ -91,7 +91,9 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 #### Data Exposure
 - **Sensor entity attributes** MUST NOT expose raw user behavior data (suggestions, overrides, patterns) — expose counts/summaries only
 - **API responses** MUST redact values that could reveal personal information (notify service names, entity IDs that contain names)
+- **Config API endpoint** (`ClimateAdvisorConfigView`) MUST check `meta.get("sensitive")` on CONFIG_METADATA entries and replace the value with `"configured"/"not set"` — never send raw sensitive values in REST responses
 - **Log statements** MUST NOT include credentials, tokens, full SSH commands with key paths, or infrastructure topology details
+- **NEVER log any portion of API keys or tokens** — not even prefixes or partial strings. Log only whether a key is present (e.g., "key configured", "key updated")
 
 #### File & Data Safety
 - **JSON files read from disk** MUST be type-validated (`isinstance(data, dict)`) before accessing fields — never assume structure
@@ -137,6 +139,12 @@ TypeError: metaclass conflict: the metaclass of a derived class must be a (non-s
 
 **Pattern to follow**: Replicate the `extra_state_attributes` logic as a plain helper function in the test file and test that directly. Reference implementations: `test_fan_control.py` (`_fan_sensor_extra_state_attributes` / `TestFanSensorAttributes`), `test_contact_status.py` (`_compute_contact_status`).
 
+#### Module-Level sys.modules Mocking
+
+When a test file injects mock packages via `sys.modules` (e.g., `test_claude_api.py` mocks `anthropic`), the mock only takes effect if it runs BEFORE any other test imports the target module. In the full suite, import order is controlled by conftest/other test files, not the mocking test. If the target module has a try/except ImportError guard (like `ANTHROPIC_AVAILABLE`), the guard resolves at first import time.
+
+**Pattern**: In tests that depend on module-level mocking, also patch the module-level variables (e.g., `_mod.ANTHROPIC_AVAILABLE`, `_mod.RateLimitError`) directly on the already-imported module, rather than relying on `sys.modules` ordering.
+
 #### Verification
 
 **All new or modified tests MUST pass with warnings-as-errors before completion:**
@@ -152,9 +160,9 @@ This project uses `pre-commit` with ruff, ruff-format, check-yaml, check-json, e
 
 **Before running pytest**, lint all modified files with the same settings as the pre-commit hook:
 ```bash
-python -m ruff check --fix custom_components/climate_advisor/
-python -m ruff format custom_components/climate_advisor/
-python -m ruff check custom_components/climate_advisor/  # confirm clean
+python -m ruff check --fix custom_components/climate_advisor/ tests/
+python -m ruff format custom_components/climate_advisor/ tests/
+python -m ruff check custom_components/climate_advisor/ tests/  # confirm clean
 ```
 Re-stage any files ruff modified, then run tests. Never run pytest on unlinted code — long f-strings and `format_temp` calls frequently exceed the 120-character limit and will fail at commit instead.
 
@@ -411,6 +419,10 @@ Claude should follow existing conventions:
 - Indentation: 4 spaces
 - Type hints on all function signatures
 - Docstrings on public methods
+
+#### CONFIG_METADATA Keys
+
+`CONFIG_METADATA` in `const.py` is a large dict literal. Use **string literal keys** (e.g., `"ai_enabled"`) rather than `CONF_*` variable references when the variable is defined after the dict in the file. Python dict literals require keys to be defined before the dict is evaluated.
 
 ### Home Assistant Patterns
 

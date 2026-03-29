@@ -19,6 +19,7 @@ Climate Advisor exposes several sensor entities in Home Assistant. These persist
 | Daily Briefing | `sensor.climate_advisor_daily_briefing` | TLDR summary | `full_briefing` | Today's plan |
 | Occupancy Mode | `sensor.climate_advisor_occupancy_mode` | home / away / guest / vacation | — | Current occupancy |
 | Comfort Score | `sensor.climate_advisor_comfort_score` | 0-100% | `pending_suggestions` | Compliance tracking |
+| AI Status | `sensor.climate_advisor_ai_status` | active / inactive / error / disabled / circuit_open | `last_request_time`, `error_count`, `total_requests`, `model_in_use`, `circuit_breaker`, `monthly_cost_estimate`, `auto_requests_today`, `manual_requests_today` | AI integration health and usage |
 
 **How to access:**
 - HA UI: Developer Tools → States → filter "climate_advisor"
@@ -77,6 +78,37 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status,sensor
 3. Check contact sensors: `sensor.climate_advisor_contact_status` (paused_by_door attribute)
 4. Check occupancy: `sensor.climate_advisor_occupancy_mode`
 5. Review logs: `python3 tools/ha_logs.py --lines 200`
+
+## Debugging AI Features
+
+### AI Status Sensor
+
+`sensor.climate_advisor_ai_status` is the first place to check when AI features are not responding:
+
+- **`active`** — AI integration is healthy and making successful requests
+- **`inactive`** — AI is enabled but no requests have been made yet
+- **`error`** — last request failed; check the `error_count` attribute
+- **`disabled`** — AI features are turned off in configuration
+- **`circuit_open`** — circuit breaker has tripped after 5 consecutive failures; will auto-reset after 5 minutes
+
+### Activity Report Service
+
+The `ai_activity_report` service triggers an on-demand AI analysis of recent automation behavior. This is useful for diagnosing unexpected HVAC decisions — the report includes a timeline, key decisions, anomalies, and diagnostics drawn from current system state.
+
+```bash
+# Check report history file directly
+python3 tools/ha_logs.py --history --entity sensor.climate_advisor_ai_status --hours 24
+```
+
+### AI Report Persistence
+
+AI reports are stored at `climate_advisor_ai_reports.json` in the HA config root directory. The file is capped at 10 reports (`AI_REPORT_HISTORY_CAP`). Request history is capped at 50 entries (`AI_REQUEST_HISTORY_CAP`).
+
+### Circuit Breaker
+
+The circuit breaker trips after **5 consecutive failures** (`AI_CIRCUIT_BREAKER_THRESHOLD = 5`) and enters a cooldown period of **5 minutes** (`AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300`) before attempting requests again. While the circuit is open, all AI requests return immediately without calling the Claude API. The `circuit_breaker` attribute of the AI status sensor shows the current state (`closed` = normal, `open` = tripped).
+
+---
 
 ## Diagnostic Logging
 

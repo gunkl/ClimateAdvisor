@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 # Default setpoints (°F)
 DEFAULT_COMFORT_HEAT = 70
@@ -503,6 +503,79 @@ CONFIG_METADATA = {
         "description": "Send an email when someone arrives home and comfort temperature is restored.",
         "category": "notifications",
     },
+    "ai_enabled": {
+        "label": "Enable AI Features",
+        "description": (
+            "Master switch for all AI-powered features."
+            " When disabled, Climate Advisor uses only its built-in coded logic."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_api_key": {
+        "label": "Claude API Key",
+        "description": (
+            "Your Anthropic API key. Stored securely in Home Assistant's config entry."
+            " Never logged or exposed in sensor attributes."
+        ),
+        "category": "ai_settings",
+        "sensitive": True,
+    },
+    "ai_model": {
+        "label": "AI Model",
+        "description": (
+            "Which Claude model to use."
+            " Sonnet is recommended for cost/quality balance."
+            " Haiku is cheapest. Opus is most capable but expensive."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_reasoning_effort": {
+        "label": "Reasoning Effort",
+        "description": (
+            "How much reasoning effort Claude uses."
+            " Higher effort produces better analysis but uses more tokens and costs more."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_max_tokens": {
+        "label": "Max Response Length (tokens)",
+        "description": (
+            "Maximum length of AI responses in tokens. Higher values allow more detailed analysis but cost more."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_temperature": {
+        "label": "Creativity (temperature)",
+        "description": (
+            "Controls randomness in AI responses. 0 = deterministic, 1.0 = most creative. 0.3 recommended for analysis."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_monthly_budget": {
+        "label": "Monthly Budget Cap ($)",
+        "description": (
+            "Maximum estimated monthly spend in USD. Set to 0 for no limit. AI features pause when budget is reached."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_auto_requests_per_day": {
+        "label": "Auto Requests Per Day",
+        "description": (
+            "Maximum automated/scheduled AI requests per day."
+            " Limits unattended usage from features like daily plan generation."
+            " Resets at midnight."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_manual_requests_per_day": {
+        "label": "Manual Requests Per Day",
+        "description": (
+            "Maximum user-triggered AI requests per day."
+            " Limits on-demand usage from features like the Activity Report."
+            " Resets at midnight."
+        ),
+        "category": "ai_settings",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -536,3 +609,68 @@ MAX_WEATHER_BIAS_APPLY_F = 8.0  # cap correction at 8°F (sanity limit)
 ATTR_FORECAST_HIGH_BIAS = "forecast_high_bias"
 ATTR_FORECAST_LOW_BIAS = "forecast_low_bias"
 ATTR_FORECAST_BIAS_CONFIDENCE = "forecast_bias_confidence"
+
+# ---------------------------------------------------------------------------
+# AI / Claude API Integration (Issue #68)
+# ---------------------------------------------------------------------------
+
+# Config keys
+CONF_AI_ENABLED = "ai_enabled"
+CONF_AI_API_KEY = "ai_api_key"
+CONF_AI_MODEL = "ai_model"
+CONF_AI_REASONING_EFFORT = "ai_reasoning_effort"
+CONF_AI_MAX_TOKENS = "ai_max_tokens"
+CONF_AI_TEMPERATURE = "ai_temperature"
+CONF_AI_MONTHLY_BUDGET = "ai_monthly_budget"
+CONF_AI_AUTO_REQUESTS_PER_DAY = "ai_auto_requests_per_day"
+CONF_AI_MANUAL_REQUESTS_PER_DAY = "ai_manual_requests_per_day"
+
+# Defaults
+DEFAULT_AI_ENABLED = False
+DEFAULT_AI_MODEL = "claude-sonnet-4-6"
+DEFAULT_AI_REASONING_EFFORT = "medium"
+DEFAULT_AI_MAX_TOKENS = 4096
+DEFAULT_AI_TEMPERATURE = 0.3
+DEFAULT_AI_MONTHLY_BUDGET = 0  # 0 = no cap
+DEFAULT_AI_AUTO_REQUESTS_PER_DAY = 5
+DEFAULT_AI_MANUAL_REQUESTS_PER_DAY = 20
+
+# Model options
+AI_MODEL_SONNET = "claude-sonnet-4-6"
+AI_MODEL_OPUS = "claude-opus-4-6"
+AI_MODEL_HAIKU = "claude-haiku-4-5-20251001"
+AI_MODELS = [AI_MODEL_SONNET, AI_MODEL_OPUS, AI_MODEL_HAIKU]
+
+# Reasoning effort options and budget_tokens mapping
+AI_REASONING_LOW = "low"
+AI_REASONING_MEDIUM = "medium"
+AI_REASONING_HIGH = "high"
+AI_REASONING_OPTIONS = [AI_REASONING_LOW, AI_REASONING_MEDIUM, AI_REASONING_HIGH]
+AI_REASONING_BUDGET_TOKENS = {
+    AI_REASONING_LOW: 1024,
+    AI_REASONING_MEDIUM: 4096,
+    AI_REASONING_HIGH: 16384,
+}
+
+# Circuit breaker
+AI_CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures before tripping
+AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300  # 5 min cooldown
+
+# Retry
+AI_MAX_RETRIES = 3
+AI_RETRY_BASE_DELAY_SECONDS = 1.0  # exponential backoff: 1s, 2s, 4s
+
+# Request history cap (metadata-only deque)
+AI_REQUEST_HISTORY_CAP = 50
+
+# Persisted report history
+AI_REPORT_HISTORY_CAP = 10
+AI_REPORTS_FILE = "climate_advisor_ai_reports.json"
+
+# Sensor attributes for AI status
+ATTR_AI_STATUS = "ai_status"
+
+# API paths for AI endpoints
+API_AI_STATUS = f"{API_BASE}/ai_status"
+API_AI_ACTIVITY = f"{API_BASE}/ai_activity"
+API_AI_REPORTS = f"{API_BASE}/ai_reports"

@@ -14,8 +14,11 @@ custom_components/climate_advisor/
 ├── briefing.py          # Daily email/notification text generation
 ├── automation.py        # HVAC service calls, door/window pause, occupancy
 ├── learning.py          # Pattern tracking, suggestion generation, persistence
-├── sensor.py            # 6 HA sensor entities for dashboards
-└── switch.py            # Automation enable/disable switch (observe-only mode)
+├── sensor.py            # HA sensor entities for dashboards
+├── switch.py            # Automation enable/disable switch (observe-only mode)
+├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
+├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
+└── ai_skills_activity.py  # Activity Report skill (first AI skill): gathers system state, sends to Claude for analysis, returns structured report with timeline, decisions, anomalies, diagnostics.
 ```
 
 ## Data Flow
@@ -32,9 +35,17 @@ Weather Entity ──► Coordinator (every 30 min)
                        ├──► Thermostat Events → Learning Engine (track overrides)
                        ├──► Time Events → Automation Engine (bedtime/morning)
                        │
-                       └──► End of Day → Learning Engine (save DailyRecord)
-                                              │
-                                              └──► Suggestions (after 14+ days)
+                       ├──► End of Day → Learning Engine (save DailyRecord)
+                       │                      │
+                       │                      └──► Suggestions (after 14+ days)
+                       │
+                       └──► AI Service Calls ──► claude_api.py (circuit breaker, budget)
+                                                       │
+                                                  ai_skills.py (skill registry)
+                                                       │
+                                             ai_skills_activity.py (Activity Report)
+                                                       │
+                                             AI Status Sensor + Report History
 ```
 
 ## Key Data Structures
@@ -77,12 +88,16 @@ One day's tracked data: what was recommended, what actually happened, outcomes (
 | `sensor.climate_advisor_comfort_score` | 0–100% | `pending_suggestions`, `comfort_violations_minutes_today`, `comfort_range_low`, `comfort_range_high` |
 | `sensor.climate_advisor_status` | active/inactive | — |
 | `sensor.climate_advisor_occupancy_mode` | home/away/vacation/guest | occupancy_entity_states (raw toggle states) |
+| `sensor.climate_advisor_ai_status` | active/inactive/error/disabled/circuit_open | last_request_time, error_count, total_requests, model_in_use, circuit_breaker, monthly_cost_estimate, auto_requests_today, manual_requests_today |
 
 ## Services Registered
 
 | Service | Data | Purpose |
 |---------|------|---------|
 | `climate_advisor.respond_to_suggestion` | action (accept/dismiss), suggestion_key | User responds to learning suggestion |
+| `climate_advisor.ai_activity_report` | (none) | Trigger an on-demand AI activity report analysis |
+| `climate_advisor.get_ai_report` | (none) | Retrieve the most recent AI activity report |
+| `climate_advisor.clear_ai_reports` | (none) | Clear persisted AI report history |
 
 ## Configuration Data (from config flow)
 

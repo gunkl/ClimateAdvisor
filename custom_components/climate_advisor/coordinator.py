@@ -11,7 +11,11 @@ import logging
 import math
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .ai_skills import AISkillRegistry
+    from .claude_api import ClaudeAPIClient
 
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import (
@@ -26,6 +30,9 @@ from .automation import AutomationEngine, compute_bedtime_setback
 from .briefing import generate_briefing
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .const import (
+    AI_REPORT_HISTORY_CAP,
+    AI_REPORTS_FILE,
+    ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
     ATTR_BRIEFING,
     ATTR_BRIEFING_SHORT,
@@ -45,6 +52,8 @@ from .const import (
     ATTR_OCCUPANCY_MODE,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
+    CONF_AI_API_KEY,
+    CONF_AI_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -123,6 +132,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self.automation_engine._revisit_callback = self.async_request_refresh
         self.automation_engine._sensor_check_callback = self._any_sensor_open
+
+        # AI subsystem (only if enabled and API key present)
+        self.claude_client: ClaudeAPIClient | None = None
+        self.ai_skills: AISkillRegistry | None = None
+        self._ai_report_history: list[dict] = []
+        if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
+            from .ai_skills import AISkillRegistry as _AISkillRegistry
+            from .ai_skills_activity import register_activity_skill
+            from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
+
+            self.claude_client = _ClaudeAPIClient(config)
+            self.ai_skills = _AISkillRegistry()
+            register_activity_skill(self.ai_skills)
+            _LOGGER.info("AI subsystem initialized — model: %s", config.get("ai_model", "unknown"))
+        else:
+            _LOGGER.debug(
+                "AI subsystem disabled — enabled: %s, key present: %s",
+                config.get(CONF_AI_ENABLED, False),
+                bool(config.get(CONF_AI_API_KEY)),
+            )
 
         # Startup safety — first update checks HVAC state before applying classification
         self._first_run: bool = True
@@ -365,6 +394,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except (ValueError, TypeError):
                 self._occupancy_away_since = None
 
+        # Load AI report history if AI subsystem is active
+        if self.claude_client:
+            await self.hass.async_add_executor_job(self._load_ai_reports)
+
         _LOGGER.info("State restore complete")
 
     def _build_state_dict(self) -> dict[str, Any]:
@@ -433,6 +466,64 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Persist current operational state to disk."""
         state_dict = self._build_state_dict()
         await self.hass.async_add_executor_job(self._state_persistence.save, state_dict)
+
+    async def async_store_ai_report(self, result: dict) -> None:
+        """Store an AI activity report result and persist to disk."""
+        import json  # noqa: F401 — imported for _save_ai_reports called via executor
+        from datetime import datetime as _datetime
+
+        report_entry = {
+            "timestamp": _datetime.now().isoformat(),
+            "result": result,
+        }
+        self._ai_report_history.append(report_entry)
+        # Cap the list
+        if len(self._ai_report_history) > AI_REPORT_HISTORY_CAP:
+            self._ai_report_history = self._ai_report_history[-AI_REPORT_HISTORY_CAP:]
+        # Persist to disk via executor (blocking I/O)
+        await self.hass.async_add_executor_job(self._save_ai_reports)
+
+    def _save_ai_reports(self) -> None:
+        """Save AI report history to disk (atomic write)."""
+        import json
+        import os
+
+        filepath = self.hass.config.path(AI_REPORTS_FILE)
+        tmp_path = filepath + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._ai_report_history, f, indent=2, default=str)
+            os.replace(tmp_path, filepath)
+        except Exception:
+            _LOGGER.exception("Failed to save AI reports to %s", filepath)
+            import contextlib
+
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+
+    def _load_ai_reports(self) -> None:
+        """Load AI report history from disk."""
+        import json
+
+        filepath = self.hass.config.path(AI_REPORTS_FILE)
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._ai_report_history = data[-AI_REPORT_HISTORY_CAP:]
+                _LOGGER.debug("Loaded %d AI reports from disk", len(self._ai_report_history))
+            else:
+                _LOGGER.warning("AI reports file has unexpected format, starting fresh")
+                self._ai_report_history = []
+        except FileNotFoundError:
+            self._ai_report_history = []
+        except Exception:
+            _LOGGER.exception("Failed to load AI reports from %s", filepath)
+            self._ai_report_history = []
+
+    def get_ai_report_history(self) -> list[dict]:
+        """Return the AI report history for dashboard display."""
+        return list(self._ai_report_history)
 
     def _flush_hvac_runtime(self) -> None:
         """Flush accumulated HVAC runtime to today's record."""
@@ -796,6 +887,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_OVERRIDE_SINCE: self.automation_engine._fan_override_time,
             ATTR_FAN_RUNNING: self.automation_engine._fan_active,
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
+            ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
         }
 
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:

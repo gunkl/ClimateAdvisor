@@ -1775,12 +1775,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "observation_count_cool": thermal_model.get("observation_count_cool", 0),
                 "heating_rate": (
                     convert_delta(thermal_model["heating_rate_f_per_hour"], unit)
-                    if "heating_rate_f_per_hour" in thermal_model
+                    if thermal_model.get("heating_rate_f_per_hour") is not None
                     else None
                 ),
                 "cooling_rate": (
                     convert_delta(thermal_model["cooling_rate_f_per_hour"], unit)
-                    if "cooling_rate_f_per_hour" in thermal_model
+                    if thermal_model.get("cooling_rate_f_per_hour") is not None
                     else None
                 ),
                 "unit": unit,

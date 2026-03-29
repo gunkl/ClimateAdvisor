@@ -849,3 +849,25 @@ class TestGetChartDataThermalModel:
         assert tm["heating_rate"] == pytest.approx(3.5)
         assert tm["cooling_rate"] == pytest.approx(2.0)
         assert tm["unit"] == "fahrenheit"
+
+    def test_chart_data_none_rates_do_not_raise(self):
+        """Regression test for #64: when get_thermal_model() returns None rate values
+        (keys present, values None), get_chart_data() must not raise TypeError."""
+        model_return = {
+            "confidence": "none",
+            "observation_count_heat": 0,
+            "observation_count_cool": 0,
+            "heating_rate_f_per_hour": None,
+            "cooling_rate_f_per_hour": None,
+        }
+        coord = _make_chart_coordinator(temp_unit="fahrenheit", thermal_model_return=model_return)
+
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util",
+            _mock_dt_util_fixed(12, 0),
+        ):
+            chart = coord.get_chart_data()  # must not raise
+
+        tm = chart["thermal_model"]
+        assert tm["heating_rate"] is None
+        assert tm["cooling_rate"] is None

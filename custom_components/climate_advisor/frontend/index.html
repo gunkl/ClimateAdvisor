@@ -1150,14 +1150,14 @@
       }[s.status] || 'var(--text-secondary)';
 
       grid.innerHTML = `
-        <div class="status-item"><span class="label">Status</span><span class="value" style="color:${statusColor}">${(s.status || 'unknown').toUpperCase()}</span></div>
-        <div class="status-item"><span class="label">Model</span><span class="value">${s.model || 'n/a'}</span></div>
-        <div class="status-item"><span class="label">Total Requests</span><span class="value">${s.total_requests || 0}</span></div>
-        <div class="status-item"><span class="label">Errors</span><span class="value" style="color:${(s.error_count || 0) > 0 ? 'var(--danger)' : 'inherit'}">${s.error_count || 0}</span></div>
-        <div class="status-item"><span class="label">Monthly Cost</span><span class="value">$${(s.monthly_cost || 0).toFixed(4)}</span></div>
-        <div class="status-item"><span class="label">Circuit Breaker</span><span class="value">${s.circuit_breaker_state || 'closed'}</span></div>
-        <div class="status-item"><span class="label">Auto Today</span><span class="value">${s.auto_requests_today || 0}</span></div>
-        <div class="status-item"><span class="label">Manual Today</span><span class="value">${s.manual_requests_today || 0}</span></div>
+        <div class="status-item"><div class="label">Status</div><div class="value" style="color:${statusColor}">${(s.status || 'unknown').toUpperCase()}</div></div>
+        <div class="status-item"><div class="label">Model</div><div class="value">${s.model || 'n/a'}</div></div>
+        <div class="status-item"><div class="label">Total Requests</div><div class="value">${s.total_requests || 0}</div></div>
+        <div class="status-item"><div class="label">Errors</div><div class="value" style="color:${(s.error_count || 0) > 0 ? 'var(--danger)' : 'inherit'}">${s.error_count || 0}</div></div>
+        <div class="status-item"><div class="label">Monthly Cost</div><div class="value">$${(s.monthly_cost_estimate || 0).toFixed(4)}</div></div>
+        <div class="status-item"><div class="label">Circuit Breaker</div><div class="value">${s.circuit_breaker_state || 'closed'}</div></div>
+        <div class="status-item"><div class="label">Auto Today</div><div class="value">${s.auto_requests_today || 0}</div></div>
+        <div class="status-item"><div class="label">Manual Today</div><div class="value">${s.manual_requests_today || 0}</div></div>
       `;
     } catch (e) {
       document.getElementById('ai-status-loading').textContent = 'Failed to load AI status: ' + e.message;
@@ -1257,12 +1257,33 @@
         lines.push('');
       }
     });
-    navigator.clipboard.writeText(lines.join('\n')).then(() => {
-      const btn = document.querySelector('#ai-report-actions .btn');
-      const orig = btn.textContent;
+    const text = lines.join('\n');
+    const btn = document.querySelector('#ai-report-actions .btn');
+    const orig = btn.textContent;
+    function showCopied() {
       btn.textContent = 'Copied!';
       setTimeout(() => { btn.textContent = orig; }, 2000);
-    });
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(showCopied).catch(() => {
+        fallbackCopy(text);
+        showCopied();
+      });
+    } else {
+      fallbackCopy(text);
+      showCopied();
+    }
+  }
+
+  function fallbackCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
   }
 
   async function loadAIHistory() {

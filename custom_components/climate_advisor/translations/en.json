@@ -133,6 +133,7 @@
           "schedule": "Schedule",
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
+          "ai_settings": "AI Settings (Claude)",
           "save": "Save & Close"
         }
       },
@@ -287,6 +288,32 @@
           "max_setback_depth_f": "Largest overnight setback the adaptive engine may compute.",
           "aggressive_savings": "When enabled, Climate Advisor favors energy savings over comfort \u2014 for example, using wider temperature swings and earlier setbacks."
         }
+      },
+      "ai_settings": {
+        "title": "AI Settings",
+        "description": "Configure Claude AI integration for intelligent analysis and reporting.\nAPI Key Status: {key_status}",
+        "data": {
+          "ai_enabled": "Enable AI Features",
+          "ai_api_key": "Claude API Key",
+          "ai_model": "AI Model",
+          "ai_reasoning_effort": "Reasoning Effort",
+          "ai_max_tokens": "Max Response Length (tokens)",
+          "ai_temperature": "Creativity (temperature)",
+          "ai_monthly_budget": "Monthly Budget Cap ($)",
+          "ai_auto_requests_per_day": "Auto Requests Per Day",
+          "ai_manual_requests_per_day": "Manual Requests Per Day"
+        },
+        "data_description": {
+          "ai_enabled": "Master switch for all AI-powered features. When disabled, Climate Advisor uses only its built-in coded logic.",
+          "ai_api_key": "Your Anthropic API key. Get one at console.anthropic.com. Leave blank to keep existing key.",
+          "ai_model": "Which Claude model to use. Sonnet is recommended for cost/quality balance.",
+          "ai_reasoning_effort": "How much reasoning effort Claude uses. Higher = better analysis but more cost.",
+          "ai_max_tokens": "Maximum length of AI responses in tokens (256-8192).",
+          "ai_temperature": "Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
+          "ai_monthly_budget": "Maximum estimated monthly spend in USD. Set to 0 for no limit.",
+          "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",
+          "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight)."
+        }
       }
     },
     "error": {
@@ -294,7 +321,11 @@
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
       "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
       "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",
-      "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time"
+      "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time",
+      "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
+      "ai_key_required": "API key is required when AI features are enabled.",
+      "ai_temperature_out_of_range": "Temperature must be between 0.0 and 1.0.",
+      "ai_max_tokens_out_of_range": "Max tokens must be between 256 and 8192."
     }
   },
   "issues": {

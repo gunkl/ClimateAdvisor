@@ -55,8 +55,7 @@ async def async_build_activity_context(
     structured text block suitable for Claude analysis.
     """
     data: dict[str, Any] = coordinator.data or {}
-    entry = coordinator.config_entry
-    options: dict[str, Any] = dict(entry.options) if entry else {}
+    options: dict[str, Any] = coordinator.config or {}
 
     # --- Classification ---
     day_type = data.get(ATTR_DAY_TYPE, "unknown")

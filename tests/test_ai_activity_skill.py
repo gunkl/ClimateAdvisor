@@ -18,7 +18,7 @@ from custom_components.climate_advisor.ai_skills_activity import (
 # ---------------------------------------------------------------------------
 
 
-def _mock_coordinator(data_overrides: dict | None = None, options_overrides: dict | None = None) -> MagicMock:
+def _mock_coordinator(data_overrides: dict | None = None, config_overrides: dict | None = None) -> MagicMock:
     """Build a mock coordinator with realistic default data."""
     coord = MagicMock()
     coord.data = {
@@ -37,8 +37,7 @@ def _mock_coordinator(data_overrides: dict | None = None, options_overrides: dic
     if data_overrides:
         coord.data.update(data_overrides)
 
-    coord.config_entry = MagicMock()
-    coord.config_entry.options = {
+    coord.config = {
         "comfort_heat": 70,
         "comfort_cool": 75,
         "setback_heat": 60,
@@ -48,8 +47,8 @@ def _mock_coordinator(data_overrides: dict | None = None, options_overrides: dic
         "briefing_time": "06:00",
         "climate_entity": "climate.thermostat",
     }
-    if options_overrides:
-        coord.config_entry.options.update(options_overrides)
+    if config_overrides:
+        coord.config.update(config_overrides)
 
     return coord
 
@@ -337,7 +336,7 @@ class TestAsyncBuildActivityContext:
 
     def test_context_builder_handles_missing_climate_entity(self):
         """No raise when climate_entity option is absent or entity state is None."""
-        coord = _mock_coordinator(options_overrides={"climate_entity": ""})
+        coord = _mock_coordinator(config_overrides={"climate_entity": ""})
         hass = _mock_hass()
 
         context = asyncio.run(async_build_activity_context(hass, coord))
@@ -360,8 +359,7 @@ class TestAsyncBuildActivityContext:
         """No raise when coordinator.data is empty."""
         coord = MagicMock()
         coord.data = {}
-        coord.config_entry = MagicMock()
-        coord.config_entry.options = {}
+        coord.config = {}
         hass = _mock_hass()
 
         context = asyncio.run(async_build_activity_context(hass, coord))
@@ -388,7 +386,7 @@ class TestAsyncBuildActivityContext:
     def test_context_builder_includes_active_features_section(self):
         """Output includes an ACTIVE FEATURES block."""
         coord = _mock_coordinator(
-            options_overrides={
+            config_overrides={
                 "adaptive_preheat_enabled": True,
                 "adaptive_setback_enabled": False,
                 "weather_bias_enabled": True,

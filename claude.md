@@ -424,6 +424,18 @@ Claude should follow existing conventions:
 
 `CONFIG_METADATA` in `const.py` is a large dict literal. Use **string literal keys** (e.g., `"ai_enabled"`) rather than `CONF_*` variable references when the variable is defined after the dict in the file. Python dict literals require keys to be defined before the dict is evaluated.
 
+#### Dashboard Frontend (index.html)
+
+The dashboard is a single-file HTML/CSS/JS panel. When adding new status grid cards:
+- Use `<div class="label">` and `<div class="value">` (block elements) inside `.status-item` containers — never `<span>` (inline), which causes labels and values to render side-by-side
+- Match the existing pattern in the Status tab's `loadStatus()` function
+- For clipboard operations, always include a `document.execCommand('copy')` fallback via temporary textarea — `navigator.clipboard` is unavailable in HA iframe panels without secure context
+- Use `escapeHtml()` for any user-provided or API-returned content rendered as innerHTML
+
+#### API-Frontend Contract
+
+When adding new REST API endpoints or modifying response shapes, verify that the frontend JavaScript reads the exact same key names. Search `index.html` for the endpoint path and check every property access. Common failure: backend returns `monthly_cost_estimate` but frontend reads `monthly_cost`.
+
 ### Home Assistant Patterns
 
 Always use these HA patterns:

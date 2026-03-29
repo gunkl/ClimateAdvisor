@@ -340,9 +340,11 @@ What modules need changes and what's the best approach?"
 For plans touching 4+ files, structure execution as:
 - **Parallel Sonnet executor agents** — one per independent phase or file group, run in a single message with multiple Agent tool calls
 - **Coordinator** — the main Claude instance sequences phases, handles dependencies, and passes results between agents
-- **Verification agent (Sonnet)** — runs `ruff check` then the full test suite after each phase; reports failures back to the coordinator for fixing before the next phase begins
+- **Verification agent (Opus 4.6)** — runs `ruff check` then the full test suite after each phase; reports failures back to the coordinator for fixing before the next phase begins
 
 Phases that modify different files with no shared dependencies can run in parallel. Phases with dependencies must be sequential.
+
+After the final test phase passes, always run an Opus 4.6 verification agent to review all modified files for correctness, completeness, security, and logging coverage before handing off to the user. Do not skip this step or wait to be asked.
 
 **Ask Claude to:**
 - Write implementations following HA conventions

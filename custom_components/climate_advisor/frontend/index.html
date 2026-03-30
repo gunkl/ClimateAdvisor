@@ -762,6 +762,25 @@
         `Heat rate: <strong>${hRate} ${unitLabel}</strong> &nbsp;|&nbsp; ` +
         `Cool rate: <strong>${cRate} ${unitLabel}</strong></div>`;
     }
+    let noneHtml = '';
+    if (tm.confidence === 'none') {
+      const infoStyle = 'margin-top:12px;padding:10px 12px;background:#f5f5f5;border-radius:6px;font-size:0.85em;color:#555;line-height:1.5';
+      if (totalObs === 0) {
+        noneHtml = `<div style="${infoStyle}">` +
+          `<strong>No data yet</strong> — the thermal model learns your home's heating and cooling ` +
+          `rates by measuring temperature change during HVAC sessions.<br><br>` +
+          `An observation is recorded each time a heating or cooling cycle completes ` +
+          `(minimum 10 minutes). Five observations are needed before the model activates.<br><br>` +
+          `<em>This panel will populate automatically once the system has run a few heating or cooling cycles.</em>` +
+          `</div>`;
+      } else {
+        const remaining = 5 - totalObs;
+        noneHtml = `<div style="${infoStyle}">` +
+          `<strong>${totalObs} of 5 observations recorded</strong> — ` +
+          `${remaining} more heating or cooling cycle${remaining !== 1 ? 's' : ''} needed before the model activates.` +
+          `</div>`;
+      }
+    }
     content.innerHTML =
       `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">` +
       `<span style="background:${badgeColor};color:#fff;border-radius:4px;padding:2px 8px;font-size:0.8rem;font-weight:600">${confLabel}</span>` +
@@ -770,7 +789,8 @@
       `<div style="background:#e0e0e0;border-radius:4px;height:8px;overflow:hidden">` +
       `<div style="background:${badgeColor};width:${progressPct}%;height:100%;transition:width 0.3s"></div>` +
       `</div>` +
-      rateHtml;
+      rateHtml +
+      noneHtml;
   }
 
   async function loadChart() {

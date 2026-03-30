@@ -13,11 +13,36 @@ Claude is a development assistant that helps with:
 
 **Important**: The human developer remains responsible for all code review, commits, and architectural decisions.
 
+### Goal-Oriented Comfort Model
+
+**Comfort zone temperatures are proxies, not goals.** The goal is that users are comfortable.
+When a user deviates from the recommended schedule (e.g., leaves windows open overnight),
+treat it as revealed preference — not a failure. Violations should only count when the system
+had control and failed to maintain comfort.
+
+Issue #74 (Metrics Rethink) captures the full design analysis for this — do not re-plan
+what is already documented there. Key pending decisions:
+- `comfort_violations_minutes` should only accumulate when the system had control and failed
+- `windows_opened` compliance should track outcome quality (energy + temp), not just schedule adherence
+- Repeated overrides in same context = learned preference; single overrides = note but don't learn yet
+
 ## Skills
 
 The following custom skills are available to enhance your workflow:
 
 - **[end-of-session](.claude/skills/end-of-session.md)** — Review conversation and suggest additions to CLAUDE.md files that will improve future sessions. Use this when wrapping up work for the day to capture lessons learned and preferences.
+- **[simulate](.claude/skills/simulate.md)** — Run behavior simulations against stored scenarios to validate automation logic and catch regressions. Use before and after any change to `automation.py`.
+
+### Simulation Skill
+
+Before any change to `automation.py` automation logic, run `python3 tools/simulate.py`
+to confirm all golden scenarios still pass. After implementing a behavior change:
+1. Run `python3 tools/simulate.py --pending -v` — new scenarios should pass
+2. After the user validates in production: `mv tools/simulations/pending/<name>.json tools/simulations/golden/<name>.json`
+
+Every closed automation-behavior issue should have a corresponding golden scenario.
+Scenarios flow: `pending/` → review → `golden/` or `pending-fix/` or `unsupported/`.
+Never delete `unsupported/` scenarios — they document deliberate scope decisions.
 
 ## Critical Project Decisions
 
@@ -461,6 +486,22 @@ await hass.services.async_call("climate", "set_temperature", {...})
 # Notifications
 await hass.services.async_call("notify", service, {"message": "..."})
 ```
+
+#### coordinator.config vs coordinator.config_entry
+
+`ClimateAdvisorCoordinator` never passes `config_entry` to its parent class, so
+`coordinator.config_entry` is always `None`. Use `coordinator.config` (the runtime dict
+set in `__init__` from `dict(entry.data)`) for all config reads. This affects any code
+that builds context from the coordinator — `api.py`, `ai_skills_activity.py`, briefing
+helpers, etc. Never access `coordinator.config_entry.options`.
+
+#### Adding new data to the coordinator
+
+New runtime values (thermostat attributes, computed state) belong in the
+`_async_update_data()` return dict in `coordinator.py`. Secondary consumers (`api.py`,
+`ai_skills_activity.py`) should read from `coordinator.data`, not call
+`hass.states.get()` themselves. This keeps the single-update-cycle guarantee and avoids
+stale reads.
 
 ### Reference Documentation
 

@@ -164,6 +164,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_sent_today = False
         self._last_briefing: str = ""
         self._last_briefing_short: str = ""
+        self._briefing_day_type: str | None = None
         self._door_open_timers: dict[str, Any] = {}
 
         # Startup retry state — gentle backoff when weather entity isn't ready
@@ -377,6 +378,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_sent_today = briefing.get("sent_today", False)
         self._last_briefing = briefing.get("last_text", "")
         self._last_briefing_short = briefing.get("last_text_short", "")
+        self._briefing_day_type = briefing.get("briefing_day_type")
 
         # Automation state
         auto_state = state.get("automation_state", {})
@@ -458,6 +460,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "sent_today": self._briefing_sent_today,
                 "last_text": self._last_briefing,
                 "last_text_short": self._last_briefing_short,
+                "briefing_day_type": self._briefing_day_type,
             },
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -786,7 +789,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         forecast = await self._get_forecast()
         self._hourly_forecast_temps = await self._get_hourly_forecast_data()
         if forecast:
-            self._current_classification = classify_day(forecast)
+            prev_type = self._current_classification.day_type if self._current_classification else None
+            self._current_classification = classify_day(forecast, previous_day_type=prev_type)
 
             # Startup safety: only set manual override if the current HVAC
             # mode differs from the classification (Issue #42)
@@ -796,6 +800,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._check_startup_override(climate_state, self._current_classification)
 
             await self.automation_engine.apply_classification(self._current_classification)
+
+            # If the day type changed since the briefing was generated,
+            # regenerate the briefing text without re-sending notifications (Issue #78).
+            if (
+                self._briefing_sent_today
+                and self._briefing_day_type is not None
+                and self._current_classification.day_type != self._briefing_day_type
+            ):
+                _LOGGER.info(
+                    "Classification changed %s → %s; regenerating briefing text",
+                    self._briefing_day_type,
+                    self._current_classification.day_type,
+                )
+                self._last_briefing, self._last_briefing_short = self._build_briefing_text(self._current_classification)
+                self._briefing_day_type = self._current_classification.day_type
+                await self._async_save_state()
 
             # Reset startup retry state on success
             if self._startup_retries_remaining < 5:
@@ -1142,6 +1162,59 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             timestamp=dt_util.now(),
         )
 
+    def _build_briefing_text(
+        self, classification: DayClassification, suggestions: list | None = None
+    ) -> tuple[str, str]:
+        """Generate briefing text for the given classification.
+
+        Returns (briefing_full, briefing_short).  No notifications are sent.
+        """
+        if suggestions is None:
+            suggestions = self.learning.generate_suggestions()
+        wake_time = _parse_time(self.config.get("wake_time", "06:30"))
+        sleep_time = _parse_time(self.config.get("sleep_time", "22:30"))
+
+        thermal_model = {}
+        if self.config.get("learning_enabled", True):
+            thermal_model = self.learning.get_thermal_model()
+        adaptive_thermal_active = thermal_model.get("confidence", "none") != "none"
+
+        bedtime_setback_heat: float | None = None
+        bedtime_setback_cool: float | None = None
+        if classification is not None:
+            hvac_mode = classification.hvac_mode
+            if hvac_mode == "heat":
+                bedtime_setback_heat = compute_bedtime_setback(self.config, thermal_model, classification)
+            elif hvac_mode == "cool":
+                bedtime_setback_cool = compute_bedtime_setback(self.config, thermal_model, classification)
+
+        _LOGGER.debug(
+            "Bedtime setback: heat=%s cool=%s",
+            bedtime_setback_heat,
+            bedtime_setback_cool,
+        )
+
+        briefing_kwargs = dict(
+            classification=classification,
+            comfort_heat=self.config["comfort_heat"],
+            comfort_cool=self.config["comfort_cool"],
+            setback_heat=self.config["setback_heat"],
+            setback_cool=self.config["setback_cool"],
+            wake_time=wake_time,
+            sleep_time=sleep_time,
+            learning_suggestions=suggestions if suggestions else None,
+            debounce_seconds=self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS),
+            manual_grace_seconds=self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS),
+            automation_grace_seconds=self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS),
+            grace_active=self.automation_engine._grace_active,
+            grace_source=self.automation_engine._last_resume_source,
+            temp_unit=self.config.get("temp_unit", "fahrenheit"),
+            bedtime_setback_heat=bedtime_setback_heat,
+            bedtime_setback_cool=bedtime_setback_cool,
+            adaptive_thermal_active=adaptive_thermal_active,
+        )
+        return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
+
     async def _async_send_briefing(self, now: datetime) -> None:
         """Generate and send the daily briefing."""
         if self._briefing_sent_today:
@@ -1152,7 +1225,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not forecast:
             return
 
-        classification = classify_day(forecast)
+        prev_type = self._current_classification.day_type if self._current_classification else None
+        classification = classify_day(forecast, previous_day_type=prev_type)
         self._current_classification = classification
 
         # Inject thermal model into automation engine for adaptive scheduling
@@ -1199,51 +1273,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         suggestions = self.learning.generate_suggestions()
         if self._today_record:
             self._today_record.suggestion_sent = self.learning.get_last_suggestion_keys()
-        wake_time = _parse_time(self.config.get("wake_time", "06:30"))
-        sleep_time = _parse_time(self.config.get("sleep_time", "22:30"))
 
-        # Precompute adaptive setback values for the briefing
-        adaptive_thermal_active = thermal_model.get("confidence", "none") != "none"
-
-        bedtime_setback_heat: float | None = None
-        bedtime_setback_cool: float | None = None
-        if classification is not None:
-            hvac_mode = classification.hvac_mode
-            if hvac_mode == "heat":
-                bedtime_setback_heat = compute_bedtime_setback(self.config, thermal_model, classification)
-            elif hvac_mode == "cool":
-                bedtime_setback_cool = compute_bedtime_setback(self.config, thermal_model, classification)
-        if bedtime_setback_heat is not None or bedtime_setback_cool is not None:
-            _LOGGER.debug(
-                "Bedtime setback: heat=%s cool=%s (via compute_bedtime_setback)",
-                f"{bedtime_setback_heat:.1f}°F" if bedtime_setback_heat is not None else "n/a",
-                f"{bedtime_setback_cool:.1f}°F" if bedtime_setback_cool is not None else "n/a",
-            )
-
-        briefing_kwargs = dict(
-            classification=classification,
-            comfort_heat=self.config["comfort_heat"],
-            comfort_cool=self.config["comfort_cool"],
-            setback_heat=self.config["setback_heat"],
-            setback_cool=self.config["setback_cool"],
-            wake_time=wake_time,
-            sleep_time=sleep_time,
-            learning_suggestions=suggestions if suggestions else None,
-            debounce_seconds=self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS),
-            manual_grace_seconds=self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS),
-            automation_grace_seconds=self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS),
-            grace_active=self.automation_engine._grace_active,
-            grace_source=self.automation_engine._last_resume_source,
-            temp_unit=self.config.get("temp_unit", "fahrenheit"),
-            bedtime_setback_heat=bedtime_setback_heat,
-            bedtime_setback_cool=bedtime_setback_cool,
-            adaptive_thermal_active=adaptive_thermal_active,
+        self._last_briefing, self._last_briefing_short = self._build_briefing_text(
+            classification, suggestions=suggestions
         )
-        briefing = generate_briefing(**briefing_kwargs)
-        briefing_short = generate_briefing(**briefing_kwargs, verbosity="tldr_only")
-
-        self._last_briefing = briefing
-        self._last_briefing_short = briefing_short
+        self._briefing_day_type = classification.day_type
 
         # In observe-only mode, skip sending the notification
         if not self._automation_enabled:
@@ -1259,14 +1293,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self.hass.services.async_call(
                 "notify",
                 _notify_name,
-                {"message": briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
+                {"message": self._last_briefing_short, "title": "🏠 Your Home Climate Plan for Today"},
             )
         # Send email — full briefing
         if self.config.get("email_briefing", True):
             await self.hass.services.async_call(
                 "notify",
                 "send_email",
-                {"message": briefing, "title": "🏠 Your Home Climate Plan for Today"},
+                {"message": self._last_briefing, "title": "🏠 Your Home Climate Plan for Today"},
             )
 
         self._briefing_sent_today = True
@@ -1303,6 +1337,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         self._today_record = None
         self._briefing_sent_today = False
+        self._briefing_day_type = None
         self._hvac_on_since = None
         self._last_violation_check = None
         self._outdoor_temp_history.clear()

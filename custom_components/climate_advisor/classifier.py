@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, time
 
 from .const import (
+    CLASSIFICATION_HYSTERESIS_F,
     DAY_TYPE_COLD,
     DAY_TYPE_COOL,
     DAY_TYPE_HOT,
@@ -148,11 +149,51 @@ class DayClassification:
             )
 
 
-def classify_day(forecast: ForecastSnapshot) -> DayClassification:
+# Ordered classification bands from cold→hot, with their lower thresholds.
+_DAY_TYPE_ORDER = [DAY_TYPE_COLD, DAY_TYPE_COOL, DAY_TYPE_MILD, DAY_TYPE_WARM, DAY_TYPE_HOT]
+_BAND_LOWER_THRESHOLD = {
+    DAY_TYPE_COOL: THRESHOLD_COOL,
+    DAY_TYPE_MILD: THRESHOLD_MILD,
+    DAY_TYPE_WARM: THRESHOLD_WARM,
+    DAY_TYPE_HOT: THRESHOLD_HOT,
+}
+
+
+def _should_stick(today_high: float, previous_day_type: str, margin: float) -> bool:
+    """Return True if the temperature is in the dead zone around a threshold.
+
+    When a prior classification exists, the temperature must move beyond
+    the threshold by *margin* degrees to justify switching.  This prevents
+    bouncing when the forecast fluctuates near a boundary.
+    """
+    prev_idx = _DAY_TYPE_ORDER.index(previous_day_type)
+
+    # Upper boundary: to move UP, temp must reach next band's threshold + margin
+    if prev_idx < len(_DAY_TYPE_ORDER) - 1:
+        upper_type = _DAY_TYPE_ORDER[prev_idx + 1]
+        upper_threshold = _BAND_LOWER_THRESHOLD[upper_type]
+        if today_high >= upper_threshold and today_high < upper_threshold + margin:
+            return True
+
+    # Lower boundary: to move DOWN, temp must drop below own threshold - margin
+    if prev_idx > 0:
+        own_threshold = _BAND_LOWER_THRESHOLD[previous_day_type]
+        if today_high < own_threshold and today_high >= own_threshold - margin:
+            return True
+
+    return False
+
+
+def classify_day(
+    forecast: ForecastSnapshot,
+    previous_day_type: str | None = None,
+) -> DayClassification:
     """Classify the day type and trend from forecast data.
 
     Args:
         forecast: Current forecast snapshot with today/tomorrow temps.
+        previous_day_type: If set, apply hysteresis to prevent threshold
+            bouncing when the forecast fluctuates near a boundary.
 
     Returns:
         DayClassification with day type, trend, and recommendations.
@@ -171,6 +212,21 @@ def classify_day(forecast: ForecastSnapshot) -> DayClassification:
         day_type = DAY_TYPE_COOL
     else:
         day_type = DAY_TYPE_COLD
+
+    # Apply hysteresis: if we have a prior classification, only change
+    # if the temperature has moved beyond the threshold by the margin.
+    if (
+        previous_day_type is not None
+        and day_type != previous_day_type
+        and _should_stick(today_high, previous_day_type, CLASSIFICATION_HYSTERESIS_F)
+    ):
+        _LOGGER.debug(
+            "Hysteresis — today_high=%.0f°F would be %s but sticking with %s",
+            today_high,
+            day_type,
+            previous_day_type,
+        )
+        day_type = previous_day_type
 
     _LOGGER.debug("Day type — today_high=%.0f°F, classified=%s", today_high, day_type)
 

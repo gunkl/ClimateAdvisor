@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.6"
+VERSION = "0.3.7"
 
 # Default setpoints (°F)
 DEFAULT_COMFORT_HEAT = 70
@@ -24,6 +24,7 @@ THRESHOLD_HOT = 85
 THRESHOLD_WARM = 75
 THRESHOLD_MILD = 60
 THRESHOLD_COOL = 45
+CLASSIFICATION_HYSTERESIS_F = 2  # °F dead zone to prevent threshold bouncing
 
 # Trend thresholds (°F difference to trigger predictive behavior)
 TREND_THRESHOLD_SIGNIFICANT = 10

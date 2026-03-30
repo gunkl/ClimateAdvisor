@@ -332,6 +332,7 @@ class TestBriefingNotificationSplit:
         coord._briefing_sent_today = False
         coord._last_briefing = ""
         coord._last_briefing_short = ""
+        coord._briefing_day_type = None
         coord._automation_enabled = True
         coord._today_record = None
 
@@ -358,8 +359,9 @@ class TestBriefingNotificationSplit:
         coord._get_forecast = AsyncMock(return_value=MagicMock())
         coord._get_hourly_forecast_data = AsyncMock(return_value=[])
 
-        # Bind the real _async_send_briefing method to our mock
+        # Bind the real methods to our mock
         coord._async_send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
+        coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
 
         return coord
 
@@ -637,3 +639,238 @@ class TestTemperatureNormalization:
         result = coord._get_indoor_temp()
 
         assert result == 72.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Briefing regeneration on day-type change (Issue #78)
+# ---------------------------------------------------------------------------
+
+REGEN_FULL = "Full briefing (regenerated)"
+REGEN_SHORT = "TLDR (regenerated)"
+
+
+def _side_effect_regen(**kwargs):
+    if kwargs.get("verbosity") == "tldr_only":
+        return REGEN_SHORT
+    return REGEN_FULL
+
+
+class TestBriefingRegeneration:
+    """Verify that the briefing text is regenerated when day_type changes."""
+
+    def _make_coord(self):
+        """Build a minimal coordinator stub for regeneration tests."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import (
+            ClimateAdvisorCoordinator,
+        )
+
+        coord = MagicMock()
+        coord.hass = MagicMock()
+        coord.hass.services = MagicMock()
+        coord.hass.services.async_call = AsyncMock()
+
+        coord.config = {
+            "notify_service": "notify.mobile_app_phone",
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+            "push_briefing": True,
+            "email_briefing": True,
+        }
+
+        coord._briefing_sent_today = True
+        coord._briefing_day_type = DAY_TYPE_WARM
+        coord._last_briefing = "Old warm briefing"
+        coord._last_briefing_short = "Old warm TLDR"
+        coord._automation_enabled = True
+
+        coord.automation_engine = MagicMock()
+        coord.automation_engine._grace_active = False
+        coord.automation_engine._last_resume_source = None
+        coord.automation_engine.apply_classification = AsyncMock()
+
+        coord.learning = MagicMock()
+        coord.learning.generate_suggestions.return_value = []
+        coord.learning.get_thermal_model.return_value = {}
+
+        coord._async_save_state = AsyncMock()
+
+        coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
+
+        return coord
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_regen,
+    )
+    def test_regenerated_on_day_type_change(self, mock_gen):
+        """When day_type changes and briefing was already sent, text is regenerated."""
+        coord = self._make_coord()
+        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
+
+        # Simulate what _async_update_data does after classification changes
+        coord._current_classification = new_classification
+        if (
+            coord._briefing_sent_today
+            and coord._briefing_day_type is not None
+            and coord._current_classification.day_type != coord._briefing_day_type
+        ):
+            coord._last_briefing, coord._last_briefing_short = coord._build_briefing_text(coord._current_classification)
+            coord._briefing_day_type = coord._current_classification.day_type
+
+        assert coord._last_briefing == REGEN_FULL
+        assert coord._last_briefing_short == REGEN_SHORT
+        assert coord._briefing_day_type == DAY_TYPE_HOT
+
+    def test_not_regenerated_when_same_day_type(self):
+        """When day_type hasn't changed, briefing is NOT regenerated."""
+        coord = self._make_coord()
+        new_classification = _make_classification(day_type=DAY_TYPE_WARM)
+
+        coord._current_classification = new_classification
+        should_regen = (
+            coord._briefing_sent_today
+            and coord._briefing_day_type is not None
+            and coord._current_classification.day_type != coord._briefing_day_type
+        )
+
+        assert not should_regen
+        assert coord._last_briefing == "Old warm briefing"
+
+    def test_not_regenerated_before_first_briefing(self):
+        """Before briefing has been sent today, no regeneration."""
+        coord = self._make_coord()
+        coord._briefing_sent_today = False
+        coord._briefing_day_type = None
+
+        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
+        coord._current_classification = new_classification
+
+        should_regen = (
+            coord._briefing_sent_today
+            and coord._briefing_day_type is not None
+            and coord._current_classification.day_type != coord._briefing_day_type
+        )
+
+        assert not should_regen
+        assert coord._last_briefing == "Old warm briefing"
+
+    def test_briefing_day_type_set_after_send(self):
+        """After _async_send_briefing, _briefing_day_type matches classification."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import (
+            ClimateAdvisorCoordinator,
+        )
+
+        coord = self._make_coord()
+        coord._briefing_sent_today = False
+        coord._briefing_day_type = None
+        coord._today_record = None
+
+        coord._get_forecast = AsyncMock(return_value=MagicMock())
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+
+        coord._async_send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
+
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.classify_day",
+                return_value=_make_classification(day_type=DAY_TYPE_HOT),
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.generate_briefing",
+                side_effect=_side_effect_regen,
+            ),
+        ):
+            asyncio.run(coord._async_send_briefing(MagicMock()))
+
+        assert coord._briefing_day_type == DAY_TYPE_HOT
+
+    @patch(
+        "custom_components.climate_advisor.coordinator.generate_briefing",
+        side_effect=_side_effect_regen,
+    )
+    def test_regeneration_does_not_send_notifications(self, mock_gen):
+        """Regeneration updates cached text but does NOT call notify services."""
+        coord = self._make_coord()
+        new_classification = _make_classification(day_type=DAY_TYPE_HOT)
+
+        coord._current_classification = new_classification
+        if (
+            coord._briefing_sent_today
+            and coord._briefing_day_type is not None
+            and coord._current_classification.day_type != coord._briefing_day_type
+        ):
+            coord._last_briefing, coord._last_briefing_short = coord._build_briefing_text(coord._current_classification)
+            coord._briefing_day_type = coord._current_classification.day_type
+
+        # Briefing text was updated
+        assert coord._last_briefing == REGEN_FULL
+        # But no notification services were called
+        coord.hass.services.async_call.assert_not_called()
+
+    def test_state_persistence_round_trip(self):
+        """_briefing_day_type survives save → restore cycle."""
+        coord = self._make_coord()
+        coord._briefing_day_type = DAY_TYPE_WARM
+
+        # Simulate _build_state_dict briefing_state section
+        briefing_state = {
+            "sent_today": coord._briefing_sent_today,
+            "last_text": coord._last_briefing,
+            "last_text_short": coord._last_briefing_short,
+            "briefing_day_type": coord._briefing_day_type,
+        }
+
+        # Simulate _restore_state for briefing section
+        restored_coord = self._make_coord()
+        restored_coord._briefing_day_type = None  # start clean
+        restored_coord._briefing_day_type = briefing_state.get("briefing_day_type")
+
+        assert restored_coord._briefing_day_type == DAY_TYPE_WARM
+
+    def test_state_persistence_backward_compatible(self):
+        """Old state files without briefing_day_type restore as None."""
+        coord = self._make_coord()
+        coord._briefing_day_type = "something"
+
+        # Old state file has no briefing_day_type key
+        old_briefing_state = {
+            "sent_today": True,
+            "last_text": "old briefing",
+            "last_text_short": "old tldr",
+        }
+        coord._briefing_day_type = old_briefing_state.get("briefing_day_type")
+
+        assert coord._briefing_day_type is None
+
+    def test_end_of_day_resets_briefing_day_type(self):
+        """_async_end_of_day resets _briefing_day_type to None."""
+        import types
+
+        from custom_components.climate_advisor.coordinator import (
+            ClimateAdvisorCoordinator,
+        )
+
+        coord = self._make_coord()
+        coord._briefing_day_type = DAY_TYPE_HOT
+        coord._briefing_sent_today = True
+        coord._today_record = None
+        coord._hvac_on_since = None
+        coord._last_violation_check = None
+        coord._outdoor_temp_history = MagicMock()
+        coord._indoor_temp_history = MagicMock()
+        coord._hourly_forecast_temps = MagicMock()
+
+        coord._async_end_of_day = types.MethodType(ClimateAdvisorCoordinator._async_end_of_day, coord)
+
+        asyncio.run(coord._async_end_of_day(MagicMock()))
+
+        assert coord._briefing_day_type is None
+        assert coord._briefing_sent_today is False

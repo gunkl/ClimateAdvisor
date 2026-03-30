@@ -15,6 +15,7 @@ from custom_components.climate_advisor.classifier import (
     classify_day,
 )
 from custom_components.climate_advisor.const import (
+    CLASSIFICATION_HYSTERESIS_F,
     DAY_TYPE_COLD,
     DAY_TYPE_COOL,
     DAY_TYPE_HOT,
@@ -888,3 +889,126 @@ class TestHotDayWindowOpportunityTimes:
         assert result.window_opportunity_morning_end is None
         assert result.window_opportunity_evening_start is None
         assert result.window_opportunity_evening_end is None
+
+
+# ---------------------------------------------------------------------------
+# Hysteresis tests (Issue #78)
+# ---------------------------------------------------------------------------
+
+M = CLASSIFICATION_HYSTERESIS_F  # shorthand for margin (2°F)
+
+
+class TestClassificationHysteresis:
+    """Verify that classify_day() applies hysteresis when previous_day_type is set."""
+
+    # --- No prior classification: standard thresholds ---
+
+    def test_no_prior_uses_standard_thresholds(self):
+        """Without previous_day_type, exact threshold → upper band."""
+        result = classify_day(make_forecast(THRESHOLD_HOT))
+        assert result.day_type == DAY_TYPE_HOT
+
+    def test_no_prior_below_hot(self):
+        result = classify_day(make_forecast(THRESHOLD_HOT - 1))
+        assert result.day_type == DAY_TYPE_WARM
+
+    def test_previous_none_same_as_omitted(self):
+        """Passing previous_day_type=None is identical to omitting it."""
+        a = classify_day(make_forecast(THRESHOLD_HOT), previous_day_type=None)
+        b = classify_day(make_forecast(THRESHOLD_HOT))
+        assert a.day_type == b.day_type
+
+    # --- Warm→Hot boundary: sticky warm ---
+
+    def test_sticky_warm_at_threshold_hot(self):
+        """previous=warm, today_high=85 → stays warm (85 < 85+2)."""
+        result = classify_day(make_forecast(THRESHOLD_HOT), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_WARM
+
+    def test_sticky_warm_above_threshold_hot(self):
+        """previous=warm, today_high=86 → stays warm (86 < 87)."""
+        result = classify_day(make_forecast(THRESHOLD_HOT + 1), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_WARM
+
+    def test_warm_exits_to_hot(self):
+        """previous=warm, today_high=87 → hot (87 >= 85+2)."""
+        result = classify_day(make_forecast(THRESHOLD_HOT + M), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_HOT
+
+    # --- Hot→Warm boundary: sticky hot ---
+
+    def test_sticky_hot_below_threshold(self):
+        """previous=hot, today_high=84 → stays hot (84 >= 85-2)."""
+        result = classify_day(make_forecast(THRESHOLD_HOT - 1), previous_day_type=DAY_TYPE_HOT)
+        assert result.day_type == DAY_TYPE_HOT
+
+    def test_sticky_hot_at_lower_dead_zone(self):
+        """previous=hot, today_high=83 → stays hot (83 >= 83)."""
+        result = classify_day(make_forecast(THRESHOLD_HOT - M), previous_day_type=DAY_TYPE_HOT)
+        assert result.day_type == DAY_TYPE_HOT
+
+    def test_hot_exits_to_warm(self):
+        """previous=hot, today_high=82 → warm (82 < 83)."""
+        result = classify_day(make_forecast(THRESHOLD_HOT - M - 1), previous_day_type=DAY_TYPE_HOT)
+        assert result.day_type == DAY_TYPE_WARM
+
+    # --- Large jump bypasses dead zone ---
+
+    def test_large_jump_warm_to_hot(self):
+        """previous=warm, today_high=95 → hot (well past dead zone)."""
+        result = classify_day(make_forecast(95), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_HOT
+
+    def test_large_drop_hot_to_warm(self):
+        """previous=hot, today_high=76 → warm (well past dead zone)."""
+        result = classify_day(make_forecast(76), previous_day_type=DAY_TYPE_HOT)
+        assert result.day_type == DAY_TYPE_WARM
+
+    # --- Mild→Warm boundary ---
+
+    def test_sticky_mild_at_warm_threshold(self):
+        """previous=mild, today_high=75 → stays mild (75 < 77)."""
+        result = classify_day(make_forecast(THRESHOLD_WARM), previous_day_type=DAY_TYPE_MILD)
+        assert result.day_type == DAY_TYPE_MILD
+
+    def test_mild_exits_to_warm(self):
+        """previous=mild, today_high=77 → warm (77 >= 75+2)."""
+        result = classify_day(make_forecast(THRESHOLD_WARM + M), previous_day_type=DAY_TYPE_MILD)
+        assert result.day_type == DAY_TYPE_WARM
+
+    def test_sticky_warm_at_mild_boundary(self):
+        """previous=warm, today_high=74 → stays warm (74 >= 75-2)."""
+        result = classify_day(make_forecast(THRESHOLD_WARM - 1), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_WARM
+
+    def test_warm_exits_to_mild(self):
+        """previous=warm, today_high=72 → mild (72 < 73)."""
+        result = classify_day(make_forecast(THRESHOLD_WARM - M - 1), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_MILD
+
+    # --- Cool→Mild boundary ---
+
+    def test_sticky_cool_at_mild_threshold(self):
+        result = classify_day(make_forecast(THRESHOLD_MILD), previous_day_type=DAY_TYPE_COOL)
+        assert result.day_type == DAY_TYPE_COOL
+
+    def test_cool_exits_to_mild(self):
+        result = classify_day(make_forecast(THRESHOLD_MILD + M), previous_day_type=DAY_TYPE_COOL)
+        assert result.day_type == DAY_TYPE_MILD
+
+    # --- Cold→Cool boundary ---
+
+    def test_sticky_cold_at_cool_threshold(self):
+        result = classify_day(make_forecast(THRESHOLD_COOL), previous_day_type=DAY_TYPE_COLD)
+        assert result.day_type == DAY_TYPE_COLD
+
+    def test_cold_exits_to_cool(self):
+        result = classify_day(make_forecast(THRESHOLD_COOL + M), previous_day_type=DAY_TYPE_COLD)
+        assert result.day_type == DAY_TYPE_COOL
+
+    # --- Same classification: no change regardless of hysteresis ---
+
+    def test_same_classification_no_change(self):
+        """If standard threshold gives same as previous, no hysteresis needed."""
+        result = classify_day(make_forecast(90), previous_day_type=DAY_TYPE_HOT)
+        assert result.day_type == DAY_TYPE_HOT

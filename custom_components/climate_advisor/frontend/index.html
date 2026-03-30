@@ -339,6 +339,11 @@
       <button class="btn warning" onclick="forceUpdate()">Force Update</button>
       <button id="toggle-automation-btn" class="btn danger" onclick="toggleAutomation()">Disable Automation</button>
     </div>
+    <div class="btn-group" style="margin-top:10px">
+      <button id="cancel-override-btn" class="btn danger" onclick="cancelOverride()" disabled>Cancel Override</button>
+      <button id="cancel-fan-override-btn" class="btn danger" onclick="cancelFanOverride()" disabled>Cancel Fan Override</button>
+      <button id="resume-pause-btn" class="btn warning" onclick="resumeFromPause()" disabled>Resume from Pause</button>
+    </div>
     <div id="action-result" class="action-result"></div>
   </div>
 </div>
@@ -608,6 +613,9 @@
       document.getElementById('status-loading').style.display = 'none';
       grid.style.display = 'grid';
       updateAutomationButton(data.automation_enabled);
+      document.getElementById('cancel-override-btn').disabled = !data.manual_override_active;
+      document.getElementById('cancel-fan-override-btn').disabled = !data.fan_override_active;
+      document.getElementById('resume-pause-btn').disabled = !data.paused_by_door;
     } catch (e) {
       document.getElementById('status-loading').textContent = 'Failed to load status: ' + e.message;
     }
@@ -829,11 +837,18 @@
 
   window.cancelOverride = async function() {
     await window.doAction('cancel_override');
+    loadStatus();
     loadAutomationState();
+  };
+
+  window.cancelFanOverride = async function() {
+    await window.doAction('cancel_fan_override');
+    loadStatus();
   };
 
   window.resumeFromPause = async function() {
     await window.doAction('resume_from_pause');
+    loadStatus();
     loadAutomationState();
   };
 
@@ -913,8 +928,7 @@
               const durationMs = (data.manual_grace_duration || 1800) * 1000;
               const remainMs = (startMs + durationMs) - Date.now();
               const remainMin = Math.max(0, Math.ceil(remainMs / 60000));
-              return data.manual_override_mode + ' (active, ' + remainMin + ' min remaining) '
-                + '<button onclick="cancelOverride()" style="margin-left:8px;padding:2px 10px;cursor:pointer;border-radius:4px;border:1px solid var(--border);background:var(--danger);color:#fff;font-size:0.8rem">Reset</button>';
+              return data.manual_override_mode + ' (active, ' + remainMin + ' min remaining)';
             })() : 'No'}</td></tr>
           </table>
         </div>
@@ -922,11 +936,6 @@
           <div class="debug-section">
             <h3>Door/Window Sensors</h3>
             <table class="kv-table">${sensorRows}</table>
-            ${data.paused_by_door ? `
-              <button onclick="resumeFromPause()" style="margin-top:8px;padding:5px 16px;cursor:pointer;border-radius:4px;border:1px solid var(--border);background:var(--warning, #ff9800);color:#fff;font-size:0.85rem">
-                Resume HVAC (override pause)
-              </button>
-            ` : ''}
           </div>
         ` : ''}
         <div class="debug-section">

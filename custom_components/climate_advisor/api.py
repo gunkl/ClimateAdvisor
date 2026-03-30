@@ -16,6 +16,7 @@ from .const import (
     API_AI_STATUS,
     API_AUTOMATION_STATE,
     API_BRIEFING,
+    API_CANCEL_FAN_OVERRIDE,
     API_CANCEL_OVERRIDE,
     API_CHART_DATA,
     API_CONFIG,
@@ -71,6 +72,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
         data = coordinator.data or {}
+        ae = coordinator.automation_engine
         climate_state = hass.states.get(coordinator.config.get("climate_entity", ""))
         hvac_mode = climate_state.state if climate_state else "unknown"
 
@@ -102,6 +104,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
                 "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
                 "contact_sensors": coordinator._compute_contact_details(),
+                "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
+                "fan_override_active": ae._fan_override_active,
+                "paused_by_door": ae.is_paused_by_door,
             }
         )
 
@@ -405,6 +410,24 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
         )
 
 
+class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
+    """Clear the fan manual override and return fan to automation control."""
+
+    url = API_CANCEL_FAN_OVERRIDE
+    name = "api:climate_advisor:cancel_fan_override"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        ae = coordinator.automation_engine
+        ae.clear_fan_override()
+        return self.json({"status": "ok", "message": "Fan override cleared."})
+
+
 class ClimateAdvisorToggleAutomationView(HomeAssistantView):
     """Toggle automation enabled/disabled state."""
 
@@ -569,6 +592,7 @@ API_VIEWS = [
     ClimateAdvisorRespondSuggestionView,
     ClimateAdvisorConfigView,
     ClimateAdvisorCancelOverrideView,
+    ClimateAdvisorCancelFanOverrideView,
     ClimateAdvisorResumeFromPauseView,
     ClimateAdvisorToggleAutomationView,
     ClimateAdvisorAIStatusView,

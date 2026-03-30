@@ -1779,7 +1779,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if fan_mode == FAN_MODE_DISABLED:
             return "disabled"
         if ae._fan_override_active:
-            return "override — on" if ae._fan_active else "override — off"
+            return "running (manual override)" if ae._fan_active else "off (manual override)"
         if ae._fan_active:
             return "active"
         return "inactive"

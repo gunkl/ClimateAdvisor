@@ -21,6 +21,7 @@ from custom_components.climate_advisor.const import (
     CONF_EMAIL_NOTIFY,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
+    CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -265,6 +266,7 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
         "setback_heat": 60,
         "setback_cool": 80,
         "notify_service": "notify.notify",
+        CONF_OVERRIDE_CONFIRM_PERIOD: 0,  # bypass confirmation for test immediacy
     }
     if config_overrides:
         config.update(config_overrides)

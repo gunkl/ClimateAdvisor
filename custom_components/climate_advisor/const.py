@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.7"
+VERSION = "0.3.8"
 
 # Default setpoints (°F)
 DEFAULT_COMFORT_HEAT = 70
@@ -59,6 +59,7 @@ CONF_MANUAL_GRACE_NOTIFY = "manual_grace_notify"
 CONF_AUTOMATION_GRACE_PERIOD = "automation_grace_seconds"
 CONF_AUTOMATION_GRACE_NOTIFY = "automation_grace_notify"
 CONF_WELCOME_HOME_DEBOUNCE = "welcome_home_debounce_seconds"
+CONF_OVERRIDE_CONFIRM_PERIOD = "override_confirm_seconds"
 CONF_EMAIL_NOTIFY = "email_notify"  # DEPRECATED — replaced by per-event toggles in v8
 
 # Per-event push notification toggles (Issue #50)
@@ -78,6 +79,7 @@ DEFAULT_SENSOR_DEBOUNCE_SECONDS = 300  # 5 minutes
 DEFAULT_MANUAL_GRACE_SECONDS = 1800  # 30 minutes
 DEFAULT_AUTOMATION_GRACE_SECONDS = 300  # 5 minutes
 DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS = 3600  # 60 minutes
+DEFAULT_OVERRIDE_CONFIRM_SECONDS = 600  # 10 minutes
 OCCUPANCY_SETBACK_MINUTES = 15
 MAX_CONTINUOUS_RUNTIME_HOURS = 3
 
@@ -170,6 +172,9 @@ ATTR_CONTACT_STATUS = "contact_status"
 # Revisit delay — follow-up check after any HVAC action (seconds)
 REVISIT_DELAY_SECONDS = 300  # 5 minutes
 
+# Event log ring buffer cap (Issue #76)
+EVENT_LOG_CAP = 500  # keep last 500 events
+
 # API paths for dashboard panel
 API_BASE = "/api/climate_advisor"
 API_STATUS = f"{API_BASE}/status"
@@ -184,6 +189,7 @@ API_CONFIG = f"{API_BASE}/config"
 API_CANCEL_OVERRIDE = f"{API_BASE}/cancel_override"
 API_RESUME_FROM_PAUSE = f"{API_BASE}/resume_from_pause"
 API_TOGGLE_AUTOMATION = f"{API_BASE}/toggle_automation"
+API_EVENT_LOG = f"{API_BASE}/event_log"
 
 # Panel
 PANEL_URL = "/climate_advisor/frontend"
@@ -322,6 +328,17 @@ CONFIG_METADATA = {
         "label": "Push: Automation Grace Expired",
         "description": "Send a push notification when the automation grace period expires.",
         "category": "notifications",
+    },
+    "override_confirm_seconds": {
+        "label": "Override Confirmation Delay (minutes)",
+        "description": (
+            "Time between system changes and confirmation of manual override."
+            " When a change looks like a manual override, Climate Advisor waits this long before formally accepting it."
+            " Transient events (thermostat restart, fan cycle) that resolve within the window are ignored."
+            " Set to 0 to confirm overrides immediately."
+        ),
+        "category": "sensors",
+        "display_transform": "seconds_to_minutes",
     },
     "fan_mode": {
         "label": "Fan Control Mode",

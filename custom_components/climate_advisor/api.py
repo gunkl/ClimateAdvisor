@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from datetime import timedelta
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -18,6 +19,7 @@ from .const import (
     API_CANCEL_OVERRIDE,
     API_CHART_DATA,
     API_CONFIG,
+    API_EVENT_LOG,
     API_FORCE_RECLASSIFY,
     API_LEARNING,
     API_RESPOND_SUGGESTION,
@@ -528,6 +530,33 @@ class ClimateAdvisorAIReportsView(HomeAssistantView):
         )
 
 
+class ClimateAdvisorEventLogView(HomeAssistantView):
+    """Return the in-memory automation event log for the requested time window (Issue #76)."""
+
+    url = API_EVENT_LOG
+    name = "api:climate_advisor:event_log"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        from homeassistant.util import dt as dt_util
+
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        try:
+            hours = float(request.rel_url.query.get("hours", "24"))
+            hours = max(0.5, min(hours, 168))  # clamp: 30 min – 7 days
+        except (ValueError, TypeError):
+            hours = 24.0
+
+        cutoff = (dt_util.now() - timedelta(hours=hours)).isoformat()
+        events = [e for e in coordinator._event_log if e.get("time", "") >= cutoff]
+
+        return self.json({"events": events, "total": len(events), "hours": hours})
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -545,4 +574,5 @@ API_VIEWS = [
     ClimateAdvisorAIStatusView,
     ClimateAdvisorAIActivityView,
     ClimateAdvisorAIReportsView,
+    ClimateAdvisorEventLogView,
 ]

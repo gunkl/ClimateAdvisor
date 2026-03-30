@@ -185,6 +185,7 @@ def _make_coordinator(
     coordinator.automation_engine.natural_vent_active = False
     coordinator.automation_engine._grace_active = False
     coordinator.automation_engine._last_resume_source = None
+    coordinator.automation_engine._override_confirm_pending = False
 
     return coordinator
 

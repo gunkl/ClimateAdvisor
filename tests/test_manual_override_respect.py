@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
+from custom_components.climate_advisor.const import CONF_OVERRIDE_CONFIRM_PERIOD
 
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 19, 14, 30, 0)
@@ -45,6 +46,7 @@ def _make_automation_engine(config_overrides=None):
         "setback_heat": 60,
         "setback_cool": 80,
         "notify_service": "notify.notify",
+        CONF_OVERRIDE_CONFIRM_PERIOD: 0,  # bypass confirmation for test immediacy
     }
     if config_overrides:
         config.update(config_overrides)

@@ -25,12 +25,14 @@ from .const import (
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NATURAL_VENT_DELTA,
+    CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NATURAL_VENT_DELTA,
+    DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
@@ -208,6 +210,15 @@ class AutomationEngine:
         self._natural_vent_active: bool = False
         self._last_outdoor_temp: float | None = None
 
+        # Override confirmation period (Issue #76) — pending window before override is formally accepted
+        self._override_confirm_pending: bool = False
+        self._override_confirm_cancel: Any | None = None
+        self._override_confirm_time: str | None = None
+        self._override_confirm_mode: str | None = None
+
+        # Event log callback — set by coordinator after construction
+        self._emit_event_callback: Any | None = None
+
         # Resume-from-pause tracking (Issue #47)
         self._resumed_from_pause: bool = False
         self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
@@ -294,7 +305,22 @@ class AutomationEngine:
 
     def clear_manual_override(self) -> None:
         """Clear the manual override flag (called at transition points)."""
+        if self._override_confirm_pending:
+            if self._override_confirm_cancel:
+                self._override_confirm_cancel()
+                self._override_confirm_cancel = None
+            self._override_confirm_pending = False
+            self._override_confirm_time = None
+            self._override_confirm_mode = None
         if self._manual_override_active:
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "override_cleared",
+                    {
+                        "was_mode": self._manual_override_mode,
+                        "active_since": self._manual_override_time,
+                    },
+                )
             _LOGGER.info(
                 "Clearing manual override (was %s since %s)",
                 self._manual_override_mode,
@@ -349,12 +375,102 @@ class AutomationEngine:
     def handle_manual_override(self) -> None:
         """Handle a manual thermostat change (outside of door/window pause).
 
-        Sets the manual override flag and starts a grace period so that
-        classification does not fight the user's intent.
+        Starts the confirmation period (Issue #76). If the thermostat state
+        still differs from classification after the confirmation delay, the
+        override is formally accepted and the grace period begins. Transient
+        events (thermostat restart, fan cycles) that resolve within the window
+        are silently ignored.
+        """
+        self.start_override_confirmation(source="normal")
+
+    def start_override_confirmation(self, source: str) -> None:
+        """Begin the override confirmation window (Issue #76).
+
+        Args:
+            source: "normal" for regular operation overrides,
+                    "pause" for overrides detected during a door/window pause.
         """
         state = self.hass.states.get(self.climate_entity)
+        detected_mode = state.state if state else "unknown"
+        confirm_seconds = int(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS))
+
+        if confirm_seconds <= 0:
+            # Confirmation disabled — accept override immediately (legacy behaviour)
+            self._confirm_override(detected_mode)
+            return
+
+        # Cancel any existing pending confirmation (restart the window)
+        if self._override_confirm_cancel:
+            self._override_confirm_cancel()
+            self._override_confirm_cancel = None
+
+        self._override_confirm_pending = True
+        self._override_confirm_time = dt_util.now().isoformat()
+        self._override_confirm_mode = detected_mode
+        _LOGGER.info(
+            "Potential %s override detected (mode=%s) — confirming in %d minutes",
+            source,
+            detected_mode,
+            confirm_seconds // 60,
+        )
+
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "override_detected",
+                {
+                    "detected_mode": detected_mode,
+                    "source": source,
+                    "confirm_delay_seconds": confirm_seconds,
+                },
+            )
+
+        @callback
+        def _confirm_override_expired(_now: Any) -> None:
+            self._override_confirm_cancel = None
+            if not self._override_confirm_pending:
+                return
+            current_state = self.hass.states.get(self.climate_entity)
+            current_mode = current_state.state if current_state else "unknown"
+            cls_mode = self._current_classification.hvac_mode if self._current_classification else None
+            if current_mode not in ("unavailable", "unknown") and current_mode != cls_mode:
+                # Still divergent — formally confirm the override
+                _LOGGER.warning(
+                    "Override confirmed after %d minutes (mode=%s, classification wants %s)",
+                    confirm_seconds // 60,
+                    current_mode,
+                    cls_mode,
+                )
+                self._override_confirm_pending = False
+                self._override_confirm_time = None
+                self._override_confirm_mode = None
+                self._confirm_override(current_mode)
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "override_confirmed",
+                        {"mode": current_mode, "confirm_delay_seconds": confirm_seconds},
+                    )
+            else:
+                # State resolved — transient event, no override
+                _LOGGER.info(
+                    "Potential override self-resolved (detected=%s, current=%s) — no action taken",
+                    self._override_confirm_mode,
+                    current_mode,
+                )
+                self._override_confirm_pending = False
+                self._override_confirm_time = None
+                self._override_confirm_mode = None
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "override_self_resolved",
+                        {"detected_mode": detected_mode, "current_mode": current_mode},
+                    )
+
+        self._override_confirm_cancel = async_call_later(self.hass, confirm_seconds, _confirm_override_expired)
+
+    def _confirm_override(self, mode: str) -> None:
+        """Formally accept a manual override and start the grace period."""
         self._manual_override_active = True
-        self._manual_override_mode = state.state if state else "unknown"
+        self._manual_override_mode = mode
         self._manual_override_time = dt_util.now().isoformat()
         _LOGGER.warning(
             "Manual override activated: mode=%s",
@@ -378,6 +494,14 @@ class AutomationEngine:
             )
             return
 
+        if self._override_confirm_pending:
+            _LOGGER.info(
+                "Override confirmation pending (detected=%s at %s) — skipping HVAC mode change",
+                self._override_confirm_mode,
+                self._override_confirm_time,
+            )
+            return
+
         unit = self.config.get("temp_unit", "fahrenheit")
         _LOGGER.warning(
             "Applying classification: %s (trend: %s %s)",
@@ -385,6 +509,15 @@ class AutomationEngine:
             classification.trend_direction,
             format_temp_delta(classification.trend_magnitude, unit),
         )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "classification_applied",
+                {
+                    "day_type": classification.day_type,
+                    "hvac_mode": classification.hvac_mode,
+                    "trend": classification.trend_direction,
+                },
+            )
 
         # Set the base HVAC mode
         cls_reason = (
@@ -597,6 +730,8 @@ class AutomationEngine:
                 outdoor,
                 nat_vent_threshold,
             )
+            if self._emit_event_callback:
+                self._emit_event_callback("sensor_opened", {"entity": entity_id, "result": "natural_ventilation"})
             return
 
         # Get current mode before pausing
@@ -606,6 +741,8 @@ class AutomationEngine:
 
         if self._pre_pause_mode and self._pre_pause_mode != "off":
             self._paused_by_door = True
+            if self._emit_event_callback:
+                self._emit_event_callback("sensor_opened", {"entity": entity_id, "result": "paused"})
             await self._set_hvac_mode(
                 "off",
                 reason=f"door/window open — {entity_id}, was {self._pre_pause_mode} mode",
@@ -624,6 +761,14 @@ class AutomationEngine:
 
     async def handle_all_doors_windows_closed(self) -> None:
         """Resume HVAC after all monitored doors/windows are closed."""
+        was_nat_vent = self._natural_vent_active
+        was_paused = self._paused_by_door
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "sensor_all_closed",
+                {"was_paused": was_paused, "was_nat_vent": was_nat_vent},
+            )
+
         # Handle natural ventilation mode cleanup (sensors closed while in nat vent)
         if self._natural_vent_active:
             self._natural_vent_active = False
@@ -712,12 +857,8 @@ class AutomationEngine:
         _LOGGER.info("Manual HVAC override detected during door/window pause")
         self._paused_by_door = False
         self._pre_pause_mode = None
-        # Record the manual override so classification respects user intent
-        state = self.hass.states.get(self.climate_entity)
-        self._manual_override_active = True
-        self._manual_override_mode = state.state if state else "unknown"
-        self._manual_override_time = dt_util.now().isoformat()
-        self._start_grace_period("manual")
+        # Start confirmation period — wait before formally accepting the override
+        self.start_override_confirmation(source="pause")
 
     async def resume_from_pause(self) -> str | None:
         """Resume HVAC from contact sensor pause (user-initiated via dashboard).
@@ -801,6 +942,8 @@ class AutomationEngine:
                 self._manual_grace_cancel = None
                 self._automation_grace_cancel = None
                 self.clear_manual_override()
+                if self._emit_event_callback:
+                    self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
                 self.hass.async_create_task(self._re_pause_for_open_sensor())
                 return
 
@@ -810,6 +953,8 @@ class AutomationEngine:
             self._automation_grace_cancel = None
             self.clear_manual_override()
             _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
+            if self._emit_event_callback:
+                self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
 
             if should_notify:
                 self.hass.async_create_task(
@@ -829,6 +974,8 @@ class AutomationEngine:
             self._automation_grace_cancel = cancel
 
         _LOGGER.info("Started %s grace period (%d seconds)", source, duration)
+        if self._emit_event_callback:
+            self._emit_event_callback("grace_started", {"source": source, "duration_seconds": duration})
 
     def _cancel_grace_timers(self) -> None:
         """Cancel any active grace period timers."""
@@ -1324,6 +1471,8 @@ class AutomationEngine:
             "manual_override_active": self._manual_override_active,
             "manual_override_mode": self._manual_override_mode,
             "manual_override_time": self._manual_override_time,
+            "override_confirm_pending": self._override_confirm_pending,
+            "override_confirm_time": self._override_confirm_time,
             "fan_active": self._fan_active,
             "fan_on_since": self._fan_on_since,
             "fan_override_active": self._fan_override_active,
@@ -1348,6 +1497,9 @@ class AutomationEngine:
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None
+        if self._override_confirm_cancel:
+            self._override_confirm_cancel()
+            self._override_confirm_cancel = None
         for unsub in self._active_listeners:
             unsub()
         self._active_listeners.clear()

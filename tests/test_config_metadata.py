@@ -62,6 +62,7 @@ EXPECTED_KEYS = {
     "ai_monthly_budget",
     "ai_auto_requests_per_day",
     "ai_manual_requests_per_day",
+    "override_confirm_seconds",
 }
 
 VALID_CATEGORIES = {"core", "sensors", "fan", "schedule", "advanced", "occupancy", "notifications", "ai_settings"}

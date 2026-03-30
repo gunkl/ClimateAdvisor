@@ -38,6 +38,7 @@ from .const import (
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
+    CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_PUSH_BRIEFING,
     CONF_PUSH_DOOR_WINDOW_PAUSE,
     CONF_PUSH_OCCUPANCY_HOME,
@@ -60,6 +61,7 @@ from .const import (
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MODE,
     DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_HEAT,
@@ -336,7 +338,12 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the door/window sensor selection step."""
         if user_input is not None:
             # Convert minutes (UI) to seconds (internal storage)
-            for key in (CONF_SENSOR_DEBOUNCE, CONF_MANUAL_GRACE_PERIOD, CONF_AUTOMATION_GRACE_PERIOD):
+            for key in (
+                CONF_SENSOR_DEBOUNCE,
+                CONF_MANUAL_GRACE_PERIOD,
+                CONF_AUTOMATION_GRACE_PERIOD,
+                CONF_OVERRIDE_CONFIRM_PERIOD,
+            ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
             self._data.update(user_input)
@@ -381,6 +388,17 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         selector.NumberSelectorConfig(
                             min=0,
                             max=240,
+                            step=1,
+                            unit_of_measurement="minutes",
+                            mode="box",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_OVERRIDE_CONFIRM_PERIOD, default=DEFAULT_OVERRIDE_CONFIRM_SECONDS // 60
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=60,
                             step=1,
                             unit_of_measurement="minutes",
                             mode="box",
@@ -694,7 +712,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         """Door/window sensor and fan configuration."""
         if user_input is not None:
             # Convert minutes (UI) to seconds (internal storage)
-            for key in (CONF_SENSOR_DEBOUNCE, CONF_MANUAL_GRACE_PERIOD, CONF_AUTOMATION_GRACE_PERIOD):
+            for key in (
+                CONF_SENSOR_DEBOUNCE,
+                CONF_MANUAL_GRACE_PERIOD,
+                CONF_AUTOMATION_GRACE_PERIOD,
+                CONF_OVERRIDE_CONFIRM_PERIOD,
+            ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
             self._updates.update(user_input)
@@ -750,6 +773,18 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         selector.NumberSelectorConfig(
                             min=0,
                             max=240,
+                            step=1,
+                            unit_of_measurement="minutes",
+                            mode="box",
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_OVERRIDE_CONFIRM_PERIOD,
+                        default=current.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS) // 60,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=60,
                             step=1,
                             unit_of_measurement="minutes",
                             mode="box",

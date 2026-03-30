@@ -64,6 +64,7 @@
           "sensor_debounce_seconds": "Open delay before pausing HVAC (minutes)",
           "manual_grace_seconds": "Pause after manual thermostat change (minutes)",
           "automation_grace_seconds": "Cooldown after automated change (minutes)",
+          "override_confirm_seconds": "Override confirmation delay (minutes)",
           "fan_mode": "Fan Control Mode",
           "fan_entity": "Fan Entity"
         },
@@ -73,6 +74,7 @@
           "sensor_debounce_seconds": "How long a door/window must stay open before HVAC is paused. Prevents brief openings (like walking through a door) from triggering a pause.",
           "manual_grace_seconds": "How long to wait after you manually adjust the thermostat before Climate Advisor resumes automation. Gives you time to enjoy your chosen temperature.",
           "automation_grace_seconds": "How long to wait after Climate Advisor makes an automated change before allowing another one. Prevents rapid back-to-back adjustments.",
+          "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode. 'Both' uses both.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode)."
         }
@@ -184,6 +186,7 @@
           "sensor_debounce_seconds": "Open delay before pausing HVAC (minutes)",
           "manual_grace_seconds": "Pause after manual thermostat change (minutes)",
           "automation_grace_seconds": "Cooldown after automated change (minutes)",
+          "override_confirm_seconds": "Override confirmation delay (minutes)",
           "fan_mode": "Fan Control Mode",
           "fan_entity": "Fan Entity",
           "natural_vent_delta": "Natural ventilation window (\u00b0F above comfort)"
@@ -194,6 +197,7 @@
           "sensor_debounce_seconds": "How long a door/window must stay open before HVAC is paused. Prevents brief openings from triggering a pause.",
           "manual_grace_seconds": "How long to wait after you manually adjust the thermostat before Climate Advisor resumes automation.",
           "automation_grace_seconds": "How long to wait after Climate Advisor makes an automated change before allowing another one.",
+          "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode. 'Both' uses both.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
           "natural_vent_delta": "When a door or window opens and outdoor temperature is within this many degrees above your cooling comfort setpoint, Climate Advisor uses the fan for natural ventilation instead of pausing HVAC. Default is 3\u00b0F."

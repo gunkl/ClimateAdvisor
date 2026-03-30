@@ -80,6 +80,7 @@ from .const import (
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_TEMP_DELTA,
+    EVENT_LOG_CAP,
     FAN_MODE_DISABLED,
     MAX_THERMAL_RATE_F_PER_HOUR,
     MAX_WEATHER_BIAS_APPLY_F,
@@ -134,6 +135,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self.automation_engine._revisit_callback = self.async_request_refresh
         self.automation_engine._sensor_check_callback = self._any_sensor_open
+        self.automation_engine._emit_event_callback = self._emit_event
+
+        # Event log ring buffer (Issue #76) — timestamped automation events for debug download
+        self._event_log: list[dict] = []
 
         # AI subsystem (only if enabled and API key present)
         self.claude_client: ClaudeAPIClient | None = None
@@ -1467,6 +1472,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_state.state,
                     new_state.state,
                 )
+                self._emit_event(
+                    "override_detected",
+                    {
+                        "old_mode": old_state.state,
+                        "new_mode": new_state.state,
+                        "classification_mode": (
+                            self._current_classification.hvac_mode if self._current_classification else None
+                        ),
+                        "source": "pause",
+                    },
+                )
                 await self.automation_engine.handle_manual_override_during_pause()
                 self._cancel_all_debounce_timers()
             else:
@@ -1492,6 +1508,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 old_state.state,
                 new_state.state,
                 self._current_classification.hvac_mode,
+            )
+            self._emit_event(
+                "override_detected",
+                {
+                    "old_mode": old_state.state,
+                    "new_mode": new_state.state,
+                    "classification_mode": self._current_classification.hvac_mode,
+                    "source": "normal",
+                },
             )
             self.automation_engine.handle_manual_override()
 
@@ -1714,6 +1739,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         return "No action needed right now. Automation is handling it."
 
+    def _emit_event(self, event_type: str, data: dict) -> None:
+        """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
+        entry: dict[str, Any] = {"time": dt_util.now().isoformat(), "type": event_type, **data}
+        self._event_log.append(entry)
+        if len(self._event_log) > EVENT_LOG_CAP:
+            self._event_log.pop(0)
+
     def _compute_automation_status(self) -> str:
         """Compute the current automation status string."""
         if not self._automation_enabled:
@@ -1725,6 +1757,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "natural ventilation"
         if self.automation_engine.is_paused_by_door:
             return "paused — door/window open"
+        if self.automation_engine._override_confirm_pending:
+            return "override pending (confirming...)"
         if self.automation_engine._grace_active:
             if self.automation_engine._resumed_from_pause:
                 return "resumed — door/window override"

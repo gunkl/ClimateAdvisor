@@ -23,10 +23,12 @@ from custom_components.climate_advisor.const import (
     ATTR_DAY_TYPE,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_MANUAL_GRACE_PERIOD,
+    CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
     CONFIG_METADATA,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DOMAIN,
 )
@@ -94,7 +96,7 @@ class TestAPIViewList:
     """Test the API_VIEWS registry."""
 
     def test_correct_count(self):
-        assert len(API_VIEWS) == 15
+        assert len(API_VIEWS) == 16
 
     def test_all_are_callable(self):
         for view_cls in API_VIEWS:
@@ -174,6 +176,7 @@ class TestConfigViewDisplayTransform:
         CONF_SENSOR_DEBOUNCE,
         CONF_MANUAL_GRACE_PERIOD,
         CONF_AUTOMATION_GRACE_PERIOD,
+        CONF_OVERRIDE_CONFIRM_PERIOD,
     )
 
     def test_seconds_keys_have_display_transform(self):
@@ -190,6 +193,7 @@ class TestConfigViewDisplayTransform:
             (DEFAULT_SENSOR_DEBOUNCE_SECONDS, 5),
             (DEFAULT_MANUAL_GRACE_SECONDS, 30),
             (DEFAULT_AUTOMATION_GRACE_SECONDS, 5),
+            (DEFAULT_OVERRIDE_CONFIRM_SECONDS, 10),
         ]
         for seconds, expected_minutes in cases:
             assert seconds // 60 == expected_minutes

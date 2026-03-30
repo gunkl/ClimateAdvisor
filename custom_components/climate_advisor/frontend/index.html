@@ -426,8 +426,9 @@
     </div>
     <div id="ai-report-loading" class="loading" style="display:none">Generating report... this may take 15-30 seconds.</div>
     <div id="ai-report-content" style="display:none"></div>
-    <div id="ai-report-actions" style="display:none;margin-top:12px">
+    <div id="ai-report-actions" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap">
       <button class="btn secondary" onclick="copyAIReport()" style="font-size:0.8rem">Copy for Bug Report</button>
+      <button class="btn secondary" onclick="downloadFullLogs()" style="font-size:0.8rem">Download Full Logs</button>
     </div>
   </div>
 
@@ -1252,7 +1253,7 @@
     });
 
     content.innerHTML = html;
-    actions.style.display = 'block';
+    actions.style.display = 'flex';
   }
 
   function escapeHtml(text) {
@@ -1304,6 +1305,32 @@
     ta.select();
     document.execCommand('copy');
     document.body.removeChild(ta);
+  }
+
+  async function downloadFullLogs() {
+    const hoursEl = document.getElementById('ai-hours');
+    const hours = hoursEl ? parseInt(hoursEl.value, 10) || 24 : 24;
+    const btn = document.querySelector('#ai-report-actions .btn:last-child');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
+    try {
+      const data = await apiFetch('event_log?hours=' + hours);
+      const json = JSON.stringify(data, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStr = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = 'climate-advisor-logs-' + dateStr + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Failed to download logs: ' + e.message);
+    } finally {
+      if (btn) { btn.textContent = orig; btn.disabled = false; }
+    }
   }
 
   async function loadAIHistory() {
@@ -1398,6 +1425,7 @@
   // Expose AI tab functions to window for onclick handlers
   window.runAIReport = runAIReport;
   window.copyAIReport = copyAIReport;
+  window.downloadFullLogs = downloadFullLogs;
   window.showHistoryReport = showHistoryReport;
 
   // --- Initial load (retry until auth token is available) ---

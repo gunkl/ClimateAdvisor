@@ -122,6 +122,10 @@ FAN_MODE_HVAC = "hvac_fan"
 FAN_MODE_BOTH = "both"
 DEFAULT_FAN_MODE = FAN_MODE_DISABLED
 
+# Minimum fan runtime per hour (Issue #77)
+CONF_FAN_MIN_RUNTIME_PER_HOUR = "fan_min_runtime_per_hour"
+DEFAULT_FAN_MIN_RUNTIME_PER_HOUR = 0  # minutes; 0 = disabled
+
 # Natural ventilation mode (door/window open + outdoor air within comfort range)
 CONF_NATURAL_VENT_DELTA = "natural_vent_delta"
 DEFAULT_NATURAL_VENT_DELTA = 3.0
@@ -355,6 +359,16 @@ CONFIG_METADATA = {
         "description": (
             "The fan or switch entity to control for whole-house ventilation."
             " Only used when fan mode is 'whole_house_fan' or 'both'."
+        ),
+        "category": "fan",
+    },
+    "fan_min_runtime_per_hour": {
+        "label": "Fan Minimum Runtime Per Hour",
+        "description": (
+            "Minutes of fan runtime per hour (0 = disabled, 60 = always on)."
+            " Activates the fan for the specified duration each hour for air"
+            " circulation. The cycle start time is offset from the clock hour"
+            " based on when HA started."
         ),
         "category": "fan",
     },

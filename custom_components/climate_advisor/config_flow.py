@@ -31,6 +31,7 @@ from .const import (
     CONF_EMAIL_GRACE_REPAUSE,
     CONF_EMAIL_OCCUPANCY_HOME,
     CONF_FAN_ENTITY,
+    CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
@@ -59,6 +60,7 @@ from .const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
+    DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_FAN_MODE,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
@@ -414,6 +416,12 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_FAN_ENTITY,
                         description={"suggested_value": None},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["fan", "switch"])),
+                    vol.Optional(
+                        CONF_FAN_MIN_RUNTIME_PER_HOUR,
+                        default=DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode="box")
+                    ),
                 }
             ),
         )
@@ -803,6 +811,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         CONF_FAN_ENTITY,
                         description={"suggested_value": current.get(CONF_FAN_ENTITY)},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["fan", "switch"])),
+                    vol.Optional(
+                        CONF_FAN_MIN_RUNTIME_PER_HOUR,
+                        default=current.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode="box")
+                    ),
                 }
             ),
         )

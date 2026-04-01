@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 19, 14, 30, 0)
@@ -32,6 +32,7 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     ATTR_FAN_RUNNING,
     ATTR_FAN_RUNTIME,
     CONF_FAN_ENTITY,
+    CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
     DAY_TYPE_HOT,
     FAN_MODE_BOTH,
@@ -874,3 +875,149 @@ class TestFanSensorAttributes:
         """fan_running defaults to False when key is absent from coordinator data."""
         attrs = _fan_sensor_extra_state_attributes({ATTR_FAN_RUNTIME: 0.0})
         assert attrs["fan_running"] is False
+
+
+_PATCH_CALL_LATER = "custom_components.climate_advisor.automation.async_call_later"
+
+
+class TestMinFanRuntime:
+    """Tests for the minimum fan runtime per hour rolling cycle (Issue #77)."""
+
+    def test_cycle_on_activates_fan(self):
+        """_fan_cycle_on activates fan and stores a cancel token when feature is enabled."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 10,
+            }
+        )
+        cancel_mock = MagicMock()
+        with patch(_PATCH_CALL_LATER, return_value=cancel_mock) as mock_later:
+            asyncio.run(engine._fan_cycle_on())
+        engine.hass.services.async_call.assert_called()
+        assert engine._fan_min_runtime_active is True
+        mock_later.assert_called_once()
+        assert engine._fan_min_cycle_cancel is cancel_mock
+
+    def test_cycle_on_skips_when_zero(self):
+        """_fan_cycle_on does nothing when min_runtime is 0."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 0,
+            }
+        )
+        asyncio.run(engine._fan_cycle_on())
+        engine.hass.services.async_call.assert_not_called()
+        assert engine._fan_min_runtime_active is False
+
+    def test_cycle_on_skips_when_fan_mode_disabled(self):
+        """_fan_cycle_on does nothing when CONF_FAN_MODE is disabled."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_DISABLED,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 10,
+            }
+        )
+        asyncio.run(engine._fan_cycle_on())
+        engine.hass.services.async_call.assert_not_called()
+        assert engine._fan_min_runtime_active is False
+
+    def test_cycle_on_skips_when_override_active(self):
+        """_fan_cycle_on does nothing if fan override is active."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 10,
+            }
+        )
+        engine._fan_override_active = True
+        asyncio.run(engine._fan_cycle_on())
+        engine.hass.services.async_call.assert_not_called()
+        assert engine._fan_min_runtime_active is False
+
+    def test_cycle_on_retries_when_fan_already_running(self):
+        """_fan_cycle_on schedules a 60-min retry without activation when fan is already on."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 10,
+            }
+        )
+        engine._fan_active = True
+        cancel_mock = MagicMock()
+        with patch(_PATCH_CALL_LATER, return_value=cancel_mock) as mock_later:
+            asyncio.run(engine._fan_cycle_on())
+        engine.hass.services.async_call.assert_not_called()
+        assert engine._fan_min_runtime_active is False
+        # Retry is scheduled for 60 * 60 seconds
+        mock_later.assert_called_once()
+        assert mock_later.call_args[0][1] == 60 * 60
+
+    def test_cycle_on_no_deactivation_when_60_min(self):
+        """_fan_cycle_on with min_runtime=60 activates fan and schedules no deactivation."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 60,
+            }
+        )
+        with patch(_PATCH_CALL_LATER) as mock_later:
+            asyncio.run(engine._fan_cycle_on())
+        engine.hass.services.async_call.assert_called()
+        assert engine._fan_min_runtime_active is True
+        mock_later.assert_not_called()
+        assert engine._fan_min_cycle_cancel is None
+
+    def test_cycle_off_deactivates_fan_and_schedules_next_on(self):
+        """_fan_cycle_off deactivates fan and schedules next cycle after wait period."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 10,
+            }
+        )
+        engine._fan_min_runtime_active = True
+        engine._fan_active = True
+        engine._fan_on_since = "2026-03-19T14:20:00"
+        cancel_mock = MagicMock()
+        with patch(_PATCH_CALL_LATER, return_value=cancel_mock) as mock_later:
+            asyncio.run(engine._fan_cycle_off())
+        assert engine._fan_min_runtime_active is False
+        # Deactivation service call was made
+        engine.hass.services.async_call.assert_called()
+        # Next "on" is scheduled for (60 - 10) * 60 = 3000 seconds
+        mock_later.assert_called_once()
+        assert mock_later.call_args[0][1] == (60 - 10) * 60
+        assert engine._fan_min_cycle_cancel is cancel_mock
+
+    def test_override_stops_cycle(self):
+        """handle_fan_manual_override cancels any pending cycle timer."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 10,
+            }
+        )
+        cancel_mock = MagicMock()
+        engine._fan_min_cycle_cancel = cancel_mock
+        engine._fan_min_runtime_active = True
+        engine.handle_fan_manual_override()
+        cancel_mock.assert_called_once()
+        assert engine._fan_min_cycle_cancel is None
+        assert engine._fan_min_runtime_active is False
+
+    def test_start_cycles_cancels_old_and_starts_new(self):
+        """start_min_fan_runtime_cycles cancels existing timer before starting a new cycle."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+                CONF_FAN_MIN_RUNTIME_PER_HOUR: 5,
+            }
+        )
+        old_cancel = MagicMock()
+        engine._fan_min_cycle_cancel = old_cancel
+        engine._fan_min_runtime_active = True
+        with patch(_PATCH_CALL_LATER):
+            asyncio.run(engine.start_min_fan_runtime_cycles())
+        old_cancel.assert_called_once()  # old timer cancelled

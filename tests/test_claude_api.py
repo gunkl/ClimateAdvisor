@@ -444,7 +444,8 @@ class TestPersistentStats:
         client._budget.budget_month = 3
         client._rate_counters.auto_requests_today = 4
         client._rate_counters.manual_requests_today = 7
-        client._rate_counters.counter_date = date(2026, 3, 31)
+        today = date.today()
+        client._rate_counters.counter_date = today
 
         stats = client.get_persistent_stats()
 
@@ -457,7 +458,7 @@ class TestPersistentStats:
         assert client2._budget.budget_month == 3
         assert client2._rate_counters.auto_requests_today == 4
         assert client2._rate_counters.manual_requests_today == 7
-        assert client2._rate_counters.counter_date == date(2026, 3, 31)
+        assert client2._rate_counters.counter_date == today
 
     def test_empty_dict_restores_to_defaults(self):
         """Restoring from empty dict should not crash and should use defaults."""

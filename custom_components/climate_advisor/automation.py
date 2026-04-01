@@ -21,6 +21,7 @@ from .const import (
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
+    CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
@@ -30,6 +31,7 @@ from .const import (
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
+    DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
@@ -216,6 +218,10 @@ class AutomationEngine:
         self._override_confirm_time: str | None = None
         self._override_confirm_mode: str | None = None
 
+        # Minimum fan runtime per hour — rolling cycle (Issue #77)
+        self._fan_min_runtime_active: bool = False  # True if THIS feature activated the fan
+        self._fan_min_cycle_cancel: Any | None = None  # cancel token for pending on/off timer
+
         # Event log callback — set by coordinator after construction
         self._emit_event_callback: Any | None = None
 
@@ -354,6 +360,7 @@ class AutomationEngine:
 
     def handle_fan_manual_override(self) -> None:
         """Handle a manual fan state change — sets fan override flag + grace."""
+        self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_time = dt_util.now().isoformat()
         _LOGGER.warning(
@@ -371,6 +378,77 @@ class AutomationEngine:
             )
             self._fan_override_active = False
             self._fan_override_time = None
+            # Restart the min-runtime cycle that was suspended when override was set
+            self.hass.async_create_task(self.start_min_fan_runtime_cycles())
+
+    async def start_min_fan_runtime_cycles(self) -> None:
+        """Start rolling minimum fan runtime cycles (not clock-aligned).
+
+        Called once at coordinator startup and when fan override is cleared.
+        Cancels any existing cycle before starting a new one. The cycle
+        start time is offset from the clock hour by however many seconds
+        into the hour HA happened to start, so no two installs fire together.
+        """
+        self._stop_fan_min_runtime_cycles()
+        min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
+        if min_runtime <= 0 or self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_DISABLED:
+            return
+        await self._fan_cycle_on()
+
+    def _stop_fan_min_runtime_cycles(self) -> None:
+        """Cancel any pending min-runtime cycle timer and clear active flag."""
+        if self._fan_min_cycle_cancel:
+            self._fan_min_cycle_cancel()
+            self._fan_min_cycle_cancel = None
+        self._fan_min_runtime_active = False
+
+    async def _fan_cycle_on(self) -> None:
+        """Fan 'on' phase: activate fan, schedule off after min_runtime minutes."""
+        min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
+        if min_runtime <= 0 or self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_DISABLED:
+            return  # Feature disabled — stop cycling
+
+        if self._fan_override_active:
+            return  # User has control; cycle suspended until override cleared
+
+        if not self._fan_active:
+            await self._activate_fan(reason="min_runtime_cycle")
+            self._fan_min_runtime_active = True
+
+            if min_runtime >= 60:
+                return  # Always-on: fan stays on, no further scheduling
+
+            @callback
+            def _turn_off(_now: Any) -> None:
+                self._fan_min_cycle_cancel = None
+                self.hass.async_create_task(self._fan_cycle_off())
+
+            self._fan_min_cycle_cancel = async_call_later(self.hass, min_runtime * 60, _turn_off)
+        else:
+            # Fan already running for another reason — skip, retry in 60 minutes
+            @callback
+            def _retry(_now: Any) -> None:
+                self._fan_min_cycle_cancel = None
+                self.hass.async_create_task(self._fan_cycle_on())
+
+            self._fan_min_cycle_cancel = async_call_later(self.hass, 60 * 60, _retry)
+
+    async def _fan_cycle_off(self) -> None:
+        """Fan 'off' phase: deactivate fan, schedule next on after wait period."""
+        min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
+
+        if self._fan_min_runtime_active:
+            self._fan_min_runtime_active = False
+            await self._deactivate_fan(reason="min_runtime_cycle_complete")
+
+        wait_sec = max(0, (60 - min_runtime) * 60)
+
+        @callback
+        def _turn_on(_now: Any) -> None:
+            self._fan_min_cycle_cancel = None
+            self.hass.async_create_task(self._fan_cycle_on())
+
+        self._fan_min_cycle_cancel = async_call_later(self.hass, wait_sec, _turn_on)
 
     def handle_manual_override(self) -> None:
         """Handle a manual thermostat change (outside of door/window pause).
@@ -1434,6 +1512,8 @@ class AutomationEngine:
         self._fan_on_since = state.get("fan_on_since")
         self._fan_override_active = state.get("fan_override_active", False)
         self._fan_override_time = state.get("fan_override_time")
+        self._fan_min_runtime_active = state.get("fan_min_runtime_active", False)
+        # _fan_min_cycle_cancel is not serializable; cycle restarts fresh from coordinator startup
         last_notified = state.get("last_welcome_home_notified")
         if last_notified:
             try:
@@ -1477,6 +1557,7 @@ class AutomationEngine:
             "fan_on_since": self._fan_on_since,
             "fan_override_active": self._fan_override_active,
             "fan_override_time": self._fan_override_time,
+            "fan_min_runtime_active": self._fan_min_runtime_active,
             "last_welcome_home_notified": (
                 self._last_welcome_home_notified.isoformat() if self._last_welcome_home_notified else None
             ),
@@ -1494,6 +1575,7 @@ class AutomationEngine:
     def cleanup(self) -> None:
         """Remove all active listeners and cancel pending timers."""
         self._cancel_grace_timers()
+        self._stop_fan_min_runtime_cycles()
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None

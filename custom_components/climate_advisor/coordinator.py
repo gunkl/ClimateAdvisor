@@ -292,6 +292,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             )
 
+        # Start minimum fan runtime rolling cycle (Issue #77) — not clock-aligned
+        await self.automation_engine.start_min_fan_runtime_cycles()
+
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
 
     async def async_restore_state(self) -> None:

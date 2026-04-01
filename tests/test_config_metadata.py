@@ -32,6 +32,7 @@ EXPECTED_KEYS = {
     "automation_grace_notify",
     "fan_mode",
     "fan_entity",
+    "fan_min_runtime_per_hour",
     "wake_time",
     "sleep_time",
     "briefing_time",

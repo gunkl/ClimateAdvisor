@@ -16,6 +16,7 @@ Usage:
   python3 tools/simulate.py -s NAME      # run specific scenario (any state)
   python3 tools/simulate.py --pending    # run all pending scenarios (for review)
   python3 tools/simulate.py --list       # list all scenarios by state
+  python3 tools/simulate.py --cases      # summary table of all scenarios across all states
   python3 tools/simulate.py -v           # verbose (show full decision timeline)
 
 Lifecycle:
@@ -260,7 +261,7 @@ def _outcome_at(decisions: list[Decision], iso_time: str) -> str:
     return matching[-1].outcome if matching else "no_decision"
 
 
-def run_scenario(scenario_file: Path) -> dict:
+def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
     """Run a single scenario file and return a results dict."""
     with open(scenario_file) as f:
         scenario = json.load(f)
@@ -270,7 +271,21 @@ def run_scenario(scenario_file: Path) -> dict:
         sim.process_event(event)
 
     assertion_results = []
+    any_real_assertion = False
     for a in scenario.get("assertions", []):
+        if a.get("simulator_support") is False:
+            assertion_results.append(
+                {
+                    "at": a["at"],
+                    "expected": a.get("expect", ""),
+                    "actual": None,
+                    "pass": None,
+                    "skipped": True,
+                    "reason": "event type not simulated",
+                }
+            )
+            continue
+        any_real_assertion = True
         actual = _outcome_at(sim.decisions, a["at"])
         assertion_results.append(
             {
@@ -278,17 +293,23 @@ def run_scenario(scenario_file: Path) -> dict:
                 "expected": a["expect"],
                 "actual": actual,
                 "pass": actual == a["expect"],
+                "skipped": False,
                 "reason": a.get("reason", ""),
             }
         )
+
+    real_results = [r for r in assertion_results if not r.get("skipped")]
+    passed = all(r["pass"] for r in real_results) if any_real_assertion else None
 
     return {
         "name": scenario.get("name", scenario_file.stem),
         "description": scenario.get("description", ""),
         "issue": scenario.get("issue"),
+        "verdict": scenario.get("verdict"),
+        "state": state,
         "decisions": [{"time": d.time, "outcome": d.outcome, "reason": d.reason} for d in sim.decisions],
         "assertions": assertion_results,
-        "passed": all(r["pass"] for r in assertion_results) if assertion_results else None,
+        "passed": passed,
     }
 
 
@@ -297,20 +318,45 @@ def run_scenario(scenario_file: Path) -> dict:
 # ------------------------------------------------------------------
 
 
+def _status_label(result: dict) -> str:
+    """Return the display status string for a result, accounting for pending-fix expected fails."""
+    passed = result["passed"]
+    state = result.get("state")
+    verdict = result.get("verdict") or {}
+    verdict_type = verdict.get("type")
+
+    if state == "pending-fix" and verdict_type == "negative":
+        if passed is False:
+            return "EXPECTED FAIL"
+        if passed is True:
+            return "PASS"
+
+    if passed is True:
+        return "PASS"
+    if passed is False:
+        return "FAIL"
+    return "SKIP (no assertions)"
+
+
 def print_result(result: dict, verbose: bool = False) -> None:
     """Print simulation result in human-readable form."""
-    if result["passed"] is True:
-        status = "PASS"
-    elif result["passed"] is False:
-        status = "FAIL"
-    else:
-        status = "SKIP (no assertions)"
+    status = _status_label(result)
+    verdict = result.get("verdict") or {}
 
     issue_tag = f" [#{result['issue']}]" if result.get("issue") else ""
     print(f"\n{'=' * 60}")
     print(f"Scenario: {result['name']}{issue_tag}")
     print(f"  {result['description']}")
+
+    if verdict:
+        verdict_type = verdict.get("type", "")
+        summary = verdict.get("summary", "")
+        print(f"  Verdict: {verdict_type} — {summary}")
+
     print(f"  Status: {status}")
+
+    if status == "PASS" and result.get("state") == "pending-fix":
+        print("  NOTE: pending-fix scenario now passes — consider promoting to golden/")
 
     if verbose and result["decisions"]:
         print("\nDecision timeline:")
@@ -320,10 +366,58 @@ def print_result(result: dict, verbose: bool = False) -> None:
     if result["assertions"]:
         print("\nAssertions:")
         for a in result["assertions"]:
-            icon = "[OK]  " if a["pass"] else "[FAIL]"
-            print(f"  {icon} at {a['at']}: expected={a['expected']!r} actual={a['actual']!r}")
-            if not a["pass"] and a["reason"]:
-                print(f"         {a['reason']}")
+            if a.get("skipped"):
+                print(f"  [SKIP] at {a['at']}: {a['reason']}")
+            elif a["pass"]:
+                print(f"  [OK]   at {a['at']}: expected={a['expected']!r} actual={a['actual']!r}")
+            else:
+                print(f"  [FAIL] at {a['at']}: expected={a['expected']!r} actual={a['actual']!r}")
+                if a["reason"]:
+                    print(f"         {a['reason']}")
+
+
+# ------------------------------------------------------------------
+# Cases summary
+# ------------------------------------------------------------------
+
+
+def print_cases_summary() -> None:
+    """Scan all directories and print a summary table of all scenarios."""
+    print("\nSCENARIO CASE SUMMARY")
+    print("======================")
+
+    for state, state_dir in STATE_DIRS.items():
+        if not state_dir.exists():
+            continue
+        files = sorted(state_dir.glob("*.json"))
+        if not files:
+            continue
+
+        print(f"\n{state.upper()} ({len(files)} scenario{'s' if len(files) != 1 else ''})")
+
+        for f in files:
+            try:
+                result = run_scenario(f, state=state)
+            except (json.JSONDecodeError, OSError, KeyError):
+                print(f"  [ERROR] {f.stem}: unreadable or invalid")
+                continue
+
+            status = _status_label(result)
+            verdict = result.get("verdict") or {}
+            verdict_type = verdict.get("type", "")
+            issue_tag = f" #{result['issue']}" if result.get("issue") else ""
+
+            verdict_tag = f" [{verdict_type}]" if verdict_type else ""
+            print(f"  [{status}]{verdict_tag} {result['name']}{issue_tag}")
+            print(f"         {result['description']}")
+
+            if verdict_type == "negative":
+                observed = verdict.get("observed_behavior", "")
+                expected = verdict.get("expected_behavior", "")
+                if observed:
+                    print(f"         Observed: {observed}")
+                if expected:
+                    print(f"         Expected: {expected}")
 
 
 # ------------------------------------------------------------------
@@ -341,11 +435,17 @@ def main() -> int:
     )
     parser.add_argument("--pending", action="store_true", help="Run all pending scenarios (for review)")
     parser.add_argument("--list", action="store_true", dest="list_all", help="List all scenarios by state")
+    parser.add_argument("--cases", action="store_true", help="Show summary table of all scenarios across all states")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show full decision timeline for each scenario")
     args = parser.parse_args()
 
     for d in STATE_DIRS.values():
         d.mkdir(parents=True, exist_ok=True)
+
+    # Cases summary mode
+    if args.cases:
+        print_cases_summary()
+        return 0
 
     # List mode
     if args.list_all:
@@ -359,7 +459,9 @@ def main() -> int:
                             s = json.load(fh)
                         desc = s.get("description", "")[:70]
                         issue = f" [#{s['issue']}]" if s.get("issue") else ""
-                        print(f"  {f.stem}{issue}: {desc}")
+                        verdict = s.get("verdict") or {}
+                        verdict_tag = f" [{verdict['type']}]" if verdict.get("type") else ""
+                        print(f"  {f.stem}{issue}{verdict_tag}: {desc}")
                     except (json.JSONDecodeError, OSError):
                         print(f"  {f.stem}: [unreadable]")
         return 0
@@ -374,9 +476,11 @@ def main() -> int:
                 for f in sorted(d.glob("*.json")):
                     print(f"  [{state}] {f.stem}")
             return 1
-        result = run_scenario(found[0])
+        scenario_path, scenario_state = found
+        result = run_scenario(scenario_path, state=scenario_state)
         print_result(result, verbose=args.verbose)
-        return 0 if result["passed"] is not False else 1
+        status = _status_label(result)
+        return 0 if status != "FAIL" else 1
 
     # Run a batch (golden by default, pending with --pending)
     source_key = "pending" if args.pending else "golden"
@@ -389,14 +493,14 @@ def main() -> int:
             print("  Promote a scenario from pending/ to golden/ after review.")
         return 0
 
-    results = [run_scenario(f) for f in files]
+    results = [run_scenario(f, state=source_key) for f in files]
     for r in results:
         print_result(r, verbose=args.verbose)
 
     total = len(results)
     passed = sum(1 for r in results if r["passed"] is True)
-    failed = sum(1 for r in results if r["passed"] is False)
-    skipped = total - passed - failed
+    failed = sum(1 for r in results if _status_label(r) == "FAIL")
+    skipped = sum(1 for r in results if r["passed"] is None)
 
     print(f"\n{'=' * 60}")
     summary = f"{passed}/{total} {source_key} scenarios passed"

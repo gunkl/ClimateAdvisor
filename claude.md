@@ -155,7 +155,7 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 
 - **`@callback` decorator** — Is a `MagicMock` in the test mock layer and swallows decorated functions. If a test needs to invoke a `@callback`-decorated inner function (e.g., timer callbacks), patch it: `patch("...coordinator.callback", side_effect=lambda fn: fn)`
 
-#### Testing Sensor Attributes
+#### Testing Sensor Attributes and API Views
 
 **Sensor entity classes (`ClimateAdvisorBaseSensor` subclasses) CANNOT be directly instantiated in test files that use the lightweight HA module stubs** (e.g., `test_fan_control.py`, `test_contact_status.py`). Importing `sensor.py` in that environment causes a metaclass conflict:
 ```
@@ -163,6 +163,20 @@ TypeError: metaclass conflict: the metaclass of a derived class must be a (non-s
 ```
 
 **Pattern to follow**: Replicate the `extra_state_attributes` logic as a plain helper function in the test file and test that directly. Reference implementations: `test_fan_control.py` (`_fan_sensor_extra_state_attributes` / `TestFanSensorAttributes`), `test_contact_status.py` (`_compute_contact_status`).
+
+**`HomeAssistantView` subclasses (API views) have the same metaclass constraint.** Do NOT try to instantiate `ClimateAdvisorRespondSuggestionView` or similar view classes in tests. Instead, replicate the validation and dispatch logic as a plain `_simulate_post()` helper function in the test file and test that directly. Reference implementation: `test_api_respond_suggestion.py`.
+
+#### Coordinator Class After test_occupancy.py Module Deletion
+
+**`test_occupancy.py` deletes `custom_components.climate_advisor.coordinator` from `sys.modules` and re-imports it.** If another test file holds a module-level reference to `ClimateAdvisorCoordinator` (e.g., `coord = ClimateAdvisorCoordinator`), any methods bound via `types.MethodType` will have stale `__globals__` pointing to the old module. Patches applied to the new module (e.g., `patch("...coordinator.async_call_later")`) won't be visible to those bound methods, causing `call_count == 0` failures that only appear in the full suite.
+
+**Pattern**: Use a `_get_coordinator_class()` helper that calls `importlib.import_module()` each time rather than holding a module-level reference:
+```python
+def _get_coordinator_class():
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    return mod.ClimateAdvisorCoordinator
+```
+Call this inside every stub factory function before `object.__new__()` and `types.MethodType()`. Reference implementation: `tests/test_daily_record_accuracy.py`.
 
 #### Module-Level sys.modules Mocking
 
@@ -376,6 +390,8 @@ For plans touching 4+ files, structure execution as:
 - **Verification agent (Opus 4.6)** — runs `ruff check` then the full test suite after each phase; reports failures back to the coordinator for fixing before the next phase begins
 
 Phases that modify different files with no shared dependencies can run in parallel. Phases with dependencies must be sequential.
+
+**The plan file MUST include an "Execution Structure" section before `ExitPlanMode` is called.** This section defines: which agents run in parallel (grouped by file independence), which files each agent owns, and what verification steps run between groups. Without this section, the parallel execution pattern cannot be validated — the user will push back. Use the table format: `Agent | Phases | Files` with a `→ Verification agent` row between groups.
 
 After the final test phase passes, always run an Opus 4.6 verification agent to review all modified files for correctness, completeness, security, and logging coverage before handing off to the user. Do not skip this step or wait to be asked.
 

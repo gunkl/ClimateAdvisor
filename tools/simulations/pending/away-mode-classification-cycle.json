@@ -1,0 +1,86 @@
+{
+  "name": "away-mode-classification-cycle",
+  "description": "User leaves home; away setback applied; 30-min classification cycle fires; setback must be maintained (not overwritten with comfort)",
+  "source": "issue-report",
+  "issue": 85,
+  "notes": [
+    "Before Issue #85, apply_classification() would overwrite away setback with comfort temps every 30 minutes.",
+    "This scenario verifies that the classification cycle respects the away occupancy mode.",
+    "Also verifies morning wakeup is skipped when away.",
+    "Promote to golden/ once production validation confirms correct behavior."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80
+  },
+  "events": [
+    {
+      "time": "2026-04-05T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "morning classification — cool mode at 75F comfort"
+    },
+    {
+      "time": "2026-04-05T09:30:00",
+      "type": "occupancy_change",
+      "mode": "away",
+      "note": "user leaves home — should apply cool setback (80F) after delay"
+    },
+    {
+      "time": "2026-04-05T10:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "30-min classification cycle fires while away — must NOT overwrite setback with comfort"
+    },
+    {
+      "time": "2026-04-05T10:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "another classification cycle — should still maintain setback"
+    },
+    {
+      "time": "2026-04-05T14:00:00",
+      "type": "occupancy_change",
+      "mode": "home",
+      "note": "user returns — should restore comfort (75F)"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T08:00:00",
+      "expect": "set_temperature",
+      "temperature": 75,
+      "reason": "initial classification — user is home, comfort_cool applies"
+    },
+    {
+      "at": "2026-04-05T09:45:00",
+      "expect": "set_temperature",
+      "temperature": 80,
+      "reason": "away setback applied after occupancy delay — setback_cool (80F)"
+    },
+    {
+      "at": "2026-04-05T10:00:00",
+      "expect": "set_temperature",
+      "temperature": 80,
+      "reason": "classification cycle while away — reapplies setback (80F), NOT comfort (75F)"
+    },
+    {
+      "at": "2026-04-05T10:30:00",
+      "expect": "set_temperature",
+      "temperature": 80,
+      "reason": "another classification cycle — still setback (80F)"
+    },
+    {
+      "at": "2026-04-05T14:00:00",
+      "expect": "set_temperature",
+      "temperature": 75,
+      "reason": "user returns home — comfort_cool (75F) restored"
+    }
+  ],
+  "verdict": "pending"
+}

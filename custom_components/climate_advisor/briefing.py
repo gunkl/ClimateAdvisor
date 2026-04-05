@@ -108,6 +108,7 @@ def generate_briefing(
         temp_unit=temp_unit,
         bedtime_setback_heat=bedtime_setback_heat,
         bedtime_setback_cool=bedtime_setback_cool,
+        occupancy_mode=occupancy_mode,
     )
 
     if verbosity == "tldr_only":
@@ -223,6 +224,7 @@ def _generate_tldr_table(
     temp_unit: str = FAHRENHEIT,
     bedtime_setback_heat: float | None = None,
     bedtime_setback_cool: float | None = None,
+    occupancy_mode: str = "home",
 ) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
@@ -244,8 +246,17 @@ def _generate_tldr_table(
     # --- Day Type row ---
     day_type_val = f"{c.day_type.title()} ({format_temp(c.today_high, temp_unit)})"
 
-    # --- HVAC Mode row ---
-    if c.hvac_mode == "cool":
+    # --- HVAC Mode row (Issue #85: show setback temps when away/vacation) ---
+    setback_heat = config.get("setback_heat", 62)
+    setback_cool = config.get("setback_cool", 80)
+    if occupancy_mode in ("away", "vacation"):
+        if c.hvac_mode == "cool":
+            hvac_val = f"Cool at {format_temp(setback_cool, temp_unit)} (setback — {occupancy_mode})"
+        elif c.hvac_mode == "heat":
+            hvac_val = f"Heat at {format_temp(setback_heat, temp_unit)} (setback — {occupancy_mode})"
+        else:
+            hvac_val = f"Off — {occupancy_mode}"
+    elif c.hvac_mode == "cool":
         hvac_val = f"Cool at {format_temp(comfort_cool, temp_unit)}"
     elif c.hvac_mode == "heat":
         hvac_val = f"Heat at {format_temp(comfort_heat, temp_unit)}"
@@ -293,10 +304,21 @@ def _generate_tldr_table(
     rows = [
         f"  {'Day Type:':<{label_w}} {day_type_val}",
         f"  {'HVAC Mode:':<{label_w}} {hvac_val}",
-        f"  {'Windows:':<{label_w}} {windows_val}",
-        f"  {'Bedtime Setback:':<{label_w}} {bedtime_val}",
-        f"  {'Tomorrow:':<{label_w}} {tomorrow_val}",
     ]
+    # Issue #85: show occupancy status when not home
+    if occupancy_mode == "away":
+        rows.append(f"  {'Occupancy:':<{label_w}} Away — setback active")
+    elif occupancy_mode == "vacation":
+        rows.append(f"  {'Occupancy:':<{label_w}} Vacation — deep setback active")
+    elif occupancy_mode == "guest":
+        rows.append(f"  {'Occupancy:':<{label_w}} Guest — comfort maintained")
+    rows.extend(
+        [
+            f"  {'Windows:':<{label_w}} {windows_val}",
+            f"  {'Bedtime Setback:':<{label_w}} {bedtime_val}",
+            f"  {'Tomorrow:':<{label_w}} {tomorrow_val}",
+        ]
+    )
     return rows
 
 

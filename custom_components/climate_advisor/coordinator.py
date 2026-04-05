@@ -405,8 +405,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._automation_enabled = state.get("automation_enabled", True)
         self.automation_engine.dry_run = not self._automation_enabled
 
-        # Occupancy state
+        # Occupancy state — sync to engine so guards are active from startup (Issue #85)
         self._occupancy_mode = state.get("occupancy_mode", OCCUPANCY_HOME)
+        self.automation_engine.set_occupancy_mode(self._occupancy_mode)
         away_since = state.get("occupancy_away_since")
         if away_since:
             try:
@@ -685,6 +686,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._occupancy_away_since = None
 
         self._occupancy_mode = new_mode
+        # Issue #85: sync occupancy mode to engine immediately so guards
+        # take effect even before the delayed away timer fires
+        self.automation_engine.set_occupancy_mode(new_mode)
 
         # Call appropriate automation handler
         if new_mode == OCCUPANCY_VACATION:
@@ -1229,6 +1233,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             bedtime_setback_heat=bedtime_setback_heat,
             bedtime_setback_cool=bedtime_setback_cool,
             adaptive_thermal_active=adaptive_thermal_active,
+            occupancy_mode=self._occupancy_mode,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 

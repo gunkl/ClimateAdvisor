@@ -46,6 +46,10 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    OCCUPANCY_AWAY,
+    OCCUPANCY_GUEST,
+    OCCUPANCY_HOME,
+    OCCUPANCY_VACATION,
     REVISIT_DELAY_SECONDS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -236,6 +240,9 @@ class AutomationEngine:
         # Thermal model — set by coordinator before apply_classification()
         self._thermal_model: dict = {}
 
+        # Occupancy mode — synced by coordinator (Issue #85)
+        self._occupancy_mode: str = OCCUPANCY_HOME
+
     async def _notify(self, message: str, title: str, notification_type: str) -> None:
         """Send a notification via configured channels, filtered by per-event preferences."""
         if self.dry_run:
@@ -258,6 +265,17 @@ class AutomationEngine:
     def natural_vent_active(self) -> bool:
         """Whether natural ventilation mode is currently active."""
         return self._natural_vent_active
+
+    _VALID_OCCUPANCY_MODES = {OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST}
+
+    def set_occupancy_mode(self, mode: str) -> None:
+        """Update the engine's occupancy mode (synced by coordinator)."""
+        if mode not in self._VALID_OCCUPANCY_MODES:
+            _LOGGER.warning("Invalid occupancy mode %r — defaulting to home", mode)
+            mode = OCCUPANCY_HOME
+        if mode != self._occupancy_mode:
+            _LOGGER.info("Occupancy mode changed: %s → %s", self._occupancy_mode, mode)
+        self._occupancy_mode = mode
 
     def update_outdoor_temp(self, temp: float | None) -> None:
         """Update the cached outdoor temperature used for natural vent decisions."""
@@ -581,6 +599,15 @@ class AutomationEngine:
             )
             return
 
+        # Issue #85: respect occupancy mode — don't overwrite setback with comfort
+        if self._occupancy_mode == OCCUPANCY_VACATION:
+            _LOGGER.info("Vacation mode — skipping classification temp change (deep setback preserved)")
+            return
+        if self._occupancy_mode == OCCUPANCY_AWAY:
+            _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
+            await self.handle_occupancy_away()
+            return
+
         unit = self.config.get("temp_unit", "fahrenheit")
         _LOGGER.warning(
             "Applying classification: %s (trend: %s %s)",
@@ -668,7 +695,21 @@ class AutomationEngine:
         self._record_action(f"Set temp to {format_temp(temperature, unit)}", reason)
 
     async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str) -> None:
-        """Set temperature based on the classification and current period."""
+        """Set temperature based on the classification and current period.
+
+        Safety net: redirects to setback handlers when occupancy is away/vacation
+        so that any code path calling this function respects occupancy mode (Issue #85).
+        """
+        # Issue #85: redirect to setback when not home/guest
+        if self._occupancy_mode == OCCUPANCY_AWAY:
+            _LOGGER.info("Away mode — redirecting to setback instead of comfort (%s)", reason)
+            await self.handle_occupancy_away()
+            return
+        if self._occupancy_mode == OCCUPANCY_VACATION:
+            _LOGGER.info("Vacation mode — redirecting to deep setback instead of comfort (%s)", reason)
+            await self.handle_occupancy_vacation()
+            return
+
         unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             target = self.config["comfort_heat"]
@@ -1097,6 +1138,7 @@ class AutomationEngine:
 
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
+        self._occupancy_mode = OCCUPANCY_AWAY
         c = self._current_classification
         if not c:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
@@ -1131,6 +1173,7 @@ class AutomationEngine:
 
     async def handle_occupancy_home(self) -> None:
         """Handle someone returning — restore comfort."""
+        self._occupancy_mode = OCCUPANCY_HOME
         c = self._current_classification
         if not c:
             return
@@ -1176,6 +1219,7 @@ class AutomationEngine:
 
     async def handle_occupancy_vacation(self) -> None:
         """Handle vacation mode — apply deeper setback for extended away."""
+        self._occupancy_mode = OCCUPANCY_VACATION
         c = self._current_classification
         if not c:
             return
@@ -1206,6 +1250,11 @@ class AutomationEngine:
 
     async def handle_bedtime(self) -> None:
         """Apply bedtime setback."""
+        # Issue #85: vacation already has deeper setback — don't override it
+        if self._occupancy_mode == OCCUPANCY_VACATION:
+            _LOGGER.info("Vacation mode — skipping bedtime setback (vacation setback already active)")
+            return
+
         self.clear_manual_override()
 
         # Deactivate fan at bedtime (fan running overnight is noisy/wasteful)
@@ -1242,6 +1291,14 @@ class AutomationEngine:
 
     async def handle_morning_wakeup(self) -> None:
         """Restore comfort for morning wake-up."""
+        # Issue #85: skip comfort restore when nobody is home
+        if self._occupancy_mode not in (OCCUPANCY_HOME, OCCUPANCY_GUEST):
+            _LOGGER.info(
+                "Morning wakeup skipped — occupancy mode is '%s'",
+                self._occupancy_mode,
+            )
+            return
+
         self.clear_manual_override()
 
         # Deactivate fan if still running from overnight

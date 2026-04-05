@@ -101,6 +101,9 @@ Default values used in examples: `comfort_heat = 70`, `comfort_cool = 75`, `setb
 - Bedtime heat continues to incorporate `setback_modifier` on top of the computed depth.
 - `VACATION_SETBACK_EXTRA = 3` degrees beyond the normal setback.
 - Guest mode calls `handle_occupancy_home()` directly — no separate handler.
+- Morning wakeup is skipped when occupancy is `away` or `vacation` (Issue #85).
+- Bedtime setback is skipped when occupancy is `vacation` (vacation setback is deeper).
+- The daily briefing TLDR table shows setback temps and an occupancy status row when not home.
 
 ### 5a. Adaptive Bedtime Setback (`compute_bedtime_setback()`)
 
@@ -154,6 +157,21 @@ When multiple toggles are active simultaneously, the highest-priority mode wins.
 3. Else if **vacation** toggle is on → mode = `vacation`.
 4. Else if **home** toggle is **off** → mode = `away`.
 5. Else → mode = `home`.
+
+### 6a. Occupancy-Aware Automation Guards (Issue #85)
+
+The automation engine tracks `_occupancy_mode` internally (synced by the coordinator). All temperature-setting code paths check occupancy before applying comfort temps:
+
+| Code Path | Home/Guest | Away | Vacation |
+|---|---|---|---|
+| `apply_classification()` (30-min cycle) | Apply comfort temps | Reapply away setback | Skip entirely |
+| `handle_morning_wakeup()` | Restore comfort | Skip (no wakeup) | Skip (no wakeup) |
+| `handle_bedtime()` | Apply bedtime setback | Apply bedtime setback | Skip (vacation setback preserved) |
+| `_set_temperature_for_mode()` (safety net) | Apply comfort | Redirect → `handle_occupancy_away()` | Redirect → `handle_occupancy_vacation()` |
+
+The `_set_temperature_for_mode()` safety net catches all indirect callers (door/window resume, grace expiry, economizer deactivation) so comfort temps are never applied while away/vacation.
+
+**Test coverage:** `tests/test_occupancy_automation.py` — 18 tests covering all cells above.
 
 ---
 

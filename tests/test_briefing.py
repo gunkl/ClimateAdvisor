@@ -60,6 +60,7 @@ def _generate(classification: DayClassification, **kwargs) -> str:
         sleep_time=kwargs.get("sleep_time", DEFAULT_SLEEP),
         learning_suggestions=kwargs.get("learning_suggestions"),
         bedtime_setback_heat=kwargs.get("bedtime_setback_heat"),
+        occupancy_mode=kwargs.get("occupancy_mode", "home"),
     )
 
 
@@ -416,6 +417,66 @@ class TestLeavingHomeSection:
         result = _generate(c)
         low = result.lower()
         assert "leave" in low or "head out" in low or "hvac is off" in low or "nothing" in low
+
+
+class TestLeavingHomeSectionOccupancy:
+    """Issue #85: leaving home section should adapt to actual occupancy mode."""
+
+    def test_away_mode_shows_away_text(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="away")
+        low = result.lower()
+        assert "currently away" in low or "you're away" in low
+
+    def test_vacation_mode_shows_vacation_text(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="vacation")
+        low = result.lower()
+        assert "vacation" in low
+
+    def test_guest_mode_shows_guest_text(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="guest")
+        low = result.lower()
+        assert "guest" in low
+
+    def test_home_mode_shows_hypothetical(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="home")
+        low = result.lower()
+        assert "head out" in low or "leave" in low
+
+
+class TestTldrTableOccupancy:
+    """Issue #85: TLDR table should reflect occupancy state."""
+
+    def test_away_shows_setback_in_hvac_row(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="away")
+        assert "setback" in result.lower()
+
+    def test_away_shows_occupancy_row(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="away")
+        assert "Occupancy:" in result
+        assert "Away" in result
+
+    def test_vacation_shows_occupancy_row(self):
+        c = _make_classification("cold", today_high=40, today_low=20)
+        result = _generate(c, occupancy_mode="vacation")
+        assert "Occupancy:" in result
+        assert "Vacation" in result
+
+    def test_guest_shows_occupancy_row(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="guest")
+        assert "Occupancy:" in result
+        assert "Guest" in result
+
+    def test_home_no_occupancy_row(self):
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, occupancy_mode="home")
+        assert "Occupancy:" not in result
 
 
 class TestFreshAirSection:

@@ -350,13 +350,6 @@
 
 <div id="tab-debug" class="tab-content">
   <div class="card">
-    <h2>Learning Suggestions</h2>
-    <div id="suggestions-container">
-      <div class="loading">Loading...</div>
-    </div>
-  </div>
-
-  <div class="card">
     <h2>Automation State</h2>
     <div id="automation-state">
       <div class="loading">Loading...</div>
@@ -407,6 +400,14 @@
     <div id="ai-status-loading" class="loading">Loading...</div>
     <div id="ai-status-content" style="display:none">
       <div class="status-grid" id="ai-status-grid"></div>
+    </div>
+  </div>
+
+  <!-- Learning Suggestions Card -->
+  <div class="card">
+    <h2>💡 Learning Suggestions</h2>
+    <div id="suggestions-container">
+      <div class="loading">Loading...</div>
     </div>
   </div>
 
@@ -892,9 +893,46 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: action, suggestion_key: key }),
       });
-      loadLearning();
+      const actionsEl = document.getElementById(`suggestion-actions-${key}`);
+      if (actionsEl) {
+        const label = action === 'accept' ? '✓ Accepted' : '✓ Dismissed';
+        actionsEl.innerHTML = `
+          <span class="action-result show ok">${label}</span>
+          <div style="margin-top:8px;font-size:0.85em;color:#666;">
+            Was this diagnosis accurate?
+            <button class="btn success" style="padding:2px 8px;font-size:0.8em;margin-left:6px;" onclick="submitFeedback('${escapeHtml(key)}','correct')">✓ Correct</button>
+            <button class="btn danger" style="padding:2px 8px;font-size:0.8em;margin-left:4px;" onclick="submitFeedback('${escapeHtml(key)}','incorrect')">✗ Incorrect</button>
+          </div>`;
+      }
+      // Don't auto-reload here — let the feedback row stay visible until feedback is given or 8s pass
+      setTimeout(() => {
+        const card = document.getElementById(`suggestion-${key}`);
+        if (card) card.remove();
+        loadSuggestions();
+      }, 8000);
     } catch (e) {
       console.error('Suggestion response failed:', e);
+    }
+  };
+
+  window.submitFeedback = async function(key, verdict) {
+    try {
+      await apiFetch('respond_suggestion', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback: verdict, suggestion_key: key }),
+      });
+      const actionsEl = document.getElementById(`suggestion-actions-${key}`);
+      if (actionsEl) {
+        actionsEl.innerHTML = '<span class="action-result show ok">✓ Feedback recorded</span>';
+      }
+      setTimeout(() => {
+        const card = document.getElementById(`suggestion-${key}`);
+        if (card) card.remove();
+        loadSuggestions();
+      }, 1500);
+    } catch (e) {
+      console.error('Feedback submission failed:', e);
     }
   };
 
@@ -1026,31 +1064,58 @@
     `;
   }
 
+  async function loadSuggestions() {
+    try {
+      const data = await apiFetch('learning');
+      const suggestions = data.suggestions || [];
+      const container = document.getElementById('suggestions-container');
+      if (!container) return;
+      if (suggestions.length === 0) {
+        container.innerHTML = '<p>No pending suggestions.</p>';
+        return;
+      }
+      container.innerHTML = suggestions.map(item => {
+        const k = escapeHtml(item.key);
+        return `
+        <div class="suggestion-card" id="suggestion-${k}">
+          <p>${escapeHtml(item.text)}</p>
+          <div class="btn-group" id="suggestion-actions-${k}">
+            <button class="btn success" onclick="respondSuggestion('${k}','accept')">Accept</button>
+            <button class="btn secondary" onclick="respondSuggestion('${k}','dismiss')">Dismiss</button>
+          </div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      const container = document.getElementById('suggestions-container');
+      if (container) {
+        container.innerHTML = '<p style="color:var(--danger)">Failed to load: ' + e.message + '</p>';
+      }
+    }
+  }
+
   async function loadLearning() {
     try {
       const data = await apiFetch('learning');
-      const sugEl = document.getElementById('suggestions-container');
 
-      // Suggestions
+      // Suggestions (also rendered independently via loadSuggestions)
       const suggestions = data.suggestions || [];
-      if (suggestions.length === 0) {
-        sugEl.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">No pending suggestions.</p>';
-      } else {
-        // Generate simple keys from suggestion text
-        sugEl.innerHTML = suggestions.map((s, i) => {
-          const key = s.substring(0, 30).replace(/[^a-z0-9]/gi, '_').toLowerCase();
-          return `
-            <div class="suggestion-card">
-              <p>${s}</p>
-              <div class="btn-group">
-                <button class="btn success" style="padding:6px 14px;font-size:0.8rem"
-                  onclick="respondSuggestion('${key}','accept')">Accept</button>
-                <button class="btn secondary" style="padding:6px 14px;font-size:0.8rem"
-                  onclick="respondSuggestion('${key}','dismiss')">Dismiss</button>
+      const sugEl = document.getElementById('suggestions-container');
+      if (sugEl) {
+        if (suggestions.length === 0) {
+          sugEl.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">No pending suggestions.</p>';
+        } else {
+          sugEl.innerHTML = suggestions.map(item => {
+            const k = escapeHtml(item.key);
+            return `
+            <div class="suggestion-card" id="suggestion-${k}">
+              <p>${escapeHtml(item.text)}</p>
+              <div class="btn-group" id="suggestion-actions-${k}">
+                <button class="btn success" onclick="respondSuggestion('${k}','accept')">Accept</button>
+                <button class="btn secondary" onclick="respondSuggestion('${k}','dismiss')">Dismiss</button>
               </div>
-            </div>
-          `;
-        }).join('');
+            </div>`;
+          }).join('');
+        }
       }
 
       // Daily record — three columns
@@ -1085,8 +1150,8 @@
         `;
       }
     } catch (e) {
-      document.getElementById('suggestions-container').innerHTML =
-        '<p style="color:var(--danger)">Failed to load: ' + e.message + '</p>';
+      const sugEl = document.getElementById('suggestions-container');
+      if (sugEl) sugEl.innerHTML = '<p style="color:var(--danger)">Failed to load: ' + e.message + '</p>';
       document.getElementById('today-record').innerHTML = '';
       document.getElementById('yesterday-record').innerHTML = '';
       document.getElementById('tomorrow-plan').innerHTML = '';
@@ -1158,6 +1223,7 @@
     loadAIStatus();
     loadAIHistory();
     loadAISettings();
+    loadSuggestions();
   }
 
   async function loadAIStatus() {

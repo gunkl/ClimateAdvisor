@@ -204,7 +204,7 @@ def generate_briefing(
         for suggestion in learning_suggestions:
             lines.append(f"  \u2022 {suggestion}")
         lines.append("")
-        lines.append("Reply ACCEPT or DISMISS to any suggestion, or ignore to keep current behavior.")
+        lines.append("To respond to these suggestions, open the Climate Advisor dashboard and visit the AI tab.")
 
     briefing_text = "\n".join(lines)
     _LOGGER.debug(

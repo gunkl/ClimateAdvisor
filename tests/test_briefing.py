@@ -558,8 +558,7 @@ class TestLearningSuggestions:
         c = _make_classification("mild", today_high=68, today_low=48)
         suggestions = ["Test suggestion"]
         result = _generate(c, learning_suggestions=suggestions)
-        assert "ACCEPT" in result
-        assert "DISMISS" in result
+        assert "AI tab" in result
 
 
 # ---------------------------------------------------------------------------

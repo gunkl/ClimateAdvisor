@@ -210,12 +210,16 @@ class ClimateAdvisorLearningView(HomeAssistantView):
         if coordinator.today_record:
             today_record = asdict(coordinator.today_record)
 
+        suggestion_texts = coordinator.learning.generate_suggestions()
+        suggestion_keys = coordinator.learning.get_last_suggestion_keys()
+        suggestions = [{"key": k, "text": t} for k, t in zip(suggestion_keys, suggestion_texts, strict=False)]
+
         return self.json(
             {
                 "today_record": today_record,
                 "yesterday_record": coordinator.yesterday_record,
                 "tomorrow_plan": coordinator.tomorrow_plan,
-                "suggestions": coordinator.learning.generate_suggestions(),
+                "suggestions": suggestions,
                 "compliance": coordinator.learning.get_compliance_summary(),
                 "comfort_range_low": coordinator.config.get("comfort_heat", 70),
                 "comfort_range_high": coordinator.config.get("comfort_cool", 75),
@@ -280,22 +284,63 @@ class ClimateAdvisorRespondSuggestionView(HomeAssistantView):
 
         action = body.get("action")
         suggestion_key = body.get("suggestion_key")
+        feedback = body.get("feedback")
 
-        if action not in ("accept", "dismiss") or not suggestion_key:
+        # Validate feedback if present
+        if feedback is not None and feedback not in ("correct", "incorrect"):
             return self.json(
-                {"error": "Required: action (accept/dismiss), suggestion_key"},
+                {"error": "feedback must be 'correct' or 'incorrect'"},
                 status_code=400,
             )
 
+        # suggestion_key is required; action is required only when feedback is absent
+        if not suggestion_key:
+            return self.json(
+                {"error": "Required: suggestion_key"},
+                status_code=400,
+            )
+        if action is None and feedback is None:
+            return self.json(
+                {"error": "Required: action (accept/dismiss) or feedback (correct/incorrect)"},
+                status_code=400,
+            )
+        if action is not None and action not in ("accept", "dismiss"):
+            return self.json(
+                {"error": "action must be 'accept' or 'dismiss'"},
+                status_code=400,
+            )
+
+        # Handle feedback recording (independent of action)
+        if feedback is not None:
+            coordinator.learning.record_feedback(suggestion_key, feedback)
+            await hass.async_add_executor_job(coordinator.learning.save_state)
+
+        # Handle accept/dismiss action
         if action == "accept":
             changes = coordinator.learning.accept_suggestion(suggestion_key)
             await hass.async_add_executor_job(coordinator.learning.save_state)
             coordinator.config.update(changes)
+            # Persist valid config keys to the config entry so changes survive reload
+            valid_keys = set(CONFIG_METADATA.keys())
+            entry_changes = {k: v for k, v in changes.items() if k in valid_keys}
+            if entry_changes:
+                entries = hass.data.get(DOMAIN, {})
+                entry_id = next((eid for eid, c in entries.items() if c is coordinator), None)
+                if entry_id:
+                    config_entry = hass.config_entries.async_get_entry(entry_id)
+                    if config_entry:
+                        hass.config_entries.async_update_entry(
+                            config_entry,
+                            data={**config_entry.data, **entry_changes},
+                        )
             return self.json({"status": "ok", "changes": changes})
-        else:
+        elif action == "dismiss":
             coordinator.learning.dismiss_suggestion(suggestion_key)
             await hass.async_add_executor_job(coordinator.learning.save_state)
             return self.json({"status": "ok", "dismissed": suggestion_key})
+        else:
+            # feedback-only request
+            return self.json({"status": "ok"})
 
 
 class ClimateAdvisorConfigView(HomeAssistantView):

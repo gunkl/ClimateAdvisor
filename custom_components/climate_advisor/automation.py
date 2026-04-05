@@ -206,6 +206,7 @@ class AutomationEngine:
         self._fan_override_time: str | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
+        self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
 
         # Natural ventilation mode (Issue #73)
@@ -650,11 +651,15 @@ class AutomationEngine:
                 reason,
             )
             return
-        await self.hass.services.async_call(
-            "climate",
-            "set_temperature",
-            {"entity_id": self.climate_entity, "temperature": service_temp},
-        )
+        self._temp_command_pending = True
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                "set_temperature",
+                {"entity_id": self.climate_entity, "temperature": service_temp},
+            )
+        finally:
+            self._temp_command_pending = False
         _LOGGER.warning(
             "Set temperature to %s — %s",
             format_temp(temperature, unit),

@@ -334,6 +334,25 @@ class LearningEngine:
         pairs: list[tuple[str, str]] = []
         recently_dismissed = set(self._state.dismissed_suggestions)
 
+        # Build suppression set from feedback history (last 30 days)
+        cutoff_30 = datetime.now() - timedelta(days=30)
+        recently_accepted_or_incorrect: set[str] = set()
+        for entry in reversed(self._state.settings_history):
+            entry_type = entry.get("type")
+            ts_str = entry.get("timestamp", "")
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except (ValueError, TypeError):
+                continue
+            if ts < cutoff_30:
+                break  # history is chronological; once past cutoff we can stop
+            suggestion = entry.get("suggestion", "")
+            if entry_type == "feedback" and entry.get("verdict") == "incorrect":
+                recently_accepted_or_incorrect.add(suggestion)
+            elif entry_type is None and suggestion:
+                # Legacy accept entries (no "type" field) — treat as accepted
+                recently_accepted_or_incorrect.add(suggestion)
+
         # --- Pattern: Windows recommended but rarely opened ---
         window_days = [
             r for r in records if r.get("windows_recommended") and r.get("occupancy_mode", "home") != "vacation"
@@ -341,7 +360,11 @@ class LearningEngine:
         if len(window_days) >= 7:
             compliance = sum(1 for r in window_days if r.get("windows_opened")) / len(window_days)
             suggestion_key = "low_window_compliance"
-            if compliance < COMPLIANCE_THRESHOLD_LOW and suggestion_key not in recently_dismissed:
+            if (
+                compliance < COMPLIANCE_THRESHOLD_LOW
+                and suggestion_key not in recently_dismissed
+                and suggestion_key not in recently_accepted_or_incorrect
+            ):
                 pairs.append(
                     (
                         suggestion_key,
@@ -362,7 +385,7 @@ class LearningEngine:
         total_overrides = sum(r.get("manual_overrides", 0) for r in non_vacation)
         if total_overrides > 10:
             suggestion_key = "frequent_overrides"
-            if suggestion_key not in recently_dismissed:
+            if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
                 # Analyze override direction and timing from granular data
                 all_overrides: list[dict] = []
                 for r in non_vacation:
@@ -415,7 +438,7 @@ class LearningEngine:
             avg_runtime = sum(r.get("hvac_runtime_minutes", 0) for r in mild_warm_days) / len(mild_warm_days)
             if avg_runtime > 120:  # More than 2 hours on mild/warm days
                 suggestion_key = "high_runtime_mild_days"
-                if suggestion_key not in recently_dismissed:
+                if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
                     pairs.append(
                         (
                             suggestion_key,
@@ -432,7 +455,7 @@ class LearningEngine:
         short_away = [r for r in away_days if r.get("occupancy_away_minutes", 0) < 45]
         if len(short_away) > 5:
             suggestion_key = "short_departures"
-            if suggestion_key not in recently_dismissed:
+            if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
                 pairs.append(
                     (
                         suggestion_key,
@@ -448,7 +471,7 @@ class LearningEngine:
         violation_days = [r for r in non_vacation if r.get("comfort_violations_minutes", 0) > 30]
         if len(violation_days) > 5:
             suggestion_key = "comfort_violations"
-            if suggestion_key not in recently_dismissed:
+            if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
                 pairs.append(
                     (
                         suggestion_key,
@@ -463,7 +486,7 @@ class LearningEngine:
         pause_total = sum(r.get("door_window_pause_events", 0) for r in non_vacation)
         if pause_total > 20:
             suggestion_key = "frequent_door_pauses"
-            if suggestion_key not in recently_dismissed:
+            if suggestion_key not in recently_dismissed and suggestion_key not in recently_accepted_or_incorrect:
                 # Aggregate per-sensor pause data across 14-day window
                 sensor_totals: dict[str, int] = {}
                 for r in non_vacation:
@@ -504,6 +527,7 @@ class LearningEngine:
         if (
             thermal_model["confidence"] != "none"
             and "thermal_model_ready" not in recently_dismissed
+            and "thermal_model_ready" not in recently_accepted_or_incorrect
             and not any(s.get("key") == "thermal_model_ready" for s in self._state.active_suggestions)
         ):
             pairs.append(
@@ -523,6 +547,7 @@ class LearningEngine:
             weather_bias["confidence"] != "none"
             and abs(weather_bias["high_bias"]) >= 2.0
             and "forecast_bias_significant" not in recently_dismissed
+            and "forecast_bias_significant" not in recently_accepted_or_incorrect
             and not any(s.get("key") == "forecast_bias_significant" for s in self._state.active_suggestions)
         ):
             direction = "higher" if weather_bias["high_bias"] < 0 else "lower"
@@ -555,6 +580,20 @@ class LearningEngine:
         if len(self._state.dismissed_suggestions) > 100:
             self._state.dismissed_suggestions = self._state.dismissed_suggestions[-100:]
         _LOGGER.info("Learning suggestion dismissed — key=%s", suggestion_key)
+
+    def record_feedback(self, suggestion_key: str, verdict: str) -> None:
+        """Record whether a suggestion diagnosis was correct or incorrect."""
+        self._state.settings_history.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "type": "feedback",
+                "suggestion": suggestion_key,
+                "verdict": verdict,  # "correct" | "incorrect"
+            }
+        )
+        if len(self._state.settings_history) > 200:
+            self._state.settings_history = self._state.settings_history[-200:]
+        _LOGGER.info("Suggestion feedback recorded — key=%s verdict=%s", suggestion_key, verdict)
 
     def accept_suggestion(self, suggestion_key: str) -> dict[str, Any]:
         """Accept a suggestion and return the config changes to apply.

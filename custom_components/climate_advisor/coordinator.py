@@ -1407,19 +1407,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                                 self._today_record.door_pause_by_sensor.get(sensor_key, 0) + 1
                             )
 
-                            # Track window compliance during recommended window period
+                            # Track window compliance — credit any open during a windows-recommended day
                             c = self._current_classification
-                            if (
-                                c
-                                and c.windows_recommended
-                                and c.window_open_time
-                                and c.window_close_time
-                                and not self._today_record.windows_opened
-                            ):
-                                now_time = dt_util.now().time()
-                                if c.window_open_time <= now_time <= c.window_close_time:
-                                    self._today_record.windows_opened = True
-                                    self._today_record.window_open_actual_time = dt_util.now().isoformat()
+                            if c and c.windows_recommended and not self._today_record.windows_opened:
+                                self._today_record.windows_opened = True
+                                self._today_record.window_open_actual_time = dt_util.now().isoformat()
 
                             # Always track physical window opens (independent of recommendations)
                             if not self._today_record.windows_physically_opened:
@@ -1576,9 +1568,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         new_temp = new_state.attributes.get("temperature")
         old_temp = old_state.attributes.get("temperature")
 
-        if new_temp != old_temp and self._today_record:
-            # This is a rough heuristic — in production you'd track which
-            # changes were initiated by the integration vs. manual
+        if new_temp != old_temp and self._today_record and not self.automation_engine._temp_command_pending:
             self._today_record.manual_overrides += 1
             try:
                 old_val = float(old_temp)

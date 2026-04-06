@@ -1,0 +1,41 @@
+{
+  "name": "fan-cycle-on-off",
+  "description": "Fan min-runtime cycle: activates fan then deactivates it after the cycle phase completes",
+  "source": "synthetic",
+  "issue": 86,
+  "verdict": {
+    "type": "positive",
+    "summary": "Verifies fan_cycle_on activates the fan and fan_cycle_off deactivates it",
+    "observed_behavior": "fan_cycle_on at T+0, fan_cycle_off after min_runtime",
+    "expected_behavior": "fan_cycle_on at T+0, fan_cycle_off after min_runtime"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 10
+  },
+  "events": [
+    {
+      "time": "2026-04-05T09:00:00",
+      "type": "fan_cycle_on"
+    },
+    {
+      "time": "2026-04-05T09:10:00",
+      "type": "fan_cycle_off"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T09:00:00",
+      "expect": "fan_cycle_on",
+      "reason": "fan_min_runtime_per_hour=10, fan_mode=hvac_fan → fan activates"
+    },
+    {
+      "at": "2026-04-05T09:10:00",
+      "expect": "fan_cycle_off",
+      "reason": "10 minutes elapsed → fan_cycle_off deactivates fan"
+    }
+  ]
+}

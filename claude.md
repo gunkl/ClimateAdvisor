@@ -184,6 +184,12 @@ When a test file injects mock packages via `sys.modules` (e.g., `test_claude_api
 
 **Pattern**: In tests that depend on module-level mocking, also patch the module-level variables (e.g., `_mod.ANTHROPIC_AVAILABLE`, `_mod.RateLimitError`) directly on the already-imported module, rather than relying on `sys.modules` ordering.
 
+#### Python 3.14 Async Tests
+
+Python 3.14 removed the implicit event loop. Use `asyncio.run()` instead of
+`asyncio.get_event_loop().run_until_complete()` in all tests. The latter raises
+`RuntimeError: There is no current event loop in thread 'MainThread'`.
+
 #### Verification
 
 **All new or modified tests MUST pass with warnings-as-errors before completion:**
@@ -221,6 +227,15 @@ A `tools/validate.py` hook also runs on `custom_components/climate_advisor/` fil
 - `tests/test_windows_recommended_integration.py` — windows-recommended + door/window interaction
 - `tests/test_door_window.py` — pause/resume/grace mechanics
 - `tests/test_resume_from_pause.py` — resume behavior and grace recheck
+- `tests/test_occupancy_automation.py` — occupancy-aware automation guards (Issue #85)
+
+#### Occupancy-Aware Guards (Issue #85)
+
+The automation engine tracks `_occupancy_mode` internally and all temperature-setting
+code paths must respect it. When adding new code that calls `_set_temperature_for_mode()`
+or sets comfort temps, verify it works correctly when occupancy is away/vacation — the
+safety net in `_set_temperature_for_mode()` redirects to setback handlers, but direct
+calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERENCE.md`.
 
 ### Project Memory
 
@@ -460,6 +475,11 @@ Claude should follow existing conventions:
 - Indentation: 4 spaces
 - Type hints on all function signatures
 - Docstrings on public methods
+
+#### Occupancy Constants
+
+Use `OCCUPANCY_HOME`, `OCCUPANCY_AWAY`, `OCCUPANCY_VACATION`, `OCCUPANCY_GUEST` from
+`const.py` instead of string literals `"home"`, `"away"`, etc. in automation logic.
 
 #### CONFIG_METADATA Keys
 

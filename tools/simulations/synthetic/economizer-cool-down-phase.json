@@ -1,0 +1,43 @@
+{
+  "name": "economizer-cool-down-phase",
+  "description": "Hot day economizer check during evening window with indoor above comfort — enters cool-down phase",
+  "source": "synthetic",
+  "issue": 86,
+  "verdict": {
+    "type": "positive",
+    "summary": "Verifies economizer_check engages cool-down phase when eligible on a hot day",
+    "observed_behavior": "economizer_engaged (phase=cool-down) with HVAC=cool, target_temp=75",
+    "expected_behavior": "economizer_engaged (phase=cool-down) with HVAC=cool, target_temp=75"
+  },
+  "config": {
+    "comfort_cool": 75,
+    "comfort_heat": 70,
+    "natural_vent_delta": 3.0,
+    "economizer_temp_delta": 3.0,
+    "aggressive_savings": false
+  },
+  "events": [
+    {
+      "time": "2026-04-05T07:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool"
+    },
+    {
+      "time": "2026-04-05T18:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 77,
+      "indoor_temp": 79,
+      "windows_open": true,
+      "hour": 18
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T18:00:00",
+      "expect": "economizer_engaged",
+      "expect_temp": 75.0,
+      "reason": "hot day, outdoor=77 <= threshold(75+3=78), windows open, hour=18 in evening window, indoor=79 > comfort=75 → cool-down phase, target=comfort_cool=75"
+    }
+  ]
+}

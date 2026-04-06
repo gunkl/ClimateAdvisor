@@ -1,0 +1,51 @@
+{
+  "name": "bedtime-heat-setback-fan-off",
+  "description": "Bedtime deactivates running fan and applies heat setback (comfort 70 - depth 4 = 66)",
+  "source": "synthetic",
+  "issue": 86,
+  "verdict": {
+    "type": "positive",
+    "summary": "Verifies bedtime stops the fan and applies the default-depth heat setback",
+    "observed_behavior": "fan_off then setback_applied at target_temp=66 — setback is the dominant outcome",
+    "expected_behavior": "fan_off then setback_applied at target_temp=66 — setback is the dominant outcome"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac_fan",
+    "fan_min_runtime_per_hour": 10
+  },
+  "events": [
+    {
+      "time": "2026-04-05T07:00:00",
+      "type": "classification",
+      "day_type": "cool",
+      "hvac_mode": "heat",
+      "setback_modifier": 0.0
+    },
+    {
+      "time": "2026-04-05T10:00:00",
+      "type": "fan_cycle_on"
+    },
+    {
+      "time": "2026-04-05T22:30:00",
+      "type": "bedtime"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T10:00:00",
+      "expect": "fan_cycle_on",
+      "reason": "fan min-runtime cycle activates fan"
+    },
+    {
+      "at": "2026-04-05T22:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 66.0,
+      "reason": "bedtime: comfort_heat(70) - DEFAULT_SETBACK_DEPTH_F(4) + modifier(0) = 66, clamped above setback_heat(60)"
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "name": "occupancy-away-setback-heat",
+  "description": "Away setback on a heat day: target = setback_heat + setback_modifier",
+  "source": "synthetic",
+  "issue": 86,
+  "verdict": {
+    "type": "positive",
+    "summary": "Verifies occupancy_away applies heat setback temperature without mode change",
+    "observed_behavior": "setback_applied with target_temp=60 (setback_heat=60, modifier=0)",
+    "expected_behavior": "setback_applied with target_temp=60 (setback_heat=60, modifier=0)"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-05T07:00:00",
+      "type": "classification",
+      "day_type": "cool",
+      "hvac_mode": "heat",
+      "setback_modifier": 0.0
+    },
+    {
+      "time": "2026-04-05T08:30:00",
+      "type": "occupancy_away"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T07:00:00",
+      "expect": "classification_applied",
+      "reason": "cool day → heat mode applied"
+    },
+    {
+      "at": "2026-04-05T08:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 60.0,
+      "reason": "away setback: setback_heat(60) + modifier(0) = 60"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "name": "classification-cool-day-heat-on",
+  "description": "Cool day classification applies heat mode and sets target to comfort_heat",
+  "source": "synthetic",
+  "issue": 86,
+  "verdict": {
+    "type": "positive",
+    "summary": "Verifies classification event sets hvac_mode and comfort temp target",
+    "observed_behavior": "classification_applied with hvac_mode=heat, target_temp=70",
+    "expected_behavior": "classification_applied with hvac_mode=heat, target_temp=70"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-05T07:00:00",
+      "type": "classification",
+      "day_type": "cool",
+      "hvac_mode": "heat",
+      "setback_modifier": 0.0
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T07:00:00",
+      "expect": "classification_applied",
+      "expect_temp": 70.0,
+      "reason": "cool day → heat mode → target = comfort_heat = 70"
+    }
+  ]
+}

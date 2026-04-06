@@ -28,6 +28,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, field
+from datetime import time as dt_time
 from pathlib import Path
 
 SIMULATIONS_DIR = Path(__file__).parent / "simulations"
@@ -39,15 +40,38 @@ STATE_DIRS: dict[str, Path] = {
     "synthetic": SIMULATIONS_DIR / "synthetic",
 }
 
+# Constants mirrored from const.py — keep in sync.
+VACATION_SETBACK_EXTRA = 3.0  # const.py VACATION_SETBACK_EXTRA = 3
+DEFAULT_SETBACK_DEPTH_F = 4.0  # heat bedtime default depth (no thermal model)
+DEFAULT_SETBACK_DEPTH_COOL_F = 3.0  # cool bedtime default depth (no thermal model)
+
+
+@dataclass(frozen=True)
+class SimClassification:
+    """Mirrors DayClassification fields used in the simulator state machine.
+
+    Keep in sync with classifier.py DayClassification.
+    window_open_time and window_close_time are stored as "HH:MM" strings
+    and parsed to datetime.time on demand by _parse_window_time().
+    """
+
+    day_type: str
+    hvac_mode: str  # "heat" | "cool" | "off"
+    setback_modifier: float = 0.0
+    windows_recommended: bool = False
+    window_open_time: str | None = None  # "HH:MM"
+    window_close_time: str | None = None  # "HH:MM"
+
 
 @dataclass
 class SimState:
-    """Mirrors AutomationEngine state variables used in door/window handling.
+    """Mirrors AutomationEngine state variables.
 
     Keep this in sync with automation.py. When automation.py state variables
     change, update this class and the ClimateSimulator methods below.
     """
 
+    # Door/window + temperature
     indoor_temp: float | None = None
     outdoor_temp: float | None = None
     sensors_open: set = field(default_factory=set)
@@ -56,6 +80,20 @@ class SimState:
     paused_by_door: bool = False
     natural_vent_active: bool = False
     grace_active: bool = False
+
+    # Classification and occupancy
+    classification: SimClassification | None = None
+    occupancy: str = "home"  # "home" | "away" | "vacation"
+    hvac_target_temp: float | None = None
+    manual_override_active: bool = False
+
+    # Fan state (Issue #37 + #77)
+    fan_active: bool = False
+    fan_min_runtime_active: bool = False
+
+    # Economizer state (Issue #27)
+    economizer_active: bool = False
+    economizer_phase: str = "inactive"  # "inactive" | "cool-down" | "maintain"
 
 
 @dataclass
@@ -68,10 +106,11 @@ class Decision:
     reason: str
     hvac_mode: str
     fan_mode: str
+    target_temp: float | None = None  # set when a setback/restore temperature is applied
 
 
 class ClimateSimulator:
-    """Pure-Python state machine mirroring automation.py door/window logic.
+    """Pure-Python state machine mirroring automation.py logic.
 
     This class intentionally duplicates the decision logic from automation.py
     so it can run without a Home Assistant instance. When automation.py logic
@@ -107,7 +146,31 @@ class ClimateSimulator:
             return None
 
         if etype == "classification":
-            return None  # classification affects briefing, not nat-vent logic
+            return self._handle_classification(ts, event)
+
+        if etype == "occupancy_away":
+            return self._handle_occupancy_away(ts)
+
+        if etype == "occupancy_home":
+            return self._handle_occupancy_home(ts)
+
+        if etype == "occupancy_vacation":
+            return self._handle_occupancy_vacation(ts)
+
+        if etype == "bedtime":
+            return self._handle_bedtime(ts)
+
+        if etype == "wakeup":
+            return self._handle_wakeup(ts)
+
+        if etype == "fan_cycle_on":
+            return self._handle_fan_cycle_on(ts)
+
+        if etype == "fan_cycle_off":
+            return self._handle_fan_cycle_off(ts)
+
+        if etype == "economizer_check":
+            return self._handle_economizer_check(ts, event)
 
         if etype == "grace_start":
             self.state.grace_active = True
@@ -120,7 +183,7 @@ class ClimateSimulator:
         return None
 
     # ------------------------------------------------------------------
-    # Internal decision logic
+    # Door/window + nat-vent handlers (existing logic)
     # ------------------------------------------------------------------
 
     def _handle_sensor_open(self, ts: str) -> Decision:
@@ -136,6 +199,18 @@ class ClimateSimulator:
                 "sensor_open",
                 "no_action",
                 "grace period active — skip pause",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        if self._is_within_planned_window_period(ts):
+            d = Decision(
+                ts,
+                "sensor_open",
+                "no_action",
+                "within planned window period — not pausing",
                 self.state.hvac_mode,
                 self.state.fan_mode,
             )
@@ -240,6 +315,642 @@ class ClimateSimulator:
         self.decisions.append(d)
         return d
 
+    # ------------------------------------------------------------------
+    # Planned window period gate (mirrors automation.py)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_window_time(time_str: str | None) -> dt_time | None:
+        """Parse "HH:MM" string to datetime.time. Returns None on any failure."""
+        if not time_str:
+            return None
+        try:
+            h, m = time_str.split(":")
+            return dt_time(int(h), int(m))
+        except (ValueError, AttributeError):
+            return None
+
+    def _is_within_planned_window_period(self, ts: str) -> bool:
+        """Return True when windows are recommended AND we are within the planned window time.
+
+        Mirrors automation.py _is_within_planned_window_period(). Uses the event
+        timestamp string instead of dt_util.now() since the simulator is not real-time.
+        """
+        c = self.state.classification
+        if not c or not c.windows_recommended:
+            return False
+        if c.hvac_mode != "off":
+            return False
+        open_t = self._parse_window_time(c.window_open_time)
+        close_t = self._parse_window_time(c.window_close_time)
+        if not open_t or not close_t:
+            return False
+        try:
+            from datetime import datetime as _dt
+
+            now_time = _dt.fromisoformat(ts).time()
+        except (ValueError, AttributeError):
+            return False
+        return open_t <= now_time <= close_t
+
+    # ------------------------------------------------------------------
+    # Classification handler
+    # ------------------------------------------------------------------
+
+    def _handle_classification(self, ts: str, event: dict) -> Decision:
+        """Apply day classification — mirrors apply_classification().
+
+        Sets HVAC mode and comfort target temp unless manual_override_active.
+        Classification is always stored even when overridden.
+        """
+        c = SimClassification(
+            day_type=event["day_type"],
+            hvac_mode=event.get("hvac_mode", "off"),
+            setback_modifier=float(event.get("setback_modifier", 0.0)),
+            windows_recommended=bool(event.get("windows_recommended", False)),
+            window_open_time=event.get("window_open_time"),
+            window_close_time=event.get("window_close_time"),
+        )
+        self.state.classification = c
+
+        if self.state.manual_override_active:
+            d = Decision(
+                ts,
+                "classification",
+                "no_action",
+                f"manual override active — classification stored ({c.day_type}/{c.hvac_mode}), HVAC unchanged",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.hvac_mode = c.hvac_mode
+        if c.hvac_mode == "heat":
+            self.state.hvac_target_temp = float(self.config.get("comfort_heat", 70))
+        elif c.hvac_mode == "cool":
+            self.state.hvac_target_temp = float(self.config.get("comfort_cool", 75))
+        else:
+            self.state.hvac_target_temp = None
+
+        d = Decision(
+            ts,
+            "classification",
+            "classification_applied",
+            f"daily classification — {c.day_type} day, hvac_mode={c.hvac_mode}",
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=self.state.hvac_target_temp,
+        )
+        self.decisions.append(d)
+        return d
+
+    # ------------------------------------------------------------------
+    # Occupancy handlers
+    # ------------------------------------------------------------------
+
+    def _handle_occupancy_away(self, ts: str) -> Decision:
+        """Apply away setback — mirrors handle_occupancy_away().
+
+        No HVAC mode change; temperature setback only.
+        """
+        self.state.occupancy = "away"
+        c = self.state.classification
+        if not c:
+            d = Decision(
+                ts,
+                "occupancy_away",
+                "no_action",
+                "no classification — setback skipped",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        if c.hvac_mode == "heat":
+            target = float(self.config.get("setback_heat", 60)) + c.setback_modifier
+            reason = (
+                f"occupancy away — heat setback"
+                f" (base {self.config.get('setback_heat', 60)}"
+                f" + modifier {c.setback_modifier})"
+            )
+        elif c.hvac_mode == "cool":
+            target = float(self.config.get("setback_cool", 80)) - c.setback_modifier
+            reason = (
+                f"occupancy away — cool setback"
+                f" (base {self.config.get('setback_cool', 80)}"
+                f" - modifier {c.setback_modifier})"
+            )
+        else:
+            d = Decision(
+                ts,
+                "occupancy_away",
+                "no_action",
+                f"hvac_mode='{c.hvac_mode}' — no setback needed",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.hvac_target_temp = target
+        d = Decision(
+            ts,
+            "occupancy_away",
+            "setback_applied",
+            reason,
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=target,
+        )
+        self.decisions.append(d)
+        return d
+
+    def _handle_occupancy_home(self, ts: str) -> Decision:
+        """Restore comfort temperature — mirrors handle_occupancy_home()."""
+        self.state.occupancy = "home"
+        c = self.state.classification
+        if not c:
+            d = Decision(
+                ts,
+                "occupancy_home",
+                "no_action",
+                "no classification — restore skipped",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        if c.hvac_mode == "heat":
+            target = float(self.config.get("comfort_heat", 70))
+            reason = "occupancy home — restoring heat comfort"
+        elif c.hvac_mode == "cool":
+            target = float(self.config.get("comfort_cool", 75))
+            reason = "occupancy home — restoring cool comfort"
+        else:
+            d = Decision(
+                ts,
+                "occupancy_home",
+                "no_action",
+                f"hvac_mode='{c.hvac_mode}' — no restore needed",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.hvac_target_temp = target
+        d = Decision(
+            ts,
+            "occupancy_home",
+            "comfort_restored",
+            reason,
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=target,
+        )
+        self.decisions.append(d)
+        return d
+
+    def _handle_occupancy_vacation(self, ts: str) -> Decision:
+        """Apply vacation (deeper) setback — mirrors handle_occupancy_vacation()."""
+        self.state.occupancy = "vacation"
+        c = self.state.classification
+        if not c:
+            d = Decision(
+                ts,
+                "occupancy_vacation",
+                "no_action",
+                "no classification — setback skipped",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        if c.hvac_mode == "heat":
+            target = float(self.config.get("setback_heat", 60)) + c.setback_modifier - VACATION_SETBACK_EXTRA
+            reason = (
+                f"vacation — deep heat setback"
+                f" (base {self.config.get('setback_heat', 60)}"
+                f" + modifier {c.setback_modifier}"
+                f" - vacation {VACATION_SETBACK_EXTRA})"
+            )
+        elif c.hvac_mode == "cool":
+            target = float(self.config.get("setback_cool", 80)) - c.setback_modifier + VACATION_SETBACK_EXTRA
+            reason = (
+                f"vacation — deep cool setback"
+                f" (base {self.config.get('setback_cool', 80)}"
+                f" - modifier {c.setback_modifier}"
+                f" + vacation {VACATION_SETBACK_EXTRA})"
+            )
+        else:
+            d = Decision(
+                ts,
+                "occupancy_vacation",
+                "no_action",
+                f"hvac_mode='{c.hvac_mode}' — no setback needed",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.hvac_target_temp = target
+        d = Decision(
+            ts,
+            "occupancy_vacation",
+            "setback_applied",
+            reason,
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=target,
+        )
+        self.decisions.append(d)
+        return d
+
+    # ------------------------------------------------------------------
+    # Bedtime / wakeup handlers
+    # ------------------------------------------------------------------
+
+    def _compute_bedtime_setback(self, c: SimClassification) -> float | None:
+        """Compute bedtime setback target using default depth (no thermal model).
+
+        Mirrors the no-thermal-model fallback path of compute_bedtime_setback()
+        in automation.py. Uses DEFAULT_SETBACK_DEPTH_F for heat (4°F) and
+        DEFAULT_SETBACK_DEPTH_COOL_F for cool (3°F), clamped to setback bounds.
+        """
+        if c.hvac_mode == "heat":
+            comfort = float(self.config.get("comfort_heat", 70))
+            floor = float(self.config.get("setback_heat", 60))
+            raw = comfort - DEFAULT_SETBACK_DEPTH_F + c.setback_modifier
+            return max(raw, floor)
+        if c.hvac_mode == "cool":
+            comfort = float(self.config.get("comfort_cool", 75))
+            ceiling = float(self.config.get("setback_cool", 80))
+            raw = comfort + DEFAULT_SETBACK_DEPTH_COOL_F + c.setback_modifier
+            return min(raw, ceiling)
+        return None
+
+    def _handle_bedtime(self, ts: str) -> Decision:
+        """Apply bedtime setback + deactivate fan — mirrors handle_bedtime().
+
+        May produce two Decision entries at the same timestamp:
+          1. fan_off (if fan was active) — appended first
+          2. setback_applied or no_action — appended last
+
+        _outcome_at() returns the LAST matching decision, so asserting at
+        the bedtime timestamp returns setback_applied (or no_action).
+        """
+        self.state.manual_override_active = False  # clear_manual_override()
+
+        # Deactivate fan if running (mirrors the bedtime fan-off logic)
+        if self.state.fan_active:
+            self.state.fan_active = False
+            self.state.fan_min_runtime_active = False
+            self.state.fan_mode = "auto"
+            fan_d = Decision(
+                ts,
+                "bedtime",
+                "fan_off",
+                "bedtime — fan off for night",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(fan_d)
+
+        # Deactivate economizer silently (mirrors _deactivate_economizer; no Decision)
+        if self.state.economizer_active:
+            self.state.economizer_active = False
+            self.state.economizer_phase = "inactive"
+
+        c = self.state.classification
+        if not c:
+            d = Decision(
+                ts,
+                "bedtime",
+                "no_action",
+                "no classification — bedtime setback skipped",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        target = self._compute_bedtime_setback(c)
+        if target is None:
+            d = Decision(
+                ts,
+                "bedtime",
+                "no_action",
+                f"hvac_mode='{c.hvac_mode}' — no setback needed",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.hvac_target_temp = target
+        reason = f"bedtime — {'heat' if c.hvac_mode == 'heat' else 'cool'} setback (default depth, no thermal model)"
+        d = Decision(
+            ts,
+            "bedtime",
+            "setback_applied",
+            reason,
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=target,
+        )
+        self.decisions.append(d)
+        return d
+
+    def _handle_wakeup(self, ts: str) -> Decision:
+        """Restore comfort at morning wakeup — mirrors handle_morning_wakeup().
+
+        May produce two Decision entries: fan_off (if fan active) then comfort_restored.
+        _outcome_at() returns comfort_restored as the dominant outcome.
+        """
+        self.state.manual_override_active = False  # clear_manual_override()
+
+        # Deactivate fan if still running from overnight
+        if self.state.fan_active:
+            self.state.fan_active = False
+            self.state.fan_min_runtime_active = False
+            self.state.fan_mode = "auto"
+            fan_d = Decision(
+                ts,
+                "wakeup",
+                "fan_off",
+                "morning wakeup — resetting fan state",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(fan_d)
+
+        c = self.state.classification
+        if not c:
+            d = Decision(
+                ts,
+                "wakeup",
+                "no_action",
+                "no classification — wakeup restore skipped",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        if c.hvac_mode == "heat":
+            target = float(self.config.get("comfort_heat", 70))
+            reason = "morning wake-up — restoring heat comfort"
+        elif c.hvac_mode == "cool":
+            target = float(self.config.get("comfort_cool", 75))
+            reason = "morning wake-up — restoring cool comfort"
+        else:
+            d = Decision(
+                ts,
+                "wakeup",
+                "no_action",
+                f"hvac_mode='{c.hvac_mode}' — no restore needed",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.hvac_target_temp = target
+        d = Decision(
+            ts,
+            "wakeup",
+            "comfort_restored",
+            reason,
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=target,
+        )
+        self.decisions.append(d)
+        return d
+
+    # ------------------------------------------------------------------
+    # Fan cycling handlers (Issue #77)
+    # ------------------------------------------------------------------
+
+    def _handle_fan_cycle_on(self, ts: str) -> Decision:
+        """Fan min-runtime cycle on phase — mirrors _fan_cycle_on()."""
+        fan_mode_cfg = self.config.get("fan_mode", "disabled")
+        min_runtime = int(self.config.get("fan_min_runtime_per_hour", 0))
+
+        if fan_mode_cfg == "disabled" or min_runtime <= 0:
+            d = Decision(
+                ts,
+                "fan_cycle_on",
+                "no_action",
+                "fan_mode disabled or fan_min_runtime_per_hour=0",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        if self.state.fan_active:
+            # Fan already running — production retries after 60 min; simulator records no_action
+            d = Decision(
+                ts,
+                "fan_cycle_on",
+                "no_action",
+                "fan already active — cycle-on skipped",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.fan_active = True
+        self.state.fan_min_runtime_active = True
+        self.state.fan_mode = "on"
+        d = Decision(
+            ts,
+            "fan_cycle_on",
+            "fan_cycle_on",
+            f"fan min-runtime cycle on (min_runtime={min_runtime} min/hr)",
+            self.state.hvac_mode,
+            self.state.fan_mode,
+        )
+        self.decisions.append(d)
+        return d
+
+    def _handle_fan_cycle_off(self, ts: str) -> Decision:
+        """Fan min-runtime cycle off phase — mirrors _fan_cycle_off()."""
+        if not self.state.fan_min_runtime_active:
+            d = Decision(
+                ts,
+                "fan_cycle_off",
+                "no_action",
+                "fan_cycle_off received but fan_min_runtime_active=False — no state change",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        self.state.fan_min_runtime_active = False
+        self.state.fan_active = False
+        self.state.fan_mode = "auto"
+        d = Decision(
+            ts,
+            "fan_cycle_off",
+            "fan_cycle_off",
+            "fan min-runtime cycle complete — fan off",
+            self.state.hvac_mode,
+            self.state.fan_mode,
+        )
+        self.decisions.append(d)
+        return d
+
+    # ------------------------------------------------------------------
+    # Economizer handler (Issue #27)
+    # ------------------------------------------------------------------
+
+    def _handle_economizer_check(self, ts: str, event: dict) -> Decision:
+        """Evaluate economizer eligibility — mirrors check_window_cooling_opportunity().
+
+        Event fields:
+          outdoor_temp  (float, required)
+          indoor_temp   (float, optional)
+          windows_open  (bool, default False)
+          hour          (int, default -1; use -1 to skip the time-window gate)
+        """
+        outdoor_temp = float(event["outdoor_temp"])
+        indoor_temp = event.get("indoor_temp")
+        if indoor_temp is not None:
+            indoor_temp = float(indoor_temp)
+            self.state.indoor_temp = indoor_temp
+        self.state.outdoor_temp = outdoor_temp
+        windows_open = bool(event.get("windows_open", False))
+        hour = int(event.get("hour", -1))
+
+        c = self.state.classification
+
+        # Guard: classification required and day must be hot
+        if not c or c.day_type != "hot":
+            if self.state.economizer_active:
+                self.state.economizer_active = False
+                self.state.economizer_phase = "inactive"
+                d = Decision(
+                    ts,
+                    "economizer_check",
+                    "economizer_disengaged",
+                    "classification not hot — economizer deactivated",
+                    self.state.hvac_mode,
+                    self.state.fan_mode,
+                )
+                self.decisions.append(d)
+                return d
+            d = Decision(
+                ts,
+                "economizer_check",
+                "no_action",
+                f"day_type='{c.day_type if c else 'none'}' — economizer only activates on hot days",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        comfort_cool = float(self.config.get("comfort_cool", 75))
+        delta = float(self.config.get("economizer_temp_delta", 3.0))
+        aggressive_savings = bool(self.config.get("aggressive_savings", False))
+
+        # Time gate: morning 6–9, evening 17–24; hour=-1 skips gate
+        in_window = True if hour < 0 else (6 <= hour < 9) or (17 <= hour < 24)
+
+        eligible = windows_open and outdoor_temp <= comfort_cool + delta and in_window
+
+        if not eligible:
+            if self.state.economizer_active:
+                self.state.economizer_active = False
+                self.state.economizer_phase = "inactive"
+                self.state.fan_active = False
+                self.state.fan_mode = "auto"
+                self.state.hvac_mode = "cool"
+                self.state.hvac_target_temp = comfort_cool
+                d = Decision(
+                    ts,
+                    "economizer_check",
+                    "economizer_disengaged",
+                    f"conditions ineligible (outdoor={outdoor_temp}, windows={windows_open}, hour={hour})",
+                    self.state.hvac_mode,
+                    self.state.fan_mode,
+                )
+                self.decisions.append(d)
+                return d
+            d = Decision(
+                ts,
+                "economizer_check",
+                "no_action",
+                (
+                    f"economizer ineligible"
+                    f" (outdoor={outdoor_temp}, threshold={comfort_cool + delta},"
+                    f" windows={windows_open}, hour={hour})"
+                ),
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        # Eligible — engage
+        self.state.economizer_active = True
+
+        if aggressive_savings:
+            self.state.economizer_phase = "maintain"
+            self.state.hvac_mode = "off"
+            self.state.fan_active = True
+            self.state.fan_mode = "on"
+            d = Decision(
+                ts,
+                "economizer_check",
+                "economizer_engaged",
+                f"economizer (savings mode) — HVAC off, fan ventilating; outdoor={outdoor_temp}",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        # Comfort mode two-phase
+        if indoor_temp is not None and indoor_temp > comfort_cool:
+            self.state.economizer_phase = "cool-down"
+            self.state.hvac_mode = "cool"
+            self.state.hvac_target_temp = comfort_cool
+            reason = (
+                f"economizer cool-down — indoor={indoor_temp} > comfort={comfort_cool},"
+                f" outdoor={outdoor_temp} assisting"
+            )
+        else:
+            self.state.economizer_phase = "maintain"
+            self.state.hvac_mode = "off"
+            self.state.fan_active = True
+            self.state.fan_mode = "on"
+            reason = (
+                f"economizer maintain — indoor at/below comfort={comfort_cool},"
+                f" HVAC off, fan ventilating; outdoor={outdoor_temp}"
+            )
+
+        d = Decision(
+            ts,
+            "economizer_check",
+            "economizer_engaged",
+            reason,
+            self.state.hvac_mode,
+            self.state.fan_mode,
+            target_temp=self.state.hvac_target_temp,
+        )
+        self.decisions.append(d)
+        return d
+
 
 # ------------------------------------------------------------------
 # Scenario I/O
@@ -259,6 +970,12 @@ def _outcome_at(decisions: list[Decision], iso_time: str) -> str:
     """Return the most recent outcome at or before iso_time."""
     matching = [d for d in decisions if d.time <= iso_time]
     return matching[-1].outcome if matching else "no_decision"
+
+
+def _temp_at(decisions: list[Decision], iso_time: str) -> float | None:
+    """Return the target_temp from the most recent decision at or before iso_time."""
+    matching = [d for d in decisions if d.time <= iso_time]
+    return matching[-1].target_temp if matching else None
 
 
 def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
@@ -285,16 +1002,34 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
                 }
             )
             continue
+
         any_real_assertion = True
-        actual = _outcome_at(sim.decisions, a["at"])
+        actual_outcome = _outcome_at(sim.decisions, a["at"])
+        outcome_ok = actual_outcome == a["expect"]
+
+        # Optional temperature assertion
+        temp_pass = True
+        temp_detail = None
+        if "expect_temp" in a:
+            actual_temp = _temp_at(sim.decisions, a["at"])
+            expected_temp = float(a["expect_temp"])
+            if actual_temp is None:
+                temp_pass = False
+                temp_detail = f"expect_temp={expected_temp} but no target_temp recorded"
+            else:
+                temp_pass = abs(actual_temp - expected_temp) < 0.01
+                temp_detail = f"expect_temp={expected_temp}, actual_temp={actual_temp}"
+
+        overall_pass = outcome_ok and temp_pass
         assertion_results.append(
             {
                 "at": a["at"],
                 "expected": a["expect"],
-                "actual": actual,
-                "pass": actual == a["expect"],
+                "actual": actual_outcome,
+                "pass": overall_pass,
                 "skipped": False,
                 "reason": a.get("reason", ""),
+                "temp_detail": temp_detail,
             }
         )
 
@@ -307,7 +1042,15 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
         "issue": scenario.get("issue"),
         "verdict": scenario.get("verdict"),
         "state": state,
-        "decisions": [{"time": d.time, "outcome": d.outcome, "reason": d.reason} for d in sim.decisions],
+        "decisions": [
+            {
+                "time": d.time,
+                "outcome": d.outcome,
+                "reason": d.reason,
+                "target_temp": d.target_temp,
+            }
+            for d in sim.decisions
+        ],
         "assertions": assertion_results,
         "passed": passed,
     }
@@ -322,7 +1065,8 @@ def _status_label(result: dict) -> str:
     """Return the display status string for a result, accounting for pending-fix expected fails."""
     passed = result["passed"]
     state = result.get("state")
-    verdict = result.get("verdict") or {}
+    verdict_raw = result.get("verdict")
+    verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
     verdict_type = verdict.get("type")
 
     if state == "pending-fix" and verdict_type == "negative":
@@ -341,7 +1085,8 @@ def _status_label(result: dict) -> str:
 def print_result(result: dict, verbose: bool = False) -> None:
     """Print simulation result in human-readable form."""
     status = _status_label(result)
-    verdict = result.get("verdict") or {}
+    verdict_raw = result.get("verdict")
+    verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
 
     issue_tag = f" [#{result['issue']}]" if result.get("issue") else ""
     print(f"\n{'=' * 60}")
@@ -361,7 +1106,8 @@ def print_result(result: dict, verbose: bool = False) -> None:
     if verbose and result["decisions"]:
         print("\nDecision timeline:")
         for d in result["decisions"]:
-            print(f"  {d['time']}  [{d['outcome']}]  {d['reason']}")
+            temp_suffix = f"  → {d['target_temp']}°F" if d.get("target_temp") is not None else ""
+            print(f"  {d['time']}  [{d['outcome']}]{temp_suffix}  {d['reason']}")
 
     if result["assertions"]:
         print("\nAssertions:")
@@ -370,8 +1116,12 @@ def print_result(result: dict, verbose: bool = False) -> None:
                 print(f"  [SKIP] at {a['at']}: {a['reason']}")
             elif a["pass"]:
                 print(f"  [OK]   at {a['at']}: expected={a['expected']!r} actual={a['actual']!r}")
+                if a.get("temp_detail"):
+                    print(f"         temp: {a['temp_detail']}")
             else:
                 print(f"  [FAIL] at {a['at']}: expected={a['expected']!r} actual={a['actual']!r}")
+                if a.get("temp_detail"):
+                    print(f"         temp: {a['temp_detail']}")
                 if a["reason"]:
                     print(f"         {a['reason']}")
 
@@ -403,7 +1153,8 @@ def print_cases_summary() -> None:
                 continue
 
             status = _status_label(result)
-            verdict = result.get("verdict") or {}
+            verdict_raw = result.get("verdict")
+            verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
             verdict_type = verdict.get("type", "")
             issue_tag = f" #{result['issue']}" if result.get("issue") else ""
 
@@ -459,7 +1210,8 @@ def main() -> int:
                             s = json.load(fh)
                         desc = s.get("description", "")[:70]
                         issue = f" [#{s['issue']}]" if s.get("issue") else ""
-                        verdict = s.get("verdict") or {}
+                        verdict_raw = s.get("verdict")
+                        verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
                         verdict_tag = f" [{verdict['type']}]" if verdict.get("type") else ""
                         print(f"  {f.stem}{issue}{verdict_tag}: {desc}")
                     except (json.JSONDecodeError, OSError):

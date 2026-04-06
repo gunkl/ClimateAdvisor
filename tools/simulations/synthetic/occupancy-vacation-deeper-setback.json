@@ -1,0 +1,40 @@
+{
+  "name": "occupancy-vacation-deeper-setback",
+  "description": "Vacation setback on a heat day: deeper than away (setback_heat + modifier - VACATION_EXTRA)",
+  "source": "synthetic",
+  "issue": 86,
+  "verdict": {
+    "type": "positive",
+    "summary": "Verifies occupancy_vacation applies a deeper setback than occupancy_away",
+    "observed_behavior": "setback_applied with target_temp=57 (60 + 0 - 3)",
+    "expected_behavior": "setback_applied with target_temp=57 (60 + 0 - 3)"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-05T07:00:00",
+      "type": "classification",
+      "day_type": "cool",
+      "hvac_mode": "heat",
+      "setback_modifier": 0.0
+    },
+    {
+      "time": "2026-04-05T09:00:00",
+      "type": "occupancy_vacation"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-05T09:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 57.0,
+      "reason": "vacation: setback_heat(60) + modifier(0) - VACATION_SETBACK_EXTRA(3) = 57"
+    }
+  ]
+}

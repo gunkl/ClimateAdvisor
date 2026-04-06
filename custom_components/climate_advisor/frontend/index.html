@@ -349,6 +349,9 @@
 </div>
 
 <div id="tab-debug" class="tab-content">
+  <div style="text-align: right; margin-bottom: 12px;">
+    <button class="btn secondary" onclick="downloadDebugLogs()">⬇ Download Logs</button>
+  </div>
   <div class="card">
     <h2>Automation State</h2>
     <div id="automation-state">
@@ -956,7 +959,7 @@
             <tr><td>Occupancy Mode</td><td>${data.occupancy_mode || 'home'}<span class="kv-desc">Guest &gt; Vacation &gt; Home/Away</span></td></tr>
             <tr><td>Paused by Door/Window</td><td>${data.paused_by_door ? 'Yes' : 'No'}</td></tr>
             <tr><td>Pre-Pause Mode</td><td>${data.pre_pause_mode || 'N/A'}<span class="kv-desc">HVAC mode before door paused automation</span></td></tr>
-            <tr><td>Grace Period Active</td><td>${data.grace_active ? 'Yes' : 'No'}</td></tr>
+            <tr><td>Grace Period Active</td><td>${(() => { let graceValue = data.grace_active ? 'Active' : 'Inactive'; if (data.grace_active && data.grace_end_time) { const graceEnd = new Date(data.grace_end_time).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}); graceValue = 'Active (until ' + graceEnd + ')'; } return graceValue; })()}</td></tr>
             <tr><td>Last Resume Source</td><td>${data.last_resume_source || 'N/A'}</td></tr>
             <tr><td>Pending Debounce Timers</td><td>${(data.pending_debounce_timers || []).length}</td></tr>
             <tr><td>Last Action Time</td><td>${data.last_action_time ? new Date(data.last_action_time).toLocaleString() : 'N/A'}</td></tr>
@@ -1392,6 +1395,39 @@
       const data = await apiFetch('event_log?hours=' + hours);
       const json = JSON.stringify(data, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const dateStr = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = 'climate-advisor-logs-' + dateStr + '.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Failed to download logs: ' + e.message);
+    } finally {
+      if (btn) { btn.textContent = orig; btn.disabled = false; }
+    }
+  }
+
+  async function downloadDebugLogs() {
+    const btn = document.querySelector('[onclick="downloadDebugLogs()"]');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
+    try {
+      const [logData, reportData] = await Promise.allSettled([
+        apiFetch('event_log?hours=24'),
+        apiFetch('ai_reports'),
+      ]);
+      const bundle = {
+        downloaded_at: new Date().toISOString(),
+        events: logData.status === 'fulfilled' ? (logData.value.events || []) : [],
+      };
+      if (reportData.status === 'fulfilled' && reportData.value.reports && reportData.value.reports.length) {
+        bundle.ai_summary = reportData.value.reports[0];
+      }
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       const dateStr = new Date().toISOString().slice(0, 10);

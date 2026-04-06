@@ -7,7 +7,7 @@ based on the day classification and learning state.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -182,6 +182,7 @@ class AutomationEngine:
         self._automation_grace_cancel: Any | None = None
         self._grace_active = False
         self._last_resume_source: str | None = None
+        self._grace_end_time: str | None = None
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -823,12 +824,19 @@ class AutomationEngine:
             return  # Already paused
 
         if self._grace_active:
-            _LOGGER.info(
-                "Door/window open (%s) but %s grace period active — not pausing",
-                entity_id,
-                self._last_resume_source,
-            )
-            return
+            outdoor = self._last_outdoor_temp
+            comfort_cool = float(self.config.get("comfort_cool", 75))
+            nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+            nat_vent_threshold = comfort_cool + nat_vent_delta
+            if outdoor is not None and outdoor <= nat_vent_threshold:
+                pass  # outdoor cool enough — fall through to nat-vent check below
+            else:
+                _LOGGER.info(
+                    "Door/window open (%s) but %s grace period active — not pausing",
+                    entity_id,
+                    self._last_resume_source,
+                )
+                return
 
         if self._is_within_planned_window_period():
             _LOGGER.info(
@@ -1038,6 +1046,7 @@ class AutomationEngine:
 
         self._grace_active = True
         self._last_resume_source = source
+        self._grace_end_time = (dt_util.now() + timedelta(seconds=duration)).isoformat()
 
         @callback
         def _grace_expired(_now: Any) -> None:
@@ -1050,6 +1059,7 @@ class AutomationEngine:
                 )
                 self._grace_active = False
                 self._last_resume_source = None
+                self._grace_end_time = None
                 self._manual_grace_cancel = None
                 self._automation_grace_cancel = None
                 self.clear_manual_override()
@@ -1063,6 +1073,7 @@ class AutomationEngine:
                 )
                 self._grace_active = False
                 self._last_resume_source = None
+                self._grace_end_time = None
                 self._manual_grace_cancel = None
                 self._automation_grace_cancel = None
                 self.clear_manual_override()
@@ -1073,6 +1084,7 @@ class AutomationEngine:
 
             self._grace_active = False
             self._last_resume_source = None
+            self._grace_end_time = None
             self._manual_grace_cancel = None
             self._automation_grace_cancel = None
             self.clear_manual_override()
@@ -1118,6 +1130,24 @@ class AutomationEngine:
             _LOGGER.info(
                 "Skipping re-pause — within planned window period (windows recommended)",
             )
+            return
+        # Check nat-vent conditions before blindly re-pausing
+        outdoor = self._last_outdoor_temp
+        comfort_cool = float(self.config.get("comfort_cool", 75))
+        nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+        if outdoor is not None and outdoor <= comfort_cool + nat_vent_delta:
+            nat_vent_threshold = comfort_cool + nat_vent_delta
+            nat_vent_reason = f"grace expired — nat-vent: outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
+            await self._set_hvac_mode("off", reason=nat_vent_reason)
+            await self._activate_fan(reason=nat_vent_reason)
+            self._natural_vent_active = True
+            _LOGGER.info(
+                "Re-check after grace: nat-vent conditions met — outdoor %.1f°F ≤ %.1f°F",
+                outdoor,
+                nat_vent_threshold,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback("sensor_opened", {"entity": "re-check", "result": "natural_ventilation"})
             return
         state = self.hass.states.get(self.climate_entity)
         if state and state.state not in ("off", "unavailable", "unknown"):
@@ -1430,6 +1460,10 @@ class AutomationEngine:
                 await self._deactivate_economizer(outdoor_temp)
             return False
 
+        # If natural ventilation is active, don't override it with economizer
+        if self._natural_vent_active:
+            return False
+
         unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", 75)
         delta = self.config.get("economizer_temp_delta", ECONOMIZER_TEMP_DELTA)
@@ -1605,6 +1639,7 @@ class AutomationEngine:
             "pre_pause_mode": self._pre_pause_mode,
             "grace_active": self._grace_active,
             "last_resume_source": self._last_resume_source,
+            "grace_end_time": self._grace_end_time,
             "dry_run": self.dry_run,
             "economizer_active": self._economizer_active,
             "economizer_phase": self._economizer_phase,

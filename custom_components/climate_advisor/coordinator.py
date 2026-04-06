@@ -2005,6 +2005,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "pre_pause_mode": ae._pre_pause_mode,
             "grace_active": ae._grace_active,
             "last_resume_source": ae._last_resume_source,
+            "grace_end_time": getattr(ae, "_grace_end_time", None),
             "door_window_sensors": sensor_states,
             "pending_debounce_timers": list(self._door_open_timers.keys()),
             "classification": {

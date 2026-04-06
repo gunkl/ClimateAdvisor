@@ -630,8 +630,14 @@ class ClaudeAPIClient:
                 }
 
                 # Extended thinking for high reasoning effort
+                # Claude API requirements when thinking is enabled:
+                #   1. temperature must be exactly 1
+                #   2. max_tokens must exceed budget_tokens
                 if reasoning_effort == AI_REASONING_HIGH:
                     budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
+                    kwargs["temperature"] = 1  # required by API — overrides configured value
+                    if kwargs["max_tokens"] <= budget:
+                        kwargs["max_tokens"] = budget + 4096  # reserve room for output tokens
                     kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
                 api_response = await self._client.messages.create(**kwargs)

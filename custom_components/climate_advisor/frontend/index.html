@@ -448,14 +448,6 @@
     <div id="ai-history-content" style="display:none"></div>
   </div>
 
-  <!-- AI Settings Summary Card -->
-  <div class="card">
-    <h2>AI Settings</h2>
-    <div id="ai-settings-content">
-      <div class="loading">Loading...</div>
-    </div>
-  </div>
-
   <!-- Investigative Analysis Card -->
   <div class="card">
     <h2>🔬 Investigative Analysis</h2>
@@ -472,6 +464,7 @@
     </div>
     <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
       <button class="btn" onclick="runInvestigation()" id="investigate-btn">🔍 Run Investigation</button>
+      <button class="btn secondary" onclick="downloadInvestigationReport()" id="investigate-download-btn" style="display:none;">⬇ Download Report</button>
       <span id="investigation-status" style="font-size:0.8rem; color:var(--text-secondary);"></span>
     </div>
     <div id="investigation-result" style="display:none; margin-top:1rem;"></div>
@@ -482,6 +475,14 @@
     <h2>📋 Investigation History</h2>
     <div id="investigation-history-list">
       <p style="color:var(--text-secondary); font-size:0.85rem;">No investigations run yet.</p>
+    </div>
+  </div>
+
+  <!-- AI Settings Summary Card -->
+  <div class="card">
+    <h2>AI Settings</h2>
+    <div id="ai-settings-content">
+      <div class="loading">Loading...</div>
     </div>
   </div>
 </div>
@@ -573,7 +574,14 @@
       }
       throw new Error('HTTP 401');
     }
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    if (!resp.ok) {
+      let msg = 'HTTP ' + resp.status;
+      try {
+        const body = await resp.json();
+        if (body && body.message) msg = body.message;
+      } catch (_) { /* ignore parse errors */ }
+      throw new Error(msg);
+    }
     return resp.json();
   }
 
@@ -1574,13 +1582,18 @@
     }
   }
 
+  let _lastInvestigationResult = null;
+  let _cachedInvestigationReports = [];
+
   async function runInvestigation() {
     const btn = document.getElementById('investigate-btn');
+    const dlBtn = document.getElementById('investigate-download-btn');
     const status = document.getElementById('investigation-status');
     const resultDiv = document.getElementById('investigation-result');
     const focus = document.getElementById('investigation-focus').value.trim();
 
     btn.disabled = true;
+    dlBtn.style.display = 'none';
     status.textContent = 'Running investigation...';
     resultDiv.style.display = 'none';
 
@@ -1589,10 +1602,13 @@
       if (focus) body.focus = focus;
       const result = await apiFetch('ai_investigate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
+      _lastInvestigationResult = { timestamp: new Date().toISOString(), result, focus };
+
       const data = result.data || {};
       const source = result.source || 'unknown';
       const ts = new Date().toLocaleTimeString();
       status.textContent = 'Completed at ' + ts + ' (source: ' + source + ')';
+      dlBtn.style.display = '';
 
       // Build structured output
       const sections = [
@@ -1626,7 +1642,10 @@
       // Refresh history
       loadInvestigationHistory();
     } catch (err) {
-      status.textContent = 'Error: ' + err.message;
+      const hint = err.message.toLowerCase().includes('not enabled')
+        ? ' — enable it in Home Assistant → Settings → Integrations → Climate Advisor → Configure → AI Settings'
+        : '';
+      status.textContent = 'Error: ' + err.message + hint;
     } finally {
       btn.disabled = false;
     }
@@ -1643,16 +1662,19 @@
       }
       // Show most recent first
       const sorted = [...reports].reverse();
-      container.innerHTML = sorted.map((entry) => {
+      _cachedInvestigationReports = sorted;
+      container.innerHTML = sorted.map((entry, idx) => {
         const ts = new Date(entry.timestamp).toLocaleString();
         const summary = (entry.result && entry.result.data && entry.result.data.summary)
           ? entry.result.data.summary
           : (entry.result && entry.result.error ? entry.result.error : 'No summary available');
         const source = (entry.result && entry.result.source) ? entry.result.source : 'unknown';
         return '<details style="margin-bottom:0.5rem;">'
-          + '<summary style="cursor:pointer; font-size:0.85rem; padding:0.25rem 0;">'
-          + '<strong>' + escapeHtml(ts) + '</strong>'
-          + ' <span style="color:var(--text-secondary);">(' + escapeHtml(source) + ')</span>'
+          + '<summary style="cursor:pointer; font-size:0.85rem; padding:0.25rem 0; display:flex; align-items:center; gap:0.5rem;">'
+          + '<span><strong>' + escapeHtml(ts) + '</strong>'
+          + ' <span style="color:var(--text-secondary);">(' + escapeHtml(source) + ')</span></span>'
+          + '<button class="btn secondary" style="font-size:0.75rem; padding:0.15rem 0.5rem; margin-left:auto;" '
+          + 'onclick="event.stopPropagation(); downloadInvestigationReportByIndex(' + idx + ')">⬇ Download</button>'
           + '</summary>'
           + '<p style="font-size:0.8rem; margin:0.5rem 0 0; color:var(--text-secondary);">' + escapeHtml(summary) + '</p>'
           + '</details>';
@@ -1662,6 +1684,70 @@
     }
   }
 
+  function _formatInvestigationReport(entry) {
+    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : 'Unknown time';
+    const result = entry.result || {};
+    const data = result.data || {};
+    const source = result.source || 'unknown';
+    const focus = entry.focus || '';
+    const sections = [
+      { key: 'summary',            label: 'Investigation Summary' },
+      { key: 'incongruities',      label: 'Incongruities Found' },
+      { key: 'data_quality',       label: 'Data Quality Issues' },
+      { key: 'errors_warnings',    label: 'System Errors / Warnings' },
+      { key: 'hypotheses',         label: 'Hypotheses' },
+      { key: 'recommended_actions',label: 'Recommended Actions' },
+      { key: 'assumptions',        label: 'Assumptions & Confidence' },
+    ];
+    let out = '# Climate Advisor — Investigation Report\n\n';
+    out += '| Field | Value |\n|---|---|\n';
+    out += '| **Date** | ' + ts + ' |\n';
+    out += '| **Source** | ' + source + ' |\n';
+    if (focus) out += '| **Focus** | ' + focus + ' |\n';
+    out += '\n---\n\n';
+    for (const { key, label } of sections) {
+      const content = (data[key] || '').trim();
+      if (!content) continue;
+      out += '## ' + label + '\n\n' + content + '\n\n';
+    }
+    if (result.raw_response && !data.summary) {
+      out += '## Raw Response\n\n```\n' + result.raw_response + '\n```\n\n';
+    }
+    out += '---\n\n*Generated by Climate Advisor — Home Assistant Integration*\n';
+    return out;
+  }
+
+  function _triggerTextDownload(text, filename) {
+    const blob = new Blob([text], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function downloadInvestigationReport() {
+    if (!_lastInvestigationResult) return;
+    const date = new Date(_lastInvestigationResult.timestamp).toISOString().slice(0, 10);
+    _triggerTextDownload(
+      _formatInvestigationReport(_lastInvestigationResult),
+      'climate-advisor-investigation-' + date + '.md'
+    );
+  }
+
+  function downloadInvestigationReportByIndex(idx) {
+    const entry = _cachedInvestigationReports[idx];
+    if (!entry) return;
+    const date = new Date(entry.timestamp).toISOString().slice(0, 10);
+    _triggerTextDownload(
+      _formatInvestigationReport(entry),
+      'climate-advisor-investigation-' + date + '.md'
+    );
+  }
+
   // Expose AI tab functions to window for onclick handlers
   window.runAIReport = runAIReport;
   window.copyAIReport = copyAIReport;
@@ -1669,6 +1755,8 @@
   window.showHistoryReport = showHistoryReport;
   window.runInvestigation = runInvestigation;
   window.loadInvestigationHistory = loadInvestigationHistory;
+  window.downloadInvestigationReport = downloadInvestigationReport;
+  window.downloadInvestigationReportByIndex = downloadInvestigationReportByIndex;
 
   // --- Initial load (retry until auth token is available) ---
   function loadAll() {

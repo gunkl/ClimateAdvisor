@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.12"
+VERSION = "0.3.13"
 
 # Default setpoints (°F)
 DEFAULT_COMFORT_HEAT = 70
@@ -615,6 +615,48 @@ CONFIG_METADATA = {
         ),
         "category": "ai_settings",
     },
+    "ai_investigator_enabled": {
+        "label": "Enable Investigative Agent",
+        "description": (
+            "Enable the investigative agent, which performs deep cross-source analysis"
+            " to find incongruities, data quality issues, and system errors."
+            " Requires AI to be enabled and configured. Default is off."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_investigator_model": {
+        "label": "Investigator AI Model",
+        "description": (
+            "Which Claude model the investigative agent uses."
+            " Opus is recommended for deep analysis. Sonnet is a cost-effective alternative."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_investigator_reasoning_effort": {
+        "label": "Investigator Reasoning Effort",
+        "description": (
+            "How much extended thinking the investigator uses."
+            " High is recommended — the agent needs to reason through multiple hypotheses."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_investigator_max_tokens": {
+        "label": "Investigator Max Response Length (tokens)",
+        "description": (
+            "Maximum token length for investigator reports."
+            " Larger values allow more detailed findings. 8192 recommended."
+        ),
+        "category": "ai_settings",
+    },
+    "ai_investigator_requests_per_day": {
+        "label": "Investigator Requests Per Day",
+        "description": (
+            "Maximum investigative analysis runs per day."
+            " Each investigation uses extended thinking and is more expensive than activity reports."
+            " Resets at midnight."
+        ),
+        "category": "ai_settings",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -663,6 +705,11 @@ CONF_AI_TEMPERATURE = "ai_temperature"
 CONF_AI_MONTHLY_BUDGET = "ai_monthly_budget"
 CONF_AI_AUTO_REQUESTS_PER_DAY = "ai_auto_requests_per_day"
 CONF_AI_MANUAL_REQUESTS_PER_DAY = "ai_manual_requests_per_day"
+CONF_AI_INVESTIGATOR_ENABLED = "ai_investigator_enabled"
+CONF_AI_INVESTIGATOR_MODEL = "ai_investigator_model"
+CONF_AI_INVESTIGATOR_REASONING = "ai_investigator_reasoning_effort"
+CONF_AI_INVESTIGATOR_MAX_TOKENS = "ai_investigator_max_tokens"
+CONF_AI_INVESTIGATOR_RPD = "ai_investigator_requests_per_day"
 
 # Defaults
 DEFAULT_AI_ENABLED = False
@@ -673,6 +720,11 @@ DEFAULT_AI_TEMPERATURE = 0.3
 DEFAULT_AI_MONTHLY_BUDGET = 0  # 0 = no cap
 DEFAULT_AI_AUTO_REQUESTS_PER_DAY = 5
 DEFAULT_AI_MANUAL_REQUESTS_PER_DAY = 20
+DEFAULT_AI_INVESTIGATOR_ENABLED = False
+DEFAULT_AI_INVESTIGATOR_MODEL = "claude-sonnet-4-6"
+DEFAULT_AI_INVESTIGATOR_REASONING = "high"
+DEFAULT_AI_INVESTIGATOR_MAX_TOKENS = 8192
+DEFAULT_AI_INVESTIGATOR_RPD = 3
 
 # Model options
 AI_MODEL_SONNET = "claude-sonnet-4-6"
@@ -706,6 +758,10 @@ AI_REQUEST_HISTORY_CAP = 50
 AI_REPORT_HISTORY_CAP = 10
 AI_REPORTS_FILE = "climate_advisor_ai_reports.json"
 
+# Investigation report history (Issue #82)
+INVESTIGATION_REPORT_HISTORY_CAP = 20
+INVESTIGATION_REPORTS_FILE = "climate_advisor_investigation_reports.json"
+
 # Sensor attributes for AI status
 ATTR_AI_STATUS = "ai_status"
 
@@ -713,3 +769,5 @@ ATTR_AI_STATUS = "ai_status"
 API_AI_STATUS = f"{API_BASE}/ai_status"
 API_AI_ACTIVITY = f"{API_BASE}/ai_activity"
 API_AI_REPORTS = f"{API_BASE}/ai_reports"
+API_AI_INVESTIGATE = f"{API_BASE}/ai_investigate"
+API_INVESTIGATION_REPORTS = f"{API_BASE}/investigation_reports"

@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     API_AI_ACTIVITY,
+    API_AI_INVESTIGATE,
     API_AI_REPORTS,
     API_AI_STATUS,
     API_AUTOMATION_STATE,
@@ -22,6 +23,7 @@ from .const import (
     API_CONFIG,
     API_EVENT_LOG,
     API_FORCE_RECLASSIFY,
+    API_INVESTIGATION_REPORTS,
     API_LEARNING,
     API_RESPOND_SUGGESTION,
     API_RESUME_FROM_PAUSE,
@@ -42,7 +44,11 @@ from .const import (
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
+    CONF_AI_ENABLED,
+    CONF_AI_INVESTIGATOR_ENABLED,
     CONFIG_METADATA,
+    DEFAULT_AI_ENABLED,
+    DEFAULT_AI_INVESTIGATOR_ENABLED,
     DOMAIN,
     VERSION,
 )
@@ -598,6 +604,84 @@ class ClimateAdvisorAIReportsView(HomeAssistantView):
         )
 
 
+class ClimateAdvisorInvestigateView(HomeAssistantView):
+    """POST /api/climate_advisor/ai_investigate — run an investigation."""
+
+    url = API_AI_INVESTIGATE
+    name = "api:climate_advisor:ai_investigate"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        # Parse optional JSON body — body may be absent
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        focus: str = str(body.get("focus", ""))
+        try:
+            hours: int = max(1, min(int(body.get("hours", 48)), 168))
+        except (ValueError, TypeError):
+            hours = 48
+
+        if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
+            return self.json_message("AI features are not enabled", status_code=403)
+
+        if not coordinator.config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED):
+            return self.json_message("Investigative agent is not enabled", status_code=403)
+
+        if coordinator.claude_client is None:
+            return self.json_message("AI client not available", status_code=503)
+
+        allowed, reason = coordinator.claude_client.check_investigator_rate_limit()
+        if not allowed:
+            return self.json_message(reason, status_code=429)
+
+        _LOGGER.info(
+            "Investigation requested: focus_len=%d hours=%d",
+            len(focus),
+            hours,
+        )
+
+        result = await coordinator.ai_skills.async_execute(
+            "investigator",
+            hass,
+            coordinator,
+            coordinator.claude_client,
+            focus=focus,
+            hours=hours,
+        )
+
+        if result.get("success") or result.get("source") == "fallback":
+            coordinator.claude_client.increment_investigator_counter()
+            await coordinator.async_store_investigation_report(result)
+            _LOGGER.info("Investigation complete: source=%s", result.get("source", "unknown"))
+            return self.json(result)
+
+        return self.json_message(result.get("error", "Investigation failed"), status_code=500)
+
+
+class ClimateAdvisorInvestigationReportsView(HomeAssistantView):
+    """GET /api/climate_advisor/investigation_reports — list investigation history."""
+
+    url = API_INVESTIGATION_REPORTS
+    name = "api:climate_advisor:investigation_reports"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        return self.json(coordinator.get_investigation_report_history())
+
+
 class ClimateAdvisorEventLogView(HomeAssistantView):
     """Return the in-memory automation event log for the requested time window (Issue #76)."""
 
@@ -643,5 +727,7 @@ API_VIEWS = [
     ClimateAdvisorAIStatusView,
     ClimateAdvisorAIActivityView,
     ClimateAdvisorAIReportsView,
+    ClimateAdvisorInvestigateView,
+    ClimateAdvisorInvestigationReportsView,
     ClimateAdvisorEventLogView,
 ]

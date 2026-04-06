@@ -26,6 +26,10 @@ class AISkillDefinition:
     response_parser: Callable  # (raw_response: str) -> dict[str, Any]
     fallback: Callable | None = None  # (coordinator, **kwargs) -> dict[str, Any]
     triggered_by: str = "manual"  # "manual" or "auto" — determines rate limit counter
+    # Optional per-skill config overrides — config key names read from coordinator.config at call time
+    config_key_model: str | None = None  # config key for model override (e.g. CONF_AI_INVESTIGATOR_MODEL)
+    config_key_max_tokens: str | None = None  # config key for max_tokens override
+    config_key_reasoning: str | None = None  # config key for reasoning_effort override
 
 
 class AISkillRegistry:
@@ -94,11 +98,21 @@ class AISkillRegistry:
                 return _run_fallback(skill, coordinator, **kwargs)
             return _error_result(f"Context builder failed for {name}")
 
+        # Resolve per-skill config overrides from coordinator.config (if configured)
+        cfg: dict[str, Any] = getattr(coordinator, "config", {}) or {}
+        override_model = cfg.get(skill.config_key_model) if skill.config_key_model else None
+        override_max_tokens_raw = cfg.get(skill.config_key_max_tokens) if skill.config_key_max_tokens else None
+        override_max_tokens = int(override_max_tokens_raw) if override_max_tokens_raw is not None else None
+        override_reasoning = cfg.get(skill.config_key_reasoning) if skill.config_key_reasoning else None
+
         # Call Claude
         response = await claude_client.async_request(
             system_prompt=skill.system_prompt,
             user_message=context,
             triggered_by=skill.triggered_by,
+            model=override_model,
+            max_tokens=override_max_tokens,
+            reasoning_effort=override_reasoning,
         )
 
         if response.success:

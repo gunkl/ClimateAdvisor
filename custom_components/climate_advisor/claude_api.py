@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import time
 from collections import deque
@@ -20,6 +21,8 @@ from .const import (
     AI_RETRY_BASE_DELAY_SECONDS,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
+    CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_AI_INVESTIGATOR_RPD,
     CONF_AI_MANUAL_REQUESTS_PER_DAY,
     CONF_AI_MAX_TOKENS,
     CONF_AI_MODEL,
@@ -27,6 +30,8 @@ from .const import (
     CONF_AI_REASONING_EFFORT,
     CONF_AI_TEMPERATURE,
     DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
+    DEFAULT_AI_INVESTIGATOR_ENABLED,
+    DEFAULT_AI_INVESTIGATOR_RPD,
     DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
     DEFAULT_AI_MAX_TOKENS,
     DEFAULT_AI_MODEL,
@@ -135,6 +140,8 @@ class ClaudeAPIClient:
         self._total_requests: int = 0
         self._error_count: int = 0
         self._last_request_time: float | None = None
+        self._investigator_requests_today: int = 0
+        self._investigator_requests_date: str = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -147,6 +154,8 @@ class ClaudeAPIClient:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
         triggered_by: str = "manual",
     ) -> ClaudeResponse:
         """Send a request to the Claude API with resilience guards.
@@ -156,6 +165,8 @@ class ClaudeAPIClient:
             user_message: The user turn content.
             max_tokens: Override the configured max_tokens for this request.
             temperature: Override the configured temperature for this request.
+            model: Override the configured model for this request.
+            reasoning_effort: Override the configured reasoning effort for this request.
             triggered_by: "manual" (user-initiated) or "auto" (scheduled/automated).
 
         Returns:
@@ -226,8 +237,12 @@ class ClaudeAPIClient:
         resolved_temperature = (
             temperature if temperature is not None else self._config.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE)
         )
-        model = self._config.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)
-        reasoning_effort = self._config.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT)
+        model = model if model is not None else self._config.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)
+        reasoning_effort = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else self._config.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT)
+        )
 
         response = await self._async_call_with_retry(
             system_prompt=system_prompt,
@@ -345,6 +360,9 @@ class ClaudeAPIClient:
             "monthly_cost_estimate": round(self._budget.monthly_cost, 4),
             "auto_requests_today": self._rate_counters.auto_requests_today,
             "manual_requests_today": self._rate_counters.manual_requests_today,
+            "investigator_requests_today": self._investigator_requests_today,
+            "investigator_requests_limit": int(self._config.get(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD)),
+            "investigator_enabled": self._config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED),
         }
 
     def get_persistent_stats(self) -> dict[str, Any]:
@@ -365,6 +383,8 @@ class ClaudeAPIClient:
             "auto_requests_today": self._rate_counters.auto_requests_today,
             "manual_requests_today": self._rate_counters.manual_requests_today,
             "counter_date": self._rate_counters.counter_date.isoformat(),
+            "investigator_requests_today": self._investigator_requests_today,
+            "investigator_requests_date": self._investigator_requests_date,
         }
 
     def restore_persistent_stats(self, data: dict[str, Any]) -> None:
@@ -388,6 +408,8 @@ class ClaudeAPIClient:
             self._rate_counters.counter_date = date.fromisoformat(data["counter_date"])
         except (KeyError, ValueError):
             self._rate_counters.counter_date = date.today()
+        self._investigator_requests_today = int(data.get("investigator_requests_today", 0))
+        self._investigator_requests_date = data.get("investigator_requests_date", "")
         # Apply daily reset if rebooted after midnight
         self._reset_daily_counters_if_needed()
         _LOGGER.debug(
@@ -451,6 +473,34 @@ class ClaudeAPIClient:
         else:
             limit = self._config.get(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY)
             return self._rate_counters.manual_requests_today < limit
+
+    def check_investigator_rate_limit(self) -> tuple[bool, str]:
+        """Check whether an investigator request is allowed under the daily limit.
+
+        Returns (allowed: bool, reason: str).
+        """
+        if not self._config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED):
+            return False, "Investigative agent is not enabled"
+        self._reset_investigator_counter_if_needed()
+        limit = int(self._config.get(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD))
+        if limit > 0 and self._investigator_requests_today >= limit:
+            return (
+                False,
+                f"Investigator daily limit reached ({self._investigator_requests_today}/{limit})",
+            )
+        return True, ""
+
+    def increment_investigator_counter(self) -> None:
+        """Increment the investigator daily request counter."""
+        self._reset_investigator_counter_if_needed()
+        self._investigator_requests_today += 1
+
+    def _reset_investigator_counter_if_needed(self) -> None:
+        """Reset investigator counter if the date has rolled over."""
+        today = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d")
+        if self._investigator_requests_date != today:
+            self._investigator_requests_today = 0
+            self._investigator_requests_date = today
 
     def _check_circuit_breaker(self) -> bool:
         """Return True if the circuit breaker permits a request.

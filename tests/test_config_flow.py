@@ -934,7 +934,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 13
+        assert entry.version == 14
 
     def test_chain_from_v1_includes_temp_unit(self):
         """v1 entry chains through all migrations and ends up with temp_unit."""
@@ -966,7 +966,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 13
+        assert entry.version == 14
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1027,7 @@ class TestMigrationV9ToV10:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
-        assert entry.version == 13
+        assert entry.version == 14
 
     def test_chain_from_v1_includes_debounce(self):
         """v1 entry chains through all migrations and ends up with welcome_home_debounce_seconds."""
@@ -1059,7 +1059,7 @@ class TestMigrationV9ToV10:
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 13
+        assert entry.version == 14
 
 
 class TestMigrationV10ToV11:
@@ -1115,7 +1115,7 @@ class TestMigrationV10ToV11:
         assert final_data.get("adaptive_preheat_enabled") is True
         assert final_data.get("adaptive_setback_enabled") is True
         assert final_data.get("weather_bias_enabled") is True
-        assert entry.version == 13
+        assert entry.version == 14
 
 
 class TestMigrationV11ToV12:
@@ -1143,7 +1143,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
-        assert entry.version == 13
+        assert entry.version == 14
 
     def test_v11_to_v12_existing_values_preserved(self):
         """v11 entry with all threshold keys set retains those values after migration."""
@@ -1175,7 +1175,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 90
         assert final_data.get("preheat_safety_margin") == 1.5
         assert final_data.get("max_setback_depth_f") == 6.0
-        assert entry.version == 13
+        assert entry.version == 14
 
     def test_v11_to_v12_invalid_type_replaced(self):
         """v11 entry where min_preheat_minutes is a non-numeric string gets the default."""
@@ -1196,7 +1196,7 @@ class TestMigrationV11ToV12:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("min_preheat_minutes") == 30
-        assert entry.version == 13
+        assert entry.version == 14
 
     def test_v11_to_v12_from_v10_chain(self):
         """v10 entry chains through v11 and v12 migrations; all five threshold keys get defaults."""
@@ -1215,7 +1215,7 @@ class TestMigrationV11ToV12:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 13
+        assert entry.version == 14
         assert final_data.get("min_preheat_minutes") == 30
         assert final_data.get("max_preheat_minutes") == 240
         assert final_data.get("default_preheat_minutes") == 120
@@ -1317,7 +1317,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 13
+        assert entry.version == 14
         assert final_data.get("ai_enabled") is DEFAULT_AI_ENABLED
         assert final_data.get("ai_api_key") == ""
         assert final_data.get("ai_model") == DEFAULT_AI_MODEL
@@ -1345,10 +1345,111 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 13
+        assert entry.version == 14
         assert final_data.get("ai_enabled") is False
         assert final_data.get("ai_model") == "claude-sonnet-4-6"
         assert final_data.get("ai_max_tokens") == 4096
+
+
+# ---------------------------------------------------------------------------
+# v13→v14 migration — investigative agent config keys (Issue #82)
+# ---------------------------------------------------------------------------
+
+_INVESTIGATOR_KEYS = [
+    "ai_investigator_enabled",
+    "ai_investigator_model",
+    "ai_investigator_reasoning_effort",
+    "ai_investigator_max_tokens",
+    "ai_investigator_requests_per_day",
+]
+
+
+class TestMigrationV13ToV14:
+    """Tests for config entry migration from version 13 to version 14."""
+
+    def _run_v13_to_v14_migration(self, v13_data: dict) -> dict:
+        """Run only the v13→v14 migration step and return resulting data."""
+        from custom_components.climate_advisor import async_migrate_entry
+
+        entry = _make_config_entry(dict(v13_data), version=13)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        asyncio.run(async_migrate_entry(hass, entry))
+        return final_data
+
+    def test_v13_to_v14_adds_investigator_defaults(self):
+        """Migration adds all 5 investigator keys with correct defaults."""
+        from custom_components.climate_advisor.const import (
+            DEFAULT_AI_INVESTIGATOR_ENABLED,
+            DEFAULT_AI_INVESTIGATOR_MAX_TOKENS,
+            DEFAULT_AI_INVESTIGATOR_MODEL,
+            DEFAULT_AI_INVESTIGATOR_REASONING,
+            DEFAULT_AI_INVESTIGATOR_RPD,
+        )
+
+        result = self._run_v13_to_v14_migration(dict(FULL_CONFIG))
+        assert result.get("ai_investigator_enabled") is DEFAULT_AI_INVESTIGATOR_ENABLED
+        assert result.get("ai_investigator_model") == DEFAULT_AI_INVESTIGATOR_MODEL
+        assert result.get("ai_investigator_reasoning_effort") == DEFAULT_AI_INVESTIGATOR_REASONING
+        assert result.get("ai_investigator_max_tokens") == DEFAULT_AI_INVESTIGATOR_MAX_TOKENS
+        assert result.get("ai_investigator_requests_per_day") == DEFAULT_AI_INVESTIGATOR_RPD
+
+    def test_v13_to_v14_adds_exactly_five_keys(self):
+        """Migration adds exactly the five investigator keys and nothing else."""
+        result = self._run_v13_to_v14_migration(dict(FULL_CONFIG))
+        new_keys = set(result) - set(FULL_CONFIG)
+        assert new_keys == set(_INVESTIGATOR_KEYS)
+
+    def test_v13_to_v14_preserves_existing_fields(self):
+        """All existing v13 fields survive migration unchanged."""
+        result = self._run_v13_to_v14_migration(dict(FULL_CONFIG))
+        for key in FULL_CONFIG:
+            assert result[key] == FULL_CONFIG[key], f"Field {key!r} changed unexpectedly"
+
+    def test_v13_to_v14_does_not_overwrite_existing_investigator_key(self):
+        """If a key already exists it is preserved (setdefault semantics)."""
+        v13_with_key = {**FULL_CONFIG, "ai_investigator_enabled": True}
+        result = self._run_v13_to_v14_migration(v13_with_key)
+        assert result.get("ai_investigator_enabled") is True
+
+    def test_v13_to_v14_via_real_function(self):
+        """Real async_migrate_entry() adds all investigator defaults to a v13 entry."""
+        from custom_components.climate_advisor import async_migrate_entry
+        from custom_components.climate_advisor.const import (
+            DEFAULT_AI_INVESTIGATOR_ENABLED,
+            DEFAULT_AI_INVESTIGATOR_MAX_TOKENS,
+            DEFAULT_AI_INVESTIGATOR_MODEL,
+            DEFAULT_AI_INVESTIGATOR_REASONING,
+            DEFAULT_AI_INVESTIGATOR_RPD,
+        )
+
+        entry = _make_config_entry(dict(FULL_CONFIG), version=13)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert entry.version == 14
+        assert final_data.get("ai_investigator_enabled") is DEFAULT_AI_INVESTIGATOR_ENABLED
+        assert final_data.get("ai_investigator_model") == DEFAULT_AI_INVESTIGATOR_MODEL
+        assert final_data.get("ai_investigator_reasoning_effort") == DEFAULT_AI_INVESTIGATOR_REASONING
+        assert final_data.get("ai_investigator_max_tokens") == DEFAULT_AI_INVESTIGATOR_MAX_TOKENS
+        assert final_data.get("ai_investigator_requests_per_day") == DEFAULT_AI_INVESTIGATOR_RPD
 
 
 # ---------------------------------------------------------------------------

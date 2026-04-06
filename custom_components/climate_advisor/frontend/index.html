@@ -455,6 +455,35 @@
       <div class="loading">Loading...</div>
     </div>
   </div>
+
+  <!-- Investigative Analysis Card -->
+  <div class="card">
+    <h2>🔬 Investigative Analysis</h2>
+    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem;">
+      Scientific cross-source analysis to find incongruities, data issues, and system errors.
+      Requires AI and Investigative Agent to be enabled in settings.
+    </p>
+    <div style="margin-bottom: 0.75rem;">
+      <textarea id="investigation-focus"
+        placeholder="Optional: describe what you'd like investigated (e.g. 'why is window compliance 0%')..."
+        style="width:100%; min-height:60px; padding:0.5rem; border-radius:6px;
+               border:1px solid var(--border); background:var(--bg);
+               color:var(--text); font-size:0.85rem; resize:vertical; box-sizing:border-box;"></textarea>
+    </div>
+    <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+      <button class="btn" onclick="runInvestigation()" id="investigate-btn">🔍 Run Investigation</button>
+      <span id="investigation-status" style="font-size:0.8rem; color:var(--text-secondary);"></span>
+    </div>
+    <div id="investigation-result" style="display:none; margin-top:1rem;"></div>
+  </div>
+
+  <!-- Investigation History Card -->
+  <div class="card">
+    <h2>📋 Investigation History</h2>
+    <div id="investigation-history-list">
+      <p style="color:var(--text-secondary); font-size:0.85rem;">No investigations run yet.</p>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -1227,6 +1256,7 @@
     loadAIHistory();
     loadAISettings();
     loadSuggestions();
+    loadInvestigationHistory();
   }
 
   async function loadAIStatus() {
@@ -1392,8 +1422,15 @@
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
     try {
-      const data = await apiFetch('event_log?hours=' + hours);
-      const json = JSON.stringify(data, null, 2);
+      const [logData, investigationData] = await Promise.allSettled([
+        apiFetch('event_log?hours=' + hours),
+        apiFetch('investigation_reports'),
+      ]);
+      const bundle = logData.status === 'fulfilled' ? logData.value : {};
+      if (investigationData.status === 'fulfilled') {
+        bundle.investigation_reports = investigationData.value;
+      }
+      const json = JSON.stringify(bundle, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1416,9 +1453,10 @@
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
     try {
-      const [logData, reportData] = await Promise.allSettled([
+      const [logData, reportData, investigationData] = await Promise.allSettled([
         apiFetch('event_log?hours=24'),
         apiFetch('ai_reports'),
+        apiFetch('investigation_reports'),
       ]);
       const bundle = {
         downloaded_at: new Date().toISOString(),
@@ -1426,6 +1464,9 @@
       };
       if (reportData.status === 'fulfilled' && reportData.value.reports && reportData.value.reports.length) {
         bundle.ai_summary = reportData.value.reports[0];
+      }
+      if (investigationData.status === 'fulfilled') {
+        bundle.investigation_reports = investigationData.value;
       }
       const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -1533,11 +1574,101 @@
     }
   }
 
+  async function runInvestigation() {
+    const btn = document.getElementById('investigate-btn');
+    const status = document.getElementById('investigation-status');
+    const resultDiv = document.getElementById('investigation-result');
+    const focus = document.getElementById('investigation-focus').value.trim();
+
+    btn.disabled = true;
+    status.textContent = 'Running investigation...';
+    resultDiv.style.display = 'none';
+
+    try {
+      const body = { hours: 48 };
+      if (focus) body.focus = focus;
+      const result = await apiFetch('ai_investigate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+      const data = result.data || {};
+      const source = result.source || 'unknown';
+      const ts = new Date().toLocaleTimeString();
+      status.textContent = 'Completed at ' + ts + ' (source: ' + source + ')';
+
+      // Build structured output
+      const sections = [
+        { key: 'summary', label: '📊 Summary' },
+        { key: 'incongruities', label: '⚠️ Incongruities Found' },
+        { key: 'data_quality', label: '🔢 Data Quality Issues' },
+        { key: 'errors_warnings', label: '🚨 System Errors / Warnings' },
+        { key: 'hypotheses', label: '🔬 Hypotheses' },
+        { key: 'recommended_actions', label: '✅ Recommended Actions' },
+        { key: 'assumptions', label: '📝 Assumptions & Confidence' },
+      ];
+
+      let html = '';
+      for (const { key, label } of sections) {
+        const content = data[key] || '';
+        if (!content) continue;
+        html += '<details open style="margin-bottom:0.5rem;">'
+          + '<summary style="cursor:pointer; font-weight:600; padding:0.25rem 0;">' + escapeHtml(label) + '</summary>'
+          + '<pre style="white-space:pre-wrap; font-size:0.8rem; margin:0.5rem 0 0; padding:0.5rem;'
+          + ' background:var(--bg); border-radius:4px;">' + escapeHtml(content) + '</pre>'
+          + '</details>';
+      }
+
+      if (!html) {
+        html = '<pre style="white-space:pre-wrap; font-size:0.8rem;">' + escapeHtml(result.raw_response || JSON.stringify(result, null, 2)) + '</pre>';
+      }
+
+      resultDiv.innerHTML = html;
+      resultDiv.style.display = 'block';
+
+      // Refresh history
+      loadInvestigationHistory();
+    } catch (err) {
+      status.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function loadInvestigationHistory() {
+    const container = document.getElementById('investigation-history-list');
+    if (!container) return;
+    try {
+      const reports = await apiFetch('investigation_reports');
+      if (!Array.isArray(reports) || reports.length === 0) {
+        container.innerHTML = '<p style="color:var(--text-secondary); font-size:0.85rem;">No investigations run yet.</p>';
+        return;
+      }
+      // Show most recent first
+      const sorted = [...reports].reverse();
+      container.innerHTML = sorted.map((entry) => {
+        const ts = new Date(entry.timestamp).toLocaleString();
+        const summary = (entry.result && entry.result.data && entry.result.data.summary)
+          ? entry.result.data.summary
+          : (entry.result && entry.result.error ? entry.result.error : 'No summary available');
+        const source = (entry.result && entry.result.source) ? entry.result.source : 'unknown';
+        return '<details style="margin-bottom:0.5rem;">'
+          + '<summary style="cursor:pointer; font-size:0.85rem; padding:0.25rem 0;">'
+          + '<strong>' + escapeHtml(ts) + '</strong>'
+          + ' <span style="color:var(--text-secondary);">(' + escapeHtml(source) + ')</span>'
+          + '</summary>'
+          + '<p style="font-size:0.8rem; margin:0.5rem 0 0; color:var(--text-secondary);">' + escapeHtml(summary) + '</p>'
+          + '</details>';
+      }).join('');
+    } catch (_err) {
+      container.innerHTML = '<p style="color:var(--text-secondary); font-size:0.85rem;">Failed to load history.</p>';
+    }
+  }
+
   // Expose AI tab functions to window for onclick handlers
   window.runAIReport = runAIReport;
   window.copyAIReport = copyAIReport;
   window.downloadFullLogs = downloadFullLogs;
   window.showHistoryReport = showHistoryReport;
+  window.runInvestigation = runInvestigation;
+  window.loadInvestigationHistory = loadInvestigationHistory;
 
   // --- Initial load (retry until auth token is available) ---
   function loadAll() {

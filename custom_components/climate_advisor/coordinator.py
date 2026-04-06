@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +56,7 @@ from .const import (
     ATTR_TREND_MAGNITUDE,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
+    CONF_AI_INVESTIGATOR_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -82,6 +83,8 @@ from .const import (
     ECONOMIZER_TEMP_DELTA,
     EVENT_LOG_CAP,
     FAN_MODE_DISABLED,
+    INVESTIGATION_REPORT_HISTORY_CAP,
+    INVESTIGATION_REPORTS_FILE,
     MAX_THERMAL_RATE_F_PER_HOUR,
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_THERMAL_RATE_F_PER_HOUR,
@@ -144,14 +147,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.claude_client: ClaudeAPIClient | None = None
         self.ai_skills: AISkillRegistry | None = None
         self._ai_report_history: list[dict] = []
+        self._investigation_report_history: list[dict] = []
         if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
             from .ai_skills_activity import register_activity_skill
+            from .ai_skills_investigator import register_investigator_skill
             from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
 
             self.claude_client = _ClaudeAPIClient(config)
             self.ai_skills = _AISkillRegistry()
             register_activity_skill(self.ai_skills)
+            if config.get(CONF_AI_INVESTIGATOR_ENABLED, False):
+                register_investigator_skill(self.ai_skills)
             _LOGGER.info("AI subsystem initialized — model: %s", config.get("ai_model", "unknown"))
         else:
             _LOGGER.debug(
@@ -418,6 +425,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Load AI report history if AI subsystem is active
         if self.claude_client:
             await self.hass.async_add_executor_job(self._load_ai_reports)
+            await self.hass.async_add_executor_job(self._load_investigation_reports)
 
         _LOGGER.info("State restore complete")
 
@@ -547,6 +555,66 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def get_ai_report_history(self) -> list[dict]:
         """Return the AI report history for dashboard display."""
         return list(self._ai_report_history)
+
+    async def async_store_investigation_report(self, result: dict) -> None:
+        """Store an investigation report result in history and persist to disk."""
+
+        entry = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "result": result,
+        }
+        self._investigation_report_history.append(entry)
+        if len(self._investigation_report_history) > INVESTIGATION_REPORT_HISTORY_CAP:
+            self._investigation_report_history = self._investigation_report_history[-INVESTIGATION_REPORT_HISTORY_CAP:]
+        await self.hass.async_add_executor_job(self._save_investigation_reports)
+
+    def get_investigation_report_history(self) -> list[dict]:
+        """Return a copy of the investigation report history."""
+        return list(self._investigation_report_history)
+
+    def _save_investigation_reports(self) -> None:
+        """Save investigation report history to disk (atomic write)."""
+        import json
+        import os
+        import sys
+
+        filepath = self.hass.config.path(INVESTIGATION_REPORTS_FILE)
+        tmp_path = filepath + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._investigation_report_history, f, indent=2, default=str)
+            if sys.platform != "win32":
+                os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, filepath)
+        except Exception:
+            _LOGGER.exception("Failed to save investigation reports to %s", filepath)
+            import contextlib
+
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
+
+    def _load_investigation_reports(self) -> None:
+        """Load investigation report history from disk."""
+        import json
+
+        filepath = self.hass.config.path(INVESTIGATION_REPORTS_FILE)
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                self._investigation_report_history = data[-INVESTIGATION_REPORT_HISTORY_CAP:]
+                _LOGGER.debug(
+                    "Loaded %d investigation reports from disk",
+                    len(self._investigation_report_history),
+                )
+            else:
+                _LOGGER.warning("Investigation reports file has unexpected format, starting fresh")
+                self._investigation_report_history = []
+        except FileNotFoundError:
+            self._investigation_report_history = []
+        except Exception:
+            _LOGGER.exception("Failed to load investigation reports from %s", filepath)
+            self._investigation_report_history = []
 
     def _flush_hvac_runtime(self) -> None:
         """Flush accumulated HVAC runtime to today's record."""

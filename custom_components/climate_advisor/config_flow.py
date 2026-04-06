@@ -17,6 +17,11 @@ from .const import (
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
+    CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_AI_INVESTIGATOR_MAX_TOKENS,
+    CONF_AI_INVESTIGATOR_MODEL,
+    CONF_AI_INVESTIGATOR_REASONING,
+    CONF_AI_INVESTIGATOR_RPD,
     CONF_AI_MANUAL_REQUESTS_PER_DAY,
     CONF_AI_MAX_TOKENS,
     CONF_AI_MODEL,
@@ -51,6 +56,11 @@ from .const import (
     CONF_WELCOME_HOME_DEBOUNCE,
     DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
     DEFAULT_AI_ENABLED,
+    DEFAULT_AI_INVESTIGATOR_ENABLED,
+    DEFAULT_AI_INVESTIGATOR_MAX_TOKENS,
+    DEFAULT_AI_INVESTIGATOR_MODEL,
+    DEFAULT_AI_INVESTIGATOR_REASONING,
+    DEFAULT_AI_INVESTIGATOR_RPD,
     DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
     DEFAULT_AI_MAX_TOKENS,
     DEFAULT_AI_MODEL,
@@ -139,7 +149,7 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 13
+    VERSION = 14
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -1081,6 +1091,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if not (256 <= ai_max_tokens <= 8192):
                 errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
 
+            investigator_max_tokens = int(
+                user_input.get(CONF_AI_INVESTIGATOR_MAX_TOKENS, DEFAULT_AI_INVESTIGATOR_MAX_TOKENS)
+            )
+            if not (256 <= investigator_max_tokens <= 16384):
+                errors[CONF_AI_INVESTIGATOR_MAX_TOKENS] = "ai_max_tokens_out_of_range"
+
             if not errors and new_key and new_key != existing_key and ai_enabled:
                 try:
                     from .claude_api import ClaudeAPIClient
@@ -1108,6 +1124,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     CONF_AI_MONTHLY_BUDGET,
                     CONF_AI_AUTO_REQUESTS_PER_DAY,
                     CONF_AI_MANUAL_REQUESTS_PER_DAY,
+                    CONF_AI_INVESTIGATOR_MAX_TOKENS,
+                    CONF_AI_INVESTIGATOR_RPD,
                 ):
                     if key in merged:
                         merged[key] = int(merged[key])
@@ -1178,6 +1196,40 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     default=current.get(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY),
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=100, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_AI_INVESTIGATOR_ENABLED,
+                    default=current.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED),
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_AI_INVESTIGATOR_MODEL,
+                    default=current.get(CONF_AI_INVESTIGATOR_MODEL, DEFAULT_AI_INVESTIGATOR_MODEL),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": m, "label": m} for m in AI_MODELS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_AI_INVESTIGATOR_REASONING,
+                    default=current.get(CONF_AI_INVESTIGATOR_REASONING, DEFAULT_AI_INVESTIGATOR_REASONING),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[{"value": r, "label": r.title()} for r in AI_REASONING_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_AI_INVESTIGATOR_MAX_TOKENS,
+                    default=current.get(CONF_AI_INVESTIGATOR_MAX_TOKENS, DEFAULT_AI_INVESTIGATOR_MAX_TOKENS),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=256, max=16384, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_AI_INVESTIGATOR_RPD,
+                    default=current.get(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=20, mode=selector.NumberSelectorMode.BOX)
                 ),
             }
         )

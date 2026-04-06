@@ -63,6 +63,11 @@ EXPECTED_KEYS = {
     "ai_monthly_budget",
     "ai_auto_requests_per_day",
     "ai_manual_requests_per_day",
+    "ai_investigator_enabled",
+    "ai_investigator_model",
+    "ai_investigator_reasoning_effort",
+    "ai_investigator_max_tokens",
+    "ai_investigator_requests_per_day",
     "override_confirm_seconds",
 }
 

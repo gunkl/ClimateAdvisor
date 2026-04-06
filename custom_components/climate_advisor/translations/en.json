@@ -311,7 +311,12 @@
           "ai_temperature": "Creativity (temperature)",
           "ai_monthly_budget": "Monthly Budget Cap ($)",
           "ai_auto_requests_per_day": "Auto Requests Per Day",
-          "ai_manual_requests_per_day": "Manual Requests Per Day"
+          "ai_manual_requests_per_day": "Manual Requests Per Day",
+          "ai_investigator_enabled": "Enable Investigative Agent",
+          "ai_investigator_model": "Investigator AI Model",
+          "ai_investigator_reasoning_effort": "Investigator Reasoning Effort",
+          "ai_investigator_max_tokens": "Investigator Max Response Length (tokens)",
+          "ai_investigator_requests_per_day": "Investigator Requests Per Day"
         },
         "data_description": {
           "ai_enabled": "Master switch for all AI-powered features. When disabled, Climate Advisor uses only its built-in coded logic.",
@@ -322,7 +327,12 @@
           "ai_temperature": "Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
           "ai_monthly_budget": "Maximum estimated monthly spend in USD. Set to 0 for no limit.",
           "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",
-          "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight)."
+          "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight).",
+          "ai_investigator_enabled": "Enable the investigative agent (requires AI to be enabled). Performs deep cross-source analysis to find incongruities and data issues.",
+          "ai_investigator_model": "Which Claude model the investigator uses. Opus recommended for deep analysis; Sonnet is more cost-effective.",
+          "ai_investigator_reasoning_effort": "How much extended thinking the investigator uses. High recommended — the agent reasons through multiple hypotheses.",
+          "ai_investigator_max_tokens": "Maximum token length for investigator reports (256-16384). 8192 recommended.",
+          "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
         }
       }
     },
@@ -335,7 +345,7 @@
       "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
       "ai_key_required": "API key is required when AI features are enabled.",
       "ai_temperature_out_of_range": "Temperature must be between 0.0 and 1.0.",
-      "ai_max_tokens_out_of_range": "Max tokens must be between 256 and 8192."
+      "ai_max_tokens_out_of_range": "Max tokens value is out of the allowed range for this field."
     }
   },
   "issues": {

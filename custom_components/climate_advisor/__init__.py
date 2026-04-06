@@ -26,6 +26,11 @@ from .const import (
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
+    CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_AI_INVESTIGATOR_MAX_TOKENS,
+    CONF_AI_INVESTIGATOR_MODEL,
+    CONF_AI_INVESTIGATOR_REASONING,
+    CONF_AI_INVESTIGATOR_RPD,
     CONF_AI_MANUAL_REQUESTS_PER_DAY,
     CONF_AI_MAX_TOKENS,
     CONF_AI_MODEL,
@@ -57,6 +62,11 @@ from .const import (
     CONF_WELCOME_HOME_DEBOUNCE,
     DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
     DEFAULT_AI_ENABLED,
+    DEFAULT_AI_INVESTIGATOR_ENABLED,
+    DEFAULT_AI_INVESTIGATOR_MAX_TOKENS,
+    DEFAULT_AI_INVESTIGATOR_MODEL,
+    DEFAULT_AI_INVESTIGATOR_REASONING,
+    DEFAULT_AI_INVESTIGATOR_RPD,
     DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
     DEFAULT_AI_MAX_TOKENS,
     DEFAULT_AI_MODEL,
@@ -271,6 +281,17 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         new_data.setdefault(CONF_AI_MANUAL_REQUESTS_PER_DAY, DEFAULT_AI_MANUAL_REQUESTS_PER_DAY)
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=13)
         _LOGGER.info("Migration to version 13 complete")
+
+    if config_entry.version == 13:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 13 to 14")
+        new_data = {**config_entry.data}
+        new_data.setdefault(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED)
+        new_data.setdefault(CONF_AI_INVESTIGATOR_MODEL, DEFAULT_AI_INVESTIGATOR_MODEL)
+        new_data.setdefault(CONF_AI_INVESTIGATOR_REASONING, DEFAULT_AI_INVESTIGATOR_REASONING)
+        new_data.setdefault(CONF_AI_INVESTIGATOR_MAX_TOKENS, DEFAULT_AI_INVESTIGATOR_MAX_TOKENS)
+        new_data.setdefault(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD)
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=14)
+        _LOGGER.info("Migration to version 14 complete")
 
     return True
 

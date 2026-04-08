@@ -154,6 +154,63 @@
   .chart-range-bar .range-btn:hover:not(.active) {
     background: var(--primary-light);
   }
+  .activity-timeline {
+    width: 100%;
+    margin-bottom: 4px;
+  }
+  .activity-timeline canvas {
+    display: block;
+  }
+  .chart-hover-panel {
+    min-height: 20px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    padding: 2px 0 4px;
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .chart-hover-panel .chp-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .chart-hover-panel .chp-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .chart-hover-panel .chp-state {
+    font-size: 0.75rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    color: #fff;
+  }
+  .chart-legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+  }
+  .cl-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .cl-swatch {
+    display: inline-block;
+    width: 22px;
+    height: 0;
+  }
+  .chart-overlay-bar label.no-data {
+    opacity: 0.4;
+    cursor: default;
+  }
   .chart-overlay-bar {
     display: flex;
     gap: 12px;
@@ -337,21 +394,31 @@
       <button class="chart-zoom-reset" id="chart-zoom-reset" onclick="resetChartZoom()">Reset Zoom</button>
     </div>
     <div class="chart-range-bar">
-      <button class="range-btn active" data-range="24h" onclick="setChartRange('24h', this)">24h</button>
       <button class="range-btn" data-range="6h" onclick="setChartRange('6h', this)">6h</button>
       <button class="range-btn" data-range="12h" onclick="setChartRange('12h', this)">12h</button>
+      <button class="range-btn active" data-range="24h" onclick="setChartRange('24h', this)">24h</button>
       <button class="range-btn" data-range="3d" onclick="setChartRange('3d', this)">3d</button>
       <button class="range-btn" data-range="7d" onclick="setChartRange('7d', this)">7d</button>
       <button class="range-btn" data-range="30d" onclick="setChartRange('30d', this)">30d</button>
       <button class="range-btn" data-range="1y" onclick="setChartRange('1y', this)">1y</button>
     </div>
+    <div id="chart-hover-panel" class="chart-hover-panel"></div>
+    <div class="activity-timeline">
+      <canvas id="activity-chart"></canvas>
+    </div>
     <div class="chart-container">
       <canvas id="temp-chart"></canvas>
     </div>
+    <div class="chart-legend">
+      <div class="cl-item"><span class="cl-swatch" style="border-top:2px dashed rgba(255,152,0,0.85)"></span><span>Predicted Indoor</span></div>
+      <div class="cl-item"><span class="cl-swatch" style="border-top:2px dashed rgba(33,150,243,0.85)"></span><span>Predicted Outdoor</span></div>
+      <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(255,152,0,1)"></span><span>Actual Indoor</span></div>
+      <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(33,150,243,1)"></span><span>Actual Outdoor</span></div>
+    </div>
     <div class="chart-overlay-bar">
       <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Comfort band</label>
-      <label><input type="checkbox" id="overlay-humidity" onchange="toggleOverlay('humidity')"> Humidity</label>
-      <label><input type="checkbox" id="overlay-feelslike" onchange="toggleOverlay('feelslike')"> Feels-like</label>
+      <label id="overlay-humidity-label"><input type="checkbox" id="overlay-humidity" onchange="toggleOverlay('humidity')"> Humidity</label>
+      <label id="overlay-feelslike-label"><input type="checkbox" id="overlay-feelslike" onchange="toggleOverlay('feelslike')"> Feels-like</label>
     </div>
   </div>
 
@@ -731,36 +798,100 @@
   // Parse ISO timestamp → milliseconds (numeric, no date adapter needed)
   function _parseTs(ts) { return new Date(ts).getTime(); }
 
-  // Convert state_log entries into Chart.js datasets
-  function _buildDatasetsFromLog(log) {
-    const hvacBgColors = log.map(e => _hvacColor(e.hvac));
-    const fanBgColors  = log.map(e => e.fan ? CHART_COLORS.fan_on : 'transparent');
+  // Convert range string to { min, max } ms window for x-axis
+  function _rangeToWindow(range) {
+    const now = Date.now();
+    const hoursMap = { '6h': 6, '12h': 12, '24h': 24, '3d': 72, '7d': 168, '30d': 720, '1y': 8760 };
+    const hours = hoursMap[range] || 24;
+    return { min: now - hours * 3600000, max: now + 1800000 }; // +30 min so "Now" marker isn't clipped
+  }
 
-    const hvacDs = {
-      label: 'HVAC State',
-      type: 'bar',
-      data: log.map(e => ({ x: _parseTs(e.ts), y: 2 })),
-      backgroundColor: hvacBgColors,
-      borderWidth: 0,
-      barPercentage: 1.0,
-      categoryPercentage: 1.0,
-      yAxisID: 'yState',
-      order: 10,
+  // Draw horizontal activity timeline above the temperature chart
+  function drawActivityTimeline(log, rangeMin, rangeMax) {
+    const canvas = document.getElementById('activity-chart');
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.parentElement.clientWidth;
+    const H = 52; // px: 2 rows × 20px + 12px labels
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const labelColor = isDark ? '#9e9e9e' : '#757575';
+    const rowH = 14;
+    const labelW = 36;
+    const pad = { right: 20 };
+    const plotW = W - labelW - pad.right;
+    const span = rangeMax - rangeMin;
+
+    function xPx(ms) { return labelW + ((ms - rangeMin) / span) * plotW; }
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = '9px sans-serif';
+    ctx.fillStyle = labelColor;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('HVAC', labelW - 4, rowH / 2);
+    ctx.fillText('Fan', labelW - 4, rowH + 10 + rowH / 2);
+
+    // Background track
+    ctx.fillStyle = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)';
+    ctx.fillRect(labelW, 0, plotW, rowH);
+    ctx.fillRect(labelW, rowH + 10, plotW, rowH);
+
+    // Draw segments — each log entry represents a ~30-min window
+    const halfStep = 900000; // 15 min on each side of the timestamp
+    const hvacColorMap = {
+      heating: 'rgba(239,83,80,0.80)',
+      cooling: 'rgba(66,165,250,0.75)',
+      fan:     'rgba(102,187,106,0.70)',
     };
 
-    const fanDs = {
-      label: 'Fan',
-      type: 'bar',
-      data: log.map(e => ({ x: _parseTs(e.ts), y: 1 })),
-      backgroundColor: fanBgColors,
-      borderWidth: 0,
-      barPercentage: 1.0,
-      categoryPercentage: 1.0,
-      yAxisID: 'yState',
-      order: 11,
-    };
+    log.forEach((e, i) => {
+      const ts = _parseTs(e.ts);
+      // Segment spans from midpoint to previous to midpoint to next
+      const prev = i > 0 ? _parseTs(log[i-1].ts) : ts - halfStep * 2;
+      const next = i < log.length - 1 ? _parseTs(log[i+1].ts) : ts + halfStep * 2;
+      const segStart = Math.max(rangeMin, (ts + prev) / 2);
+      const segEnd   = Math.min(rangeMax, (ts + next) / 2);
+      if (segEnd <= rangeMin || segStart >= rangeMax) return;
 
-    return { hvacDs, fanDs };
+      const x0 = xPx(segStart);
+      const x1 = xPx(segEnd);
+      const w  = Math.max(1, x1 - x0);
+
+      // HVAC row
+      const hv = (e.hvac || '').toLowerCase();
+      if (hvacColorMap[hv]) {
+        ctx.fillStyle = hvacColorMap[hv];
+        ctx.fillRect(x0, 0, w, rowH);
+      }
+
+      // Fan row
+      if (e.fan) {
+        ctx.fillStyle = 'rgba(102,187,106,0.60)';
+        ctx.fillRect(x0, rowH + 10, w, rowH);
+      }
+    });
+
+    // Rounded caps: none needed — rectangles look clean as segments
+
+    // "Now" tick on timeline
+    const nowX = xPx(Date.now());
+    if (nowX >= labelW && nowX <= labelW + plotW) {
+      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(nowX, 0);
+      ctx.lineTo(nowX, H);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   function drawChart(chartData) {
@@ -793,7 +924,9 @@
     const actOutdoorPts = (chartData.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
     const actIndoorPts  = (chartData.actual_indoor  || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
 
-    const { hvacDs, fanDs } = _buildDatasetsFromLog(log);
+    // Draw separate activity timeline (horizontal bars above temp chart)
+    const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
+    drawActivityTimeline(log, rMin, rMax);
 
     // Comfort band dataset
     const comfortBandVisible = document.getElementById('overlay-comfort')?.checked ?? true;
@@ -833,6 +966,7 @@
         borderWidth: 2,
         borderDash: [6, 4],
         pointRadius: 0,
+        pointStyle: 'line',
         tension: 0.3,
         yAxisID: 'y',
         order: 2,
@@ -845,6 +979,7 @@
         borderWidth: 2,
         borderDash: [6, 4],
         pointRadius: 0,
+        pointStyle: 'line',
         tension: 0.3,
         yAxisID: 'y',
         order: 1,
@@ -857,6 +992,7 @@
         backgroundColor: 'transparent',
         borderWidth: 2,
         pointRadius: 0,
+        pointStyle: 'line',
         tension: 0.2,
         yAxisID: 'y',
         order: 4,
@@ -869,52 +1005,96 @@
         backgroundColor: 'transparent',
         borderWidth: 2,
         pointRadius: 0,
+        pointStyle: 'line',
         tension: 0.2,
         yAxisID: 'y',
         order: 3,
       },
-      hvacDs,
-      fanDs,
     ];
 
     if (comfortBandDs) datasets.push(comfortBandDs);
 
-    if (humidityPts.length > 0) {
-      datasets.push({
-        label: 'Humidity %',
-        type: 'line',
-        data: humidityPts,
-        borderColor: CHART_COLORS.humidity,
-        borderWidth: 1.5,
-        pointRadius: 0,
-        tension: 0.2,
-        yAxisID: 'yRight',
-        hidden: !humidityVisible,
-        order: 6,
-      });
-    }
+    // Always add humidity/feels-like datasets so toggleOverlay() can find them.
+    // Disable the checkbox if no data is available for the selected range.
+    const humidityCheck = document.getElementById('overlay-humidity');
+    const feelslikeCheck = document.getElementById('overlay-feelslike');
+    const humidityLabel = document.getElementById('overlay-humidity-label');
+    const feelslikeLabel = document.getElementById('overlay-feelslike-label');
+    if (humidityCheck) humidityCheck.disabled = humidityPts.length === 0;
+    if (feelslikeCheck) feelslikeCheck.disabled = feelsLikePts.length === 0;
+    if (humidityLabel) humidityLabel.classList.toggle('no-data', humidityPts.length === 0);
+    if (feelslikeLabel) feelslikeLabel.classList.toggle('no-data', feelsLikePts.length === 0);
 
-    if (feelsLikePts.length > 0) {
-      datasets.push({
-        label: 'Feels-like',
-        type: 'line',
-        data: feelsLikePts,
-        borderColor: CHART_COLORS.feelslike,
-        borderWidth: 1.5,
-        borderDash: [3, 3],
-        pointRadius: 0,
-        tension: 0.2,
-        yAxisID: 'y',
-        hidden: !feelsLikeVisible,
-        order: 7,
-      });
-    }
+    datasets.push({
+      label: 'Humidity %',
+      type: 'line',
+      data: humidityPts,
+      borderColor: CHART_COLORS.humidity,
+      borderWidth: 1.5,
+      pointRadius: 0,
+      pointStyle: 'line',
+      tension: 0.2,
+      yAxisID: 'yRight',
+      hidden: !humidityVisible || humidityPts.length === 0,
+      order: 6,
+    });
+
+    datasets.push({
+      label: 'Feels-like',
+      type: 'line',
+      data: feelsLikePts,
+      borderColor: CHART_COLORS.feelslike,
+      borderWidth: 1.5,
+      borderDash: [3, 3],
+      pointRadius: 0,
+      pointStyle: 'line',
+      tension: 0.2,
+      yAxisID: 'y',
+      hidden: !feelsLikeVisible || feelsLikePts.length === 0,
+      order: 7,
+    });
 
     const nowMs = Date.now();
 
     // Defensive: destroy any orphaned chart on this canvas (e.g. from a prior failed init)
     const _existing = Chart.getChart(canvas);
     if (_existing) _existing.destroy();
+
+    // Interpolate a y-value from a dataset at a given x (millisecond domain value)
+    function _interpolateY(dataset, xVal) {
+      const pts = dataset.data;
+      if (!pts || pts.length < 2) return pts?.[0]?.y ?? null;
+      let lo = 0, hi = pts.length - 1;
+      if (xVal <= pts[lo].x) return pts[lo].y;
+      if (xVal >= pts[hi].x) return pts[hi].y;
+      while (lo < hi - 1) {
+        const mid = (lo + hi) >> 1;
+        if (pts[mid].x <= xVal) lo = mid; else hi = mid;
+      }
+      const p0 = pts[lo], p1 = pts[hi];
+      if (p0.x === p1.x) return p0.y;
+      const t = (xVal - p0.x) / (p1.x - p0.x);
+      return p0.y + t * (p1.y - p0.y);
+    }
+
+    // Crosshair cursor position (canvas-relative px); updated by caAnnotations afterEvent
+    let _cursorPx = null;
+    window.__test_cursorPx = null;
+
+    // Test hook: simulate a hover at canvas-relative x pixel (used by Playwright tests)
+    window.__triggerHoverAt = function(canvasX) {
+      _cursorPx = canvasX;
+      window.__test_cursorPx = canvasX;
+      if (_tempChart) {
+        // Manually invoke the external tooltip callback at this pixel
+        const xVal = _tempChart.scales.x.getValueForPixel(canvasX);
+        // Synthesize a minimal tooltip context and call external directly
+        const fakeTooltip = { caretX: canvasX, dataPoints: [] };
+        const externalFn = _tempChart.options.plugins.tooltip.external;
+        if (externalFn) externalFn({ chart: _tempChart, tooltip: fakeTooltip });
+        _tempChart.draw();
+      }
+    };
 
     try {
     _tempChart = new Chart(canvas, {
@@ -924,44 +1104,71 @@
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
+        elements: {
+          point: { hoverRadius: 0 },  // suppress per-dataset dots; crosshair drawn by plugin instead
+        },
         interaction: {
           mode: 'index',
           intersect: false,
         },
         plugins: {
-          legend: {
-            display: true,
-            position: 'bottom',
-            labels: {
-              color: textColor,
-              font: { size: 11 },
-              usePointStyle: true,
-              filter: item => !['HVAC State', 'Fan'].includes(item.text),
-            },
-          },
+          legend: { display: false },  // custom HTML legend used instead
           tooltip: {
-            callbacks: {
-              title(items) {
-                if (!items.length) return '';
-                const d = new Date(items[0].parsed.x);
-                return d.toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
-              },
-              afterBody(items) {
-                if (!items.length) return [];
-                const x = items[0].parsed.x;
-                let closest = null, minDiff = Infinity;
-                log.forEach(e => {
-                  const diff = Math.abs(_parseTs(e.ts) - x);
-                  if (diff < minDiff) { minDiff = diff; closest = e; }
-                });
-                if (!closest) return [];
-                const lines = [];
-                const hvacLabel = { heating: '🔴 Heating', cooling: '🔵 Cooling', fan: '🟢 Fan circ.', idle: '⚪ Idle', off: '⚫ Off' };
-                if (closest.hvac) lines.push('HVAC: ' + (hvacLabel[closest.hvac.toLowerCase()] || closest.hvac));
-                lines.push('Fan: ' + (closest.fan ? 'On' : 'Off'));
-                if (closest.event) lines.push('Event: ' + closest.event.replace(/_/g,' '));
-                return lines;
-              },
+            enabled: false,
+            external({ chart, tooltip }) {
+              const panel = document.getElementById('chart-hover-panel');
+              if (!panel) return;
+              // Use _cursorPx (raw mouse pixel from afterEvent) — not tooltip.caretX which snaps to data points
+              if (_cursorPx == null || !chart.scales.x) { panel.innerHTML = ''; return; }
+              const xVal = chart.scales.x.getValueForPixel(_cursorPx);
+              if (xVal == null) { panel.innerHTML = ''; return; }
+
+              const d = new Date(xVal);
+              const timeStr = d.toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+
+              const seriesDefs = [
+                { dsLabel: 'Predicted Indoor',  color: 'rgba(255,152,0,0.85)',  short: 'P-Indoor'  },
+                { dsLabel: 'Predicted Outdoor', color: 'rgba(33,150,243,0.85)', short: 'P-Outdoor' },
+                { dsLabel: 'Actual Indoor',     color: 'rgba(255,152,0,1)',     short: 'Indoor'     },
+                { dsLabel: 'Actual Outdoor',    color: 'rgba(33,150,243,1)',    short: 'Outdoor'    },
+              ];
+
+              const tempItems = seriesDefs.map(def => {
+                const ds = chart.data.datasets.find(d => d.label === def.dsLabel);
+                if (!ds || !ds.data || ds.data.length === 0) return '';
+                const y = _interpolateY(ds, xVal);
+                if (y == null) return '';
+                return `<div class="chp-item">` +
+                  `<span class="chp-dot" style="background:${def.color}"></span>` +
+                  `<span>${def.short}: <strong>${Math.round(y)}°</strong></span>` +
+                  `</div>`;
+              }).join('');
+
+              // HVAC/fan from nearest log entry
+              let stateHtml = '';
+              let closest = null, minDiff = Infinity;
+              log.forEach(e => {
+                const diff = Math.abs(_parseTs(e.ts) - xVal);
+                if (diff < minDiff) { minDiff = diff; closest = e; }
+              });
+              if (closest) {
+                const hvacColors = { heating:'#ef5350', cooling:'#42a5f5', fan:'#66bb6a' };
+                const hvacText   = { heating:'Heating', cooling:'Cooling', fan:'Fan' };
+                const hv = (closest.hvac || '').toLowerCase();
+                if (hvacColors[hv]) {
+                  stateHtml += `<div class="chp-item"><span class="chp-state" style="background:${hvacColors[hv]}">${hvacText[hv]}</span></div>`;
+                }
+                if (closest.fan) {
+                  stateHtml += `<div class="chp-item"><span class="chp-state" style="background:#66bb6a">Fan on</span></div>`;
+                }
+                if (closest.event) {
+                  stateHtml += `<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">${closest.event.replace(/_/g,' ')}</div>`;
+                }
+              }
+
+              panel.innerHTML = tempItems || stateHtml
+                ? `<div class="chp-item" style="color:var(--text-secondary);margin-right:4px">${timeStr}</div>` + tempItems + stateHtml
+                : '';
             },
           },
           zoom: {
@@ -980,6 +1187,8 @@
         scales: {
           x: {
             type: 'linear',
+            min: _rangeToWindow(_chartRange).min,
+            max: _rangeToWindow(_chartRange).max,
             grid: { color: gridColor },
             ticks: {
               color: textColor,
@@ -1003,13 +1212,7 @@
               callback: v => v + '°',
             },
           },
-          yState: {
-            position: 'right',
-            display: false,
-            min: 0,
-            max: 3,
-            grid: { display: false },
-          },
+
           yRight: {
             position: 'right',
             display: 'auto',
@@ -1021,11 +1224,37 @@
       plugins: [
         {
           id: 'caAnnotations',
+          afterEvent(chart, args) {
+            const e = args.event;
+            if (e.type === 'mousemove') {
+              _cursorPx = e.x;
+              window.__test_cursorPx = e.x;
+              chart.draw();
+            } else if (e.type === 'mouseout') {
+              _cursorPx = null;
+              window.__test_cursorPx = null;
+              chart.draw();
+            }
+          },
           afterDraw(chart) {
             const ctx = chart.ctx;
             const xScale = chart.scales.x;
             const yScale = chart.scales.y;
             if (!xScale || !yScale) return;
+
+            // Crosshair: tracks raw mouse position, not nearest data point
+            if (_cursorPx != null && _cursorPx >= xScale.left && _cursorPx <= xScale.right) {
+              ctx.save();
+              ctx.strokeStyle = 'rgba(180,180,180,0.4)';
+              ctx.lineWidth = 1;
+              ctx.setLineDash([3, 3]);
+              ctx.beginPath();
+              ctx.moveTo(_cursorPx, yScale.top);
+              ctx.lineTo(_cursorPx, yScale.bottom);
+              ctx.stroke();
+              ctx.setLineDash([]);
+              ctx.restore();
+            }
 
             // Draw "Now" vertical line
             const nowX = xScale.getPixelForValue(nowMs);
@@ -2111,8 +2340,20 @@
   setTimeout(_pollCycle, _BASE_POLL);
   setTimeout(_chartCycle, _CHART_POLL);
 
-  // Redraw chart on resize
-  window.addEventListener('resize', loadChart);
+  // Redraw chart and timeline on resize
+  window.addEventListener('resize', () => {
+    loadChart();
+    if (_lastChartData) {
+      const { min, max } = _rangeToWindow(_chartRange);
+      drawActivityTimeline(_lastChartData.state_log || [], min, max);
+    }
+  });
+
+  // Clear hover panel when cursor leaves the chart area
+  document.getElementById('temp-chart')?.addEventListener('mouseleave', () => {
+    const panel = document.getElementById('chart-hover-panel');
+    if (panel) panel.innerHTML = '';
+  });
 })();
 </script>
 </body>

@@ -29,3 +29,9 @@ id_ecdsa
 
 # Installers
 get-pip.py
+
+# JavaScript / Playwright
+node_modules/
+package-lock.json
+playwright-report/
+test-results/

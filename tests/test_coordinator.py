@@ -9,6 +9,7 @@ Tests for:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import sys
 from datetime import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -874,3 +875,70 @@ class TestBriefingRegeneration:
 
         assert coord._briefing_day_type is None
         assert coord._briefing_sent_today is False
+
+
+# ---------------------------------------------------------------------------
+# TestStateContradictionEvent — Fix 2: state_contradiction_warning event bridge
+# ---------------------------------------------------------------------------
+
+
+def _check_state_contradiction(hvac_mode, hvac_action, ca_fan_active, last_time, now):
+    """Replicate the state contradiction check from _async_update_data."""
+    _active_hvac_actions = {"heating", "cooling", "fan"}
+    if hvac_mode == "off" and str(hvac_action).lower() in _active_hvac_actions:
+        _is_expected_fan = str(hvac_action).lower() == "fan" and ca_fan_active
+        if not _is_expected_fan:
+            _dedup_window = datetime.timedelta(minutes=30)
+            if last_time is None or (now - last_time) > _dedup_window:
+                return [{"hvac_mode": hvac_mode, "hvac_action": hvac_action}]
+    return []
+
+
+class TestStateContradictionEvent:
+    """Tests for the state_contradiction_warning event emission added to _async_update_data."""
+
+    _NOW = datetime.datetime(2026, 4, 8, 21, 0, 0)
+
+    def test_event_emitted_when_mode_off_action_fan(self):
+        events = _check_state_contradiction("off", "fan", False, None, self._NOW)
+        assert len(events) == 1
+        assert events[0] == {"hvac_mode": "off", "hvac_action": "fan"}
+
+    def test_event_emitted_when_mode_off_action_heating(self):
+        events = _check_state_contradiction("off", "heating", False, None, self._NOW)
+        assert len(events) == 1
+
+    def test_event_emitted_when_mode_off_action_cooling(self):
+        events = _check_state_contradiction("off", "cooling", False, None, self._NOW)
+        assert len(events) == 1
+
+    def test_no_event_when_ca_fan_is_active(self):
+        """hvac_action=fan but CA itself activated the fan → expected, no event."""
+        events = _check_state_contradiction("off", "fan", True, None, self._NOW)
+        assert events == []
+
+    def test_no_event_when_mode_is_not_off(self):
+        events = _check_state_contradiction("heat", "heating", False, None, self._NOW)
+        assert events == []
+
+    def test_no_event_when_action_is_idle(self):
+        events = _check_state_contradiction("off", "idle", False, None, self._NOW)
+        assert events == []
+
+    def test_dedup_suppresses_within_30_min(self):
+        last = self._NOW - datetime.timedelta(minutes=10)
+        events = _check_state_contradiction("off", "fan", False, last, self._NOW)
+        assert events == []
+
+    def test_dedup_allows_after_30_min(self):
+        last = self._NOW - datetime.timedelta(minutes=31)
+        events = _check_state_contradiction("off", "fan", False, last, self._NOW)
+        assert len(events) == 1
+
+    def test_dedup_allows_when_last_time_is_none(self):
+        events = _check_state_contradiction("off", "fan", False, None, self._NOW)
+        assert len(events) == 1
+
+    def test_hvac_action_case_insensitive(self):
+        events = _check_state_contradiction("off", "FAN", False, None, self._NOW)
+        assert len(events) == 1

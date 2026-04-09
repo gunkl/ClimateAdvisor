@@ -1018,7 +1018,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _is_expected_fan = str(hvac_action).lower() == "fan" and _ca_fan_running
             if not _is_expected_fan:
                 _now = dt_util.now()
-                _dedup_window = datetime.timedelta(minutes=30)
+                _dedup_window = timedelta(minutes=30)
                 if (
                     self._last_state_contradiction_time is None
                     or (_now - self._last_state_contradiction_time) > _dedup_window
@@ -1685,12 +1685,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         old_action = old_state.attributes.get("hvac_action", "").lower()
         running_actions = {"heating", "cooling"}
 
-        if new_action and old_action:
-            # Use hvac_action when available (more accurate)
+        if old_action in running_actions or new_action in running_actions:
+            # At least one side shows active heating/cooling — hvac_action is providing a
+            # meaningful signal, prefer it for precise on/off edge detection.
             was_running = old_action in running_actions
             is_running = new_action in running_actions
         else:
-            # Fall back to mode-based tracking
+            # hvac_action gives no heating/cooling signal (both are "fan", "idle", or absent).
+            # Some thermostats report hvac_action="fan" persistently (even when off/idle),
+            # which would trap this branch indefinitely if we used the old `new_action and
+            # old_action` guard.  Fall back to hvac_mode state for reliable edge detection.
             idle_modes = {"off", "unavailable", "unknown", ""}
             was_running = old_state.state not in idle_modes
             is_running = new_state.state not in idle_modes

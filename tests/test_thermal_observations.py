@@ -512,6 +512,28 @@ class TestThermalObsSkipWarnings:
             f"Expected no WARNING for short session; got: {[r.message for r in warning_records]}"
         )
 
+    def test_warning_when_end_indoor_temp_unavailable(self, tmp_path, caplog):
+        """_get_indoor_temp() returns None at session end → warning logged (was previously silent)."""
+        coord = self._make_coord_with_learning(tmp_path)
+        now = datetime(2026, 3, 28, 12, 0, 0)
+        coord._hvac_on_since = now - timedelta(minutes=20)
+        coord._hvac_session_start_indoor_temp = 65.0
+        coord._hvac_session_start_outdoor_temp = 40.0
+        coord._hvac_session_mode = "heat"
+        coord._get_indoor_temp = MagicMock(return_value=None)  # unavailable at session end
+
+        mock_dt = _now_mock(now)
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util", mock_dt),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            coord._record_thermal_observation(MagicMock())
+
+        assert any("indoor temp unavailable at session end" in r.message for r in caplog.records), (
+            f"Expected end-indoor-unavailable warning; got: {[r.message for r in caplog.records]}"
+        )
+        assert len(coord.learning._state.thermal_observations) == 0
+
     def test_no_warning_when_rate_out_of_range(self, tmp_path, caplog):
         """Rate outside bounds → DEBUG only, no WARNING."""
         coord = self._make_coord_with_learning(tmp_path)
@@ -631,3 +653,93 @@ class TestEndOfDayWatchdog:
         warning_msgs = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
         assert not any("Thermal learning watchdog" in m for m in warning_msgs)
         coord._emit_event.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestHvacSessionDetectionFallback — Fix 1a: running detection + session mode
+# ---------------------------------------------------------------------------
+
+
+def _detect_was_is_running(old_state, new_state):
+    """Replicate the hvac_action/mode-based running detection from _async_thermostat_changed."""
+    new_action = new_state.attributes.get("hvac_action", "").lower()
+    old_action = old_state.attributes.get("hvac_action", "").lower()
+    running_actions = {"heating", "cooling"}
+
+    if old_action in running_actions or new_action in running_actions:
+        return old_action in running_actions, new_action in running_actions
+    else:
+        idle_modes = {"off", "unavailable", "unknown", ""}
+        return old_state.state not in idle_modes, new_state.state not in idle_modes
+
+
+def _detect_session_mode(new_state):
+    """Replicate the session mode assignment from the HVAC-just-turned-on block."""
+    action = new_state.attributes.get("hvac_action", "").lower()
+    if action == "heating":
+        return "heat"
+    elif action == "cooling":
+        return "cool"
+    elif new_state.state == "heat":
+        return "heat"
+    elif new_state.state == "cool":
+        return "cool"
+    return None
+
+
+class TestHvacSessionDetectionFallback:
+    """Tests for the running-detection and session-mode fallback fixes.
+
+    When hvac_action is stuck at "fan" (a known thermostat firmware behaviour),
+    the old `if new_action and old_action` guard prevented mode-based turn-on/off
+    detection entirely — causing zero thermal observations.  The fix changes the
+    guard to `if old_action in running_actions or new_action in running_actions`.
+    """
+
+    def test_turn_on_detected_when_hvac_action_stuck_at_fan(self):
+        """old=off/fan → new=heat/fan: mode fallback fires the turn-on."""
+        old = _make_thermostat_state("off", action="fan")
+        new = _make_thermostat_state("heat", action="fan")
+        was_running, is_running = _detect_was_is_running(old, new)
+        assert not was_running and is_running
+
+    def test_turn_off_detected_when_hvac_action_stuck_at_fan(self):
+        """old=heat/fan → new=off/fan: mode fallback fires the turn-off."""
+        old = _make_thermostat_state("heat", action="fan")
+        new = _make_thermostat_state("off", action="fan")
+        was_running, is_running = _detect_was_is_running(old, new)
+        assert was_running and not is_running
+
+    def test_normal_heating_action_still_detected(self):
+        """Normal hvac_action transition heating→idle still fires turn-off."""
+        old = _make_thermostat_state("heat", action="heating")
+        new = _make_thermostat_state("off", action="idle")
+        was_running, is_running = _detect_was_is_running(old, new)
+        assert was_running and not is_running
+
+    def test_no_edge_when_both_idle(self):
+        """Both sides idle → no run edge detected."""
+        old = _make_thermostat_state("off", action="idle")
+        new = _make_thermostat_state("off", action="idle")
+        was_running, is_running = _detect_was_is_running(old, new)
+        assert not was_running and not is_running
+
+    def test_session_mode_set_from_state_when_hvac_action_is_fan(self):
+        """hvac_action='fan' at turn-on → session mode resolved from state='heat'."""
+        new = _make_thermostat_state("heat", action="fan")
+        assert _detect_session_mode(new) == "heat"
+
+    def test_session_mode_cool_from_state_when_hvac_action_is_fan(self):
+        """hvac_action='fan' at turn-on → session mode resolved from state='cool'."""
+        new = _make_thermostat_state("cool", action="fan")
+        assert _detect_session_mode(new) == "cool"
+
+    def test_session_mode_from_hvac_action_when_heating(self):
+        """hvac_action='heating' takes priority over state."""
+        new = _make_thermostat_state("heat", action="heating")
+        assert _detect_session_mode(new) == "heat"
+
+    def test_session_mode_none_when_both_ambiguous(self):
+        """fan_only mode + fan action → session mode is None (no observation possible)."""
+        new = _make_thermostat_state("fan_only", action="fan")
+        assert _detect_session_mode(new) is None

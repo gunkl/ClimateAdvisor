@@ -162,14 +162,16 @@
     display: block;
   }
   .chart-hover-panel {
-    min-height: 20px;
+    height: 24px;
+    overflow: hidden;
     font-size: 0.78rem;
     color: var(--text-secondary);
     padding: 2px 0 4px;
     display: flex;
     gap: 14px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     font-variant-numeric: tabular-nums;
+    align-items: center;
   }
   .chart-hover-panel .chp-item {
     display: flex;
@@ -823,7 +825,7 @@
     const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const labelColor = isDark ? '#9e9e9e' : '#757575';
     const rowH = 14;
-    const labelW = 36;
+    const labelW = 52;
     const pad = { right: 20 };
     const plotW = W - labelW - pad.right;
     const span = rangeMax - rangeMin;
@@ -1136,13 +1138,13 @@
       });
       if (closest) {
         const hvacColors = { heating:'#ef5350', cooling:'#42a5f5', fan:'#66bb6a' };
-        const hvacText   = { heating:'Heating', cooling:'Cooling', fan:'Fan' };
+        const hvacText   = { heating:'Heating', cooling:'Cooling', fan:'Fan-Only' };
         const hv = (closest.hvac || '').toLowerCase();
         if (hvacColors[hv]) {
           stateHtml += `<div class="chp-item"><span class="chp-state" style="background:${hvacColors[hv]}">${hvacText[hv]}</span></div>`;
         }
-        if (closest.fan) {
-          stateHtml += `<div class="chp-item"><span class="chp-state" style="background:#66bb6a">Fan on</span></div>`;
+        if (closest.fan && hv !== 'fan') {
+          stateHtml += `<div class="chp-item"><span class="chp-state" style="background:#66bb6a">Sched fan</span></div>`;
         }
         if (closest.event) {
           stateHtml += `<div class="chp-item" style="color:var(--text-secondary);font-size:0.73rem">${closest.event.replace(/_/g,' ')}</div>`;

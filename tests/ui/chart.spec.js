@@ -224,12 +224,55 @@ test.describe('Temperature Forecast Chart', () => {
     await dispatch(fanPageX, pageY);
     await page.waitForTimeout(150);
     let html = await page.locator('#chart-hover-panel').innerHTML();
-    expect(html).toContain('Fan on');
+    expect(html).toContain('Sched fan');
 
     await dispatch(fanOffPageX, pageY);
     await page.waitForTimeout(150);
     html = await page.locator('#chart-hover-panel').innerHTML();
-    expect(html).not.toContain('Fan on');
+    expect(html).not.toContain('Sched fan');
+  });
+
+  test('hover panel height stays fixed when state badges appear', async ({ page }) => {
+    // Get panel offsetHeight when empty (no hover yet)
+    const emptyHeight = await page.evaluate(() =>
+      document.getElementById('chart-hover-panel').offsetHeight
+    );
+
+    // Trigger hover at HVAC=fan segment (fixture i=5 → ts = now - 42*1800000)
+    const fanX = await page.evaluate(() => {
+      const canvas = document.getElementById('temp-chart');
+      const chart = Chart.getChart(canvas);
+      const now = Date.now();
+      return chart ? chart.scales.x.getPixelForValue(now - 42 * 1800000) : null;
+    });
+    expect(fanX).not.toBeNull();
+    await page.evaluate((x) => window.__triggerHoverAt(x), fanX);
+    await page.waitForTimeout(150);
+
+    const badgeHeight = await page.evaluate(() =>
+      document.getElementById('chart-hover-panel').offsetHeight
+    );
+
+    // Panel height must not grow when HVAC/fan badges appear — layout jump is a UX bug
+    expect(badgeHeight).toBe(emptyHeight);
+  });
+
+  test('fan state shown once — HVAC fan mode does not also show Fan on badge', async ({ page }) => {
+    // Fixture i=5: hvac='fan' → hover must show fan indication exactly once (not both
+    // an HVAC "Fan" badge AND a separate "Fan on" automation badge simultaneously)
+    const fanX = await page.evaluate(() => {
+      const canvas = document.getElementById('temp-chart');
+      const chart = Chart.getChart(canvas);
+      const now = Date.now();
+      return chart ? chart.scales.x.getPixelForValue(now - 42 * 1800000) : null;
+    });
+    expect(fanX).not.toBeNull();
+    await page.evaluate((x) => window.__triggerHoverAt(x), fanX);
+    await page.waitForTimeout(150);
+
+    const html = await page.locator('#chart-hover-panel').innerHTML();
+    // When HVAC mode is already 'fan', the separate 'Fan on' badge must not also appear
+    expect(html.toLowerCase()).not.toContain('fan on');
   });
 
 });

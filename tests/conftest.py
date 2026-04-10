@@ -94,6 +94,61 @@ class _MockDataUpdateCoordinator:
 
 sys.modules["homeassistant.helpers.update_coordinator"].DataUpdateCoordinator = _MockDataUpdateCoordinator
 
+
+# CoordinatorEntity and SensorEntity need to be real classes so sensor.py can subclass them
+# (MagicMock instances cannot be used as base classes — metaclass conflict)
+class _MockCoordinatorEntity:
+    """Minimal stand-in for homeassistant.helpers.update_coordinator.CoordinatorEntity."""
+
+    def __init__(self, coordinator, *args, **kwargs):
+        self.coordinator = coordinator
+
+
+class _MockSensorEntity:
+    """Minimal stand-in for homeassistant.components.sensor.SensorEntity."""
+
+
+sys.modules["homeassistant.helpers.update_coordinator"].CoordinatorEntity = _MockCoordinatorEntity
+sys.modules["homeassistant.components.sensor"].SensorEntity = _MockSensorEntity
+
+# Add SensorStateClass and SensorDeviceClass as real objects so tests can compare them
+import enum as _enum  # noqa: E402
+
+
+class _SensorStateClass(_enum.StrEnum):
+    MEASUREMENT = "measurement"
+    TOTAL = "total"
+    TOTAL_INCREASING = "total_increasing"
+
+
+class _SensorDeviceClass(_enum.StrEnum):
+    TEMPERATURE = "temperature"
+    HUMIDITY = "humidity"
+    PRESSURE = "pressure"
+    POWER = "power"
+    ENERGY = "energy"
+
+
+sys.modules["homeassistant.components.sensor"].SensorStateClass = _SensorStateClass
+sys.modules["homeassistant.components.sensor"].SensorDeviceClass = _SensorDeviceClass
+
+# Add UnitOfTemperature to homeassistant.const
+import enum as _enum2  # noqa: E402, F811
+
+
+class _UnitOfTemperature(_enum2.StrEnum):
+    FAHRENHEIT = "°F"
+    CELSIUS = "°C"
+    KELVIN = "K"
+
+
+sys.modules["homeassistant.const"].UnitOfTemperature = _UnitOfTemperature
+
+
+def _install_ha_stubs():
+    """No-op: stubs are installed at module load time in conftest."""
+
+
 # voluptuous is used by config_flow — mock it only if not installed
 try:
     import voluptuous as _vol_check  # noqa: F401

@@ -45,8 +45,13 @@ from .const import (
     ATTR_FAN_RUNNING,
     ATTR_FAN_RUNTIME,
     ATTR_FAN_STATUS,
+    ATTR_FORECAST_HIGH,
+    ATTR_FORECAST_HIGH_TOMORROW,
+    ATTR_FORECAST_LOW,
+    ATTR_FORECAST_LOW_TOMORROW,
     ATTR_HVAC_ACTION,
     ATTR_HVAC_RUNTIME_TODAY,
+    ATTR_INDOOR_TEMP,
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
     ATTR_LEARNING_SUGGESTIONS,
@@ -54,6 +59,7 @@ from .const import (
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
+    ATTR_OUTDOOR_TEMP,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     CHART_LOG_MAX_DAYS,
@@ -1033,6 +1039,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _session_elapsed = (dt_util.now() - self._hvac_on_since).total_seconds() / 60 if self._hvac_on_since else 0.0
         hvac_runtime_today = round(_base_runtime + _session_elapsed, 1)
 
+        # --- Temperatures for coordinator.data (sensor entities + AI context) ---
+        _indoor_temp = self._get_indoor_temp()
+        _outdoor_temp = forecast.current_outdoor_temp if forecast else None
+
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
         result = {
@@ -1058,6 +1068,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_HVAC_RUNTIME_TODAY: hvac_runtime_today,
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
+            ATTR_INDOOR_TEMP: _indoor_temp,
+            ATTR_OUTDOOR_TEMP: _outdoor_temp,
+            ATTR_FORECAST_HIGH: c.today_high if c else None,
+            ATTR_FORECAST_LOW: c.today_low if c else None,
+            ATTR_FORECAST_HIGH_TOMORROW: c.tomorrow_high if c else None,
+            ATTR_FORECAST_LOW_TOMORROW: c.tomorrow_low if c else None,
         }
 
         # Append chart log entry (every coordinator tick — 30-min cadence)
@@ -2151,11 +2167,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             thermal_model.get("observation_count_heat", 0),
             thermal_model.get("observation_count_cool", 0),
         )
+        log_entries = self._chart_log.get_entries(range_str)
+        actual_outdoor = []
+        actual_indoor = []
+        for _e in log_entries:
+            _ts = _e.get("ts")
+            if not _ts:
+                continue
+            # Raw/hourly buckets use "indoor"/"outdoor"; daily buckets use "indoor_avg"/"outdoor_avg"
+            _indoor = _e.get("indoor") if _e.get("indoor") is not None else _e.get("indoor_avg")
+            _outdoor = _e.get("outdoor") if _e.get("outdoor") is not None else _e.get("outdoor_avg")
+            if _indoor is not None:
+                actual_indoor.append({"time": _ts, "temp": _indoor})
+            if _outdoor is not None:
+                actual_outdoor.append({"time": _ts, "temp": _outdoor})
+
         return {
             "predicted_outdoor": predicted_outdoor,
             "predicted_indoor": predicted_indoor,
-            "actual_outdoor": [{"time": ts, "temp": t} for ts, t in self._outdoor_temp_history],
-            "actual_indoor": [{"time": ts, "temp": t} for ts, t in self._indoor_temp_history],
+            "actual_outdoor": actual_outdoor,
+            "actual_indoor": actual_indoor,
             "current_hour": round(current_hour, 1),
             "thermal_model": {
                 "confidence": thermal_model.get("confidence", "none"),
@@ -2173,7 +2204,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ),
                 "unit": unit,
             },
-            "state_log": self._chart_log.get_entries(range_str),
+            "state_log": log_entries,
             "comfort_heat": self.config.get("comfort_heat", 68),
             "comfort_cool": self.config.get("comfort_cool", 76),
         }

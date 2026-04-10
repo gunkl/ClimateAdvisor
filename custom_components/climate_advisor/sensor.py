@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -29,8 +30,11 @@ from .const import (
     ATTR_FAN_RUNTIME,
     ATTR_FAN_STATUS,
     ATTR_FORECAST_BIAS_CONFIDENCE,
+    ATTR_FORECAST_HIGH,
     ATTR_FORECAST_HIGH_BIAS,
+    ATTR_FORECAST_LOW,
     ATTR_FORECAST_LOW_BIAS,
+    ATTR_INDOOR_TEMP,
     ATTR_LAST_ACTION_REASON,
     ATTR_LAST_ACTION_TIME,
     ATTR_LEARNING_SUGGESTIONS,
@@ -38,6 +42,7 @@ from .const import (
     ATTR_NEXT_AUTOMATION_ACTION,
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
+    ATTR_OUTDOOR_TEMP,
     ATTR_THERMAL_CONFIDENCE,
     ATTR_THERMAL_COOLING_RATE,
     ATTR_THERMAL_HEATING_RATE,
@@ -74,6 +79,10 @@ async def async_setup_entry(
         ClimateAdvisorFanStatusSensor(coordinator, entry),
         ClimateAdvisorContactStatusSensor(coordinator, entry),
         ClimateAdvisorAIStatusSensor(coordinator, entry),
+        ClimateAdvisorIndoorTempSensor(coordinator, entry),
+        ClimateAdvisorOutdoorTempSensor(coordinator, entry),
+        ClimateAdvisorForecastHighSensor(coordinator, entry),
+        ClimateAdvisorForecastLowSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -375,3 +384,54 @@ class ClimateAdvisorAIStatusSensor(ClimateAdvisorBaseSensor):
                 "manual_requests_today": status.get("manual_requests_today", 0),
             }
         return {"status": "disabled"}
+
+
+class ClimateAdvisorIndoorTempSensor(ClimateAdvisorBaseSensor):
+    """Current indoor temperature sensor, tracked by HA Recorder for long-term history.
+
+    Reports in °F. HA automatically converts to °C for users with metric preferences.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the indoor temperature sensor."""
+        super().__init__(coordinator, entry, ATTR_INDOOR_TEMP, "Indoor Temperature", "mdi:thermometer")
+
+
+class ClimateAdvisorOutdoorTempSensor(ClimateAdvisorBaseSensor):
+    """Current outdoor temperature sensor, tracked by HA Recorder for long-term history."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the outdoor temperature sensor."""
+        super().__init__(coordinator, entry, ATTR_OUTDOOR_TEMP, "Outdoor Temperature", "mdi:thermometer-lines")
+
+
+class ClimateAdvisorForecastHighSensor(ClimateAdvisorBaseSensor):
+    """Today's forecast high temperature, tracked by HA Recorder for long-term history."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the forecast high temperature sensor."""
+        super().__init__(coordinator, entry, ATTR_FORECAST_HIGH, "Forecast High", "mdi:thermometer-chevron-up")
+
+
+class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
+    """Today's forecast low temperature, tracked by HA Recorder for long-term history."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the forecast low temperature sensor."""
+        super().__init__(coordinator, entry, ATTR_FORECAST_LOW, "Forecast Low", "mdi:thermometer-chevron-down")

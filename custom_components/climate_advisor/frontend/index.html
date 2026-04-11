@@ -1269,12 +1269,11 @@
               maxTicksLimit: 10,
               callback(ms) {
                 const d = new Date(ms);
-                const now = new Date();
-                const diffDays = (now - d) / 86400000;
-                if (diffDays > 2) {
-                  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                const shortRanges = new Set(['6h', '12h', '24h']);
+                if (shortRanges.has(_chartRange)) {
+                  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
                 }
-                return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+                return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
               },
             },
           },

@@ -13,6 +13,12 @@ function makeChartFixture() {
   const predicted_outdoor = Array.from({length:24}, (_,h) => ({ hour: h, temp: 55 + 20*Math.sin((h-6)*Math.PI/12) }));
   const predicted_indoor  = Array.from({length:24}, (_,h) => ({ hour: h, temp: 68 + 4*Math.sin((h-14)*Math.PI/12) }));
 
+  // 5 days of future hourly forecast (absolute timestamps, 120 entries)
+  const forecast_outdoor = Array.from({length:120}, (_,i) => ({
+    ts: new Date(now + i * 3600000).toISOString(),
+    temp: parseFloat((55 + 20*Math.sin((i - 6) * Math.PI / 12)).toFixed(1))
+  }));
+
   // 48 actual points (every 30 min over last 24h)
   const actual_outdoor = Array.from({length:48}, (_,i) => ({
     time: new Date(now - (47-i)*1800000).toISOString(),
@@ -39,6 +45,7 @@ function makeChartFixture() {
 
   return {
     predicted_outdoor, predicted_indoor,
+    forecast_outdoor,
     actual_outdoor, actual_indoor,
     state_log,
     comfort_heat: 68, comfort_cool: 74,

@@ -2268,6 +2268,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return {
             "predicted_outdoor": predicted_outdoor,
             "predicted_indoor": predicted_indoor,
+            "forecast_outdoor": _build_future_forecast_outdoor(self._hourly_forecast_temps),
             "actual_outdoor": actual_outdoor,
             "actual_indoor": actual_indoor,
             "current_hour": round(current_hour, 1),
@@ -2561,6 +2562,37 @@ def _build_outdoor_curve(
         # Flat or near-flat hourly data — fall back to cosine
         result = _cosine_outdoor_curve(high, low)
 
+    return result
+
+
+def _build_future_forecast_outdoor(
+    hourly_forecast: list[dict] | None,
+) -> list[dict]:
+    """Extract future hourly outdoor temps from the weather forecast.
+
+    Returns all entries at or after now as {"ts": ISO_string, "temp": float}.
+    Covers all available forecast days (2-10+), not just today.
+    Unlike _build_outdoor_curve, values are NOT normalised to daily high/low —
+    the raw forecast temperatures are used directly.
+    """
+    if not hourly_forecast:
+        return []
+    now = dt_util.now()
+    result = []
+    for entry in hourly_forecast:
+        dt_str = entry.get("datetime") or entry.get("time")
+        temp = entry.get("temperature") if entry.get("temperature") is not None else entry.get("temp")
+        if dt_str is None or temp is None:
+            continue
+        try:
+            dt_obj = datetime.fromisoformat(dt_str)
+            local_dt = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
+            if local_dt < now:
+                continue
+            result.append({"ts": local_dt.isoformat(), "temp": round(float(temp), 1)})
+        except (ValueError, TypeError):
+            continue
+    result.sort(key=lambda x: x["ts"])
     return result
 
 

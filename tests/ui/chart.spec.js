@@ -361,6 +361,25 @@ test.describe('Temperature Forecast Chart', () => {
     expect(Math.abs(midpoint - Date.now())).toBeLessThan(5 * 60 * 1000);
   });
 
+  test('3d view: predicted outdoor curve extends beyond 24h', async ({ page }) => {
+    // Switch to 3d range — forecast_outdoor fixture has 5 days (120h) of future data
+    await page.evaluate(() => window.setChartRange('3d', null));
+    await page.waitForTimeout(500);
+
+    const maxX = await page.evaluate(() => {
+      const canvas = document.getElementById('temp-chart');
+      const chart = Chart.getChart(canvas);
+      if (!chart) return null;
+      const ds = chart.data.datasets.find(d => d.label === 'Predicted Outdoor');
+      if (!ds || !ds.data.length) return null;
+      return Math.max(...ds.data.map(p => p.x));
+    });
+
+    expect(maxX).not.toBeNull();
+    // fixture has 120h of future data; the max data point must be > 23h from now
+    expect(maxX).toBeGreaterThan(Date.now() + 23 * 3600000);
+  });
+
   test('swipe right on chart canvas scrolls backward in time', async ({ page }) => {
     const minBefore = await page.evaluate(() => {
       const chart = Chart.getChart(document.getElementById('temp-chart'));

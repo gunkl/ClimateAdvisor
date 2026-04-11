@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import UTC, date, time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,6 +10,7 @@ import pytest
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.coordinator import (
     ClimateAdvisorCoordinator,
+    _build_future_forecast_outdoor,
     _build_outdoor_curve,
     _compute_ramp_hours,
     _cosine_outdoor_curve,
@@ -875,3 +876,80 @@ class TestGetChartDataThermalModel:
         tm = chart["thermal_model"]
         assert tm["heating_rate"] is None
         assert tm["cooling_rate"] is None
+
+
+def _make_dt_util_mock(now_dt):
+    """Return a dt_util mock using now_dt as the current time.
+
+    dt_util.now() returns now_dt; dt_util.as_local() returns the dt unchanged
+    (tests use UTC datetimes throughout so no conversion is needed).
+    """
+    mock = MagicMock()
+    mock.now.return_value = now_dt
+    mock.as_local = lambda dt: dt
+    return mock
+
+
+class TestBuildFutureForecastOutdoor:
+    """Tests for _build_future_forecast_outdoor() — multi-day forecast extraction."""
+
+    def _make_entry(self, dt_str: str, temp: float) -> dict:
+        return {"datetime": dt_str, "temperature": temp}
+
+    def test_empty_on_none(self):
+        result = _build_future_forecast_outdoor(None)
+        assert result == []
+
+    def test_empty_on_empty_list(self):
+        result = _build_future_forecast_outdoor([])
+        assert result == []
+
+    def test_filters_past_entries(self):
+        """Only entries at or after now should be returned."""
+        from datetime import datetime, timedelta
+
+        now_utc = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+        entries = [
+            # 6 past entries (1h apart going backward)
+            self._make_entry((now_utc - timedelta(hours=i + 1)).isoformat(), 60.0 + i)
+            for i in range(6)
+        ] + [
+            # 6 future entries (1h apart going forward)
+            self._make_entry((now_utc + timedelta(hours=i + 1)).isoformat(), 70.0 + i)
+            for i in range(6)
+        ]
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(now_utc)):
+            result = _build_future_forecast_outdoor(entries)
+        assert len(result) == 6
+        for item in result:
+            assert "ts" in item
+            assert "temp" in item
+            assert isinstance(item["temp"], float)
+
+    def test_multi_day_coverage(self):
+        """All available forecast days should be returned, not just today."""
+        from datetime import datetime, timedelta
+
+        now_utc = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+        # 72 future entries = 3 days of hourly data
+        entries = [self._make_entry((now_utc + timedelta(hours=i + 1)).isoformat(), 55.0 + (i % 20)) for i in range(72)]
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(now_utc)):
+            result = _build_future_forecast_outdoor(entries)
+        assert len(result) == 72
+        # All should have ISO ts strings and float temps
+        for item in result:
+            assert isinstance(item["ts"], str)
+            assert isinstance(item["temp"], float)
+        # Should be sorted by timestamp
+        assert result == sorted(result, key=lambda x: x["ts"])
+
+    def test_result_sorted_ascending(self):
+        """Results must be sorted ascending by timestamp."""
+        from datetime import datetime, timedelta
+
+        now_utc = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+        # Insert in reverse order
+        entries = [self._make_entry((now_utc + timedelta(hours=6 - i)).isoformat(), 65.0) for i in range(5)]
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(now_utc)):
+            result = _build_future_forecast_outdoor(entries)
+        assert result == sorted(result, key=lambda x: x["ts"])

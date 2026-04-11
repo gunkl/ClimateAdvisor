@@ -987,8 +987,13 @@
       .map(e => ({ x: _parseTs(e.ts), y: e.pred_indoor != null ? e.pred_indoor : e.pred_indoor_avg != null ? e.pred_indoor_avg : null }))
       .filter(p => p.y != null);
 
-    // Merge: historical stored predictions + today's remaining forecast (future hours only)
-    const mergedPredOutdoor = [...histPredOutdoorPts, ...predOutdoorPts.filter(p => p.x >= _nowMs)].sort((a, b) => a.x - b.x);
+    // Multi-day forecast (absolute timestamps, all entries >= now from API)
+    const forecastOutdoorPts = (chartData.forecast_outdoor || []).map(p => ({ x: _parseTs(p.ts), y: p.temp }));
+
+    // Merge: historical snapshots (past) + multi-day future forecast (covers today's remaining
+    // hours and all future days — no double-count with histPredOutdoorPts which are all past)
+    const mergedPredOutdoor = [...histPredOutdoorPts, ...forecastOutdoorPts].sort((a, b) => a.x - b.x);
+    // Indoor prediction stays today-only (future days require per-day classification)
     const mergedPredIndoor  = [...histPredIndoorPts,  ...predIndoorPts.filter(p => p.x >= _nowMs)].sort((a, b) => a.x - b.x);
 
     // Actual series from temp history (ISO timestamps)

@@ -706,6 +706,7 @@
   async function loadStatus() {
     try {
       const data = await apiFetch('status');
+      const unitSym = data.unit === 'celsius' ? '°C' : '°F';
       const grid = document.getElementById('status-grid');
       const dayType = data.day_type || 'unknown';
       const trendArrow = data.trend_direction === 'warming' ? '\u2191'
@@ -719,15 +720,15 @@
         </div>
         <div class="status-item">
           <div class="label">Trend</div>
-          <div class="value"><span class="trend-arrow">${trendArrow}</span> ${(data.trend_magnitude || 0).toFixed(1)}\u00b0F</div>
+          <div class="value"><span class="trend-arrow">${trendArrow}</span> ${(data.trend_magnitude || 0).toFixed(1)}${unitSym}</div>
         </div>
         <div class="status-item">
           <div class="label">HVAC Mode</div>
-          <div class="value">${data.hvac_mode || 'unknown'}${data.current_setpoint != null ? ' @ ' + data.current_setpoint + '\u00b0F' : ''}</div>
+          <div class="value">${data.hvac_mode || 'unknown'}${data.current_setpoint != null ? ' @ ' + data.current_setpoint + unitSym : ''}</div>
         </div>
         <div class="status-item">
           <div class="label">Status</div>
-          <div class="value">${data.automation_status || 'unknown'}${data.indoor_temp != null ? ' | ' + data.indoor_temp.toFixed(1) + '\u00b0F' : ''}</div>
+          <div class="value">${data.automation_status || 'unknown'}${data.indoor_temp != null ? ' | ' + data.indoor_temp.toFixed(1) + unitSym : ''}</div>
         </div>
         <div class="status-item">
           <div class="label">Occupancy</div>
@@ -1610,6 +1611,7 @@
   async function loadAutomationState() {
     try {
       const data = await apiFetch('automation_state');
+      const unitSym = data.unit === 'celsius' ? '°C' : '°F';
       const el = document.getElementById('automation-state');
 
       let sensorRows = '';
@@ -1665,7 +1667,7 @@
             <table class="kv-table">
               <tr><td>Day Type</td><td>${data.classification.day_type || 'N/A'}<span class="kv-desc">Drives HVAC strategy</span></td></tr>
               <tr><td>HVAC Mode</td><td>${data.classification.hvac_mode || 'N/A'}</td></tr>
-              <tr><td>Trend</td><td>${data.classification.trend_direction || 'N/A'} (${(data.classification.trend_magnitude || 0).toFixed(1)}\u00b0F)</td></tr>
+              <tr><td>Trend</td><td>${data.classification.trend_direction || 'N/A'} (${(data.classification.trend_magnitude || 0).toFixed(1)}${unitSym})</td></tr>
               <tr><td>Windows Recommended</td><td>${data.classification.windows_recommended ? 'Yes' : 'No'}<span class="kv-desc">Open windows instead of HVAC</span></td></tr>
               ${(() => {
                 const dt = (data.classification.day_type || '').toLowerCase();
@@ -1687,10 +1689,10 @@
                 }
                 return '';
               })()}
-              <tr><td>Pre-Condition</td><td>${data.classification.pre_condition ? 'Yes (' + data.classification.pre_condition_target + '\u00b0F)' : 'No'}<span class="kv-desc">Pre-heat/cool before peak</span></td></tr>
-              <tr><td>Setback Modifier</td><td>${data.classification.setback_modifier || 0}\u00b0F<span class="kv-desc">Trend-based setpoint adjust</span></td></tr>
-              <tr><td>Today Low</td><td>${data.classification.today_low != null ? data.classification.today_low.toFixed(1) + '°F' : 'N/A'}</td></tr>
-              <tr><td>Tomorrow Low</td><td>${data.classification.tomorrow_low != null ? data.classification.tomorrow_low.toFixed(1) + '°F' : 'N/A'}</td></tr>
+              <tr><td>Pre-Condition</td><td>${data.classification.pre_condition ? 'Yes (' + data.classification.pre_condition_target + unitSym + ')' : 'No'}<span class="kv-desc">Pre-heat/cool before peak</span></td></tr>
+              <tr><td>Setback Modifier</td><td>${data.classification.setback_modifier || 0}${unitSym}<span class="kv-desc">Trend-based setpoint adjust</span></td></tr>
+              <tr><td>Today Low</td><td>${data.classification.today_low != null ? data.classification.today_low.toFixed(1) + unitSym : 'N/A'}</td></tr>
+              <tr><td>Tomorrow Low</td><td>${data.classification.tomorrow_low != null ? data.classification.tomorrow_low.toFixed(1) + unitSym : 'N/A'}</td></tr>
             </table>
           </div>
         ` : ''}
@@ -1701,8 +1703,9 @@
     }
   }
 
-  function renderRecord(rec, rangeLow, rangeHigh) {
+  function renderRecord(rec, rangeLow, rangeHigh, unit) {
     if (!rec) return '<p style="color:var(--text-secondary);font-size:0.85rem">No data available.</p>';
+    const unitSym = unit === 'celsius' ? '°C' : '°F';
     return `
       <table class="kv-table">
         <tr><td>Date</td><td>${rec.date}</td></tr>
@@ -1713,20 +1716,21 @@
         <tr><td>HVAC Runtime</td><td>${(rec.hvac_runtime_minutes || 0).toFixed(0)} min</td></tr>
         <tr><td>Manual Overrides</td><td>${rec.manual_overrides || 0}</td></tr>
         <tr><td>Door/Window Pauses</td><td>${rec.door_window_pause_events || 0}</td></tr>
-        <tr title="Time the indoor temperature was outside your comfort range (${rangeLow != null && rangeHigh != null ? `outside ${rangeLow}–${rangeHigh}°F` : 'outside configured range'})"><td>Comfort Violations</td><td>${(rec.comfort_violations_minutes || 0).toFixed(0)} min (${((rec.comfort_violations_minutes || 0) / 1440 * 100).toFixed(0)}% of day)</td></tr>
+        <tr title="Time the indoor temperature was outside your comfort range (${rangeLow != null && rangeHigh != null ? `outside ${rangeLow}–${rangeHigh}${unitSym}` : 'outside configured range'})"><td>Comfort Violations</td><td>${(rec.comfort_violations_minutes || 0).toFixed(0)} min (${((rec.comfort_violations_minutes || 0) / 1440 * 100).toFixed(0)}% of day)</td></tr>
       </table>
     `;
   }
 
-  function renderTomorrowPlan(plan) {
+  function renderTomorrowPlan(plan, unit) {
     if (!plan) return '<p style="color:var(--text-secondary);font-size:0.85rem">No forecast data yet.</p>';
+    const unitSym = unit === 'celsius' ? '°C' : '°F';
     return `
       <table class="kv-table">
         <tr><td>Date</td><td>${plan.date}</td></tr>
         <tr><td>Expected Day Type</td><td>${plan.day_type}</td></tr>
         <tr><td>Expected HVAC</td><td>${plan.hvac_mode}</td></tr>
-        <tr><td>Expected High</td><td>${plan.expected_high}\u00b0F</td></tr>
-        <tr><td>Expected Low</td><td>${plan.expected_low}\u00b0F</td></tr>
+        <tr><td>Expected High</td><td>${plan.expected_high}${unitSym}</td></tr>
+        <tr><td>Expected Low</td><td>${plan.expected_low}${unitSym}</td></tr>
         <tr><td>Windows Rec.</td><td>${plan.windows_recommended ? 'Yes' : 'No'}</td></tr>
         <tr><td>Window Open</td><td>${plan.window_open_time || '\u2014'}</td></tr>
         <tr><td>Window Close</td><td>${plan.window_close_time || '\u2014'}</td></tr>
@@ -1767,6 +1771,7 @@
   async function loadLearning() {
     try {
       const data = await apiFetch('learning');
+      const unitSym = data.unit === 'celsius' ? '°C' : '°F';
 
       // Suggestions (also rendered independently via loadSuggestions)
       const suggestions = data.suggestions || [];
@@ -1794,15 +1799,15 @@
       const yesterdayEl = document.getElementById('yesterday-record');
       const tomorrowEl = document.getElementById('tomorrow-plan');
 
-      yesterdayEl.innerHTML = renderRecord(data.yesterday_record, data.comfort_range_low, data.comfort_range_high);
+      yesterdayEl.innerHTML = renderRecord(data.yesterday_record, data.comfort_range_low, data.comfort_range_high, data.unit);
 
       if (!data.today_record) {
         todayEl.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem">No record yet today (created at briefing time).</p>';
       } else {
-        todayEl.innerHTML = renderRecord(data.today_record, data.comfort_range_low, data.comfort_range_high);
+        todayEl.innerHTML = renderRecord(data.today_record, data.comfort_range_low, data.comfort_range_high, data.unit);
       }
 
-      tomorrowEl.innerHTML = renderTomorrowPlan(data.tomorrow_plan);
+      tomorrowEl.innerHTML = renderTomorrowPlan(data.tomorrow_plan, data.unit);
 
       // Compliance summary (below today's column)
       const comp = data.compliance || {};
@@ -1814,7 +1819,7 @@
               <tr><td>Days Recorded</td><td>${comp.days_recorded}</td></tr>
               <tr><td>Window Compliance</td><td>${comp.window_compliance != null ? (comp.window_compliance * 100).toFixed(0) + '%' : 'N/A'}</td></tr>
               <tr><td>Avg HVAC Runtime</td><td>${(comp.avg_daily_hvac_runtime_minutes || 0).toFixed(0)} min/day</td></tr>
-              <tr title="% of time the indoor temperature stayed within your comfort range (${data.comfort_range_low != null ? data.comfort_range_low : 70}–${data.comfort_range_high != null ? data.comfort_range_high : 75}°F), averaged over the last 14 days"><td>Comfort Score</td><td>${((comp.comfort_score || 0) * 100).toFixed(0)}%</td></tr>
+              <tr title="% of time the indoor temperature stayed within your comfort range (${data.comfort_range_low != null ? data.comfort_range_low : 70}–${data.comfort_range_high != null ? data.comfort_range_high : 75}${unitSym}), averaged over the last 14 days"><td>Comfort Score</td><td>${((comp.comfort_score || 0) * 100).toFixed(0)}%</td></tr>
               <tr><td>Total Manual Overrides</td><td>${comp.total_manual_overrides || 0}</td></tr>
             </table>
           </div>

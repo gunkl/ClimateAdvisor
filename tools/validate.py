@@ -39,6 +39,11 @@ REQUIRED_MANIFEST_KEYS = {
 
 SEMVER_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
 
+HARDCODED_UNIT_EXCEPTION_PHRASES = [
+    "\u2264 80",  # classifier threshold descriptions — not user-facing temps (Unicode char form)
+    "\\u2264 80",  # same, when stored as JS unicode escape sequence in HTML
+]
+
 SECRET_PATTERNS = [
     re.compile(r"""['"]([^'"]*(?:password|token|api_key|secret|credential)[^'"]*)['"]""", re.IGNORECASE),
     re.compile(r"""['"]([^'"]*(?:private_key|ssh_key|bearer|authorization)[^'"]*)['"]""", re.IGNORECASE),
@@ -211,6 +216,40 @@ def check_secrets(component_dir):
     return result
 
 
+def check_hardcoded_units(component_dir):
+    """Ensure index.html has no hardcoded °F symbols outside unit-variable contexts."""
+    result = CheckResult("Hardcoded Unit Check")
+    html_path = os.path.join(component_dir, "frontend", "index.html")
+    if not os.path.exists(html_path):
+        result.warn("frontend/index.html not found — skipping unit check")
+        return result
+    unit_var_patterns = (
+        "unitSym",
+        "unitLabel",
+        "tm.unit",
+        "data.unit",
+        "unit ===",
+        "unit ?",
+        "unit:",
+        "=== 'celsius'",
+    )
+    with open(html_path, encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            # Check for °F in any form
+            if "\u00b0F" not in line and "\\u00b0F" not in line and "\xb0F" not in line:
+                continue
+            # Line has a dynamic unit reference — OK
+            if any(p in line for p in unit_var_patterns):
+                continue
+            # Known-safe threshold description
+            if any(exc in line for exc in HARDCODED_UNIT_EXCEPTION_PHRASES):
+                continue
+            result.error(
+                f"frontend/index.html:{line_num}: hardcoded \u00b0F — use a unit variable (unitSym/unitLabel) instead"
+            )
+    return result
+
+
 def main():
     print("Climate Advisor Pre-Deploy Validation")
     print(f"Component dir: {COMPONENT_DIR}")
@@ -226,6 +265,7 @@ def main():
         check_imports(COMPONENT_DIR),
         check_strings(COMPONENT_DIR),
         check_secrets(COMPONENT_DIR),
+        check_hardcoded_units(COMPONENT_DIR),
     ]
 
     all_passed = True

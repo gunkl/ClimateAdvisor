@@ -114,7 +114,7 @@ from .const import (
 )
 from .learning import DailyRecord, LearningEngine
 from .state import StatePersistence
-from .temperature import convert_delta, format_temp, to_fahrenheit
+from .temperature import convert_delta, format_temp, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1913,7 +1913,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         session_minutes = (dt_util.now() - self._hvac_on_since).total_seconds() / 60.0
         if session_minutes < MIN_THERMAL_SESSION_MINUTES:
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Thermal obs skipped: session too short (%.1f min < %.1f min minimum)",
                 session_minutes,
                 MIN_THERMAL_SESSION_MINUTES,
@@ -2265,10 +2265,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if _outdoor is not None:
                 actual_outdoor.append({"time": _ts, "temp": _outdoor})
 
+        def _conv(v: float | None) -> float | None:
+            return round(from_fahrenheit(v, unit), 1) if v is not None else None
+
+        actual_outdoor = [{"time": p["time"], "temp": _conv(p["temp"])} for p in actual_outdoor]
+        actual_indoor = [{"time": p["time"], "temp": _conv(p["temp"])} for p in actual_indoor]
+        predicted_outdoor = [{"hour": p["hour"], "temp": _conv(p["temp"])} for p in predicted_outdoor]
+        predicted_indoor = [{"hour": p["hour"], "temp": _conv(p["temp"])} for p in predicted_indoor]
+
+        def _conv_log_entry(e: dict) -> dict:
+            e = dict(e)
+            for k in ("pred_outdoor", "pred_indoor", "pred_outdoor_avg", "pred_indoor_avg"):
+                if e.get(k) is not None:
+                    e[k] = _conv(e[k])
+            return e
+
+        log_entries = [_conv_log_entry(e) for e in log_entries]
+
+        forecast_outdoor = [
+            {"ts": p["ts"], "temp": _conv(p["temp"])}
+            for p in _build_future_forecast_outdoor(self._hourly_forecast_temps)
+        ]
+
         return {
             "predicted_outdoor": predicted_outdoor,
             "predicted_indoor": predicted_indoor,
-            "forecast_outdoor": _build_future_forecast_outdoor(self._hourly_forecast_temps),
+            "forecast_outdoor": forecast_outdoor,
             "actual_outdoor": actual_outdoor,
             "actual_indoor": actual_indoor,
             "current_hour": round(current_hour, 1),
@@ -2289,14 +2311,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "unit": unit,
             },
             "state_log": log_entries,
-            "comfort_heat": self.config.get("comfort_heat", 68),
-            "comfort_cool": self.config.get("comfort_cool", 76),
+            "comfort_heat": _conv(self.config.get("comfort_heat", 68)),
+            "comfort_cool": _conv(self.config.get("comfort_cool", 76)),
+            "unit": unit,
         }
 
     def get_debug_state(self) -> dict[str, Any]:
         """Return serializable debug state for the dashboard."""
         ae = self.automation_engine
         c = self._current_classification
+        unit = self.config.get("temp_unit", "fahrenheit")
 
         # Door/window sensor states
         sensor_states = {}
@@ -2319,7 +2343,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "classification": {
                 "day_type": c.day_type if c else None,
                 "trend_direction": c.trend_direction if c else None,
-                "trend_magnitude": c.trend_magnitude if c else None,
+                "trend_magnitude": round(convert_delta(c.trend_magnitude, unit), 1) if c else None,
                 "hvac_mode": c.hvac_mode if c else None,
                 "windows_recommended": c.windows_recommended if c else None,
                 "window_open_time": (c.window_open_time.isoformat() if c and c.window_open_time else None),
@@ -2339,10 +2363,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     c.window_opportunity_evening_end.isoformat() if c and c.window_opportunity_evening_end else None
                 ),
                 "pre_condition": c.pre_condition if c else None,
-                "pre_condition_target": c.pre_condition_target if c else None,
-                "setback_modifier": c.setback_modifier if c else None,
-                "today_low": c.today_low if c else None,
-                "tomorrow_low": c.tomorrow_low if c else None,
+                "pre_condition_target": (
+                    round(from_fahrenheit(c.pre_condition_target, unit), 1)
+                    if c and c.pre_condition_target is not None
+                    else None
+                ),
+                "setback_modifier": round(convert_delta(c.setback_modifier or 0, unit), 1) if c else None,
+                "today_low": (round(from_fahrenheit(c.today_low, unit), 1) if c and c.today_low is not None else None),
+                "tomorrow_low": (
+                    round(from_fahrenheit(c.tomorrow_low, unit), 1) if c and c.tomorrow_low is not None else None
+                ),
             },
             "last_action_time": ae._last_action_time,
             "last_action_reason": ae._last_action_reason,
@@ -2363,6 +2393,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "economizer_phase": ae._economizer_phase,
             "resumed_from_pause": ae._resumed_from_pause,
             "occupancy_away_timer_pending": self._occupancy_away_timer_cancel is not None,
+            "unit": unit,
         }
 
     async def async_shutdown(self) -> None:

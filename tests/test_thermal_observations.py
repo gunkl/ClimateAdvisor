@@ -177,8 +177,8 @@ class TestThermalObservationRecordingViaCoordinator:
     def test_observation_skipped_if_session_too_short(self, tmp_path: Path):
         coord = self._make_coordinator_with_learning(tmp_path)
         now = datetime(2026, 3, 28, 12, 0, 0)
-        # 5 minutes — below MIN_THERMAL_SESSION_MINUTES (10)
-        coord._hvac_on_since = now - timedelta(minutes=5)
+        # 3 minutes — below MIN_THERMAL_SESSION_MINUTES (5)
+        coord._hvac_on_since = now - timedelta(minutes=3)
         coord._hvac_session_start_indoor_temp = 65.0
         coord._hvac_session_start_outdoor_temp = 40.0
         coord._hvac_session_mode = "heat"
@@ -189,6 +189,45 @@ class TestThermalObservationRecordingViaCoordinator:
             coord._record_thermal_observation(MagicMock())
 
         assert len(coord.learning._state.thermal_observations) == 0
+
+    def test_observation_accepted_at_new_minimum(self, tmp_path: Path):
+        """Session at exactly MIN_THERMAL_SESSION_MINUTES (5 min) should be accepted."""
+        coord = self._make_coordinator_with_learning(tmp_path)
+        now = datetime(2026, 3, 28, 12, 0, 0)
+        coord._hvac_on_since = now - timedelta(minutes=5)
+        coord._hvac_session_start_indoor_temp = 65.0
+        coord._hvac_session_start_outdoor_temp = 40.0
+        coord._hvac_session_mode = "heat"
+        # 5 min, 0.5°F change → rate = 0.5 / (5/60) = 6 °F/hr — within range
+        coord._get_indoor_temp = MagicMock(return_value=65.5)
+
+        mock_dt = _now_mock(now)
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util", mock_dt),
+            _patch_learning_dt(now.date()),
+        ):
+            coord._record_thermal_observation(MagicMock())
+
+        assert len(coord.learning._state.thermal_observations) == 1
+
+    def test_observation_accepted_for_ecobee_8min_cycle(self, tmp_path: Path):
+        """Typical Ecobee 8-minute cycle should now produce an observation (regression guard)."""
+        coord = self._make_coordinator_with_learning(tmp_path)
+        now = datetime(2026, 4, 12, 8, 39, 24)  # end of first real-world Ecobee session
+        coord._hvac_on_since = now - timedelta(minutes=8, seconds=18)  # 8.3 min
+        coord._hvac_session_start_indoor_temp = 64.5
+        coord._hvac_session_start_outdoor_temp = 52.0
+        coord._hvac_session_mode = "heat"
+        coord._get_indoor_temp = MagicMock(return_value=65.5)
+
+        mock_dt = _now_mock(now)
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util", mock_dt),
+            _patch_learning_dt(now.date()),
+        ):
+            coord._record_thermal_observation(MagicMock())
+
+        assert len(coord.learning._state.thermal_observations) == 1
 
     def test_observation_skipped_if_no_start_temp(self, tmp_path: Path):
         coord = self._make_coordinator_with_learning(tmp_path)

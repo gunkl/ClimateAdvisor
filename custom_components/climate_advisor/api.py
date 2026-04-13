@@ -52,6 +52,7 @@ from .const import (
     DOMAIN,
     VERSION,
 )
+from .temperature import convert_delta, from_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,18 +89,22 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             setpoint = climate_state.attributes.get("temperature")
 
         indoor_temp = coordinator._get_indoor_temp()
+        unit = coordinator.config.get("temp_unit", "fahrenheit")
+        indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
+        trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
 
         return self.json(
             {
                 "version": VERSION,
                 "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
                 "trend_direction": data.get(ATTR_TREND, "unknown"),
-                "trend_magnitude": data.get(ATTR_TREND_MAGNITUDE, 0),
+                "trend_magnitude": trend_magnitude_display,
                 "hvac_mode": hvac_mode,
                 ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
                 ATTR_HVAC_RUNTIME_TODAY: data.get(ATTR_HVAC_RUNTIME_TODAY, 0),
                 ATTR_CURRENT_SETPOINT: setpoint,
-                ATTR_INDOOR_TEMP: indoor_temp,
+                ATTR_INDOOR_TEMP: indoor_temp_display,
+                "unit": unit,
                 "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
                 "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
                 "next_action": data.get(ATTR_NEXT_ACTION, ""),
@@ -225,6 +230,8 @@ class ClimateAdvisorLearningView(HomeAssistantView):
         suggestion_keys = coordinator.learning.get_last_suggestion_keys()
         suggestions = [{"key": k, "text": t} for k, t in zip(suggestion_keys, suggestion_texts, strict=False)]
 
+        unit = coordinator.config.get("temp_unit", "fahrenheit")
+
         return self.json(
             {
                 "today_record": today_record,
@@ -232,8 +239,9 @@ class ClimateAdvisorLearningView(HomeAssistantView):
                 "tomorrow_plan": coordinator.tomorrow_plan,
                 "suggestions": suggestions,
                 "compliance": coordinator.learning.get_compliance_summary(),
-                "comfort_range_low": coordinator.config.get("comfort_heat", 70),
-                "comfort_range_high": coordinator.config.get("comfort_cool", 75),
+                "comfort_range_low": round(from_fahrenheit(coordinator.config.get("comfort_heat", 70), unit), 1),
+                "comfort_range_high": round(from_fahrenheit(coordinator.config.get("comfort_cool", 75), unit), 1),
+                "unit": unit,
             }
         )
 

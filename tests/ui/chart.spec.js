@@ -401,4 +401,33 @@ test.describe('Temperature Forecast Chart', () => {
     expect(minAfter).toBeLessThan(minBefore);
   });
 
+  test('status tab shows °C not °F when unit is celsius', async ({ browser }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.route('**/api/climate_advisor/status', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        day_type: 'mild', hvac_mode: 'off', trend_direction: 'stable',
+        trend_magnitude: 1.1,
+        indoor_temp: 22.2,
+        current_setpoint: 20,
+        automation_status: 'active', compliance_score: 0.9,
+        next_action: '', next_automation_action: '', next_automation_time: '',
+        automation_enabled: true, occupancy_mode: 'home',
+        fan_status: 'inactive', contact_status: 'all closed', contact_sensors: [],
+        manual_override_active: false, fan_override_active: false, paused_by_door: false,
+        unit: 'celsius',
+      }),
+    }));
+    await page.goto('/');
+    await page.waitForTimeout(800);
+    await page.click('[data-tab="status"]');
+    await page.waitForTimeout(600);
+    const gridText = await page.locator('#status-grid').innerText();
+    expect(gridText).toContain('°C');
+    expect(gridText).not.toMatch(/\d+\.?\d*\s*°F/);
+    await context.close();
+  });
+
 });

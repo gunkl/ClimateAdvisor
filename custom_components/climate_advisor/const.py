@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.18"
+VERSION = "0.3.19"
 
 # Default setpoints (°F)
 DEFAULT_COMFORT_HEAT = 70
@@ -679,7 +679,7 @@ CONFIG_METADATA = {
 # ---------------------------------------------------------------------------
 # Thermal Model Learning (Issue #61)
 # ---------------------------------------------------------------------------
-MIN_THERMAL_SESSION_MINUTES = 10  # ignore sessions shorter than this
+MIN_THERMAL_SESSION_MINUTES = 5  # ignore sessions shorter than this (was 10; Ecobee cycles 7-9 min)
 MIN_THERMAL_OBSERVATIONS = 5  # min obs before model is trusted
 THERMAL_MODEL_MAX_OBS = 30  # use only most recent N observations
 MIN_THERMAL_RATE_F_PER_HOUR = 0.1  # outlier floor

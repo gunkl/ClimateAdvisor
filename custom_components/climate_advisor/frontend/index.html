@@ -850,7 +850,7 @@
   }
 
   // Draw horizontal activity timeline above the temperature chart
-  function drawActivityTimeline(log, rangeMin, rangeMax) {
+  function drawActivityTimeline(log, rangeMin, rangeMax, chartLeftPx, chartRightPx) {
     const canvas = document.getElementById('activity-chart');
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
@@ -866,29 +866,29 @@
     const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const labelColor = isDark ? '#9e9e9e' : '#757575';
     const rowH = 14;
-    const labelW = 52;
-    const pad = { right: 20 };
-    const plotW = W - labelW - pad.right;
+    const plotLeft  = (chartLeftPx  != null) ? chartLeftPx  : 52;
+    const plotRight = (chartRightPx != null) ? chartRightPx : W - 20;
+    const plotW = plotRight - plotLeft;
     const span = rangeMax - rangeMin;
 
-    function xPx(ms) { return labelW + ((ms - rangeMin) / span) * plotW; }
+    function xPx(ms) { return plotLeft + ((ms - rangeMin) / span) * plotW; }
 
     ctx.clearRect(0, 0, W, H);
     ctx.font = '9px sans-serif';
     ctx.fillStyle = labelColor;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText('HVAC',    labelW - 4, 7);
-    ctx.fillText('Fan',     labelW - 4, 31);
-    ctx.fillText('Win Rec', labelW - 4, 55);
-    ctx.fillText('Windows', labelW - 4, 79);
+    ctx.fillText('HVAC',    plotLeft - 4, 7);
+    ctx.fillText('Fan',     plotLeft - 4, 31);
+    ctx.fillText('Win Rec', plotLeft - 4, 55);
+    ctx.fillText('Windows', plotLeft - 4, 79);
 
     // Background track
     ctx.fillStyle = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)';
-    ctx.fillRect(labelW, 0,  plotW, rowH);
-    ctx.fillRect(labelW, 24, plotW, rowH);
-    ctx.fillRect(labelW, 48, plotW, rowH);
-    ctx.fillRect(labelW, 72, plotW, rowH);
+    ctx.fillRect(plotLeft, 0,  plotW, rowH);
+    ctx.fillRect(plotLeft, 24, plotW, rowH);
+    ctx.fillRect(plotLeft, 48, plotW, rowH);
+    ctx.fillRect(plotLeft, 72, plotW, rowH);
 
     // Draw segments — each log entry represents a ~30-min window
     const halfStep = 900000; // 15 min on each side of the timestamp
@@ -941,7 +941,7 @@
 
     // "Now" tick on timeline
     const nowX = xPx(Date.now());
-    if (nowX >= labelW && nowX <= labelW + plotW) {
+    if (nowX >= plotLeft && nowX <= plotRight) {
       ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.25)' : 'rgba(0,0,0,0.25)';
       ctx.lineWidth = 1;
       ctx.setLineDash([3, 3]);
@@ -1000,10 +1000,6 @@
     // Actual series from temp history (ISO timestamps)
     const actOutdoorPts = (chartData.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
     const actIndoorPts  = (chartData.actual_indoor  || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
-
-    // Draw separate activity timeline (horizontal bars above temp chart)
-    const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
-    drawActivityTimeline(log, rMin, rMax);
 
     // Comfort band dataset
     const comfortBandVisible = document.getElementById('overlay-comfort')?.checked ?? true;
@@ -1250,10 +1246,12 @@
             zoom: {
               drag: { enabled: true, backgroundColor: 'rgba(33,150,243,0.12)' },
               mode: 'x',
-              onZoomComplete() {
+              onZoomComplete({ chart }) {
                 _chartZoomed = true;
                 const btn = document.getElementById('chart-zoom-reset');
                 if (btn) btn.classList.add('visible');
+                const xs = chart.scales.x;
+                drawActivityTimeline((_lastChartData?.state_log || []), xs.min, xs.max, xs.left, xs.right);
               },
             },
             pan: { enabled: false },
@@ -1383,6 +1381,14 @@
       console.error('Chart init failed:', err);
       _tempChart = null;
     }
+    // Sync activity timeline AFTER Chart.js has computed its x-axis pixel bounds
+    if (_tempChart?.scales?.x) {
+      const xs = _tempChart.scales.x;
+      drawActivityTimeline(log, xs.min, xs.max, xs.left, xs.right);
+    } else {
+      const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
+      drawActivityTimeline(log, rMin, rMax);
+    }
   }
 
   function updateThermalPanel(tm) {
@@ -1458,7 +1464,12 @@
   }
 
   function resetChartZoom() {
-    if (_tempChart) _tempChart.resetZoom();
+    if (_tempChart) {
+      _tempChart.resetZoom();
+      const xs = _tempChart.scales.x;
+      const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
+      drawActivityTimeline((_lastChartData?.state_log || []), rMin, rMax, xs.left, xs.right);
+    }
     _chartZoomed = false;
     const btn = document.getElementById('chart-zoom-reset');
     if (btn) btn.classList.remove('visible');
@@ -2425,9 +2436,9 @@
   // Redraw chart and timeline on resize
   window.addEventListener('resize', () => {
     loadChart();
-    if (_lastChartData) {
-      const { min, max } = _rangeToWindow(_chartRange);
-      drawActivityTimeline(_lastChartData.state_log || [], min, max);
+    if (_lastChartData && _tempChart?.scales?.x) {
+      const xs = _tempChart.scales.x;
+      drawActivityTimeline(_lastChartData.state_log || [], xs.min, xs.max, xs.left, xs.right);
     }
   });
 

@@ -2469,16 +2469,11 @@ def compute_predicted_temps(
     ramp_h_morning = _compute_ramp_hours(abs(comfort - setback), c.hvac_mode, thermal_model)
     ramp_h_evening = _compute_ramp_hours(abs(comfort - bedtime_setback), c.hvac_mode, thermal_model)
 
-    for h in range(24):
-        if h < wake_h:
-            temp = setback  # overnight setback
-        elif h < wake_h + ramp_h_morning:
-            # ramping from setback to comfort
-            frac = (h - wake_h) / ramp_h_morning
-            temp = setback + frac * (comfort - setback)
-        elif h < sleep_h:
-            if c.hvac_mode == "off" and predicted_outdoor:
-                # drift toward outdoor when HVAC off
+    # Free-floating: no HVAC control, drift toward outdoor all 24 hours accumulating
+    if c.hvac_mode == "off":
+        prev_temp = comfort  # comfort_cool as midnight baseline
+        for h in range(24):
+            if predicted_outdoor:
                 outdoor_t = predicted_outdoor[h]["temp"]
                 drift_rate = (
                     3.0
@@ -2490,11 +2485,20 @@ def compute_predicted_temps(
                     )
                     else 1.5
                 )
-                # Simple drift model: move toward outdoor at drift_rate °/hr
-                diff = outdoor_t - comfort
-                temp = comfort + min(abs(diff), drift_rate) * (1 if diff > 0 else -1)
-            else:
-                temp = comfort
+                diff = outdoor_t - prev_temp
+                prev_temp = prev_temp + min(abs(diff), drift_rate) * (1 if diff > 0 else -1)
+            predicted_indoor.append({"hour": h, "temp": round(prev_temp, 1)})
+        return predicted_outdoor, predicted_indoor
+
+    for h in range(24):
+        if h < wake_h:
+            temp = setback  # overnight setback
+        elif h < wake_h + ramp_h_morning:
+            # ramping from setback to comfort
+            frac = (h - wake_h) / ramp_h_morning
+            temp = setback + frac * (comfort - setback)
+        elif h < sleep_h:
+            temp = comfort
         elif h < sleep_h + ramp_h_evening:
             # ramping from comfort to bedtime setback
             frac = (h - sleep_h) / ramp_h_evening

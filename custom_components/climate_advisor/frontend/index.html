@@ -970,6 +970,7 @@
     const log = chartData.state_log || [];
     const comfortHeat = chartData.comfort_heat ?? null;
     const comfortCool = chartData.comfort_cool ?? null;
+    const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
 
     // Predicted series anchored to today midnight
     const todayMidnight = new Date();
@@ -1006,9 +1007,7 @@
     const comfortBandDs = (comfortHeat != null && comfortCool != null) ? {
       label: 'Comfort Band',
       type: 'line',
-      data: predIndoorPts.length > 0
-        ? predIndoorPts.map(p => ({ x: p.x, y: comfortCool }))
-        : predOutdoorPts.map(p => ({ x: p.x, y: comfortCool })),
+      data: [{ x: rMin, y: comfortCool }, { x: rMax, y: comfortCool }],
       borderColor: CHART_COLORS.comfort_border,
       borderWidth: 1,
       borderDash: [3, 3],

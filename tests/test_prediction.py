@@ -235,9 +235,9 @@ class TestIndoorPredictionHvacOff:
         )
 
     def test_drift_limited_by_rate(self):
-        """Drift per hour is capped at drift_rate, even with huge outdoor-indoor delta."""
-        # Extreme outdoor: today_high=120, comfort_cool=75 → diff=45
-        # drift_rate=3.0 (windows open), so drift should be exactly 3.0
+        """Drift per hour is capped at drift_rate, accumulating across hours."""
+        # Extreme outdoor: today_high=120, today_low=100 → outdoor always >> indoor
+        # drift_rate=3.0 (windows open) → each window-hour step should be exactly 3.0
         c = _make_classification(
             day_type="warm",
             hvac_mode="off",
@@ -248,12 +248,11 @@ class TestIndoorPredictionHvacOff:
             window_close_time=time(18, 0),
         )
         _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # At any window hour, indoor = comfort + min(abs(diff), 3.0) = 75 + 3 = 78
-        comfort = 75.0
-        for h in range(8, 18):
-            assert indoor[h]["temp"] == pytest.approx(comfort + 3.0, abs=0.1), (
-                f"Hour {h}: expected {comfort + 3.0}, got {indoor[h]['temp']}"
-            )
+        # With outdoor always much hotter than indoor (indoor starts ~75, outdoor 100+),
+        # diff always >> drift_rate, so each window-hour step = exactly drift_rate (3.0)
+        for h in range(8, 17):
+            step = indoor[h + 1]["temp"] - indoor[h]["temp"]
+            assert step == pytest.approx(3.0, abs=0.1), f"Hour {h}→{h + 1}: step should be drift_rate 3.0, got {step}"
 
     def test_drift_direction_when_outdoor_cooler(self):
         """When outdoor < comfort, indoor drifts below comfort."""
@@ -273,8 +272,8 @@ class TestIndoorPredictionHvacOff:
             f"Indoor should drift below comfort when outdoor is cooler, got {indoor[12]['temp']}"
         )
 
-    def test_overnight_still_at_setback_hvac_off(self):
-        """Even in HVAC-off mode, hours before wake should be at setback (not drifting)."""
+    def test_overnight_drifts_toward_outdoor_when_hvac_off(self):
+        """On HVAC-off days, overnight hours drift toward outdoor — no setback applied."""
         c = _make_classification(
             day_type="warm",
             hvac_mode="off",
@@ -282,14 +281,48 @@ class TestIndoorPredictionHvacOff:
             today_low=60.0,
         )
         _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # Hours 0-5 are before wake_h (6.5), so setback applies (setback_cool=80)
+        # Hours 0-5 are overnight. Outdoor overnight is ~60-65°F (low=60).
+        # Starting from comfort_cool=75, indoor drifts DOWN toward outdoor.
         for h in range(6):
-            assert indoor[h]["temp"] == pytest.approx(80.0, abs=0.5), (
-                f"Hour {h}: overnight should be at setback (80), got {indoor[h]['temp']}"
+            assert indoor[h]["temp"] < 75.0, (
+                f"Hour {h}: overnight should drift below comfort_cool (75), got {indoor[h]['temp']}"
+            )
+            assert indoor[h]["temp"] != pytest.approx(80.0, abs=0.5), (
+                f"Hour {h}: overnight must NOT be at setback_cool (80), got {indoor[h]['temp']}"
+            )
+        # Verify drift direction: cooling overnight (later hours are cooler than earlier)
+        assert indoor[5]["temp"] < indoor[0]["temp"], "Overnight should cool toward outdoor, not warm up"
+
+    def test_overnight_drift_accumulates_across_hours(self):
+        """Overnight drift accumulates: h=1 indoor depends on h=0, not reset to comfort."""
+        c = _make_classification(
+            day_type="warm",
+            hvac_mode="off",
+            today_high=90.0,
+            today_low=60.0,
+        )
+        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
+        # Outdoor overnight ~60-65°F < indoor start 75°F → indoor drifts DOWN
+        assert indoor[1]["temp"] < indoor[0]["temp"], "h=1 should be cooler than h=0 overnight"
+        assert indoor[2]["temp"] < indoor[1]["temp"], "h=2 should be cooler than h=1 overnight"
+
+    def test_hvac_off_no_setback_cool_in_prediction(self):
+        """hvac_off prediction must never produce setback_cool (80°F) in any hour."""
+        c = _make_classification(
+            day_type="warm",
+            hvac_mode="off",
+            today_high=90.0,
+            today_low=60.0,
+        )
+        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
+        setback_cool = DEFAULT_CONFIG["setback_cool"]  # 80
+        for entry in indoor:
+            assert entry["temp"] != pytest.approx(setback_cool, abs=0.1), (
+                f"Hour {entry['hour']}: should not hit setback_cool ({setback_cool}°F), got {entry['temp']}"
             )
 
     def test_no_fast_drift_outside_window_hours(self):
-        """Before window_open_time, drift rate should be 1.5 (slow), not 3.0."""
+        """Before window_open_time, drift rate is 1.5 (slow); during window, 3.0 (fast)."""
         # Window opens at 10:00, so h=8 and h=9 are outside window hours
         c = _make_classification(
             day_type="warm",
@@ -301,14 +334,15 @@ class TestIndoorPredictionHvacOff:
             window_close_time=time(18, 0),
         )
         _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        comfort = 75.0
-        # h=8: before window open → drift rate 1.5, so indoor = 75 + 1.5 = 76.5
-        assert indoor[8]["temp"] == pytest.approx(comfort + 1.5, abs=0.1), (
-            f"Hour 8 (before window): expected {comfort + 1.5}, got {indoor[8]['temp']}"
+        # Before window open (h=8→9): step = 1.5 (slow rate)
+        step_before = indoor[9]["temp"] - indoor[8]["temp"]
+        assert step_before == pytest.approx(1.5, abs=0.1), (
+            f"Before window (h=8→9): expected step 1.5, got {step_before}"
         )
-        # h=12: within window → drift rate 3.0, so indoor = 75 + 3.0 = 78.0
-        assert indoor[12]["temp"] == pytest.approx(comfort + 3.0, abs=0.1), (
-            f"Hour 12 (during window): expected {comfort + 3.0}, got {indoor[12]['temp']}"
+        # During window (h=11→12): step = 3.0 (fast rate)
+        step_during = indoor[12]["temp"] - indoor[11]["temp"]
+        assert step_during == pytest.approx(3.0, abs=0.1), (
+            f"During window (h=11→12): expected step 3.0, got {step_during}"
         )
 
 

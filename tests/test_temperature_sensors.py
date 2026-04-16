@@ -286,6 +286,8 @@ def _make_chart_data_coord(
     chart_log.get_entries = MagicMock(side_effect=_get_entries)
     coord._chart_log = chart_log
 
+    coord._thermal_factors = None
+
     coord.get_chart_data = types.MethodType(ClimateAdvisorCoordinator.get_chart_data, coord)
     return coord
 

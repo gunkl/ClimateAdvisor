@@ -200,6 +200,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history: list[tuple[str, float]] = []
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
+        self._thermal_factors: dict | None = None
 
         # Observe-only mode: when disabled, automation still runs but skips actions
         self._automation_enabled: bool = True
@@ -1105,14 +1106,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.config,
                     self._hourly_forecast_temps,
                     thermal_model=getattr(self.automation_engine, "_thermal_model", None),
+                    thermal_factors=self._thermal_factors,
                 )
                 _now_h = dt_util.now().hour
                 if _pred_out and _now_h < len(_pred_out):
                     _pred_outdoor_val = _pred_out[_now_h]["temp"]
                 if _pred_in and _now_h < len(_pred_in):
                     _pred_indoor_val = _pred_in[_now_h]["temp"]
+            _hvac_action_str = str(hvac_action).lower() if hvac_action else ""
+            _hvac_mode_str = str(hvac_mode).lower() if hvac_mode else ""
+            if _hvac_action_str == "fan":
+                if _hvac_mode_str == "heat":
+                    _hvac_action_str = "heating"
+                elif _hvac_mode_str in ("cool", "heat_cool"):
+                    _hvac_action_str = "cooling"
             self._chart_log.append(
-                hvac=str(hvac_action) if hvac_action else "",
+                hvac=_hvac_action_str,
                 fan=bool(fan_running),
                 indoor=indoor_temp,
                 outdoor=outdoor_temp,
@@ -1124,6 +1133,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pred_indoor=_pred_indoor_val,
             )
             self._chart_log.save()
+
+        with contextlib.suppress(Exception):
+            self._thermal_factors = _compute_thermal_factors(self._chart_log.get_entries("7d"))
 
         return result
 
@@ -2240,6 +2252,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self.config,
             self._hourly_forecast_temps,
             thermal_model=getattr(self.automation_engine, "_thermal_model", None),
+            thermal_factors=self._thermal_factors,
         )
 
         thermal_model = self.learning.get_thermal_model() if self.learning else {}
@@ -2430,15 +2443,108 @@ def _compute_ramp_hours(temp_delta: float, hvac_mode: str, thermal_model: dict |
     return max(temp_delta / rate, 0.25)
 
 
+def _compute_thermal_factors(chart_entries: list[dict]) -> dict:
+    """Compute thermal lag and conditional differential from historical chart data.
+
+    Returns:
+        {
+            "time_lag_hours": float,
+            "cold_diff": float,    # indoor-outdoor when outdoor < 60°F (HVAC idle)
+            "mild_diff": float,    # indoor-outdoor when outdoor 60-70°F (HVAC idle)
+            "warm_diff": float,    # indoor-outdoor when outdoor > 70°F (HVAC idle)
+            "has_data": bool,
+        }
+    """
+    valid = [e for e in chart_entries if e.get("indoor") is not None and e.get("outdoor") is not None]
+    if len(valid) < 20:
+        return {
+            "time_lag_hours": 1.0,
+            "cold_diff": 15.0,
+            "mild_diff": 8.0,
+            "warm_diff": 0.0,
+            "has_data": False,
+        }
+
+    # Time lag: cross-correlation of consecutive outdoor vs indoor changes
+    outdoors = [e["outdoor"] for e in valid]
+    indoors = [e["indoor"] for e in valid]
+    d_out = [outdoors[i + 1] - outdoors[i] for i in range(len(outdoors) - 1)]
+    d_in = [indoors[i + 1] - indoors[i] for i in range(len(indoors) - 1)]
+    best_lag, best_score = 0, float("-inf")
+    for lag in range(min(5, len(d_out))):
+        score = sum(d_out[i] * d_in[i + lag] for i in range(len(d_out) - lag))
+        if score > best_score:
+            best_score, best_lag = score, lag
+
+    # Conditional differential from HVAC-idle entries
+    idle_hvac = {"", "idle", "off"}
+    buckets: dict[str, list[float]] = {"cold": [], "mild": [], "warm": []}
+    for e in valid:
+        if str(e.get("hvac", "")).lower() not in idle_hvac:
+            continue
+        delta = e["indoor"] - e["outdoor"]
+        outdoor = e["outdoor"]
+        if outdoor < 60:
+            buckets["cold"].append(delta)
+        elif outdoor < 70:
+            buckets["mild"].append(delta)
+        else:
+            buckets["warm"].append(delta)
+
+    def _median(vals: list[float], fallback: float) -> float:
+        if len(vals) < 3:
+            return fallback
+        s = sorted(vals)
+        return s[len(s) // 2]
+
+    return {
+        "time_lag_hours": float(best_lag),
+        "cold_diff": round(_median(buckets["cold"], 15.0), 1),
+        "mild_diff": round(_median(buckets["mild"], 8.0), 1),
+        "warm_diff": round(_median(buckets["warm"], 0.0), 1),
+        "has_data": True,
+    }
+
+
+def _outdoor_conditional_diff(outdoor: float, thermal_factors: dict) -> float:
+    """Return the learned indoor-outdoor differential for a given outdoor temp.
+
+    Linear interpolation over ±2°F transition zones at bucket boundaries (60°F, 70°F)
+    eliminates the hard 7.6°F jump that occurs when outdoor crosses a threshold.
+    """
+    cold = thermal_factors.get("cold_diff", 15.0)
+    mild = thermal_factors.get("mild_diff", 8.0)
+    warm = thermal_factors.get("warm_diff", 0.0)
+
+    if outdoor <= 58.0:
+        return cold
+    elif outdoor < 62.0:
+        frac = (outdoor - 58.0) / 4.0  # 0 at 58°F, 1 at 62°F
+        return cold + frac * (mild - cold)
+    elif outdoor <= 68.0:
+        return mild
+    elif outdoor < 72.0:
+        frac = (outdoor - 68.0) / 4.0  # 0 at 68°F, 1 at 72°F
+        return mild + frac * (warm - mild)
+    else:
+        return warm
+
+
 def compute_predicted_temps(
     classification: DayClassification | None,
     config: dict[str, Any],
     hourly_forecast: list[dict] | None = None,
     thermal_model: dict | None = None,
+    thermal_factors: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Compute predicted outdoor and indoor hourly temperatures.
 
     This is a standalone function so it can be tested without a coordinator.
+
+    Uses a unified equilibrium model:
+    - For hvac_mode="off" (mild/warm days): indoor = max(HVAC_floor, outdoor_lagged + cond_diff)
+    - For hvac_mode="heat" or "cool": follow HVAC schedule (setback→comfort ramps),
+      equilibrium adjusts drift at edges.
 
     Returns:
         (predicted_outdoor, predicted_indoor) — each a list of 24 dicts
@@ -2452,59 +2558,87 @@ def compute_predicted_temps(
     # --- Predicted outdoor temps ---
     predicted_outdoor = _build_outdoor_curve(high=c.today_high, low=c.today_low, hourly_forecast=hourly_forecast)
 
-    # --- Predicted indoor temps (from schedule + setpoints) ---
-    predicted_indoor: list[dict] = []
+    # --- Thermal factors ---
+    _tf = thermal_factors or {}
+    _lag_h = max(0, int(round(_tf.get("time_lag_hours", 1.0))))
+
+    # --- HVAC floor and ceiling for this day type ---
+    if c.hvac_mode == "heat":
+        hvac_floor = config.get("comfort_heat", 70)
+        hvac_ceiling = None
+    elif c.hvac_mode == "cool":
+        hvac_floor = config.get("setback_cool", 80) + c.setback_modifier
+        hvac_ceiling = config.get("comfort_cool", 75)
+    else:  # "off" / mild
+        hvac_floor = config.get("setback_heat", 60) + c.setback_modifier
+        hvac_ceiling = None
+
+    # --- Schedule timing (for heat/cool days where HVAC actively ramps) ---
+    comfort = config.get("comfort_heat", 70) if c.hvac_mode != "cool" else config.get("comfort_cool", 75)
+    if c.hvac_mode == "heat":
+        setback = config.get("setback_heat", 60) + c.setback_modifier
+    elif c.hvac_mode == "cool":
+        setback = config.get("setback_cool", 80) + c.setback_modifier
+    else:
+        setback = hvac_floor
+
     wake = _parse_time(config.get("wake_time", "06:30"))
     sleep = _parse_time(config.get("sleep_time", "22:30"))
     wake_h = wake.hour + wake.minute / 60.0
     sleep_h = sleep.hour + sleep.minute / 60.0
 
-    comfort = config.get("comfort_heat", 70) if c.hvac_mode == "heat" else config.get("comfort_cool", 75)
-    setback = config.get("setback_heat", 60) if c.hvac_mode == "heat" else config.get("setback_cool", 80)
-    setback += c.setback_modifier
-
     bedtime_depth = DEFAULT_SETBACK_DEPTH_F if c.hvac_mode == "heat" else DEFAULT_SETBACK_DEPTH_COOL_F
     bedtime_setback = comfort - bedtime_depth + c.setback_modifier if c.hvac_mode == "heat" else comfort + bedtime_depth
-
     ramp_h_morning = _compute_ramp_hours(abs(comfort - setback), c.hvac_mode, thermal_model)
     ramp_h_evening = _compute_ramp_hours(abs(comfort - bedtime_setback), c.hvac_mode, thermal_model)
 
-    # Free-floating: no HVAC control, drift toward outdoor all 24 hours accumulating
-    if c.hvac_mode == "off":
-        prev_temp = comfort  # comfort_cool as midnight baseline
-        for h in range(24):
-            if predicted_outdoor:
-                outdoor_t = predicted_outdoor[h]["temp"]
-                drift_rate = (
-                    3.0
-                    if (
-                        c.windows_recommended
-                        and c.window_open_time
-                        and c.window_close_time
-                        and c.window_open_time.hour <= h < c.window_close_time.hour
-                    )
-                    else 1.5
-                )
-                diff = outdoor_t - prev_temp
-                prev_temp = prev_temp + min(abs(diff), drift_rate) * (1 if diff > 0 else -1)
-            predicted_indoor.append({"hour": h, "temp": round(prev_temp, 1)})
-        return predicted_outdoor, predicted_indoor
+    # Running indoor state for exponential smoothing (off-day only).
+    # Seed with hour-0 equilibrium so the first step uses a physical starting point.
+    if predicted_outdoor and c.hvac_mode not in ("heat", "cool"):
+        _out0 = predicted_outdoor[0]["temp"]
+        _cd0 = _outdoor_conditional_diff(_out0, _tf)
+        _prev_indoor = max(hvac_floor, _out0 + _cd0)
+    else:
+        _prev_indoor = comfort
 
+    predicted_indoor: list[dict] = []
     for h in range(24):
-        if h < wake_h:
-            temp = setback  # overnight setback
-        elif h < wake_h + ramp_h_morning:
-            # ramping from setback to comfort
-            frac = (h - wake_h) / ramp_h_morning
-            temp = setback + frac * (comfort - setback)
-        elif h < sleep_h:
-            temp = comfort
-        elif h < sleep_h + ramp_h_evening:
-            # ramping from comfort to bedtime setback
-            frac = (h - sleep_h) / ramp_h_evening
-            temp = comfort + frac * (bedtime_setback - comfort)
+        if predicted_outdoor:
+            lag_idx = max(0, h - _lag_h)
+            out_t = predicted_outdoor[lag_idx]["temp"]
+            cond_diff = _outdoor_conditional_diff(out_t, _tf)
+            equilibrium = out_t + cond_diff
         else:
-            temp = bedtime_setback
+            equilibrium = comfort
+
+        if c.hvac_mode in ("heat", "cool"):
+            # HVAC actively holds setpoints: follow schedule
+            if h < wake_h:
+                temp = setback
+            elif h < wake_h + ramp_h_morning:
+                frac = (h - wake_h) / ramp_h_morning
+                temp = setback + frac * (comfort - setback)
+            elif h < sleep_h:
+                temp = comfort
+            elif h < sleep_h + ramp_h_evening:
+                frac = (h - sleep_h) / ramp_h_evening
+                temp = comfort + frac * (bedtime_setback - comfort)
+            else:
+                temp = bedtime_setback
+        else:
+            # hvac_mode == "off": CA manages floor (heater), no active cooling ceiling.
+            # Exponential smoothing: alpha=1/lag_h so lag controls convergence speed,
+            # not an index offset. For lag=1 (alpha=1.0) this is identical to instantaneous.
+            _alpha = 1.0 / max(1, _lag_h)
+            raw = _prev_indoor + _alpha * (equilibrium - _prev_indoor)
+            temp = max(hvac_floor, raw)
+
+        _prev_indoor = temp  # track for exponential smoothing
+
+        # Apply ceiling for cool days during waking hours
+        if hvac_ceiling is not None and wake_h <= h < sleep_h:
+            temp = min(temp, hvac_ceiling)
+
         predicted_indoor.append({"hour": h, "temp": round(temp, 1)})
 
     return predicted_outdoor, predicted_indoor

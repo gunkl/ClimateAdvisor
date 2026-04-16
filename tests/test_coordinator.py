@@ -942,3 +942,66 @@ class TestStateContradictionEvent:
     def test_hvac_action_case_insensitive(self):
         events = _check_state_contradiction("off", "FAN", False, None, self._NOW)
         assert len(events) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: fan→heating mapping in chart_log write (Change 6)
+# ---------------------------------------------------------------------------
+
+
+def _apply_fan_to_hvac_action_mapping(hvac_action, hvac_mode):
+    """Replicate the fan→heating/cooling mapping logic from _async_update_data."""
+    _hvac_action_str = str(hvac_action).lower() if hvac_action else ""
+    _hvac_mode_str = str(hvac_mode).lower() if hvac_mode else ""
+    if _hvac_action_str == "fan":
+        if _hvac_mode_str == "heat":
+            _hvac_action_str = "heating"
+        elif _hvac_mode_str in ("cool", "heat_cool"):
+            _hvac_action_str = "cooling"
+    return _hvac_action_str
+
+
+class TestChartLogFanMapping:
+    """Tests for the fan→heating/cooling mapping added to chart_log write."""
+
+    def test_fan_action_with_heat_mode_maps_to_heating(self):
+        result = _apply_fan_to_hvac_action_mapping("fan", "heat")
+        assert result == "heating"
+
+    def test_fan_action_with_cool_mode_maps_to_cooling(self):
+        result = _apply_fan_to_hvac_action_mapping("fan", "cool")
+        assert result == "cooling"
+
+    def test_fan_action_with_heat_cool_mode_maps_to_cooling(self):
+        result = _apply_fan_to_hvac_action_mapping("fan", "heat_cool")
+        assert result == "cooling"
+
+    def test_fan_action_with_off_mode_stays_fan(self):
+        """When hvac_mode=off and hvac_action=fan, no remapping — stays 'fan'."""
+        result = _apply_fan_to_hvac_action_mapping("fan", "off")
+        assert result == "fan"
+
+    def test_heating_action_unchanged(self):
+        result = _apply_fan_to_hvac_action_mapping("heating", "heat")
+        assert result == "heating"
+
+    def test_cooling_action_unchanged(self):
+        result = _apply_fan_to_hvac_action_mapping("cooling", "cool")
+        assert result == "cooling"
+
+    def test_idle_action_unchanged(self):
+        result = _apply_fan_to_hvac_action_mapping("idle", "heat")
+        assert result == "idle"
+
+    def test_empty_action_unchanged(self):
+        result = _apply_fan_to_hvac_action_mapping("", "heat")
+        assert result == ""
+
+    def test_none_action_becomes_empty_string(self):
+        result = _apply_fan_to_hvac_action_mapping(None, "heat")
+        assert result == ""
+
+    def test_fan_action_case_insensitive(self):
+        """Input 'FAN' (uppercase) should also be mapped correctly."""
+        result = _apply_fan_to_hvac_action_mapping("FAN", "heat")
+        assert result == "heating"

@@ -13,6 +13,7 @@ from custom_components.climate_advisor.coordinator import (
     _build_future_forecast_outdoor,
     _build_outdoor_curve,
     _compute_ramp_hours,
+    _compute_thermal_factors,
     _cosine_outdoor_curve,
     compute_predicted_temps,
 )
@@ -185,7 +186,11 @@ class TestIndoorPredictionHvacOff:
     """Test indoor prediction drift logic when HVAC mode is off."""
 
     def test_drift_toward_outdoor_windows_open(self):
-        """With windows open during window hours, indoor drifts toward outdoor at rate 3.0."""
+        """On a hot hvac_off day, midday indoor rises toward outdoor via equilibrium model.
+
+        In the new equilibrium model, windows are not a factor for off-days (no drift rate).
+        On a hot day (high=90, low=60), outdoor at h=12 ≈ 85°F, warm_diff≈0 → indoor ≈ 85°F > 75.
+        """
         # Warm day: outdoor will be above comfort_cool (75) during midday
         c = _make_classification(
             day_type="warm",
@@ -197,62 +202,8 @@ class TestIndoorPredictionHvacOff:
             window_close_time=time(18, 0),
         )
         outdoor, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # At h=12 (midday, within window hours), outdoor is well above 75
-        # Indoor should drift above comfort (75) toward outdoor
-        assert indoor[12]["temp"] > 75.0, f"Indoor at h=12 should drift above comfort, got {indoor[12]['temp']}"
-
-    def test_drift_toward_outdoor_without_windows(self):
-        """Without windows recommended, drift rate is 1.5 (slower)."""
-        c = _make_classification(
-            day_type="warm",
-            hvac_mode="off",
-            today_high=90.0,
-            today_low=60.0,
-            windows_recommended=False,
-            window_open_time=None,
-            window_close_time=None,
-        )
-        _, indoor_no_win = compute_predicted_temps(c, DEFAULT_CONFIG)
-
-        c_win = _make_classification(
-            day_type="warm",
-            hvac_mode="off",
-            today_high=90.0,
-            today_low=60.0,
-            windows_recommended=True,
-            window_open_time=time(8, 0),
-            window_close_time=time(18, 0),
-        )
-        _, indoor_win = compute_predicted_temps(c_win, DEFAULT_CONFIG)
-
-        # At h=12 (within window hours), windows-open drift (3.0) should produce
-        # a larger deviation from comfort than no-windows drift (1.5)
-        comfort = 75.0
-        drift_win = abs(indoor_win[12]["temp"] - comfort)
-        drift_no_win = abs(indoor_no_win[12]["temp"] - comfort)
-        assert drift_no_win < drift_win, (
-            f"No-windows drift ({drift_no_win}) should be less than windows drift ({drift_win})"
-        )
-
-    def test_drift_limited_by_rate(self):
-        """Drift per hour is capped at drift_rate, accumulating across hours."""
-        # Extreme outdoor: today_high=120, today_low=100 → outdoor always >> indoor
-        # drift_rate=3.0 (windows open) → each window-hour step should be exactly 3.0
-        c = _make_classification(
-            day_type="warm",
-            hvac_mode="off",
-            today_high=120.0,
-            today_low=100.0,
-            windows_recommended=True,
-            window_open_time=time(8, 0),
-            window_close_time=time(18, 0),
-        )
-        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # With outdoor always much hotter than indoor (indoor starts ~75, outdoor 100+),
-        # diff always >> drift_rate, so each window-hour step = exactly drift_rate (3.0)
-        for h in range(8, 17):
-            step = indoor[h + 1]["temp"] - indoor[h]["temp"]
-            assert step == pytest.approx(3.0, abs=0.1), f"Hour {h}→{h + 1}: step should be drift_rate 3.0, got {step}"
+        # At h=12 (midday), outdoor is well above 75 → equilibrium pushes indoor above comfort
+        assert indoor[12]["temp"] > 75.0, f"Indoor at h=12 should be above comfort, got {indoor[12]['temp']}"
 
     def test_drift_direction_when_outdoor_cooler(self):
         """When outdoor < comfort, indoor drifts below comfort."""
@@ -272,29 +223,22 @@ class TestIndoorPredictionHvacOff:
             f"Indoor should drift below comfort when outdoor is cooler, got {indoor[12]['temp']}"
         )
 
-    def test_overnight_drifts_toward_outdoor_when_hvac_off(self):
-        """On HVAC-off days, overnight hours drift toward outdoor — no setback applied."""
-        c = _make_classification(
-            day_type="warm",
-            hvac_mode="off",
-            today_high=90.0,
-            today_low=60.0,
-        )
-        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # Hours 0-5 are overnight. Outdoor overnight is ~60-65°F (low=60).
-        # Starting from comfort_cool=75, indoor drifts DOWN toward outdoor.
-        for h in range(6):
-            assert indoor[h]["temp"] < 75.0, (
-                f"Hour {h}: overnight should drift below comfort_cool (75), got {indoor[h]['temp']}"
-            )
-            assert indoor[h]["temp"] != pytest.approx(80.0, abs=0.5), (
-                f"Hour {h}: overnight must NOT be at setback_cool (80), got {indoor[h]['temp']}"
-            )
-        # Verify drift direction: cooling overnight (later hours are cooler than earlier)
-        assert indoor[5]["temp"] < indoor[0]["temp"], "Overnight should cool toward outdoor, not warm up"
+    def test_overnight_at_or_above_setback_heat_when_hvac_off(self):
+        """On hvac_off days, overnight prediction = max(setback_heat, equilibrium).
 
-    def test_overnight_drift_accumulates_across_hours(self):
-        """Overnight drift accumulates: h=1 indoor depends on h=0, not reset to comfort."""
+        With warm outdoor (high=90/low=60) and default differential (cold_diff=15),
+        equilibrium overnight ≈ 60+15=75°F → well above setback_heat (60°F).
+        """
+        c = _make_classification(day_type="warm", hvac_mode="off", today_high=90.0, today_low=60.0)
+        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
+        setback_heat = DEFAULT_CONFIG["setback_heat"]  # 60
+        for h in range(6):
+            assert indoor[h]["temp"] >= setback_heat, (
+                f"Hour {h}: {indoor[h]['temp']}°F should be >= setback_heat ({setback_heat}°F)"
+            )
+
+    def test_hot_day_hvac_off_indoor_rises_toward_outdoor(self):
+        """On a hot day with hvac_off, midday indoor should be high (no AC ceiling)."""
         c = _make_classification(
             day_type="warm",
             hvac_mode="off",
@@ -302,9 +246,28 @@ class TestIndoorPredictionHvacOff:
             today_low=60.0,
         )
         _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # Outdoor overnight ~60-65°F < indoor start 75°F → indoor drifts DOWN
-        assert indoor[1]["temp"] < indoor[0]["temp"], "h=1 should be cooler than h=0 overnight"
-        assert indoor[2]["temp"] < indoor[1]["temp"], "h=2 should be cooler than h=1 overnight"
+        # Midday outdoor ~85°F, warm_diff≈0 → equilibrium ≈ 85°F → indoor should be high
+        assert indoor[14]["temp"] > 75.0, (
+            f"Hot day with no AC: indoor at h=14 should exceed 75°F, got {indoor[14]['temp']}"
+        )
+        # Should never fall below setback_heat (heater floor)
+        for entry in indoor:
+            assert entry["temp"] >= DEFAULT_CONFIG["setback_heat"]
+
+    def test_cool_off_day_stays_near_heater_floor(self):
+        """Cold outdoor with hvac_off: equilibrium is low, heater floor dominates."""
+        c = _make_classification(
+            day_type="warm",
+            hvac_mode="off",
+            today_high=55.0,
+            today_low=40.0,
+        )
+        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
+        setback_heat = DEFAULT_CONFIG["setback_heat"]  # 60
+        for entry in indoor:
+            assert entry["temp"] >= setback_heat, (
+                f"Hour {entry['hour']}: {entry['temp']}°F fell below setback_heat ({setback_heat}°F)"
+            )
 
     def test_hvac_off_no_setback_cool_in_prediction(self):
         """hvac_off prediction must never produce setback_cool (80°F) in any hour."""
@@ -320,30 +283,6 @@ class TestIndoorPredictionHvacOff:
             assert entry["temp"] != pytest.approx(setback_cool, abs=0.1), (
                 f"Hour {entry['hour']}: should not hit setback_cool ({setback_cool}°F), got {entry['temp']}"
             )
-
-    def test_no_fast_drift_outside_window_hours(self):
-        """Before window_open_time, drift rate is 1.5 (slow); during window, 3.0 (fast)."""
-        # Window opens at 10:00, so h=8 and h=9 are outside window hours
-        c = _make_classification(
-            day_type="warm",
-            hvac_mode="off",
-            today_high=120.0,
-            today_low=100.0,
-            windows_recommended=True,
-            window_open_time=time(10, 0),
-            window_close_time=time(18, 0),
-        )
-        _, indoor = compute_predicted_temps(c, DEFAULT_CONFIG)
-        # Before window open (h=8→9): step = 1.5 (slow rate)
-        step_before = indoor[9]["temp"] - indoor[8]["temp"]
-        assert step_before == pytest.approx(1.5, abs=0.1), (
-            f"Before window (h=8→9): expected step 1.5, got {step_before}"
-        )
-        # During window (h=11→12): step = 3.0 (fast rate)
-        step_during = indoor[12]["temp"] - indoor[11]["temp"]
-        assert step_during == pytest.approx(3.0, abs=0.1), (
-            f"During window (h=11→12): expected step 3.0, got {step_during}"
-        )
 
 
 class TestRampTransitions:
@@ -808,6 +747,8 @@ def _make_chart_coordinator(temp_unit: str = "fahrenheit", thermal_model_return:
     chart_log.get_entries.return_value = []
     coord._chart_log = chart_log
 
+    coord._thermal_factors = None
+
     return coord
 
 
@@ -987,3 +928,71 @@ class TestBuildFutureForecastOutdoor:
         with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(now_utc)):
             result = _build_future_forecast_outdoor(entries)
         assert result == sorted(result, key=lambda x: x["ts"])
+
+
+class TestComputeThermalFactors:
+    """Tests for _compute_thermal_factors helper."""
+
+    def test_insufficient_data_returns_defaults(self):
+        factors = _compute_thermal_factors([])
+        assert factors["time_lag_hours"] == pytest.approx(1.0)
+        assert factors["cold_diff"] == pytest.approx(15.0)
+        assert factors["mild_diff"] == pytest.approx(8.0)
+        assert factors["warm_diff"] == pytest.approx(0.0)
+        assert factors["has_data"] is False
+
+    def test_differential_bucketing(self):
+        """Each outdoor temp range produces a separate differential bucket."""
+        entries = (
+            [{"outdoor": 55.0, "indoor": 70.0, "hvac": "idle"}] * 10  # cold: diff=15
+            + [{"outdoor": 65.0, "indoor": 73.0, "hvac": "idle"}] * 10  # mild: diff=8
+            + [{"outdoor": 75.0, "indoor": 75.0, "hvac": "idle"}] * 5  # warm: diff=0
+        )
+        factors = _compute_thermal_factors(entries)
+        assert factors["cold_diff"] == pytest.approx(15.0, abs=0.5)
+        assert factors["mild_diff"] == pytest.approx(8.0, abs=0.5)
+        assert factors["warm_diff"] == pytest.approx(0.0, abs=0.5)
+        assert factors["has_data"] is True
+
+
+class TestOutdoorConditionalDiff:
+    """Tests for _outdoor_conditional_diff — smooth bucket transitions."""
+
+    def test_cold_zone_returns_cold_diff(self):
+        from custom_components.climate_advisor.coordinator import _outdoor_conditional_diff
+
+        tf = {"cold_diff": 15.0, "mild_diff": 8.0, "warm_diff": 0.0}
+        assert _outdoor_conditional_diff(50.0, tf) == pytest.approx(15.0)
+        assert _outdoor_conditional_diff(58.0, tf) == pytest.approx(15.0)
+
+    def test_warm_zone_returns_warm_diff(self):
+        from custom_components.climate_advisor.coordinator import _outdoor_conditional_diff
+
+        tf = {"cold_diff": 15.0, "mild_diff": 8.0, "warm_diff": 0.0}
+        assert _outdoor_conditional_diff(72.0, tf) == pytest.approx(0.0)
+        assert _outdoor_conditional_diff(80.0, tf) == pytest.approx(0.0)
+
+    def test_cold_mild_midpoint_is_halfway(self):
+        from custom_components.climate_advisor.coordinator import _outdoor_conditional_diff
+
+        tf = {"cold_diff": 16.0, "mild_diff": 8.0, "warm_diff": 0.0}
+        # Midpoint 60°F = halfway between 58 and 62
+        mid = _outdoor_conditional_diff(60.0, tf)
+        assert mid == pytest.approx(12.0, abs=0.1)
+
+    def test_mild_warm_midpoint_is_halfway(self):
+        from custom_components.climate_advisor.coordinator import _outdoor_conditional_diff
+
+        tf = {"cold_diff": 15.0, "mild_diff": 8.0, "warm_diff": 2.0}
+        # Midpoint 70°F = halfway between 68 and 72
+        mid = _outdoor_conditional_diff(70.0, tf)
+        assert mid == pytest.approx(5.0, abs=0.1)
+
+    def test_no_jump_crossing_cold_mild_boundary(self):
+        from custom_components.climate_advisor.coordinator import _outdoor_conditional_diff
+
+        tf = {"cold_diff": 15.0, "mild_diff": 8.0, "warm_diff": 0.0}
+        d59 = _outdoor_conditional_diff(59.0, tf)
+        d61 = _outdoor_conditional_diff(61.0, tf)
+        # 2°F outdoor change near boundary → < 4°F diff change (vs 7.6°F hard cutoff)
+        assert abs(d61 - d59) < 4.0

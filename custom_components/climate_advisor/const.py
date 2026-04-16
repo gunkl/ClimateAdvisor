@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.20"
+VERSION = "0.3.21"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.21": [

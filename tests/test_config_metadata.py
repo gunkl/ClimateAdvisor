@@ -35,6 +35,8 @@ EXPECTED_KEYS = {
     "fan_min_runtime_per_hour",
     "wake_time",
     "sleep_time",
+    "sleep_heat",
+    "sleep_cool",
     "briefing_time",
     "learning_enabled",
     "adaptive_preheat_enabled",

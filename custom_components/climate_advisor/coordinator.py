@@ -2587,8 +2587,15 @@ def compute_predicted_temps(
     wake_h = wake.hour + wake.minute / 60.0
     sleep_h = sleep.hour + sleep.minute / 60.0
 
-    bedtime_depth = DEFAULT_SETBACK_DEPTH_F if c.hvac_mode == "heat" else DEFAULT_SETBACK_DEPTH_COOL_F
-    bedtime_setback = comfort - bedtime_depth + c.setback_modifier if c.hvac_mode == "heat" else comfort + bedtime_depth
+    if c.hvac_mode == "heat":
+        _sleep_h = config.get("sleep_heat", comfort - DEFAULT_SETBACK_DEPTH_F)
+        bedtime_setback = _sleep_h + c.setback_modifier
+    elif c.hvac_mode == "cool":
+        # Cool mode: setback_modifier is not applied to bedtime (original behavior preserved)
+        _sleep_c = config.get("sleep_cool", comfort + DEFAULT_SETBACK_DEPTH_COOL_F)
+        bedtime_setback = _sleep_c
+    else:
+        bedtime_setback = comfort  # off-mode: unused in schedule loop
     ramp_h_morning = _compute_ramp_hours(abs(comfort - setback), c.hvac_mode, thermal_model)
     ramp_h_evening = _compute_ramp_hours(abs(comfort - bedtime_setback), c.hvac_mode, thermal_model)
 

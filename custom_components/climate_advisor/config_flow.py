@@ -149,7 +149,7 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 14
+    VERSION = 15
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -221,10 +221,18 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["setback_heat"] = "setback_must_be_lower"
             if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
                 errors["setback_cool"] = "setback_must_be_higher"
+            if user_input.get("sleep_heat", 999) >= user_input.get("comfort_heat", 0):
+                errors["sleep_heat"] = "sleep_must_be_below_comfort"
+            if user_input.get("sleep_heat", 0) <= user_input.get("setback_heat", 999):
+                errors["sleep_heat"] = "sleep_must_be_above_setback"
+            if user_input.get("sleep_cool", 0) <= user_input.get("comfort_cool", 999):
+                errors["sleep_cool"] = "sleep_must_be_above_comfort"
+            if user_input.get("sleep_cool", 999) >= user_input.get("setback_cool", 0):
+                errors["sleep_cool"] = "sleep_must_be_below_setback"
             if not errors:
                 # Convert display values → stored °F (canonical internal unit)
                 converted = {**user_input}
-                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool"):
+                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"):
                     if key in converted:
                         converted[key] = to_fahrenheit(converted[key], unit)
                 self._data.update(converted)
@@ -237,6 +245,8 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "comfort_cool": (20, 29, 24, 0.5),
                 "setback_heat": (7, 18, 16, 0.5),
                 "setback_cool": (24, 32, 27, 0.5),
+                "sleep_heat": (13, 26, 19, 0.5),
+                "sleep_cool": (21, 32, 26, 0.5),
             }
             unit_label = "°C"
         else:
@@ -245,6 +255,8 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "comfort_cool": (68, 85, DEFAULT_COMFORT_COOL, 1),
                 "setback_heat": (45, 65, DEFAULT_SETBACK_HEAT, 1),
                 "setback_cool": (75, 90, DEFAULT_SETBACK_COOL, 1),
+                "sleep_heat": (55, 79, 66, 1),
+                "sleep_cool": (69, 89, 78, 1),
             }
             unit_label = "°F"
 
@@ -268,6 +280,8 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("comfort_cool", default=ranges["comfort_cool"][2]): _num("comfort_cool"),
                     vol.Required("setback_heat", default=ranges["setback_heat"][2]): _num("setback_heat"),
                     vol.Required("setback_cool", default=ranges["setback_cool"][2]): _num("setback_cool"),
+                    vol.Required("sleep_heat", default=ranges["sleep_heat"][2]): _num("sleep_heat"),
+                    vol.Required("sleep_cool", default=ranges["sleep_cool"][2]): _num("sleep_cool"),
                 }
             ),
             errors=errors,
@@ -558,11 +572,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 errors["setback_heat"] = "setback_must_be_lower"
             if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
                 errors["setback_cool"] = "setback_must_be_higher"
+            if user_input.get("sleep_heat", 999) >= user_input.get("comfort_heat", 0):
+                errors["sleep_heat"] = "sleep_must_be_below_comfort"
+            if user_input.get("sleep_heat", 0) <= user_input.get("setback_heat", 999):
+                errors["sleep_heat"] = "sleep_must_be_above_setback"
+            if user_input.get("sleep_cool", 0) <= user_input.get("comfort_cool", 999):
+                errors["sleep_cool"] = "sleep_must_be_above_comfort"
+            if user_input.get("sleep_cool", 999) >= user_input.get("setback_cool", 0):
+                errors["sleep_cool"] = "sleep_must_be_below_setback"
 
             if not errors:
                 # Convert display values → stored °F
                 unit_in = user_input.get(CONF_TEMP_UNIT, FAHRENHEIT)
-                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool"):
+                for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"):
                     if key in user_input:
                         user_input[key] = to_fahrenheit(user_input[key], unit_in)
                 self._updates.update(user_input)
@@ -574,6 +596,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 "comfort_cool": (20, 29, 0.5),
                 "setback_heat": (7, 18, 0.5),
                 "setback_cool": (24, 32, 0.5),
+                "sleep_heat": (13, 26, 0.5),
+                "sleep_cool": (21, 32, 0.5),
             }
             unit_label = "°C"
             # Pre-fill: convert stored °F to display unit
@@ -581,12 +605,16 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             comfort_cool_disp = from_fahrenheit(current.get("comfort_cool", DEFAULT_COMFORT_COOL), unit)
             setback_heat_disp = from_fahrenheit(current.get("setback_heat", DEFAULT_SETBACK_HEAT), unit)
             setback_cool_disp = from_fahrenheit(current.get("setback_cool", DEFAULT_SETBACK_COOL), unit)
+            sleep_heat_disp = from_fahrenheit(current.get("sleep_heat", 66.0), unit)
+            sleep_cool_disp = from_fahrenheit(current.get("sleep_cool", 78.0), unit)
         else:
             ranges = {
                 "comfort_heat": (55, 80, 1),
                 "comfort_cool": (68, 85, 1),
                 "setback_heat": (45, 65, 1),
                 "setback_cool": (75, 90, 1),
+                "sleep_heat": (55, 79, 1),
+                "sleep_cool": (69, 89, 1),
             }
             unit_label = "°F"
             # Stored in °F already — use directly
@@ -594,6 +622,8 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             comfort_cool_disp = current.get("comfort_cool", DEFAULT_COMFORT_COOL)
             setback_heat_disp = current.get("setback_heat", DEFAULT_SETBACK_HEAT)
             setback_cool_disp = current.get("setback_cool", DEFAULT_SETBACK_COOL)
+            sleep_heat_disp = current.get("sleep_heat", 66.0)
+            sleep_cool_disp = current.get("sleep_cool", 78.0)
 
         return self.async_show_form(
             step_id="core",
@@ -660,6 +690,30 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                             min=ranges["setback_cool"][0],
                             max=ranges["setback_cool"][1],
                             step=ranges["setback_cool"][2],
+                            unit_of_measurement=unit_label,
+                            mode="slider",
+                        )
+                    ),
+                    vol.Required(
+                        "sleep_heat",
+                        default=sleep_heat_disp,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ranges["sleep_heat"][0],
+                            max=ranges["sleep_heat"][1],
+                            step=ranges["sleep_heat"][2],
+                            unit_of_measurement=unit_label,
+                            mode="slider",
+                        )
+                    ),
+                    vol.Required(
+                        "sleep_cool",
+                        default=sleep_cool_disp,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ranges["sleep_cool"][0],
+                            max=ranges["sleep_cool"][1],
+                            step=ranges["sleep_cool"][2],
                             unit_of_measurement=unit_label,
                             mode="slider",
                         )

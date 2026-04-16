@@ -56,6 +56,8 @@ from .const import (
     CONF_PUSH_OCCUPANCY_HOME,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_SLEEP_COOL,
+    CONF_SLEEP_HEAT,
     CONF_TEMP_UNIT,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
@@ -76,6 +78,8 @@ from .const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_SETBACK_DEPTH_COOL_F,
+    DEFAULT_SETBACK_DEPTH_F,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
     PANEL_FRONTEND_PATH,
@@ -292,6 +296,24 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         new_data.setdefault(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD)
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=14)
         _LOGGER.info("Migration to version 14 complete")
+
+    if config_entry.version == 14:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 14 to 15")
+        new_data = {**config_entry.data}
+        comfort_heat = new_data.get("comfort_heat", 70.0)
+        comfort_cool = new_data.get("comfort_cool", 75.0)
+        setback_heat = new_data.get("setback_heat", 60.0)
+        setback_cool = new_data.get("setback_cool", 80.0)
+        new_data.setdefault(
+            CONF_SLEEP_HEAT,
+            max(setback_heat + 0.1, comfort_heat - DEFAULT_SETBACK_DEPTH_F),
+        )
+        new_data.setdefault(
+            CONF_SLEEP_COOL,
+            min(setback_cool - 0.1, comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F),
+        )
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=15)
+        _LOGGER.info("Migration to version 15 complete")
 
     return True
 

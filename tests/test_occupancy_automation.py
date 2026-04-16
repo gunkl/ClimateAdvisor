@@ -10,6 +10,8 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 
@@ -240,8 +242,8 @@ class TestBedtimeOccupancy:
 
         engine.hass.services.async_call.assert_not_called()
 
-    def test_bedtime_runs_when_away(self):
-        """Away mode should still apply bedtime setback (setback >= setback)."""
+    def test_bedtime_skipped_when_away(self):
+        """Issue #101: Away setback is already active — bedtime should not override it."""
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
@@ -249,12 +251,8 @@ class TestBedtimeOccupancy:
 
         asyncio.run(engine.handle_bedtime())
 
-        # Bedtime should still run (away setback is not deeper than bedtime setback)
-        calls = engine.hass.services.async_call.call_args_list
-        temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        # The _set_temperature_for_mode safety net will redirect to handle_occupancy_away
-        # but bedtime uses _set_temperature directly, so we just check it ran
-        assert len(temp_calls) >= 1
+        # Bedtime is skipped when AWAY — away setback wins
+        engine.hass.services.async_call.assert_not_called()
 
     def test_bedtime_runs_when_home(self):
         """Bedtime should run normally when home."""
@@ -281,6 +279,27 @@ class TestBedtimeOccupancy:
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) >= 1
+
+    def test_bedtime_uses_sleep_heat_when_home(self):
+        """Issue #101: sleep_heat=67 in config → bedtime sets to 67°F, not comfort_heat-4."""
+        engine = _make_engine(
+            config_overrides={
+                "comfort_heat": 70,
+                "setback_heat": 60,
+                "sleep_heat": 67.0,
+            }
+        )
+        c = _make_classification(hvac_mode="heat", day_type="cold")
+        engine._current_classification = c
+        engine.set_occupancy_mode("home")
+
+        asyncio.run(engine.handle_bedtime())
+
+        calls = engine.hass.services.async_call.call_args_list
+        temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
+        assert len(temp_calls) >= 1
+        set_temp = temp_calls[0][0][2]["temperature"]
+        assert set_temp == pytest.approx(67.0, abs=0.1)
 
 
 # ── _set_temperature_for_mode safety net tests ──────────────────

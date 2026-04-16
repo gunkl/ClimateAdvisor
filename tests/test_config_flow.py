@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helpers shared across all test classes
 # ---------------------------------------------------------------------------
@@ -934,7 +936,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 14
+        assert entry.version == 15
 
     def test_chain_from_v1_includes_temp_unit(self):
         """v1 entry chains through all migrations and ends up with temp_unit."""
@@ -966,7 +968,7 @@ class TestMigrationV8ToV9:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 14
+        assert entry.version == 15
 
 
 # ---------------------------------------------------------------------------
@@ -1027,7 +1029,7 @@ class TestMigrationV9ToV10:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
-        assert entry.version == 14
+        assert entry.version == 15
 
     def test_chain_from_v1_includes_debounce(self):
         """v1 entry chains through all migrations and ends up with welcome_home_debounce_seconds."""
@@ -1059,7 +1061,7 @@ class TestMigrationV9ToV10:
         assert result is True
         assert final_data.get("welcome_home_debounce_seconds") == 3600
         assert final_data.get("temp_unit") == "fahrenheit"
-        assert entry.version == 14
+        assert entry.version == 15
 
 
 class TestMigrationV10ToV11:
@@ -1115,7 +1117,7 @@ class TestMigrationV10ToV11:
         assert final_data.get("adaptive_preheat_enabled") is True
         assert final_data.get("adaptive_setback_enabled") is True
         assert final_data.get("weather_bias_enabled") is True
-        assert entry.version == 14
+        assert entry.version == 15
 
 
 class TestMigrationV11ToV12:
@@ -1143,7 +1145,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 120
         assert final_data.get("preheat_safety_margin") == 1.3
         assert final_data.get("max_setback_depth_f") == 8.0
-        assert entry.version == 14
+        assert entry.version == 15
 
     def test_v11_to_v12_existing_values_preserved(self):
         """v11 entry with all threshold keys set retains those values after migration."""
@@ -1175,7 +1177,7 @@ class TestMigrationV11ToV12:
         assert final_data.get("default_preheat_minutes") == 90
         assert final_data.get("preheat_safety_margin") == 1.5
         assert final_data.get("max_setback_depth_f") == 6.0
-        assert entry.version == 14
+        assert entry.version == 15
 
     def test_v11_to_v12_invalid_type_replaced(self):
         """v11 entry where min_preheat_minutes is a non-numeric string gets the default."""
@@ -1196,7 +1198,7 @@ class TestMigrationV11ToV12:
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
         assert final_data.get("min_preheat_minutes") == 30
-        assert entry.version == 14
+        assert entry.version == 15
 
     def test_v11_to_v12_from_v10_chain(self):
         """v10 entry chains through v11 and v12 migrations; all five threshold keys get defaults."""
@@ -1215,7 +1217,7 @@ class TestMigrationV11ToV12:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 14
+        assert entry.version == 15
         assert final_data.get("min_preheat_minutes") == 30
         assert final_data.get("max_preheat_minutes") == 240
         assert final_data.get("default_preheat_minutes") == 120
@@ -1317,7 +1319,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 14
+        assert entry.version == 15
         assert final_data.get("ai_enabled") is DEFAULT_AI_ENABLED
         assert final_data.get("ai_api_key") == ""
         assert final_data.get("ai_model") == DEFAULT_AI_MODEL
@@ -1345,7 +1347,7 @@ class TestMigrationV12ToV13:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 14
+        assert entry.version == 15
         assert final_data.get("ai_enabled") is False
         assert final_data.get("ai_model") == "claude-sonnet-4-6"
         assert final_data.get("ai_max_tokens") == 4096
@@ -1402,11 +1404,12 @@ class TestMigrationV13ToV14:
         assert result.get("ai_investigator_max_tokens") == DEFAULT_AI_INVESTIGATOR_MAX_TOKENS
         assert result.get("ai_investigator_requests_per_day") == DEFAULT_AI_INVESTIGATOR_RPD
 
-    def test_v13_to_v14_adds_exactly_five_keys(self):
-        """Migration adds exactly the five investigator keys and nothing else."""
+    def test_v13_to_v14_adds_exactly_five_investigator_keys_plus_sleep_keys(self):
+        """Migration v13→v15 adds the five investigator keys and the two sleep keys."""
         result = self._run_v13_to_v14_migration(dict(FULL_CONFIG))
         new_keys = set(result) - set(FULL_CONFIG)
-        assert new_keys == set(_INVESTIGATOR_KEYS)
+        # v13→v14 adds 5 investigator keys; v14→v15 fall-through adds sleep_heat + sleep_cool
+        assert new_keys == set(_INVESTIGATOR_KEYS) | {"sleep_heat", "sleep_cool"}
 
     def test_v13_to_v14_preserves_existing_fields(self):
         """All existing v13 fields survive migration unchanged."""
@@ -1444,12 +1447,178 @@ class TestMigrationV13ToV14:
         hass.config_entries.async_update_entry.side_effect = capture_update
         result = asyncio.run(async_migrate_entry(hass, entry))
         assert result is True
-        assert entry.version == 14
+        assert entry.version == 15
         assert final_data.get("ai_investigator_enabled") is DEFAULT_AI_INVESTIGATOR_ENABLED
         assert final_data.get("ai_investigator_model") == DEFAULT_AI_INVESTIGATOR_MODEL
         assert final_data.get("ai_investigator_reasoning_effort") == DEFAULT_AI_INVESTIGATOR_REASONING
         assert final_data.get("ai_investigator_max_tokens") == DEFAULT_AI_INVESTIGATOR_MAX_TOKENS
         assert final_data.get("ai_investigator_requests_per_day") == DEFAULT_AI_INVESTIGATOR_RPD
+
+
+# ---------------------------------------------------------------------------
+# v14→v15 migration — sleep_heat and sleep_cool (Issue #101)
+# ---------------------------------------------------------------------------
+
+_SLEEP_KEYS = ["sleep_heat", "sleep_cool"]
+
+# A v14-era config that does NOT yet have sleep keys
+_FULL_CONFIG_V14 = {
+    **{
+        k: v
+        for k, v in FULL_CONFIG.items()
+        if k
+        not in (
+            "adaptive_preheat_enabled",
+            "adaptive_setback_enabled",
+            "weather_bias_enabled",
+        )
+    },
+    "adaptive_preheat_enabled": True,
+    "adaptive_setback_enabled": True,
+    "weather_bias_enabled": True,
+    "min_preheat_minutes": 30,
+    "max_preheat_minutes": 240,
+    "default_preheat_minutes": 120,
+    "preheat_safety_margin": 1.3,
+    "max_setback_depth_f": 8.0,
+    "ai_enabled": False,
+    "ai_api_key": "",
+    "ai_model": "claude-sonnet-4-6",
+    "ai_reasoning_effort": "medium",
+    "ai_max_tokens": 4096,
+    "ai_temperature": 0.3,
+    "ai_monthly_budget": 0,
+    "ai_auto_requests_per_day": 5,
+    "ai_manual_requests_per_day": 20,
+    "ai_investigator_enabled": False,
+    "ai_investigator_model": "claude-sonnet-4-6",
+    "ai_investigator_reasoning_effort": "high",
+    "ai_investigator_max_tokens": 20480,
+    "ai_investigator_requests_per_day": 3,
+}
+
+
+class TestMigrationV14ToV15:
+    """Tests for config entry migration from version 14 to version 15."""
+
+    def _run_migration(self, initial_data: dict) -> dict:
+        """Run only the v14→v15 migration step and return resulting data."""
+        from custom_components.climate_advisor import async_migrate_entry
+
+        entry = _make_config_entry(dict(initial_data), version=14)
+        hass = _make_hass()
+        final_data: dict = {}
+
+        def capture_update(entry, *, data, version):
+            final_data.clear()
+            final_data.update(data)
+            entry.data = dict(data)
+            entry.version = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        asyncio.run(async_migrate_entry(hass, entry))
+        return final_data
+
+    def test_adds_sleep_heat_from_comfort(self):
+        """sleep_heat is set to comfort_heat - 4 (default depth)."""
+        data = self._run_migration(
+            {
+                **_FULL_CONFIG_V14,
+                "comfort_heat": 70.0,
+                "setback_heat": 60.0,
+                "comfort_cool": 75.0,
+                "setback_cool": 80.0,
+            }
+        )
+        assert data["sleep_heat"] == pytest.approx(66.0, abs=0.5)
+
+    def test_adds_sleep_cool_from_comfort(self):
+        """sleep_cool is set to comfort_cool + 3 (default cool depth)."""
+        data = self._run_migration(
+            {
+                **_FULL_CONFIG_V14,
+                "comfort_heat": 70.0,
+                "setback_heat": 60.0,
+                "comfort_cool": 75.0,
+                "setback_cool": 80.0,
+            }
+        )
+        assert data["sleep_cool"] == pytest.approx(78.0, abs=0.5)
+
+    def test_preserves_existing_fields(self):
+        """All existing v14 fields survive migration unchanged."""
+        data = self._run_migration(
+            {
+                **_FULL_CONFIG_V14,
+                "comfort_heat": 70.0,
+                "setback_heat": 60.0,
+                "comfort_cool": 75.0,
+                "setback_cool": 80.0,
+            }
+        )
+        assert data["wake_time"] == _FULL_CONFIG_V14["wake_time"]
+        assert data.get("ai_enabled") is False
+
+    def test_does_not_overwrite_existing_sleep_heat(self):
+        """If sleep_heat already exists, it is preserved (setdefault semantics)."""
+        data = self._run_migration(
+            {
+                **_FULL_CONFIG_V14,
+                "comfort_heat": 70.0,
+                "setback_heat": 60.0,
+                "comfort_cool": 75.0,
+                "setback_cool": 80.0,
+                "sleep_heat": 68.5,
+            }
+        )
+        assert data["sleep_heat"] == pytest.approx(68.5)
+
+    def test_does_not_overwrite_existing_sleep_cool(self):
+        """If sleep_cool already exists, it is preserved (setdefault semantics)."""
+        data = self._run_migration(
+            {
+                **_FULL_CONFIG_V14,
+                "comfort_heat": 70.0,
+                "setback_heat": 60.0,
+                "comfort_cool": 75.0,
+                "setback_cool": 80.0,
+                "sleep_cool": 77.0,
+            }
+        )
+        assert data["sleep_cool"] == pytest.approx(77.0)
+
+    def test_sleep_heat_floored_above_setback(self):
+        """When comfort_heat - 4 <= setback_heat, sleep_heat is setback_heat + 0.1."""
+        data = self._run_migration(
+            {
+                **_FULL_CONFIG_V14,
+                "comfort_heat": 64.0,
+                "setback_heat": 62.0,
+                "comfort_cool": 75.0,
+                "setback_cool": 80.0,
+            }
+        )
+        # comfort_heat(64) - 4 = 60 < setback_heat(62) → floor applies
+        assert data["sleep_heat"] >= 62.0 + 0.05  # above setback_heat floor
+        assert data["sleep_heat"] < 64.0  # below comfort_heat
+
+    def test_migration_returns_true_and_bumps_version(self):
+        """async_migrate_entry returns True and entry reaches version 15."""
+        from custom_components.climate_advisor import async_migrate_entry
+
+        entry = _make_config_entry(dict(_FULL_CONFIG_V14), version=14)
+        hass = _make_hass()
+        final_version = [14]
+
+        def capture_update(entry, *, data, version):
+            entry.data = dict(data)
+            entry.version = version
+            final_version[0] = version
+
+        hass.config_entries.async_update_entry.side_effect = capture_update
+        result = asyncio.run(async_migrate_entry(hass, entry))
+        assert result is True
+        assert final_version[0] == 15
 
 
 # ---------------------------------------------------------------------------

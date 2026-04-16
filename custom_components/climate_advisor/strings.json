@@ -9,8 +9,10 @@
           "climate_entity": "Thermostat",
           "comfort_heat": "Comfortable Heating Temperature (\u00b0F)",
           "comfort_cool": "Comfortable Cooling Temperature (\u00b0F)",
-          "setback_heat": "Away/Sleep Heating Temperature (\u00b0F)",
-          "setback_cool": "Away/Sleep Cooling Temperature (\u00b0F)",
+          "setback_heat": "Away Heating Temperature (\u00b0F)",
+          "setback_cool": "Away Cooling Temperature (\u00b0F)",
+          "sleep_heat": "Sleep Heating Temperature (\u00b0F)",
+          "sleep_cool": "Sleep Cooling Temperature (\u00b0F)",
           "notify_service": "Notification Service"
         },
         "data_description": {
@@ -18,8 +20,10 @@
           "climate_entity": "The thermostat Climate Advisor will monitor and control.",
           "comfort_heat": "Target temperature when heating and someone is home.",
           "comfort_cool": "Target temperature when cooling and someone is home.",
-          "setback_heat": "Lower temperature used when away or sleeping to save energy.",
-          "setback_cool": "Higher temperature used when away or sleeping to save energy.",
+          "setback_heat": "Lower temperature used when away from home to save energy.",
+          "setback_cool": "Higher temperature used when away from home to save energy.",
+          "sleep_heat": "Target temperature when heating during sleep hours (when home). Must be between away setback and comfort temperature.",
+          "sleep_cool": "Target temperature when cooling during sleep hours (when home). Must be between comfort and away setback temperature.",
           "notify_service": "The Home Assistant notify service for alerts and daily briefings (e.g. notify.mobile_app_yourphone)."
         }
       },
@@ -121,7 +125,11 @@
     "error": {
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
-      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp"
+      "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
+      "sleep_must_be_below_comfort": "Sleep temperature must be below comfort temperature",
+      "sleep_must_be_above_setback": "Sleep temperature must be above away setback temperature",
+      "sleep_must_be_above_comfort": "Sleep temperature must be above comfort temperature",
+      "sleep_must_be_below_setback": "Sleep temperature must be below away setback temperature"
     }
   },
   "options": {
@@ -149,8 +157,10 @@
           "climate_entity": "Thermostat",
           "comfort_heat": "Comfortable Heating Temperature (\u00b0F)",
           "comfort_cool": "Comfortable Cooling Temperature (\u00b0F)",
-          "setback_heat": "Away/Sleep Heating Temperature (\u00b0F)",
-          "setback_cool": "Away/Sleep Cooling Temperature (\u00b0F)",
+          "setback_heat": "Away Heating Temperature (\u00b0F)",
+          "setback_cool": "Away Cooling Temperature (\u00b0F)",
+          "sleep_heat": "Sleep Heating Temperature (\u00b0F)",
+          "sleep_cool": "Sleep Cooling Temperature (\u00b0F)",
           "notify_service": "Notification Service"
         },
         "data_description": {
@@ -158,8 +168,10 @@
           "climate_entity": "The thermostat Climate Advisor will monitor and control.",
           "comfort_heat": "Target temperature when heating and someone is home.",
           "comfort_cool": "Target temperature when cooling and someone is home.",
-          "setback_heat": "Lower temperature used when away or sleeping to save energy.",
-          "setback_cool": "Higher temperature used when away or sleeping to save energy.",
+          "setback_heat": "Lower temperature used when away from home to save energy.",
+          "setback_cool": "Higher temperature used when away from home to save energy.",
+          "sleep_heat": "Target temperature when heating during sleep hours (when home). Must be between away setback and comfort temperature.",
+          "sleep_cool": "Target temperature when cooling during sleep hours (when home). Must be between comfort and away setback temperature.",
           "notify_service": "The Home Assistant notify service for alerts and daily briefings (e.g. notify.mobile_app_yourphone)."
         }
       },
@@ -340,6 +352,10 @@
       "invalid_notify_service": "Must be in domain.service format (e.g. notify.mobile_app_phone)",
       "setback_must_be_lower": "Setback heating temp must be lower than comfort heating temp",
       "setback_must_be_higher": "Setback cooling temp must be higher than comfort cooling temp",
+      "sleep_must_be_below_comfort": "Sleep temperature must be below comfort temperature",
+      "sleep_must_be_above_setback": "Sleep temperature must be above away setback temperature",
+      "sleep_must_be_above_comfort": "Sleep temperature must be above comfort temperature",
+      "sleep_must_be_below_setback": "Sleep temperature must be below away setback temperature",
       "preheat_min_exceeds_max": "Minimum pre-heat time must not exceed maximum pre-heat time",
       "preheat_default_exceeds_max": "Default pre-heat time must not exceed maximum pre-heat time",
       "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",

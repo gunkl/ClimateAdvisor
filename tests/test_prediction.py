@@ -49,6 +49,8 @@ DEFAULT_CONFIG = {
     "comfort_cool": 75,
     "setback_heat": 60,
     "setback_cool": 80,
+    "sleep_heat": 66,
+    "sleep_cool": 78,
     "wake_time": "06:30",
     "sleep_time": "22:30",
 }
@@ -996,3 +998,41 @@ class TestOutdoorConditionalDiff:
         d61 = _outdoor_conditional_diff(61.0, tf)
         # 2°F outdoor change near boundary → < 4°F diff change (vs 7.6°F hard cutoff)
         assert abs(d61 - d59) < 4.0
+
+
+class TestSleepTempInPrediction:
+    """sleep_heat/sleep_cool appear in the 24-hour predicted curve."""
+
+    def test_prediction_heat_uses_sleep_heat_at_bedtime(self):
+        """After sleep_time, indoor prediction should settle near sleep_heat."""
+        c = _make_classification(hvac_mode="heat", today_high=45.0, today_low=35.0)
+        config = {**DEFAULT_CONFIG, "sleep_heat": 67.0}
+        _, indoor = compute_predicted_temps(c, config)
+        # sleep_time is 22:30 → hours 23 are fully in the bedtime setback period
+        overnight = [e for e in indoor if e["hour"] >= 23]
+        for entry in overnight:
+            assert entry["temp"] == pytest.approx(67.0, abs=0.5), (
+                f"h={entry['hour']}: expected 67°F, got {entry['temp']}"
+            )
+
+    def test_prediction_cool_uses_sleep_cool_at_bedtime(self):
+        """After sleep_time, indoor prediction should settle near sleep_cool."""
+        c = _make_classification(hvac_mode="cool", today_high=95.0, today_low=75.0)
+        config = {**DEFAULT_CONFIG, "sleep_cool": 79.0}
+        _, indoor = compute_predicted_temps(c, config)
+        overnight = [e for e in indoor if e["hour"] >= 23]
+        for entry in overnight:
+            assert entry["temp"] == pytest.approx(79.0, abs=0.5), (
+                f"h={entry['hour']}: expected 79°F, got {entry['temp']}"
+            )
+
+    def test_custom_sleep_heat_warmer_than_default_overnight(self):
+        """Non-default sleep_heat=69 (warmer) gives higher overnight temp than sleep_heat=66."""
+        c = _make_classification(hvac_mode="heat", today_high=45.0, today_low=35.0)
+        _, indoor_66 = compute_predicted_temps(c, {**DEFAULT_CONFIG, "sleep_heat": 66.0})
+        _, indoor_69 = compute_predicted_temps(c, {**DEFAULT_CONFIG, "sleep_heat": 69.0})
+        # Hour 23 should be at full setback for both (ramp finishes quickly)
+        assert indoor_69[-1]["temp"] > indoor_66[-1]["temp"], (
+            f"sleep_heat=69 should give warmer h=23 than sleep_heat=66; "
+            f"got {indoor_69[-1]['temp']} vs {indoor_66[-1]['temp']}"
+        )

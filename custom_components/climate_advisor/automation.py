@@ -76,6 +76,8 @@ def compute_bedtime_setback(
     """
     from .const import (
         CONF_MAX_SETBACK_DEPTH,
+        CONF_SLEEP_COOL,
+        CONF_SLEEP_HEAT,
         DEFAULT_SETBACK_DEPTH_COOL_F,
         DEFAULT_SETBACK_DEPTH_F,
         MAX_SETBACK_DEPTH_F,
@@ -90,12 +92,20 @@ def compute_bedtime_setback(
         floor = config.get("setback_heat", 60)
         rate = (thermal_model or {}).get("heating_rate_f_per_hour")
         default_depth = DEFAULT_SETBACK_DEPTH_F
+        # Explicit sleep temp takes priority over adaptive calculation
+        _explicit = config.get(CONF_SLEEP_HEAT)
+        if _explicit is not None:
+            return max(float(_explicit) + setback_modifier, floor)
     elif hvac_mode == "cool":
         comfort = config.get("comfort_cool", 75)
         floor = config.get("setback_cool", 80)
         rate = (thermal_model or {}).get("cooling_rate_f_per_hour")
         default_depth = DEFAULT_SETBACK_DEPTH_COOL_F
         setback_modifier = -setback_modifier  # cool setback goes up, not down
+        # Explicit sleep temp takes priority over adaptive calculation
+        _explicit = config.get(CONF_SLEEP_COOL)
+        if _explicit is not None:
+            return min(float(_explicit) + setback_modifier, floor)
     else:
         return config.get("comfort_heat", 70)
 
@@ -1509,9 +1519,9 @@ class AutomationEngine:
 
     async def handle_bedtime(self) -> None:
         """Apply bedtime setback."""
-        # Issue #85: vacation already has deeper setback — don't override it
-        if self._occupancy_mode == OCCUPANCY_VACATION:
-            _LOGGER.info("Vacation mode — skipping bedtime setback (vacation setback already active)")
+        # Issue #85: vacation/away already has a setback — don't override it with sleep temps
+        if self._occupancy_mode in (OCCUPANCY_VACATION, OCCUPANCY_AWAY):
+            _LOGGER.info("Bedtime skipped — %s mode (setback already active)", self._occupancy_mode)
             return
 
         self.clear_manual_override()

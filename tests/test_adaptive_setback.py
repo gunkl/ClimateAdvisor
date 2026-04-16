@@ -22,6 +22,10 @@ from custom_components.climate_advisor.const import (
 )
 
 # ---------------------------------------------------------------------------
+# Additional imports used by TestSleepTempOverridesAdaptive
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -180,3 +184,78 @@ class TestAdaptiveSetbackConfigOverrides:
         model = {"confidence": "high", "heating_rate_f_per_hour": 3.0}
         result = compute_bedtime_setback(config, model, c)
         assert result == pytest.approx(62.0)
+
+
+class TestSleepTempOverridesAdaptive:
+    """Explicit sleep_heat/sleep_cool bypasses adaptive bedtime setback."""
+
+    def test_sleep_heat_bypasses_adaptive_calc(self):
+        """sleep_heat in config returns that value, ignoring thermal model."""
+        config = {
+            "comfort_heat": 70.0,
+            "setback_heat": 60.0,
+            "sleep_heat": 67.0,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+            "learning_enabled": True,
+            "adaptive_setback_enabled": True,
+        }
+        # Use a fast thermal model that would compute a very different depth
+        thermal_model = {"heating_rate_f_per_hour": 5.0, "confidence": "high"}
+        c = _make_classification(hvac_mode="heat")
+        result = compute_bedtime_setback(config, thermal_model, c)
+        assert result == pytest.approx(67.0)
+
+    def test_sleep_cool_bypasses_adaptive_calc(self):
+        """sleep_cool in config returns that value, ignoring thermal model."""
+        config = {
+            "comfort_cool": 75.0,
+            "setback_cool": 80.0,
+            "sleep_cool": 78.0,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+            "learning_enabled": True,
+            "adaptive_setback_enabled": True,
+        }
+        thermal_model = {"cooling_rate_f_per_hour": 5.0, "confidence": "high"}
+        c = _make_classification(hvac_mode="cool")
+        result = compute_bedtime_setback(config, thermal_model, c)
+        assert result == pytest.approx(78.0)
+
+    def test_sleep_heat_floored_by_setback_heat(self):
+        """If sleep_heat < setback_heat (bad config data), setback_heat floor wins."""
+        config = {
+            "comfort_heat": 70.0,
+            "setback_heat": 65.0,
+            "sleep_heat": 60.0,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+        }
+        c = _make_classification(hvac_mode="heat")
+        result = compute_bedtime_setback(config, None, c)
+        assert result == pytest.approx(65.0)
+
+    def test_no_sleep_heat_falls_through_to_adaptive(self):
+        """Without sleep_heat, adaptive logic runs unchanged (falls back to default depth)."""
+        config = {
+            "comfort_heat": 70.0,
+            "setback_heat": 60.0,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+        }
+        c = _make_classification(hvac_mode="heat")
+        result = compute_bedtime_setback(config, None, c)
+        # No thermal model → default depth=4 → 70-4=66
+        assert result == pytest.approx(66.0)
+
+    def test_no_sleep_cool_falls_through_to_default(self):
+        """Without sleep_cool, returns comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F."""
+        config = {
+            "comfort_cool": 75.0,
+            "setback_cool": 80.0,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+        }
+        c = _make_classification(hvac_mode="cool")
+        result = compute_bedtime_setback(config, None, c)
+        assert result == pytest.approx(75.0 + DEFAULT_SETBACK_DEPTH_COOL_F)

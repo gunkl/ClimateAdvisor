@@ -447,8 +447,25 @@ CONFIG_METADATA = {
     "sleep_time": {
         "label": "Sleep Time",
         "description": (
-            "When bedtime setbacks begin."
-            " The system sets back 4°F for heating or +3°F for cooling to save energy while you sleep."
+            "When bedtime temperatures take effect. The system transitions to your sleep temperatures at this time."
+        ),
+        "category": "schedule",
+    },
+    "sleep_heat": {
+        "label": "Sleep Temperature (Heat)",
+        "description": (
+            "Target temperature during sleep hours when you are home."
+            " Independent from your away setback — use this to stay warmer at night"
+            " than when you leave the house."
+        ),
+        "category": "schedule",
+    },
+    "sleep_cool": {
+        "label": "Sleep Temperature (Cool)",
+        "description": (
+            "Target temperature during sleep hours when you are home."
+            " Independent from your away setback — use this to stay cooler at night"
+            " than when you leave the house."
         ),
         "category": "schedule",
     },
@@ -690,6 +707,12 @@ MAX_PREHEAT_MINUTES = 240  # clamp ceiling (4 hrs)
 PREHEAT_SAFETY_MARGIN = 1.3  # multiply computed time by this
 DEFAULT_SETBACK_DEPTH_F = 4.0  # preserved fallback (current heat setback)
 DEFAULT_SETBACK_DEPTH_COOL_F = 3.0  # preserved fallback (current cool setback)
+
+# Sleep temperature config keys (Issue #101)
+CONF_SLEEP_HEAT = "sleep_heat"
+CONF_SLEEP_COOL = "sleep_cool"
+DEFAULT_SLEEP_HEAT = 66.0  # comfort_heat(70) - DEFAULT_SETBACK_DEPTH_F(4)
+DEFAULT_SLEEP_COOL = 78.0  # comfort_cool(75) + DEFAULT_SETBACK_DEPTH_COOL_F(3)
 MAX_SETBACK_DEPTH_F = 8.0  # never set back more than this
 SETBACK_RECOVERY_BUFFER_MINUTES = 30  # pre-heat leads wake_time by this much
 THERMAL_OBS_CAP = 200  # max observations in LearningState

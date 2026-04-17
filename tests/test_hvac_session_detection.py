@@ -407,3 +407,63 @@ class TestStateContradictionEventReal:
             asyncio.run(coord._async_update_data())
             second_count = sum(1 for c in coord._emit_event.call_args_list if c[0][0] == "state_contradiction_warning")
             assert second_count == 1, "Dedup should suppress the second emission within 30 min"
+
+
+# ---------------------------------------------------------------------------
+# Event-driven chart_log writes at hvac_action transitions (#110)
+# ---------------------------------------------------------------------------
+
+
+class TestChartLogEventDriven:
+    """Verify chart_log is written immediately when hvac_action enters/exits heating/cooling.
+
+    These tests catch the sampling-gap bug: a short heating cycle (e.g. 8 min) that
+    starts and ends between consecutive 30-min chart_log polls is invisible unless an
+    event-driven write is added at the transition boundaries.
+    """
+
+    def test_heating_start_writes_chart_log(self):
+        """idle → heating transition writes hvac_action_change entry with hvac='heating'."""
+        coord = _make_thermostat_coord()
+        old = _make_state("heat", hvac_action="idle")
+        new = _make_state("heat", hvac_action="heating")
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 17, 14, 26, 17)
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        append_calls = coord._chart_log.append.call_args_list
+        event_calls = [c for c in append_calls if c.kwargs.get("event") == "hvac_action_change"]
+        assert len(event_calls) == 1, f"Expected 1 hvac_action_change append, got: {append_calls}"
+        assert event_calls[0].kwargs.get("hvac") == "heating"
+        coord._chart_log.save.assert_called()
+
+    def test_heating_end_writes_chart_log(self):
+        """heating → idle transition writes hvac_action_change entry with hvac='idle'."""
+        coord = _make_thermostat_coord(
+            hvac_session_mode="heat",
+            hvac_on_since=datetime(2026, 4, 17, 14, 26, 17),
+        )
+        coord.learning = MagicMock()
+        old = _make_state("heat", hvac_action="heating")
+        new = _make_state("heat", hvac_action="idle")
+
+        asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        append_calls = coord._chart_log.append.call_args_list
+        event_calls = [c for c in append_calls if c.kwargs.get("event") == "hvac_action_change"]
+        assert len(event_calls) == 1, f"Expected 1 hvac_action_change append, got: {append_calls}"
+        assert event_calls[0].kwargs.get("hvac") == "idle"
+        coord._chart_log.save.assert_called()
+
+    def test_idle_to_idle_no_event_chart_write(self):
+        """hvac_action staying idle → no event-driven chart_log write."""
+        coord = _make_thermostat_coord()
+        old = _make_state("heat", hvac_action="idle")
+        new = _make_state("heat", hvac_action="idle")
+
+        asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        append_calls = coord._chart_log.append.call_args_list
+        event_calls = [c for c in append_calls if c.kwargs.get("event") == "hvac_action_change"]
+        assert len(event_calls) == 0, f"Expected no hvac_action_change writes for idle→idle, got: {event_calls}"

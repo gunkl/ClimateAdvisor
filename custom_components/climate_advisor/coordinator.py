@@ -1802,6 +1802,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("Thermostat set to off while HVAC fan was marked active — clearing stale fan state")
                 ae._fan_active = False
 
+        # Chart_log: event-driven write when hvac_action transitions in/out of heating/cooling.
+        # 30-minute polling can miss short cycles entirely — this captures the start and end
+        # edge of every real heating/cooling event regardless of when the next poll fires.
+        _chart_active_actions = {"heating", "cooling"}
+        _was_chart_active = old_action in _chart_active_actions
+        _is_chart_active = new_action in _chart_active_actions
+        if _was_chart_active != _is_chart_active:
+            with contextlib.suppress(Exception):
+                self._chart_log.append(
+                    hvac=new_action or new_state.state.lower(),
+                    fan=bool(ae._fan_active),
+                    indoor=self._get_indoor_temp(),
+                    outdoor=None,
+                    event="hvac_action_change",
+                )
+                self._chart_log.save()
+
         # Detect manual override: temperature changed but not by us
         new_temp = new_state.attributes.get("temperature")
         old_temp = old_state.attributes.get("temperature")

@@ -465,6 +465,51 @@ async def async_build_investigator_context(
         _LOGGER.warning("investigator: failed to read config — skipping")
         lines += ["=== CONFIGURATION ===", "  unavailable", ""]
 
+    # ------------------------------------------------------------------
+    # 7. CA operational design — prevents the AI from hallucinating
+    #    explanations for states that CA itself controls (#113)
+    # ------------------------------------------------------------------
+    lines += [
+        "=== CA OPERATIONAL DESIGN ===",
+        "CA has 100% programmatic control of the HVAC via HA service calls.",
+        "There is NO physical switch that can activate the fan independently.",
+        "If the fan is running, one of the following is true:",
+        "  - CA activated it (fan_status=active, natural vent or HVAC fan-only mode)",
+        "  - A user overrode it via the thermostat app (fan_status='running (manual override)')",
+        "  - It is a post-command thermostat transient (fan_status='running (untracked)')",
+        "",
+        "fan_status values explained:",
+        "  inactive                  — fan is off; CA has no record of activating it",
+        "  active                    — CA commanded the fan on (natural vent or HVAC fan-only)",
+        "  running (manual override) — fan running; user overrode CA's command at the thermostat",
+        "  running (untracked)       — thermostat reports fan on but CA's _fan_active=False;",
+        "                             typical after HA restart, or post-heat blowdown transient",
+        "  disabled                  — fan control feature is turned off in configuration",
+        "",
+        "Heating/cooling deadband (thermostat behavior — not a CA fault):",
+        "  Thermostats have a built-in deadband. Heating fires when indoor drops ~1-2°F",
+        "  below the setpoint and runs until slightly above. If CA commanded heat mode",
+        "  at comfort_heat=68°F and indoor=67°F, the thermostat reporting hvac_action=idle",
+        "  or hvac_action=fan is expected deadband behavior — not a CA failure.",
+        "",
+        "Warm-day comfort floor guard:",
+        "  When day_type is warm/hot, CA sets hvac_mode=off — but ONLY after indoor reaches",
+        "  comfort_heat. If indoor < comfort_heat at automation time, CA heats first",
+        "  (event: warm_day_comfort_gap) then shuts off. A brief morning heating cycle on",
+        "  a warm day is intentional. This guard prevents comfort violations at shutoff.",
+        "",
+        "Natural ventilation / economizer maintain phase:",
+        "  CA can set hvac_mode=off AND fan_mode=on simultaneously for fan-only air",
+        "  circulation. hvac_mode=off with fan running is NOT a contradiction when",
+        "  fan_status=active or natural_vent_active=True. This is the economizer phase.",
+        "",
+        "State contradiction warning:",
+        "  Fires when hvac_mode=off and hvac_action is heating/cooling/fan AND",
+        "  the fan is not CA-controlled and not already classified as untracked.",
+        "  It does NOT fire for untracked fans (already acknowledged) or CA-activated fans.",
+        "",
+    ]
+
     # Version and release notes (Issue #105)
     lines.append(_build_version_context(coordinator))
 
@@ -592,18 +637,19 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                         for rec in raw_records[-14:]:
                             if not isinstance(rec, dict):
                                 continue
-                            opened = rec.get("windows_physically_opened", False)
-                            compliance_val = rec.get("window_compliance", None)
                             date_val = rec.get("date", "?")
-                            if opened and compliance_val is not None:
-                                try:
-                                    if float(compliance_val) < 0.01:
-                                        incongruity_parts.append(
-                                            f"Record {date_val}: windows_physically_opened=True"
-                                            f" but window_compliance={compliance_val} (near 0%)"
-                                        )
-                                except (TypeError, ValueError):
-                                    pass
+                            # `window_compliance` does NOT exist on DailyRecord — it is
+                            # only an aggregate in get_compliance_summary(). Use the two
+                            # per-record fields that do exist: windows_recommended and
+                            # windows_opened (True only when recommended AND opened).
+                            _win_recommended = rec.get("windows_recommended", False)
+                            _win_opened = rec.get("windows_opened", False)
+                            if _win_recommended and not _win_opened:
+                                incongruity_parts.append(
+                                    f"Record {date_val}: windows_recommended=True"
+                                    " but windows_opened=False (user did not open windows"
+                                    " on a recommended day)"
+                                )
             except Exception:
                 _LOGGER.warning("investigator fallback: failed to check daily records")
 

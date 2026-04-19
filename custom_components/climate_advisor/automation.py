@@ -811,6 +811,22 @@ class AutomationEngine:
             )
             _LOGGER.warning("Set HVAC mode to %s — %s", mode, reason)
             self._record_action(f"Set HVAC to {mode}", reason)
+            # When taking HVAC offline, also assert fan_mode=auto so any post-heat
+            # blowdown fan doesn't linger in "running (untracked)" state. Natural
+            # ventilation calls _activate_fan() immediately after this and overrides
+            # to fan_mode=on — the two calls don't conflict.
+            if mode == "off":
+                _fan_cfg = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+                if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+                    try:
+                        await self.hass.services.async_call(
+                            "climate",
+                            "set_fan_mode",
+                            {"entity_id": self.climate_entity, "fan_mode": "auto"},
+                        )
+                        _LOGGER.debug("Asserted fan_mode=auto alongside hvac_mode=off")
+                    except Exception:
+                        _LOGGER.debug("Could not assert fan_mode=auto — non-critical", exc_info=True)
         finally:
             self._hvac_command_pending = False
 

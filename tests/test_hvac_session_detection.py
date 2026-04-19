@@ -511,3 +511,93 @@ class TestChartLogOverrideEvent:
         assert override_calls[0].kwargs.get("outdoor") == 45.0, (
             "outdoor should come from _get_outdoor_temp (weather source), not the climate entity"
         )
+
+
+class TestChartLogFanIsRunning:
+    """Verify _fan_is_running() and that chart_log writes use it, not ae._fan_active.
+
+    Issue #113: fan=bool(ae._fan_active) missed 'running (untracked)' state, causing
+    the fan indicator to be absent in the chart even when the fan was visibly running.
+    """
+
+    def _make_coord_with_fan_status(self, fan_status: str):
+        """Return a thermostat coord with _compute_fan_status mocked to fan_status."""
+        coord = _make_thermostat_coord()
+        coord._compute_fan_status = MagicMock(return_value=fan_status)
+        return coord
+
+    def test_fan_is_running_true_for_active(self):
+        """_fan_is_running() returns True when fan_status='active'."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = self._make_coord_with_fan_status("active")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+        assert coord._fan_is_running() is True
+
+    def test_fan_is_running_true_for_untracked(self):
+        """_fan_is_running() returns True when fan_status='running (untracked)'."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = self._make_coord_with_fan_status("running (untracked)")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+        assert coord._fan_is_running() is True
+
+    def test_fan_is_running_true_for_manual_override(self):
+        """_fan_is_running() returns True when fan_status='running (manual override)'."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = self._make_coord_with_fan_status("running (manual override)")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+        assert coord._fan_is_running() is True
+
+    def test_fan_is_running_false_for_inactive(self):
+        """_fan_is_running() returns False when fan_status='inactive'."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = self._make_coord_with_fan_status("inactive")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+        assert coord._fan_is_running() is False
+
+    def test_fan_is_running_false_for_disabled(self):
+        """_fan_is_running() returns False when fan_status='disabled'."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = self._make_coord_with_fan_status("disabled")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+        assert coord._fan_is_running() is False
+
+    def test_chart_log_hvac_action_change_uses_fan_is_running(self):
+        """hvac_action_change chart_log write passes fan=True when fan is untracked."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = _make_thermostat_coord()
+        # Simulate fan in "running (untracked)" state — ae._fan_active is False
+        coord.automation_engine._fan_active = False
+        coord._compute_fan_status = MagicMock(return_value="running (untracked)")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+
+        # Trigger hvac_action_change: idle → heating crosses the chart_active_actions boundary
+        old = _make_state("heat", hvac_action="idle")
+        new = _make_state("heat", hvac_action="heating")
+        asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        hvac_action_calls = [
+            c for c in coord._chart_log.append.call_args_list if c.kwargs.get("event") == "hvac_action_change"
+        ]
+        all_calls = coord._chart_log.append.call_args_list
+        assert len(hvac_action_calls) == 1, f"Expected 1 hvac_action_change write; got {all_calls}"
+        assert hvac_action_calls[0].kwargs.get("fan") is True, (
+            "chart_log fan= should be True when fan is running (untracked)"
+        )
+
+    def test_chart_log_hvac_action_change_fan_false_when_inactive(self):
+        """hvac_action_change chart_log write passes fan=False when fan is inactive."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = _make_thermostat_coord()
+        coord.automation_engine._fan_active = False
+        coord._compute_fan_status = MagicMock(return_value="inactive")
+        coord._fan_is_running = types.MethodType(ClimateAdvisorCoordinator._fan_is_running, coord)
+
+        old = _make_state("heat", hvac_action="idle")
+        new = _make_state("heat", hvac_action="heating")
+        asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        hvac_action_calls = [
+            c for c in coord._chart_log.append.call_args_list if c.kwargs.get("event") == "hvac_action_change"
+        ]
+        assert len(hvac_action_calls) == 1
+        assert hvac_action_calls[0].kwargs.get("fan") is False

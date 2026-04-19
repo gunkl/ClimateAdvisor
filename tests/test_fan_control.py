@@ -1316,3 +1316,83 @@ class TestNatVentComfortFloorExit:
 
         assert len(engine.hass.services.async_call.call_args_list) == 0
         assert engine._natural_vent_active is False
+
+
+# ---------------------------------------------------------------------------
+# _set_hvac_mode("off") → assert fan_mode=auto (Issue #113)
+# ---------------------------------------------------------------------------
+
+
+class TestSetHvacModeOffFanAssert:
+    """When CA sets hvac_mode=off, it should also assert fan_mode=auto for HVAC-
+    controlled fans so post-heat blowdown fans don't linger in untracked state."""
+
+    def _make_engine_with_fan_mode(self, fan_mode: str) -> AutomationEngine:
+        engine = _make_automation_engine(
+            config_overrides={
+                CONF_FAN_MODE: fan_mode,
+                "climate_entity": "climate.thermostat",
+            }
+        )
+        engine.climate_entity = "climate.thermostat"
+        return engine
+
+    def test_set_hvac_off_asserts_fan_auto_for_hvac_fan_mode(self):
+        """hvac_mode=off + fan_mode=hvac_fan → set_fan_mode('auto') is called."""
+        engine = self._make_engine_with_fan_mode(FAN_MODE_HVAC)
+        asyncio.run(engine._set_hvac_mode("off", reason="warm day"))
+
+        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(fan_calls) == 1, f"Expected 1 set_fan_mode call; got {fan_calls}"
+        assert fan_calls[0][0][2]["fan_mode"] == "auto"
+
+    def test_set_hvac_off_asserts_fan_auto_for_both_fan_mode(self):
+        """hvac_mode=off + fan_mode=both → set_fan_mode('auto') is called."""
+        engine = self._make_engine_with_fan_mode(FAN_MODE_BOTH)
+        asyncio.run(engine._set_hvac_mode("off", reason="warm day"))
+
+        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(fan_calls) == 1
+        assert fan_calls[0][0][2]["fan_mode"] == "auto"
+
+    def test_set_hvac_off_no_fan_call_when_fan_disabled(self):
+        """hvac_mode=off + fan_mode=disabled → no set_fan_mode call."""
+        engine = self._make_engine_with_fan_mode(FAN_MODE_DISABLED)
+        asyncio.run(engine._set_hvac_mode("off", reason="warm day"))
+
+        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(fan_calls) == 0, "No fan call when fan feature is disabled"
+
+    def test_set_hvac_off_no_fan_call_for_whole_house_fan(self):
+        """hvac_mode=off + fan_mode=whole_house → no set_fan_mode on climate entity."""
+        engine = self._make_engine_with_fan_mode(FAN_MODE_WHOLE_HOUSE)
+        asyncio.run(engine._set_hvac_mode("off", reason="warm day"))
+
+        # Whole-house fans use a separate entity (fan.attic) — no climate set_fan_mode
+        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(fan_calls) == 0
+
+    def test_set_hvac_heat_does_not_assert_fan_auto(self):
+        """hvac_mode=heat (not off) → no set_fan_mode call."""
+        engine = self._make_engine_with_fan_mode(FAN_MODE_HVAC)
+        asyncio.run(engine._set_hvac_mode("heat", reason="morning restore"))
+
+        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(fan_calls) == 0, "set_fan_mode should only fire when mode=off"
+
+    def test_nat_vent_flow_still_activates_fan_after_hvac_off(self):
+        """Natural vent: _set_hvac_mode('off') then _activate_fan() → fan ends up on."""
+        engine = self._make_engine_with_fan_mode(FAN_MODE_HVAC)
+
+        async def _run():
+            await engine._set_hvac_mode("off", reason="nat vent start")
+            await engine._activate_fan(reason="nat vent circulation")
+
+        asyncio.run(_run())
+
+        # The last set_fan_mode call must be "on" (activate overrides the auto)
+        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
+        assert len(fan_calls) == 2  # first "auto" from _set_hvac_mode, then "on" from _activate_fan
+        assert fan_calls[0][0][2]["fan_mode"] == "auto"
+        assert fan_calls[1][0][2]["fan_mode"] == "on"
+        assert engine._fan_active is True

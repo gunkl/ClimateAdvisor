@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
-from datetime import UTC, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -527,7 +527,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         import json  # noqa: F401 — imported for _save_ai_reports called via executor
 
         report_entry = {
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": dt_util.now().isoformat(),
             "result": result,
         }
         self._ai_report_history.append(report_entry)
@@ -583,7 +583,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Store an investigation report result in history and persist to disk."""
 
         entry = {
-            "timestamp": datetime.now(UTC).isoformat(),
+            "timestamp": dt_util.now().isoformat(),
             "result": result,
         }
         self._investigation_report_history.append(entry)
@@ -950,7 +950,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 with contextlib.suppress(Exception):
                     self._chart_log.append(
                         hvac=self._current_classification.hvac_mode or "",
-                        fan=bool(self.automation_engine._fan_active) if self.automation_engine else False,
+                        fan=self._fan_is_running() if self.automation_engine else False,
                         indoor=forecast.current_indoor_temp,
                         outdoor=forecast.current_outdoor_temp,
                         event="classification_change",
@@ -1176,7 +1176,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _hvac_action_str = "cooling"
             self._chart_log.append(
                 hvac=_hvac_action_str,
-                fan=bool(fan_running),
+                fan=self._fan_is_running(),
                 indoor=indoor_temp,
                 outdoor=outdoor_temp,
                 windows_open=self._any_sensor_open(),
@@ -1782,7 +1782,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _outdoor_val = self._get_outdoor_temp(_ov_weather_attrs)
                 self._chart_log.append(
                     hvac=new_state.state,
-                    fan=bool(self.automation_engine._fan_active),
+                    fan=self._fan_is_running(),
                     indoor=_indoor,
                     outdoor=_outdoor_val,
                     event="override",
@@ -1865,7 +1865,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with contextlib.suppress(Exception):
                 self._chart_log.append(
                     hvac=new_action or new_state.state.lower(),
-                    fan=bool(ae._fan_active),
+                    fan=self._fan_is_running(),
                     indoor=self._get_indoor_temp(),
                     outdoor=None,
                     event="hvac_action_change",
@@ -2137,6 +2137,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._occupancy_mode == OCCUPANCY_GUEST:
             return "active (guest)"
         return "active"
+
+    def _fan_is_running(self) -> bool:
+        """Return True if the fan is running for any reason.
+
+        Covers CA-activated, manual override, and untracked states so that
+        chart_log entries correctly reflect fan activity even when CA's own
+        _fan_active flag is False (e.g. post-heat blowdown still in progress).
+        """
+        return self._compute_fan_status() not in {"inactive", "disabled"}
 
     def _compute_fan_status(self) -> str:
         """Compute the current fan status string.

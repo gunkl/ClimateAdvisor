@@ -367,13 +367,18 @@ class TestInvestigationFallback:
         assert isinstance(result, dict)
         assert set(result.keys()) == _EXPECTED_FALLBACK_KEYS
 
-    def test_fallback_detects_opened_but_zero_compliance(self):
-        """Incongruity flagged when windows_physically_opened=True but compliance=0.0."""
+    def test_fallback_detects_recommended_not_opened(self):
+        """Incongruity flagged when windows_recommended=True but windows_opened=False.
+
+        The old code checked a non-existent window_compliance per-record field.
+        The fix uses the actual DailyRecord fields: windows_recommended + windows_opened.
+        """
         records = [
             {
                 "date": "2026-04-01",
-                "windows_physically_opened": True,
-                "window_compliance": 0.0,
+                "windows_recommended": True,
+                "windows_opened": False,
+                "windows_physically_opened": False,
                 "hvac_runtime_minutes": 60,
                 "manual_overrides": 1,
             }
@@ -383,7 +388,8 @@ class TestInvestigationFallback:
 
         result = investigation_fallback(coord)
 
-        assert "windows_physically_opened=True" in result["incongruities"]
+        assert "windows_recommended=True" in result["incongruities"]
+        assert "windows_opened=False" in result["incongruities"]
 
     def test_fallback_high_override_count_reported_as_data_quality(self):
         """total_manual_overrides > 50 is flagged as a data quality issue."""
@@ -1268,3 +1274,88 @@ class TestInvestigatorGithubContext:
         result = self._run(async_build_github_context(hass))
         assert "bug" in result
         assert "urgent" in result
+
+
+# ---------------------------------------------------------------------------
+# Group: CA Operational Design context (Issue #113)
+# ---------------------------------------------------------------------------
+
+
+class TestCAOperationalDesignContext:
+    """Verify async_build_investigator_context includes the CA operational design
+    section added to stop the AI from hallucinating 'physical switch' explanations."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_context_includes_ca_operational_design_section(self):
+        """Context output must contain the CA OPERATIONAL DESIGN header."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+        ctx = self._run(async_build_investigator_context(hass, coord))
+        assert "CA OPERATIONAL DESIGN" in ctx
+
+    def test_context_explains_fan_status_values(self):
+        """Context must describe all four fan_status values so AI can interpret them."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+        ctx = self._run(async_build_investigator_context(hass, coord))
+        assert "running (untracked)" in ctx
+        assert "running (manual override)" in ctx
+        assert "active" in ctx  # fan_status=active description
+
+    def test_context_mentions_deadband(self):
+        """Context must explain thermostat deadband so AI doesn't misread idle as failure."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+        ctx = self._run(async_build_investigator_context(hass, coord))
+        assert "deadband" in ctx.lower()
+
+    def test_context_clarifies_programmatic_control(self):
+        """Context must assert CA has 100% programmatic control (no physical switch)."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+        ctx = self._run(async_build_investigator_context(hass, coord))
+        assert "programmatic control" in ctx.lower() or "100%" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Group: Window compliance per-record bug (Issue #113)
+# ---------------------------------------------------------------------------
+
+
+class TestWindowCompliancePerRecordFix:
+    """Verify the investigator incongruity check uses per-record DailyRecord fields
+    (windows_recommended, windows_opened) instead of the non-existent window_compliance
+    per-record field.
+
+    These tests use investigation_fallback() because incongruity detection lives there,
+    not in the context builder (which only builds the AI prompt string).
+    """
+
+    def test_recommended_not_opened_flags_incongruity(self):
+        """windows_recommended=True + windows_opened=False → incongruity detected."""
+        records = [{"date": "2026-04-10", "windows_recommended": True, "windows_opened": False}]
+        learning = _make_learning_mock(records=records)
+        coord = _make_coordinator(learning=learning)
+        result = investigation_fallback(coord)
+        assert "windows_recommended=True" in result["incongruities"]
+        assert "windows_opened=False" in result["incongruities"]
+
+    def test_recommended_and_opened_no_incongruity(self):
+        """windows_recommended=True + windows_opened=True → no incongruity for that record."""
+        records = [{"date": "2026-04-10", "windows_recommended": True, "windows_opened": True}]
+        learning = _make_learning_mock(records=records)
+        coord = _make_coordinator(learning=learning)
+        result = investigation_fallback(coord)
+        # Compliant day — no incongruity entry for this specific check
+        assert "2026-04-10: windows_recommended=True" not in result["incongruities"]
+
+    def test_not_recommended_no_incongruity(self):
+        """windows_recommended=False → not a compliance day, no incongruity."""
+        records = [{"date": "2026-04-10", "windows_recommended": False, "windows_opened": False}]
+        learning = _make_learning_mock(records=records)
+        coord = _make_coordinator(learning=learning)
+        result = investigation_fallback(coord)
+        # Not a windows-recommended day — should not trigger incongruity
+        assert "2026-04-10" not in result["incongruities"]

@@ -2987,6 +2987,15 @@ def _build_predicted_indoor_future(
                 f"{_k_active_heat:.2f}" if _k_active_heat is not None else "None",
                 f"{_k_active_cool:.2f}" if _k_active_cool is not None else "None",
             )
+        else:
+            _LOGGER.debug(
+                "_build_predicted_indoor_future: using fallback ramp (conf=%s k_passive=%s indoor=%s)",
+                _conf,
+                f"{_k_passive:.4f}" if _k_passive is not None else "None",
+                f"{current_indoor_temp:.1f}" if current_indoor_temp is not None else "None",
+            )
+    elif not _use_physics:
+        _LOGGER.debug("_build_predicted_indoor_future: using fallback ramp (no model or no indoor temp)")
 
     result = []
     skipped_past = 0

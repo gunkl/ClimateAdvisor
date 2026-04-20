@@ -133,6 +133,53 @@ The circuit breaker trips after **5 consecutive failures** (`AI_CIRCUIT_BREAKER_
 
 ---
 
+## Debugging Thermal Model Learning
+
+### "Thermal model confidence is 'none' after weeks of use"
+
+The v2 architecture (Issue #114) requires the full post-heat decay curve to extract `k_passive`. Observations are silently abandoned if they do not meet minimum quality bars.
+
+**Step 1 — Check for WARNING logs from thermal methods:**
+```bash
+python3 tools/ha_logs.py --lines 500 --filter "thermal\|k_passive\|k_active"
+```
+
+Look for:
+- `"Thermal event commit failed: k_passive rejected"` — R² too low; likely sensor noise or very short runs
+- `"Thermal observation abandoned"` — timeout (post-heat took > 45 min to stabilize) or insufficient post-heat samples (< 10)
+- `"Thermal observation abandoned: active phase restart"` — HVAC mode changed mid-session; the old active phase was discarded
+
+**Step 2 — Check observation history in the learning DB:**
+```bash
+python3 tools/ha_logs.py --history --entity sensor.climate_advisor_comfort_score --hours 72
+```
+The `thermal_observation_count` attribute on `sensor.climate_advisor_comfort_score` shows how many observations have been accepted. If it is 0 after multiple heating/cooling days, all observations are being rejected.
+
+**Step 3 — Common root causes:**
+
+| Symptom | Likely cause | What to check |
+|---|---|---|
+| R² rejection logged repeatedly | Very short HVAC runs (< 10 post-heat samples) | Use the 24h chart view — do runs end quickly? Setpoints may be too close to current temp |
+| Stabilization timeout logged | Indoor temp still drifting 45+ min after HVAC stops | House may have poor insulation or large thermal mass; observations still accumulate if R² ≥ 0.2 |
+| No WARNING logs at all but count stays 0 | `_start_thermal_event` never called | Check `hvac_action` attribute on the climate entity — thermostat must report `"heating"` or `"cooling"`, not just `hvac_mode` |
+| k_passive out of bounds | Value rejected by sanity bounds | Very unusual; log will show the rejected value |
+
+**Step 4 — Verify the pending event is being persisted:**
+
+Check `climate_advisor_learning.json` in the HA config directory for a `pending_thermal_event` key. If it is always `null` even during an active heating run, the state machine is not being entered — confirm `_async_thermostat_changed` is being called by checking thermostat entity history.
+
+### "Predicted temperature curve looks wrong"
+
+The physics path activates when `confidence != "none"` and `k_passive < 0`. Before that threshold is reached, the legacy ramp interpolation runs.
+
+```bash
+python3 tools/ha_logs.py --lines 100 --filter "using physics model\|k_passive"
+```
+
+A `DEBUG` log line is emitted inside `_build_predicted_indoor_future()` when the physics path is taken: `"_build_predicted_indoor_future: using physics model (conf=... k_passive=... k_active_heat=... k_active_cool=...)"`. If this line does not appear, the function fell back to ramp interpolation (model not ready or `k_passive` not yet negative).
+
+---
+
 ## Diagnostic Logging
 
 Key decision points in automation.py emit debug/info logs:

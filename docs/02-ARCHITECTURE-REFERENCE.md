@@ -79,6 +79,22 @@ One day's tracked data: what was recommended, what actually happened, outcomes (
 | Climate entity | State change (temp, mode) | `_async_thermostat_changed` |
 | Occupancy toggle entities (home/vacation/guest) | State change (on/off) | `_async_occupancy_changed` |
 
+## Coordinator Thermal State Machine Methods
+
+These methods on `ClimateAdvisorCoordinator` implement the Issue #114 two-parameter physics observation pipeline. They are driven by thermostat state changes detected in `_async_thermostat_changed`.
+
+| Method | Role |
+|--------|------|
+| `_start_thermal_event(session_mode)` | Begins a new observation window; sets state to `active` |
+| `_sample_thermal_event()` | Records a sample during the active (HVAC-on) phase |
+| `_end_active_phase()` | Transitions from `active` to `post_heat` when HVAC stops |
+| `_check_stabilization()` | Tests for post-heat temperature stabilization; triggers commit or continues polling |
+| `_commit_thermal_event()` | Calls `learning.commit_thermal_event()` to extract k_passive/k_active and persist |
+| `_abandon_thermal_event(reason)` | Discards the event (timeout or bad data); logs a WARNING |
+| `_update_pre_heat_buffer()` | Maintains the 15-min rolling pre-HVAC sample buffer for richer regression |
+
+The pending event is serialised in `LearningState.pending_thermal_event` (persisted to disk) so a mid-event HA restart can recover the post-heat phase.
+
 ## Sensors Exposed
 
 | Entity ID | Value | Extra Attributes |
@@ -195,6 +211,17 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - High compliance threshold: 80%
 - Data retention: 90-day rolling window
 - Storage: JSON file in HA config dir
+
+### Thermal Model Parameters (Issue #114)
+- Post-heat timeout: 45 min (`THERMAL_POST_HEAT_TIMEOUT_MINUTES`)
+- Stabilization threshold: 0.3°F over 5 consecutive minutes (`THERMAL_STABILIZATION_THRESHOLD_F`, `THERMAL_STABILIZATION_WINDOW_MINUTES`)
+- Sample interval: 60 seconds (`THERMAL_SAMPLE_INTERVAL_SECONDS`)
+- Pre-heat buffer window: 15 min / max 15 entries (`THERMAL_PRE_HEAT_BUFFER_MINUTES`)
+- Minimum R² for k_passive acceptance: 0.2 (`THERMAL_MIN_R_SQUARED`)
+- Minimum post-heat samples for regression: 10 (`THERMAL_MIN_POST_HEAT_SAMPLES`)
+- k_passive sanity bounds: −0.5 to −0.001 hr⁻¹
+- k_active_heat sanity bounds: 0.5 to 15.0 °F/hr
+- k_active_cool sanity bounds: −15.0 to −0.5 °F/hr
 
 ### Chart Log Parameters
 - Entry cadence: every coordinator tick (~30 min)

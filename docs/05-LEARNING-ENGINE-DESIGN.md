@@ -92,49 +92,157 @@ Suggestions are generated when `generate_suggestions()` is called (typically dur
 
 ## Thermal Model
 
-The thermal model records how quickly the house heats and cools under HVAC control. Observations accumulate over time to produce heating and cooling rate estimates that are used to compute adaptive bedtime setback depth and pre-heat start time.
+The thermal model characterises how the house envelope and HVAC system move indoor temperature over time. Observations accumulate across HVAC sessions and are used to compute adaptive bedtime setback depth, pre-heat start time, and the physics-based predicted temperature curve shown in the dashboard.
 
-### `ThermalObservation` Dataclass
+### Physics Model (Issue #114 — v2 Architecture)
+
+The model is a two-parameter first-order ODE:
+
+```
+dT/dt = k_passive * (T_indoor - T_outdoor) + Q
+```
+
+where:
+- `k_passive` (hr⁻¹, always negative) — envelope decay rate; describes how fast the house drifts toward outdoor temperature without HVAC
+- `Q` = `k_active` when HVAC is running, 0 when HVAC is off
+- `k_active_heat` (°F/hr, positive) — net HVAC heating contribution above envelope exchange
+- `k_active_cool` (°F/hr, negative) — net HVAC cooling contribution
+
+**Analytical ODE solution** used for prediction and simulation:
+
+```
+T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt) - 1)
+```
+
+**Why this replaces the scalar rate model:** The old architecture computed a single `end_temp – start_temp` delta at the moment HVAC stopped. Because most thermostats have a 15–30 second sensor update lag after the heating/cooling action ends, `start_temp == end_temp` in almost every observation, yielding `rate = 0°F/hr` and causing the observation to be dropped. The new architecture never takes a single-point delta — it builds the model from the full post-heat decay curve and the active-phase samples together.
+
+### `PendingThermalEvent` State Machine
+
+The coordinator maintains an in-progress observation window as a state machine stored in `LearningState.pending_thermal_event`. The coordinator methods managing it are all on `ClimateAdvisorCoordinator`.
+
+```
+idle
+  │
+  │  hvac_action becomes "heating" or "cooling"
+  ▼
+active
+  │  samples collected every 60s; pre-heat buffer also sampled every 60s (15-min rolling window)
+  │
+  │  hvac_action leaves "heating"/"cooling"
+  ▼
+post_heat
+  │  samples collected every 60s for up to 45 min (THERMAL_POST_HEAT_TIMEOUT_MINUTES)
+  │
+  ├──[stabilized: |ΔT| < 0.3°F over 5 consecutive minutes]──► commit
+  │
+  └──[timeout: 45 min elapsed without stabilization]──► abandon
+```
+
+**State machine methods:**
+
+| Method | Role |
+|---|---|
+| `_start_thermal_event(session_mode)` | Enters `active` state; initialises event dict |
+| `_sample_thermal_event()` | Appends a sample during the active phase |
+| `_end_active_phase()` | Transitions from `active` to `post_heat` |
+| `_check_stabilization()` | Evaluates stabilization criterion; triggers commit or continues |
+| `_commit_thermal_event()` | Extracts k_passive/k_active and calls `learning.commit_thermal_event()` |
+| `_abandon_thermal_event(reason)` | Discards event; logs WARNING with reason |
+| `_update_pre_heat_buffer()` | Maintains the 15-min rolling pre-heat sample buffer |
+
+**Pre-heat buffer:** Sampled every 60 seconds regardless of HVAC state. Holds at most 15 entries (THERMAL_PRE_HEAT_BUFFER_MINUTES). Pre-heat samples are included in the OLS regression for `k_passive` to provide a richer baseline before the heating/cooling run began.
+
+**HVAC mode classification:** The session mode (`heat`, `cool`, `heat_cool`, `fan_only`) is determined by the first `hvac_action` observed during the active phase. `fan_only` sessions contribute only `k_passive` — no `k_active` is extracted.
+
+### `ThermalObservation` Dataclass (v2)
 
 | Field | Type | Purpose |
 |---|---|---|
-| `timestamp` | `datetime` | UTC time the observation was recorded |
-| `mode` | `str` | `"heat"` or `"cool"` — which HVAC mode was active |
-| `start_temp_f` | `float` | Indoor temperature (°F) at the start of the HVAC run |
-| `end_temp_f` | `float` | Indoor temperature (°F) at the end of the HVAC run |
-| `duration_minutes` | `float` | Length of the HVAC run in minutes |
-| `outdoor_temp_f` | `float \| None` | Outdoor temperature at observation time (for future stratification) |
+| `timestamp` | `datetime` | UTC time the observation was committed |
+| `mode` | `str` | `"heat"`, `"cool"`, `"heat_cool"`, or `"fan_only"` |
+| `k_passive` | `float` | Envelope decay rate (hr⁻¹, negative) from OLS regression |
+| `k_active` | `float \| None` | HVAC contribution (°F/hr); `None` for `fan_only` |
+| `confidence_grade` | `str` | `"high"`, `"medium"`, or `"low"` — governs EWMA alpha |
+| `r_squared_passive` | `float` | R² of the post-heat OLS regression |
+| `r_squared_active` | `float \| None` | R² of the active-phase regression |
+| `n_post_samples` | `int` | Post-heat sample count used in regression |
+| `outdoor_temp_f` | `float \| None` | Mean outdoor temperature during the event |
 
-### `record_thermal_observation(mode, start_temp_f, end_temp_f, duration_minutes, outdoor_temp_f=None)`
+### Parameter Extraction
 
-Called by the coordinator at the end of a completed heating or cooling run. Appends a `ThermalObservation` to the rolling history (capped at 90 observations). The observation is only recorded when `duration_minutes > 0` and the temperature delta is in the expected direction (indoor temp rose for heat, fell for cool).
+`k_passive` is estimated from the post-heat decay curve (plus pre-heat buffer) using OLS regression:
+
+```
+rate_i = k_passive * delta_i
+```
+
+where `rate_i = ΔT/Δt` (°F/hr) and `delta_i = T_indoor - T_outdoor` for each sample pair. Minimum requirements: 10 post-heat samples, R² ≥ 0.2 (`THERMAL_MIN_R_SQUARED`).
+
+`k_active` is extracted from active-phase samples:
+
+```
+k_active_i = rate_i - k_passive * delta_i
+```
+
+The mean of all per-sample estimates is taken. Out-of-bounds values are rejected using sanity bounds (see §Constants below).
+
+**Confidence grades and EWMA alpha:**
+
+| Grade | k_passive condition | k_active condition | EWMA alpha |
+|---|---|---|---|
+| `"high"` | R² ≥ 0.7 and ≥ 10 post samples | R² ≥ 0.7 | 0.30 |
+| `"medium"` | R² ≥ 0.4 and ≥ 5 post samples | R² ≥ 0.4 | 0.15 |
+| `"low"` | R² ≥ 0.2 (minimum) | any passing sanity bounds | 0.05 |
+| rejected | R² < 0.2 or < 10 post samples | — | observation discarded |
+
+### `record_thermal_observation(obs: dict) -> None`
+
+Called by `learning.commit_thermal_event()` after parameter extraction. Appends the observation to the rolling history (capped at 90 entries) and updates `thermal_model_cache` via EWMA using the observation's `confidence_grade`. State is saved to disk immediately after each commit — HA restarts mid-day do not lose accumulated observations.
 
 ### `get_thermal_model() -> dict`
 
-Computes and returns the current thermal model from all stored observations.
+Returns the current accumulated thermal model from `thermal_model_cache`.
 
 **Output dict structure:**
 
 ```python
 {
-    "heating_rate_f_per_hour": float | None,   # degrees F gained per hour under heat mode
-    "cooling_rate_f_per_hour": float | None,   # degrees F lost per hour under cool mode
-    "confidence": str,                          # "none" | "low" | "medium" | "high"
-    "observation_count_heat": int,             # number of heat observations used
-    "observation_count_cool": int,             # number of cool observations used
+    # v2 physics parameters
+    "k_passive": float | None,              # envelope decay rate (hr⁻¹, negative)
+    "k_active_heat": float | None,          # HVAC heating contribution (°F/hr, positive)
+    "k_active_cool": float | None,          # HVAC cooling contribution (°F/hr, negative)
+    "confidence": str,                      # "none" | "low" | "medium" | "high"
+    # legacy compatibility fields
+    "heating_rate_f_per_hour": float | None,  # = abs(k_active_heat), rounded to 2dp
+    "cooling_rate_f_per_hour": float | None,  # = abs(k_active_cool), rounded to 2dp
+    "observation_count_heat": int,
+    "observation_count_cool": int,
 }
 ```
 
-**Confidence levels:**
+`confidence` is derived from the count of heat+cool observations: `"none"` (< 3 of either mode), `"low"` (3–9), `"medium"` (10–19), `"high"` (20+).
 
-| Level | Condition |
-|---|---|
-| `"none"` | Fewer than 3 observations of the relevant mode |
-| `"low"` | 3–9 observations |
-| `"medium"` | 10–19 observations |
-| `"high"` | 20+ observations |
+The legacy `heating_rate_f_per_hour` and `cooling_rate_f_per_hour` fields are kept for backward compatibility with `compute_bedtime_setback()` and `_compute_ramp_hours()`.
 
-Rates are computed as the median of all per-observation rates (°F delta / duration hours) to reduce sensitivity to outliers.
+### `LearningState` New Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `pending_thermal_event` | `dict \| None` | Serialised in-progress event; persisted so a mid-event HA restart can recover the event |
+| `thermal_model_cache` | `dict \| None` | EWMA-accumulated `k_passive`, `k_active_heat`, `k_active_cool` |
+
+**Startup recovery:** `recover_pending_event_on_startup()` reads `pending_thermal_event` from state. If the event is in `post_heat` phase, it resumes monitoring. If it is in `active` phase, it is abandoned (cannot resume an active HVAC session across a restart reliably).
+
+### Sanity Bounds (from `const.py`)
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `THERMAL_K_PASSIVE_MIN` | `-0.5` hr⁻¹ | Minimum envelope decay rate (very leaky) |
+| `THERMAL_K_PASSIVE_MAX` | `-0.001` hr⁻¹ | Maximum envelope decay rate (very well insulated) |
+| `THERMAL_K_ACTIVE_HEAT_MIN` | `0.5` °F/hr | Minimum HVAC heating contribution |
+| `THERMAL_K_ACTIVE_HEAT_MAX` | `15.0` °F/hr | Maximum HVAC heating contribution |
+| `THERMAL_K_ACTIVE_COOL_MIN` | `-15.0` °F/hr | Maximum HVAC cooling contribution (magnitude) |
+| `THERMAL_K_ACTIVE_COOL_MAX` | `-0.5` °F/hr | Minimum HVAC cooling contribution (magnitude) |
 
 ### `get_weather_bias() -> dict`
 
@@ -166,8 +274,8 @@ The following attributes are added to `sensor.climate_advisor_comfort_score` whe
 
 | Attribute | Type | Description |
 |---|---|---|
-| `thermal_heating_rate` | `float \| None` | Heating rate in user's configured unit per hour (`None` if no data) |
-| `thermal_cooling_rate` | `float \| None` | Cooling rate in user's configured unit per hour (`None` if no data) |
+| `thermal_heating_rate` | `float \| None` | `k_active_heat` in user's configured unit per hour (`None` if no data) |
+| `thermal_cooling_rate` | `float \| None` | `abs(k_active_cool)` in user's configured unit per hour (`None` if no data) |
 | `thermal_confidence` | `str` | Confidence level: `"none"`, `"low"`, `"medium"`, or `"high"` |
 | `thermal_observation_count` | `int` | Total heat + cool observations recorded |
 | `forecast_high_bias` | `float` | Forecast high bias in user's configured unit (0.0 if no data) |
@@ -179,7 +287,7 @@ The following attributes are added to `sensor.climate_advisor_comfort_score` whe
 ## Future Learning Capabilities (v0.3+)
 
 ### ~~Thermal Model Learning~~ _(Complete — see Thermal Model section above)_
-~~Track how quickly the house heats/cools under different conditions to build a simple thermal model.~~ Implemented in Phase 5. The thermal model now drives adaptive bedtime setback depth and pre-heat start time, and exposes rates via the compliance sensor.
+~~Track how quickly the house heats/cools under different conditions to build a simple thermal model.~~ Implemented in Phase 5 (scalar rate model) and replaced with a two-parameter physics model in Issue #114 (`k_passive` + `k_active`). The thermal model drives adaptive bedtime setback depth, pre-heat start time, and the physics-based predicted temperature curve. Parameters are exposed via the compliance sensor.
 
 ### Seasonal Baselines
 After a full year of data, establish seasonal baselines for runtime, comfort scores, and energy use. Detect anomalies (e.g., "Your heating runtime this November is 30% higher than last November — possible insulation issue or thermostat drift").

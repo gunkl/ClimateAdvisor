@@ -107,12 +107,14 @@ Default values used in examples: `comfort_heat = 70`, `comfort_cool = 75`, `setb
 
 ### 5a. Adaptive Bedtime Setback (`compute_bedtime_setback()`)
 
-Bedtime setback depth is computed from the thermal model heating/cooling rate and the overnight recovery window:
+Bedtime setback depth is computed from the thermal model HVAC rates and the overnight recovery window:
 
 | Condition | Heat Mode | Cool Mode |
 |---|---|---|
 | Thermal model confidence is `"none"` | Fall back to `DEFAULT_SETBACK_DEPTH_F = 4°F` below `comfort_heat` | Fall back to `DEFAULT_SETBACK_DEPTH_COOL_F = 3°F` above `comfort_cool` |
-| Model available | Depth = rate × recovery_window_hours; clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]` | Same formula using cooling rate |
+| Model available | Depth = `heating_rate_f_per_hour` × recovery_window_hours; clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]` | Same formula using `cooling_rate_f_per_hour` |
+
+`heating_rate_f_per_hour` and `cooling_rate_f_per_hour` are the legacy alias fields returned by `get_thermal_model()` — they equal `abs(k_active_heat)` and `abs(k_active_cool)` respectively. Both are `None` when no model data is available, which triggers the fallback.
 
 `setback_modifier` is always added to the heat setback result regardless of whether the model or the fallback was used.
 
@@ -127,14 +129,22 @@ The pre-heat start time is computed from the thermal model heating rate and the 
 
 The temperature delta is `comfort_heat − bedtime_setpoint`. The safety margin of 1.3× ensures the house reaches comfort even on colder-than-average mornings.
 
-### 5c. Predicted Temperature Graph Ramps
+### 5c. Predicted Temperature Graph — Physics Path
 
-Temperature graph ramps in the briefing are computed from the thermal model rather than using a fixed 30-minute value:
+From Issue #114, when the thermal model has confidence ≥ `"low"` and `k_passive < 0`, the dashboard temperature forecast uses the ODE analytical solution to simulate future indoor temperatures instead of simple ramp interpolation:
+
+```
+T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt) - 1)
+```
+
+`_simulate_indoor_physics()` in `coordinator.py` implements one ODE time step. `_build_predicted_indoor_future()` drives the simulation forward through the schedule, switching `Q` between `k_active_heat`, `k_active_cool`, and `0` depending on the HVAC mode in each period.
+
+**Fallback (ramp interpolation):** When model confidence is `"none"` or `k_passive` is unavailable/non-negative, the legacy ramp path runs:
 
 | Condition | Ramp Duration |
 |---|---|
 | No model data | Default 30-minute ramp |
-| Model available | `ramp_hours = temp_delta / rate`; minimum 15 minutes; computed by `_compute_ramp_hours()` |
+| Model available (legacy path only) | `ramp_hours = temp_delta / rate`; minimum 15 minutes; computed by `_compute_ramp_hours()` |
 
 `_compute_ramp_hours()` uses whichever rate applies to the transition direction (heating rate for rising ramps, cooling rate for falling ramps).
 
@@ -431,6 +441,21 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `DEFAULT_PREHEAT_MINUTES` | `120` | minutes | Pre-heat lead time fallback when no thermal model data |
 | `MIN_PREHEAT_MINUTES` | `30` | minutes | Minimum clamped pre-heat lead time |
 | `MAX_PREHEAT_MINUTES` | `240` | minutes | Maximum clamped pre-heat lead time |
+| `THERMAL_POST_HEAT_TIMEOUT_MINUTES` | `45` | minutes | Maximum post-heat observation window before abandoning |
+| `THERMAL_STABILIZATION_THRESHOLD_F` | `0.3` | °F | |ΔT| threshold for stabilization criterion |
+| `THERMAL_STABILIZATION_WINDOW_MINUTES` | `5` | minutes | Duration |ΔT| must remain below threshold to count as stabilized |
+| `THERMAL_SAMPLE_INTERVAL_SECONDS` | `60` | seconds | Active and post-heat sampling cadence |
+| `THERMAL_PRE_HEAT_BUFFER_MINUTES` | `15` | minutes | Rolling pre-HVAC sample window included in k_passive regression |
+| `THERMAL_MAX_ACTIVE_SAMPLES` | `120` | samples | Cap on active-phase samples (2 hours at 60s cadence) |
+| `THERMAL_MAX_POST_HEAT_SAMPLES` | `45` | samples | Cap on post-heat samples (45 min at 60s cadence) |
+| `THERMAL_MIN_R_SQUARED` | `0.2` | — | Minimum R² for k_passive OLS regression to accept an observation |
+| `THERMAL_MIN_POST_HEAT_SAMPLES` | `10` | samples | Minimum post-heat samples required for regression |
+| `THERMAL_K_PASSIVE_MIN` | `-0.5` | hr⁻¹ | Sanity lower bound for k_passive (very leaky envelope) |
+| `THERMAL_K_PASSIVE_MAX` | `-0.001` | hr⁻¹ | Sanity upper bound for k_passive (very well insulated) |
+| `THERMAL_K_ACTIVE_HEAT_MIN` | `0.5` | °F/hr | Minimum credible HVAC heating contribution |
+| `THERMAL_K_ACTIVE_HEAT_MAX` | `15.0` | °F/hr | Maximum credible HVAC heating contribution |
+| `THERMAL_K_ACTIVE_COOL_MIN` | `-15.0` | °F/hr | Maximum credible HVAC cooling contribution (magnitude) |
+| `THERMAL_K_ACTIVE_COOL_MAX` | `-0.5` | °F/hr | Minimum credible HVAC cooling contribution (magnitude) |
 
 **User-facing config keys** (set via config flow, stored in the config entry):
 
@@ -563,4 +588,4 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 ---
 
-_Last Updated: 2026-04-06_
+_Last Updated: 2026-04-19_

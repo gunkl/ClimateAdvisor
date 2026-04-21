@@ -7,25 +7,17 @@
         "Issue #96: On a warm day the classifier sets hvac_mode='off', but when the thermostat",
         "is currently running in heat_cool (auto) mode the correct behavior is to apply dual",
         "setpoints: target_temp_low=setback_heat (60F) and target_temp_high=setback_cool (82F).",
-        "This widens the comfort band for the day without forcing a full HVAC-off command,",
-        "allowing the thermostat to stay in heat_cool mode and only engage when indoor temp",
-        "drifts outside the widened setback band.",
+        "This widens the comfort band for the day without forcing a full HVAC-off command.",
         "The indoor temp (71F) is above comfort_heat (70F) so the warm-day comfort-gap guard",
         "does NOT fire — the system proceeds directly to dual setback.",
-        "Expected outcome at classification time: dual_setback_applied with",
-        "  target_temp_low=60.0 (setback_heat) and target_temp_high=82.0 (setback_cool).",
-        "HVAC mode must remain 'heat_cool' — set_hvac_mode('off') must NOT be called.",
-        "The Decision.target_temp field carries target_temp_low for dual-setpoint decisions;",
-        "a future simulator extension may add target_temp_high.",
-        "Simulator support: the simulator does not model heat_cool mode at all currently.",
-        "Issue #96 adds heat_cool awareness in both the simulator and automation.py.",
-        "All assertions are marked simulator_support=false until that is implemented."
+        "The Decision.target_temp field carries target_temp_low (heat setback) for dual-setpoint decisions."
     ],
     "config": {
         "comfort_heat": 70,
         "comfort_cool": 76,
         "setback_heat": 60,
-        "setback_cool": 82
+        "setback_cool": 82,
+        "initial_thermostat_mode": "heat_cool"
     },
     "events": [
         {
@@ -48,9 +40,13 @@
             "at": "2026-04-10T07:30:00",
             "expect": "dual_setback_applied",
             "expect_temp": 60.0,
-            "reason": "warm day + thermostat in heat_cool mode — dual setback applied: target_temp_low=setback_heat (60F), target_temp_high=setback_cool (82F); HVAC mode unchanged",
-            "simulator_support": false
+            "reason": "warm day + thermostat in heat_cool mode — dual setback: setback_heat (60F) low / setback_cool (82F) high; HVAC mode unchanged"
         }
     ],
-    "verdict": "pending"
+    "verdict": {
+        "type": "positive",
+        "summary": "Warm-day classifier respects thermostat heat_cool mode — applies dual setpoints instead of shutoff",
+        "observed_behavior": "dual_setback_applied with target_temp=60 (setback_heat low bound)",
+        "expected_behavior": "dual_setback_applied with target_temp=60 (setback_heat low bound)"
+    }
 }

@@ -4,11 +4,11 @@
   "source": "activity-report",
   "issue": 69,
   "notes": [
-    "This scenario tests the natural ventilation behavior proposed in issue #69.",
-    "Expected: nat vent at 06:00 (outdoor 75F <= threshold 75F), pause at 14:00 (outdoor 87F > 75F),",
-    "then nat vent re-activated at 23:30 when outdoor dropped back to 53F.",
-    "This scenario will FAIL until Sub-issue B (natural ventilation mode) is implemented.",
-    "Promote to golden/ once all assertions pass after #73 is merged."
+    "This scenario captures natural ventilation cycling from a real activity report (March 28, 2026).",
+    "Tests: nat vent at 06:00, pause at 14:00 (afternoon peak), re-activation at 20:00, comfort-floor exit at 23:30.",
+    "At 23:30 indoor drops to comfort_heat=70F — Issue #99 comfort-floor exit fires, heat restores.",
+    "The outdoor temp (53F) is still below the nat vent threshold, but the indoor comfort floor takes priority.",
+    "Promote to golden/ once all assertions pass in production."
   ],
   "config": {
     "comfort_heat": 70,
@@ -69,8 +69,8 @@
     },
     {
       "at": "2026-03-28T23:30:00",
-      "expect": "natural_ventilation",
-      "reason": "outdoor 53F still below threshold 75F — nat vent should remain active"
+      "expect": "nat_vent_comfort_floor_exit",
+      "reason": "indoor 70F hit comfort_heat floor — nat vent exits and heat restores (Issue #99 behavior)"
     }
   ]
 }

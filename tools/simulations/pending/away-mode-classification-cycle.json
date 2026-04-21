@@ -53,34 +53,38 @@
   "assertions": [
     {
       "at": "2026-04-05T08:00:00",
-      "expect": "set_temperature",
-      "temperature": 75,
-      "reason": "initial classification — user is home, comfort_cool applies"
+      "expect": "classification_applied",
+      "reason": "initial classification at home — cool mode applied (comfort_cool=75F)"
     },
     {
       "at": "2026-04-05T09:45:00",
-      "expect": "set_temperature",
-      "temperature": 80,
-      "reason": "away setback applied after occupancy delay — setback_cool (80F)"
+      "expect": "setback_applied",
+      "expect_temp": 80.0,
+      "reason": "occupancy_change to away — setback_cool (80F) applied"
     },
     {
       "at": "2026-04-05T10:00:00",
-      "expect": "set_temperature",
-      "temperature": 80,
-      "reason": "classification cycle while away — reapplies setback (80F), NOT comfort (75F)"
+      "expect": "setback_applied",
+      "expect_temp": 80.0,
+      "reason": "classification while away — setback reapplied (80F), comfort NOT restored"
     },
     {
       "at": "2026-04-05T10:30:00",
-      "expect": "set_temperature",
-      "temperature": 80,
-      "reason": "another classification cycle — still setback (80F)"
+      "expect": "setback_applied",
+      "expect_temp": 80.0,
+      "reason": "another classification while away — setback maintained (80F)"
     },
     {
       "at": "2026-04-05T14:00:00",
-      "expect": "set_temperature",
-      "temperature": 75,
-      "reason": "user returns home — comfort_cool (75F) restored"
+      "expect": "comfort_restored",
+      "expect_temp": 75.0,
+      "reason": "occupancy_change to home — comfort_cool (75F) restored"
     }
   ],
-  "verdict": "pending"
+  "verdict": {
+    "type": "positive",
+    "summary": "Classification cycle while away maintains setback — does not restore comfort",
+    "observed_behavior": "setback_applied (80F) on each classification event while away; comfort_restored (75F) on return",
+    "expected_behavior": "setback_applied (80F) on each classification event while away; comfort_restored (75F) on return"
+  }
 }

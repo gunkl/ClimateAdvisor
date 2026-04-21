@@ -23,6 +23,13 @@ repos:
         pass_filenames: false
         files: ^custom_components/climate_advisor/
 
+      - id: simulate-integrity
+        name: Golden scenario integrity check
+        entry: py -3 tools/simulate.py --check-integrity
+        language: system
+        pass_filenames: false
+        files: ^tools/simulations/golden/
+
       - id: pytest
         name: pytest
         entry: py -3 -m pytest tests/ -x --tb=short -q

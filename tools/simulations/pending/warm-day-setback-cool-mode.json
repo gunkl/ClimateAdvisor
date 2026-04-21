@@ -8,21 +8,18 @@
         "is currently running in cool mode the correct behavior is to apply the setback_cool",
         "temperature (82F) rather than issuing a full HVAC-off command.",
         "This allows the thermostat to coast naturally — AC shuts off when indoor temp falls",
-        "below 82F rather than being forced off immediately and then overcooling.",
+        "below 82F rather than being forced off immediately.",
         "The indoor temp (74F) is above comfort_heat (70F) so the warm-day comfort-gap guard",
         "does NOT fire — the system proceeds directly to setback_cool.",
         "Expected outcome at classification time: setback_applied with target_temp=82.0.",
-        "HVAC mode must remain 'cool' — set_hvac_mode('off') must NOT be called.",
-        "Simulator support: the simulator _handle_classification() currently sets hvac_mode=off",
-        "unconditionally when c.hvac_mode='off'. Issue #96 adds a thermostat-mode-aware branch",
-        "that checks the current thermostat hvac_mode and applies setback instead of shutoff.",
-        "These assertions are marked simulator_support=false until that branch is implemented."
+        "HVAC mode must remain 'cool' — set_hvac_mode('off') must NOT be called."
     ],
     "config": {
         "comfort_heat": 70,
         "comfort_cool": 76,
         "setback_heat": 60,
-        "setback_cool": 82
+        "setback_cool": 82,
+        "initial_thermostat_mode": "cool"
     },
     "events": [
         {
@@ -45,9 +42,13 @@
             "at": "2026-04-10T07:30:00",
             "expect": "setback_applied",
             "expect_temp": 82.0,
-            "reason": "warm day + thermostat in cool mode — setback_cool (82F) applied instead of HVAC off",
-            "simulator_support": false
+            "reason": "warm day + thermostat in cool mode — setback_cool (82F) applied instead of HVAC off"
         }
     ],
-    "verdict": "pending"
+    "verdict": {
+        "type": "positive",
+        "summary": "Warm-day classifier respects thermostat cool mode — applies setback instead of shutoff",
+        "observed_behavior": "setback_applied with target_temp=82 (setback_cool)",
+        "expected_behavior": "setback_applied with target_temp=82 (setback_cool)"
+    }
 }

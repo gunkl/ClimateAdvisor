@@ -18,6 +18,9 @@ Usage:
   python3 tools/simulate.py --list       # list all scenarios by state
   python3 tools/simulate.py --cases      # summary table of all scenarios across all states
   python3 tools/simulate.py -v           # verbose (show full decision timeline)
+  python3 tools/simulate.py --report           # write markdown report to tools/simulations/REPORT.md
+  python3 tools/simulate.py --check-integrity  # verify golden hashes against MANIFEST.json
+  python3 tools/simulate.py --sign NAME        # sign a golden scenario into MANIFEST.json
 
 Lifecycle:
   Real event → /simulate add → pending/ → review → golden/ or pending-fix/ or unsupported/
@@ -25,9 +28,15 @@ Lifecycle:
 """
 
 import argparse
+import hashlib
 import json
 import sys
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
 from dataclasses import dataclass, field
+from datetime import date as dt_date
 from datetime import time as dt_time
 from pathlib import Path
 
@@ -39,6 +48,7 @@ STATE_DIRS: dict[str, Path] = {
     "unsupported": SIMULATIONS_DIR / "unsupported",
     "synthetic": SIMULATIONS_DIR / "synthetic",
 }
+MANIFEST_PATH = SIMULATIONS_DIR / "golden" / "MANIFEST.json"
 
 # Constants mirrored from const.py — keep in sync.
 VACATION_SETBACK_EXTRA = 3.0  # const.py VACATION_SETBACK_EXTRA = 3
@@ -95,6 +105,9 @@ class SimState:
     economizer_active: bool = False
     economizer_phase: str = "inactive"  # "inactive" | "cool-down" | "maintain"
 
+    # Thermostat mode tracking (Issue #96) — independent of classification hvac_mode
+    thermostat_mode: str = "off"  # actual thermostat running mode: "heat"|"cool"|"heat_cool"|"off"
+
 
 @dataclass
 class Decision:
@@ -122,6 +135,9 @@ class ClimateSimulator:
         self.config = config
         self.state = SimState()
         self.decisions: list[Decision] = []
+        # Initialize thermostat_mode from scenario config if provided (Issue #96)
+        if "initial_thermostat_mode" in config:
+            self.state.thermostat_mode = config["initial_thermostat_mode"]
 
     def process_event(self, event: dict) -> Decision | None:
         """Process one scenario event and return any decision made."""
@@ -156,6 +172,14 @@ class ClimateSimulator:
 
         if etype == "occupancy_vacation":
             return self._handle_occupancy_vacation(ts)
+
+        if etype == "occupancy_change":
+            mode = event.get("mode", "home")
+            if mode == "away":
+                return self._handle_occupancy_away(ts)
+            if mode == "vacation":
+                return self._handle_occupancy_vacation(ts)
+            return self._handle_occupancy_home(ts)
 
         if etype == "bedtime":
             return self._handle_bedtime(ts)
@@ -387,7 +411,11 @@ class ClimateSimulator:
     def _handle_classification(self, ts: str, event: dict) -> Decision:
         """Apply day classification — mirrors apply_classification().
 
-        Sets HVAC mode and comfort target temp unless manual_override_active.
+        Sets HVAC mode and comfort target temp unless:
+        - manual_override_active (no-op)
+        - occupancy is away/vacation (reapply setback — Issue #85)
+        - warm-day classifier says 'off' but thermostat is actively heating/cooling
+          (apply mode-aware setback instead — Issue #96)
         Classification is always stored even when overridden.
         """
         c = SimClassification(
@@ -412,6 +440,64 @@ class ClimateSimulator:
             self.decisions.append(d)
             return d
 
+        # Issue #85: if away/vacation, reapply setback instead of restoring comfort
+        if self.state.occupancy == "away":
+            return self._handle_occupancy_away(ts)
+        if self.state.occupancy == "vacation":
+            return self._handle_occupancy_vacation(ts)
+
+        # Issue #96: warm-day classifier says 'off' but thermostat is actively heating/cooling —
+        # apply mode-aware setback instead of full shutoff
+        if c.hvac_mode == "off" and self.state.thermostat_mode in ("heat", "cool", "heat_cool", "auto"):
+            tmode = self.state.thermostat_mode
+            if tmode == "heat":
+                target = float(self.config.get("setback_heat", 60)) + c.setback_modifier
+                self.state.hvac_target_temp = target
+                d = Decision(
+                    ts,
+                    "classification",
+                    "setback_applied",
+                    f"warm-day setback: thermostat in heat mode — setback_heat applied ({target}°F)",
+                    "heat",
+                    self.state.fan_mode,
+                    target_temp=target,
+                )
+                self.decisions.append(d)
+                return d
+            if tmode == "cool":
+                target = float(self.config.get("setback_cool", 80)) - c.setback_modifier
+                self.state.hvac_target_temp = target
+                d = Decision(
+                    ts,
+                    "classification",
+                    "setback_applied",
+                    f"warm-day setback: thermostat in cool mode — setback_cool applied ({target}°F)",
+                    "cool",
+                    self.state.fan_mode,
+                    target_temp=target,
+                )
+                self.decisions.append(d)
+                return d
+            # heat_cool / auto — dual setpoints; target_temp carries the heat setback (low bound)
+            heat_target = float(self.config.get("setback_heat", 60)) + c.setback_modifier
+            cool_target = float(self.config.get("setback_cool", 80)) - c.setback_modifier
+            self.state.hvac_target_temp = heat_target
+            d = Decision(
+                ts,
+                "classification",
+                "dual_setback_applied",
+                (
+                    f"warm-day setback: thermostat in {tmode} mode — "
+                    f"dual setpoints {heat_target}°F heat / {cool_target}°F cool"
+                ),
+                "heat_cool",
+                self.state.fan_mode,
+                target_temp=heat_target,
+            )
+            self.decisions.append(d)
+            return d
+
+        # Normal classification: apply comfort temperature (or off)
         self.state.hvac_mode = c.hvac_mode
         if c.hvac_mode == "heat":
             self.state.hvac_target_temp = float(self.config.get("comfort_heat", 70))
@@ -993,6 +1079,7 @@ class ClimateSimulator:
         Issue #95: natural ventilation is intentionally hvac_mode=off + fan active.
         """
         new_hvac_mode = event.get("hvac_mode", self.state.hvac_mode)
+        self.state.thermostat_mode = new_hvac_mode  # track actual thermostat mode
         fan_mode_cfg = self.config.get("fan_mode", "disabled")
 
         # Mirror the stale-clear condition from coordinator.py (post-fix):
@@ -1215,7 +1302,7 @@ def print_cases_summary() -> None:
     for state, state_dir in STATE_DIRS.items():
         if not state_dir.exists():
             continue
-        files = sorted(state_dir.glob("*.json"))
+        files = sorted(p for p in state_dir.glob("*.json") if p.name != "MANIFEST.json")
         if not files:
             continue
 
@@ -1248,6 +1335,256 @@ def print_cases_summary() -> None:
 
 
 # ------------------------------------------------------------------
+# Golden test integrity — MANIFEST.json
+# ------------------------------------------------------------------
+
+
+def _file_sha256(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file."""
+    h = hashlib.sha256()
+    h.update(path.read_bytes())
+    return h.hexdigest()
+
+
+def check_integrity() -> int:
+    """Verify all golden scenario files match their MANIFEST.json hashes.
+
+    Returns 0 if clean, 1 if any mismatch or unlisted file is found.
+    """
+    if not MANIFEST_PATH.exists():
+        print("MANIFEST.json not found — run: python tools/simulate.py --sign <name>")
+        return 1
+
+    with open(MANIFEST_PATH) as f:
+        manifest = json.load(f)
+    if not isinstance(manifest, dict):
+        print("MANIFEST.json is corrupt — expected a JSON object")
+        return 1
+
+    golden_dir = STATE_DIRS["golden"]
+    errors: list[str] = []
+    golden_files = sorted(p for p in golden_dir.glob("*.json") if p.name != "MANIFEST.json")
+
+    for path in golden_files:
+        name = path.stem
+        actual_hash = _file_sha256(path)
+        if name not in manifest:
+            errors.append(f"  UNSIGNED  {name}.json — not in MANIFEST; run --sign {name}")
+        elif manifest[name].get("sha256") != actual_hash:
+            errors.append(f"  MODIFIED  {name}.json — hash mismatch (run --sign {name} after human review)")
+
+    if errors:
+        print("Golden integrity check FAILED:")
+        for e in errors:
+            print(e)
+        return 1
+
+    print(f"Golden integrity OK — {len(golden_files)} scenario(s) verified")
+    return 0
+
+
+def sign_scenario(name: str) -> int:
+    """Print a human-readable scenario card and update MANIFEST.json.
+
+    Requires interactive confirmation. Returns 0 on success, 1 on abort.
+    """
+    golden_dir = STATE_DIRS["golden"]
+    path = golden_dir / f"{name}.json"
+    if not path.exists():
+        print(f"Scenario not found in golden/: {name}.json")
+        return 1
+
+    with open(path) as f:
+        scenario = json.load(f)
+
+    # Print human-readable card for review
+    print("\n" + "=" * 70)
+    print(f"GOLDEN TEST SIGNING CEREMONY: {name}")
+    print("=" * 70)
+    print(f"Description : {scenario.get('description', '(none)')}")
+    issue = scenario.get("issue")
+    if issue:
+        print(f"Issue       : #{issue}")
+    verdict_raw = scenario.get("verdict")
+    verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
+    if verdict:
+        print(f"Verdict     : {verdict.get('type', '')} — {verdict.get('summary', '')}")
+        if verdict.get("observed_behavior"):
+            print(f"  Observed  : {verdict['observed_behavior']}")
+        if verdict.get("expected_behavior"):
+            print(f"  Expected  : {verdict['expected_behavior']}")
+    notes = scenario.get("notes", [])
+    if notes:
+        print("Notes:")
+        for note in notes:
+            print(f"  • {note}")
+
+    print("\nEvents:")
+    for ev in scenario.get("events", []):
+        t = ev.get("time", "?")
+        etype = ev.get("type", "?")
+        note = ev.get("note", "")
+        detail = "  — " + note if note else ""
+        print(f"  {t}  [{etype}]{detail}")
+
+    print("\nAssertions:")
+    for a in scenario.get("assertions", []):
+        at = a.get("at", "?")
+        expect = a.get("expect", "?")
+        temp = a.get("expect_temp")
+        reason = a.get("reason", "")
+        skip = " [SKIP — simulator_support=false]" if a.get("simulator_support") is False else ""
+        temp_str = f"  → {temp}°F" if temp is not None else ""
+        print(f"  {at}: expect={expect!r}{temp_str}  {reason}{skip}")
+
+    print("\n" + "=" * 70)
+    print("Review the scenario above.")
+    print("Does this accurately represent real HVAC behavior? (Enter to sign, Ctrl-C to abort)")
+    try:
+        input()
+    except KeyboardInterrupt:
+        print("\nAborted — MANIFEST not updated.")
+        return 1
+
+    # Update MANIFEST
+    manifest: dict = {}
+    if MANIFEST_PATH.exists():
+        with open(MANIFEST_PATH) as f:
+            manifest = json.load(f)
+        if not isinstance(manifest, dict):
+            print("MANIFEST.json is corrupt — expected a JSON object. Delete it and re-sign all golden scenarios.")
+            return 1
+
+    if "_meta" not in manifest:
+        manifest["_meta"] = {
+            "description": "SHA-256 hashes of approved golden scenarios. Each entry requires human review.",
+            "policy": "Modify only via: python tools/simulate.py --sign <scenario-name>",
+        }
+
+    actual_hash = _file_sha256(path)
+    manifest[name] = {
+        "sha256": actual_hash,
+        "signed": str(dt_date.today()),
+    }
+    if issue:
+        manifest[name]["issue"] = issue
+
+    with open(MANIFEST_PATH, "w") as f:
+        json.dump(manifest, f, indent=2)
+        f.write("\n")
+
+    print(f"Signed: {name} → MANIFEST.json updated ({actual_hash[:12]}...)")
+    return 0
+
+
+# ------------------------------------------------------------------
+# Markdown report generation
+# ------------------------------------------------------------------
+
+
+def write_report(output_path: Path | None = None) -> None:
+    """Write a human-readable markdown report of all scenarios to REPORT.md."""
+    if output_path is None:
+        output_path = SIMULATIONS_DIR / "REPORT.md"
+
+    lines: list[str] = []
+    lines.append("# Climate Advisor Simulation Report")
+    lines.append(f"\nGenerated: {dt_date.today()}")
+    lines.append("\n---\n")
+
+    state_counts: dict[str, dict[str, int]] = {}
+    all_results: list[tuple[str, dict]] = []
+
+    for state, state_dir in STATE_DIRS.items():
+        if not state_dir.exists():
+            continue
+        files = sorted(p for p in state_dir.glob("*.json") if p.name != "MANIFEST.json")
+        if not files:
+            continue
+        counts = {"pass": 0, "fail": 0, "skip": 0}
+        for fpath in files:
+            try:
+                result = run_scenario(fpath, state=state)
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                result = {
+                    "name": fpath.stem,
+                    "description": f"ERROR: {e}",
+                    "issue": None,
+                    "verdict": None,
+                    "state": state,
+                    "decisions": [],
+                    "assertions": [],
+                    "passed": False,
+                }
+            all_results.append((state, result))
+            lbl = _status_label(result)
+            if lbl == "PASS":
+                counts["pass"] += 1
+            elif lbl == "FAIL":
+                counts["fail"] += 1
+            else:
+                counts["skip"] += 1
+        state_counts[state] = counts
+
+    # Summary table
+    lines.append("## Summary\n")
+    lines.append("| State | Pass | Fail | Skip |")
+    lines.append("|-------|------|------|------|")
+    for state, c in state_counts.items():
+        lines.append(f"| {state} | {c['pass']} | {c['fail']} | {c['skip']} |")
+    lines.append("")
+
+    # Per-scenario sections
+    current_state = None
+    for state, result in all_results:
+        if state != current_state:
+            current_state = state
+            lines.append(f"\n---\n\n## {state.upper()} Scenarios\n")
+
+        status = _status_label(result)
+        status_icon = "✅" if status == "PASS" else ("❌" if status == "FAIL" else "⏭️")
+        issue_tag = f" [#{result['issue']}]" if result.get("issue") else ""
+        lines.append(f"### {result['name']}{issue_tag} {status_icon} {status}\n")
+        lines.append(f"**Description:** {result['description']}\n")
+
+        verdict_raw = result.get("verdict")
+        verdict = verdict_raw if isinstance(verdict_raw, dict) else {}
+        if verdict:
+            vtype = verdict.get("type", "")
+            vsummary = verdict.get("summary", "")
+            lines.append(f"**Verdict:** {vtype} — {vsummary}\n")
+
+        # Events table
+        if result.get("decisions"):
+            lines.append("**Decision timeline:**\n")
+            lines.append("| Time | Outcome | Temp | Reason |")
+            lines.append("|------|---------|------|--------|")
+            for d in result["decisions"]:
+                temp = f"{d['target_temp']}°F" if d.get("target_temp") is not None else "—"
+                reason = d["reason"].replace("|", "\\|")
+                lines.append(f"| {d['time']} | `{d['outcome']}` | {temp} | {reason} |")
+            lines.append("")
+
+        # Assertions table
+        if result.get("assertions"):
+            lines.append("**Assertions:**\n")
+            lines.append("| Time | Expected | Actual | Result | Reason |")
+            lines.append("|------|----------|--------|--------|--------|")
+            for a in result["assertions"]:
+                if a.get("skipped"):
+                    lines.append(f"| {a['at']} | `{a['expected']}` | — | ⏭️ SKIP | {a.get('reason', '')} |")
+                else:
+                    icon = "✅" if a["pass"] else "❌"
+                    actual = f"`{a['actual']}`" if a["actual"] else "—"
+                    reason = a.get("reason", "").replace("|", "\\|")
+                    lines.append(f"| {a['at']} | `{a['expected']}` | {actual} | {icon} | {reason} |")
+            lines.append("")
+
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Report written to {output_path}")
+
+
+# ------------------------------------------------------------------
 # CLI
 # ------------------------------------------------------------------
 
@@ -1264,10 +1601,39 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", dest="list_all", help="List all scenarios by state")
     parser.add_argument("--cases", action="store_true", help="Show summary table of all scenarios across all states")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show full decision timeline for each scenario")
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Write human-readable markdown report to tools/simulations/REPORT.md",
+    )
+    parser.add_argument(
+        "--check-integrity",
+        action="store_true",
+        dest="check_integrity",
+        help="Verify golden scenario hashes against MANIFEST.json",
+    )
+    parser.add_argument(
+        "--sign",
+        metavar="NAME",
+        help="Sign a golden scenario into MANIFEST.json after human review",
+    )
     args = parser.parse_args()
 
     for d in STATE_DIRS.values():
         d.mkdir(parents=True, exist_ok=True)
+
+    # Golden integrity check
+    if args.check_integrity:
+        return check_integrity()
+
+    # Sign a golden scenario
+    if args.sign:
+        return sign_scenario(args.sign)
+
+    # Report generation
+    if args.report:
+        write_report()
+        return 0
 
     # Cases summary mode
     if args.cases:
@@ -1277,7 +1643,7 @@ def main() -> int:
     # List mode
     if args.list_all:
         for state, d in STATE_DIRS.items():
-            files = sorted(d.glob("*.json"))
+            files = sorted(p for p in d.glob("*.json") if p.name != "MANIFEST.json")
             if files:
                 print(f"\n{state.upper()} ({len(files)}):")
                 for f in files:
@@ -1301,7 +1667,7 @@ def main() -> int:
             print(f"Scenario not found: {args.scenario}")
             print("Available:")
             for state, d in STATE_DIRS.items():
-                for f in sorted(d.glob("*.json")):
+                for f in sorted(p for p in d.glob("*.json") if p.name != "MANIFEST.json"):
                     print(f"  [{state}] {f.stem}")
             return 1
         scenario_path, scenario_state = found
@@ -1313,7 +1679,7 @@ def main() -> int:
     # Run a batch (golden by default, pending with --pending)
     source_key = "pending" if args.pending else "golden"
     source_dir = STATE_DIRS[source_key]
-    files = sorted(source_dir.glob("*.json")) if source_dir.exists() else []
+    files = sorted(p for p in source_dir.glob("*.json") if p.name != "MANIFEST.json") if source_dir.exists() else []
 
     if not files:
         print(f"No {source_key} scenarios found.")

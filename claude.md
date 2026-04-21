@@ -204,6 +204,25 @@ Python 3.14 removed the implicit event loop. Use `asyncio.run()` instead of
 pytest tests/test_<file>.py -W error::pytest.PytestUnraisableExceptionWarning -W error::RuntimeWarning
 ```
 
+### Golden Simulation Test Policy
+
+Golden scenarios in `tools/simulations/golden/` are **LOCKED**. The AI MUST NOT modify these files without explicit user instruction. When the user approves a modification:
+1. Show the full scenario in human-readable form (description, each event + intended outcome, each assertion + rationale)
+2. Ask the user to confirm the scenario accurately represents real HVAC behavior
+3. Run `python tools/simulate.py --sign <scenario-name>` to update `MANIFEST.json`
+4. Run `python tools/simulate.py --check-integrity` to confirm clean
+5. Run `python tools/simulate.py` to confirm all golden tests still pass
+
+**AI review checklist** before any golden test is written or modified:
+- Does the scenario represent a realistic HVAC operating condition?
+- Is comfort maintained appropriately for the described conditions?
+- If `aggressive_savings=true`, does behavior correctly prioritize savings over comfort?
+- Are the assertions grounded in documented automation logic (`docs/08-COMPUTATION-REFERENCE.md`)?
+- Could a reasonable HVAC technician confirm this outcome as correct?
+- Are all assertion `reason` fields specific enough to explain the HVAC logic, not just restate the outcome?
+
+**Never promote a scenario from `pending/` to `golden/` without running it first and having the user review the scenario card output.**
+
 ### Pre-commit Hooks
 
 This project uses `pre-commit` with ruff, ruff-format, check-yaml, check-json, end-of-file-fixer, and trailing-whitespace hooks. The ruff hook runs with `--fix`, which can modify files during commit.

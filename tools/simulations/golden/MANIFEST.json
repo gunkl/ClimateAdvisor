@@ -1,0 +1,16 @@
+{
+  "_meta": {
+    "description": "SHA-256 hashes of approved golden scenarios. Each entry requires human review.",
+    "policy": "Modify only via: python tools/simulate.py --sign <scenario-name>"
+  },
+  "nat-vent-comfort-floor-exit-restores-heat": {
+    "sha256": "4095cec9bf0a141d63dfdca1f3dd2d498aff40b5e7af2e0ea012ef4860b63c66",
+    "signed": "2026-04-19",
+    "issue": 99
+  },
+  "nat-vent-fan-preserved-on-thermostat-event": {
+    "sha256": "268d271fe02989a70c7b406cbc3c242f6282d3e36452d05e860c9a5c0ffca045",
+    "signed": "2026-04-19",
+    "issue": 95
+  }
+}

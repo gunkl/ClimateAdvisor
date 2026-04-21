@@ -349,9 +349,9 @@ class TestCasesFlag:
 
 class TestBackwardCompatibility:
     def test_existing_scenario_without_new_fields(self) -> None:
-        """Load and run the real pending scenario — must produce valid results with no errors."""
-        scenario_path = Path(__file__).parent.parent / "tools" / "simulations" / "pending" / "2026-03-28-overnight.json"
-        assert scenario_path.exists(), f"Real pending scenario not found at {scenario_path}"
+        """Load and run a real golden scenario — must produce valid results with no errors."""
+        scenario_path = Path(__file__).parent.parent / "tools" / "simulations" / "golden" / "2026-03-28-overnight.json"
+        assert scenario_path.exists(), f"Real golden scenario not found at {scenario_path}"
         # run_scenario with no state param — backward-compatible call signature
         result = run_scenario(scenario_path)
         assert isinstance(result, dict), "run_scenario must return a dict"
@@ -359,8 +359,8 @@ class TestBackwardCompatibility:
         assert "assertions" in result
         assert "decisions" in result
         assert "passed" in result
-        # No verdict in this scenario — must not crash and must return None/absent verdict
-        assert result.get("verdict") is None
+        # Scenario has a verdict — must be present and non-None
+        assert result.get("verdict") is not None
 
     def test_run_scenario_no_state_param(self, tmp_path: Path) -> None:
         """run_scenario(path) with no state kwarg runs without error."""
@@ -377,12 +377,13 @@ class TestBackwardCompatibility:
         assert "PASS" in captured.out
 
     def test_simulator_core_nat_vent_logic(self) -> None:
-        """ClimateSimulator core logic still works — nat vent activates when outdoor <= threshold."""
+        """ClimateSimulator core logic: nat vent activates when outdoor < indoor AND outdoor < threshold."""
         config = {"comfort_cool": 72, "natural_vent_delta": 3.0}
         sim = ClimateSimulator(config)
-        sim.process_event({"type": "temp_update", "time": "T1", "indoor_f": 74.0, "outdoor_f": 74.0})
+        # indoor=76 > outdoor=70 (directional guard passes); outdoor=70 < threshold=75 (ceiling passes)
+        sim.process_event({"type": "temp_update", "time": "T1", "indoor_f": 76.0, "outdoor_f": 70.0})
         sim.process_event({"type": "sensor_open", "time": "T2", "entity": "binary_sensor.door"})
-        assert sim.state.natural_vent_active, "nat vent should activate when outdoor <= threshold"
+        assert sim.state.natural_vent_active, "nat vent should activate when outdoor < indoor and outdoor < threshold"
 
     def test_simulator_core_pause_logic(self) -> None:
         """ClimateSimulator core logic: pause when outdoor > threshold."""

@@ -95,6 +95,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._grace_end_time = None
     ae._last_resume_source = None
     ae._last_outdoor_temp = 65.0
+    ae._get_indoor_temp_f = MagicMock(return_value=75.0)
     ae._fan_active = False
     ae._fan_on_since = None
     ae._manual_grace_cancel = None

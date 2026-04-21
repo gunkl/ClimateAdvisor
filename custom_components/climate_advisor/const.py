@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.25"
+VERSION = "0.3.26"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.22": [
@@ -156,7 +156,21 @@ DEFAULT_FAN_MIN_RUNTIME_PER_HOUR = 0  # minutes; 0 = disabled
 
 # Natural ventilation mode (door/window open + outdoor air within comfort range)
 CONF_NATURAL_VENT_DELTA = "natural_vent_delta"
+# Ceiling tolerance above comfort_cool for nat vent.
+# Outdoor must also be below current indoor temperature (see NAT_VENT_HYSTERESIS_F guard).
 DEFAULT_NATURAL_VENT_DELTA = 3.0
+
+# Nat vent re-activation guards (Philosopher-approved, Issue #115)
+# After an outdoor-warm exit (outdoor ≥ indoor), outdoor must be this many °F
+# below indoor before re-activation is allowed. Prevents oscillation at equilibrium.
+NAT_VENT_HYSTERESIS_F = 1.0
+
+# Minimum seconds between an outdoor-warm exit and the next re-activation check.
+# 5 minutes prevents whiplash cycling when temps are near-equal.
+NAT_VENT_REACTIVATION_LOCKOUT_S = 300
+
+CONF_NAT_VENT_HYSTERESIS_F = "nat_vent_hysteresis_f"
+CONF_NAT_VENT_REACTIVATION_LOCKOUT_S = "nat_vent_reactivation_lockout_s"
 
 # State persistence
 STATE_FILE = "climate_advisor_state.json"

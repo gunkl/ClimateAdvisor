@@ -1,0 +1,39 @@
+{
+  "name": "nat-vent-indoor-hot-outdoor-near-comfort",
+  "description": "Hot interior (78F) with outdoor near comfort (74F) — activates since outdoor < indoor and outdoor < threshold",
+  "source": "synthetic",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "When indoor is above comfort_cool and outdoor is below both indoor and threshold, nat vent activates",
+    "observed_behavior": "natural_ventilation: outdoor(74) < indoor(78), outdoor(74) < threshold(75)",
+    "expected_behavior": "natural_ventilation: outdoor(74) < indoor(78), outdoor(74) < threshold(75)"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 72,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-20T17:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 74.0,
+      "note": "hot interior; outdoor 74F is above comfort_cool(72) but below indoor(78) and below threshold(75)"
+    },
+    {
+      "time": "2026-04-20T17:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "sensor opens on hot afternoon"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T17:00:00",
+      "expect": "natural_ventilation",
+      "reason": "outdoor 74F < indoor 78F (beneficial); outdoor 74F < threshold 75F (within ceiling); indoor 78F > comfort_heat 70F — nat vent activates for hot-day free cooling"
+    }
+  ]
+}

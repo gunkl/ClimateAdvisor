@@ -1,0 +1,51 @@
+{
+  "name": "nat-vent-outdoor-rises-above-indoor-exit",
+  "description": "Nat vent active; outdoor rises above indoor — new directional exit fires before threshold is crossed",
+  "source": "synthetic",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "When outdoor warms above indoor during active nat vent, exits to pause even if still below threshold",
+    "observed_behavior": "nat_vent_outdoor_rise_exit when outdoor >= indoor",
+    "expected_behavior": "nat_vent_outdoor_rise_exit when outdoor >= indoor"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 72,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "note": "evening: outdoor well below indoor — nat vent eligible"
+    },
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "nat vent activates"
+    },
+    {
+      "time": "2026-04-20T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 74.5,
+      "note": "outdoor has risen just above indoor (74.5F > 74.0F); still below threshold 75F — directional exit fires before threshold exit would"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T18:00:00",
+      "expect": "natural_ventilation",
+      "reason": "outdoor 70F < indoor 76F and below threshold 75F — nat vent activates"
+    },
+    {
+      "at": "2026-04-20T20:00:00",
+      "expect": "nat_vent_outdoor_rise_exit",
+      "reason": "outdoor 74.5F >= indoor 74.0F — directional exit fires; outdoor still below threshold 75F but airflow no longer beneficial"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "nat-vent-evening-activation",
+  "description": "Evening cool-down: outdoor 70F < indoor 76F — nat vent activates for free cooling",
+  "source": "synthetic",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "When outdoor is cooler than indoor and below threshold, nat vent activates",
+    "observed_behavior": "natural_ventilation with outdoor < indoor and outdoor < threshold",
+    "expected_behavior": "natural_ventilation with outdoor < indoor and outdoor < threshold"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 72,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 70.0,
+      "note": "evening: indoor above comfort_cool, outdoor 6F cooler — nat vent eligible"
+    },
+    {
+      "time": "2026-04-20T18:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "sensor opens during eligible conditions"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T18:00:00",
+      "expect": "natural_ventilation",
+      "reason": "outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 75F; indoor 76F > comfort_heat 70F — nat vent activates"
+    }
+  ]
+}

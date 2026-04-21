@@ -398,4 +398,50 @@ graph TD
 
 ---
 
-*Last Updated: 2026-03-21*
+## 12. Natural Ventilation Decision Flow
+
+`check_natural_vent_conditions()` in `AutomationEngine` implements continuous monitoring. Initial activation fires from `handle_door_window_open()` when a contact sensor opens and the system is not already in a planned window period or grace period.
+
+### 12a. Activation on Sensor Open
+
+When a contact sensor opens (after debounce), the automation engine checks whether natural ventilation conditions are met before deciding how to respond.
+
+```mermaid
+flowchart TD
+    A[Contact sensor opens\nafter debounce] --> B{Grace period active\nOR outdoor > ceiling threshold?}
+    B -->|Yes| C[Skip nat vent check\nGrace or ceiling blocks activation]
+    B -->|No| D{Planned window period\nactive for this classification?}
+    D -->|Yes| E[Skip — sensor open is expected\nno HVAC action]
+    D -->|No| F{outdoor < indoor\nAND indoor > comfort_heat\nAND outdoor < comfort_cool + delta?}
+    F -->|Yes| G[Activate natural ventilation\nHVAC off · fan on\n_natural_vent_active = True]
+    F -->|No| H[Enter paused state\nHVAC off · fan off\nWait for conditions to improve]
+```
+
+### 12b. Continuous Monitoring (`check_natural_vent_conditions`)
+
+This check runs on every coordinator update while nat vent is active or paused. Exit conditions are evaluated in priority order; the first match wins.
+
+```mermaid
+flowchart TD
+    A{State?} -->|Neither active nor paused| Z[Return — no action]
+    A -->|Natural vent active| B{All sensors closed?}
+    B -->|Yes| C[Exit nat vent\nResume HVAC from classification]
+    B -->|No| D{indoor ≤ comfort_heat?}
+    D -->|Yes| E[nat_vent_comfort_floor_exit\nRestore heat at comfort_heat]
+    D -->|No| F{outdoor ≥ indoor?}
+    F -->|Yes| G[nat_vent_outdoor_rise_exit\nFan off · enter paused state\nStart 300s lockout timer]
+    F -->|No| H{outdoor > comfort_cool + delta?}
+    H -->|Yes| I[Fan off · enter paused state]
+    H -->|No| J[Continue natural ventilation]
+    A -->|Paused| K{All sensors closed?}
+    K -->|Yes| L[Exit paused state\nResume HVAC from classification]
+    K -->|No| M{300s lockout elapsed?\nAND outdoor < indoor - 1°F?\nAND outdoor < comfort_cool + delta?}
+    M -->|All yes| N[Re-activate natural ventilation\nFan on · _natural_vent_active = True]
+    M -->|Any no| O[Stay paused\nRe-check next coordinator update]
+```
+
+**Hysteresis note:** The 1°F gap in the re-activation check (`outdoor < indoor - 1°F`) and the 300-second lockout timer together prevent rapid oscillation when outdoor and indoor temperatures are near equilibrium. Without both guards, a small thermal fluctuation could toggle nat vent on and off multiple times within a single hour.
+
+---
+
+*Last Updated: 2026-04-20*

@@ -1,0 +1,39 @@
+{
+  "name": "nat-vent-outdoor-warmer-no-activate",
+  "description": "Sensor opens; outdoor 75F >= indoor 74F — directional guard prevents nat vent activation",
+  "source": "synthetic",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "When outdoor temp equals or exceeds indoor, nat vent must not activate",
+    "observed_behavior": "paused with outdoor >= indoor guard",
+    "expected_behavior": "paused with outdoor >= indoor guard"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 72,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-20T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 75.0,
+      "note": "outdoor 75F > indoor 74F — directional guard should block nat vent"
+    },
+    {
+      "time": "2026-04-20T06:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "sensor opens; outdoor already warmer than indoor"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T06:00:00",
+      "expect": "paused",
+      "reason": "outdoor 75F >= indoor 74F — pulling in warmer air; directional guard blocks nat vent"
+    }
+  ]
+}

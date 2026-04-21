@@ -5,15 +5,23 @@
   "issue": 69,
   "notes": [
     "This scenario captures natural ventilation cycling from a real activity report (March 28, 2026).",
-    "Tests: nat vent at 06:00, pause at 14:00 (afternoon peak), re-activation at 20:00, comfort-floor exit at 23:30.",
+    "Tests: nat vent pause at 06:00 (directional guard), pause at 14:00 (afternoon peak), re-activation at 20:00, comfort-floor exit at 23:30.",
+    "At 06:00: outdoor(75F) >= indoor(74F) — Issue #115 directional guard blocks nat vent; enters paused instead.",
     "At 23:30 indoor drops to comfort_heat=70F — Issue #99 comfort-floor exit fires, heat restores.",
     "The outdoor temp (53F) is still below the nat vent threshold, but the indoor comfort floor takes priority.",
+    "06:00 assertion updated for Issue #115: outdoor >= indoor -> paused (directional guard).",
     "Promote to golden/ once all assertions pass in production."
   ],
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 72,
     "natural_vent_delta": 3.0
+  },
+  "verdict": {
+    "type": "positive",
+    "summary": "Directional guard blocks nat vent when outdoor >= indoor; threshold-based exit and comfort-floor exit still fire correctly",
+    "observed_behavior": "paused at 06:00 (outdoor >= indoor), paused at 14:00 (threshold exceeded), nat_vent at 20:00 (cooled below indoor + threshold), nat_vent_comfort_floor_exit at 23:30",
+    "expected_behavior": "paused at 06:00 (outdoor >= indoor), paused at 14:00 (threshold exceeded), nat_vent at 20:00 (cooled below indoor + threshold), nat_vent_comfort_floor_exit at 23:30"
   },
   "events": [
     {
@@ -27,7 +35,7 @@
       "type": "temp_update",
       "indoor_f": 74.0,
       "outdoor_f": 75.0,
-      "note": "morning temps — outdoor 75F is exactly at threshold (72+3), nat vent should activate"
+      "note": "morning temps — outdoor 75F >= indoor 74F; new directional guard -> paused, not nat vent"
     },
     {
       "time": "2026-03-28T14:00:00",
@@ -54,8 +62,8 @@
   "assertions": [
     {
       "at": "2026-03-28T06:00:00",
-      "expect": "natural_ventilation",
-      "reason": "sensor opened; outdoor 75F <= comfort 72F + delta 3F = 75F threshold — nat vent mode"
+      "expect": "paused",
+      "reason": "outdoor 75F >= indoor 74F — directional guard blocks nat vent; enters pause instead"
     },
     {
       "at": "2026-03-28T14:00:00",

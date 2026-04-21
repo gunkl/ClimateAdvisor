@@ -25,6 +25,8 @@ from .const import (
     CONF_FAN_MODE,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
+    CONF_NAT_VENT_HYSTERESIS_F,
+    CONF_NAT_VENT_REACTIVATION_LOCKOUT_S,
     CONF_NATURAL_VENT_DELTA,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
@@ -46,6 +48,8 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    NAT_VENT_HYSTERESIS_F,
+    NAT_VENT_REACTIVATION_LOCKOUT_S,
     OCCUPANCY_AWAY,
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
@@ -227,6 +231,9 @@ class AutomationEngine:
         # Natural ventilation mode (Issue #73)
         self._natural_vent_active: bool = False
         self._last_outdoor_temp: float | None = None
+        # Timestamp of last outdoor-warm exit (outdoor ≥ indoor → pause).
+        # Used for hysteresis lockout. Not serialized — resets on HA restart (acceptable for 5-min window).
+        self._nat_vent_outdoor_exit_time: datetime | None = None
 
         # Override confirmation period (Issue #76) — pending window before override is formally accepted
         self._override_confirm_pending: bool = False
@@ -1034,7 +1041,7 @@ class AutomationEngine:
             comfort_cool = float(self.config.get("comfort_cool", 75))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             nat_vent_threshold = comfort_cool + nat_vent_delta
-            if outdoor is not None and outdoor <= nat_vent_threshold:
+            if outdoor is not None and outdoor < nat_vent_threshold:
                 pass  # outdoor cool enough — fall through to nat-vent check below
             else:
                 _LOGGER.info(
@@ -1058,14 +1065,27 @@ class AutomationEngine:
         comfort_cool = float(self.config.get("comfort_cool", 75))
         nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
         nat_vent_threshold = comfort_cool + nat_vent_delta
-        if outdoor is not None and outdoor <= nat_vent_threshold:
-            nat_vent_reason = f"natural ventilation: outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
+        indoor = self._get_indoor_temp_f()
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        if (
+            outdoor is not None
+            and indoor is not None
+            and outdoor < indoor  # outdoor must be cooler than indoor
+            and indoor > comfort_heat  # indoor must be above comfort floor
+            and outdoor < nat_vent_threshold
+        ):
+            nat_vent_reason = (
+                f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
+                f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
+            )
             await self._set_hvac_mode("off", reason=nat_vent_reason + ", HVAC off, fan on")
             await self._activate_fan(reason=nat_vent_reason)
             self._natural_vent_active = True
             _LOGGER.info(
-                "Natural ventilation mode: outdoor %.1f\u00b0F \u2264 target %.1f\u00b0F \u2014 fan on, HVAC off",
+                "Natural ventilation mode: outdoor %.1f\u00b0F < indoor %.1f\u00b0F,"
+                " outdoor \u2264 target %.1f\u00b0F \u2014 fan on, HVAC off",
                 outdoor,
+                indoor,
                 nat_vent_threshold,
             )
             if self._emit_event_callback:
@@ -1195,6 +1215,28 @@ class AutomationEngine:
                         self._start_grace_period("automation")
                 return
 
+        # NEW (Issue #115): exit if outdoor ≥ indoor — airflow now heating not cooling
+        indoor = self._get_indoor_temp_f()
+        if self._natural_vent_active and outdoor is not None and indoor is not None and outdoor >= indoor:
+            self._natural_vent_active = False
+            self._paused_by_door = True
+            self._nat_vent_outdoor_exit_time = dt_util.now()
+            await self._deactivate_fan(
+                reason=(
+                    f"nat vent exit: outdoor {outdoor:.1f}\u00b0F \u2265 indoor {indoor:.1f}\u00b0F"
+                    " \u2014 airflow reversed"
+                )
+            )
+            _LOGGER.info(
+                "Natural vent exit: outdoor %.1f\u00b0F \u2265 indoor %.1f\u00b0F"
+                " \u2014 airflow reversed, entering pause",
+                outdoor,
+                indoor,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback("nat_vent_outdoor_rise_exit", {"outdoor": outdoor, "indoor": indoor})
+            return
+
         if self._natural_vent_active and outdoor is not None and outdoor > threshold:
             # Outdoor got too warm — exit nat vent, enter pause
             self._natural_vent_active = False
@@ -1209,18 +1251,40 @@ class AutomationEngine:
             )
             return
 
-        if self._paused_by_door and outdoor is not None and outdoor <= threshold:
-            # Outdoor cooled down — activate natural vent
-            await self._activate_fan(
-                reason=f"natural vent activated: outdoor {outdoor:.1f}\u00b0F \u2264 threshold {threshold:.1f}\u00b0F"
-            )
-            self._natural_vent_active = True
-            self._paused_by_door = False
-            _LOGGER.info(
-                "Natural vent activated: outdoor %.1f\u00b0F \u2264 threshold %.1f\u00b0F while paused",
-                outdoor,
-                threshold,
-            )
+        if self._paused_by_door and outdoor is not None and indoor is not None:
+            hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+            lockout_s = float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S))
+            comfort_heat = float(self.config.get("comfort_heat", 70))
+
+            # Enforce lockout after outdoor-warm exit
+            if self._nat_vent_outdoor_exit_time is not None:
+                elapsed = (dt_util.now() - self._nat_vent_outdoor_exit_time).total_seconds()
+                if elapsed < lockout_s:
+                    return  # still within lockout window
+
+            if (
+                outdoor < indoor - hysteresis  # outdoor must be at least 1°F below indoor
+                and indoor > comfort_heat  # indoor above comfort floor
+                and outdoor < threshold  # within acceptable ceiling
+            ):
+                # Outdoor cooled down — activate natural vent
+                await self._activate_fan(
+                    reason=(
+                        f"natural vent activated: outdoor {outdoor:.1f}\u00b0F"
+                        f" < indoor {indoor:.1f}\u00b0F \u2212 {hysteresis:.1f}\u00b0F hysteresis,"
+                        f" outdoor \u2264 threshold {threshold:.1f}\u00b0F"
+                    )
+                )
+                self._natural_vent_active = True
+                self._paused_by_door = False
+                _LOGGER.info(
+                    "Natural vent activated: outdoor %.1f\u00b0F < indoor %.1f\u00b0F \u2212 %.1f\u00b0F hysteresis,"
+                    " outdoor \u2264 threshold %.1f\u00b0F while paused",
+                    outdoor,
+                    indoor,
+                    hysteresis,
+                    threshold,
+                )
 
     async def handle_manual_override_during_pause(
         self,
@@ -1390,15 +1454,27 @@ class AutomationEngine:
         outdoor = self._last_outdoor_temp
         comfort_cool = float(self.config.get("comfort_cool", 75))
         nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-        if outdoor is not None and outdoor <= comfort_cool + nat_vent_delta:
+        indoor = self._get_indoor_temp_f()
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        if (
+            outdoor is not None
+            and indoor is not None
+            and outdoor < indoor  # outdoor must be cooler than indoor
+            and indoor > comfort_heat  # indoor must be above comfort floor
+            and outdoor < comfort_cool + nat_vent_delta
+        ):
             nat_vent_threshold = comfort_cool + nat_vent_delta
-            nat_vent_reason = f"grace expired — nat-vent: outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
+            nat_vent_reason = (
+                f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
+                f" outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
+            )
             await self._set_hvac_mode("off", reason=nat_vent_reason)
             await self._activate_fan(reason=nat_vent_reason)
             self._natural_vent_active = True
             _LOGGER.info(
-                "Re-check after grace: nat-vent conditions met — outdoor %.1f°F ≤ %.1f°F",
+                "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F, outdoor ≤ %.1f°F",
                 outdoor,
+                indoor,
                 nat_vent_threshold,
             )
             if self._emit_event_callback:

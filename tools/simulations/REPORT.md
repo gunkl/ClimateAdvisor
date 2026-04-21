@@ -8,7 +8,7 @@ Generated: 2026-04-20
 
 | State | Pass | Fail | Skip |
 |-------|------|------|------|
-| pending | 4 | 1 | 0 |
+| pending | 10 | 0 | 0 |
 | golden | 2 | 0 | 0 |
 | synthetic | 7 | 0 | 0 |
 
@@ -17,17 +17,18 @@ Generated: 2026-04-20
 
 ## PENDING Scenarios
 
-### 2026-03-28-overnight-door-open [#69] ❌ FAIL
+### 2026-03-28-overnight-door-open [#69] ✅ PASS
 
 **Description:** Door open all day (87F high); 555 min comfort violations; outdoor dropped to 53F overnight
+
+**Verdict:** positive — Directional guard blocks nat vent when outdoor >= indoor; threshold-based exit and comfort-floor exit still fire correctly
 
 **Decision timeline:**
 
 | Time | Outcome | Temp | Reason |
 |------|---------|------|--------|
-| 2026-03-28T06:00:00 | `paused` | — | outdoor temp unknown — defaulting to pause |
-| 2026-03-28T06:00:00 | `natural_ventilation` | — | outdoor 75.0F <= target 72.0F + delta 3.0F |
-| 2026-03-28T14:00:00 | `paused` | — | outdoor 87.0F exceeded threshold 75.0F — sensors still open |
+| 2026-03-28T06:00:00 | `paused` | — | outdoor or indoor temp unknown — defaulting to pause |
+| 2026-03-28T06:00:00 | `paused` | — | outdoor 75.0F >= indoor 74.0F — opening windows would add heat |
 | 2026-03-28T20:00:00 | `natural_ventilation` | — | outdoor 74.0F <= target 72.0F + delta 3.0F |
 | 2026-03-28T23:30:00 | `nat_vent_comfort_floor_exit` | — | indoor 70.0F ≤ comfort_heat 70.0F — fan stopped, heat restored |
 
@@ -35,10 +36,10 @@ Generated: 2026-04-20
 
 | Time | Expected | Actual | Result | Reason |
 |------|----------|--------|--------|--------|
-| 2026-03-28T06:00:00 | `natural_ventilation` | `natural_ventilation` | ✅ | sensor opened; outdoor 75F <= comfort 72F + delta 3F = 75F threshold â€” nat vent mode |
+| 2026-03-28T06:00:00 | `paused` | `paused` | ✅ | outdoor 75F >= indoor 74F â€” directional guard blocks nat vent; enters pause instead |
 | 2026-03-28T14:00:00 | `paused` | `paused` | ✅ | outdoor 87F > threshold 75F with sensors open â€” must exit nat vent, enter pause |
 | 2026-03-28T20:00:00 | `natural_ventilation` | `natural_ventilation` | ✅ | outdoor 74F dropped back to <= threshold 75F while paused â€” re-activate nat vent |
-| 2026-03-28T23:30:00 | `natural_ventilation` | `nat_vent_comfort_floor_exit` | ❌ | outdoor 53F still below threshold 75F â€” nat vent should remain active |
+| 2026-03-28T23:30:00 | `nat_vent_comfort_floor_exit` | `nat_vent_comfort_floor_exit` | ✅ | indoor 70F hit comfort_heat floor â€” nat vent exits and heat restores (Issue #99 behavior) |
 
 ### away-mode-classification-cycle [#85] ✅ PASS
 
@@ -65,6 +66,98 @@ Generated: 2026-04-20
 | 2026-04-05T10:00:00 | `setback_applied` | `setback_applied` | ✅ | classification while away â€” setback reapplied (80F), comfort NOT restored |
 | 2026-04-05T10:30:00 | `setback_applied` | `setback_applied` | ✅ | another classification while away â€” setback maintained (80F) |
 | 2026-04-05T14:00:00 | `comfort_restored` | `comfort_restored` | ✅ | occupancy_change to home â€” comfort_cool (75F) restored |
+
+### nat-vent-at-comfort-floor-no-activate [#115] ✅ PASS
+
+**Description:** Indoor at comfort_heat floor (70F); sensor opens â€” floor guard prevents activation even though outdoor is cooler
+
+**Verdict:** positive — When indoor is already at comfort_heat, nat vent must not activate regardless of outdoor temp
+
+**Decision timeline:**
+
+| Time | Outcome | Temp | Reason |
+|------|---------|------|--------|
+| 2026-04-20T23:00:00 | `paused` | — | indoor 70.0F <= comfort_heat 70.0F — too cold to vent |
+
+**Assertions:**
+
+| Time | Expected | Actual | Result | Reason |
+|------|----------|--------|--------|--------|
+| 2026-04-20T23:00:00 | `paused` | `paused` | ✅ | indoor 70F == comfort_heat 70F â€” floor guard blocks nat vent activation; pulling in 65F air would immediately violate comfort floor |
+
+### nat-vent-evening-activation [#115] ✅ PASS
+
+**Description:** Evening cool-down: outdoor 70F < indoor 76F â€” nat vent activates for free cooling
+
+**Verdict:** positive — When outdoor is cooler than indoor and below threshold, nat vent activates
+
+**Decision timeline:**
+
+| Time | Outcome | Temp | Reason |
+|------|---------|------|--------|
+| 2026-04-20T18:00:00 | `natural_ventilation` | — | outdoor 70.0F <= target 72.0F + delta 3.0F |
+
+**Assertions:**
+
+| Time | Expected | Actual | Result | Reason |
+|------|----------|--------|--------|--------|
+| 2026-04-20T18:00:00 | `natural_ventilation` | `natural_ventilation` | ✅ | outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 75F; indoor 76F > comfort_heat 70F â€” nat vent activates |
+
+### nat-vent-indoor-hot-outdoor-near-comfort [#115] ✅ PASS
+
+**Description:** Hot interior (78F) with outdoor near comfort (74F) â€” activates since outdoor < indoor and outdoor < threshold
+
+**Verdict:** positive — When indoor is above comfort_cool and outdoor is below both indoor and threshold, nat vent activates
+
+**Decision timeline:**
+
+| Time | Outcome | Temp | Reason |
+|------|---------|------|--------|
+| 2026-04-20T17:00:00 | `natural_ventilation` | — | outdoor 74.0F <= target 72.0F + delta 3.0F |
+
+**Assertions:**
+
+| Time | Expected | Actual | Result | Reason |
+|------|----------|--------|--------|--------|
+| 2026-04-20T17:00:00 | `natural_ventilation` | `natural_ventilation` | ✅ | outdoor 74F < indoor 78F (beneficial); outdoor 74F < threshold 75F (within ceiling); indoor 78F > comfort_heat 70F â€” nat vent activates for hot-day free cooling |
+
+### nat-vent-outdoor-rises-above-indoor-exit [#115] ✅ PASS
+
+**Description:** Nat vent active; outdoor rises above indoor â€” new directional exit fires before threshold is crossed
+
+**Verdict:** positive — When outdoor warms above indoor during active nat vent, exits to pause even if still below threshold
+
+**Decision timeline:**
+
+| Time | Outcome | Temp | Reason |
+|------|---------|------|--------|
+| 2026-04-20T18:00:00 | `natural_ventilation` | — | outdoor 70.0F <= target 72.0F + delta 3.0F |
+| 2026-04-20T20:00:00 | `nat_vent_outdoor_rise_exit` | — | outdoor 74.5F >= indoor 74.0F — airflow would add heat |
+
+**Assertions:**
+
+| Time | Expected | Actual | Result | Reason |
+|------|----------|--------|--------|--------|
+| 2026-04-20T18:00:00 | `natural_ventilation` | `natural_ventilation` | ✅ | outdoor 70F < indoor 76F and below threshold 75F â€” nat vent activates |
+| 2026-04-20T20:00:00 | `nat_vent_outdoor_rise_exit` | `nat_vent_outdoor_rise_exit` | ✅ | outdoor 74.5F >= indoor 74.0F â€” directional exit fires; outdoor still below threshold 75F but airflow no longer beneficial |
+
+### nat-vent-outdoor-warmer-no-activate [#115] ✅ PASS
+
+**Description:** Sensor opens; outdoor 75F >= indoor 74F â€” directional guard prevents nat vent activation
+
+**Verdict:** positive — When outdoor temp equals or exceeds indoor, nat vent must not activate
+
+**Decision timeline:**
+
+| Time | Outcome | Temp | Reason |
+|------|---------|------|--------|
+| 2026-04-20T06:00:00 | `paused` | — | outdoor 75.0F >= indoor 74.0F — opening windows would add heat |
+
+**Assertions:**
+
+| Time | Expected | Actual | Result | Reason |
+|------|----------|--------|--------|--------|
+| 2026-04-20T06:00:00 | `paused` | `paused` | ✅ | outdoor 75F >= indoor 74F â€” pulling in warmer air; directional guard blocks nat vent |
 
 ### warm-day-setback-cool-mode [#96] ✅ PASS
 

@@ -1,0 +1,39 @@
+{
+  "name": "nat-vent-at-comfort-floor-no-activate",
+  "description": "Indoor at comfort_heat floor (70F); sensor opens — floor guard prevents activation even though outdoor is cooler",
+  "source": "synthetic",
+  "issue": 115,
+  "verdict": {
+    "type": "positive",
+    "summary": "When indoor is already at comfort_heat, nat vent must not activate regardless of outdoor temp",
+    "observed_behavior": "paused with indoor at comfort floor",
+    "expected_behavior": "paused with indoor at comfort floor"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 72,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-20T23:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 65.0,
+      "note": "indoor exactly at comfort_heat=70F; outdoor cooler but floor guard must block activation"
+    },
+    {
+      "time": "2026-04-20T23:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.door_window",
+      "note": "sensor opens when indoor is at comfort floor"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-20T23:00:00",
+      "expect": "paused",
+      "reason": "indoor 70F == comfort_heat 70F — floor guard blocks nat vent activation; pulling in 65F air would immediately violate comfort floor"
+    }
+  ]
+}

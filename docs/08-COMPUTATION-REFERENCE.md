@@ -526,7 +526,78 @@ When `_is_within_planned_window_period()` returns `True`, the following are supp
 
 ---
 
-## 17. Automation Logic Table
+## 17. Natural Ventilation
+
+### Philosophy
+
+Natural ventilation is the cheap path. When outdoor air is cooler than indoor air, pulling it through an open door or window moves heat out of the house at zero energy cost. Running the HVAC system to achieve the same result burns electricity or gas. Climate Advisor treats outdoor air as a free resource to be used whenever three conditions are simultaneously true: the airflow is directionally beneficial, the house has not yet reached the comfort floor, and the outdoor air is not too warm to be useful. When any of those conditions fails, the system either suspends ventilation (if outdoor conditions have temporarily turned unfavorable) or restores heating (if the comfort floor has been reached). HVAC resumes only when outdoor air stops being the better option.
+
+### Activation Conditions
+
+All four must be true simultaneously for natural ventilation to activate.
+
+| Condition | Guard | Rationale |
+|---|---|---|
+| `outdoor_temp < indoor_temp` | Directional — outdoor must be cooler than indoor | Pulling in warmer air heats the house instead of cooling it; nat vent would work against the goal |
+| `indoor_temp > comfort_heat` | Floor guard | If indoor is already at or below the comfort floor, nat vent would immediately trigger a comfort-floor exit — no benefit from activating first |
+| `outdoor_temp < comfort_cool + nat_vent_delta` | Ceiling | Outdoor air too warm (even for transitional cooling) should not enter; `nat_vent_delta` provides a configurable tolerance band above `comfort_cool` |
+| At least one door/window sensor open | Physical prerequisite | Natural ventilation requires an open path for airflow |
+
+When all conditions are met: HVAC is set to `off`, the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`.
+
+### Exit Hierarchy
+
+Exit conditions are evaluated in priority order on every continuous-monitoring check (`check_natural_vent_conditions()`). The highest-priority matching condition wins.
+
+| Priority | Trigger | Action | Event emitted |
+|---|---|---|---|
+| 1 | All monitored sensors close | Exit nat vent; resume HVAC from current classification | — |
+| 2 | `indoor_temp ≤ comfort_heat` | Exit; restore heat mode at `comfort_heat` (Issue #99 comfort floor exit) | `nat_vent_comfort_floor_exit` |
+| 3 | `outdoor_temp ≥ indoor_temp` | Exit to paused state; fan off; start hysteresis lockout timer | `nat_vent_outdoor_rise_exit` |
+| 4 | `outdoor_temp > comfort_cool + nat_vent_delta` | Exit to paused state; fan off | — |
+
+**Priority 1 (sensor closes)** always wins. When the physical path for airflow is closed, nat vent ends immediately regardless of outdoor temperature comparisons.
+
+**Priority 2 (comfort floor)** restores heat rather than simply pausing. Once indoor temperature has dropped to `comfort_heat`, the right action is to heat the space back up, not to wait for outdoor conditions to change.
+
+**Priority 3 (outdoor warms above indoor)** starts a hysteresis lockout timer (see Re-activation section below). Without this lockout, the system would oscillate at thermal equilibrium: outdoor rises above indoor → exit → cooling resumes → outdoor drops below indoor → re-activate → repeat.
+
+### Re-activation from Pause
+
+When nat vent has exited due to an outdoor-warm event (Priority 2 above), re-activation requires all three of the following simultaneously:
+
+| Condition | Value | Rationale |
+|---|---|---|
+| `outdoor_temp < indoor_temp - 1.0°F` | 1°F hysteresis band | Prevents immediate re-activation when temperatures are nearly equal; outdoor must be meaningfully cooler |
+| Time elapsed since last outdoor-warm exit ≥ 300 seconds | 5-minute lockout | Prevents oscillation when outdoor and indoor temperatures are at near-equilibrium; gives thermal conditions time to settle |
+| `outdoor_temp < comfort_cool + nat_vent_delta` | Ceiling still valid | Ensures outdoor air is still within the useful temperature range |
+
+If all three conditions are met, nat vent re-activates: HVAC remains off, fan turns on, `_natural_vent_active` is set back to `True`.
+
+### `natural_vent_delta` Semantics
+
+`natural_vent_delta` is a ceiling tolerance: the number of degrees above `comfort_cool` that outdoor air is still considered acceptable for natural ventilation. The effective outdoor temperature ceiling is `comfort_cool + natural_vent_delta`.
+
+**Worked example:** indoor = 78°F, outdoor = 74°F, comfort_heat = 70°F, comfort_cool = 72°F, delta = 3°F.
+
+- Ceiling threshold = 72 + 3 = **75°F**
+- `outdoor (74) < indoor (78)` ✓ — airflow is directionally beneficial
+- `indoor (78) > comfort_heat (70)` ✓ — above comfort floor
+- `outdoor (74) < ceiling (75)` ✓ — outdoor is within the useful range
+
+All conditions met → natural ventilation activates.
+
+If outdoor were 76°F instead, the ceiling check would fail (`76 ≥ 75`) and nat vent would not activate despite outdoor still being cooler than indoor.
+
+Default value: `NAT_VENT_DELTA_DEFAULT = 3°F` (see §15 Defaults Reference).
+
+### Phase 2 Note
+
+Trajectory-aware look-ahead — using the thermal model and short-range outdoor temperature forecast to project the activation window into the future — is deferred to Issue #116.
+
+---
+
+## 18. Automation Logic Table
 
 This is the definitive reference for expected system behavior across all classification contexts and sensor/user events. Every cell describes what the automation engine does when a given event fires in a given classification context.
 
@@ -588,4 +659,4 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 ---
 
-_Last Updated: 2026-04-19_
+_Last Updated: 2026-04-20_

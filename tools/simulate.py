@@ -262,11 +262,21 @@ class ClimateSimulator:
     def _apply_nat_vent_or_pause(self, ts: str, event_type: str) -> Decision:
         """Decide: natural ventilation or full pause? Returns and records the decision."""
         outdoor = self.state.outdoor_temp
+        indoor = self.state.indoor_temp
         comfort_cool = float(self.config.get("comfort_cool", 75))
+        comfort_heat = float(self.config.get("comfort_heat", 70))
         delta = float(self.config.get("natural_vent_delta", 3.0))
         threshold = comfort_cool + delta
 
-        if outdoor is not None and outdoor <= threshold:
+        # Issue #115: activation guard — outdoor must be cooling (outdoor < indoor) and
+        # indoor must be above comfort floor (indoor > comfort_heat) before opening windows.
+        if (
+            outdoor is not None
+            and indoor is not None
+            and outdoor < indoor
+            and indoor > comfort_heat
+            and outdoor <= threshold
+        ):
             self.state.hvac_mode = "off"
             self.state.fan_mode = "on"
             self.state.fan_active = True
@@ -284,11 +294,14 @@ class ClimateSimulator:
             self.state.hvac_mode = "off"
             self.state.paused_by_door = True
             self.state.natural_vent_active = False
-            reason = (
-                f"outdoor {outdoor}F > threshold {threshold}F"
-                if outdoor is not None
-                else "outdoor temp unknown — defaulting to pause"
-            )
+            if outdoor is not None and indoor is not None and outdoor >= indoor:
+                reason = f"outdoor {outdoor}F >= indoor {indoor}F — opening windows would add heat"
+            elif indoor is not None and indoor <= comfort_heat:
+                reason = f"indoor {indoor}F <= comfort_heat {comfort_heat}F — too cold to vent"
+            elif outdoor is not None and outdoor > threshold:
+                reason = f"outdoor {outdoor}F > threshold {threshold}F"
+            else:
+                reason = "outdoor or indoor temp unknown — defaulting to pause"
             d = Decision(ts, event_type, "paused", reason, "off", self.state.fan_mode)
 
         self.decisions.append(d)
@@ -318,10 +331,27 @@ class ClimateSimulator:
             self.decisions.append(d)
             return d
 
+        # Issue #115: exit if outdoor >= indoor — airflow now heating, not cooling
+        outdoor = self.state.outdoor_temp
+        if self.state.natural_vent_active and outdoor is not None and indoor is not None and outdoor >= indoor:
+            self.state.natural_vent_active = False
+            self.state.paused_by_door = True
+            self.state.fan_mode = "auto"
+            self.state.fan_active = False
+            d = Decision(
+                ts,
+                "temp_update",
+                "nat_vent_outdoor_rise_exit",
+                f"outdoor {outdoor}F >= indoor {indoor}F — airflow would add heat",
+                "off",
+                "auto",
+            )
+            self.decisions.append(d)
+            return d
+
         # Existing: exit nat vent if outdoor climbed above threshold
         comfort_cool = float(self.config.get("comfort_cool", 75))
         delta = float(self.config.get("natural_vent_delta", 3.0))
-        outdoor = self.state.outdoor_temp
         threshold = comfort_cool + delta
 
         if outdoor is not None and outdoor > threshold and self.state.sensors_open:

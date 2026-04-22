@@ -96,7 +96,7 @@ Default values used in examples: `comfort_heat = 70`, `comfort_cool = 75`, `setb
 | Pre-heat (cold front, significant) | `comfort_heat + 3` | n/a | 73°F | n/a |
 
 **Notes:**
-- Bedtime setback depth is now computed by `compute_bedtime_setback()` in `automation.py` (see §5a). The hardcoded `−4°F / +3°F` defaults remain as fallbacks when the thermal model confidence is `"none"`.
+- Bedtime setback depth is now computed by `compute_bedtime_setback()` in `automation.py` (see §5a). When `sleep_heat` / `sleep_cool` are explicitly configured (#101), those values are used directly as the bedtime setpoint, bypassing the adaptive depth computation. The hardcoded defaults (`DEFAULT_SLEEP_HEAT = 66°F`, `DEFAULT_SLEEP_COOL = 78°F`) apply when neither sleep temps are configured nor thermal model data is available.
 - Bedtime cool still applies the same `+3°F` offset logic at default; when the thermal model is active, the depth is scaled to ensure the house warms/cools back to comfort within the overnight recovery window.
 - Bedtime heat continues to incorporate `setback_modifier` on top of the computed depth.
 - `VACATION_SETBACK_EXTRA = 3` degrees beyond the normal setback.
@@ -411,6 +411,8 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `DEFAULT_COMFORT_COOL` | `75` | °F | Cooling target when home/comfort |
 | `DEFAULT_SETBACK_HEAT` | `60` | °F | Heating target when away |
 | `DEFAULT_SETBACK_COOL` | `80` | °F | Cooling target when away |
+| `DEFAULT_SLEEP_HEAT` | `66` | °F | Bedtime heating target (default: `comfort_heat − 4°F`); overrides adaptive depth when `sleep_heat` is explicitly configured (#101) |
+| `DEFAULT_SLEEP_COOL` | `78` | °F | Bedtime cooling target (default: `comfort_cool + 3°F`); overrides adaptive depth when `sleep_cool` is explicitly configured (#101) |
 | `THRESHOLD_HOT` | `85` | °F | today_high threshold for `hot` day type |
 | `THRESHOLD_WARM` | `75` | °F | today_high threshold for `warm` day type |
 | `THRESHOLD_MILD` | `60` | °F | today_high threshold for `mild` day type |
@@ -659,4 +661,4 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 ---
 
-_Last Updated: 2026-04-20_
+_Last Updated: 2026-04-22_

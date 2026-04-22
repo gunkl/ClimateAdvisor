@@ -2,7 +2,7 @@
 
 An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
 
-**Current version: 0.2.1**
+**Current version: 0.3.26**
 
 ## Architecture Overview
 
@@ -98,6 +98,27 @@ After 14+ days of data, the learning engine starts analyzing patterns:
 - **Comfort violations**: Suggests less aggressive setbacks if the house is uncomfortable too often
 - **Door pauses**: Identifies problem doors and offers to adjust monitoring
 
+### AI Investigator
+
+Climate Advisor includes a Claude-powered Activity Report accessible from the dashboard. When a Claude API key is configured in settings, the AI Investigator analyzes recent system activity — HVAC decisions, automation events, anomalies, and thermal performance — and returns a structured report with a timeline, decision rationale, and diagnostics. On-demand analysis can also be triggered via the `climate_advisor.ai_activity_report` service.
+
+### Sleep Temperature Configuration
+
+Separate `sleep_heat` and `sleep_cool` setpoints can be configured to define bedtime comfort targets that are distinct from the away setback temperatures. This allows a warmer-than-setback but cooler-than-daytime sleep environment without conflating bedtime comfort with absence setback.
+
+### Natural Ventilation Directional Guard
+
+Phase 1 of the natural ventilation guard prevents counterproductive ventilation: nat vent activation is blocked when outdoor temperature is warmer than indoor (cooling intent) or cooler than indoor (heating intent). This ensures ventilation is only opened when it will move indoor temperature in the desired direction.
+
+### Thermal Observation Architecture (v2)
+
+The thermal model uses a two-parameter first-order physics ODE to characterize how the house envelope and HVAC system move indoor temperature over time:
+
+- **`k_passive`** (hr⁻¹, always negative) — envelope decay rate; how fast the house drifts toward outdoor temperature without HVAC
+- **`k_active_heat` / `k_active_cool`** (°F/hr) — net HVAC contribution above envelope exchange
+
+Parameters are extracted from the full post-HVAC decay curve and active-phase samples via OLS regression — not from a single start/end temperature delta. This eliminates the zero-rate observations caused by thermostat sensor lag that affected the previous scalar model. The physics-based predicted temperature curve shown in the dashboard is driven by these parameters.
+
 ## Installation
 
 ### HACS (Recommended)
@@ -152,6 +173,7 @@ Set your wake time, bedtime, and when you want the daily briefing.
 All settings are editable after setup, plus advanced options:
 - **Learning enabled**: Toggle the learning engine on/off
 - **Aggressive savings**: More aggressive energy-saving strategies
+- **AI Investigator**: Enable Claude-powered activity analysis; requires a Claude API key
 
 ## Entities Created
 
@@ -216,6 +238,30 @@ Log a comprehensive diagnostic snapshot to HA logs at INFO level for troubleshoo
 service: climate_advisor.dump_diagnostics
 ```
 
+### `climate_advisor.ai_activity_report`
+
+Trigger an on-demand AI activity report analysis. Requires AI Investigator to be enabled and a Claude API key configured.
+
+```yaml
+service: climate_advisor.ai_activity_report
+```
+
+### `climate_advisor.get_ai_report`
+
+Retrieve the most recent AI activity report.
+
+```yaml
+service: climate_advisor.get_ai_report
+```
+
+### `climate_advisor.clear_ai_reports`
+
+Clear persisted AI report history.
+
+```yaml
+service: climate_advisor.clear_ai_reports
+```
+
 ## Dashboard
 
 Climate Advisor includes a built-in dashboard panel accessible from the HA sidebar. The panel provides:
@@ -224,6 +270,7 @@ Climate Advisor includes a built-in dashboard panel accessible from the HA sideb
 - **Daily Briefing** — Full briefing with TLDR summary table, verbosity control (tldr_only/normal/verbose)
 - **Classification Details** — Forecast data, window schedules, trend analysis
 - **Learning** — Today's record, suggestions, compliance tracking
+- **AI Investigator** — Claude-powered activity report with timeline, HVAC decisions, anomalies, and diagnostics (requires API key)
 - **Settings** — Read-only view of all configuration grouped by category
 - **Debug** — Automation state, force reclassify, resend briefing, diagnostics dump
 
@@ -312,11 +359,17 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] 250-char notification limit for short notifications (#21)
 - [x] Startup race condition handling for weather entity (#36)
 
-### Phase 2.5: Thermal Learning (v0.2.x) — Remaining
-- [ ] Thermal model learning (heat/cool rates, recovery time estimates)
-- [ ] Optimized pre-heat/pre-cool timing based on thermal performance
-- [ ] Setback depth optimization based on house characteristics
-- [ ] Override-driven scheduling suggestions ("You raise temp 2°F at 3pm daily")
+### Phase 2.5: Thermal Learning & AI Investigator (v0.3.24–v0.3.26) — Shipped
+- [x] Thermal model v2: two-parameter physics ODE (`k_passive` + `k_active_heat`/`k_active_cool`) replacing scalar rate model (#114)
+- [x] `PendingThermalEvent` state machine with post-heat decay curve OLS regression
+- [x] Pending thermal event persisted across HA restarts
+- [x] Optimized pre-heat/pre-cool timing and setback depth based on thermal performance
+- [x] Claude API client with circuit breaker, retry, rate limiting, and budget tracking (`claude_api.py`)
+- [x] AI skills framework — pluggable registry for AI analysis capabilities (`ai_skills.py`)
+- [x] AI Investigator (Activity Report skill): timeline, HVAC decisions, anomalies, diagnostics (`ai_skills_activity.py`)
+- [x] Persistent 1-year chart log ring buffer for temperature/HVAC/fan/event data (`chart_log.py`)
+- [x] Sleep temperature setpoints (`sleep_heat` / `sleep_cool`) distinct from away setback
+- [x] Natural ventilation directional guard — Phase 1: blocks nat vent when outdoor temp opposes intent (#115)
 
 ### Phase 3: Seasonal & Cost Intelligence (v0.3+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)
@@ -360,6 +413,10 @@ custom_components/climate_advisor/
 ├── api.py               # 12 REST API endpoints for dashboard panel
 ├── state.py             # State persistence across restarts
 ├── repairs.py           # HA repairs flow for config issues
+├── claude_api.py        # Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking
+├── ai_skills.py         # Lightweight skill registry framework for pluggable AI capabilities
+├── ai_skills_activity.py  # Activity Report skill (AI Investigator): timeline, decisions, anomalies, diagnostics
+├── chart_log.py         # Persistent 1-year ring buffer of HVAC/fan/temperature data + event markers
 ├── services.yaml        # Service definitions
 ├── frontend/
 │   └── index.html       # Built-in dashboard panel

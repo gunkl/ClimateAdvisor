@@ -560,6 +560,15 @@ The dashboard is a single-file HTML/CSS/JS panel. When adding new status grid ca
 - For clipboard operations, always include a `document.execCommand('copy')` fallback via temporary textarea — `navigator.clipboard` is unavailable in HA iframe panels without secure context
 - Use `escapeHtml()` for any user-provided or API-returned content rendered as innerHTML
 
+**Target Band (Issue #119):** The chart overlay previously called "Comfort Band" is now "Target Band". The `get_chart_data()` API response sends `target_band: [{ts, lower, upper}]` — a time-series array, not static scalars. The frontend renders this as a stepped/interpolated shaded region that changes with time of day and occupancy mode. If modifying chart rendering code, never assume `target_band` is a single pair of values; always iterate the array. The `_compute_target_band_schedule()` function in `coordinator.py` is the single source of truth for band logic — do not replicate band calculations in `index.html`.
+
+`_compute_target_band_schedule()` full signature: `(hourly_timestamps, config, occupancy_mode, now, setback_modifier=0.0, thermal_model=None, classification=None)`. Key behaviors:
+- When `thermal_model` + `classification` are both provided, sleep temps are derived from `compute_bedtime_setback(config, thermal_model, classification)` — the same function used by `automation.py`. Chart band, prediction curve, and automation engine all use identical adaptive sleep setpoints.
+- Vacation mode applies deep setback to **all** forecast days; away mode applies setback to today only.
+- Night-owl schedules (`sleep_time < wake_time`) are handled via midnight wraparound: `sleep_h += 24`; per-timestamp `h_n = h + 24 if night_owl and h < wake_h else h`.
+- `setback_modifier` is applied to setback bounds so chart and automation agree on trend days.
+- The function is pre-computed once before the forecast-hour loop (not called per-hour).
+
 #### API-Frontend Contract
 
 When adding new REST API endpoints or modifying response shapes, verify that the frontend JavaScript reads the exact same key names. Search `index.html` for the endpoint path and check every property access. Common failure: backend returns `monthly_cost_estimate` but frontend reads `monthly_cost`.
@@ -738,6 +747,6 @@ When creating PRs:
 
 ---
 
-**Last Updated**: 2026-03-18
+**Last Updated**: 2026-04-25
 **For**: Climate Advisor — Home Assistant Integration
 **AI**: Claude Opus 4.6

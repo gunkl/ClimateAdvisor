@@ -199,6 +199,16 @@ The mean of all per-sample estimates is taken. Out-of-bounds values are rejected
 
 Called by `learning.commit_thermal_event()` after parameter extraction. Appends the observation to the rolling history (capped at 90 entries) and updates `thermal_model_cache` via EWMA using the observation's `confidence_grade`. State is saved to disk immediately after each commit — HA restarts mid-day do not lose accumulated observations.
 
+### Predicted Indoor Temperature — Band Schedule Alignment (Issue #119)
+
+`_build_predicted_indoor_future()` in `coordinator.py` accepts a `classification` parameter alongside `thermal_model`. When both are provided:
+
+- The target band schedule is computed once via `_compute_target_band_schedule(hourly_timestamps, config, occupancy_mode, now, setback_modifier, thermal_model, classification)` before iterating forecast hours (pre-computed, not per-hour — Issue #119 B3 fix).
+- Sleep temperatures in the band are derived from `compute_bedtime_setback(config, thermal_model, classification)`, the same function used by `automation.py`. Chart band, physics prediction, and automation engine all use identical adaptive sleep setpoints when a model is available.
+- Occupancy mode is propagated: away today → setback setpoints for today's hours only; vacation → deep setback for all forecast days.
+
+When `thermal_model` or `classification` is absent, the band falls back to static sleep-temp defaults and the ramp interpolation path is used for the indoor prediction curve.
+
 ### `get_thermal_model() -> dict`
 
 Returns the current accumulated thermal model from `thermal_model_cache`.

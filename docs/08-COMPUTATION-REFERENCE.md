@@ -139,6 +139,8 @@ T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt)
 
 `_simulate_indoor_physics()` in `coordinator.py` implements one ODE time step. `_build_predicted_indoor_future()` drives the simulation forward through the schedule, switching `Q` between `k_active_heat`, `k_active_cool`, and `0` depending on the HVAC mode in each period.
 
+`_build_predicted_indoor_future()` accepts `occupancy_mode` (default `OCCUPANCY_HOME`) and `classification` parameters. It pre-computes the band schedule once via `_compute_target_band_schedule()` — passing `thermal_model`, `classification`, and `setback_modifier` — before iterating forecast hours. This means the predicted indoor curve uses the same adaptive sleep setpoints as the automation engine, and correctly targets setback temperatures on away/vacation days. Vacation mode propagates setback to all forecast days; away mode applies setback to today only.
+
 **Fallback (ramp interpolation):** When model confidence is `"none"` or `k_passive` is unavailable/non-negative, the legacy ramp path runs:
 
 | Condition | Ramp Duration |
@@ -147,6 +149,39 @@ T(t+dt) = T_outdoor + (T - T_outdoor) * exp(k_p * dt) + (Q/k_p) * (exp(k_p * dt)
 | Model available (legacy path only) | `ramp_hours = temp_delta / rate`; minimum 15 minutes; computed by `_compute_ramp_hours()` |
 
 `_compute_ramp_hours()` uses whichever rate applies to the transition direction (heating rate for rising ramps, cooling rate for falling ramps).
+
+### 5d. Dynamic Target Band — `_compute_target_band_schedule()`
+
+From Issue #119, the chart's "Target Band" overlay is no longer two static scalars. `get_chart_data()` calls `_compute_target_band_schedule()` once (pre-computed before the loop) to produce a time-series `[{ts, lower, upper}]` covering every forecast hour, and passes this as `target_band` in the API response.
+
+**Function signature:** `_compute_target_band_schedule(hourly_timestamps, config, occupancy_mode, now, setback_modifier=0.0, thermal_model=None, classification=None) → list[{ts, lower, upper}]`
+
+**Per-timestamp band logic:**
+
+| Occupancy / time condition | lower | upper |
+|---|---|---|
+| Away — today only | `setback_heat + setback_modifier` | `setback_cool − setback_modifier` |
+| Vacation — **all forecast days** | `setback_heat + setback_modifier − VACATION_SETBACK_EXTRA` | `setback_cool − setback_modifier + VACATION_SETBACK_EXTRA` |
+| Home/guest — pre-wake (`h_n < wake_h`) | `sleep_heat` | `sleep_cool` |
+| Home/guest — wake ramp (2h linear) | Interpolates `sleep_heat → comfort_heat` | Interpolates `sleep_cool → comfort_cool` |
+| Home/guest — awake (`wake_h+2h ≤ h_n < sleep_h`) | `comfort_heat` | `comfort_cool` |
+| Home/guest — sleep ramp (1h linear) | Interpolates `comfort_heat → sleep_heat` | Interpolates `comfort_cool → sleep_cool` |
+| Home/guest — post-sleep (`h_n ≥ sleep_h+1h`) | `sleep_heat` | `sleep_cool` |
+| Away — **future days** (tomorrow+) | Normal home/guest schedule (assumes return) | Same |
+
+**`setback_modifier` parameter:** The trend-based offset from `DayClassification` (see §3). Positive values (cold front coming) narrow the setback; negative values (warm trend) widen it. Passing `setback_modifier` ensures the chart band and the automation engine use identical setback bounds on trend days.
+
+**Vacation scope:** Vacation mode applies deep setback to **all** forecast days (today and future), not just today. This reflects that a vacationing household is away for the entire forecast window. Away mode applies setback to today only (assumes a return by tomorrow).
+
+**Night-owl schedule normalization:** When `sleep_time < wake_time` (e.g., sleep=01:00, wake=09:00), the schedule wraps past midnight. The function normalises by adding 24 to `sleep_h` (making it e.g. 25) and computing `h_n = h + 24 if night_owl and h < wake_h else h` for each timestamp's local hour. This maps all timestamps onto a continuous `[wake_h, sleep_h]` number line regardless of the midnight boundary.
+
+**Adaptive sleep temperatures (G1/G2):** When both `thermal_model` and `classification` are provided, `sleep_heat` and `sleep_cool` are derived from `compute_bedtime_setback(config, thermal_model, classification)` — the same function used by `automation.py`. This eliminates the three-implementation gap between chart band, physics prediction, and automation setpoints: all three now derive sleep temps from the same adaptive logic. When `thermal_model` or `classification` is `None`, the fallback values (`comfort_heat − DEFAULT_SETBACK_DEPTH_F`, `comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F`) are used.
+
+**Notes:**
+- `sleep_heat` and `sleep_cool` base fallbacks are `comfort_heat − 4°F` and `comfort_cool + 3°F` respectively, but are overridden when the user has explicitly configured sleep temperatures (Issue #101). Adaptive `compute_bedtime_setback()` output is used in preference to both when a thermal model is available.
+- HVAC-off days (warm/mild) still display the full target band. The system actively monitors and will engage heating or cooling if indoor temperature wanders outside the target range.
+- The chart layer was renamed from "Comfort Band" to "Target Band" in Issue #119 to reflect that the band now varies over time.
+- `_build_predicted_indoor_future()` pre-computes the band schedule once via `_compute_target_band_schedule()` before iterating forecast hours (Issue #119 Phase 2 fix for B3 — eliminates redundant per-hour recomputation).
 
 ---
 
@@ -661,4 +696,4 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 ---
 
-_Last Updated: 2026-04-22_
+_Last Updated: 2026-04-25_

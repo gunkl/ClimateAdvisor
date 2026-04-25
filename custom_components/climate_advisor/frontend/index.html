@@ -436,7 +436,7 @@
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(33,150,243,1)"></span><span>Actual Outdoor</span></div>
     </div>
     <div class="chart-overlay-bar">
-      <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Comfort band</label>
+      <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Target band</label>
       <label id="overlay-humidity-label"><input type="checkbox" id="overlay-humidity" onchange="toggleOverlay('humidity')"> Humidity</label>
       <label id="overlay-feelslike-label"><input type="checkbox" id="overlay-feelslike" onchange="toggleOverlay('feelslike')"> Feels-like</label>
     </div>
@@ -968,8 +968,6 @@
     const textColor = isDark ? '#9e9e9e' : '#757575';
 
     const log = chartData.state_log || [];
-    const comfortHeat = chartData.comfort_heat ?? null;
-    const comfortCool = chartData.comfort_cool ?? null;
     const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
 
     // Historical predicted points stored in state_log (absolute timestamps)
@@ -995,24 +993,40 @@
     const actOutdoorPts = (chartData.actual_outdoor || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
     const actIndoorPts  = (chartData.actual_indoor  || []).map(p => ({ x: _parseTs(p.time), y: p.temp }));
 
-    // Comfort band dataset
-    const comfortBandVisible = document.getElementById('overlay-comfort')?.checked ?? true;
-    const comfortBandDs = (comfortHeat != null && comfortCool != null) ? {
-      label: 'Comfort Band',
+    // Target band datasets (dynamic — reflects occupancy and time-of-day schedule)
+    const targetBandVisible = document.getElementById('overlay-comfort')?.checked ?? true;
+    const _targetBandRaw = chartData.target_band || [];
+    const targetBandUpper = _targetBandRaw.map(e => ({ x: _parseTs(e.ts), y: e.upper }));
+    const targetBandLower = _targetBandRaw.map(e => ({ x: _parseTs(e.ts), y: e.lower }));
+    const targetBandUpperDs = _targetBandRaw.length > 0 ? {
+      label: 'Target Band',
       type: 'line',
-      data: [{ x: rMin, y: comfortCool }, { x: rMax, y: comfortCool }],
+      data: targetBandUpper,
       borderColor: CHART_COLORS.comfort_border,
       borderWidth: 1,
       borderDash: [3, 3],
       backgroundColor: CHART_COLORS.comfort_band,
-      fill: {
-        target: { value: comfortHeat },
-      },
+      fill: '+1',
       pointRadius: 0,
       tension: 0,
       yAxisID: 'y',
-      hidden: !comfortBandVisible,
+      hidden: !targetBandVisible,
       order: 5,
+    } : null;
+    const targetBandLowerDs = _targetBandRaw.length > 0 ? {
+      label: '_target_band_lower',
+      type: 'line',
+      data: targetBandLower,
+      borderColor: CHART_COLORS.comfort_border,
+      borderWidth: 1,
+      borderDash: [3, 3],
+      backgroundColor: 'transparent',
+      fill: false,
+      pointRadius: 0,
+      tension: 0,
+      yAxisID: 'y',
+      hidden: !targetBandVisible,
+      order: 6,
     } : null;
 
     // Humidity / feels-like overlays
@@ -1077,7 +1091,8 @@
       },
     ];
 
-    if (comfortBandDs) datasets.push(comfortBandDs);
+    if (targetBandUpperDs) datasets.push(targetBandUpperDs);
+    if (targetBandLowerDs) datasets.push(targetBandLowerDs);
 
     // Always add humidity/feels-like datasets so toggleOverlay() can find them.
     // Disable the checkbox if no data is available for the selected range.
@@ -1470,17 +1485,24 @@
   function toggleOverlay(name) {
     if (!_tempChart) return;
     const labelMap = {
-      comfort_band: 'Comfort Band',
+      comfort_band: 'Target Band',
       humidity: 'Humidity %',
       feelslike: 'Feels-like',
     };
     const label = labelMap[name];
     if (!label) return;
-    const ds = _tempChart.data.datasets.find(d => d.label === label);
-    if (ds) {
-      ds.hidden = !ds.hidden;
-      _tempChart.update('none');
+    // For target band, toggle both the upper and the hidden lower dataset
+    if (name === 'comfort_band') {
+      _tempChart.data.datasets.forEach(d => {
+        if (d.label === 'Target Band' || d.label === '_target_band_lower') {
+          d.hidden = !d.hidden;
+        }
+      });
+    } else {
+      const ds = _tempChart.data.datasets.find(d => d.label === label);
+      if (ds) ds.hidden = !ds.hidden;
     }
+    _tempChart.update('none');
   }
 
   window.setChartRange = setChartRange;

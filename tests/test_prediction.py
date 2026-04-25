@@ -8,6 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from custom_components.climate_advisor.classifier import DayClassification
+from custom_components.climate_advisor.const import (
+    OCCUPANCY_AWAY,
+    OCCUPANCY_HOME,
+    OCCUPANCY_VACATION,
+    VACATION_SETBACK_EXTRA,
+)
 from custom_components.climate_advisor.coordinator import (
     ClimateAdvisorCoordinator,
     _build_future_forecast_outdoor,
@@ -752,6 +758,7 @@ def _make_chart_coordinator(temp_unit: str = "fahrenheit", thermal_model_return:
 
     coord._thermal_factors = None
     coord._get_indoor_temp = MagicMock(return_value=None)
+    coord._occupancy_mode = "home"
 
     return coord
 
@@ -1212,3 +1219,245 @@ class TestBuildPredictedIndoorFuture:
         assert result[0]["temp"] == pytest.approx(70.0, abs=0.1), (
             f"02:00 UTC = 21:00 local must map to comfort zone (70°F), got {result[0]['temp']}"
         )
+
+
+class TestBuildPredictedIndoorFutureOccupancy:
+    """Tests for occupancy-aware setpoint threading in _build_predicted_indoor_future."""
+
+    # Use a "now" anchored in the morning so all today-daytime hours are future.
+    # _PRED_NOW = 2026-04-10 12:00 UTC; use a fresh value to be self-contained.
+    _NOW = datetime(2026, 4, 10, 6, 0, 0, tzinfo=UTC)  # 6 AM UTC — all daytime is future
+
+    def _call(self, forecast, occupancy_mode=OCCUPANCY_HOME, now=None, config=_PRED_CONFIG):
+        _now = now or self._NOW
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(_now)):
+            return _build_predicted_indoor_future(forecast, config, _now, occupancy_mode=occupancy_mode)
+
+    def test_away_uses_setback_setpoints_in_fallback(self):
+        """Away today → all today entries should use setback_heat, not comfort_heat.
+
+        Cold day (high=40°F → heat mode). Away → _compute_target_band_schedule returns
+        lower=setback_heat=60 for today. Fallback path (no thermal model) → predicted
+        temp = band lower = 60, not comfort_heat=70.
+        """
+        now = self._NOW
+        entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 13)]
+        result = self._call(entries, occupancy_mode=OCCUPANCY_AWAY, now=now)
+        assert result, "Expected future entries"
+        waking = [e for e in result if datetime.fromisoformat(e["ts"]).hour in range(9, 22)]
+        assert waking, "Expected waking-hour entries in result"
+        for e in waking:
+            assert e["temp"] == pytest.approx(60.0, abs=0.1), (
+                f"Away today: waking-hour entry should be setback_heat=60, got {e['temp']}"
+            )
+
+    def test_vacation_uses_deep_setback_in_fallback(self):
+        """Vacation today → entries use setback_heat - VACATION_SETBACK_EXTRA.
+
+        Cold day (high=40°F → heat mode). Vacation → lower = setback_heat(60) - 3 = 57.
+        Fallback path → predicted temp = 57.
+        """
+        now = self._NOW
+        entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 13)]
+        result = self._call(entries, occupancy_mode=OCCUPANCY_VACATION, now=now)
+        assert result, "Expected future entries"
+        expected = _PRED_CONFIG["setback_heat"] - VACATION_SETBACK_EXTRA  # 60 - 3 = 57
+        waking = [e for e in result if datetime.fromisoformat(e["ts"]).hour in range(9, 22)]
+        assert waking, "Expected waking-hour entries in result"
+        for e in waking:
+            assert e["temp"] == pytest.approx(expected, abs=0.1), (
+                f"Vacation today: waking-hour entry should be {expected}°F, got {e['temp']}"
+            )
+
+    def test_away_tomorrow_reverts_to_normal_schedule(self):
+        """Away today but tomorrow entries should use the normal comfort schedule.
+
+        _compute_target_band_schedule applies setback only when ts_date == now_date.
+        Tomorrow should revert to the wake/sleep schedule → waking hours at comfort_heat=70.
+        """
+        now = self._NOW  # 2026-04-10 06:00 UTC
+        # Build entries for tomorrow's daytime: 2026-04-11 hours 9–21 UTC (all future)
+        tomorrow_start = datetime(2026, 4, 11, 0, 0, 0, tzinfo=UTC)
+        entries = [_pred_entry(tomorrow_start + timedelta(hours=i), 40.0) for i in range(9, 22)]
+        result = self._call(entries, occupancy_mode=OCCUPANCY_AWAY, now=now)
+        assert result, "Expected tomorrow entries"
+        waking = [e for e in result if datetime.fromisoformat(e["ts"]).hour in range(9, 22)]
+        assert waking, "Expected waking-hour entries for tomorrow"
+        for e in waking:
+            assert e["temp"] == pytest.approx(70.0, abs=0.1), (
+                f"Away tomorrow: waking hours should revert to comfort_heat=70, got {e['temp']}"
+            )
+
+    def test_home_occupancy_unchanged(self):
+        """Explicit occupancy=home must produce the same result as the default (no regression).
+
+        Cold day (high=40°F → heat mode), waking hours → comfort_heat=70.
+        """
+        now = datetime(2026, 4, 10, 6, 0, 0, tzinfo=UTC)
+        entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 25)]
+        result_default = self._call(entries, occupancy_mode=OCCUPANCY_HOME, now=now)
+        result_explicit = self._call(entries, occupancy_mode=OCCUPANCY_HOME, now=now)
+        assert result_default == result_explicit
+        waking = [e for e in result_default if datetime.fromisoformat(e["ts"]).hour == 14]
+        assert waking, "Expected hour-14 entries"
+        for e in waking:
+            assert e["temp"] == pytest.approx(70.0, abs=0.1), (
+                f"Home occupancy: hour-14 should be comfort_heat=70, got {e['temp']}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# TG1: Physics path + occupancy-aware setpoint threading
+# ---------------------------------------------------------------------------
+
+# Thermal model sufficient to activate physics path (confidence != "none", k_passive < 0).
+# k_active_heat=10 chosen so HVAC can overcome envelope loss at outdoor=40°F:
+#   eq_temp = outdoor - k_active/k_passive = 40 + 10/0.3 ≈ 73°F > comfort_heat(70)
+_PHYSICS_THERMAL_MODEL = {
+    "confidence": "low",
+    "k_passive": -0.3,
+    "k_active_heat": 10.0,
+    "k_active_cool": -10.0,
+    "heating_rate_f_per_hour": 10.0,
+    "cooling_rate_f_per_hour": 10.0,
+    "observation_count_heat": 3,
+    "observation_count_cool": 3,
+}
+_PHYSICS_CONFIG = {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 66,
+    "sleep_cool": 78,
+    "wake_time": "06:30",
+    "sleep_time": "22:30",
+}
+
+
+class TestBuildPredictedIndoorFuturePhysics:
+    """TG1: Physics ODE path uses the correct setpoint based on occupancy mode.
+
+    Verifies that occupancy_mode is threaded through to the ODE setpoint source
+    (_compute_target_band_schedule via _band["lower"]/"upper"), not hardcoded.
+    """
+
+    _NOW = datetime(2026, 4, 10, 6, 0, 0, tzinfo=UTC)  # 6 AM — all daytime is future
+
+    def _call(
+        self,
+        forecast,
+        occupancy_mode=OCCUPANCY_HOME,
+        now=None,
+        config=_PHYSICS_CONFIG,
+        indoor_temp=65.0,
+    ):
+        _now = now or self._NOW
+        with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(_now)):
+            return _build_predicted_indoor_future(
+                forecast,
+                config,
+                _now,
+                current_indoor_temp=indoor_temp,
+                thermal_model=_PHYSICS_THERMAL_MODEL,
+                occupancy_mode=occupancy_mode,
+            )
+
+    def test_home_physics_heats_toward_comfort_heat(self):
+        """Home + physics: ODE setpoint = comfort_heat (70); HVAC heats from 65 toward 70.
+
+        With k_active_heat=10 the equilibrium temp is ~73°F, well above comfort_heat=70.
+        The ODE drives T up to the setpoint and clamps there. Between steps, passive decay
+        (k_passive=-0.3) pulls T back down, creating a cycle that always peaks at 70.
+        Assert: the peak waking-hour temp reaches comfort_heat — not the last entry (which
+        may be mid-decay).
+        """
+        now = self._NOW
+        entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 13)]
+        result = self._call(entries, occupancy_mode=OCCUPANCY_HOME, indoor_temp=65.0)
+        assert result, "Expected physics results"
+        waking = [e for e in result if datetime.fromisoformat(e["ts"]).hour in range(9, 21)]
+        assert waking, "Expected waking-hour entries (hours 9-20)"
+        peak_temp = max(e["temp"] for e in waking)
+        assert peak_temp == pytest.approx(70.0, abs=1.0), (
+            f"Home + physics: expected peak waking temp ≈ comfort_heat=70, got {peak_temp}°F"
+        )
+
+    def test_away_physics_uses_setback_setpoint(self):
+        """Away today + physics: ODE setpoint = setback_heat (60), not comfort_heat (70).
+
+        With indoor=65 and setpoint=60 the ODE 'cool' branch activates (setpoint ≤ comfort_cool
+        and T > setpoint), driving T toward 60. Home mode instead heats toward 70.
+        Assert: home peak ≈ 70; away peak ≤ 62 (clamped to 60 then passive decay).
+        """
+        now = self._NOW
+        entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 13)]
+        result_away = self._call(entries, occupancy_mode=OCCUPANCY_AWAY, indoor_temp=65.0)
+        result_home = self._call(entries, occupancy_mode=OCCUPANCY_HOME, indoor_temp=65.0)
+        assert result_away, "Expected away physics results"
+        assert result_home, "Expected home physics results"
+        waking_away = [e for e in result_away if datetime.fromisoformat(e["ts"]).hour in range(9, 21)]
+        waking_home = [e for e in result_home if datetime.fromisoformat(e["ts"]).hour in range(9, 21)]
+        assert waking_away and waking_home, "Expected waking entries for both modes"
+        home_peak = max(e["temp"] for e in waking_home)
+        away_peak = max(e["temp"] for e in waking_away)
+        assert home_peak == pytest.approx(70.0, abs=1.0), (
+            f"Home physics: expected peak ≈ comfort_heat=70, got {home_peak}"
+        )
+        assert away_peak <= 65.0, f"Away physics: expected peak ≤ 65°F (setpoint=60 used, not 70), got {away_peak}"
+
+
+# ---------------------------------------------------------------------------
+# TG2: get_chart_data() target_band shape contract
+# ---------------------------------------------------------------------------
+
+
+class TestGetChartDataShape:
+    """TG2: Verify get_chart_data() returns target_band with correct structure.
+
+    Regression guard: any change to get_chart_data() that breaks the target_band
+    key or entry shape will be caught here before it reaches the frontend.
+    """
+
+    def test_target_band_present_with_correct_shape(self):
+        """target_band must be present, length == forecast hours, each entry has ts/lower/upper."""
+        now = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+        # 24 future hourly entries: one per hour starting 1h from now
+        entries = [_pred_entry(now + timedelta(hours=i), 70.0) for i in range(1, 25)]
+
+        coord = _make_chart_coordinator()
+        coord._hourly_forecast_temps = entries
+
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util",
+            _make_dt_util_mock(now),
+        ):
+            chart = coord.get_chart_data()
+
+        assert "target_band" in chart, "get_chart_data() must include 'target_band' key"
+        band = chart["target_band"]
+        assert len(band) == 24, f"Expected 24 band entries (one per forecast hour), got {len(band)}"
+        for i, entry in enumerate(band):
+            assert "ts" in entry, f"Band entry {i} missing 'ts'"
+            assert "lower" in entry, f"Band entry {i} missing 'lower'"
+            assert "upper" in entry, f"Band entry {i} missing 'upper'"
+            if entry["lower"] is not None:
+                assert entry["lower"] <= entry["upper"], (
+                    f"Band entry {i}: lower ({entry['lower']}) > upper ({entry['upper']})"
+                )
+
+    def test_legacy_comfort_scalars_removed(self):
+        """comfort_heat and comfort_cool must not appear as top-level chart keys (Phase 1 removal)."""
+        now = datetime(2026, 4, 10, 12, 0, 0, tzinfo=UTC)
+        entries = [_pred_entry(now + timedelta(hours=i), 70.0) for i in range(1, 5)]
+        coord = _make_chart_coordinator()
+        coord._hourly_forecast_temps = entries
+
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util",
+            _make_dt_util_mock(now),
+        ):
+            chart = coord.get_chart_data()
+
+        assert "comfort_heat" not in chart, "Legacy comfort_heat scalar must not appear in chart data"
+        assert "comfort_cool" not in chart, "Legacy comfort_cool scalar must not appear in chart data"

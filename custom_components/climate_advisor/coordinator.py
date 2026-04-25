@@ -117,6 +117,7 @@ from .const import (
     THRESHOLD_HOT,
     THRESHOLD_MILD,
     THRESHOLD_WARM,
+    VACATION_SETBACK_EXTRA,
     VERSION,
 )
 from .learning import DailyRecord, LearningEngine
@@ -2613,6 +2614,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 now,
                 current_indoor_temp=self._get_indoor_temp(),
                 thermal_model=self.learning.get_thermal_model(),
+                occupancy_mode=self._occupancy_mode,
+                classification=self._current_classification,
             )
         ]
 
@@ -2629,6 +2632,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             {"ts": p["ts"], "temp": _conv(p["temp"])}
             for p in _build_future_forecast_outdoor(self._hourly_forecast_temps)
         ]
+
+        # Build timestamp list for _compute_target_band_schedule — same parse pattern
+        # as _build_predicted_indoor_future.
+        _band_timestamps = []
+        for _fc_entry in self._hourly_forecast_temps or []:
+            _dt_str = _fc_entry.get("datetime") or _fc_entry.get("time")
+            if not _dt_str:
+                continue
+            try:
+                _dt_obj = datetime.fromisoformat(_dt_str)
+                _band_timestamps.append(dt_util.as_local(_dt_obj) if _dt_obj.tzinfo else _dt_obj)
+            except (ValueError, TypeError):
+                continue
 
         return {
             "predicted_indoor": predicted_indoor,
@@ -2653,8 +2669,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "unit": unit,
             },
             "state_log": log_entries,
-            "comfort_heat": _conv(self.config.get("comfort_heat", 68)),
-            "comfort_cool": _conv(self.config.get("comfort_cool", 76)),
+            "target_band": [
+                {"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])}
+                for e in _compute_target_band_schedule(
+                    _band_timestamps,
+                    self.config,
+                    self._occupancy_mode,
+                    now,
+                    setback_modifier=(
+                        getattr(self._current_classification, "setback_modifier", 0.0)
+                        if self._current_classification is not None
+                        else 0.0
+                    ),
+                    thermal_model=self.learning.get_thermal_model(),
+                    classification=self._current_classification,
+                )
+            ],
             "unit": unit,
         }
 
@@ -2904,12 +2934,123 @@ def _simulate_indoor_physics(
     return t_next
 
 
+def _compute_target_band_schedule(
+    hourly_timestamps: list,
+    config: dict,
+    occupancy_mode: str,
+    now: Any,
+    setback_modifier: float = 0.0,
+    thermal_model: dict | None = None,
+    classification: Any | None = None,
+) -> list[dict]:
+    """Compute the dynamic target band (lower/upper) for each hourly timestamp.
+
+    Returns a list of dicts: [{"ts": ISO_str, "lower": float, "upper": float}].
+
+    Logic per timestamp:
+    - Away today: flat setback band (shifted by setback_modifier).
+    - Vacation (any day): deep setback band (setback ± VACATION_SETBACK_EXTRA + modifier).
+    - Home/guest or future days when away: wake/sleep schedule with ramps.
+      Wake ramp: 2h linear interpolation from sleep setback → comfort band.
+      Sleep ramp: 1h linear interpolation from comfort band → sleep setback.
+
+    Night-owl schedules (sleep_time < wake_time across midnight) are handled by
+    normalising sleep_h += 24 and h += 24 when h < wake_h, keeping comparisons
+    in chronological order.
+
+    When thermal_model and classification are both provided, sleep_heat is derived
+    via compute_bedtime_setback() — matching automation.py's adaptive setpoint logic.
+    """
+    comfort_heat = float(config.get("comfort_heat", 70))
+    comfort_cool = float(config.get("comfort_cool", 75))
+    setback_heat = float(config.get("setback_heat", 60))
+    setback_cool = float(config.get("setback_cool", 80))
+    sleep_heat = float(config.get("sleep_heat", comfort_heat - 4.0))
+    sleep_cool = float(config.get("sleep_cool", comfort_cool + 3.0))
+
+    # G1/G2: use compute_bedtime_setback() when thermal model + classification available —
+    # aligns chart band with the adaptive sleep setpoint used by automation.py for both
+    # heat (sleep_heat raised toward comfort) and cool (sleep_cool lowered toward comfort).
+    if thermal_model is not None and classification is not None:
+        _hvac_mode = getattr(classification, "hvac_mode", None)
+        if _hvac_mode == "heat":
+            sleep_heat = compute_bedtime_setback(config, thermal_model, classification)
+        elif _hvac_mode == "cool":
+            sleep_cool = compute_bedtime_setback(config, thermal_model, classification)
+
+    # I3: apply setback_modifier to setback bounds (mirrors automation.py behaviour)
+    setback_heat_eff = setback_heat + setback_modifier
+    setback_cool_eff = setback_cool + setback_modifier
+
+    wake_time = _parse_time(config.get("wake_time", "06:30"))
+    sleep_time_cfg = _parse_time(config.get("sleep_time", "22:30"))
+    wake_h = wake_time.hour + wake_time.minute / 60.0
+    sleep_h = sleep_time_cfg.hour + sleep_time_cfg.minute / 60.0
+    wake_ramp_h = 2.0
+    sleep_ramp_h = 1.0
+
+    # I6: midnight wraparound — night-owl schedules where sleep < wake (e.g. sleep=01:00, wake=09:00)
+    night_owl = wake_h > sleep_h
+    if night_owl:
+        sleep_h += 24  # normalise to a > wake_h value (e.g. 1 → 25)
+
+    now_date = now.date() if hasattr(now, "date") else None
+
+    result = []
+    for ts in hourly_timestamps:
+        if ts is None:
+            continue
+        ts_date = ts.date() if hasattr(ts, "date") else None
+
+        # I5: vacation applies setback to ALL days (not just today); away only applies to today
+        if occupancy_mode == OCCUPANCY_VACATION:
+            lower = setback_heat_eff - VACATION_SETBACK_EXTRA
+            upper = setback_cool_eff + VACATION_SETBACK_EXTRA
+        elif occupancy_mode == OCCUPANCY_AWAY and ts_date == now_date:
+            lower = setback_heat_eff
+            upper = setback_cool_eff
+        else:
+            # Home/guest schedule (or future days when away)
+            h = ts.hour + ts.minute / 60.0
+            # I6: normalise h for night-owl schedules
+            h_n = h + 24 if (night_owl and h < wake_h) else h
+
+            if h_n < wake_h:
+                # Pre-wake: sleep band
+                lower = sleep_heat
+                upper = sleep_cool
+            elif h_n < wake_h + wake_ramp_h:
+                # Wake ramp: interpolate toward comfort
+                frac = (h_n - wake_h) / wake_ramp_h
+                lower = sleep_heat + frac * (comfort_heat - sleep_heat)
+                upper = sleep_cool + frac * (comfort_cool - sleep_cool)
+            elif h_n < sleep_h:
+                # Awake: comfort band
+                lower = comfort_heat
+                upper = comfort_cool
+            elif h_n < sleep_h + sleep_ramp_h:
+                # Sleep ramp: interpolate toward sleep setback
+                frac = (h_n - sleep_h) / sleep_ramp_h
+                lower = comfort_heat + frac * (sleep_heat - comfort_heat)
+                upper = comfort_cool + frac * (sleep_cool - comfort_cool)
+            else:
+                # Post-sleep: sleep band
+                lower = sleep_heat
+                upper = sleep_cool
+
+        result.append({"ts": ts.isoformat(), "lower": round(lower, 1), "upper": round(upper, 1)})
+
+    return result
+
+
 def _build_predicted_indoor_future(
     hourly_forecast: list[dict] | None,
     config: dict[str, Any],
     now: Any,
     current_indoor_temp: float | None = None,
     thermal_model: dict | None = None,
+    occupancy_mode: str = OCCUPANCY_HOME,
+    classification: Any | None = None,
 ) -> list[dict]:
     """Build future predicted indoor temps from the automation plan.
 
@@ -2947,12 +3088,6 @@ def _build_predicted_indoor_future(
     setback_temp_heat = max(setback_temp_heat, setback_heat)
     setback_temp_cool = float(config.get("sleep_cool", comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F))
     setback_temp_cool = min(setback_temp_cool, setback_cool)
-
-    wake_time = _parse_time(config.get("wake_time", "06:30"))
-    sleep_time = _parse_time(config.get("sleep_time", "22:30"))
-    wake_h = wake_time.hour + wake_time.minute / 60.0
-    sleep_h = sleep_time.hour + sleep_time.minute / 60.0
-    ramp_h = 2.0
 
     # --- Classify each future day by forecast high ---
     day_highs: dict = {}
@@ -3032,6 +3167,33 @@ def _build_predicted_indoor_future(
     elif not _use_physics:
         _LOGGER.debug("_build_predicted_indoor_future: using fallback ramp (no model or no indoor temp)")
 
+    # B3: Pre-compute the full band schedule for all future timestamps in one call,
+    # then look up per entry. Avoids re-parsing config + ramp math 24+ times.
+    _band_config = dict(config)
+    _band_config["sleep_heat"] = setback_temp_heat
+    _band_config["sleep_cool"] = setback_temp_cool
+    _future_timestamps_for_band: list = []
+    for _fc in hourly_forecast:
+        _dt_s = _fc.get("datetime") or _fc.get("time")
+        if not _dt_s:
+            continue
+        try:
+            _dt_o = datetime.fromisoformat(_dt_s)
+            _lts = dt_util.as_local(_dt_o) if _dt_o.tzinfo else _dt_o
+            if _lts > now:
+                _future_timestamps_for_band.append(_lts)
+        except (ValueError, TypeError):
+            pass
+    _band_schedule = _compute_target_band_schedule(
+        _future_timestamps_for_band,
+        _band_config,
+        occupancy_mode,
+        now,
+        thermal_model=thermal_model,
+        classification=classification,
+    )
+    _band_lookup: dict[str, dict] = {b["ts"]: b for b in _band_schedule}
+
     result = []
     skipped_past = 0
     _t_current = current_indoor_temp  # running indoor temp for physics simulation
@@ -3051,29 +3213,16 @@ def _build_predicted_indoor_future(
             continue
         outdoor = entry.get("temperature")
         mode = day_modes.get(local_ts.date(), "off")
-        h = local_ts.hour + local_ts.minute / 60.0
+
+        # Look up pre-computed band entry for this timestamp
+        _band = _band_lookup.get(local_ts.isoformat(), {"lower": comfort_heat, "upper": comfort_cool})
 
         if _use_physics and _t_current is not None and outdoor is not None:
-            # Compute setpoint from the automation plan (same schedule logic)
             if mode == "heat":
-                if h < wake_h:
-                    setpoint = setback_temp_heat
-                elif h < wake_h + ramp_h:
-                    setpoint = setback_temp_heat + (h - wake_h) / ramp_h * (comfort_heat - setback_temp_heat)
-                elif h < sleep_h:
-                    setpoint = comfort_heat
-                else:
-                    setpoint = setback_temp_heat
+                setpoint = _band["lower"]
                 k_active_for_mode = _k_active_heat
             elif mode == "cool":
-                if h < wake_h:
-                    setpoint = setback_temp_cool
-                elif h < wake_h + ramp_h:
-                    setpoint = setback_temp_cool + (h - wake_h) / ramp_h * (comfort_cool - setback_temp_cool)
-                elif h < sleep_h:
-                    setpoint = comfort_cool
-                else:
-                    setpoint = setback_temp_cool
+                setpoint = _band["upper"]
                 k_active_for_mode = _k_active_cool
             else:
                 setpoint = None  # HVAC off — pure passive decay
@@ -3100,23 +3249,9 @@ def _build_predicted_indoor_future(
         else:
             # Setpoint-schedule fallback
             if mode == "heat":
-                if h < wake_h:
-                    temp = setback_temp_heat
-                elif h < wake_h + ramp_h:
-                    temp = setback_temp_heat + (h - wake_h) / ramp_h * (comfort_heat - setback_temp_heat)
-                elif h < sleep_h:
-                    temp = comfort_heat
-                else:
-                    temp = setback_temp_heat
+                temp = _band["lower"]
             elif mode == "cool":
-                if h < wake_h:
-                    temp = setback_temp_cool
-                elif h < wake_h + ramp_h:
-                    temp = setback_temp_cool + (h - wake_h) / ramp_h * (comfort_cool - setback_temp_cool)
-                elif h < sleep_h:
-                    temp = comfort_cool
-                else:
-                    temp = setback_temp_cool
+                temp = _band["upper"]
             else:
                 temp = max(setback_heat, float(outdoor) + 2.0) if outdoor is not None else comfort_heat
 

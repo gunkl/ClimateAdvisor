@@ -295,6 +295,7 @@ def _make_chart_data_coord(
 
     coord._thermal_factors = None
     coord._get_indoor_temp = MagicMock(return_value=None)
+    coord._occupancy_mode = "home"
 
     coord.get_chart_data = types.MethodType(ClimateAdvisorCoordinator.get_chart_data, coord)
     return coord

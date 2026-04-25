@@ -95,6 +95,18 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #114 two-parame
 
 The pending event is serialised in `LearningState.pending_thermal_event` (persisted to disk) so a mid-event HA restart can recover the post-heat phase.
 
+## Coordinator Chart Helper Functions
+
+Pure module-level functions called by `get_chart_data()` to build the dashboard temperature forecast payload.
+
+| Function | Role |
+|----------|------|
+| `_compute_target_band_schedule(hourly_timestamps, config, occupancy_mode, now)` | Returns `[{ts, lower, upper}]` — the occupancy-aware dynamic target band for each forecast hour. Away/vacation applies flat setback for today only; home/guest uses wake/sleep ramp schedule. Future days always use the home schedule. (Issue #119) |
+| `_build_predicted_indoor_future(hourly_forecast, config, now, ...)` | Returns `[{ts, temp}]` — predicted future indoor temperatures. Uses physics ODE when model has confidence ≥ `"low"` and `k_passive < 0`; falls back to ramp interpolation otherwise. Accepts `occupancy_mode` parameter and calls `_compute_target_band_schedule()` internally so prediction and target band share a single source of truth. (Issues #114, #119) |
+| `_build_future_forecast_outdoor(hourly_forecast)` | Returns `[{ts, temp}]` — raw hourly outdoor forecast temperatures. |
+| `_simulate_indoor_physics(t_current, t_outdoor, q, k_passive, dt_hours)` | Single ODE time step for the physics path. |
+| `_compute_ramp_hours(temp_delta, rate)` | Computes ramp duration for the legacy fallback path. |
+
 ## Sensors Exposed
 
 | Entity ID | Value | Extra Attributes |

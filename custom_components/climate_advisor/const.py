@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.27"
+VERSION = "0.3.29"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.3.29": [
+        "Fixed #119: Dynamic Target Band — chart band now tracks actual system targets"
+        " (comfort/sleep/setback/vacation) rather than static comfort limits",
+        "Fixed #119: Occupancy-aware prediction — away and vacation modes use setback setpoints in physics simulation",
+        "Fixed #119: Vacation mode applies deep setback across all forecast days (not just today)",
+        "Fixed #119: Night-owl sleep schedules (sleep_time < wake_time) now handled"
+        " correctly via midnight wraparound normalization",
+        "Fixed #119: setback_modifier (trend offset) now reflected in chart band",
+        "Fixed #119: Adaptive sleep temps (compute_bedtime_setback) used in chart and"
+        " prediction when thermal model is available",
+    ],
     "0.3.22": [
         "Fixed #107: Predicted indoor line now appears on chart after Now"
         " (HA forecast key is 'datetime', not 'time' — all entries were silently dropped)",

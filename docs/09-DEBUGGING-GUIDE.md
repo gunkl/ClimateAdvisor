@@ -41,7 +41,7 @@ The dashboard's **Temperature Forecast** chart provides a 1-year visual timeline
 | Orange solid line (Actual Indoor) | Real indoor temperature response |
 | Blue solid line (Actual Outdoor) | Actual outdoor temps driving classification |
 | Dashed lines | Predicted curves — divergence from actual reveals model error |
-| Comfort band shading | Green region = target comfort zone |
+| Target Band shading | Green region = active target zone. The band is dynamic: it narrows to sleep setback overnight, widens to comfort during waking hours, and flattens to setback temperatures when occupancy is away or vacation. Renamed from "Comfort Band" in Issue #119. |
 | Event markers | Vertical lines: grey=classification change, green=window recommendation, red=override |
 
 **Drag-to-zoom** on any region for fine-grained analysis. Reset Zoom returns to the preset range.

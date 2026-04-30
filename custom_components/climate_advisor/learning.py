@@ -735,11 +735,11 @@ class LearningEngine:
 
         result = None
         if status == "stabilized":
-            result = self._commit_event_from_dict(event, force_grade=None)
+            result, *_ = self._commit_event_from_dict(event, force_grade=None)
         elif status == "post_heat":
             post_samples = event.get("post_heat_samples", [])
             if len(post_samples) >= THERMAL_MIN_POST_HEAT_SAMPLES:
-                result = self._commit_event_from_dict(event, force_grade="low")
+                result, *_ = self._commit_event_from_dict(event, force_grade="low")
             else:
                 _LOGGER.info(
                     "Startup recovery: discarding post_heat event with only %d post samples",
@@ -756,10 +756,15 @@ class LearningEngine:
 
     def _commit_event_from_dict(
         self, event: dict, force_grade: str | None, obs_type: str = OBS_TYPE_HVAC_HEAT
-    ) -> dict | None:
+    ) -> tuple[dict | None, str | None, float | None]:
         """Compute k_passive/k_active from event samples and record the observation.
 
-        Returns the observation dict if successful, else None.
+        Returns a 3-tuple: (obs_dict_or_None, reject_code, r_squared).
+        - obs_dict_or_None: the committed observation dict on success, else None.
+        - reject_code: the REJECT_* constant string on failure, else None.
+        - r_squared: the R² computed by OLS on failure (or 0.0 if OLS ran but returned 0);
+          None when OLS never ran (pre-OLS rejection path).
+
         force_grade overrides the computed confidence grade when set.
         obs_type selects the commit path: passive_decay/fan_only_decay/ventilated_decay
         use k_passive only; solar_gain computes mean rate; hvac_heat/hvac_cool use
@@ -779,7 +784,7 @@ class LearningEngine:
                     _indoor_dt,
                     _reject_code or "unknown",
                 )
-                return None
+                return None, _reject_code, r2_p
             now_str = dt_util.now().isoformat()
             date_str = dt_util.now().date().isoformat()
             _decay_tag_map = {
@@ -809,20 +814,20 @@ class LearningEngine:
                 r2_p,
             )
             self.record_thermal_observation(obs)
-            return obs
+            return obs, None, None
 
         if obs_type == "solar_gain":
             samples = event.get("samples", event.get("active_samples", []))
             if len(samples) < 2:
-                return None
+                return None, REJECT_TOO_FEW_SAMPLES, None
             indoor_temps = [s["indoor_temp_f"] for s in samples]
             elapsed = [s["elapsed_minutes"] for s in samples]
             total_dt_hours = (elapsed[-1] - elapsed[0]) / 60.0
             if total_dt_hours <= 0:
-                return None
+                return None, REJECT_SMALL_DELTA, None
             mean_rate = (indoor_temps[-1] - indoor_temps[0]) / total_dt_hours
             if mean_rate < 0:
-                return None
+                return None, REJECT_OLS_WRONG_SIGN, None
             now_str = dt_util.now().isoformat()
             date_str = dt_util.now().date().isoformat()
             obs = {
@@ -845,7 +850,7 @@ class LearningEngine:
                 mean_rate,
             )
             self.record_thermal_observation(obs)
-            return obs
+            return obs, None, None
 
         # Default: hvac_heat / hvac_cool — original two-parameter path
         post_samples = event.get("post_heat_samples", [])
@@ -860,7 +865,7 @@ class LearningEngine:
                 r2_p,
                 len(post_samples),
             )
-            return None
+            return None, _reject_code, r2_p
 
         k_a, r2_a = compute_k_active(active_samples, k_p, session_mode)
         # k_a may be None for fan_only — that is acceptable
@@ -952,7 +957,7 @@ class LearningEngine:
             r2_p,
         )
         self.record_thermal_observation(obs)
-        return obs
+        return obs, None, None
 
     def get_weather_bias(self) -> dict:
         """Compute the weather forecast bias from recent daily records.

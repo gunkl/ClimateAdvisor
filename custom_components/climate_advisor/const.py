@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.32"
+VERSION = "0.3.33"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.31": [
@@ -833,8 +833,13 @@ THERMAL_SOLAR_DAYTIME_END_H = 18
 THERMAL_MAX_OBS_SAMPLES = 200
 
 # v3 sampling redesign (Issue #122)
+# THERMAL_DECAY_MAX_WINDOW_MINUTES is deprecated — subsumed by THERMAL_ROLLING_MAX_WINDOW_MINUTES (Issue #126).
+# Kept here for backward compatibility; do not use in new code.
 THERMAL_DECAY_MAX_WINDOW_MINUTES: int = 60  # wall-clock limit before vent/fan obs abandon
-THERMAL_ROLLING_WINDOW_MINUTES: int = 30  # rolling commit+restart interval for decay obs
+# Renamed from THERMAL_ROLLING_WINDOW_MINUTES — minimum window before first commit attempt.
+THERMAL_ROLLING_MIN_WINDOW_MINUTES: int = 30
+THERMAL_ROLLING_MAX_WINDOW_MINUTES: int = 240  # 4h hard cap; subsumes THERMAL_DECAY_MAX_WINDOW_MINUTES
+THERMAL_ROLLING_WINDOW_MINUTES: int = THERMAL_ROLLING_MIN_WINDOW_MINUTES  # backward-compat alias
 THERMAL_ROLLING_MIN_DELTA_T_F: float = 0.2  # min total indoor ΔT to commit a short window
 # THERMAL_MIN_DECAY_SAMPLES is the single source of truth for OLS sample-pair floors.
 # coordinator.py pre-gates on (THERMAL_MIN_DECAY_SAMPLES + 1) to guarantee at least

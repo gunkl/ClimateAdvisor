@@ -94,7 +94,7 @@ def _make_thermal_coord(*, learning_enabled: bool = True, indoor_temp: float = 6
     learning = MagicMock()
     learning.set_pending_thermal_event = MagicMock()
     learning.save_state = MagicMock()
-    learning._commit_event_from_dict = MagicMock(return_value=None)
+    learning._commit_event_from_dict = MagicMock(return_value=(None, None, None))
     coord.learning = learning
 
     coord._today_record = MagicMock()
@@ -525,7 +525,7 @@ class TestCommitThermalEvent:
         dt_mock = _make_dt_mock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             asyncio.run(coord._start_thermal_event("heat"))
-        coord.learning._commit_event_from_dict.return_value = {"hvac_mode": "heat", "k_active": 3.0}
+        coord.learning._commit_event_from_dict.return_value = ({"hvac_mode": "heat", "k_active": 3.0}, None, None)
         asyncio.run(coord._commit_thermal_event())
 
         assert coord._pending_thermal_event is None
@@ -533,7 +533,7 @@ class TestCommitThermalEvent:
 
     def test_commit_increments_session_count_on_success(self):
         coord = _make_thermal_coord()
-        coord.learning._commit_event_from_dict.return_value = {"hvac_mode": "heat"}
+        coord.learning._commit_event_from_dict.return_value = ({"hvac_mode": "heat"}, None, None)
         dt_mock = _make_dt_mock()
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             asyncio.run(coord._start_thermal_event("heat"))

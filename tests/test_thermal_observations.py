@@ -52,7 +52,9 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     THERMAL_PASSIVE_MIN_SAMPLES,
     THERMAL_PASSIVE_MIN_SIGNAL_F,
     THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
+    THERMAL_ROLLING_MAX_WINDOW_MINUTES,
     THERMAL_ROLLING_MIN_DELTA_T_F,
+    THERMAL_ROLLING_MIN_WINDOW_MINUTES,
     THERMAL_ROLLING_WINDOW_MINUTES,
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENTILATED_MIN_DELTA_F,
@@ -916,6 +918,11 @@ def _make_obs_61min_ago() -> datetime:
     return datetime(2026, 4, 28, 10, 59, 0, tzinfo=UTC)
 
 
+def _make_obs_241min_ago() -> datetime:
+    """Return a start_time 241 minutes before _FAKE_NOW (past the 240-min hard cap)."""
+    return datetime(2026, 4, 28, 7, 59, 0, tzinfo=UTC)
+
+
 def _make_stale_obs(obs_type: str, n_samples: int, indoor_temp: float, outdoor_temp: float) -> dict:
     """Build a monitoring observation dict that started 61 minutes ago."""
     start = _make_obs_61min_ago()
@@ -939,11 +946,39 @@ def _make_stale_obs(obs_type: str, n_samples: int, indoor_temp: float, outdoor_t
     }
 
 
-class TestWallClockTimeout:
-    """Wall-clock abandon guard for ventilated_decay and fan_only_decay (Issue #122 H4)."""
+def _make_very_stale_obs(obs_type: str, n_samples: int, indoor_temp: float, outdoor_temp: float) -> dict:
+    """Build a monitoring observation dict that started 241 minutes ago (past 240-min hard cap)."""
+    start = _make_obs_241min_ago()
+    samples = [
+        {
+            "timestamp": start.isoformat(),
+            "indoor_temp_f": indoor_temp,
+            "outdoor_temp_f": outdoor_temp,
+            "elapsed_minutes": float(i),
+        }
+        for i in range(n_samples)
+    ]
+    return {
+        "obs_type": obs_type,
+        "obs_id": "test-wallclock-2",
+        "start_time": start.isoformat(),
+        "status": "monitoring",
+        "samples": samples,
+        "flags_at_start": {},
+        "schema_version": 1,
+    }
 
-    def test_ventilated_decay_abandons_at_max_window_low_signal(self, caplog):
-        """ventilated_decay started 61 min ago, sensor still open, low |ΔT| → abandoned."""
+
+class TestWallClockTimeout:
+    """Wall-clock abandon guard for ventilated_decay and fan_only_decay (Issue #122 H4 / Issue #126)."""
+
+    def test_ventilated_decay_kept_alive_at_61min_low_signal(self, caplog):
+        """ventilated_decay started 61 min ago, low |ΔT| → kept alive (between min=30 and max=240 window).
+
+        Issue #126 changed the rolling window so that observations between THERMAL_ROLLING_MIN_WINDOW_MINUTES
+        (30 min) and THERMAL_ROLLING_MAX_WINDOW_MINUTES (240 min) with insufficient signal are kept alive
+        rather than abandoned. The old 60-min hard-abandon is replaced by the 240-min hard cap.
+        """
         # |indoor - outdoor| = 72.1 - 72.0 = 0.1 < THERMAL_VENT_MIN_SIGNAL_F (0.3)
         indoor, outdoor = 72.1, 72.0
         coord = _make_obs_coord(
@@ -968,11 +1003,49 @@ class TestWallClockTimeout:
         ):
             coord._sample_all_observations()
 
-        assert OBS_TYPE_VENTILATED_DECAY not in coord._pending_observations, (
-            "ventilated_decay observation should be abandoned after wall-clock timeout with low signal"
+        # At 61 min with low signal the obs should be kept alive, not abandoned
+        assert OBS_TYPE_VENTILATED_DECAY in coord._pending_observations, (
+            "ventilated_decay observation should be kept alive at 61 min with low signal "
+            f"(between THERMAL_ROLLING_MIN_WINDOW_MINUTES={THERMAL_ROLLING_MIN_WINDOW_MINUTES} "
+            f"and THERMAL_ROLLING_MAX_WINDOW_MINUTES={THERMAL_ROLLING_MAX_WINDOW_MINUTES})"
         )
-        assert any("max_window_elapsed_low_signal" in r.message for r in caplog.records), (
-            "Expected INFO log with reason 'max_window_elapsed_low_signal'"
+        # The coordinator should log a "keeping alive" message
+        assert any("keeping alive" in r.message for r in caplog.records), (
+            "Expected INFO log indicating observation is being kept alive"
+        )
+
+    def test_ventilated_decay_abandons_at_max_window_low_signal(self, caplog):
+        """ventilated_decay started 241 min ago (past 240-min cap), low |ΔT| → abandoned with max_window_exceeded."""
+        # |indoor - outdoor| = 72.1 - 72.0 = 0.1 < THERMAL_VENT_MIN_SIGNAL_F (0.3)
+        indoor, outdoor = 72.1, 72.0
+        coord = _make_obs_coord(
+            hvac_action="idle",
+            indoor_temp=indoor,
+            outdoor_temp=outdoor,
+            any_sensor_open=True,  # sensor open keeps ventilated_decay alive under normal logic
+        )
+        coord._pending_observations[OBS_TYPE_VENTILATED_DECAY] = _make_very_stale_obs(
+            OBS_TYPE_VENTILATED_DECAY,
+            n_samples=3,  # below THERMAL_MIN_DECAY_SAMPLES+1 threshold → abandon not commit
+            indoor_temp=indoor,
+            outdoor_temp=outdoor,
+        )
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+
+        import logging
+
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock),
+            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            coord._sample_all_observations()
+
+        assert OBS_TYPE_VENTILATED_DECAY not in coord._pending_observations, (
+            "ventilated_decay observation should be abandoned after THERMAL_ROLLING_MAX_WINDOW_MINUTES "
+            f"({THERMAL_ROLLING_MAX_WINDOW_MINUTES} min) with low signal"
+        )
+        assert any("max_window_exceeded" in r.message for r in caplog.records), (
+            "Expected log with reason 'max_window_exceeded'"
         )
 
     def test_ventilated_decay_commits_at_max_window_sufficient_signal(self):
@@ -1015,8 +1088,13 @@ class TestWallClockTimeout:
             f"queued={was_queued})"
         )
 
-    def test_fan_only_decay_abandons_at_max_window(self, caplog):
-        """fan_only_decay started 61 min ago, fan still on, low |ΔT| → abandoned."""
+    def test_fan_only_decay_kept_alive_at_61min_low_signal(self, caplog):
+        """fan_only_decay started 61 min ago, fan still on, low |ΔT| → kept alive (between min=30 and max=240 window).
+
+        Issue #126 changed the rolling window so that observations between THERMAL_ROLLING_MIN_WINDOW_MINUTES
+        (30 min) and THERMAL_ROLLING_MAX_WINDOW_MINUTES (240 min) with insufficient signal are kept alive
+        rather than abandoned. The old 60-min hard-abandon is replaced by the 240-min hard cap.
+        """
         # |indoor - outdoor| = 70.1 - 70.0 = 0.1 < THERMAL_FAN_MIN_SIGNAL_F (0.2)
         indoor, outdoor = 70.1, 70.0
         coord = _make_obs_coord(
@@ -1041,11 +1119,49 @@ class TestWallClockTimeout:
         ):
             coord._sample_all_observations()
 
-        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations, (
-            "fan_only_decay observation should be abandoned after wall-clock timeout with low signal"
+        # At 61 min with low signal the obs should be kept alive, not abandoned
+        assert OBS_TYPE_FAN_ONLY_DECAY in coord._pending_observations, (
+            "fan_only_decay observation should be kept alive at 61 min with low signal "
+            f"(between THERMAL_ROLLING_MIN_WINDOW_MINUTES={THERMAL_ROLLING_MIN_WINDOW_MINUTES} "
+            f"and THERMAL_ROLLING_MAX_WINDOW_MINUTES={THERMAL_ROLLING_MAX_WINDOW_MINUTES})"
         )
-        assert any("max_window_elapsed_low_signal" in r.message for r in caplog.records), (
-            "Expected INFO log with reason 'max_window_elapsed_low_signal'"
+        # The coordinator should log a "keeping alive" message
+        assert any("keeping alive" in r.message for r in caplog.records), (
+            "Expected INFO log indicating observation is being kept alive"
+        )
+
+    def test_fan_only_decay_abandons_at_max_window(self, caplog):
+        """fan_only_decay started 241 min ago (past 240-min cap), low |ΔT| → abandoned with max_window_exceeded."""
+        # |indoor - outdoor| = 70.1 - 70.0 = 0.1 < THERMAL_FAN_MIN_SIGNAL_F (0.2)
+        indoor, outdoor = 70.1, 70.0
+        coord = _make_obs_coord(
+            hvac_action="idle",
+            indoor_temp=indoor,
+            outdoor_temp=outdoor,
+            fan_active=True,  # fan on keeps fan_only_decay alive under normal logic
+        )
+        coord._pending_observations[OBS_TYPE_FAN_ONLY_DECAY] = _make_very_stale_obs(
+            OBS_TYPE_FAN_ONLY_DECAY,
+            n_samples=3,  # below THERMAL_MIN_DECAY_SAMPLES+1 threshold → abandon not commit
+            indoor_temp=indoor,
+            outdoor_temp=outdoor,
+        )
+        dt_mock = _make_dt_mock(_FAKE_NOW)
+
+        import logging
+
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock),
+            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            coord._sample_all_observations()
+
+        assert OBS_TYPE_FAN_ONLY_DECAY not in coord._pending_observations, (
+            "fan_only_decay observation should be abandoned after THERMAL_ROLLING_MAX_WINDOW_MINUTES "
+            f"({THERMAL_ROLLING_MAX_WINDOW_MINUTES} min) with low signal"
+        )
+        assert any("max_window_exceeded" in r.message for r in caplog.records), (
+            "Expected log with reason 'max_window_exceeded'"
         )
 
 

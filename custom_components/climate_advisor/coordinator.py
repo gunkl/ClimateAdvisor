@@ -1030,8 +1030,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Chart log: emit classification_change event when day type changes
             if prev_type is not None and prev_type != self._current_classification.day_type:
                 with contextlib.suppress(Exception):
+                    _chart_hvac_cc = self._read_chart_hvac_action()
+                    _LOGGER.debug(
+                        "chart_log append: event=classification_change hvac=%r fan=%s",
+                        _chart_hvac_cc,
+                        self._fan_is_running() if self.automation_engine else False,
+                    )
                     self._chart_log.append(
-                        hvac=self._current_classification.hvac_mode or "",
+                        hvac=_chart_hvac_cc,
                         fan=self._fan_is_running() if self.automation_engine else False,
                         indoor=forecast.current_indoor_temp,
                         outdoor=forecast.current_outdoor_temp,
@@ -1185,7 +1191,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _cs = self.hass.states.get(_climate_entity_id) if _climate_entity_id else None
         hvac_action = _cs.attributes.get("hvac_action", "") if _cs else ""
         hvac_mode = _cs.state if _cs else ""
-        fan_mode = _cs.attributes.get("fan_mode", "") if _cs else ""
 
         # Issue #96 Root Cause D: Late-start thermal session for HVAC running at HA startup.
         # _hvac_on_since is only set via state transitions in _async_thermostat_changed.
@@ -1302,20 +1307,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _pred_outdoor_val = _pred_out[_now_h]["temp"]
                 if _pred_in and _now_h < len(_pred_in) and indoor_temp is not None:
                     _pred_indoor_val = _pred_in[_now_h]["temp"]
-            _hvac_action_str = str(hvac_action).lower() if hvac_action else ""
-            _hvac_mode_str = str(hvac_mode).lower() if hvac_mode else ""
-            _fan_mode_str = str(fan_mode).lower() if fan_mode else ""
-            # Only remap fan→heating/cooling when fan_mode is auto (fan runs as part of
-            # HVAC cycle). When fan_mode=on the fan circulates independently — "fan"
-            # action does not imply active heating or cooling (#109 regression fix).
-            _fan_is_auto = not _fan_mode_str or _fan_mode_str.startswith("auto")
-            if _hvac_action_str == "fan" and _fan_is_auto:
-                if _hvac_mode_str == "heat":
-                    _hvac_action_str = "heating"
-                elif _hvac_mode_str in ("cool", "heat_cool"):
-                    _hvac_action_str = "cooling"
+            _chart_hvac_poll = self._read_chart_hvac_action()
+            _LOGGER.debug(
+                "chart_log append: event=30min_poll hvac=%r fan=%s",
+                _chart_hvac_poll,
+                self._fan_is_running(),
+            )
             self._chart_log.append(
-                hvac=_hvac_action_str,
+                hvac=_chart_hvac_poll,
                 fan=self._fan_is_running(),
                 indoor=indoor_temp,
                 outdoor=outdoor_temp,
@@ -1947,8 +1946,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     else {}
                 )
                 _outdoor_val = self._get_outdoor_temp(_ov_weather_attrs)
+                _chart_hvac_ov = self._read_chart_hvac_action()
+                _LOGGER.debug(
+                    "chart_log append: event=override hvac=%r fan=%s",
+                    _chart_hvac_ov,
+                    self._fan_is_running(),
+                )
                 self._chart_log.append(
-                    hvac=new_state.state,
+                    hvac=_chart_hvac_ov,
                     fan=self._fan_is_running(),
                     indoor=_indoor,
                     outdoor=_outdoor_val,
@@ -2046,8 +2051,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _is_chart_active = new_action in _chart_active_actions
         if _was_chart_active != _is_chart_active:
             with contextlib.suppress(Exception):
+                _LOGGER.debug(
+                    "chart_log append: event=hvac_action_change hvac=%r fan=%s",
+                    new_action,
+                    self._fan_is_running(),
+                )
                 self._chart_log.append(
-                    hvac=new_action or new_state.state.lower(),
+                    hvac=new_action,
                     fan=self._fan_is_running(),
                     indoor=self._get_indoor_temp(),
                     outdoor=None,
@@ -3316,6 +3326,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._occupancy_mode == OCCUPANCY_GUEST:
             return "active (guest)"
         return "active"
+
+    def _read_chart_hvac_action(self) -> str:
+        """Return the thermostat's current hvac_action string for chart logging.
+
+        Applies the #109 fan→heating/cooling remap: only remaps when fan_mode is
+        auto (fan is part of the HVAC cycle). When fan_mode=on, the fan is
+        circulating independently — hvac_action="fan" does NOT imply active
+        heating or cooling.
+
+        Returns "" if the climate entity is unavailable.
+        """
+        climate_id = self.config.get("climate_entity", "")
+        cs = self.hass.states.get(climate_id) if climate_id else None
+        if cs is None:
+            _LOGGER.debug("chart_hvac_action: climate entity unavailable, logging ''")
+            return ""
+        hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
+        hvac_mode = cs.state.lower()
+        fan_mode = str(cs.attributes.get("fan_mode", "")).lower()
+        fan_is_auto = not fan_mode or fan_mode.startswith("auto")
+        if hvac_action == "fan" and fan_is_auto:
+            if hvac_mode == "heat":
+                _LOGGER.debug("chart_hvac_action: remapping fan→heating (fan_mode=%s)", fan_mode or "empty")
+                return "heating"
+            if hvac_mode in ("cool", "heat_cool"):
+                _LOGGER.debug("chart_hvac_action: remapping fan→cooling (fan_mode=%s)", fan_mode or "empty")
+                return "cooling"
+        return hvac_action
 
     def _fan_is_running(self) -> bool:
         """Return True if the fan is running for any reason.

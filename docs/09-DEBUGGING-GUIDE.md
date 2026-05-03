@@ -141,6 +141,48 @@ The circuit breaker trips after **5 consecutive failures** (`AI_CIRCUIT_BREAKER_
 
 ---
 
+## Chart Activity Bars
+
+The temperature forecast chart shows four activity bars: HVAC, Fan, Windows Recommended, and Windows Open. These are built from a rolling JSON log at `/config/climate_advisor_chart_log.json` on HAOS.
+
+### Inspecting the raw chart log
+
+```bash
+# On HAOS via SSH add-on — view last 20 entries
+cat /config/climate_advisor_chart_log.json | python3 -c "
+import json, sys
+log = json.load(sys.stdin)
+for e in log['entries'][-20:]:
+    print(e['ts'][:19], 'hvac=', repr(e.get('hvac')), 'fan=', e.get('fan'), 'win_open=', e.get('windows_open'))
+"
+```
+
+Key field to check: `hvac` should be `"heating"` or `"cooling"` (action strings), never `"heat"` or `"cool"` (mode strings).
+
+### Tracing chart appends via HA logs
+
+Enable debug logging for climate_advisor, then filter:
+
+```bash
+python3 tools/ha_logs.py --lines 200 --filter "chart_log append"
+```
+
+This shows every chart log write with its event type and resolved `hvac` value.
+
+### Common failure modes
+
+| Symptom | Likely cause | How to confirm |
+|---|---|---|
+| No red heating segments despite heater running | `hvac_mode` logged instead of `hvac_action` at an event-driven append site | Inspect JSON for `"hvac": "heat"` entries; check HA logs for `chart_log append: event=classification_change hvac='heat'` |
+| Heating only visible at 30-min intervals | Event-driven append sites logging mode strings | Same as above |
+| Fan bar always green (even when HVAC off) | `_fan_is_running()` detecting untracked fan state | Check for `"running (untracked)"` in `_compute_fan_status()` log lines |
+| Windows bars drop on HVAC events | An append site missing `windows_open`/`windows_recommended` | Audit all 4 append call sites in coordinator.py for completeness |
+| Heating shown but wrong color (green instead of red) | `hvac_action="fan"` with `fan_mode=auto` not being remapped | Check #109 remap logic in `_read_chart_hvac_action()` |
+
+See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governing all four append sites.
+
+---
+
 ## Debugging Thermal Model Learning
 
 ### "Thermal model confidence is 'none' after weeks of use"

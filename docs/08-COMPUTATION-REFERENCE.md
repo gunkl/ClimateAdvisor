@@ -810,7 +810,33 @@ This logic table MUST be kept current for any changes to automation behavior.
 
 ---
 
-## 19. Chart Log Write Guards
+## 19. Chart Activity Bar Invariants
+
+The temperature forecast chart displays four activity bars fed by `ChartStateLog.append()` in `coordinator.py`. All four append call sites must use these helper methods — do not substitute raw thermostat state strings.
+
+| Bar | Field name | Required source | Frontend color |
+|---|---|---|---|
+| HVAC | `hvac` | `_read_chart_hvac_action()` | `"heating"` → red; `"cooling"` → blue; `"fan"` → green; others → no segment |
+| Fan | `fan` | `_fan_is_running()` | `true` → green |
+| Windows Recommended | `windows_recommended` | `bool(self._current_classification.windows_recommended) if self._current_classification else False` | `true` → amber |
+| Windows Open | `windows_open` | `self._any_sensor_open()` | `true` → green |
+
+**Critical invariants:**
+- The `hvac` field MUST be the thermostat's `hvac_action` attribute string (`"heating"`, `"cooling"`, `"fan"`, `"idle"`, `"off"`) — never the `hvac_mode` state (`"heat"`, `"cool"`). Mode strings produce invisible segments.
+- Use `_read_chart_hvac_action()` at every append site. It encapsulates the #109 fan→heating/cooling remap (only applies when `fan_mode` is auto).
+- Use `_fan_is_running()` for the `fan` field — never `_fan_active` directly. The helper includes ground-truth thermostat fallback for untracked fan runs.
+
+**Four append sites in coordinator.py:**
+1. Classification change event (event-driven)
+2. 30-minute poll (periodic)
+3. Manual override event (event-driven)
+4. HVAC action transition event (event-driven)
+
+All four sites are covered by tests in `tests/test_coordinator_chart.py`.
+
+---
+
+## 20. Chart Log Write Guards
 
 ### Bug A — pred_indoor gated on indoor_temp availability
 
@@ -865,15 +891,15 @@ branch of `_get_indoor_temp()`.
 
 ---
 
-## 20. Thermal Learning Health
+## 21. Thermal Learning Health
 
-### 20.1 Overview
+### 21.1 Overview
 
 The thermal learning engine uses OLS regression and quality gates to ensure only reliable observations update the model. Prior to Issue #124, rejections were logged as warnings with no persistent audit trail, making it impossible to distinguish "correctly rejecting noise" from "not learning anything" without SSH access. Issue #124 adds structured rejection events and a `learning_health` surface so the model's decision process is auditable without log access.
 
 No OLS math, automation behavior, or thermal thresholds changed in Issue #124. The only behavioral difference is that `_abandon_observation()` now logs at `INFO` level (downgraded from `WARNING`) because rejections are expected steady-state behavior, not anomalies.
 
-### 20.2 Rejection Reason Codes
+### 21.2 Rejection Reason Codes
 
 Six `REJECT_*` constants in `const.py` identify every point where an observation can be discarded. Each constant is also stored as the `reason_code` field in the `ThermalRejectionEvent` emitted at that point.
 
@@ -886,7 +912,7 @@ Six `REJECT_*` constants in `const.py` identify every point where an observation
 | `REJECT_OLS_BOUNDS` | `"ols_bounds"` | k_passive outside `[THERMAL_K_PASSIVE_MIN, THERMAL_K_PASSIVE_MAX]` = `[-0.5, -0.001]` hr⁻¹ |
 | `REJECT_ABANDONED` | `"abandoned"` | Observation abandoned before OLS could run (e.g., HVAC mode change, wall-clock timeout) |
 
-### 20.3 `ThermalRejectionEvent` Fields
+### 21.3 `ThermalRejectionEvent` Fields
 
 `ThermalRejectionEvent` is a `TypedDict` defined in `learning.py`. An instance is emitted at every rejection point and appended to the per-obs-type rejection log.
 
@@ -903,7 +929,7 @@ Six `REJECT_*` constants in `const.py` identify every point where an observation
 | `elapsed_minutes` | `int \| None` | Wall-clock duration of the observation in minutes |
 | `timestamp` | `str` | ISO 8601 datetime of the rejection |
 
-### 20.4 `compute_k_passive()` 3-Tuple Return
+### 21.4 `compute_k_passive()` 3-Tuple Return
 
 `compute_k_passive()` in `learning.py` previously returned a 2-tuple `(k_passive, r_squared)` — returning `(None, 0.0)` for five distinct failure modes with no way for the caller to distinguish them. Issue #124 extends the return to a 3-tuple `(k_passive, r_squared, reason_code)`:
 
@@ -918,7 +944,7 @@ Six `REJECT_*` constants in `const.py` identify every point where an observation
 
 All callers in `coordinator.py` unpack the 3-tuple and use the `reason_code` to populate the `ThermalRejectionEvent` before calling `_abandon_observation()`.
 
-### 20.5 `THERMAL_MIN_DECAY_SAMPLES` Alignment Contract
+### 21.5 `THERMAL_MIN_DECAY_SAMPLES` Alignment Contract
 
 `THERMAL_MIN_DECAY_SAMPLES = 4` is the single source of truth for OLS sample-pair floors on rolling decay observations.
 
@@ -926,7 +952,7 @@ The coordinator pre-gates on `THERMAL_MIN_DECAY_SAMPLES + 1 = 5` pairs before ca
 
 `THERMAL_MIN_POST_HEAT_SAMPLES = 10` governs HVAC post-heat events and is a separate, independent constant. Do not change either constant independently — the `+1` offset between the outer gate and the inner floor is intentional and must be preserved.
 
-### 20.6 `learning_health` Dict in `get_thermal_model()`
+### 21.6 `learning_health` Dict in `get_thermal_model()`
 
 `get_thermal_model()` returns a `learning_health` key containing per-obs-type health summaries aggregated from the coordinator's `_rejection_log`:
 
@@ -954,14 +980,14 @@ learning_health: {
 
 The coordinator builds this dict from `self._rejection_log` and passes it to `get_thermal_model()`, which includes it verbatim in the returned dict.
 
-### 20.7 Persistence
+### 21.7 Persistence
 
 - `self._rejection_log: dict[str, list[dict]]` is stored on the coordinator instance, keyed by obs_type.
 - Each per-obs-type list is capped at **100 entries** (oldest evicted first when the cap is reached).
 - Maximum total stored: **600 entries** across 6 obs types.
 - Persisted across HA restarts via `LearningState.rejection_log`. The cap is enforced on load to guard against file corruption.
 
-### 20.8 Sensor Attribute Exposure
+### 21.8 Sensor Attribute Exposure
 
 `ClimateAdvisorComplianceSensor.extra_state_attributes` exposes a `thermal_learning_health` key. In compliance with the security rule against exposing raw behavior data in attributes, only summary counts and the last rejection reason code are exposed — not the full `ThermalRejectionEvent` dicts:
 
@@ -976,7 +1002,7 @@ thermal_learning_health: {
 }
 ```
 
-### 20.9 `tools/thermal_health.py` Usage
+### 21.9 `tools/thermal_health.py` Usage
 
 Standalone CLI tool. Requires `HA_URL` and `HA_TOKEN` environment variables (same pattern as `tools/validate.py`). Prints two sections.
 
@@ -1010,7 +1036,7 @@ If the debug-state endpoint is unreachable or returns no `thermal_pipeline` key,
 
 No new secrets or external dependencies. Run from the project root after setting env vars.
 
-### 20.10 Test Coverage
+### 21.10 Test Coverage
 
 | Test | File |
 |---|---|
@@ -1023,7 +1049,7 @@ No new secrets or external dependencies. Run from the project root after setting
 | `thermal_learning_health` in compliance sensor attributes | `tests/test_thermal_rejection.py` |
 | Sensor attribute exposes counts/summary only (not raw events) | `tests/test_thermal_rejection.py` |
 
-### 20.11 Log Taxonomy (Issue #125)
+### 21.11 Log Taxonomy (Issue #125)
 
 Issue #125 adds structured log lines at key points in the observation lifecycle. The following table documents every new log line, its level, source method, and field semantics.
 
@@ -1048,7 +1074,7 @@ Thermal obs abandoned [type=ventilated_decay reason=ols_bad_fit n=6/4 dt=0.00°F
 
 `R²=0.000` with `indoor_ΔT=0.00°F` means the indoor temperature was effectively flat — there was no temperature excursion for OLS to fit. This is **not a bug**. The learning engine correctly refuses to extract a thermal decay rate from flat data; fitting a slope to a flat line would produce a meaningless or unstable k_passive. This condition occurs whenever indoor and outdoor temperatures are within 2–3°F of each other, or when HVAC is actively cycling to maintain a stable setpoint. Resolution: wait for a natural temperature excursion — a warm afternoon, a morning pre-heat, or an overnight cooldown — to provide the ≥ 0.2°F indoor ΔT the quality gate requires.
 
-### 20.12 `thermal_pipeline` Key in `/api/climate_advisor/automation_state`
+### 21.12 `thermal_pipeline` Key in `/api/climate_advisor/automation_state`
 
 Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This key is built on every call by `_build_thermal_pipeline_summary()` in `coordinator.py` and reflects the live state of all pending observations at the moment of the request.
 
@@ -1093,4 +1119,4 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 
 ---
 
-_Last Updated: 2026-04-29_
+_Last Updated: 2026-05-02_

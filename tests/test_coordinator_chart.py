@@ -175,3 +175,76 @@ class TestIndoorTempRangeCheck:
         coord = self._make_coord(current_temperature=72)
         result = coord._get_indoor_temp()
         assert result == 72.0, f"Expected 72.0 for normal temp 72°F; got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestChartHvacActionConsistency  (Issue #128)
+# ---------------------------------------------------------------------------
+
+
+class TestChartHvacActionConsistency:
+    """Regression tests for Issue #128: hvac_action vs hvac_mode in chart log.
+
+    All append points must use _read_chart_hvac_action() which returns the
+    thermostat's current hvac_action, not the mode string. Mode strings like
+    "heat" and "cool" produce invisible segments in the chart (no color mapping).
+    """
+
+    def _make_coord_with_thermostat(self, *, hvac_action, hvac_mode, fan_mode="auto"):
+        """Build a coordinator stub with a thermostat returning given attributes."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+
+        mock_state = MagicMock()
+        mock_state.state = hvac_mode
+        mock_state.attributes.get = MagicMock(
+            side_effect=lambda key, default="": {
+                "hvac_action": hvac_action,
+                "fan_mode": fan_mode,
+            }.get(key, default)
+        )
+
+        hass = MagicMock()
+        hass.states.get = MagicMock(return_value=mock_state)
+        coord.hass = hass
+        coord.config = {"climate_entity": "climate.thermostat"}
+
+        coord._read_chart_hvac_action = types.MethodType(ClimateAdvisorCoordinator._read_chart_hvac_action, coord)
+        return coord
+
+    def test_heating_action_returned_directly(self):
+        """Thermostat reports hvac_action='heating' → helper returns 'heating', not 'heat'."""
+        coord = self._make_coord_with_thermostat(hvac_action="heating", hvac_mode="heat")
+        result = coord._read_chart_hvac_action()
+        assert result == "heating", f"Expected 'heating', got {result!r}"
+
+    def test_override_receives_hvac_action_not_mode(self):
+        """During a manual override while heater is running, helper returns action, not mode."""
+        coord = self._make_coord_with_thermostat(hvac_action="heating", hvac_mode="heat")
+        # Simulate what the override append now uses: _read_chart_hvac_action()
+        result = coord._read_chart_hvac_action()
+        assert result == "heating", f"Override append would log {result!r} — should be 'heating' not 'heat'"
+
+    def test_nat_vent_active_logs_fan_action(self):
+        """During nat vent (hvac_mode=off, hvac_action=fan), helper returns 'fan', not 'off'."""
+        coord = self._make_coord_with_thermostat(hvac_action="fan", hvac_mode="off", fan_mode="on")
+        result = coord._read_chart_hvac_action()
+        assert result == "fan", f"Expected 'fan' during nat vent, got {result!r}"
+
+    def test_transition_idle_not_remapped(self):
+        """When heater stops (hvac_action=idle), helper returns 'idle' — no mode fallback."""
+        coord = self._make_coord_with_thermostat(hvac_action="idle", hvac_mode="heat")
+        result = coord._read_chart_hvac_action()
+        assert result == "idle", f"Expected 'idle' when heater stops, got {result!r}"
+
+    def test_fan_auto_remap_heating(self):
+        """fan_mode=auto + hvac_action=fan + hvac_mode=heat → remapped to 'heating' (#109 fix preserved)."""
+        coord = self._make_coord_with_thermostat(hvac_action="fan", hvac_mode="heat", fan_mode="auto")
+        result = coord._read_chart_hvac_action()
+        assert result == "heating", f"Expected 'heating' for fan_mode=auto+hvac_mode=heat, got {result!r}"
+
+    def test_fan_on_no_remap(self):
+        """fan_mode=on + hvac_action=fan → stays 'fan' (not remapped: #109 regression fix)."""
+        coord = self._make_coord_with_thermostat(hvac_action="fan", hvac_mode="heat", fan_mode="on")
+        result = coord._read_chart_hvac_action()
+        assert result == "fan", f"Expected 'fan' for fan_mode=on (continuous circulation), got {result!r}"

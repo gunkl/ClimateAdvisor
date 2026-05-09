@@ -12,6 +12,8 @@
 | What is the fixed return shape from every skill execution, regardless of success or fallback? | Every `async_execute()` call returns a 6-key dict: `{success, source, data, error, input_context, raw_response}`. Source is `"ai"`, `"fallback"`, or `"error"`. | [Return Contract](#return-contract) |
 | What context does the activity report build, and how does it guard against false contradiction alerts? | It assembles nine labeled sections from coordinator.data, live climate state, and config. A contradiction warning (`hvac_mode=off` but action in `{heating, cooling, fan}`) is suppressed when the CA fan is actively running. | [activity\_report](#activity_report) |
 | What makes the investigator skill different from the activity report skill? | The investigator resolves seven independent context sources (including GitHub issues and CA design prose), uses per-skill model/token/reasoning overrides, and gates on a separate `_investigator_requests_today` counter. | [investigator](#investigator) |
+| What are the full pre/post/invariant contracts for `ClaudeAPIClient.async_request()` and the circuit breaker? | The Tier 3 spec covers the 5-row circuit breaker transition table, guard sequence for `async_request()`, `ClaudeResponse` mutual-exclusivity invariants, budget reset trigger, and all four retried exception types. | [Claude API Client — Territory Spec](claude-api-spec.md) |
+| What are the full contracts for the skill registry, execution pipeline, and both registered skills? | The Tier 3 spec covers `AISkillRegistry` registration and lookup, the 6-step execution pipeline, return contract enforcement, `activity_report` and `investigator` context/parse/fallback contracts, and caching behavior. | [AI Skills Framework — Territory Spec](ai-skills-spec.md) |
 
 ---
 
@@ -117,7 +119,7 @@ A third counter, `_investigator_requests_today`, is checked only by `check_inves
 | `opus` | $15.00 | $75.00 |
 | `haiku` | $0.80 | $4.00 |
 
-Match is by substring of the model name; unrecognized models produce zero estimated cost.
+Match is by substring of the model name; unrecognized models default to Sonnet rates ($3.00/$15.00 per 1M tokens).
 
 ### Retry Policy
 
@@ -162,9 +164,9 @@ class AISkillDefinition:
     fallback: Callable | None        # (coordinator, context, **kwargs) → dict; None = use _error_result()
     triggered_by: str                # "auto" | "manual" (default "manual")
     # optional per-skill config key overrides:
-    model_config_key: str | None
-    max_tokens_config_key: str | None
-    reasoning_config_key: str | None
+    config_key_model: str | None
+    config_key_max_tokens: str | None
+    config_key_reasoning: str | None
 ```
 
 `registry.register(skill)` stores the definition under `skill.name`. If a skill with that name already exists, a warning is logged and the entry is overwritten. No type enforcement on callable signatures.
@@ -353,7 +355,7 @@ class _RateLimitCounters:
 @dataclass
 class _BudgetTracker:
     monthly_cost: float           # USD accumulated this calendar month
-    budget_month: str             # "YYYY-MM" of current accumulation window
+    budget_month: int             # calendar month (1–12) of current accumulation window
 
 @dataclass
 class AISkillDefinition:
@@ -403,5 +405,5 @@ class AISkillDefinition:
 
 ← Tier 1: [00-PROJECT-INSTRUCTIONS.md](00-PROJECT-INSTRUCTIONS.md)
 ← Tier 2 parent: [02-ARCHITECTURE-REFERENCE.md](02-ARCHITECTURE-REFERENCE.md)
-→ Tier 3 (not yet authored): `claude_api.py` circuit breaker state machine spec · `ai_skills.py` skill lifecycle and execution pipeline spec · `ai_skills_activity.py` context assembly and cross-validation spec · `ai_skills_investigator.py` seven-source context builder spec
+→ Tier 3: [Claude API Client spec](claude-api-spec.md) · [AI Skills Framework spec](ai-skills-spec.md)
 ↔ Siblings: [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md) · [Computation Reference](08-COMPUTATION-REFERENCE.md) · [State Persistence](state-persistence.md)

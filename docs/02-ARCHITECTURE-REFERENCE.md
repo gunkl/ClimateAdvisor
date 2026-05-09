@@ -16,6 +16,7 @@
 | How does the REST API work — endpoints, auth, and data access pattern? | 19 views, all requiring a HA long-lived token. GETs read from `coordinator.data`; POSTs delegate to the coordinator or automation engine. Two config fields are redacted; out-of-range numerics are silently clamped. | [§REST API Brief](rest-api.md) |
 | How does the Claude AI integration work — circuit breaker, rate limiting, skills, budget? | `ClaudeAPIClient` wraps all API calls with a three-state circuit breaker, per-month budget cap, and exponential-backoff retry. `AISkillRegistry` provides a pluggable skill framework; two skills are registered: `activity_report` and `investigator`. | [§AI Integration Brief](ai-integration.md) |
 | Where is the full Tier 3 occupancy dispatch spec — priority resolution, state transitions, setback formulas? | The Territory spec covers all four occupancy modes, GUEST > VACATION > HOME/AWAY priority, toggle entity wiring, 7-row state transition table, setback formulas, and persistence across HA restarts. | [§Occupancy Dispatch Spec](occupancy-dispatch-spec.md) |
+| Where is the Tier 3 spec for the chart state log — entry schema, ring buffer contracts, retention, persistence? | The Territory spec covers the raw/hourly/daily entry schemas, append ordering invariant, 8-path load error table, atomic write contract, downsampling tiers, and the 17,520-entry (≈1 year) cap. | [Chart State Log — Territory Spec](chart-log-spec.md) |
 
 ## File Structure
 

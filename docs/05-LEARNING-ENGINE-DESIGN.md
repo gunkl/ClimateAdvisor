@@ -253,7 +253,7 @@ The upgrade is adaptive — it fires at commit time when the solar factor range 
 observation's samples meets a minimum threshold. No new observation type, no new trigger
 condition, no new lifecycle complexity.
 
-#### Decision Points (D1–D7)
+#### Decision Points (D1–D7, Issue #126)
 
 | # | Decision | Choice | Rationale |
 |---|---|---|---|
@@ -297,6 +297,110 @@ set.
 - **`k_vent_delta` derived metric:** `k_vent_window − k_passive` quantifies the
   incremental ventilation benefit above bare envelope decay. Useful for advising users on
   whether opening windows meaningfully accelerates cooling.
+
+### HVAC Observation Commit Path (Issue #130)
+
+Issue #130 fixed zero `k_active_heat` / `k_active_cool` observations despite 60 days of
+heat cycles. The root causes and their fixes determine how HVAC observations now commit.
+
+#### Root Causes Confirmed
+
+| # | Root Cause | Fix |
+|---|---|---|
+| RC1 | Post-heat OLS required 10 samples (50 min) — systematic timeout on 5–30 min cycles | D14: lower `THERMAL_MIN_POST_HEAT_SAMPLES` 10 → 4 |
+| RC2 | Most cycles never produced a logged rejection — observation start was invisible | Phase A: INFO log at observation start, abandon, and commit |
+| RC3 | `outdoor=None` at HVAC state transitions blocked post-heat sample collection | D16: `_last_known_outdoor_f` 30-min fallback |
+| RC4 | Bridge homes: `k_passive=None` prevented `compute_k_active()` from running | D17: use `k_vent_window` as proxy k_passive in hvac commit path |
+| RC5 | No backfill mechanism for historical heat cycles | D18: `thermal_replay --hvac` mode |
+
+#### Decision Points (D14–D26, Issue #130)
+
+| D# | Decision | Rationale |
+|----|----------|-----------|
+| D14 | `THERMAL_MIN_POST_HEAT_SAMPLES`: 10 → 4 | Aligns with rolling obs min; enables short-cycle commits |
+| D15 | Remove stabilization variance gate from `_check_hvac_stabilization()` | OLS R² is the quality gate; waiting for ±0.3°F stability over 5 min was redundant and blocked all short cycles |
+| D16 | 30-min outdoor temp fallback (`_last_known_outdoor_f`) | `outdoor=None` at HVAC state transitions was blocking post-heat sample collection |
+| D17 | Use `k_vent_window` as k_passive proxy in hvac commit path | Bridge homes: enables `k_active` commit without `k_passive` from passive_decay or HVAC obs |
+| D18 | `thermal_replay --hvac` mode (`run_hvac_replay_ols()`) | Backfill historical heat/cool cycles from chart_log |
+| D19 | Single-point `k_active` estimator when `n_active < 2` | Physics valid with 1 active sample if timestamps give true elapsed |
+| D20 | Use `post[0].ts` as cycle end timestamp when `n_act=1` | State-change entry gives exact HVAC-off time |
+| D21 | Emit `k_passive=None` in obs dict when bridge proxy was used | Prevents proxy value from contaminating k_passive EWMA |
+| D22 | Load `k_vent_window` proxy in dry-run mode for `thermal_replay` | Proxy needed for single-point path regardless of write mode |
+| D23 | `THERMAL_HVAC_MIN_SIGNAL_F = 0.5°F` | Minimum ΔT threshold; filters noise and setpoint-maintenance cycles where heater ran but temperature barely moved |
+| D24 | `n_post` minimum drops 4 → 1 when proxy available | Post-heat OLS is not needed when proxy provides k_passive; single-point only needs `post[0]` for the HVAC-off timestamp |
+| D25 | Plateau guard bypassed when proxy available | The plateau guard validates OLS decay quality; irrelevant for the single-point path |
+| D26 | Proxy check via `model_cache.k_vent_window` in `coordinator.py` | Consistent with `learning.py` proxy detection pattern |
+
+#### Single-Point `k_active` Estimator (`compute_k_active_single_point()`)
+
+When `n_active < 2` (the HVAC cycle is shorter than the 5-min sampling interval so only
+one active-phase data point was recorded), OLS cannot produce a heating rate. The
+single-point estimator uses exact HVAC on/off timestamps from state-change chart_log
+entries to compute `k_active` directly from physics:
+
+```
+k_active = (T_peak − T_start) / elapsed_hours − k_passive × avg(T_in − T_out)
+```
+
+where:
+- `T_start` = indoor temperature at HVAC start
+- `T_peak` = peak indoor temperature during or after the cycle
+- `elapsed_hours` = true HVAC-on duration from timestamps (not sample interval)
+- `k_passive` = envelope decay rate or proxy (from `k_vent_window` on bridge homes)
+- `avg(T_in − T_out)` = mean indoor-outdoor differential across available samples
+
+The estimator is called from `_commit_event_from_dict()` in `learning.py` when OLS
+returns `None` (insufficient active samples). It is also used by
+`run_hvac_replay_ols()` in `tools/thermal_replay.py` with the same fallthrough logic.
+
+**Signal guard:** `THERMAL_HVAC_MIN_SIGNAL_F = 0.5°F` — if `|T_peak − T_start| < 0.5°F`
+the cycle is treated as a setpoint-maintenance run (heater ran briefly but temperature
+barely moved at chart_log 1°F resolution). The observation is rejected to avoid
+fitting noise.
+
+**Implementation:** `learning.py` ~line 401. Fallthrough in `_commit_event_from_dict()`
+~line 1145.
+
+#### Proxy-Aware `n_post` Gating
+
+`_check_hvac_stabilization()` in `coordinator.py` applies different commit thresholds
+depending on whether a `k_vent_window` proxy is available in the model cache:
+
+| Condition | `n_post` minimum | Plateau guard |
+|---|---|---|
+| No proxy (normal home, fresh install) | `THERMAL_MIN_POST_HEAT_SAMPLES` (4) | Active: rejects if `peak − end < THERMAL_HVAC_MIN_DECAY_F` |
+| Proxy available (`k_vent_window < 0`) | 1 | Bypassed |
+
+When the proxy is available, `post[0]` provides the HVAC-off timestamp for the
+single-point estimator — no OLS decay curve is needed. The same proxy-aware logic
+applies in `run_hvac_replay_ols()` in `thermal_replay.py`.
+
+**Implementation:** `coordinator.py` ~line 2951–2979.
+
+#### Phase A Diagnostic Logging
+
+Before Phase A, most HVAC observation starts and abandons were invisible — the rejection
+log showed only 1 entry across 38 historical cycles. Phase A adds INFO-level log lines at:
+
+- Observation start (`_start_hvac_observation()`)
+- Observation abandon (`_abandon_observation()`) — already existed at WARNING; downgraded
+  to INFO in Issue #124; Phase A confirms coverage
+- Observation commit (`_commit_event_from_dict()`)
+
+This makes the observation pipeline auditable from HA logs without SSH access to the
+learning DB.
+
+#### Backfill Results (Phase D)
+
+After Phases A–D, `thermal_replay --hvac --days 60` committed 24/47 detected cycles (51%).
+The 23 remaining rejections are data-quality limits of chart_log 1°F resolution:
+- 16 signal=0 rejections: setpoint-maintenance cycles where `T_start = T_peak` at 1°F resolution
+- 5 data artifacts: sub-2-minute elapsed times from timestamp coincidences or thermostat glitches
+- 2 borderline: k_active estimates just above the 15.0 °F/hr sanity bound
+
+The live coordinator reads `sensor.santa_maria_hallway_current_temperature` at 0.18°F
+resolution and samples at the exact HVAC state-change moment — expected to substantially
+exceed the 51% chart_log acceptance rate.
 
 ### `record_thermal_observation(obs: dict) -> None`
 

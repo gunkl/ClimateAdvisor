@@ -365,6 +365,72 @@ periods where lag averages out; (b) the EWMA smoothing (α = 0.05 at "low" grade
 attenuates single-observation error; (c) a cloud-aware, lag-corrected solar model is
 deferred to future scope.
 
+#### 5e-vi. HVAC Commit Path — Single-Point Estimator and Proxy-Aware Gating (Issue #130)
+
+Issue #130 fixed HVAC observations producing zero commits despite 60 days of heat cycles.
+The root causes were: (RC1) 10-sample post-heat minimum requiring 50 min — too long for
+5–30 min cycles; (RC3) `outdoor=None` at state transitions blocking sample collection;
+(RC4) bridge homes with `k_passive=None` blocking `k_active` computation; (RC5) no
+backfill tool.
+
+**Fixes applied:**
+
+| Fix | Mechanism |
+|---|---|
+| D14: Lower post-heat minimum | `THERMAL_MIN_POST_HEAT_SAMPLES`: 10 → 4 |
+| D15: Remove stabilization gate | `_check_hvac_stabilization()` commits as soon as min samples reached; no ±0.3°F stability wait |
+| D16: Outdoor temp fallback | `_last_known_outdoor_f` caches the last non-None outdoor reading; used within a 30-min window when current reading is `None` |
+| D17: k_vent_window proxy | `_commit_event_from_dict()` uses `k_vent_window` as k_passive when `k_passive=None` (bridge homes); marks grade `"low"` |
+
+**Single-point `k_active` estimator (`compute_k_active_single_point()`):**
+
+When `n_active < 2` (cycle is shorter than the 5-min sampling interval), OLS cannot fit a
+heating rate. The single-point estimator uses exact HVAC on/off timestamps:
+
+```
+k_active = (T_peak − T_start) / elapsed_hours − k_passive × avg(T_in − T_out)
+```
+
+`elapsed_hours` comes from state-change timestamps, not sample spacing, so it reflects the
+true HVAC-on duration. `post[0].ts` is used as the HVAC-off timestamp when `n_active=1`.
+
+**Signal guard (`THERMAL_HVAC_MIN_SIGNAL_F = 0.5°F`):** If `|T_peak − T_start| < 0.5°F`,
+the cycle is rejected as a setpoint-maintenance run — no learnable k_active information.
+
+**Call path:** `_commit_event_from_dict()` first attempts OLS via `compute_k_active()`.
+If OLS returns `None` (insufficient samples), it falls through to
+`compute_k_active_single_point()`. When bridge proxy was used for k_passive, the obs dict
+emits `k_passive=None` to prevent the proxy value from contaminating the k_passive EWMA
+(D21).
+
+**Proxy-aware `n_post` gating:** `_check_hvac_stabilization()` reads `k_vent_window` from
+`thermal_model_cache` at commit time. When `k_vent_window` is available and negative
+(proxy present), the `n_post` minimum drops from `THERMAL_MIN_POST_HEAT_SAMPLES` (4) to 1
+and the plateau guard is bypassed. For all other homes, the thresholds are unchanged.
+
+| Condition | `n_post` minimum | Plateau guard |
+|---|---|---|
+| No proxy (normal or fresh install) | 4 | Active — rejects if `peak − end < 0.3°F` |
+| Proxy available (`k_vent_window < 0`) | 1 | Bypassed |
+
+**`thermal_replay --hvac` mode:** `run_hvac_replay_ols()` in `tools/thermal_replay.py`
+applies the same OLS → single-point fallback and proxy-aware gating to historical chart_log
+data. Use for backfilling HVAC observations after deploying Issue #130 fixes.
+
+```bash
+python tools/thermal_replay.py --hvac --days 60 --dry-run   # inspect without writing
+python tools/thermal_replay.py --hvac --days 60             # commit to learning DB
+```
+
+**Implementation references:**
+
+| Component | Location |
+|---|---|
+| `compute_k_active_single_point()` | `learning.py` ~line 401 |
+| Single-point fallthrough in `_commit_event_from_dict()` | `learning.py` ~line 1145 |
+| Proxy-aware gate in `_check_hvac_stabilization()` | `coordinator.py` ~line 2951 |
+| `run_hvac_replay_ols()` | `tools/thermal_replay.py` ~line 817 |
+
 ---
 
 ## 6. Occupancy Mode Priority
@@ -670,7 +736,8 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `THERMAL_MAX_ACTIVE_SAMPLES` | `120` | samples | Cap on active-phase samples (2 hours at 60s cadence) |
 | `THERMAL_MAX_POST_HEAT_SAMPLES` | `45` | samples | Cap on post-heat samples (45 min at 60s cadence) |
 | `THERMAL_MIN_R_SQUARED` | `0.2` | — | Minimum R² for k_passive OLS regression to accept an observation |
-| `THERMAL_MIN_POST_HEAT_SAMPLES` | `10` | samples | Minimum post-heat samples required for regression |
+| `THERMAL_MIN_POST_HEAT_SAMPLES` | `4` | samples | Minimum post-heat samples required before committing an HVAC observation (Issue #130 D14: lowered from 10; enables short 5–30 min cycles) |
+| `THERMAL_HVAC_MIN_SIGNAL_F` | `0.5` | °F | Minimum `|T_peak − T_start|` for a heating/cooling cycle to be treated as meaningful signal. Below this the cycle is a setpoint-maintenance run and is rejected (Issue #130 D23) |
 | `THERMAL_K_PASSIVE_MIN` | `-0.5` | hr⁻¹ | Sanity lower bound for k_passive (very leaky envelope) |
 | `THERMAL_K_PASSIVE_MAX` | `-0.001` | hr⁻¹ | Sanity upper bound for k_passive (very well insulated) |
 | `THERMAL_K_ACTIVE_HEAT_MIN` | `0.5` | °F/hr | Minimum credible HVAC heating contribution |
@@ -1197,4 +1264,4 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 
 ---
 
-_Last Updated: 2026-05-03_
+_Last Updated: 2026-05-08_

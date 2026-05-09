@@ -316,6 +316,43 @@ Claude Code's built-in memory system stores project context, tooling locations, 
 
 ---
 
+## Documentation Convergence
+
+Documentation must converge toward completeness each session, not diverge. These rules are enforced in every mob session and tracked via GitHub issue #131.
+
+### Coverage Score Formula
+
+Each of 19 modules earns up to 4 points: Tier 2 brief present = 1pt, real anchors in parent doc = 1pt, Tier 3 Territory spec = 2pts. Target: ≥75% (57/76 points).
+
+**Phase targets:** Phase 1 → 50%, Phase 2 → 65%, Phase 3 → 75%+. Re-evaluate scope after each phase.
+
+### Convergence Rules
+
+1. **Scribe is always a standing lane in feature sessions.** Any session that writes new code must have a Scribe lane open. Scribe may be sidecar but cannot be absent.
+
+2. **Anchor tables are the definition of done for any doc touched.** If a session adds or modifies a section in any `docs/` file, Scribe fills or updates that doc's Anchors table before session close. A `_(placeholder)_` row = not done.
+
+3. **Every new module or function → Tier 2 stub + Tier 3 brief before session close.** Even an incomplete stub with the scope boundary and expected anchors is sufficient. The brief's expected anchors serve as the spec the Craftsman's inline comments must satisfy.
+
+4. **Doc debt is tracked in GitHub issue #131.** Update the issue at session end with coverage score delta. Score must go up, never down.
+
+5. **Accuracy verification before any issue close.** Scribe reads the relevant Tier 3 spec (or Tier 2 brief) against current code and flags mismatches. Never close an issue with a stale spec.
+
+### Templates
+
+Authoring templates for new Tier 2 briefs and Tier 3 specs live in `docs/templates/`. Always use them — they encode the correct section structure and disclosure path requirements.
+
+### Known Gaps (Phase 1 complete — 2026-05-09)
+
+- `docs/thermal-model-v3-spec.md` — Tier 3 spec: six observation types, OLS solvers, EWMA, gate bridge, swing
+- `docs/grace-periods-spec.md` — Tier 3 spec: grace period state machine, timer lifecycle, pre-pause storage
+- `docs/state-persistence.md` — Tier 2 brief: state.py + learning DB persistence
+- `docs/temperature-conversion.md` — Tier 2 brief: from_fahrenheit() vs convert_delta() distinction
+- **Security gap:** `climate_advisor_state.json` is not created with `0o600` permissions — `state.py` does not `chmod` after `os.replace`. Tracked for fix.
+- **Behavioral gap:** Sensor going unavailable during a grace pause leaves the system paused indefinitely (no unavailable-state handler). Tracked for fix.
+
+---
+
 ## Git Workflow
 
 ### Commits

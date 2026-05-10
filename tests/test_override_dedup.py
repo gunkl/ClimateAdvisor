@@ -188,9 +188,9 @@ def _make_thermostat_coordinator_stub(
     coord._pending_thermal_event = None
     coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()
-    coord._start_thermal_event = AsyncMock()
-    coord._end_active_phase = AsyncMock()
-    coord._abandon_thermal_event = AsyncMock()
+    coord._start_hvac_observation = AsyncMock()
+    coord._end_hvac_active_phase = AsyncMock()
+    coord._abandon_observation = AsyncMock()
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
     coord._chart_log = MagicMock()

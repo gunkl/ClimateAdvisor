@@ -140,7 +140,7 @@ class TestLearningEnabledToggle:
     """Tests that learning_enabled=False causes each guard to skip learning logic."""
 
     def test_thermal_observation_skipped_when_disabled(self, tmp_path: Path):
-        """_start_thermal_event() returns early when learning_enabled=False."""
+        """_start_hvac_observation() returns early when learning_enabled=False."""
         import asyncio
 
         from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
@@ -152,14 +152,13 @@ class TestLearningEnabledToggle:
         config = dict(_BASE_CONFIG, learning_enabled=False)
         coordinator = ClimateAdvisorCoordinator(hass, config)
 
-        # Spy on the learning engine
-        coordinator.learning.set_pending_thermal_event = MagicMock()
+        # Call _start_hvac_observation — should return early without creating any observation
+        asyncio.run(coordinator._start_hvac_observation("heat"))
 
-        # Call _start_thermal_event — should return early without touching learning
-        asyncio.run(coordinator._start_thermal_event("heat"))
-
-        coordinator.learning.set_pending_thermal_event.assert_not_called()
-        assert coordinator._pending_thermal_event is None
+        # No pending observation should have been created
+        assert coordinator._pending_observations == {}, (
+            "_start_hvac_observation should not create any observation when learning_enabled=False"
+        )
 
     def test_compute_bedtime_setback_uses_default_when_learning_disabled(self):
         """compute_bedtime_setback() returns default depth when learning_enabled=False."""

@@ -123,9 +123,9 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._pending_thermal_event = None
     coord._pre_heat_sample_buffer = []
     coord._flush_hvac_runtime = MagicMock()
-    coord._start_thermal_event = AsyncMock()
-    coord._end_active_phase = AsyncMock()
-    coord._abandon_thermal_event = AsyncMock()
+    coord._start_hvac_observation = AsyncMock()
+    coord._end_hvac_active_phase = MagicMock()
+    coord._abandon_observation = AsyncMock()
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
     coord._any_sensor_open = MagicMock(return_value=False)
@@ -268,10 +268,11 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._startup_retries_remaining = 0
     coord._startup_hvac_initialized = False
     coord._pending_thermal_event = None
+    coord._pending_observations = {}
     coord._pre_heat_sample_buffer = []
     coord._update_pre_heat_buffer = MagicMock()
-    coord._sample_thermal_event = MagicMock()
-    coord._check_stabilization = AsyncMock()
+    coord._sample_all_observations = MagicMock()
+    coord._check_hvac_stabilization = AsyncMock()
 
     coord._async_update_data = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)
     return coord
@@ -296,7 +297,7 @@ class TestThermalSessionDetectionReal:
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
         assert coord._hvac_on_since is not None, "Session should have started"
-        coord._start_thermal_event.assert_called_once_with("heat")
+        coord._start_hvac_observation.assert_called_once_with("heat")
 
     def test_session_mode_heat_set_from_state_not_hvac_action(self):
         """When hvac_action='fan', session mode is resolved from new_state.state='heat'."""
@@ -308,7 +309,7 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._start_thermal_event.assert_called_once_with("heat")
+        coord._start_hvac_observation.assert_called_once_with("heat")
 
     def test_session_mode_cool_set_from_state_when_hvac_action_is_fan(self):
         """hvac_action='fan' on a cool-mode turn-on → session mode = 'cool'."""
@@ -320,10 +321,10 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._start_thermal_event.assert_called_once_with("cool")
+        coord._start_hvac_observation.assert_called_once_with("cool")
 
     def test_turn_off_detected_when_hvac_action_stuck_at_fan(self):
-        """old=heat/fan, new=off/fan: turn-off fires and _end_active_phase is called."""
+        """old=heat/fan, new=off/fan: turn-off fires and _end_hvac_active_phase is called."""
         coord = _make_thermostat_coord(
             hvac_on_since=datetime(2026, 4, 8, 9, 0, 0),
         )
@@ -335,7 +336,7 @@ class TestThermalSessionDetectionReal:
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
         coord._flush_hvac_runtime.assert_called_once()
-        coord._end_active_phase.assert_called_once()
+        assert coord._end_hvac_active_phase.call_count == 2
 
     def test_normal_heating_action_still_works(self):
         """Standard old=off/'' → new=heat/'heating' path still sets mode correctly."""
@@ -348,10 +349,10 @@ class TestThermalSessionDetectionReal:
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
         assert coord._hvac_on_since is not None
-        coord._start_thermal_event.assert_called_once_with("heat")
+        coord._start_hvac_observation.assert_called_once_with("heat")
 
     def test_fan_only_mode_creates_fan_only_event(self):
-        """fan_only mode + fan action → _start_thermal_event called with 'fan_only'."""
+        """fan_only mode + fan action → _start_hvac_observation called with 'fan_only'."""
         coord = _make_thermostat_coord()
         old = _make_state("off", hvac_action="")
         new = _make_state("fan_only", hvac_action="fan")
@@ -360,7 +361,7 @@ class TestThermalSessionDetectionReal:
             mock_dt.now.return_value = datetime(2026, 4, 8, 10, 0, 0)
             asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
 
-        coord._start_thermal_event.assert_called_once_with("fan_only")
+        coord._start_hvac_observation.assert_called_once_with("fan_only")
 
 
 # ---------------------------------------------------------------------------

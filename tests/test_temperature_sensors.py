@@ -238,12 +238,13 @@ def _make_update_data_coord(
     coord._last_violation_check = None
     coord._check_comfort_violations = MagicMock()
 
-    # Thermal event pipeline (v2)
+    # Thermal event pipeline (v3)
     coord._pending_thermal_event = None
+    coord._pending_observations = {}
     coord._pre_heat_sample_buffer = []
     coord._update_pre_heat_buffer = MagicMock()
-    coord._sample_thermal_event = MagicMock()
-    coord._check_stabilization = AsyncMock()
+    coord._sample_all_observations = MagicMock()
+    coord._check_hvac_stabilization = AsyncMock()
 
     coord._async_update_data = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)
     return coord

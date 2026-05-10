@@ -24,7 +24,6 @@ from .const import (
     MIN_DATA_POINTS_FOR_SUGGESTION,
     MIN_THERMAL_OBSERVATIONS,
     MIN_WEATHER_BIAS_OBSERVATIONS,
-    OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
@@ -520,7 +519,6 @@ class LearningState:
     dismissed_suggestions: list[str] = field(default_factory=list)
     settings_history: list[dict] = field(default_factory=list)
     thermal_observations: list[dict] = field(default_factory=list)  # cap: THERMAL_OBS_CAP
-    pending_thermal_event: dict | None = None  # in-progress observation window
     pending_observations: dict = field(default_factory=dict)  # v3 multi-type obs windows
     thermal_model_cache: dict | None = None  # EWMA-accumulated k_passive, k_active_heat/cool
     rejection_log: dict = field(default_factory=dict)  # keyed by obs_type; each list capped at 100 entries
@@ -557,6 +555,7 @@ class LearningEngine:
                     "Loaded learning state — %d records",
                     len(data.get("records", [])),
                 )
+                data.pop("pending_thermal_event", None)  # v2 field removed in Issue #133
                 self._state = LearningState(**data)
                 # Validate all list fields — corrupted JSON may have wrong types
                 for field_name in (
@@ -578,7 +577,7 @@ class LearningEngine:
                     obs for obs in self._state.thermal_observations if isinstance(obs, dict)
                 ]
                 # Validate dict|None fields
-                for field_name in ("pending_thermal_event", "thermal_model_cache"):
+                for field_name in ("thermal_model_cache",):
                     val = getattr(self._state, field_name, None)
                     if val is not None and not isinstance(val, dict):
                         _LOGGER.warning(
@@ -599,52 +598,6 @@ class LearningEngine:
                             self._state.rejection_log[_obs_type] = []
                         elif len(_entries) > 100:
                             self._state.rejection_log[_obs_type] = _entries[-100:]
-                # v3 migration: convert pending_thermal_event → pending_observations
-                old_event = self._state.pending_thermal_event
-                if isinstance(old_event, dict) and old_event.get("status") in ("post_heat", "stabilized"):
-                    session_mode = old_event.get("session_mode") or old_event.get("hvac_mode") or "heat"
-                    obs_type = OBS_TYPE_HVAC_HEAT if session_mode == "heat" else OBS_TYPE_HVAC_COOL
-                    if obs_type not in self._state.pending_observations:
-                        migrated: PendingObservation = {
-                            "obs_type": obs_type,
-                            "obs_id": old_event.get("event_id", str(uuid.uuid4())),
-                            "start_time": old_event.get("active_start") or old_event.get("created_at", ""),
-                            "status": "monitoring",
-                            "samples": old_event.get("active_samples", []),
-                            "flags_at_start": {
-                                "hvac_mode": old_event.get("hvac_mode", "heat"),
-                                "hvac_action": "heating" if session_mode == "heat" else "cooling",
-                                "fan_active": False,
-                                "windows_open": False,
-                                "occupancy_mode": "home",
-                            },
-                            "_legacy_event": old_event,
-                            "schema_version": 1,
-                        }
-                        migrated.update(
-                            {
-                                "_phase": "active" if old_event.get("status") == "active" else "post_heat",
-                                "active_samples": old_event.get("active_samples", []),
-                                "post_heat_samples": old_event.get("post_heat_samples", []),
-                                "peak_indoor_f": old_event.get("peak_indoor_f"),
-                                "start_indoor_f": old_event.get("start_indoor_f"),
-                                "active_start": old_event.get("active_start", ""),
-                                "active_end": old_event.get("active_end"),
-                                "session_mode": session_mode,
-                                "hvac_mode": old_event.get("hvac_mode", session_mode),
-                            }
-                        )
-                        self._state.pending_observations[obs_type] = migrated
-                        _LOGGER.info(
-                            "v3 migration: pending_thermal_event (mode=%s) → pending_observations[%s]",
-                            session_mode,
-                            obs_type,
-                        )
-                    self._state.pending_thermal_event = None
-                elif isinstance(old_event, dict) and old_event.get("status") == "active":
-                    # Active v2 events cannot be recovered without runtime HVAC state — discard
-                    _LOGGER.info("v3 migration: discarding active-status v2 pending_thermal_event (unrecoverable)")
-                    self._state.pending_thermal_event = None
                 return
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.warning("Failed to load learning state, starting fresh: %s", err)
@@ -920,58 +873,6 @@ class LearningEngine:
             "confidence_swing_cool": _grade_swing_confidence(cache.get("observation_count_swing_cool", 0)),
             "learning_health": learning_health or {},
         }
-
-    def get_pending_thermal_event(self) -> dict | None:
-        """Return the in-progress thermal event dict, or None."""
-        return self._state.pending_thermal_event
-
-    def set_pending_thermal_event(self, event: dict | None) -> None:
-        """Update the in-progress thermal event (does NOT call save_state)."""
-        self._state.pending_thermal_event = event
-
-    def recover_pending_event_on_startup(self) -> dict | None:
-        """Process any pending thermal event that survived an HA restart.
-
-        Called once at startup (via async_add_executor_job).
-        Commits, partially commits, or discards the event per the recovery table:
-
-        | Status                        | Action                                   |
-        |-------------------------------|------------------------------------------|
-        | active                        | Discard                                  |
-        | post_heat + ≥10 post samples  | Partial commit at low confidence         |
-        | post_heat + <10 post samples  | Discard                                  |
-        | stabilized                    | Full commit                              |
-        | complete / abandoned          | Clear                                    |
-
-        Returns the committed observation dict if one was produced, else None.
-        """
-        event = self._state.pending_thermal_event
-        if not isinstance(event, dict):
-            return None
-
-        status = event.get("status", "")
-        _LOGGER.info("Startup recovery: pending thermal event status=%s", status)
-
-        result = None
-        if status == "stabilized":
-            result, *_ = self._commit_event_from_dict(event, force_grade=None)
-        elif status == "post_heat":
-            post_samples = event.get("post_heat_samples", [])
-            if len(post_samples) >= THERMAL_MIN_POST_HEAT_SAMPLES:
-                result, *_ = self._commit_event_from_dict(event, force_grade="low")
-            else:
-                _LOGGER.info(
-                    "Startup recovery: discarding post_heat event with only %d post samples",
-                    len(post_samples),
-                )
-        elif status in ("complete", "abandoned"):
-            pass  # just clear
-        else:
-            _LOGGER.info("Startup recovery: discarding event with status=%r", status)
-
-        self._state.pending_thermal_event = None
-        self.save_state()
-        return result
 
     def _commit_event_from_dict(
         self, event: dict, force_grade: str | None, obs_type: str = OBS_TYPE_HVAC_HEAT
@@ -1731,7 +1632,6 @@ class LearningEngine:
             self.save_state()
         elif scope == "thermal_model":
             self._state.thermal_observations = []
-            self._state.pending_thermal_event = None
             self._state.thermal_model_cache = None
             self.save_state()
         elif scope == "weather_bias":

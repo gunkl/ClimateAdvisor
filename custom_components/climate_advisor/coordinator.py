@@ -126,12 +126,10 @@ from .const import (
     THERMAL_FAN_MIN_SIGNAL_F,
     THERMAL_FAN_SAMPLE_INTERVAL_S,
     THERMAL_HVAC_MIN_DECAY_F,
-    THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S,
     THERMAL_MAX_ACTIVE_SAMPLES,
     THERMAL_MAX_OBS_SAMPLES,
     THERMAL_MAX_POST_HEAT_SAMPLES,
     THERMAL_MILD_BUCKET_LIMIT_F,
-    THERMAL_MIN_DECAY_F,
     THERMAL_MIN_DECAY_SAMPLES,
     THERMAL_MIN_POST_HEAT_SAMPLES,
     THERMAL_MIN_R_SQUARED,
@@ -149,8 +147,6 @@ from .const import (
     THERMAL_SOLAR_MIN_RATE_F_PER_HR,
     THERMAL_SOLAR_MIN_SAMPLES,
     THERMAL_SOLAR_SAMPLE_INTERVAL_S,
-    THERMAL_STABILIZATION_THRESHOLD_F,
-    THERMAL_STABILIZATION_WINDOW_MINUTES,
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENT_MIN_SIGNAL_F,
     THERMAL_VENTILATED_MIN_DELTA_F,
@@ -1056,15 +1052,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._first_run = False
                 climate_state = self.hass.states.get(self.config["climate_entity"])
                 self._check_startup_override(climate_state, self._current_classification)
-                # Recover any pending thermal event that survived restart
-                recovered = await self.hass.async_add_executor_job(self.learning.recover_pending_event_on_startup)
-                if recovered:
-                    _LOGGER.info(
-                        "Startup: recovered thermal observation event_id=%s mode=%s grade=%s",
-                        recovered.get("event_id", "?"),
-                        recovered.get("hvac_mode", "?"),
-                        recovered.get("confidence_grade", "?"),
-                    )
                 # Recover v3 pending_observations that survived restart
                 _pending_obs = self.learning._state.pending_observations
                 if isinstance(_pending_obs, dict):
@@ -1238,14 +1225,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # --- Thermal observation pipeline sampling ---
         self._update_pre_heat_buffer()
-        self._sample_thermal_event()
         self._sample_all_observations()
         if hasattr(self, "_pending_observations") and self._pending_observations:
             _LOGGER.info(
                 "Thermal pipeline: %d pending observations active",
                 len(self._pending_observations),
             )
-        await self._check_stabilization()
         for _hvac_obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
             await self._check_hvac_stabilization(_hvac_obs_type)
 
@@ -2016,12 +2001,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else:
                 session_mode = None
             if session_mode:
-                await self._start_thermal_event(session_mode)
                 await self._start_hvac_observation(session_mode)
         elif was_running and not is_running:
             # HVAC just turned off — flush runtime and end active phase
             self._flush_hvac_runtime()
-            await self._end_active_phase()
             for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                 self._end_hvac_active_phase(_hvac_ot)
             self._hvac_on_since = None
@@ -2033,11 +2016,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_action,
                     new_action,
                 )
-                await self._abandon_thermal_event("heat_cool mode switch mid-session")
                 for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                     self._abandon_observation(_hvac_ot, "heat_cool mode switch mid-session")
                 new_session_mode = "heat" if new_action == "heating" else "cool"
-                await self._start_thermal_event(new_session_mode)
                 await self._start_hvac_observation(new_session_mode)
 
         # If thermostat is now fully off, clear any stale HVAC-based fan active flag.
@@ -2192,7 +2173,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             session_mode,
         )
         if session_mode:
-            await self._start_thermal_event(session_mode)
             await self._start_hvac_observation(session_mode)
 
     # ------------------------------------------------------------------
@@ -2235,249 +2215,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Hard cap at 15
         if len(self._pre_heat_sample_buffer) > 15:
             self._pre_heat_sample_buffer = self._pre_heat_sample_buffer[-15:]
-
-    async def _start_thermal_event(self, session_mode: str) -> None:
-        """Begin a new thermal observation event.
-
-        Abandons any existing event first. Snapshots the pre-heat buffer.
-        """
-        if not self.config.get("learning_enabled", True):
-            return
-        if self._pending_thermal_event is not None:
-            await self._abandon_thermal_event("new HVAC session started")
-
-        import uuid
-
-        now = dt_util.now()
-        # Re-stamp pre-heat buffer relative to elapsed_minutes=0 at event start
-        pre_samples = []
-        for s in self._pre_heat_sample_buffer:
-            try:
-                ts = dt_util.parse_datetime(s["timestamp"])
-                elapsed = (now - ts).total_seconds() / 60.0 if ts else 0.0
-            except Exception:
-                elapsed = 0.0
-            pre_samples.append(
-                {
-                    "timestamp": s["timestamp"],
-                    "indoor_temp_f": s["indoor_temp_f"],
-                    "outdoor_temp_f": s["outdoor_temp_f"],
-                    "elapsed_minutes": -elapsed,  # negative = before session start
-                }
-            )
-
-        indoor = self._get_indoor_temp()
-        event = {
-            "event_id": str(uuid.uuid4()),
-            "created_at": now.isoformat(),
-            "hvac_mode": session_mode,
-            "session_mode": session_mode,
-            "status": "active",
-            "active_start": now.isoformat(),
-            "active_end": None,
-            "stabilized_at": None,
-            "pre_heat_samples": pre_samples,
-            "active_samples": [],
-            "post_heat_samples": [],
-            "start_indoor_f": indoor,
-            "end_indoor_f": None,
-            "peak_indoor_f": indoor,
-            "start_outdoor_f": None,
-            "session_minutes": None,
-            "schema_version": 1,
-        }
-        # Grab first sample now
-        first_sample = self._get_current_sample(0.0)
-        event["active_samples"].append(first_sample)
-        event["start_outdoor_f"] = first_sample["outdoor_temp_f"]
-
-        self._pending_thermal_event = event
-        self.learning.set_pending_thermal_event(event)
-        await self.hass.async_add_executor_job(self.learning.save_state)
-        _LOGGER.info(
-            "Thermal event started: event_id=%s mode=%s indoor=%.1f°F",
-            event["event_id"],
-            session_mode,
-            indoor if indoor is not None else 0.0,
-        )
-
-    def _sample_thermal_event(self) -> None:
-        """Append a sample to the active or post_heat list. Called every update cycle."""
-        if self._pending_thermal_event is None:
-            return
-        status = self._pending_thermal_event.get("status")
-        if status not in ("active", "post_heat"):
-            return
-
-        # Skip sample when indoor temp is unavailable — recording 0.0 would corrupt regression
-        if self._get_indoor_temp() is None:
-            return
-
-        active_start_str = self._pending_thermal_event.get("active_start")
-        try:
-            active_start = dt_util.parse_datetime(active_start_str) if active_start_str else dt_util.now()
-        except Exception:
-            active_start = dt_util.now()
-        elapsed = (dt_util.now() - active_start).total_seconds() / 60.0
-
-        sample = self._get_current_sample(elapsed)
-
-        if status == "active":
-            samples = self._pending_thermal_event["active_samples"]
-            if len(samples) < THERMAL_MAX_ACTIVE_SAMPLES:
-                samples.append(sample)
-            # Update peak indoor
-            indoor = sample["indoor_temp_f"]
-            cur_peak = self._pending_thermal_event.get("peak_indoor_f")
-            if indoor and (cur_peak is None or indoor > cur_peak):
-                self._pending_thermal_event["peak_indoor_f"] = indoor
-        else:  # post_heat
-            samples = self._pending_thermal_event["post_heat_samples"]
-            if len(samples) < THERMAL_MAX_POST_HEAT_SAMPLES:
-                # H1/H3: post-heat is passive dynamics — gate at 5-min intervals
-                _last_ph_s = self._pending_thermal_event.get("last_post_heat_sample_time")
-                _ph_elapsed = (
-                    (dt_util.now() - dt_util.parse_datetime(_last_ph_s)).total_seconds()
-                    if _last_ph_s
-                    else THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S + 1
-                )
-                if _ph_elapsed >= THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S:
-                    samples.append(sample)
-                    self._pending_thermal_event["last_post_heat_sample_time"] = dt_util.now().isoformat()
-            # Persist every 5th post-heat sample for crash safety
-            if len(samples) % 5 == 0:
-                self.learning.set_pending_thermal_event(self._pending_thermal_event)
-
-    async def _end_active_phase(self) -> None:
-        """Transition active → post_heat when HVAC action stops."""
-        if self._pending_thermal_event is None or self._pending_thermal_event.get("status") != "active":
-            return
-        now = dt_util.now()
-        self._pending_thermal_event["status"] = "post_heat"
-        self._pending_thermal_event["active_end"] = now.isoformat()
-
-        # Compute session_minutes
-        active_start_str = self._pending_thermal_event.get("active_start")
-        try:
-            active_start = dt_util.parse_datetime(active_start_str) if active_start_str else now
-        except Exception:
-            active_start = now
-        self._pending_thermal_event["session_minutes"] = (now - active_start).total_seconds() / 60.0
-
-        self.learning.set_pending_thermal_event(self._pending_thermal_event)
-        await self.hass.async_add_executor_job(self.learning.save_state)
-        _LOGGER.info(
-            "Thermal event active → post_heat: event_id=%s session=%.1f min",
-            self._pending_thermal_event.get("event_id", "?"),
-            self._pending_thermal_event["session_minutes"],
-        )
-
-    async def _check_stabilization(self) -> None:
-        """Check if post-heat temperature has stabilized or timed out.
-
-        Called every update cycle during post_heat phase.
-        Commits on stabilization; abandons on timeout.
-        """
-        if self._pending_thermal_event is None or self._pending_thermal_event.get("status") != "post_heat":
-            return
-
-        active_end_str = self._pending_thermal_event.get("active_end")
-        try:
-            active_end = dt_util.parse_datetime(active_end_str) if active_end_str else dt_util.now()
-        except Exception:
-            active_end = dt_util.now()
-
-        elapsed_post = (dt_util.now() - active_end).total_seconds() / 60.0
-
-        # Timeout check
-        if elapsed_post > THERMAL_POST_HEAT_TIMEOUT_MINUTES:
-            await self._abandon_thermal_event("post_heat timeout exceeded")
-            return
-
-        # Stabilization check: last THERMAL_STABILIZATION_WINDOW_MINUTES of samples
-        post_samples = self._pending_thermal_event.get("post_heat_samples", [])
-        if len(post_samples) < THERMAL_MIN_POST_HEAT_SAMPLES:
-            return
-
-        # Collect samples from the last THERMAL_STABILIZATION_WINDOW_MINUTES
-        recent = []
-        now_iso = dt_util.now()
-        for s in reversed(post_samples):
-            try:
-                sample_ts = dt_util.parse_datetime(s["timestamp"])
-                if sample_ts and (now_iso - sample_ts).total_seconds() / 60.0 <= THERMAL_STABILIZATION_WINDOW_MINUTES:
-                    recent.append(s)
-            except Exception:
-                pass
-        recent.reverse()
-
-        if len(recent) < 2:
-            return
-
-        indoor_vals = [s["indoor_temp_f"] for s in recent]
-        if max(indoor_vals) - min(indoor_vals) < THERMAL_STABILIZATION_THRESHOLD_F:
-            self._pending_thermal_event["status"] = "stabilized"
-            self._pending_thermal_event["stabilized_at"] = dt_util.now().isoformat()
-            self._pending_thermal_event["end_indoor_f"] = indoor_vals[-1]
-
-            # Plateau guard: require at least THERMAL_MIN_DECAY_F of post-heat decay
-            # before committing.  If the temp barely moved the HVAC never meaningfully
-            # ran and the observation would pollute the model with a near-zero rate.
-            peak_f = self._pending_thermal_event.get("peak_indoor_f")
-            end_f = indoor_vals[-1]
-            if peak_f is not None and (peak_f - end_f) < THERMAL_MIN_DECAY_F:
-                _LOGGER.info(
-                    "Thermal event plateau guard: event_id=%s peak=%.2f end=%.2f decay=%.2f < %.2f — abandoning",
-                    self._pending_thermal_event.get("event_id", "?"),
-                    peak_f,
-                    end_f,
-                    peak_f - end_f,
-                    THERMAL_MIN_DECAY_F,
-                )
-                await self._abandon_thermal_event("plateau guard: insufficient post-heat decay")
-                await self._async_save_state()
-                return
-
-            _LOGGER.info(
-                "Thermal event stabilized: event_id=%s post_samples=%d",
-                self._pending_thermal_event.get("event_id", "?"),
-                len(post_samples),
-            )
-            await self._commit_thermal_event()
-
-    async def _commit_thermal_event(self) -> None:
-        """Compute physics parameters and record the thermal observation."""
-        if self._pending_thermal_event is None:
-            return
-        if not self.config.get("learning_enabled", True):
-            self._pending_thermal_event = None
-            self.learning.set_pending_thermal_event(None)
-            return
-
-        obs_result, _reject_code, _r_squared = await self.hass.async_add_executor_job(
-            self.learning._commit_event_from_dict,
-            self._pending_thermal_event,
-            None,
-        )
-
-        if obs_result is not None and self._today_record is not None:
-            self._today_record.thermal_session_count += 1
-
-        self._pending_thermal_event = None
-        self.learning.set_pending_thermal_event(None)
-        await self.hass.async_add_executor_job(self.learning.save_state)
-
-    async def _abandon_thermal_event(self, reason: str) -> None:
-        """Discard the current pending thermal event."""
-        if self._pending_thermal_event is not None:
-            _LOGGER.info(
-                "Thermal event abandoned: event_id=%s reason=%s",
-                self._pending_thermal_event.get("event_id", "?"),
-                reason,
-            )
-        self._pending_thermal_event = None
-        self.learning.set_pending_thermal_event(None)
-        await self.hass.async_add_executor_job(self.learning.save_state)
 
     # ------------------------------------------------------------------
     # Thermal observation pipeline v3 (multi-type obs)
@@ -2578,8 +2315,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     obs["setpoint_f"] = round(float(_sp), 1)
 
         self._pending_observations[obs_type] = obs
-        # Keep legacy field in sync for startup recovery compat
-        self.learning.set_pending_thermal_event(obs)
         await self.hass.async_add_executor_job(self.learning.save_state)
         _LOGGER.info(
             "Thermal HVAC observation started: obs_id=%s mode=%s indoor=%.1f°F",
@@ -2648,8 +2383,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     samples = obs["post_heat_samples"]
                     if len(samples) < THERMAL_MAX_POST_HEAT_SAMPLES:
                         samples.append(sample)
-                    if len(samples) % 5 == 0:
-                        self.learning.set_pending_thermal_event(obs)
             else:
                 # passive/fan/vent/solar: append to samples list
                 elapsed = 0.0
@@ -2917,7 +2650,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             active_start = now
         obs["session_minutes"] = (now - active_start).total_seconds() / 60.0
 
-        self.learning.set_pending_thermal_event(obs)
         _LOGGER.info(
             "Thermal HVAC observation active → post_heat: obs_id=%s session=%.1f min",
             obs.get("obs_id", "?"),
@@ -3020,8 +2752,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         if not self.config.get("learning_enabled", True):
             self._pending_observations.pop(obs_type, None)
-            if obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                self.learning.set_pending_thermal_event(None)
             await self.hass.async_add_executor_job(self.learning.save_state)
             return
 
@@ -3036,8 +2766,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._today_record is not None and obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                 self._today_record.thermal_session_count += 1
             self._pending_observations.pop(obs_type, None)
-            if obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                self.learning.set_pending_thermal_event(None)
             await self.hass.async_add_executor_job(self.learning.save_state)
         else:
             # Learning engine rejected (OLS bad fit, wrong sign, bounds, etc.).
@@ -3050,8 +2778,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 r_squared=r_squared,
                 n_required=THERMAL_MIN_DECAY_SAMPLES,
             )
-            if obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-                self.learning.set_pending_thermal_event(None)
             await self.hass.async_add_executor_job(self.learning.save_state)
 
     def _abandon_observation(
@@ -3127,8 +2853,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             bucket.pop(0)
         # Sync to LearningState so rejection_log is persisted by save_state()
         self.learning._state.rejection_log = self._rejection_log
-        if obs_type in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
-            self.learning.set_pending_thermal_event(None)
         self.hass.async_create_task(self.hass.async_add_executor_job(self.learning.save_state))
 
     def _build_learning_health(self) -> dict:

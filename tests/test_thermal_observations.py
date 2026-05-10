@@ -657,36 +657,19 @@ class TestAbandonmentLogging:
 
 
 class TestMigrationLoadState:
-    """LearningEngine.load_state() migrates pending_thermal_event to pending_observations."""
+    """LearningEngine.load_state() handles legacy pending_thermal_event without crashing.
+
+    The v3 implementation uses data.pop("pending_thermal_event", None) to silently
+    discard the v2 field.  These tests verify that loading a state file containing
+    the legacy field succeeds without error and leaves pending_observations empty.
+    """
 
     def test_migration_converts_pending_thermal_event_heat(self, tmp_path: Path):
-        """A v2 post_heat event is migrated to OBS_TYPE_HVAC_HEAT in pending_observations."""
-        engine = LearningEngine(tmp_path)
-        engine.load_state()
+        """Loading a legacy DB with pending_thermal_event[mode=heat] succeeds.
 
-        # Inject a v2-style pending event into state (post_heat — recoverable)
-        engine._state.pending_thermal_event = {
-            "event_id": "test-123",
-            "status": "post_heat",
-            "session_mode": "heat",
-            "hvac_mode": "heat",
-            "active_start": "2025-06-15T08:00:00",
-            "active_samples": [
-                {
-                    "indoor_temp_f": 70.0,
-                    "outdoor_temp_f": 50.0,
-                    "elapsed_minutes": 1.0,
-                    "timestamp": "2025-06-15T08:01:00",
-                }
-            ],
-            "pre_heat_samples": [],
-            "post_heat_samples": [],
-        }
-        # Make pending_observations empty so migration runs
-        engine._state.pending_observations = {}
-
-        # Re-run load_state to trigger migration — simulate by calling the migration path
-        # directly by setting up the state and calling load_state() again after persisting
+        The v2 field is discarded (data.pop) — no migration conversion occurs.
+        pending_observations stays empty; load does not crash.
+        """
         import json
 
         state_dict = {
@@ -697,26 +680,45 @@ class TestMigrationLoadState:
             "thermal_observations": [],
             "thermal_model_cache": None,
             "pending_observations": {},
-            "pending_thermal_event": engine._state.pending_thermal_event,
+            "pending_thermal_event": {
+                "event_id": "test-123",
+                "status": "post_heat",
+                "session_mode": "heat",
+                "hvac_mode": "heat",
+                "active_start": "2025-06-15T08:00:00",
+                "active_samples": [
+                    {
+                        "indoor_temp_f": 70.0,
+                        "outdoor_temp_f": 50.0,
+                        "elapsed_minutes": 1.0,
+                        "timestamp": "2025-06-15T08:01:00",
+                    }
+                ],
+                "pre_heat_samples": [],
+                "post_heat_samples": [],
+            },
         }
         state_file = tmp_path / "climate_advisor_learning.json"
         state_file.write_text(json.dumps(state_dict))
 
-        engine2 = LearningEngine(tmp_path)
-        engine2.load_state()
+        engine = LearningEngine(tmp_path)
+        engine.load_state()  # must not raise
 
-        # After migration: pending_thermal_event should NOT have been blindly carried —
-        # the migration writes it to pending_observations
-        assert isinstance(engine2._state.pending_observations, dict)
-        assert OBS_TYPE_HVAC_HEAT in engine2._state.pending_observations, (
-            "v3 migration should convert pending_thermal_event[mode=heat] "
-            f"→ pending_observations['{OBS_TYPE_HVAC_HEAT}']"
+        # v2 field is popped — not present as a state attribute
+        assert not hasattr(engine._state, "pending_thermal_event") or engine._state.pending_thermal_event is None, (
+            "pending_thermal_event should not survive load (it is popped/discarded)"
         )
-        migrated = engine2._state.pending_observations[OBS_TYPE_HVAC_HEAT]
-        assert migrated["obs_id"] == "test-123"
+        # pending_observations starts empty — no migration conversion
+        assert isinstance(engine._state.pending_observations, dict)
+        assert engine._state.pending_observations == {}, (
+            "pending_observations should be empty after discarding legacy pending_thermal_event"
+        )
 
     def test_migration_discards_active_status_v2_event(self, tmp_path: Path):
-        """A v2 event with status='active' is discarded — cannot be recovered without runtime state."""
+        """Loading a legacy DB with pending_thermal_event[status=active] succeeds without error.
+
+        The v2 field is silently discarded via data.pop — pending_observations stays empty.
+        """
         import json
 
         state_dict = {
@@ -742,14 +744,15 @@ class TestMigrationLoadState:
         state_file.write_text(json.dumps(state_dict))
 
         engine = LearningEngine(tmp_path)
-        engine.load_state()
+        engine.load_state()  # must not raise
 
-        assert engine._state.pending_thermal_event is None, "active-status v2 event should be discarded"
-        assert engine._state.pending_observations == {}, "no obs should be created for discarded active event"
+        assert engine._state.pending_observations == {}, "pending_observations must be empty after discarding v2 field"
 
     def test_migration_clears_pending_thermal_event_after_migration(self, tmp_path: Path):
-        """After migration, pending_thermal_event entry is still present (not cleared
-        by migration itself — coordinator handles lifecycle), but pending_observations is populated."""
+        """Loading a legacy DB with pending_thermal_event[mode=cool] succeeds.
+
+        The v2 field is discarded — pending_observations is empty after load.
+        """
         import json
 
         state_dict = {
@@ -776,10 +779,12 @@ class TestMigrationLoadState:
         state_file.write_text(json.dumps(state_dict))
 
         engine = LearningEngine(tmp_path)
-        engine.load_state()
+        engine.load_state()  # must not raise
 
-        assert OBS_TYPE_HVAC_COOL in engine._state.pending_observations
-        assert engine._state.pending_observations[OBS_TYPE_HVAC_COOL]["obs_id"] == "evt-456"
+        assert isinstance(engine._state.pending_observations, dict)
+        assert engine._state.pending_observations == {}, (
+            "pending_observations should be empty — v2 cool event is discarded, not converted"
+        )
 
     def test_migration_skips_if_pending_observations_already_populated(self, tmp_path: Path):
         """If pending_observations already has the obs_type, migration does not overwrite it."""
@@ -1310,32 +1315,10 @@ class TestWallClockTimeout:
 # ---------------------------------------------------------------------------
 # Helpers for H1/H2 test classes
 # ---------------------------------------------------------------------------
-
-
-def _make_obs_coord_with_sample_thermal_event(
-    *,
-    indoor_temp: float = 75.0,
-    outdoor_temp: float = 55.0,
-    hvac_action: str = "idle",
-    fan_active: bool = False,
-    nat_vent_active: bool = False,
-    any_sensor_open: bool = False,
-    learning_enabled: bool = True,
-):
-    """Like _make_obs_coord but also binds _sample_thermal_event."""
-    coord = _make_obs_coord(
-        indoor_temp=indoor_temp,
-        outdoor_temp=outdoor_temp,
-        hvac_action=hvac_action,
-        fan_active=fan_active,
-        nat_vent_active=nat_vent_active,
-        any_sensor_open=any_sensor_open,
-        learning_enabled=learning_enabled,
-    )
-    ClimateAdvisorCoordinator = _get_coordinator_class()
-    method = ClimateAdvisorCoordinator._sample_thermal_event
-    coord._sample_thermal_event = types.MethodType(method, coord)
-    return coord
+# _make_obs_coord_with_sample_thermal_event was removed in v3 — it bound the
+# now-deleted _sample_thermal_event method.  The two tests that used it
+# (test_post_heat_decimated_at_5min, test_post_heat_appended_after_5min) were
+# also removed; post-heat decimation is now handled inside _sample_all_observations.
 
 
 def _make_obs_31min_ago() -> datetime:
@@ -1462,57 +1445,11 @@ class TestSampleDecimation:
         active_samples = coord._pending_observations.get(OBS_TYPE_HVAC_HEAT, {}).get("active_samples", [])
         assert len(active_samples) == 1, f"HVAC active obs should append every poll — got {len(active_samples)} samples"
 
-    def test_post_heat_decimated_at_5min(self):
-        """Post-heat samples are gated at THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S (300s)."""
-        coord = _make_obs_coord_with_sample_thermal_event(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0)
-
-        from datetime import timedelta
-
-        last_ph_ts = _FAKE_NOW - timedelta(seconds=30)  # 30s ago — below 300s interval
-        coord._pending_thermal_event = {
-            "event_id": "test-postheat-decimate",
-            "status": "post_heat",
-            "session_mode": "heat",
-            "active_start": _FAKE_NOW.isoformat(),
-            "active_end": _FAKE_NOW.isoformat(),
-            "active_samples": [],
-            "post_heat_samples": [],
-            "last_post_heat_sample_time": last_ph_ts.isoformat(),
-        }
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_thermal_event()
-
-        assert len(coord._pending_thermal_event["post_heat_samples"]) == 0, (
-            "post-heat sample should NOT be appended when only 30s has elapsed (interval=300s)"
-        )
-
-    def test_post_heat_appended_after_5min(self):
-        """Post-heat sample IS appended after >= 300s since last post-heat sample."""
-        coord = _make_obs_coord_with_sample_thermal_event(hvac_action="idle", indoor_temp=70.0, outdoor_temp=50.0)
-
-        from datetime import timedelta
-
-        last_ph_ts = _FAKE_NOW - timedelta(seconds=310)  # 310s ago — above 300s interval
-        coord._pending_thermal_event = {
-            "event_id": "test-postheat-allowed",
-            "status": "post_heat",
-            "session_mode": "heat",
-            "active_start": _FAKE_NOW.isoformat(),
-            "active_end": _FAKE_NOW.isoformat(),
-            "active_samples": [],
-            "post_heat_samples": [],
-            "last_post_heat_sample_time": last_ph_ts.isoformat(),
-        }
-
-        dt_mock = _make_dt_mock(_FAKE_NOW)
-        with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
-            coord._sample_thermal_event()
-
-        assert len(coord._pending_thermal_event["post_heat_samples"]) == 1, (
-            "post-heat sample should be appended after 310s (interval=300s)"
-        )
+    # test_post_heat_decimated_at_5min and test_post_heat_appended_after_5min were
+    # removed in v3.  They called coord._sample_thermal_event() which no longer exists.
+    # Post-heat decimation in v3 is handled inside _sample_all_observations() for
+    # OBS_TYPE_HVAC_HEAT post-phase samples — covered by test_hvac_active_not_decimated
+    # and the passive/fan interval tests above.
 
     def test_interval_constants_have_expected_values(self):
         """Confirm constant values match the plan spec."""
@@ -2554,19 +2491,6 @@ class TestHvacObservationLogging:
             }
 
         coord._get_current_sample = _get_current_sample
-
-        async def _noop_start_thermal(*a, **kw):
-            pass
-
-        async def _noop_end_active(*a, **kw):
-            pass
-
-        async def _noop_abandon_thermal(*a, **kw):
-            pass
-
-        coord._start_thermal_event = _noop_start_thermal
-        coord._end_active_phase = _noop_end_active
-        coord._abandon_thermal_event = _noop_abandon_thermal
 
         for method_name in (
             "_ensure_pending_observations",

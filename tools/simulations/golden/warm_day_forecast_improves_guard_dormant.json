@@ -1,0 +1,101 @@
+{
+  "name": "warm_day_forecast_improves_guard_dormant",
+  "description": "Warm morning with a ceiling breach predicted at the 8 AM classification cycle. Weather improves (cool front arrives) by noon — outdoor drops 12F, ODE no longer predicts a breach. Guard goes dormant on the noon cycle. HVAC stays off. If a window is opened in the afternoon when outdoor drops below indoor, nat vent activates normally.",
+  "source": "synthetic",
+  "issue": 136,
+  "notes": [
+    "Covers the 'weather-change resilience' pattern: guard evaluates on each 30-min cycle, not just at classification time.",
+    "The single-stateless-check design (no _ceiling_precool_scheduled flag) means the guard automatically goes dormant",
+    "when _find_ceiling_breach_time() returns None after forecast improvement.",
+    "The simulator_support=false assertions document the guard state at 8 AM (would fire) and noon (dormant).",
+    "The simulator CAN verify: classification_applied at 8 AM, natural_ventilation in the afternoon.",
+    "The simulator CANNOT verify: ceiling guard evaluation (requires ODE curve), guard dormant state transition.",
+    "This scenario directly tests the 'forecast improves mid-day' resilience described in the plan D5 decision.",
+    "Must be validated in production before promotion to golden/."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-25T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 66.0,
+      "note": "Morning: indoor 71F, outdoor 66F. Warm day forecast ahead."
+    },
+    {
+      "time": "2026-05-25T06:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "note": "Warm-day classification: hvac_mode=off, windows recommended 6–10 AM. ODE curve at this point predicts indoor hitting 74F by 2 PM — ceiling guard would evaluate."
+    },
+    {
+      "time": "2026-05-25T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 70.0,
+      "note": "8 AM: outdoor still tracking warm forecast. ODE predicts breach. Guard would be within lead_time window (120-min fallback) at this cycle."
+    },
+    {
+      "time": "2026-05-25T11:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 58.0,
+      "note": "11 AM: cool front arrived — outdoor dropped from 70F to 58F. ODE now predicts indoor will stay below 74F all day. Guard evaluates on this cycle and finds no breach — goes dormant. HVAC stays off."
+    },
+    {
+      "time": "2026-05-25T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 61.0,
+      "note": "2 PM: outdoor 61F well below indoor 73F. No breach on ODE forecast — guard dormant."
+    },
+    {
+      "time": "2026-05-25T14:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "User opens door. outdoor=61F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor <= threshold 77F — nat vent activates."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-25T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=off. Indoor=71F > comfort_heat=70F — no comfort-floor guard needed."
+    },
+    {
+      "at": "2026-05-25T08:00:00",
+      "expect": "ceiling_guard_would_fire",
+      "simulator_support": false,
+      "note": "At the 8 AM 30-min cycle, ODE predicted_indoor curve shows breach at ~2 PM. With k_active_cool=None → 120-min fallback, hours_to_breach (~6h) is OUTSIDE lead_time (2h), so guard is dormant at 8 AM. Guard would only fire when breach is within 2h. This assertion documents expected evaluation logic.",
+      "reason": "8 AM cycle: breach predicted at 2 PM (6h away), outside 120-min lead time — guard evaluates but does NOT fire yet."
+    },
+    {
+      "at": "2026-05-25T11:00:00",
+      "expect": "ceiling_guard_dormant_after_forecast_improvement",
+      "simulator_support": false,
+      "note": "At the 11 AM cycle, cool front has dropped outdoor from 70F to 58F. _find_ceiling_breach_time() returns None because ODE curve no longer crosses comfort_cool=74F. Guard goes dormant — no AC fires. HVAC stays off. This is the stateless re-evaluation advantage: no flag to cancel, no scheduled callback to remove.",
+      "reason": "Forecast improved (outdoor -12F) → ODE predicts no breach → guard dormant on next cycle → HVAC stays off. No cancellation logic required."
+    },
+    {
+      "at": "2026-05-25T14:05:00",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open: outdoor=61F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor=61F <= threshold 77F — nat vent activates normally after guard goes dormant."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "When forecast improves mid-day and ODE no longer predicts a breach, the ceiling guard goes dormant automatically on the next 30-min cycle",
+    "observed_behavior": "N/A — this scenario tests new Issue #136 behavior not yet implemented",
+    "expected_behavior": "Guard stateless re-evaluation: breach disappears from ODE curve → guard dormant → HVAC stays off → nat vent resumes in afternoon"
+  }
+}

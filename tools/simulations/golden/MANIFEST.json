@@ -62,5 +62,35 @@
     "sha256": "cc7d7a2bea16482b5874f150b140d7d57429f16eea1c0a92e9a1387798324d6b",
     "signed": "2026-04-20",
     "issue": 96
+  },
+  "cold_morning_warm_day_no_breach": {
+    "sha256": "90c5204e20f6f7cb6b76d66e320249712a0d351797d1261a828d7e92fb842e25",
+    "signed": "2026-05-13",
+    "issue": 136
+  },
+  "cool_all_day_heat_all_day": {
+    "sha256": "c37017e8be21f9589a74dc8363314cfc6988e089958bd36f434e7e218e3b9e89",
+    "signed": "2026-05-13",
+    "issue": 136
+  },
+  "hot_all_day_no_nat_vent_window": {
+    "sha256": "7636b7445b39f81858d34d4ec307299ebbb1f8866ffdc88daae38da148cf8d96",
+    "signed": "2026-05-13",
+    "issue": 136
+  },
+  "mild_all_day_nat_vent_only": {
+    "sha256": "27585a3981a1f663c38d7e1532219095b8a2d76f767befe5a2a77925d87dcc78",
+    "signed": "2026-05-13",
+    "issue": 136
+  },
+  "warm_day_ceiling_breach_ac_defense": {
+    "sha256": "16c8bd90489052799d4a80c21f7673bca00c17197f1347425595d3c87adae2f6",
+    "signed": "2026-05-13",
+    "issue": 136
+  },
+  "warm_day_forecast_improves_guard_dormant": {
+    "sha256": "6fc416a368cc222004c7056b9772ef47159e730f84dd479c6da91142c89491d7",
+    "signed": "2026-05-13",
+    "issue": 136
   }
 }

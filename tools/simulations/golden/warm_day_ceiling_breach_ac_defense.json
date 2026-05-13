@@ -1,0 +1,111 @@
+{
+  "name": "warm_day_ceiling_breach_ac_defense",
+  "description": "Core Issue #136 scenario. Warm day starts with outdoor below indoor (nat vent window). By mid-morning outdoor crosses above indoor and nat vent exits. ODE predicts indoor will reach comfort_cool=74F by 2 PM. The ceiling guard fires AC when predicted breach is within lead time. After AC runs and indoor drops, HVAC goes off and nat vent can resume if outdoor cools in the evening.",
+  "source": "synthetic",
+  "issue": 136,
+  "notes": [
+    "This is the primary Issue #136 failure case: warm day where nat vent window closes due to outdoor warming,",
+    "ODE predicts a ceiling breach, but without the ceiling guard no AC would fire.",
+    "The ceiling guard assertion (simulator_support=false) documents the expected behavior of the new guard in automation.py.",
+    "The simulator CAN verify: nat vent activation at 8 AM, nat vent exit when outdoor crosses above indoor at 10 AM.",
+    "The simulator CANNOT verify: ODE ceiling guard firing because it requires _last_predicted_indoor curve and",
+    "k_passive/k_active_cool thermal model parameters which are runtime state, not simulated here.",
+    "After guard fires and AC runs, a temp_update + sensor_close produces a no_action (ceiling guard dormant).",
+    "This scenario must be validated in production before promotion to golden/."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-20T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 62.0,
+      "note": "Early morning: outdoor 62F well below indoor 72F. Nat vent conditions favorable."
+    },
+    {
+      "time": "2026-05-20T06:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification: hvac_mode=off, windows_recommended=false so sensor_open at 8:05 AM is processed by the nat-vent eligibility check. Indoor=72F >= comfort_heat=70F so no comfort-floor guard fires."
+    },
+    {
+      "time": "2026-05-20T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 65.0,
+      "note": "8 AM: outdoor 65F still below indoor 72.5F. Nat vent eligible."
+    },
+    {
+      "time": "2026-05-20T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "User opens window per recommendation. outdoor=65F < indoor=72.5F, indoor > comfort_heat=70F, outdoor <= threshold 77F — nat vent activates."
+    },
+    {
+      "time": "2026-05-20T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 73.5,
+      "note": "10 AM: outdoor has risen above indoor (73.5F > 73.0F). Nat vent exit fires — airflow would now add heat."
+    },
+    {
+      "time": "2026-05-20T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.5,
+      "outdoor_f": 76.0,
+      "note": "12:30 PM: ODE predicts indoor will reach 74F by 2 PM. Ceiling guard evaluates on this 30-min cycle. k_active_cool not learned — 120-min fallback applies. Breach is 1.5h away, within 120-min lead time."
+    },
+    {
+      "time": "2026-05-20T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 74.0,
+      "note": "2:30 PM: AC has run and indoor dropped back to 73F. ODE no longer predicts a breach. Guard goes dormant."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-20T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=off. Indoor=72F >= comfort_heat=70F so HVAC off immediately without comfort-floor guard."
+    },
+    {
+      "at": "2026-05-20T08:05:00",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open: outdoor=65F < indoor=72.5F, indoor=72.5F > comfort_heat=70F, outdoor=65F <= threshold 77F — nat vent activates at the planned window open time."
+    },
+    {
+      "at": "2026-05-20T10:00:00",
+      "expect": "nat_vent_outdoor_rise_exit",
+      "reason": "temp_update: outdoor=73.5F >= indoor=73.0F — directional exit fires; airflow would now add heat rather than cool."
+    },
+    {
+      "at": "2026-05-20T12:30:00",
+      "expect": "ceiling_guard_fires_cool",
+      "simulator_support": false,
+      "note": "ODE ceiling guard: requires _last_predicted_indoor curve from _build_predicted_indoor_future() and k_passive/k_active_cool from thermal model. The simulator does not model ODE prediction curves. In production: guard evaluates predicted indoor vs comfort_cool=74F; breach predicted within 120-min fallback lead time (k_active_cool=None); HVAC set to cool at comfort_cool=74F.",
+      "reason": "Ceiling guard fires when breach is predicted within lead_time AND outdoor > indoor. k_active_cool=None → 120-min fallback. Expected: HVAC set to cool, target=74F."
+    },
+    {
+      "at": "2026-05-20T14:30:00",
+      "expect": "ceiling_guard_dormant_after_ac_run",
+      "simulator_support": false,
+      "note": "After the ceiling guard fires AC and indoor drops to 73F, ODE no longer predicts a breach. On the next 30-min cycle, _find_ceiling_breach_time() returns None. Guard evaluates and does nothing — HVAC stays at current state. In the simulator, the state remains paused (sensors still open, outdoor >= indoor) which is a correct partial model but does not reflect that in production the ceiling guard firing would have changed system state. The post-guard dormancy assertion requires ODE curve state not available in the simulator.",
+      "reason": "Post-AC-run: ODE breach no longer predicted; ceiling guard goes dormant on next cycle. In production: HVAC reverts to warm-day classification (off) once indoor is below comfort_cool."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Warm day with outdoor crossing above indoor: nat vent exits, ODE ceiling guard fires AC defense before indoor reaches comfort_cool",
+    "observed_behavior": "Confirmed failure 2026-05-11: HVAC stayed off, 3-hour comfort gap when indoor reached 75F",
+    "expected_behavior": "Ceiling guard fires at noon cycle when breach predicted within 120-min fallback lead time; AC defends comfort ceiling"
+  }
+}

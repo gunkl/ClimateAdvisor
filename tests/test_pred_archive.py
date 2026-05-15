@@ -241,7 +241,7 @@ class TestPredArchiveContract:
 
         # Verify: at least the within-horizon entries are present (sanity check)
         assert len(coord._pred_archive) > 0, "Archive must contain at least some entries within horizon"
-        assert len(coord._pred_archive) <= PRED_ARCHIVE_HORIZON_HOURS + 2, (
+        assert len(coord._pred_archive) <= PRED_ARCHIVE_HORIZON_HOURS + 1, (
             f"Archive contains {len(coord._pred_archive)} entries — "
-            f"expected at most {PRED_ARCHIVE_HORIZON_HOURS + 2} for a {PRED_ARCHIVE_HORIZON_HOURS}h horizon"
+            f"expected at most {PRED_ARCHIVE_HORIZON_HOURS + 1} for a {PRED_ARCHIVE_HORIZON_HOURS}h horizon"
         )

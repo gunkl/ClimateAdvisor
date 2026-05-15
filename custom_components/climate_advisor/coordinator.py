@@ -530,6 +530,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except (ValueError, TypeError):
                 self._occupancy_away_since = None
 
+        # Prediction archive — restore only on same-day restores (already gated above)
+        raw_archive = state.get("pred_archive")
+        if isinstance(raw_archive, dict):
+            restored: dict[int, float] = {}
+            for k, v in raw_archive.items():
+                try:
+                    restored[int(k)] = float(v)
+                except (ValueError, TypeError):
+                    continue
+            self._pred_archive = restored
+
         # Load AI report history if AI subsystem is active
         if self.claude_client:
             await self.hass.async_add_executor_job(self._load_ai_reports)
@@ -599,6 +610,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "occupancy_mode": self._occupancy_mode,
             "occupancy_away_since": (self._occupancy_away_since.isoformat() if self._occupancy_away_since else None),
             "ai_stats": self.claude_client.get_persistent_stats() if self.claude_client else {},
+            "pred_archive": {str(k): v for k, v in self._pred_archive.items()},
         }
 
     async def _async_save_state(self) -> None:
@@ -3231,10 +3243,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     @staticmethod
     def _pred_archive_key(dt: datetime) -> int:
-        """Round dt to nearest 30-min boundary; return as Unix timestamp (int)."""
-        floored = dt.replace(second=0, microsecond=0)
-        minute = 0 if floored.minute < 30 else 30
-        return int(floored.replace(minute=minute).timestamp())
+        """Return Unix timestamp floored to nearest 30-min boundary (UTC-safe)."""
+        ts = int(dt.timestamp())
+        return ts - (ts % 1800)
 
     def _lookup_pred_archive(self, now_dt: datetime) -> float | None:
         """Return first-written ODE prediction for this 30-min slot (None on cache miss)."""

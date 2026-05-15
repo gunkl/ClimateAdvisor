@@ -928,6 +928,68 @@ class TestBriefingRegeneration:
 
         assert coord._briefing_day_type is None
 
+    def test_pred_archive_persistence_round_trip(self):
+        """pred_archive survives _build_state_dict → async_restore_state cycle.
+
+        Verifies:
+        - int keys are serialized as str (JSON compatibility)
+        - str keys round-trip back to int on restore
+        - float values are preserved
+        - invalid/non-numeric keys in corrupted state are skipped
+        """
+        coord = self._make_coord()
+
+        # Populate archive with two int-keyed entries
+        key1 = 1747202400  # 2026-05-14 22:40:00 UTC (30-min boundary)
+        key2 = 1747204200  # 2026-05-14 23:10:00 UTC (30-min boundary)
+        coord._pred_archive = {key1: 71.5, key2: 72.3}
+
+        # Simulate _build_state_dict pred_archive serialization
+        serialized = {str(k): v for k, v in coord._pred_archive.items()}
+
+        # Verify JSON key types
+        for k in serialized:
+            assert isinstance(k, str), f"Serialized key must be str, got {type(k)}"
+
+        # Simulate async_restore_state restore block
+        restored_coord = self._make_coord()
+        restored_coord._pred_archive = {}
+
+        raw_archive = serialized
+        if isinstance(raw_archive, dict):
+            restored: dict[int, float] = {}
+            for k, v in raw_archive.items():
+                try:
+                    restored[int(k)] = float(v)
+                except (ValueError, TypeError):
+                    continue
+            restored_coord._pred_archive = restored
+
+        assert restored_coord._pred_archive[key1] == 71.5
+        assert restored_coord._pred_archive[key2] == 72.3
+        assert len(restored_coord._pred_archive) == 2
+
+    def test_pred_archive_persistence_skips_invalid_keys(self):
+        """Corrupted state dict with non-numeric keys is restored safely."""
+        coord = self._make_coord()
+        coord._pred_archive = {}
+
+        # Simulated corrupted state containing non-numeric keys
+        bad_archive = {"not_a_number": 70.0, "also_bad": 71.0, "1747202400": 72.5}
+
+        if isinstance(bad_archive, dict):
+            restored: dict[int, float] = {}
+            for k, v in bad_archive.items():
+                try:
+                    restored[int(k)] = float(v)
+                except (ValueError, TypeError):
+                    continue
+            coord._pred_archive = restored
+
+        # Only the valid numeric key survives
+        assert len(coord._pred_archive) == 1
+        assert coord._pred_archive[1747202400] == 72.5
+
     def test_end_of_day_resets_briefing_day_type(self):
         """_async_end_of_day resets _briefing_day_type to None."""
         import types

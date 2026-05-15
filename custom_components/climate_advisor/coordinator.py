@@ -2876,8 +2876,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "confidence_grade": grade,
                 "date": today_str,
                 "source": "chart_log_endpoint",
+                "elapsed_hours": round(dt_hours, 2),
+                "delta_t_f": round(t_end - t_start, 2),
+                "ratio": round(ratio, 4),
             }
-            self.learning._update_thermal_model_cache(obs)
+            self.learning.record_thermal_observation(obs)
             committed += 1
             _LOGGER.debug(
                 "chart_log_endpoint passive: k=%.4f conf=%s dt=%.1fh dT=%.1fF",
@@ -3024,8 +3027,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "confidence_grade": grade,
                 "date": today_str,
                 "source": "chart_log_endpoint",
+                "elapsed_hours": round(dt_hours, 2),
+                "delta_t_f": round(t_end - t_start, 2),
+                "ratio": round(ratio, 4),
             }
-            self.learning._update_thermal_model_cache(obs)
+            self.learning.record_thermal_observation(obs)
             committed += 1
             _LOGGER.debug(
                 "chart_log_endpoint vent: k=%.4f conf=%s dt=%.1fh dT=%.1fF",

@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.40"
+VERSION = "0.3.41"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.37": [
@@ -210,6 +210,9 @@ CHART_LOG_FILE = "climate_advisor_chart_log.json"
 CHART_LOG_MAX_DAYS = 365  # 1-year rolling cap (~17,500 entries ≈ 2MB)
 CHART_DOWNSAMPLE_HOURLY_DAYS = 3  # raw points for ≤3 days; hourly averages beyond
 CHART_DOWNSAMPLE_DAILY_DAYS = 30  # daily summaries for >30 days
+
+# Prediction archive — first-write-wins historical pred_indoor
+PRED_ARCHIVE_HORIZON_HOURS = 4  # only archive ODE entries within this lookahead window
 
 # Learning system
 LEARNING_DB_FILE = "climate_advisor_learning.json"

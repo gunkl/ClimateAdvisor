@@ -170,7 +170,7 @@ class TestBuildPredictedIndoorFuturePhysics:
         now = datetime(2026, 4, 10, 6, 0, 0, tzinfo=UTC)
         entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 5)]
         result = self._call(entries, now=now, indoor=65.0)
-        assert len(result) == 4
+        assert len(result) == 7
 
     def test_physics_differs_from_setpoint_schedule(self):
         """Physics output is distinct from the step-function setpoint fallback."""
@@ -192,7 +192,7 @@ class TestBuildPredictedIndoorFuturePhysics:
         entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 5)]
         model = {"confidence": "none"}
         result = self._call(entries, now=now, indoor=68.0, model=model)
-        assert len(result) == 4
+        assert len(result) == 7
 
     def test_fallback_when_no_model(self):
         """thermal_model=None → setpoint fallback, no crash."""
@@ -200,14 +200,14 @@ class TestBuildPredictedIndoorFuturePhysics:
         entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 5)]
         with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(now)):
             result = _build_predicted_indoor_future(entries, _PRED_CONFIG, now)
-        assert len(result) == 4
+        assert len(result) == 7
 
     def test_fallback_when_no_indoor_temp(self):
         """current_indoor_temp=None → setpoint fallback (can't seed ODE)."""
         now = datetime(2026, 4, 10, 6, 0, 0, tzinfo=UTC)
         entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 5)]
         result = self._call(entries, now=now, indoor=None)
-        assert len(result) == 4
+        assert len(result) == 7
 
     def test_fallback_when_k_passive_positive(self):
         """k_passive > 0 is physically invalid → falls back to setpoint schedule."""
@@ -215,7 +215,7 @@ class TestBuildPredictedIndoorFuturePhysics:
         entries = [_pred_entry(now + timedelta(hours=i), 40.0) for i in range(1, 4)]
         bad_model = {"confidence": "high", "k_passive": 0.05}
         result = self._call(entries, now=now, indoor=68.0, model=bad_model)
-        assert len(result) == 3  # no crash, fallback used
+        assert len(result) == 5  # no crash, fallback used
 
     def test_physics_passive_decay_on_hvac_off_day(self):
         """HVAC-off day: indoor drifts passively toward outdoor with k_passive."""
@@ -230,7 +230,7 @@ class TestBuildPredictedIndoorFuturePhysics:
         }
 
         result = self._call(entries, now=now, indoor=72.0, model=model)
-        assert len(result) == 5
+        assert len(result) == 9
         temps = [r["temp"] for r in result]
         # Indoor at 72°F, outdoor 60°F, HVAC off → drifts down toward 60°F
         assert temps[0] < 72.0
@@ -256,4 +256,4 @@ class TestBuildPredictedIndoorFuturePhysics:
             "k_active_cool": -2.5,
         }
         result = self._call(entries, now=now, indoor=65.0, model=model)
-        assert len(result) == 3
+        assert len(result) == 5

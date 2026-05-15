@@ -237,6 +237,8 @@ def _make_update_data_coord(
     coord._chart_log = MagicMock()
     coord._last_violation_check = None
     coord._check_comfort_violations = MagicMock()
+    coord._last_predicted_indoor = []
+    coord._pred_archive = {}
 
     # Thermal event pipeline (v3)
     coord._pending_thermal_event = None

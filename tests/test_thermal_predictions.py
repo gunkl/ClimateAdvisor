@@ -102,7 +102,7 @@ class TestRampAnchor:
 
         result = _call(entries, now=now, indoor=indoor_f, model=None)
 
-        assert len(result) == 4
+        assert len(result) == 7
         for point in result:
             # All off-day fallback entries should be anchored to indoor seed (69°F),
             # not outdoor+2 (= 67°F).
@@ -118,7 +118,7 @@ class TestRampAnchor:
 
         result = _call(entries, now=now, indoor=None, model=None)
 
-        assert len(result) == 3
+        assert len(result) == 5
         expected_temp = max(float(_PRED_CONFIG["setback_heat"]), _OFF_DAY_OUTDOOR_F + 2.0)
         for point in result:
             assert point["temp"] == pytest.approx(expected_temp, abs=0.05), (
@@ -139,7 +139,7 @@ class TestRampAnchor:
 
         result = _call(entries, now=now, indoor=indoor_f, model=None)
 
-        assert len(result) == 3
+        assert len(result) == 5
         for point in result:
             assert point["temp"] == pytest.approx(indoor_f, abs=0.05), (
                 f"Expected indoor anchor {indoor_f}°F verbatim; got {point['temp']}°F"
@@ -179,7 +179,7 @@ class TestGateBridge:
 
         result = _call(entries, now=now, indoor=indoor_f, model=model)
 
-        assert len(result) == 5
+        assert len(result) == 9
         temps = [r["temp"] for r in result]
         # Physics with k≈0: indoor barely moves.  All temps should stay very close
         # to the seed (within 1°F over 5 hours for k=-0.001).
@@ -200,7 +200,7 @@ class TestGateBridge:
 
         result = _call(entries, now=now, indoor=indoor_f, model=model)
 
-        assert len(result) == 4
+        assert len(result) == 7
         for point in result:
             assert point["temp"] == pytest.approx(indoor_f, abs=0.1), (
                 f"Perfectly inert home (k=0) should stay at {indoor_f}°F; got {point['temp']}°F"
@@ -227,7 +227,7 @@ class TestGateBridge:
 
         result = _call(entries, now=now, indoor=indoor_f, model=model)
 
-        assert len(result) == 3
+        assert len(result) == 5
         # No bridge → setpoint-schedule fallback → off-day → ramp anchor returns indoor seed.
         for point in result:
             assert point["temp"] == pytest.approx(indoor_f, abs=0.05), (
@@ -255,7 +255,7 @@ class TestGateBridge:
 
         result = _call(entries, now=now, indoor=indoor_f, model=model)
 
-        assert len(result) == 3
+        assert len(result) == 5
         temps = [r["temp"] for r in result]
         # With k_passive=-0.05 and k_active_heat=3.0 on a heat day, indoor=65°F
         # below comfort_heat=70°F → HVAC heats → trajectory rises toward 70°F.
@@ -378,14 +378,24 @@ class TestPerHourVentilationWiring:
             entries, now=now, indoor=self._INDOOR, model=model_without_kv, classification=classification
         )
 
-        assert len(result_with) == len(result_without) == len(hours)
+        assert len(result_with) == len(result_without) == 2 * len(hours) - 1
 
         # Build lookup by hour
         def _hour(ts_str: str) -> int:
             return datetime.fromisoformat(ts_str).hour
 
-        with_by_h = {_hour(r["ts"]): r["temp"] for r in result_with}
-        without_by_h = {_hour(r["ts"]): r["temp"] for r in result_without}
+        # First-entry-wins: with 30-min interpolation, two entries share each hour.
+        # Use top-of-hour entry so boundary hours don't bleed into the next regime.
+        with_by_h: dict[int, float] = {}
+        for r in result_with:
+            h = _hour(r["ts"])
+            if h not in with_by_h:
+                with_by_h[h] = r["temp"]
+        without_by_h: dict[int, float] = {}
+        for r in result_without:
+            h = _hour(r["ts"])
+            if h not in without_by_h:
+                without_by_h[h] = r["temp"]
 
         # During window-open hours: k_vent_window (-0.10) is weaker decay than k_passive (-0.30)
         # so indoor stays higher (closer to 72°F than to outdoor 60°F).
@@ -518,7 +528,7 @@ class TestPerHourVentilationWiring:
 
         result = _call_vc(entries, now=now, indoor=70.0, model=model, classification=classification)
 
-        assert len(result) == len(hours)
+        assert len(result) == 2 * len(hours) - 1
         temps_by_h = {datetime.fromisoformat(r["ts"]).hour: r["temp"] for r in result}
 
         # At noon (hour 12), solar_factor should be near peak — indoor should be above seed (70°F).
@@ -561,8 +571,13 @@ class TestPerHourVentilationWiring:
 
         result = _call_vc(entries, now=now, indoor=self._INDOOR, model=model, classification=classification_open)
 
-        assert len(result) == len(hours)
-        temps_by_h = {datetime.fromisoformat(r["ts"]).hour: r["temp"] for r in result}
+        assert len(result) == 2 * len(hours) - 1
+        # First-entry-wins: use top-of-hour entry so boundary hours don't bleed into next regime.
+        temps_by_h: dict[int, float] = {}
+        for r in result:
+            h = datetime.fromisoformat(r["ts"]).hour
+            if h not in temps_by_h:
+                temps_by_h[h] = r["temp"]
 
         # Hour 9 is window-closed (pre-window): bridge guard fires → ramp → ≈ indoor seed (72°F)
         assert temps_by_h[9] == pytest.approx(self._INDOOR, abs=1.0), (
@@ -833,7 +848,7 @@ class TestGateBridgeSelfHealing:
 
         result = _call(entries, now=self._NOW_SH, indoor=self._INDOOR, model=model)
 
-        assert len(result) == 4
+        assert len(result) == 7
         # Bridge fires → physics runs → k_passive = k_vent_window = -0.2547.
         # With outdoor=65°F and indoor=69°F above outdoor, passive decay slowly
         # pulls indoor toward outdoor.  After 4 hours at k=-0.25, T drops measurably
@@ -866,7 +881,7 @@ class TestGateBridgeSelfHealing:
 
         result = _call(entries, now=self._NOW_SH, indoor=self._INDOOR, model=model)
 
-        assert len(result) == 4
+        assert len(result) == 7
         temps = [r["temp"] for r in result]
         # Physics with k=-0.25 and indoor=69°F above outdoor=65°F: indoor cools slowly.
         for t in temps:
@@ -894,7 +909,7 @@ class TestGateBridgeSelfHealing:
 
         result = _call(entries, now=self._NOW_SH, indoor=self._INDOOR, model=model)
 
-        assert len(result) == 3
+        assert len(result) == 5
         temps = [r["temp"] for r in result]
         # With k_passive=-0.20 (real), physics uses this rate.
         # k_vent_window=-0.50 is much stronger — if bridge fired accidentally,
@@ -931,7 +946,7 @@ class TestGateBridgeSelfHealing:
 
         result = _call(entries, now=self._NOW_SH, indoor=self._INDOOR, model=model)
 
-        assert len(result) == 6
+        assert len(result) == 11
         temps = [r["temp"] for r in result]
         # Physics with bridge: indoor=69°F, outdoor=65°F, k=-0.25.
         # After 6h the decay is significant — expect last temp noticeably below 69°F.
@@ -959,7 +974,7 @@ class TestGateBridgeSelfHealing:
 
         result = _call(entries, now=self._NOW_SH, indoor=self._INDOOR, model=model)
 
-        assert len(result) == 4
+        assert len(result) == 7
         # No bridge, no confidence → ramp fallback → off-day → indoor anchor = 69°F flat.
         for point in result:
             assert point["temp"] == pytest.approx(self._INDOOR, abs=0.1), (
@@ -1034,7 +1049,7 @@ class TestVentilatedSolarPrediction:
             entries, now=now, indoor=self._INDOOR, model=model_no_solar, classification=classification
         )
 
-        assert len(result_solar) == len(result_no_solar) == len(hours)
+        assert len(result_solar) == len(result_no_solar) == 2 * len(hours) - 1
 
         solar_by_h = {datetime.fromisoformat(r["ts"]).hour: r["temp"] for r in result_solar}
         no_solar_by_h = {datetime.fromisoformat(r["ts"]).hour: r["temp"] for r in result_no_solar}
@@ -1089,7 +1104,7 @@ class TestVentilatedSolarPrediction:
 
         result = _call_vc(entries, now=now, indoor=outdoor_eq_indoor, model=model, classification=classification)
 
-        assert len(result) == len(hours)
+        assert len(result) == 2 * len(hours) - 1
         temps_by_h = {datetime.fromisoformat(r["ts"]).hour: r["temp"] for r in result}
 
         # Solar accumulates during 8-17h window: peak-solar hours (12-14) must be hottest

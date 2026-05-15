@@ -11,7 +11,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | How do you pull Climate Advisor logs and filter for thermal activity? | `python3 tools/ha_logs.py --thermal` for last 2000 thermal-relevant lines; `--lines 5000` for deeper history. Docker log files on HAOS persist for days — do not assume rotation without checking. | [§3. Container Logs (Real-Time)](09-DEBUGGING-GUIDE.md#3-container-logs-real-time) |
 | What is the step-by-step diagnostic sequence for "thermal model confidence is none"? | 1. `python3 tools/learning_db.py --rejections` (structured rejection log, no token needed). 2. `python3 tools/thermal_health.py` (active observations, needs HA_TOKEN). 3. `python3 tools/ha_logs.py --thermal`. | [§Debugging Thermal Model Learning](09-DEBUGGING-GUIDE.md#debugging-thermal-model-learning) |
 | What does the Temperature Forecast chart show and how do you use it for diagnosis? | Four activity bars (HVAC, Fan, Windows Recommended, Windows Open) plus indoor/outdoor temperature lines, predicted curves, and target band shading. Drag-to-zoom any region; 1-year data in chart_log survives HA restarts. | [§2. Temperature Forecast Chart (Visual History)](09-DEBUGGING-GUIDE.md#2-temperature-forecast-chart-visual-history) |
-| Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Four causes: thermal model empty after restart (auto-resolves in 30 min since #137), fresh install with no observations, fallback ramp active (indoor sensor unavailable), or outdoor ≈ indoor on an off day. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
+| Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
 
 ## Primary Debugging Data Sources
@@ -252,25 +252,42 @@ A `DEBUG` log line is emitted inside `_build_predicted_indoor_future()` when the
 
 **Symptom**: The "Predicted Indoor" line on the Temperature Forecast chart follows the "Actual Indoor" line exactly, or nearly so. `chart_log` entries show `pred_indoor ≈ indoor`.
 
-**Quick log commands**:
+**Step 1 — Check the archive source tag (highest priority):**
 ```bash
 python3 tools/ha_logs.py --filter "chart_log pred_indoor"
+```
+Look for `(archive)`, `(ode-warmup)`, or `(none)` in the log output. This tells you immediately which code path populated `pred_indoor`.
+
+| Tag | Meaning | Action |
+|---|---|---|
+| `(archive)` | First-write-wins archive is working | If delta is still ≈ 0, see Root cause 3 below |
+| `(ode-warmup)` | HA restarted < 4h ago; archive warming up | Expected; auto-resolves within 4h |
+| `(none)` | Archive and ODE cache both empty | Check thermal model confidence (Step 2) |
+
+**Step 2 — Check thermal model confidence (when tag is `(none)`):**
+```bash
 python3 tools/ha_logs.py --filter "thermal model refreshed"
 ```
 
-**Decision tree — four root causes:**
+**Decision tree — five root causes:**
 
-1. **Thermal model empty after restart** — `delta=+0.0 (none)` in chart_log log. Root cause: `_thermal_model = {}`. Since Issue #137, the thermal model is refreshed on every 30-min coordinator cycle — the delta=0 state auto-resolves within 30 minutes. Verify with `--filter "thermal model refreshed"` → should show `confidence=solid` or `confidence=moderate` once resolved.
+1. **`(ode-warmup)` in log** — HA restarted < 4h ago; archive is in warmup period. The `_last_predicted_indoor[0]` fallback is used until archive entries are populated 4h ahead. Auto-resolves within 4h. Not a bug.
 
-2. **Fresh install / no observations** — `confidence=none` in refresh log. No thermal data has been collected yet. Fix: wait 1–2 days for `k_passive` observations to accumulate.
+2. **`(none)` in log — ODE cache empty** — `_last_predicted_indoor` was empty at tick time and archive had no entry for this slot. Root cause: thermal model empty, physics gate falsy (`k_passive` absent), or indoor temp unavailable. Since Issue #137, the thermal model is refreshed every 30-min cycle; this state auto-resolves within 30 min after restart for homes with existing observations. Verify with `--filter "thermal model refreshed"` → should show `confidence=solid` or `confidence=moderate` once resolved.
 
-3. **Fallback ramp active** — `_build_predicted_indoor_future` log shows "using fallback". Thermal model has data but indoor temperature is unavailable. Resolve the underlying sensor issue.
+3. **`(archive)` but delta ≈ 0 during temperature transitions** — outdoor forecast accuracy issue. The advance prediction (made ~4h earlier) matched the actual trajectory because outdoor conditions tracked the forecast closely. Rare during pronounced heating/cooling cycles. Not a bug.
 
-4. **Off-day mode, outdoor temp near indoor** — When `day_type="off"` and outdoor ≈ indoor, physics produces near-zero delta naturally. Not a bug.
+4. **Fresh install (no observations)** — `confidence=none` in refresh log. No thermal data has been collected yet. Fix: wait 1–2 days for `k_passive` observations to accumulate.
 
-**Typical pattern**: delta=+0.0 after restart disappears within 30 minutes of the next update cycle. If it persists beyond 1 hour, check the `confidence` value in the refresh log.
+5. **Archive populated but `pred_indoor = indoor` exactly** — potential bug. Check that `_pred_archive_key()` is rounding to the correct 30-min boundary; check that archive epoch keys match the chart_log entry timestamps.
 
-See [Chart Log Spec — Regression Decision Tree](chart-log-spec.md#regression-decision-tree) for the full diagnostic tree and the [Thermal Model Refresh](chart-log-spec.md#thermal-model-refresh) section for why this was a persistent issue before Issue #137.
+**Updated log filter commands:**
+```bash
+python3 tools/ha_logs.py --filter "chart_log pred_indoor"    # check (archive) vs (ode-warmup) vs (none)
+python3 tools/ha_logs.py --filter "thermal model refreshed"  # check confidence after restart
+```
+
+See [Chart Log Spec — Regression Decision Tree](chart-log-spec.md#regression-decision-tree) for the full diagnostic tree and [First-Write-Wins Prediction Archive](chart-log-spec.md#first-write-wins-prediction-archive) for the archive architecture.
 
 ---
 

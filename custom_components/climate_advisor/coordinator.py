@@ -110,6 +110,7 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
+    PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
@@ -260,6 +261,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._indoor_temp_history: list[tuple[str, float]] = []
         self._hourly_forecast_temps: list[dict] = []
         self._last_predicted_indoor: list[dict] = []
+        self._pred_archive: dict[int, float] = {}
         self._thermal_factors: dict | None = None
 
         # Observe-only mode: when disabled, automation still runs but skips actions
@@ -1117,6 +1119,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 len(self._last_predicted_indoor),
                 f"{self._last_predicted_indoor[0]['temp']:.1f}°F" if self._last_predicted_indoor else "none",
             )
+
+            # Populate first-write-wins prediction archive (PRED_ARCHIVE_HORIZON_HOURS lookahead).
+            # setdefault ensures the earliest (most advance) prediction is kept per 30-min slot.
+            _archive_cutoff = dt_util.now() + timedelta(hours=PRED_ARCHIVE_HORIZON_HOURS)
+            for _ae in self._last_predicted_indoor:
+                try:
+                    _ae_dt = datetime.fromisoformat(_ae["ts"])
+                except (ValueError, KeyError):
+                    continue
+                if _ae_dt > _archive_cutoff:
+                    break
+                self._pred_archive.setdefault(self._pred_archive_key(_ae_dt), _ae["temp"])
+
             await self.automation_engine.apply_classification(
                 self._current_classification,
                 predicted_indoor=self._last_predicted_indoor,
@@ -1323,12 +1338,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             _now_dt = dt_util.now()
             _pred_outdoor_val = _extract_current_hour_forecast_temp(self._hourly_forecast_temps, _now_dt)
-            # Use the cached full ODE curve for a meaningful 1h-ahead prediction.
-            # _ode_single_step(actual, outdoor, dt=0.5h) gave pred≈actual (0.38°F delta,
-            # invisible at chart scale). _last_predicted_indoor[0] includes HVAC Q +
-            # solar and diverges meaningfully during temperature transitions.
-            if self._last_predicted_indoor:
-                _pred_indoor_val = self._last_predicted_indoor[0].get("temp")
+            # First-write-wins archive: pred_indoor reflects ODE made ~4h ago.
+            # Falls back to current ODE[0] only during warmup (first 4h after restart/install).
+            _archived_pred = self._lookup_pred_archive(_now_dt)
+            if _archived_pred is not None:
+                _pred_indoor_val = _archived_pred
+            elif self._last_predicted_indoor:
+                _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
             _chart_hvac_poll = self._read_chart_hvac_action()
             _LOGGER.debug(
                 "chart_log append: event=30min_poll hvac=%r fan=%s",
@@ -1355,11 +1371,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 (_pred_indoor_val - indoor_temp)
                 if (_pred_indoor_val is not None and indoor_temp is not None)
                 else float("nan"),
-                "ode" if self._last_predicted_indoor else "none",
+                "archive" if _archived_pred is not None else ("ode-warmup" if self._last_predicted_indoor else "none"),
             )
 
         with contextlib.suppress(Exception):
             self._thermal_factors = _compute_thermal_factors(self._chart_log.get_entries("7d"))
+
+        # Purge archive entries older than 7 days (bounded at ≤336 entries at 30-min resolution).
+        _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
+        self._pred_archive = {k: v for k, v in self._pred_archive.items() if k >= _archive_expire_cutoff}
 
         return result
 
@@ -3209,6 +3229,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "active (guest)"
         return "active"
 
+    @staticmethod
+    def _pred_archive_key(dt: datetime) -> int:
+        """Round dt to nearest 30-min boundary; return as Unix timestamp (int)."""
+        floored = dt.replace(second=0, microsecond=0)
+        minute = 0 if floored.minute < 30 else 30
+        return int(floored.replace(minute=minute).timestamp())
+
+    def _lookup_pred_archive(self, now_dt: datetime) -> float | None:
+        """Return first-written ODE prediction for this 30-min slot (None on cache miss)."""
+        return self._pred_archive.get(self._pred_archive_key(now_dt))
+
     def _read_chart_hvac_action(self) -> str:
         """Return the thermostat's current hvac_action string for chart logging.
 
@@ -4426,6 +4457,25 @@ def _build_predicted_indoor_future(
             ((hourly_forecast[0].get("datetime") or hourly_forecast[0].get("time")) if hourly_forecast else None),
             ((hourly_forecast[-1].get("datetime") or hourly_forecast[-1].get("time")) if hourly_forecast else None),
         )
+
+    # Expand hourly ODE output to 30-min resolution via linear interpolation.
+    # This gives the prediction archive 30-min granularity matching chart_log cadence
+    # and eliminates the step-function artifact on the historical chart.
+    _interp: list[dict] = []
+    for _i, _pt in enumerate(result):
+        _interp.append(_pt)
+        if _i + 1 < len(result):
+            _next = result[_i + 1]
+            try:
+                _pt_dt = datetime.fromisoformat(_pt["ts"])
+                _next_dt = datetime.fromisoformat(_next["ts"])
+            except (ValueError, KeyError):
+                continue
+            _mid_dt = _pt_dt + (_next_dt - _pt_dt) / 2
+            _mid_temp = round((_pt["temp"] + _next["temp"]) / 2, 1)
+            _interp.append({"ts": _mid_dt.isoformat(), "temp": _mid_temp})
+    result = _interp
+
     return result
 
 

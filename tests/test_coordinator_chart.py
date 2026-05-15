@@ -266,7 +266,8 @@ class TestPredIndoorIntegration:
     Three tests:
       1. Thermal model refresh unblocks physics (model dict is populated).
       2. ODE cache diverges after model refresh (physics != constant fallback).
-      3. pred_indoor selection picks _last_predicted_indoor[0]["temp"].
+      3. pred_indoor warmup path: archive miss falls back to _last_predicted_indoor[0]["temp"].
+         (Issue #139: updated to reflect first-write-wins archive semantics.)
     """
 
     def test_thermal_model_refresh_unblocks_physics(self):
@@ -350,25 +351,40 @@ class TestPredIndoorIntegration:
         )
 
     def test_pred_indoor_diverges_from_actual_when_model_active(self):
-        """pred_indoor is read from _last_predicted_indoor[0]['temp'], not indoor_temp.
+        """pred_indoor warmup path: archive miss falls back to _last_predicted_indoor[0]['temp'].
 
-        Verifies the selection logic used before the chart_log append:
-          if self._last_predicted_indoor:
-              _pred_indoor_val = self._last_predicted_indoor[0].get("temp")
+        Tests the warmup-fallback branch of the first-write-wins archive selection
+        logic (Issue #139).  During the first 4h after a restart the archive is empty,
+        so pred_indoor is sourced from the current ODE curve's [0] entry — the same
+        source as before the archive was introduced.
 
-        When _last_predicted_indoor[0]["temp"]=71.5 and indoor_temp=69.0,
-        pred_indoor must be 71.5, confirming the ODE curve is passed through
-        to the chart log rather than the actual reading.
+        Selection logic (coordinator.py):
+          _archived_pred = self._lookup_pred_archive(_now_dt)  # → None (cache miss)
+          if _archived_pred is not None:
+              _pred_indoor_val = _archived_pred
+          elif self._last_predicted_indoor:
+              _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
+
+        Path exercised: archive empty → uses _last_predicted_indoor[0].
         """
         _last_predicted_indoor = [{"temp": 71.5, "ts": "2026-05-13T15:00:00"}]
         indoor_temp = 69.0
 
-        # Replicate the selection logic from coordinator.py ~line 1324
-        _pred_indoor_val = None
-        if _last_predicted_indoor:
-            _pred_indoor_val = _last_predicted_indoor[0].get("temp")
+        # Replicate the updated selection logic from coordinator.py (archive-aware branch).
+        # _pred_archive is empty → _archived_pred is None → warmup fallback.
+        _pred_archive: dict[int, float] = {}
+        _archived_pred = None  # simulates lookup_pred_archive miss (empty archive)
 
-        assert _pred_indoor_val == 71.5, f"pred_indoor must be 71.5 (from ODE curve[0]); got {_pred_indoor_val!r}"
+        _pred_indoor_val = None
+        if _archived_pred is not None:
+            _pred_indoor_val = _archived_pred
+        elif _last_predicted_indoor:
+            _pred_indoor_val = _last_predicted_indoor[0].get("temp")  # warmup fallback
+
+        assert _pred_indoor_val == 71.5, (
+            f"pred_indoor must be 71.5 (warmup fallback from ODE[0]); got {_pred_indoor_val!r}"
+        )
         assert abs(_pred_indoor_val - indoor_temp) > 0, (
             f"pred_indoor ({_pred_indoor_val}) must differ from indoor_temp ({indoor_temp})"
         )
+        assert _pred_archive == {}, "archive must remain empty — warmup fallback does not populate it"

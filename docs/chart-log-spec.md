@@ -12,7 +12,7 @@
 | What downsampling tier applies for each `range_str` value? | `6h`/`12h`/`24h`/`3d` → raw entries. `7d`/`30d` → hourly averages. `1y` → daily summaries. An unrecognised range string defaults to `24h` (1-day raw). | [Downsampling Rules](#downsampling-rules) |
 | What fields does a raw entry always carry, and which are optional? | Nine core fields always present: `ts`, `hvac`, `fan`, `indoor`, `outdoor`, `windows_open`, `windows_recommended`, `pred_outdoor`, `pred_indoor`. The `event` field is only present when the marker argument is non-None. | [Entry Schema](#entry-schema) |
 | How is `pred_outdoor` populated in each chart log entry? | Raw hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()` — no normalisation. `null` when hourly forecast has no entry for the current hour. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
-| How is `pred_indoor` populated in each chart log entry? | Read from `_last_predicted_indoor[0]["temp"]` — the first future entry from the cached ODE curve built earlier in the same 30-min update cycle by `_build_predicted_indoor_future()`. Only written when the cache is non-empty and `pred_outdoor` is non-null. `null` if indoor temp is unavailable, `pred_outdoor` is null, or the cache is empty (e.g., immediately after HA restart before the first full ODE run). | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
+| How is `pred_indoor` populated in each chart log entry? | Read from `_pred_archive` (first-write-wins prediction archive): the value for time T was written ~4 hours before T arrived, producing a genuine advance prediction. Falls back to `_last_predicted_indoor[0]["temp"]` only during the warmup period (first 4h after HA restart). `null` if both archive and cache are empty, or `pred_outdoor` is null. | [First-Write-Wins Prediction Archive](#first-write-wins-prediction-archive) |
 | What fallback does `_build_future_forecast_outdoor()` use when hourly forecast is empty? | When hourly forecast is empty or yields no future entries and a `classification` is provided, generates a cosine curve using `classification.today_high`/`classification.today_low`. Returns `[]` only if no classification is provided. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
 | What fallback does `_build_predicted_indoor_future()` use when hourly forecast is empty? | When `classification` is provided, synthesises a cosine-based hourly list from `classification.today_high`/`classification.today_low` and proceeds normally. Returns `[]` only if no classification is provided. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
 | What happens when `load()` finds a missing, corrupt, or structurally wrong file? | Any of these three error paths resets `_entries` to `[]` and logs a WARNING. The coordinator continues with an empty log; no exception propagates to the caller. | [Load Contract](#load-contract) |
@@ -121,7 +121,7 @@ Entries with unparseable `ts` fields are treated differently in the two prune co
 | `windows_open` | `bool` | Always | Whether any window/door sensor reports open |
 | `windows_recommended` | `bool` | Always | Whether natural ventilation was recommended at this tick |
 | `pred_outdoor` | `float \| null` | Always | Raw hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()`. No normalisation is applied. `null` when the hourly forecast has no entry matching the current hour, or when hourly forecast is unavailable. (Fixed in Issue #132: previously stored a normalised value from `_build_outdoor_curve()`, which caused spikes at classification boundaries.) |
-| `pred_indoor` | `float \| null` | Always | Predicted indoor temperature: read from `_last_predicted_indoor[0]["temp"]` — the first future entry of the full ODE curve pre-built by `_build_predicted_indoor_future()` earlier in the same 30-min update cycle (~1 hour ahead). Includes HVAC Q + solar + passive decay terms. Only written when the cache is non-empty and `pred_outdoor` is non-null; otherwise `null`. See [Why not `_ode_single_step`?](#why-not-_ode_single_step-regression-history). |
+| `pred_indoor` | `float \| null` | Always | Predicted indoor temperature: read from `_pred_archive` (first-write-wins archive). The archived value for time T was written when T was ~4 hours in the future — i.e., the prediction was made ~4 hours before T arrived. Falls back to `_last_predicted_indoor[0]["temp"]` only during the warmup period (first 4 hours after HA restart). Only written when `pred_outdoor` is non-null; otherwise `null`. See [First-Write-Wins Prediction Archive](#first-write-wins-prediction-archive). |
 | `event` | `str` | Optional | Event marker label (e.g., `"hvac_mode_changed"`, `"windows_opened"`). Present only when `event` argument was non-None. |
 
 **Invariant:** `ts` is always present and always a string. Monotonic non-decrease of `ts` values is the caller's responsibility — the class does not enforce it.
@@ -313,22 +313,54 @@ _pred_outdoor_val = _extract_current_hour_forecast_temp(self._hourly_forecast_te
 - Returns `None` if hourly forecast is absent or has no entry for the current hour.
 - Uses the same field name and timezone handling as `_build_future_forecast_outdoor()` so past and future predicted outdoor values come from the same data source.
 
-**`pred_indoor`** is read from `_last_predicted_indoor` — a cache of the full ODE curve built earlier in the same 30-min update cycle:
+**`pred_indoor`** is read from `_pred_archive` — the first-write-wins prediction archive (added in Issue #139):
 
 ```python
-_pred_indoor_val = self._last_predicted_indoor[0]["temp"] if self._last_predicted_indoor else None
+_archived_pred = self._lookup_pred_archive(_now_dt)
+if _archived_pred is not None:
+    _pred_indoor_val = _archived_pred
+elif self._last_predicted_indoor:
+    _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
 ```
 
-- `_last_predicted_indoor` is populated by `_build_predicted_indoor_future()` during the same coordinator tick, before the append call.
-- The first entry (`[0]`) is the nearest future forecast point (~1 hour ahead of now).
-- Includes HVAC Q + solar + passive decay terms — the same full ODE used for the chart's future predicted curve.
-- Written as `None` if the cache is empty (e.g., after HA restart before the first full cycle) or if `_pred_outdoor_val` is `None`.
+- `_lookup_pred_archive()` looks up `_pred_archive[_pred_archive_key(now_dt)]` — the prediction for this 30-min slot that was written ~4 hours ago.
+- Falls back to `_last_predicted_indoor[0]["temp"]` (the current-tick ODE[0] value) only during the warmup period (first 4 hours after HA restart, before the archive has been populated 4 hours ahead).
+- Written as `None` if both archive and cache are empty, or if `_pred_outdoor_val` is `None`.
+- Log line emitted at every tick: `chart_log pred_indoor=X indoor=Y delta=+Z.Z (archive|ode-warmup|none)`.
 
 **Guard:** the entire block is wrapped in `contextlib.suppress(Exception)` — any failure silently writes `null` for both fields rather than crashing the coordinator tick.
 
-### Why not `_ode_single_step`? (Regression History)
+### First-Write-Wins Prediction Archive
 
-Prior to Issue #137, `pred_indoor` was computed by a single-step Euler approximation via `_ode_single_step(t_in, t_out, thermal_model, dt_hours=0.5)`, which applied only the `k_passive` decay term over a half-hour window. In practice this produced `pred_indoor ≈ actual_indoor` with a delta of ~0.38°F — imperceptibly small at chart scale and invisible during steady-state. The function was removed in Issue #137. The cached full-ODE approach diverges meaningfully during transitions: with an HVAC heating contribution of ~+6.8°F/hr, a 1-hour lookahead produces a clearly visible separation between predicted and actual, which is precisely when the chart is most diagnostic.
+Added in Issue #139. Resolves the structural convergence problem where re-seeding the ODE from actual indoor temp at every 30-min tick caused `pred_indoor ≈ actual_indoor` during low-delta periods.
+
+**Root cause of the old behavior:** at T=10:00, ODE seeds from `actual(10:00)=69°F` → prediction for T+1h saved. At T=10:30, ODE seeds from `actual(10:30)=69.5°F` → new prediction for T+1h saved (overwrites intent). Historical chart showed pred running ~1.2°F above actual — but because every tick restarted from actual, the prediction never diverged from the actual trajectory. Fix: freeze the prediction at first write.
+
+**Architecture:**
+
+`self._pred_archive: dict[int, float]` — maps epoch_30min → predicted_temp.
+
+- **Key:** Unix epoch timestamp rounded to the nearest **30 minutes** (via `_pred_archive_key(dt)`) — O(1) lookup.
+- **Value:** predicted indoor temp for that 30-min slot, from the **first** ODE run that covered it.
+- **Write:** at each 30-min tick, after computing `_last_predicted_indoor`, the coordinator iterates its entries for times up to `now + PRED_ARCHIVE_HORIZON_HOURS` (default: 4h) and calls `setdefault` — **first write wins, never overwritten**.
+- **Read:** when writing chart_log at time T, `_lookup_pred_archive(T)` is called; falls back to `_last_predicted_indoor[0]` only on cache miss (warmup period).
+- **Expiry:** entries where `key < epoch(now − 7 days)` are purged at each tick. Bounded at ≤ 336 entries at 30-min resolution (7 days × 48 ticks/day).
+- **Persistence:** in-memory only (v1). Warmup after HA restart = 4 hours. Restarts are rare; the 4h warmup period is acceptable.
+- **Log source tag:** `(archive)` = archive hit; `(ode-warmup)` = warmup fallback active; `(none)` = both archive and cache empty.
+
+**30-min resolution:** `_build_predicted_indoor_future()` was extended (Issue #139) to insert a linearly-interpolated midpoint between each consecutive pair of hourly ODE outputs before returning. This gives archive entries 30-min resolution and eliminates the step-function artifact on the historical chart.
+
+**Concrete example (after fix):**
+
+At T=6:00am, ODE seeded from `actual(6am)=68°F`, outdoor forecast rising to 85°F by 2pm:
+```
+archive[7am]=68.9, archive[7:30am]=69.5, archive[8am]=70.1, ..., archive[10am]=74.2  ← written, locked
+```
+At T=10:00am tick: `_pred_archive[epoch(10am)]` = **74.2°F** (from 6am ODE, 4h earlier). `indoor_temp` = 72.8°F. Log: `chart_log pred_indoor=74.2 indoor=72.8 delta=+1.4 (archive)` — meaningful divergence.
+
+**Why not `_ode_single_step`? (regression history)**
+
+Prior to Issue #137, `pred_indoor` was a single-step Euler approximation (`_ode_single_step`), which applied only the `k_passive` term over a half-hour window. This produced `pred_indoor ≈ actual_indoor` with delta ~0.38°F. The function was removed in Issue #137. Issue #137 introduced the full-ODE cache (`_last_predicted_indoor`), which diverged meaningfully during HVAC transitions — but the re-seeding problem remained. Issue #139 introduced the first-write-wins archive, making `pred_indoor` reflect a genuine advance prediction. The warmup fallback to `_last_predicted_indoor[0]` is now a temporary state, not the primary path.
 
 ### Thermal Model Refresh
 
@@ -351,22 +383,34 @@ Use this tree when `pred_indoor ≈ actual_indoor` (delta ≈ 0) on the chart:
 
 ```
 pred_indoor ≈ actual (delta ≈ 0)?
-├── Check HA restart time vs. when delta went to 0
-├── Check log: "thermal model refreshed (30-min cycle): confidence=X"
-│     → If confidence=none → thermal model empty (fresh install or no observations yet)
-├── Check log: "_build_predicted_indoor_future: using fallback" or similar
-├── Check log: "chart_log pred_indoor=X indoor=Y delta=+0.0 (none)"
-│     → "(none)" means _last_predicted_indoor was empty
-└── Commands:
-      python tools/ha_logs.py --filter "chart_log pred_indoor"
+│
+├── Step 1: Check archive source tag in log
+│     python tools/ha_logs.py --filter "chart_log pred_indoor"
+│     → "(archive)" in log?   → Archive is working. Go to Step 2.
+│     → "(ode-warmup)" in log? → HA restarted < 4h ago; archive warming up. Auto-resolves. (Root cause A)
+│     → "(none)" in log?       → Archive and ODE cache both empty. Go to Step 3.
+│
+├── Step 2 (archive active, delta still ≈ 0):
+│     → delta=0 during temperature transitions? → outdoor forecast tracked actual closely (Root cause B)
+│     → delta=0 all day? → check archive key rounding; see Root cause E
+│
+└── Step 3 ((none) tag — ODE cache empty):
       python tools/ha_logs.py --filter "thermal model refreshed"
+      → confidence=none → fresh install / no observations yet (Root cause C)
+      → confidence=solid/moderate → check _build_predicted_indoor_future fallback (Root cause D)
 ```
 
 **Root causes:**
-1. **Thermal model empty after restart** — delta=+0.0 with `(none)` tag. Auto-resolves within 30 minutes after #137 fix. Verify via `--filter "thermal model refreshed"` → should show `confidence=solid` or `confidence=moderate`.
-2. **Fresh install / no observations** — `confidence=none` in refresh log. No thermal data collected yet. Resolves after 1–2 days of `k_passive` observations.
-3. **Fallback ramp active** — `_build_predicted_indoor_future` log shows "using fallback". Thermal model has data but indoor temp is unavailable. Resolve the underlying sensor issue.
-4. **Off-day mode, outdoor near indoor** — When `day_type="off"` and outdoor ≈ indoor, physics produces near-zero delta naturally. Not a bug.
+
+A. **`(ode-warmup)` in log** — HA restarted < 4h ago; archive warming up. Uses `_last_predicted_indoor[0]` fallback until the archive is populated 4h ahead. Auto-resolves within 4h. Not a bug.
+
+B. **`(archive)` in log but delta ≈ 0 during temperature transitions** — outdoor forecast accuracy issue. The advance prediction (made 4h ago) matched the actual trajectory closely because outdoor conditions tracked the forecast. Rare during pronounced heating/cooling cycles. Not a bug.
+
+C. **Fresh install / no observations** — `confidence=none` in refresh log. No thermal data collected yet. Resolves after 1–2 days of `k_passive` observations.
+
+D. **`(none)` in log — ODE cache empty** — `_last_predicted_indoor` was empty when the chart_log entry was written and the archive had no entry for this slot. Root cause: thermal model empty, physics gate falsy, or indoor temp unavailable at tick time. Check `_build_predicted_indoor_future` log for "using fallback". The #137 thermal model refresh cycle should restore `confidence` within 30 min after restart.
+
+E. **Archive populated but `pred_indoor = indoor` exactly** — potential bug. Check that `_pred_archive_key()` is rounding to the correct 30-min boundary. Check that archive epoch keys match the chart_log entry timestamps.
 
 ### `_build_future_forecast_outdoor(hourly_forecast, classification=None)`
 

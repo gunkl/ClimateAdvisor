@@ -1091,7 +1091,7 @@ class TestBuildPredictedIndoorFuture:
             _pred_entry(_PRED_NOW + timedelta(hours=2), 65.0),
         ]
         result = self._call(entries)
-        assert len(result) == 2
+        assert len(result) == 3
         for e in result:
             ts = datetime.fromisoformat(e["ts"])
             assert ts > _PRED_NOW
@@ -1182,7 +1182,7 @@ class TestBuildPredictedIndoorFuture:
         """Function must work with 'datetime' key (HA weather format); 'time' key is fallback."""
         entries = [{"datetime": (_PRED_NOW + timedelta(hours=i)).isoformat(), "temperature": 65.0} for i in range(1, 4)]
         result = self._call(entries)
-        assert len(result) == 3
+        assert len(result) == 5
 
     def test_timezone_aware_now_no_error(self):
         """Timezone-aware now must not raise TypeError in comparison."""
@@ -1191,7 +1191,7 @@ class TestBuildPredictedIndoorFuture:
         entries = [{"datetime": (now_aware + timedelta(hours=i)).isoformat(), "temperature": 65.0} for i in range(1, 4)]
         with patch("custom_components.climate_advisor.coordinator.dt_util", _make_dt_util_mock(now_aware)):
             result = _build_predicted_indoor_future(entries, _PRED_CONFIG, now_aware)
-        assert len(result) == 3
+        assert len(result) == 5
 
     def test_local_hour_used_not_utc(self):
         """Schedule must use LOCAL hour, not UTC hour.

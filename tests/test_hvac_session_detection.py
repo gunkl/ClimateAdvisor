@@ -264,6 +264,8 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     # Suppress violation tracking helper
     coord._last_violation_check = None
     coord._check_comfort_violations = MagicMock()
+    coord._last_predicted_indoor = []
+    coord._pred_archive = {}
 
     coord._startup_retries_remaining = 0
     coord._startup_hvac_initialized = False

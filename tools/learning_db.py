@@ -10,6 +10,7 @@ Usage:
     python3 tools/learning_db.py --rejections   # rejection log only
     python3 tools/learning_db.py --committed    # committed obs only
     python3 tools/learning_db.py --model        # model summary only
+    python3 tools/learning_db.py --thermal      # chart_log endpoint observations only
     python3 tools/learning_db.py --last N       # last N rejections per type (default 5)
 """
 
@@ -327,7 +328,72 @@ def _print_committed(db: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Section D: Live pending observations (optional, requires HA_URL + HA_TOKEN)
+# Section D: Chart-log endpoint observations
+# ---------------------------------------------------------------------------
+
+
+def _print_chart_log_endpoint_obs(db: dict) -> None:
+    """Print committed observations that came from the chart_log endpoint estimator."""
+    observations = db.get("thermal_observations")
+    if not isinstance(observations, list):
+        print("Chart-Log Endpoint Observations")
+        print("--------------------------------")
+        print("(no thermal_observations found in learning DB)")
+        print()
+        return
+
+    endpoint_obs = [o for o in observations if isinstance(o, dict) and o.get("source") == "chart_log_endpoint"]
+    total = len(endpoint_obs)
+    # Show most-recent first
+    recent = list(reversed(endpoint_obs))[:20]
+
+    print(f"Chart-Log Endpoint Observations (last {min(len(recent), total)} of {total})")
+    print("-" * 68)
+
+    header = (
+        _pad("date", 12)
+        + _pad("hvac_mode", 12)
+        + _pad("k", 10)
+        + _pad("dt_h", 8)
+        + _pad("delta_F", 9)
+        + _pad("grade", 8)
+        + "ratio"
+    )
+    print(header)
+    print("-" * 68)
+
+    for obs in recent:
+        date = obs.get("date", "?")
+        hvac_mode = obs.get("hvac_mode", "?")
+        k = obs.get("k_passive")
+        k_str = f"{k:.4f}" if isinstance(k, float) else "-"
+        dt_h = obs.get("elapsed_hours")
+        dt_str = f"{dt_h:.1f}" if isinstance(dt_h, float) else "-"
+        delta = obs.get("delta_t_f")
+        delta_str = f"{delta:.1f}" if isinstance(delta, float) else "-"
+        grade = obs.get("confidence_grade", "-")
+        ratio = obs.get("ratio")
+        ratio_str = f"{ratio:.3f}" if isinstance(ratio, float) else "-"
+
+        row = (
+            _pad(str(date), 12)
+            + _pad(str(hvac_mode), 12)
+            + _pad(k_str, 10)
+            + _pad(dt_str, 8)
+            + _pad(delta_str, 9)
+            + _pad(str(grade), 8)
+            + ratio_str
+        )
+        print(row)
+
+    if total == 0:
+        print("  (none yet — backfill fires on next HA restart if not already done)")
+
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Section E: Live pending observations (optional, requires HA_URL + HA_TOKEN)
 # ---------------------------------------------------------------------------
 
 COL_PL_TYPE = 20
@@ -410,14 +476,16 @@ def main() -> None:
     parser.add_argument("--rejections", action="store_true", help="Show rejection log only")
     parser.add_argument("--committed", action="store_true", help="Show committed observations only")
     parser.add_argument("--model", action="store_true", help="Show model summary only")
+    parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
     parser.add_argument("--last", type=int, default=5, metavar="N", help="Last N rejections per type (default 5)")
     args = parser.parse_args()
 
     # Determine which sections to show
-    section_flag = args.rejections or args.committed or args.model
-    show_model = args.model or not section_flag
+    section_flag = args.rejections or args.committed or args.model or args.thermal
+    show_model = args.model or args.thermal or not section_flag
     show_rejections = args.rejections or not section_flag
     show_committed = args.committed or not section_flag
+    show_thermal = args.thermal or not section_flag
 
     config = load_config()
 
@@ -433,6 +501,9 @@ def main() -> None:
 
     if show_committed:
         _print_committed(db)
+
+    if show_thermal:
+        _print_chart_log_endpoint_obs(db)
 
     # Live pending observations via REST API (optional)
     _load_dotenv()

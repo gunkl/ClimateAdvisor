@@ -162,6 +162,15 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 
 - **`@callback` decorator** — Is a `MagicMock` in the test mock layer and swallows decorated functions. If a test needs to invoke a `@callback`-decorated inner function (e.g., timer callbacks), patch it: `patch("...coordinator.callback", side_effect=lambda fn: fn)`
 
+#### Testing `_build_predicted_indoor_future` directly
+
+When calling `_build_predicted_indoor_future` in tests using the lightweight HA stub environment, `dt_util.as_local()` returns a `MagicMock` — breaking `<=` comparisons against real `datetime` objects. Always wrap the call with:
+```python
+with patch("custom_components.climate_advisor.coordinator.dt_util.as_local", side_effect=lambda x: x):
+    result = _build_predicted_indoor_future(...)
+```
+Reference: `TestPredIndoorIntegration::test_ode_cache_diverges_after_model_refresh`
+
 #### Testing Sensor Attributes and API Views
 
 **Sensor entity classes (`ClimateAdvisorBaseSensor` subclasses) CANNOT be directly instantiated in test files that use the lightweight HA module stubs** (e.g., `test_fan_control.py`, `test_contact_status.py`). Importing `sensor.py` in that environment causes a metaclass conflict:

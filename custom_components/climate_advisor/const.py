@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.42"
+VERSION = "0.3.43"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.37": [
@@ -845,6 +845,12 @@ THERMAL_SWING_CONF_HIGH: int = 10
 THERMAL_PASSIVE_MIN_SAMPLES = 30
 THERMAL_PASSIVE_MIN_DELTA_F = 3.0
 THERMAL_PASSIVE_MIN_SIGNAL_F = 0.5
+
+# Chart_log endpoint estimator thresholds (replaces passive_decay consecutive-pair OLS)
+# Min window duration and temperature drop for passive-only and overnight ventilated windows.
+THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES: int = 120  # 2h minimum window
+THERMAL_CHART_LOG_PASSIVE_MIN_DT_F: float = 1.0  # at least 1°F sensor change
+THERMAL_CHART_LOG_VENT_MIN_MINUTES: int = 120  # 2h minimum for overnight ventilated windows
 
 # Fan-only decay observation thresholds
 THERMAL_FAN_MIN_SAMPLES = 15

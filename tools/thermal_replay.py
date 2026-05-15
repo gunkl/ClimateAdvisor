@@ -598,6 +598,633 @@ def fetch_chart_log_ssh(config: dict) -> list[dict]:
     return data.get("entries", [])
 
 
+def build_passive_only_windows(
+    entries: list[dict],
+    days: int = 30,
+    min_window_minutes: int = 120,
+    max_window_minutes: int = 720,
+) -> list[list[dict]]:
+    """Extract passive-only windows from chart_log entries.
+
+    A passive-only window is a contiguous run where:
+    - HVAC is idle/off (same check as build_windows_from_chart_log)
+    - fan is False (not CA-driven fan or manual fan)
+    - windows_open is False
+    - Duration >= min_window_minutes (default 120 min)
+
+    Each sample dict matches the format expected by compute_k_passive.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+
+    windows: list[list[dict]] = []
+    current: list[dict] = []
+
+    def _flush() -> None:
+        if current:
+            elapsed_min = (len(current) - 1) * _avg_interval(current)
+            if elapsed_min >= min_window_minutes:
+                windows.append(list(current))
+            current.clear()
+
+    def _avg_interval(samples: list[dict]) -> float:
+        if len(samples) < 2:
+            return 30.0
+        ts0 = datetime.fromisoformat(samples[0]["timestamp"])
+        ts1 = datetime.fromisoformat(samples[-1]["timestamp"])
+        return (ts1 - ts0).total_seconds() / 60.0 / max(len(samples) - 1, 1)
+
+    for entry in entries:
+        ts_str = entry.get("ts", "")
+        if not ts_str:
+            continue
+        ts = datetime.fromisoformat(ts_str)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if ts < cutoff:
+            continue
+
+        indoor = entry.get("indoor")
+        outdoor = entry.get("outdoor")
+        hvac = entry.get("hvac", "")
+        fan = entry.get("fan")
+        windows_open = entry.get("windows_open")
+
+        if indoor is None or outdoor is None:
+            _flush()
+            continue
+
+        hvac_idle = hvac in ("idle", "off", "", "fan") or ("heat" not in (hvac or "") and "cool" not in (hvac or ""))
+        fan_off = fan is False or fan is None
+        win_closed = not windows_open
+
+        if not hvac_idle or not fan_off or not win_closed:
+            _flush()
+            continue
+
+        elapsed = 0.0
+        if current:
+            ts0 = datetime.fromisoformat(current[0]["timestamp"])
+            elapsed = (ts - ts0).total_seconds() / 60.0
+
+        current.append(
+            {
+                "indoor_temp_f": float(indoor),
+                "outdoor_temp_f": float(outdoor),
+                "elapsed_minutes": elapsed,
+                "solar_factor": _solar_factor(ts.hour + ts.minute / 60.0),
+                "timestamp": ts_str,
+            }
+        )
+
+        if elapsed >= max_window_minutes:
+            _flush()
+
+    _flush()
+    return windows
+
+
+def _endpoint_k_passive(
+    window: list[dict],
+) -> tuple[float | None, str | None, str]:
+    """Endpoint estimator for k_passive using Newton's law of cooling.
+
+    k = ln((T_end - T_out_avg) / (T_start - T_out_avg)) / dt_hours
+
+    Quality gates:
+    - |T_end - T_start| >= 1.0 degF
+    - dt_hours >= 2.0
+    - k in [-0.5, -0.001]
+
+    Confidence:
+    - "medium": dt_hours >= 6 AND |deltaT| >= 2
+    - "low": otherwise
+
+    Returns (k, confidence, reject_reason).
+    reject_reason is "" on success.
+    """
+    if len(window) < 2:
+        return None, None, "too_few_samples"
+
+    t_start = window[0]["indoor_temp_f"]
+    t_end = window[-1]["indoor_temp_f"]
+    t_out_avg = sum(s["outdoor_temp_f"] for s in window) / len(window)
+
+    ts0 = datetime.fromisoformat(window[0]["timestamp"])
+    ts1 = datetime.fromisoformat(window[-1]["timestamp"])
+    dt_hours = (ts1 - ts0).total_seconds() / 3600.0
+
+    delta_t = abs(t_end - t_start)
+    if delta_t < 1.0:
+        return None, None, "delta_too_small"
+    if dt_hours < 2.0:
+        return None, None, "window_too_short"
+
+    denom = t_start - t_out_avg
+    if abs(denom) < 0.01:
+        return None, None, "small_delta_to_outdoor"
+
+    numerator = t_end - t_out_avg
+    # Avoid log of non-positive number: ratio must be positive and < 1 (cooling toward outdoor)
+    ratio = numerator / denom
+    if ratio <= 0 or ratio >= 1.0:
+        return None, None, "ratio_out_of_range"
+
+    k = math.log(ratio) / dt_hours
+    if not (_K_PASSIVE_MIN <= k <= _K_PASSIVE_MAX):
+        return None, None, "bounds"
+
+    confidence = "medium" if (dt_hours >= 6.0 and delta_t >= 2.0) else "low"
+    return k, confidence, ""
+
+
+def run_passive_only_analysis(
+    chart_entries: list[dict],
+    learning_db: dict,
+    days: int = 30,
+) -> None:
+    """Run passive-only analysis: extract windows, compare OLS vs endpoint estimator,
+    simulate EWMA convergence, and compare ODE predictions.
+
+    Prints results to stdout. Does not write to the learning DB.
+    """
+    print(f"\nExtracting passive-only windows (HVAC off, fan off, windows closed, min 120 min, last {days} days)...")
+    windows = build_passive_only_windows(chart_entries, days=days, min_window_minutes=120)
+    print(f"  Found {len(windows)} passive-only windows\n")
+
+    if not windows:
+        print("No passive-only windows found. Try increasing --days.")
+        return
+
+    # Current k_passive from learning DB
+    cache = learning_db.get("thermal_model_cache", {})
+    current_k_passive: float | None = cache.get("k_passive")
+    print(f"Current k_passive from learning DB: {current_k_passive}")
+    print()
+
+    _ALPHA_LOW = 0.05
+    _ALPHA_MEDIUM = 0.15
+
+    ewma_k = current_k_passive
+    endpoint_results: list[tuple[float, str]] = []  # (k, confidence)
+
+    for _i, window in enumerate(windows):
+        ts_start = window[0]["timestamp"]
+        ts_end = window[-1]["timestamp"]
+        ts0 = datetime.fromisoformat(ts_start)
+        ts1 = datetime.fromisoformat(ts_end)
+        dt_hours = (ts1 - ts0).total_seconds() / 3600.0
+
+        t_start = window[0]["indoor_temp_f"]
+        t_end = window[-1]["indoor_temp_f"]
+        t_out_avg = sum(s["outdoor_temp_f"] for s in window) / len(window)
+        delta_t = t_end - t_start
+        n = len(window)
+
+        # Format timestamps for display
+        def _fmt_dt(ts_str: str) -> str:
+            try:
+                dt = datetime.fromisoformat(ts_str)
+                return dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return ts_str[:16]
+
+        label_start = _fmt_dt(ts_start)
+        label_end = _fmt_dt(ts_end)
+
+        print(f"Passive window {label_start} -> {label_end} ({dt_hours:.1f}h):")
+        print(
+            f"  T_range: {t_start:.0f}F -> {t_end:.0f}F (deltaT={delta_t:+.1f}F)  "
+            f"T_out_avg: {t_out_avg:.0f}F  n={n} entries"
+        )
+
+        # OLS (consecutive-pair)
+        k_ols, r2_ols, reject_ols = compute_k_passive(window)
+        if k_ols is not None:
+            verdict_ols = "PASS" if r2_ols >= _MIN_R2 else f"WOULD REJECT (R2<{_MIN_R2})"
+            print(f"  OLS (consecutive pairs): k={k_ols:+.4f} R2={r2_ols:.3f}  -> {verdict_ols}")
+        else:
+            print(f"  OLS (consecutive pairs): REJECTED ({reject_ols})")
+
+        # Endpoint estimator
+        k_ep, conf_ep, reject_ep = _endpoint_k_passive(window)
+        if k_ep is not None:
+            print(f"  Endpoint estimator:       k={k_ep:+.4f}          -> confidence={conf_ep}")
+            endpoint_results.append((k_ep, conf_ep))  # type: ignore[arg-type]
+        else:
+            print(f"  Endpoint estimator:       REJECTED ({reject_ep})")
+
+        print()
+
+    # EWMA convergence simulation
+    if endpoint_results:
+        print("=" * 70)
+        print("EWMA convergence simulation (endpoint estimator values):")
+        print(f"  Starting k_passive: {current_k_passive}")
+        print()
+
+        ewma_k = current_k_passive
+        for j, (k_ep, conf_ep) in enumerate(endpoint_results):
+            alpha = _ALPHA_MEDIUM if conf_ep == "medium" else _ALPHA_LOW
+            ewma_k_new = _ewma(ewma_k, k_ep, alpha)
+            ewma_k_str = f"{ewma_k_new:+.5f}" if ewma_k_new is not None else "None"
+            prev_str = f"{ewma_k:+.5f}" if ewma_k is not None else "None"
+            print(
+                f"  Window {j + 1}: k_ep={k_ep:+.4f} conf={conf_ep} alpha={alpha:.2f}  "
+                f"k_passive: {prev_str} -> {ewma_k_str}"
+            )
+            ewma_k = ewma_k_new
+
+        converged_k = ewma_k
+        if converged_k is not None:
+            print(f"\n  Final converged k_passive: {converged_k:+.5f}")
+        else:
+            print("\n  No convergence (no valid endpoint estimates)")
+        print()
+
+        # ODE prediction comparison: "last night" using last overnight window
+        # Find the last window with dt >= 4h to use as overnight
+        overnight_window = None
+        for window in reversed(windows):
+            ts0 = datetime.fromisoformat(window[0]["timestamp"])
+            ts1 = datetime.fromisoformat(window[-1]["timestamp"])
+            dt_h = (ts1 - ts0).total_seconds() / 3600.0
+            if dt_h >= 4.0:
+                overnight_window = window
+                break
+
+        if overnight_window is not None:
+            print("=" * 70)
+            print("ODE prediction comparison (last overnight passive window):")
+            w = overnight_window
+            t_in_0 = w[0]["indoor_temp_f"]
+            t_out_avg_w = sum(s["outdoor_temp_f"] for s in w) / len(w)
+            ts0_dt = datetime.fromisoformat(w[0]["timestamp"])
+            ts1_dt = datetime.fromisoformat(w[-1]["timestamp"])
+            dt_h_w = (ts1_dt - ts0_dt).total_seconds() / 3600.0
+            t_actual = w[-1]["indoor_temp_f"]
+
+            def _ode_predict(k_p: float | None, t_in: float, t_out: float, dt_h: float) -> float | None:
+                if k_p is None:
+                    return None
+                # Simple passive decay: dT/dt = k_passive * (T_in - T_out)
+                # Analytical: T(t) = T_out + (T_in_0 - T_out) * exp(k_passive * dt)
+                return t_out + (t_in - t_out) * math.exp(k_p * dt_h)
+
+            pred_current = _ode_predict(current_k_passive, t_in_0, t_out_avg_w, dt_h_w)
+            pred_converged = _ode_predict(converged_k, t_in_0, t_out_avg_w, dt_h_w)
+
+            def _fmt_ts(dt: datetime) -> str:
+                return dt.strftime("%Y-%m-%d %H:%M")
+
+            print(f"  Window: {_fmt_ts(ts0_dt)} -> {_fmt_ts(ts1_dt)} ({dt_h_w:.1f}h)")
+            print(f"  T_start={t_in_0:.1f}F  T_out_avg={t_out_avg_w:.1f}F  T_actual_end={t_actual:.1f}F")
+            print()
+
+            if pred_current is not None:
+                err_current = pred_current - t_actual
+                print(f"  Current k_passive ({current_k_passive:+.5f}):")
+                print(f"    Predicted end: {pred_current:.1f}F  Actual: {t_actual:.1f}F  Error: {err_current:+.1f}F")
+            else:
+                print("  Current k_passive: None (no prediction)")
+
+            if pred_converged is not None and converged_k is not None:
+                err_converged = pred_converged - t_actual
+                print(f"  Converged k_passive ({converged_k:+.5f}):")
+                print(
+                    f"    Predicted end: {pred_converged:.1f}F  Actual: {t_actual:.1f}F  Error: {err_converged:+.1f}F"
+                )
+            else:
+                print("  Converged k_passive: None (no prediction)")
+            print()
+        else:
+            print("  (No overnight window >= 4h found for ODE comparison)")
+    else:
+        print("No valid endpoint estimates — EWMA simulation skipped.")
+
+
+def build_ventilated_overnight_windows(
+    entries: list[dict],
+    days: int = 30,
+    min_window_minutes: int = 120,
+    max_window_minutes: int = 720,
+) -> list[list[dict]]:
+    """Extract ventilated windows that pass the natural overnight regime filter.
+
+    A ventilated overnight window satisfies:
+    - HVAC is idle/off
+    - windows_open is True
+    - ALL samples in the window have T_out < T_in (T_out stays below T_in throughout)
+    - Duration >= min_window_minutes
+
+    The natural regime filter (T_out < T_in throughout) auto-selects overnight conditions
+    and rejects morning windows where T_out rises toward or past T_in. No time-of-day
+    classification needed.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+
+    windows: list[list[dict]] = []
+    current: list[dict] = []
+
+    def _flush() -> None:
+        if len(current) < 2:
+            current.clear()
+            return
+        ts0 = datetime.fromisoformat(current[0]["timestamp"])
+        ts1 = datetime.fromisoformat(current[-1]["timestamp"])
+        elapsed_min = (ts1 - ts0).total_seconds() / 60.0
+        if elapsed_min < min_window_minutes:
+            current.clear()
+            return
+        # Natural regime filter: reject windows where T_out ever meets or exceeds T_in
+        if all(s["outdoor_temp_f"] < s["indoor_temp_f"] for s in current):
+            windows.append(list(current))
+        current.clear()
+
+    for entry in entries:
+        ts_str = entry.get("ts", "")
+        if not ts_str:
+            continue
+        ts = datetime.fromisoformat(ts_str)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if ts < cutoff:
+            continue
+
+        indoor = entry.get("indoor")
+        outdoor = entry.get("outdoor")
+        hvac = entry.get("hvac", "")
+        windows_open = entry.get("windows_open")
+
+        if indoor is None or outdoor is None:
+            _flush()
+            continue
+
+        hvac_idle = hvac in ("idle", "off", "", "fan") or ("heat" not in (hvac or "") and "cool" not in (hvac or ""))
+        win_open = bool(windows_open)
+
+        if not hvac_idle or not win_open:
+            _flush()
+            continue
+
+        elapsed = 0.0
+        if current:
+            ts0 = datetime.fromisoformat(current[0]["timestamp"])
+            elapsed = (ts - ts0).total_seconds() / 60.0
+
+        current.append(
+            {
+                "indoor_temp_f": float(indoor),
+                "outdoor_temp_f": float(outdoor),
+                "elapsed_minutes": elapsed,
+                "solar_factor": _solar_factor(ts.hour + ts.minute / 60.0),
+                "timestamp": ts_str,
+            }
+        )
+
+        if elapsed >= max_window_minutes:
+            _flush()
+
+    _flush()
+    return windows
+
+
+def run_vent_overnight_analysis(
+    chart_entries: list[dict],
+    learning_db: dict,
+    days: int = 30,
+) -> None:
+    """Analyse overnight ventilated windows using endpoint estimator.
+
+    Applies the natural regime filter (T_out < T_in throughout). Morning ventilated
+    windows where T_out rises toward T_in are auto-rejected by this filter, confirming
+    the mechanism. Prints results to stdout. Does not write to the learning DB.
+    """
+    print(
+        f"\nExtracting overnight ventilated windows (HVAC off, windows open, T_out < T_in throughout, "
+        f"min 120 min, last {days} days)..."
+    )
+    windows = build_ventilated_overnight_windows(chart_entries, days=days, min_window_minutes=120)
+
+    raw_vent_count = _count_raw_ventilated_windows(chart_entries, days=days, min_window_minutes=120)
+    rejected_by_filter = raw_vent_count - len(windows)
+
+    print(f"  Raw ventilated windows found: {raw_vent_count}")
+    print(f"  Overnight (T_out < T_in throughout): {len(windows)}")
+    print(f"  Rejected by natural filter (morning/crossover): {rejected_by_filter}\n")
+
+    if not windows:
+        print("No overnight ventilated windows passed the natural filter. Try increasing --days.")
+        return
+
+    cache = learning_db.get("thermal_model_cache", {})
+    current_k_vent: float | None = cache.get("k_vent_window")
+    print(f"Current k_vent_window from learning DB: {current_k_vent}")
+    print()
+
+    _ALPHA_LOW = 0.05
+    _ALPHA_MEDIUM = 0.15
+
+    ewma_k = current_k_vent
+    endpoint_results: list[tuple[float, str]] = []
+
+    for _i, window in enumerate(windows):
+        ts_start = window[0]["timestamp"]
+        ts_end = window[-1]["timestamp"]
+        ts0 = datetime.fromisoformat(ts_start)
+        ts1 = datetime.fromisoformat(ts_end)
+        dt_hours = (ts1 - ts0).total_seconds() / 3600.0
+
+        t_start = window[0]["indoor_temp_f"]
+        t_end = window[-1]["indoor_temp_f"]
+        t_out_avg = sum(s["outdoor_temp_f"] for s in window) / len(window)
+        delta_t = t_end - t_start
+        n = len(window)
+
+        def _fmt_dt(ts_str: str) -> str:
+            try:
+                dt = datetime.fromisoformat(ts_str)
+                return dt.strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return ts_str[:16]
+
+        label_start = _fmt_dt(ts_start)
+        label_end = _fmt_dt(ts_end)
+
+        print(f"Ventilated overnight window {label_start} -> {label_end} ({dt_hours:.1f}h):")
+        print(
+            f"  T_range: {t_start:.0f}F -> {t_end:.0f}F (deltaT={delta_t:+.1f}F)  "
+            f"T_out_avg: {t_out_avg:.0f}F  n={n} entries"
+        )
+
+        # OLS (consecutive-pair) — expected to fail for slow overnight drift
+        k_ols, r2_ols, reject_ols = compute_k_passive(window)
+        if k_ols is not None:
+            verdict_ols = "PASS" if r2_ols >= _MIN_R2 else f"WOULD REJECT (R2<{_MIN_R2})"
+            print(f"  OLS (consecutive pairs): k={k_ols:+.4f} R2={r2_ols:.3f}  -> {verdict_ols}")
+        else:
+            print(f"  OLS (consecutive pairs): REJECTED ({reject_ols})")
+
+        # Endpoint estimator
+        k_ep, conf_ep, reject_ep = _endpoint_k_passive(window)
+        if k_ep is not None:
+            print(f"  Endpoint estimator:       k={k_ep:+.4f}          -> confidence={conf_ep}")
+            endpoint_results.append((k_ep, conf_ep))  # type: ignore[arg-type]
+        else:
+            print(f"  Endpoint estimator:       REJECTED ({reject_ep})")
+
+        print()
+
+    # EWMA convergence simulation
+    if endpoint_results:
+        print("=" * 70)
+        print("EWMA convergence simulation (overnight ventilated endpoint values):")
+        print(f"  Starting k_vent_window: {current_k_vent}")
+        print()
+
+        ewma_k = current_k_vent
+        for j, (k_ep, conf_ep) in enumerate(endpoint_results):
+            alpha = _ALPHA_MEDIUM if conf_ep == "medium" else _ALPHA_LOW
+            ewma_k_new = _ewma(ewma_k, k_ep, alpha)
+            ewma_k_str = f"{ewma_k_new:+.5f}" if ewma_k_new is not None else "None"
+            prev_str = f"{ewma_k:+.5f}" if ewma_k is not None else "None"
+            print(
+                f"  Window {j + 1}: k_ep={k_ep:+.4f} conf={conf_ep} alpha={alpha:.2f}  "
+                f"k_vent_window: {prev_str} -> {ewma_k_str}"
+            )
+            ewma_k = ewma_k_new
+
+        converged_k = ewma_k
+        if converged_k is not None:
+            print(f"\n  Final converged k_vent_window: {converged_k:+.5f}")
+            if current_k_vent is not None:
+                pct_change = (converged_k - current_k_vent) / abs(current_k_vent) * 100.0
+                print(f"  Change from current: {pct_change:+.1f}%  ({current_k_vent:+.5f} -> {converged_k:+.5f})")
+        else:
+            print("\n  No convergence (no valid endpoint estimates)")
+        print()
+
+        # ODE prediction comparison using last overnight ventilated window
+        overnight_window = None
+        for window in reversed(windows):
+            ts0 = datetime.fromisoformat(window[0]["timestamp"])
+            ts1 = datetime.fromisoformat(window[-1]["timestamp"])
+            dt_h = (ts1 - ts0).total_seconds() / 3600.0
+            if dt_h >= 4.0:
+                overnight_window = window
+                break
+
+        if overnight_window is not None:
+            print("=" * 70)
+            print("ODE prediction comparison (last overnight ventilated window):")
+            w = overnight_window
+            t_in_0 = w[0]["indoor_temp_f"]
+            t_out_avg_w = sum(s["outdoor_temp_f"] for s in w) / len(w)
+            ts0_dt = datetime.fromisoformat(w[0]["timestamp"])
+            ts1_dt = datetime.fromisoformat(w[-1]["timestamp"])
+            dt_h_w = (ts1_dt - ts0_dt).total_seconds() / 3600.0
+            t_actual = w[-1]["indoor_temp_f"]
+
+            def _ode_predict(k_p: float | None, t_in: float, t_out: float, dt_h: float) -> float | None:
+                if k_p is None:
+                    return None
+                return t_out + (t_in - t_out) * math.exp(k_p * dt_h)
+
+            pred_current = _ode_predict(current_k_vent, t_in_0, t_out_avg_w, dt_h_w)
+            pred_converged = _ode_predict(converged_k, t_in_0, t_out_avg_w, dt_h_w)
+
+            def _fmt_ts(dt: datetime) -> str:
+                return dt.strftime("%Y-%m-%d %H:%M")
+
+            print(f"  Window: {_fmt_ts(ts0_dt)} -> {_fmt_ts(ts1_dt)} ({dt_h_w:.1f}h)")
+            print(f"  T_start={t_in_0:.1f}F  T_out_avg={t_out_avg_w:.1f}F  T_actual_end={t_actual:.1f}F")
+            print()
+
+            if pred_current is not None:
+                err_current = pred_current - t_actual
+                print(f"  Current k_vent_window ({current_k_vent:+.5f}):")
+                print(f"    Predicted end: {pred_current:.1f}F  Actual: {t_actual:.1f}F  Error: {err_current:+.1f}F")
+            else:
+                print("  Current k_vent_window: None (no prediction)")
+
+            if pred_converged is not None and converged_k is not None:
+                err_converged = pred_converged - t_actual
+                print(f"  Converged k_vent_window ({converged_k:+.5f}):")
+                print(
+                    f"    Predicted end: {pred_converged:.1f}F  Actual: {t_actual:.1f}F  Error: {err_converged:+.1f}F"
+                )
+            else:
+                print("  Converged k_vent_window: None (no prediction)")
+            print()
+        else:
+            print("  (No overnight ventilated window >= 4h found for ODE comparison)")
+    else:
+        print("No valid endpoint estimates — EWMA simulation skipped.")
+
+
+def _count_raw_ventilated_windows(
+    entries: list[dict],
+    days: int = 30,
+    min_window_minutes: int = 120,
+) -> int:
+    """Count ventilated windows (HVAC off, windows open) without natural filter."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    count = 0
+    current: list[dict] = []
+
+    def _flush_count() -> None:
+        nonlocal count
+        if len(current) >= 2:
+            ts0 = datetime.fromisoformat(current[0]["timestamp"])
+            ts1 = datetime.fromisoformat(current[-1]["timestamp"])
+            if (ts1 - ts0).total_seconds() / 60.0 >= min_window_minutes:
+                count += 1
+        current.clear()
+
+    for entry in entries:
+        ts_str = entry.get("ts", "")
+        if not ts_str:
+            continue
+        ts = datetime.fromisoformat(ts_str)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        if ts < cutoff:
+            continue
+
+        indoor = entry.get("indoor")
+        outdoor = entry.get("outdoor")
+        hvac = entry.get("hvac", "")
+        windows_open = entry.get("windows_open")
+
+        if indoor is None or outdoor is None:
+            _flush_count()
+            continue
+
+        hvac_idle = hvac in ("idle", "off", "", "fan") or ("heat" not in (hvac or "") and "cool" not in (hvac or ""))
+
+        if not hvac_idle or not windows_open:
+            _flush_count()
+            continue
+
+        elapsed = 0.0
+        if current:
+            ts0_curr = datetime.fromisoformat(current[0]["timestamp"])
+            if ts0_curr.tzinfo is None:
+                ts0_curr = ts0_curr.replace(tzinfo=UTC)
+            elapsed = (ts - ts0_curr).total_seconds() / 60.0
+
+        current.append(
+            {
+                "indoor_temp_f": float(indoor),
+                "outdoor_temp_f": float(outdoor),
+                "elapsed_minutes": elapsed,
+                "timestamp": ts_str,
+            }
+        )
+
+    _flush_count()
+    return count
+
+
 def build_windows_from_chart_log(
     entries: list[dict],
     days: int = 30,
@@ -1087,6 +1714,22 @@ def main() -> None:
         epilog=__doc__,
     )
     parser.add_argument(
+        "--passive-only",
+        action="store_true",
+        help="Analyse passive-only windows (HVAC off, fan off, windows closed) from chart_log. "
+        "Compares OLS vs endpoint estimator side-by-side, simulates EWMA convergence, and "
+        "compares ODE predictions. Requires SSH access (same as --chart-log). "
+        "Read-only — does not write to the learning DB.",
+    )
+    parser.add_argument(
+        "--vent-overnight",
+        action="store_true",
+        help="Analyse overnight ventilated windows (HVAC off, windows open, T_out < T_in throughout) "
+        "using the endpoint estimator. Applies the natural regime filter that auto-rejects morning "
+        "windows where T_out rises toward T_in. Shows filter hit/miss counts, k_vent_window EWMA "
+        "convergence, and ODE prediction comparison. Requires SSH access. Read-only.",
+    )
+    parser.add_argument(
         "--hvac",
         action="store_true",
         help="Detect and replay HVAC heat/cool cycles from chart_log (Issue #130 Phase C). "
@@ -1124,16 +1767,20 @@ def main() -> None:
     parser.add_argument("--write", action="store_true", help="Merge replay obs into HA learning DB via SSH")
     args = parser.parse_args()
 
-    if not args.dry_run and not args.write:
+    _read_only_mode = args.passive_only or args.vent_overnight
+    if not _read_only_mode and not args.dry_run and not args.write:
         parser.error("Specify --dry-run to preview or --write to commit. Start with --dry-run.")
 
     if (
         not args.chart_log
         and not args.hvac
+        and not args.passive_only
+        and not args.vent_overnight
         and not (args.climate_entity and args.outdoor_entity and args.window_entities)
     ):
         parser.error(
-            "Either --chart-log, --hvac, or all of --climate-entity, --outdoor-entity, --window-entities are required."
+            "Either --chart-log, --hvac, --passive-only, --vent-overnight, or all of "
+            "--climate-entity, --outdoor-entity, --window-entities are required."
         )
 
     config = load_config()
@@ -1147,6 +1794,38 @@ def main() -> None:
         temp_unit = ha_cfg.get("unit_system", {}).get("temperature", "°F")
         temp_unit = "C" if "C" in temp_unit else "F"
         print(f"HA temperature unit: {temp_unit}")
+
+    if args.passive_only:
+        # --- Passive-only analysis path (read-only, no --dry-run/--write needed) ---
+        print(f"\nFetching chart_log from HA via SSH ({args.days} days) for passive-only analysis...")
+        chart_entries = fetch_chart_log_ssh(config)
+        print(f"  chart_log: {len(chart_entries)} total entries")
+
+        print("\nFetching current learning DB from HA via SSH...")
+        try:
+            learning_db = fetch_learning_json_ssh(config)
+        except Exception as exc:
+            print(f"  WARNING: Could not fetch learning DB ({exc}) — k_passive will show as None")
+            learning_db = {}
+
+        run_passive_only_analysis(chart_entries, learning_db, days=args.days)
+        return
+
+    if args.vent_overnight:
+        # --- Overnight ventilated analysis path (read-only, no --dry-run/--write needed) ---
+        print(f"\nFetching chart_log from HA via SSH ({args.days} days) for overnight ventilated analysis...")
+        chart_entries = fetch_chart_log_ssh(config)
+        print(f"  chart_log: {len(chart_entries)} total entries")
+
+        print("\nFetching current learning DB from HA via SSH...")
+        try:
+            learning_db = fetch_learning_json_ssh(config)
+        except Exception as exc:
+            print(f"  WARNING: Could not fetch learning DB ({exc}) — k_vent_window will show as None")
+            learning_db = {}
+
+        run_vent_overnight_analysis(chart_entries, learning_db, days=args.days)
+        return
 
     if args.hvac:
         # --- HVAC heat/cool cycle replay path (Issue #130 Phase C) ---

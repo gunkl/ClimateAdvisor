@@ -122,11 +122,16 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     TEMP_SOURCE_WEATHER_SERVICE,
     THERMAL_BUCKET_INTERP_HALF_F,
+    THERMAL_CHART_LOG_PASSIVE_MIN_DT_F,
+    THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES,
+    THERMAL_CHART_LOG_VENT_MIN_MINUTES,
     THERMAL_COLD_BUCKET_LIMIT_F,
     THERMAL_FAN_MIN_SAMPLES,
     THERMAL_FAN_MIN_SIGNAL_F,
     THERMAL_FAN_SAMPLE_INTERVAL_S,
     THERMAL_HVAC_MIN_DECAY_F,
+    THERMAL_K_PASSIVE_MAX,
+    THERMAL_K_PASSIVE_MIN,
     THERMAL_MAX_ACTIVE_SAMPLES,
     THERMAL_MAX_OBS_SAMPLES,
     THERMAL_MAX_POST_HEAT_SAMPLES,
@@ -136,7 +141,6 @@ from .const import (
     THERMAL_MIN_R_SQUARED,
     THERMAL_PASSIVE_MIN_DELTA_F,
     THERMAL_PASSIVE_MIN_SAMPLES,
-    THERMAL_PASSIVE_MIN_SIGNAL_F,
     THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
     THERMAL_POST_HEAT_TIMEOUT_MINUTES,
     THERMAL_ROLLING_MAX_WINDOW_MINUTES,
@@ -281,6 +285,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
         self._last_state_contradiction_time: datetime | None = None  # dedup for state_contradiction_warning events
         self._last_violation_check: datetime | None = None
+        # Chart_log endpoint estimator backfill flags (Issue #137)
+        self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
+        self._vent_k_backfilled: bool = False  # True after chart_log overnight ventilated windows processed
 
         # Occupancy state machine
         self._occupancy_mode: str = OCCUPANCY_HOME
@@ -530,6 +537,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except (ValueError, TypeError):
                 self._occupancy_away_since = None
 
+        # Chart_log endpoint estimator backfill flags (Issue #137)
+        self._passive_k_backfilled = bool(state.get("passive_k_backfilled", False))
+        self._vent_k_backfilled = bool(state.get("vent_k_backfilled", False))
+
         # Prediction archive — restore only on same-day restores (already gated above)
         raw_archive = state.get("pred_archive")
         if isinstance(raw_archive, dict):
@@ -611,6 +622,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "occupancy_away_since": (self._occupancy_away_since.isoformat() if self._occupancy_away_since else None),
             "ai_stats": self.claude_client.get_persistent_stats() if self.claude_client else {},
             "pred_archive": {str(k): v for k, v in self._pred_archive.items()},
+            "passive_k_backfilled": self._passive_k_backfilled,
+            "vent_k_backfilled": self._vent_k_backfilled,
         }
 
     async def _async_save_state(self) -> None:
@@ -1096,6 +1109,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                                     _obs.get("obs_id", "?"),
                                     len(samples),
                                 )
+
+                # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
+                # after the new code is deployed. The chart_log is loaded in __init__ so entries
+                # are already available. Flags survive restart so backfill runs exactly once.
+                if self.config.get("learning_enabled", True):
+                    if not self._passive_k_backfilled:
+                        self._run_passive_chart_log_fit(backfill=True)
+                        self._passive_k_backfilled = True
+                        _LOGGER.info("chart_log_endpoint: passive k_passive backfill complete")
+                    if not self._vent_k_backfilled:
+                        self._run_ventilated_chart_log_fit(backfill=True)
+                        self._vent_k_backfilled = True
+                        _LOGGER.info("chart_log_endpoint: ventilated k_vent_window backfill complete")
 
             # Refresh the thermal model on every 30-min cycle, not just at the daily
             # briefing. get_thermal_model() is a pure computation (no I/O), so calling it
@@ -2602,28 +2628,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             samples_list = obs.get("samples", [])
 
             if obs_type == OBS_TYPE_PASSIVE_DECAY:
-                # Two-threshold accumulation (Issue #126): keep alive until signal sufficient or 4h max
-                _pd_temps = [s["indoor_temp_f"] for s in samples_list if "indoor_temp_f" in s]
-                _pd_signal = (max(_pd_temps) - min(_pd_temps)) >= THERMAL_ROLLING_MIN_DELTA_T_F if _pd_temps else False
-                if self._evaluate_rolling_window(obs_type, obs, _pd_signal, skip_delta_guard=False):
-                    continue
+                # Issue #137: consecutive-pair OLS replaced by chart_log endpoint estimator.
+                # passive_decay observation tracks passive conditions (no HVAC/fan/sensors);
+                # when it ends, trigger the chart_log fit rather than running OLS.
                 if _is_heating_cooling or _hvac_active:
-                    self._commit_observation_if_sufficient(obs_type, "hvac_started")
+                    self._run_passive_chart_log_fit(backfill=False)
+                    self._abandon_observation(obs_type, "hvac_started")
                 elif _sensor_open:
+                    self._run_passive_chart_log_fit(backfill=False)
                     self._abandon_observation(obs_type, "sensor_opened")
                 elif _fan_active:
+                    self._run_passive_chart_log_fit(backfill=False)
                     self._abandon_observation(obs_type, "fan_activated")
                 elif indoor is not None and outdoor is not None and abs(indoor - outdoor) < THERMAL_PASSIVE_MIN_DELTA_F:
                     recent_temps = [s["indoor_temp_f"] for s in samples_list[-5:]] if len(samples_list) >= 5 else []
                     if recent_temps and (max(recent_temps) - min(recent_temps)) < 0.1:
+                        self._run_passive_chart_log_fit(backfill=False)
                         self._abandon_observation(obs_type, "equilibrium_reached")
-                elif (
-                    len(samples_list) >= THERMAL_PASSIVE_MIN_SAMPLES
-                    and indoor is not None
-                    and outdoor is not None
-                    and abs(indoor - outdoor) >= THERMAL_PASSIVE_MIN_SIGNAL_F
-                ):
-                    self._commit_observation_if_sufficient(obs_type, "insufficient_signal")
+                else:
+                    _max_samples = THERMAL_ROLLING_MAX_WINDOW_MINUTES // (THERMAL_PASSIVE_SAMPLE_INTERVAL_S // 60)
+                    if len(samples_list) >= _max_samples:
+                        # Hard time cap reached — trigger fit and end observation
+                        self._run_passive_chart_log_fit(backfill=False)
+                        self._abandon_observation(obs_type, "max_window_reached")
 
             elif obs_type == OBS_TYPE_FAN_ONLY_DECAY:
                 # Two-threshold accumulation: signal = indoor sample range (max-min).
@@ -2671,8 +2698,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if self._evaluate_rolling_window(obs_type, obs, _vent_signal_sufficient, skip_delta_guard=True):
                     continue
                 if not _sensor_open:
+                    # Sensors closed: run OLS commit (morning windows) AND chart_log endpoint
+                    # fit (overnight windows). Natural filter in the endpoint fit auto-rejects
+                    # morning windows where T_out crossed T_in.
                     self._commit_observation_if_sufficient(obs_type, "sensors_closed")
+                    self._run_ventilated_chart_log_fit(backfill=False)
                 elif _is_heating_cooling or _hvac_active:
+                    self._run_ventilated_chart_log_fit(backfill=False)
                     self._abandon_observation(obs_type, "hvac_started")
                 elif (
                     len(samples_list) >= THERMAL_VENT_MIN_SAMPLES
@@ -2714,6 +2746,307 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             ) / elapsed_h
                             if mean_rate >= THERMAL_SOLAR_MIN_RATE_F_PER_HR:
                                 self._commit_observation_if_sufficient(obs_type, "insufficient_rate")
+
+    def _run_passive_chart_log_fit(self, *, backfill: bool = False) -> None:
+        """Estimate k_passive from chart_log passive-only windows using endpoint estimator.
+
+        For each window where HVAC=off, fan=off, windows=closed:
+          k = ln((T_end - T_out_avg) / (T_start - T_out_avg)) / dt_hours
+
+        If backfill=True, processes up to 30 days of chart_log history (called once on
+        startup when _passive_k_backfilled is False). If backfill=False, processes only
+        the most recent complete passive window (called when a passive window ends).
+        """
+        import math as _math
+
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None:
+            return
+        entries = list(getattr(chart_log, "_entries", []))
+        if not entries:
+            return
+
+        _K_MIN = THERMAL_K_PASSIVE_MIN
+        _K_MAX = THERMAL_K_PASSIVE_MAX
+        days = 30 if backfill else 2
+        cutoff = dt_util.now() - timedelta(days=days)
+
+        windows: list[list[dict]] = []
+        current: list[dict] = []
+
+        def _flush_passive() -> None:
+            if len(current) < 2:
+                current.clear()
+                return
+            try:
+                ts0 = datetime.fromisoformat(current[0]["ts"])
+                ts1 = datetime.fromisoformat(current[-1]["ts"])
+                if ts0.tzinfo is None:
+                    ts0 = ts0.replace(tzinfo=UTC)
+                if ts1.tzinfo is None:
+                    ts1 = ts1.replace(tzinfo=UTC)
+                elapsed_min = (ts1 - ts0).total_seconds() / 60.0
+                if elapsed_min >= THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES:
+                    windows.append(list(current))
+            except (ValueError, KeyError):
+                pass
+            current.clear()
+
+        for entry in entries:
+            ts_str = entry.get("ts", "")
+            if not ts_str:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+
+            indoor = entry.get("indoor")
+            outdoor = entry.get("outdoor")
+            hvac = entry.get("hvac", "")
+            fan = entry.get("fan")
+            windows_open = entry.get("windows_open")
+
+            if indoor is None or outdoor is None:
+                _flush_passive()
+                continue
+
+            hvac_idle = hvac in ("idle", "off", "", "fan") or (
+                "heat" not in (hvac or "") and "cool" not in (hvac or "")
+            )
+            fan_off = fan is False or fan is None
+            win_closed = not windows_open
+
+            if not hvac_idle or not fan_off or not win_closed:
+                _flush_passive()
+                continue
+
+            current.append({"ts": ts_str, "indoor": float(indoor), "outdoor": float(outdoor)})
+
+        _flush_passive()
+
+        if not windows:
+            return
+
+        # Process only the last window on live trigger; all windows on backfill
+        target_windows = windows if backfill else windows[-1:]
+        committed = 0
+        today_str = dt_util.now().strftime("%Y-%m-%d")
+
+        for window in target_windows:
+            t_start = window[0]["indoor"]
+            t_end = window[-1]["indoor"]
+            t_out_avg = sum(s["outdoor"] for s in window) / len(window)
+
+            try:
+                ts0 = datetime.fromisoformat(window[0]["ts"])
+                ts1 = datetime.fromisoformat(window[-1]["ts"])
+                if ts0.tzinfo is None:
+                    ts0 = ts0.replace(tzinfo=UTC)
+                if ts1.tzinfo is None:
+                    ts1 = ts1.replace(tzinfo=UTC)
+                dt_hours = (ts1 - ts0).total_seconds() / 3600.0
+            except (ValueError, KeyError):
+                continue
+
+            if abs(t_end - t_start) < THERMAL_CHART_LOG_PASSIVE_MIN_DT_F:
+                continue
+            if dt_hours < THERMAL_CHART_LOG_PASSIVE_MIN_MINUTES / 60.0:
+                continue
+
+            denom = t_start - t_out_avg
+            if abs(denom) < 0.01:
+                continue
+            ratio = (t_end - t_out_avg) / denom
+            if ratio <= 0 or ratio >= 1.0:
+                continue
+
+            k = _math.log(ratio) / dt_hours
+            if not (_K_MIN <= k <= _K_MAX):
+                continue
+
+            grade = "medium" if (dt_hours >= 6.0 and abs(t_end - t_start) >= 2.0) else "low"
+            obs = {
+                "hvac_mode": "passive",
+                "k_passive": k,
+                "confidence_grade": grade,
+                "date": today_str,
+                "source": "chart_log_endpoint",
+                "elapsed_hours": round(dt_hours, 2),
+                "delta_t_f": round(t_end - t_start, 2),
+                "ratio": round(ratio, 4),
+            }
+            self.learning.record_thermal_observation(obs)
+            committed += 1
+            _LOGGER.debug(
+                "chart_log_endpoint passive: k=%.4f conf=%s dt=%.1fh dT=%.1fF",
+                k,
+                grade,
+                dt_hours,
+                t_end - t_start,
+            )
+
+        if committed > 0:
+            _LOGGER.info(
+                "chart_log_endpoint passive: committed %d observations%s",
+                committed,
+                " (backfill)" if backfill else "",
+            )
+
+    def _run_ventilated_chart_log_fit(self, *, backfill: bool = False) -> None:
+        """Estimate k_vent_window from overnight ventilated chart_log windows.
+
+        Natural regime filter: only windows where T_out < T_in throughout are used
+        (overnight conditions). Morning ventilated windows where T_out rises toward T_in
+        are auto-rejected by the ratio check without explicit time classification.
+
+        Formula: k = ln((T_end - T_out_avg) / (T_start - T_out_avg)) / dt_hours
+
+        If backfill=True, processes up to 30 days of history (once on startup).
+        If backfill=False, processes only the most recent ventilated window.
+        """
+        import math as _math
+
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None:
+            return
+        entries = list(getattr(chart_log, "_entries", []))
+        if not entries:
+            return
+
+        _K_MIN = THERMAL_K_PASSIVE_MIN
+        _K_MAX = THERMAL_K_PASSIVE_MAX
+        days = 30 if backfill else 2
+        cutoff = dt_util.now() - timedelta(days=days)
+
+        windows: list[list[dict]] = []
+        current: list[dict] = []
+
+        def _flush_vent() -> None:
+            if len(current) < 2:
+                current.clear()
+                return
+            try:
+                ts0 = datetime.fromisoformat(current[0]["ts"])
+                ts1 = datetime.fromisoformat(current[-1]["ts"])
+                if ts0.tzinfo is None:
+                    ts0 = ts0.replace(tzinfo=UTC)
+                if ts1.tzinfo is None:
+                    ts1 = ts1.replace(tzinfo=UTC)
+                elapsed_min = (ts1 - ts0).total_seconds() / 60.0
+                if elapsed_min >= THERMAL_CHART_LOG_VENT_MIN_MINUTES and all(
+                    s["outdoor"] < s["indoor"] for s in current
+                ):
+                    windows.append(list(current))
+            except (ValueError, KeyError):
+                pass
+            current.clear()
+
+        for entry in entries:
+            ts_str = entry.get("ts", "")
+            if not ts_str:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+
+            indoor = entry.get("indoor")
+            outdoor = entry.get("outdoor")
+            hvac = entry.get("hvac", "")
+            windows_open = entry.get("windows_open")
+
+            if indoor is None or outdoor is None:
+                _flush_vent()
+                continue
+
+            hvac_idle = hvac in ("idle", "off", "", "fan") or (
+                "heat" not in (hvac or "") and "cool" not in (hvac or "")
+            )
+            win_open = bool(windows_open)
+
+            if not hvac_idle or not win_open:
+                _flush_vent()
+                continue
+
+            current.append({"ts": ts_str, "indoor": float(indoor), "outdoor": float(outdoor)})
+
+        _flush_vent()
+
+        if not windows:
+            return
+
+        target_windows = windows if backfill else windows[-1:]
+        committed = 0
+        today_str = dt_util.now().strftime("%Y-%m-%d")
+
+        for window in target_windows:
+            t_start = window[0]["indoor"]
+            t_end = window[-1]["indoor"]
+            t_out_avg = sum(s["outdoor"] for s in window) / len(window)
+
+            try:
+                ts0 = datetime.fromisoformat(window[0]["ts"])
+                ts1 = datetime.fromisoformat(window[-1]["ts"])
+                if ts0.tzinfo is None:
+                    ts0 = ts0.replace(tzinfo=UTC)
+                if ts1.tzinfo is None:
+                    ts1 = ts1.replace(tzinfo=UTC)
+                dt_hours = (ts1 - ts0).total_seconds() / 3600.0
+            except (ValueError, KeyError):
+                continue
+
+            if abs(t_end - t_start) < THERMAL_CHART_LOG_PASSIVE_MIN_DT_F:
+                continue
+            if dt_hours < THERMAL_CHART_LOG_VENT_MIN_MINUTES / 60.0:
+                continue
+
+            denom = t_start - t_out_avg
+            if abs(denom) < 0.01:
+                continue
+            ratio = (t_end - t_out_avg) / denom
+            if ratio <= 0 or ratio >= 1.0:
+                continue
+
+            k = _math.log(ratio) / dt_hours
+            if not (_K_MIN <= k <= _K_MAX):
+                continue
+
+            grade = "medium" if (dt_hours >= 6.0 and abs(t_end - t_start) >= 2.0) else "low"
+            obs = {
+                "hvac_mode": "ventilated",
+                "k_passive": k,
+                "confidence_grade": grade,
+                "date": today_str,
+                "source": "chart_log_endpoint",
+                "elapsed_hours": round(dt_hours, 2),
+                "delta_t_f": round(t_end - t_start, 2),
+                "ratio": round(ratio, 4),
+            }
+            self.learning.record_thermal_observation(obs)
+            committed += 1
+            _LOGGER.debug(
+                "chart_log_endpoint vent: k=%.4f conf=%s dt=%.1fh dT=%.1fF",
+                k,
+                grade,
+                dt_hours,
+                t_end - t_start,
+            )
+
+        if committed > 0:
+            _LOGGER.info(
+                "chart_log_endpoint vent: committed %d observations%s",
+                committed,
+                " (backfill)" if backfill else "",
+            )
 
     def _start_decay_observation(self, obs_type: str) -> None:
         """Create a new monitoring observation for a passive/fan/vent/solar type."""

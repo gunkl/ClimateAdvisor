@@ -50,7 +50,6 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S,
     THERMAL_PASSIVE_CONF_HIGH,
     THERMAL_PASSIVE_MIN_SAMPLES,
-    THERMAL_PASSIVE_MIN_SIGNAL_F,
     THERMAL_PASSIVE_SAMPLE_INTERVAL_S,
     THERMAL_ROLLING_MAX_WINDOW_MINUTES,
     THERMAL_ROLLING_MIN_DELTA_T_F,
@@ -279,8 +278,14 @@ class TestPassiveDecayObservation:
         # 5 samples < THERMAL_PASSIVE_MIN_SAMPLES (30) → abandoned
         assert OBS_TYPE_PASSIVE_DECAY not in coord._pending_observations
 
-    def test_commits_when_sufficient_samples_and_signal(self):
-        """passive_decay with THERMAL_PASSIVE_MIN_SAMPLES samples and delta > MIN_SIGNAL_F commits."""
+    def test_stays_alive_with_sufficient_samples_while_hvac_idle(self):
+        """passive_decay stays alive when HVAC is still idle, even with sufficient samples and signal.
+
+        The old OLS path committed on sample count alone. The chart_log endpoint path is
+        event-driven: the observation runs until HVAC starts, a sensor opens, a fan activates,
+        or the hard cap is reached — then _run_passive_chart_log_fit() fires. It never commits
+        mid-run just because MIN_SAMPLES is accumulated.
+        """
         coord = _make_obs_coord(hvac_action="idle", indoor_temp=74.0, outdoor_temp=55.0)
         # Build MIN_SAMPLES samples (first=75.0, last=74.0 → delta=1.0 > 0.5)
         samples = [
@@ -305,27 +310,20 @@ class TestPassiveDecayObservation:
             "schema_version": 1,
         }
         dt_mock = _make_dt_mock()
-        committed_obs_types = []
 
-        def _fake_async_create_task(coro):
-            # Detect _commit_observation coroutines by name, then close safely
-            coro_name = getattr(coro, "__name__", getattr(coro, "__qualname__", ""))
-            if "_commit_observation" in coro_name:
-                committed_obs_types.append(OBS_TYPE_PASSIVE_DECAY)
+        def _consume_coro(coro):
             coro.close()
 
-        coord.hass.async_create_task = _fake_async_create_task
+        coord.hass.async_create_task = _consume_coro
 
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        # The observation should either be committed (popped) or queued for commit
-        # Either the obs was popped already or a task was queued
-        was_popped = OBS_TYPE_PASSIVE_DECAY not in coord._pending_observations
-        was_queued = len(committed_obs_types) > 0
-        assert was_popped or was_queued, (
-            "Expected passive_decay to be committed or queued for commit when "
-            f"samples={THERMAL_PASSIVE_MIN_SAMPLES}, delta=1.0 > {THERMAL_PASSIVE_MIN_SIGNAL_F}"
+        # With HVAC still idle and no external events, the observation must remain alive.
+        # chart_log endpoint only fires on external events (HVAC start, sensor open, fan, hard cap).
+        assert OBS_TYPE_PASSIVE_DECAY in coord._pending_observations, (
+            "passive_decay should stay alive when HVAC is idle — chart_log endpoint is "
+            "event-driven, not sample-count-driven"
         )
 
 
@@ -1495,33 +1493,30 @@ class TestRollingWindowCommit:
             "schema_version": 1,
         }
 
-    def test_passive_decay_commits_after_30min(self):
-        """passive_decay started 31 min ago triggers rolling-window commit."""
+    def test_passive_decay_stays_alive_after_30min_while_hvac_idle(self):
+        """passive_decay started 31 min ago stays alive when HVAC is still idle.
+
+        The old Path A rolling-window OLS committed on elapsed time. The chart_log endpoint
+        path is event-driven: the observation runs until HVAC starts, a sensor opens, a fan
+        activates, or the hard cap is reached. Elapsed time alone does not trigger a commit.
+        """
         coord = _make_obs_coord(hvac_action="idle", indoor_temp=74.0, outdoor_temp=55.0)
         obs = self._make_31min_obs(OBS_TYPE_PASSIVE_DECAY, n_samples=6)
         coord._pending_observations[OBS_TYPE_PASSIVE_DECAY] = obs
 
-        committed_obs_types: list[str] = []
-
-        def _fake_async_create_task(coro):
-            coro_name = getattr(coro, "__name__", getattr(coro, "__qualname__", ""))
-            if "_commit_observation" in coro_name:
-                committed_obs_types.append(OBS_TYPE_PASSIVE_DECAY)
+        def _consume_coro(coro):
             coro.close()
 
-        coord.hass.async_create_task = _fake_async_create_task
+        coord.hass.async_create_task = _consume_coro
 
         dt_mock = _make_dt_mock(_FAKE_NOW)
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        obs_present = coord._pending_observations.get(OBS_TYPE_PASSIVE_DECAY)
-        was_committing = obs_present is not None and obs_present.get("status") == "committing"
-        was_queued = len(committed_obs_types) > 0
-
-        assert was_committing or was_queued, (
-            "passive_decay started 31 min ago should trigger rolling-window commit "
-            f"(status={obs_present.get('status') if obs_present else 'popped'}, queued={was_queued})"
+        obs_after = coord._pending_observations.get(OBS_TYPE_PASSIVE_DECAY)
+        assert obs_after is not None and obs_after.get("status") == "monitoring", (
+            "passive_decay should remain alive (monitoring) when HVAC is still idle — "
+            "chart_log endpoint only fires on external events, not elapsed time"
         )
 
     def test_rolling_window_delta_guard_rejects_flat(self):
@@ -1563,25 +1558,30 @@ class TestRollingWindowCommit:
                 f"(total ΔT=0.0 < {THERMAL_ROLLING_MIN_DELTA_T_F})"
             )
 
-    def test_fresh_obs_starts_after_rolling_commit(self):
-        """After rolling-window commit pops the obs, next poll can start a fresh one."""
+    def test_passive_decay_remains_monitoring_without_external_event(self):
+        """passive_decay stays in monitoring status when no external event interrupts.
+
+        There is no rolling-window OLS path any more. The chart_log endpoint fires on external
+        events only (HVAC starts, sensor opens, fan activates, hard cap). A 31-minute-old
+        observation with HVAC still idle must remain in monitoring status so the window keeps
+        accumulating data until a real event ends it.
+        """
         coord = _make_obs_coord(hvac_action="idle", indoor_temp=74.0, outdoor_temp=55.0)
         obs = self._make_31min_obs(OBS_TYPE_PASSIVE_DECAY, n_samples=6)
         coord._pending_observations[OBS_TYPE_PASSIVE_DECAY] = obs
 
-        def _fake_async_create_task(coro):
+        def _consume_coro(coro):
             coro.close()
 
-        coord.hass.async_create_task = _fake_async_create_task
+        coord.hass.async_create_task = _consume_coro
 
         dt_mock = _make_dt_mock(_FAKE_NOW)
         with patch("custom_components.climate_advisor.coordinator.dt_util", dt_mock):
             coord._sample_all_observations()
 
-        # After commit, the obs is removed (popped) or marked "committing" — no longer "monitoring"
         obs_after = coord._pending_observations.get(OBS_TYPE_PASSIVE_DECAY)
-        assert obs_after is None or obs_after.get("status") != "monitoring", (
-            "After rolling-window commit, passive_decay should no longer be in monitoring status"
+        assert obs_after is not None and obs_after.get("status") == "monitoring", (
+            "passive_decay should remain in 'monitoring' status when HVAC is still idle"
         )
 
     def test_rolling_window_constant_is_30min(self):

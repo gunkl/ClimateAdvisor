@@ -972,11 +972,25 @@ class LearningEngine:
         phase_offset_val = cache.get("solar_phase_offset_h")
         conf_k_passive = _grade_passive_confidence(cache)
 
+        _PRE_TRACKING = "pre-v0.3.46"
+
+        def _since(date_key: str, value) -> str | None:
+            """Return the first_active date, or a retroactive label for pre-existing values."""
+            d = cache.get(date_key)
+            if d is not None:
+                return d
+            if value is not None:
+                # Value exists but date was never recorded — predates first_active tracking.
+                # Retroactively write the date so future calls have it persisted.
+                cache[date_key] = _PRE_TRACKING
+                return _PRE_TRACKING
+            return None
+
         status: dict = {
             "k_passive": {
-                "active": cache.get("first_active_date_passive") is not None,
+                "active": k_passive_val is not None,
                 "value": k_passive_val,
-                "since": cache.get("first_active_date_passive"),
+                "since": _since("first_active_date_passive", k_passive_val),
                 "confidence": conf_k_passive,
                 "obs_count": (
                     cache.get("observation_count_passive", 0)
@@ -986,26 +1000,26 @@ class LearningEngine:
                 ),
             },
             "k_solar": {
-                "active": cache.get("first_active_date_solar") is not None,
+                "active": k_solar_val is not None,
                 "value": k_solar_val,
-                "since": cache.get("first_active_date_solar"),
+                "since": _since("first_active_date_solar", k_solar_val),
                 "confidence": "none",
                 "obs_count": cache.get("observation_count_solar", 0),
             },
             "solar_phase_offset_h": {
-                "active": cache.get("first_active_date_phase_offset") is not None,
+                "active": phase_offset_val is not None,
                 "value": phase_offset_val,
-                "since": cache.get("first_active_date_phase_offset"),
+                "since": _since("first_active_date_phase_offset", phase_offset_val),
             },
             "k_vent_window": {
-                "active": cache.get("first_active_date_vent_window") is not None,
+                "active": k_vent_window_val is not None,
                 "value": k_vent_window_val,
-                "since": cache.get("first_active_date_vent_window"),
+                "since": _since("first_active_date_vent_window", k_vent_window_val),
             },
             "k_active_hvac": {
-                "active": cache.get("first_active_date_hvac") is not None,
+                "active": k_active_heat is not None or k_active_cool is not None,
                 "value": {"heat": k_active_heat, "cool": k_active_cool},
-                "since": cache.get("first_active_date_hvac"),
+                "since": _since("first_active_date_hvac", k_active_heat or k_active_cool),
             },
         }
 

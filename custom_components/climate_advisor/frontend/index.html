@@ -2001,8 +2001,8 @@
         if (!info || !info.active) {
           return `<tr><td>k_active_hvac</td><td style="color:var(--text-secondary)">(not yet active)</td></tr>`;
         }
-        const heat = info.k_active_heat != null ? Number(info.k_active_heat).toFixed(4) : '—';
-        const cool = info.k_active_cool != null ? Number(info.k_active_cool).toFixed(4) : '—';
+        const heat = info.value?.heat != null ? Number(info.value.heat).toFixed(4) : '—';
+        const cool = info.value?.cool != null ? Number(info.value.cool).toFixed(4) : '—';
         const since = info.since ? 'since ' + escapeHtml(info.since) : '';
         return `<tr><td>k_active_hvac</td><td>heat=${escapeHtml(heat)} cool=${escapeHtml(cool)} ${unitSym}/hr${since ? '<span class="kv-desc">' + since + '</span>' : ''}</td></tr>`;
       }

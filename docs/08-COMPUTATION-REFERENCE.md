@@ -28,6 +28,7 @@ The automation logic table and all threshold constants in this document are expr
 | What is the dynamic target band and how does occupancy mode change it? | `_compute_target_band_schedule()` returns `[{ts, lower, upper}]` per forecast hour; away = setback today only, vacation = deep setback all days, home/guest = comfort with sleep/wake ramps. | [§5d. Dynamic Target Band](08-COMPUTATION-REFERENCE.md#5d-dynamic-target-band--_compute_target_band_schedule) |
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
 | When does the ODE ceiling guard fire on a warm day and what activates AC? | The guard scans the predicted indoor curve on every 30-min cycle. When outdoor > indoor AND a breach above `comfort_cool` is predicted within the computed lead time (or 120-min fallback), the guard sets HVAC to cool at `comfort_cool`. Guard skips when no calibrated model, occupancy is away/vacation, or nat-vent can keep indoor below the ceiling. | [§6c. Warm-Day ODE Ceiling Guard](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136) |
+| How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
 
 ## 1. Day Classification
 
@@ -625,6 +626,79 @@ In practice the two guards do not conflict: if indoor is below `comfort_heat` (f
 
 ---
 
+### 6d. MILD Day Dynamic Window Close Time (Fix C, Issue #147)
+
+Prior to Issue #147, MILD day window scheduling used hardcoded `time(10, 0)` (open) and `time(17, 0)` (close) in `classifier.py`. These values were magic literals that could not be overridden by the thermal model, even on days when the ODE could predict the actual indoor–outdoor crossover time.
+
+#### Before Fix C
+
+```python
+# classifier.py (pre-v0.3.46) — lines 118–119
+self.window_open_time = time(10, 0)   # always 10am
+self.window_close_time = time(17, 0)  # always 5pm
+```
+
+These literals were correct as a starting guess but systematically incorrect for any home whose indoor–outdoor crossover does not fall at 5pm.
+
+#### After Fix C
+
+**Constants moved to `const.py`:**
+
+```python
+MILD_WINDOW_OPEN_HOUR = 10    # MILD-day window open fallback (was hardcoded in classifier.py)
+MILD_WINDOW_CLOSE_HOUR = 17   # MILD-day window close fallback
+```
+
+**`classifier.py` now uses the constants:**
+
+```python
+self.window_open_time = time(MILD_WINDOW_OPEN_HOUR, 0)
+self.window_close_time = time(MILD_WINDOW_CLOSE_HOUR, 0)
+```
+
+**`briefing.py` applies ODE timing when available:**
+
+The `_derive_warm_day_events()` function (which computes `nat_vent_cutoff` and `ceiling_breach_time` from the predicted indoor and outdoor curves) is extracted into a shared helper `_derive_natural_vent_events(predicted_indoor_future, predicted_outdoor_future, comfort_cool, k_active_cool)`. This helper is called from the MILD day briefing path as well as the warm day path.
+
+When the ODE is available (thermal model calibrated, physics gate eligible):
+- MILD day window close time = `nat_vent_cutoff` (the hour when outdoor temp ≥ indoor − 1°F)
+- Fallback when ODE unavailable = `time(MILD_WINDOW_CLOSE_HOUR, 0)` (5pm)
+
+#### Impact Cascade from Solar Phase Offset Correction
+
+The following cascade applies to both warm and MILD days when `solar_phase_offset_h` is correctly learned:
+
+1. `solar_phase_offset_h` corrects `_solar_factor` → ODE models solar input peaking at 3–5pm instead of 1pm
+2. ODE predicts indoor rise more slowly through the morning (less solar input before 3pm)
+3. `nat_vent_cutoff` (the hour when outdoor ≥ indoor − 1°F) shifts **~1–2 hours later** → windows stay open longer, more free cooling is captured
+4. `ceiling_breach_time` (the hour when indoor > `comfort_cool`) also shifts later → AC starts later
+5. `precool_start_time` shifts with it → no wasted early AC run while natural ventilation still has capacity
+6. **Net effect:** extended natural ventilation window, reduced AC runtime, improved energy efficiency
+
+#### Decision Table
+
+| Condition | MILD day open time | MILD day close time | Source |
+|---|---|---|---|
+| ODE unavailable (fresh install, no physics gate) | `time(MILD_WINDOW_OPEN_HOUR, 0)` | `time(MILD_WINDOW_CLOSE_HOUR, 0)` | `const.py` constants |
+| ODE available, `nat_vent_cutoff` computable | `time(MILD_WINDOW_OPEN_HOUR, 0)` | `nat_vent_cutoff` (dynamic, ~12–17 depending on solar offset) | ODE curve |
+| ODE available, `nat_vent_cutoff` returns None (outdoor always > indoor) | `time(MILD_WINDOW_OPEN_HOUR, 0)` | `time(MILD_WINDOW_CLOSE_HOUR, 0)` | Fallback |
+
+The open time is always `MILD_WINDOW_OPEN_HOUR` (10am). Only the close time is dynamic.
+
+#### Constants
+
+| Constant | Value | File | Notes |
+|---|---|---|---|
+| `MILD_WINDOW_OPEN_HOUR` | `10` | `const.py` | Was hardcoded literal in `classifier.py:118` |
+| `MILD_WINDOW_CLOSE_HOUR` | `17` | `const.py` | Was hardcoded literal in `classifier.py:119` |
+
+**Test coverage:** `tests/test_solar_phase.py` — `TestMildDayDynamicScheduling`:
+- `test_mild_day_uses_const_fallback_when_no_ode`
+- `test_mild_day_close_time_uses_ode_crossover`
+- `test_mild_day_constants_in_const_py`
+
+---
+
 ## 7. Window Recommendations
 
 Window advice is set by the classifier at classification time, based on `day_type` and forecast lows.
@@ -634,11 +708,13 @@ Window advice is set by the classifier at classification time, based on `day_typ
 | `hot` | Not a traditional recommendation — window *opportunities* only | 6:00 AM | 9:00 AM | Morning opportunity: `today_low <= 80` |
 | `hot` | Evening opportunity | 5:00 PM | Midnight (00:00) | Evening opportunity: `tomorrow_low <= 80` |
 | `warm` | Yes (if condition met) | 6:00 AM | 10:00 AM | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
-| `mild` | Always yes | 10:00 AM | 5:00 PM | No condition — always recommended |
+| `mild` | Always yes | 10:00 AM (`MILD_WINDOW_OPEN_HOUR`) | 5:00 PM (`MILD_WINDOW_CLOSE_HOUR`) or `nat_vent_cutoff` when ODE available | No condition — always recommended |
 | `cool` | No | — | — | — |
 | `cold` | No | — | — | — |
 
 **Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`.
+
+**MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (10:00 AM). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
 
 ---
 

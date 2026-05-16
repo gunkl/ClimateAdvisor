@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.45"
+VERSION = "0.3.46"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.44": [
@@ -67,6 +67,22 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    147: {
+        "version_fixed": "0.3.46",
+        "title": "Learned solar phase offset + engine visibility",
+        "scope_covered": [
+            "solar_phase_offset_h EWMA from chart_log daytime passive windows",
+            "per-parameter first_active_date_* tracking in learning cache",
+            "get_engine_status() method on LearningEngine",
+            "REST endpoint /api/climate_advisor/engines",
+            "dashboard Debug tab Prediction Engines card",
+            "AI investigator ACTIVE_PREDICTION_ENGINES context block",
+            "tools/engine_status.py CLI tool",
+            "MILD day window scheduling uses MILD_WINDOW_OPEN_HOUR/MILD_WINDOW_CLOSE_HOUR constants",
+            "_solar_factor phase_offset_h parameter shifts ODE peak",
+        ],
+        "scope_not_covered": [],
+    },
     146: {
         "version_fixed": "0.3.45",
         "title": "Dual-estimator framework: block-averaged OLS + endpoint estimator with per-night dynamic selection",
@@ -279,6 +295,10 @@ ECONOMIZER_EVENING_END_HOUR = 24  # midnight (end of day)
 WARM_WINDOW_OPEN_HOUR = 6  # 6:00 AM
 WARM_WINDOW_CLOSE_HOUR = 10  # 10:00 AM
 
+# MILD-day window timing — open mid-morning, close late afternoon (Issue #147)
+MILD_WINDOW_OPEN_HOUR = 10  # 10:00 AM fallback (was hardcoded in classifier.py)
+MILD_WINDOW_CLOSE_HOUR = 17  # 5:00 PM fallback
+
 # Occupancy toggle configuration
 CONF_HOME_TOGGLE = "home_toggle_entity"
 CONF_HOME_TOGGLE_INVERT = "home_toggle_invert"
@@ -410,6 +430,7 @@ API_CANCEL_FAN_OVERRIDE = f"{API_BASE}/cancel_fan_override"
 API_RESUME_FROM_PAUSE = f"{API_BASE}/resume_from_pause"
 API_TOGGLE_AUTOMATION = f"{API_BASE}/toggle_automation"
 API_EVENT_LOG = f"{API_BASE}/event_log"
+API_ENGINES = f"{API_BASE}/engines"
 
 # Panel
 PANEL_URL = "/climate_advisor/frontend"
@@ -957,6 +978,8 @@ REJECT_OLS_WRONG_SIGN = "ols_wrong_sign"
 REJECT_OLS_BOUNDS = "ols_bounds"
 REJECT_ABANDONED = "abandoned"
 REJECT_TOO_FEW_BLOCKS = "too_few_blocks"
+REJECT_WINDOW_TOO_SHORT = "window_too_short"
+REJECT_NO_INTERIOR_PEAK = "no_interior_peak"
 
 # Reduced plateau guard (was THERMAL_MIN_DECAY_F = 1.0)
 THERMAL_HVAC_MIN_DECAY_F = 0.3
@@ -1006,6 +1029,15 @@ THERMAL_SOLAR_MIN_SAMPLES = 20
 THERMAL_SOLAR_MIN_RATE_F_PER_HR = 0.5
 THERMAL_SOLAR_DAYTIME_START_H = 8
 THERMAL_SOLAR_DAYTIME_END_H = 18
+
+# Solar phase offset (learning — Issue #147)
+THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2  # Prior before learning (peak at 3pm)
+THERMAL_SOLAR_PHASE_OFFSET_MIN = 0  # Clamp lower bound
+THERMAL_SOLAR_PHASE_OFFSET_MAX = 4  # Clamp upper bound (5pm max: offset=4 → peak at local hour 17)
+THERMAL_SOLAR_PHASE_MIN_ENTRIES = 3  # Min chart_log entries in window
+THERMAL_SOLAR_PHASE_MIN_WINDOW_H = 4  # Min window span (hours)
+THERMAL_SOLAR_PHASE_MIN_DT_F = 1.5  # Min indoor ΔT for visible peak
+THERMAL_SOLAR_PHASE_ALPHA = 0.10  # EWMA alpha (slow — stable building physics)
 
 # Shared cap across all observation types
 THERMAL_MAX_OBS_SAMPLES = 200

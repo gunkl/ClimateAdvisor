@@ -21,6 +21,7 @@ from .const import (
     API_CANCEL_OVERRIDE,
     API_CHART_DATA,
     API_CONFIG,
+    API_ENGINES,
     API_EVENT_LOG,
     API_FORCE_RECLASSIFY,
     API_INVESTIGATION_REPORTS,
@@ -726,6 +727,27 @@ class ClimateAdvisorEventLogView(HomeAssistantView):
         return self.json({"events": events, "total": len(events), "hours": hours})
 
 
+class ClimateAdvisorEnginesView(HomeAssistantView):
+    """Return prediction engine status from the learning engine."""
+
+    url = API_ENGINES
+    name = "api:climate_advisor:engines"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        if not hasattr(coordinator, "learning") or not hasattr(coordinator.learning, "get_engine_status"):
+            return self.json({"error": "Engine status not available"}, status_code=503)
+
+        status = coordinator.learning.get_engine_status()
+        status["unit"] = coordinator.config.get("temp_unit", "fahrenheit")
+        return self.json(status)
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -747,4 +769,5 @@ API_VIEWS = [
     ClimateAdvisorInvestigateView,
     ClimateAdvisorInvestigationReportsView,
     ClimateAdvisorEventLogView,
+    ClimateAdvisorEnginesView,
 ]

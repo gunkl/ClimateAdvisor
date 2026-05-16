@@ -532,6 +532,59 @@ def _derive_warm_day_events(
     return result
 
 
+def _derive_natural_vent_events(
+    predicted_indoor_future: list,
+    predicted_outdoor_future: list,
+    comfort_cool: float,
+    k_active_cool,
+) -> dict:
+    """Derive natural-ventilation timing events from ODE predicted curves (hour-indexed lists).
+
+    Simpler companion to _derive_warm_day_events for use with list[float] hour-indexed
+    arrays (as produced by _build_predicted_indoor_future / MILD day ODE calls).
+
+    Args:
+        predicted_indoor_future: list[float] where index = local hour (0–23).
+        predicted_outdoor_future: list[float] where index = local hour (0–23).
+        comfort_cool: Upper comfort bound (°F); used for ceiling breach detection.
+        k_active_cool: Cooling rate (°F/hr) for precool lead time, or None.
+
+    Returns a dict with keys:
+        nat_vent_cutoff: int | None — first hour h where predicted_outdoor_future[h] >= predicted_indoor_future[h] - 1.0
+        ceiling_breach_hour: int | None — first hour where indoor > comfort_cool
+        any_nat_vent_window: bool — True if outdoor < indoor at any hour
+    """
+    result: dict = {
+        "nat_vent_cutoff": None,
+        "ceiling_breach_hour": None,
+        "any_nat_vent_window": False,
+    }
+
+    if not predicted_indoor_future or not predicted_outdoor_future:
+        return result
+
+    n = min(len(predicted_indoor_future), len(predicted_outdoor_future))
+    if n == 0:
+        return result
+
+    # Any nat-vent window (outdoor < indoor at any hour)
+    result["any_nat_vent_window"] = any(predicted_outdoor_future[h] < predicted_indoor_future[h] for h in range(n))
+
+    # nat_vent_cutoff: first hour where outdoor >= indoor - 1.0 °F
+    for h in range(n):
+        if predicted_outdoor_future[h] >= predicted_indoor_future[h] - 1.0:
+            result["nat_vent_cutoff"] = h
+            break
+
+    # ceiling_breach_hour: first hour where indoor > comfort_cool
+    for h in range(n):
+        if predicted_indoor_future[h] > comfort_cool:
+            result["ceiling_breach_hour"] = h
+            break
+
+    return result
+
+
 def _warm_day_plan(
     c,
     comfort_cool,

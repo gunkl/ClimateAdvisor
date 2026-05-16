@@ -18,6 +18,8 @@ from .const import (
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_MORNING_START_HOUR,
     ECONOMIZER_TEMP_DELTA,
+    MILD_WINDOW_CLOSE_HOUR,
+    MILD_WINDOW_OPEN_HOUR,
     THRESHOLD_COOL,
     THRESHOLD_HOT,
     THRESHOLD_MILD,
@@ -115,8 +117,8 @@ class DayClassification:
         elif self.day_type == DAY_TYPE_MILD:
             self.hvac_mode = "off"
             self.windows_recommended = True
-            self.window_open_time = time(10, 0)
-            self.window_close_time = time(17, 0)
+            self.window_open_time = time(MILD_WINDOW_OPEN_HOUR, 0)
+            self.window_close_time = time(MILD_WINDOW_CLOSE_HOUR, 0)
         elif self.day_type == DAY_TYPE_COOL or self.day_type == DAY_TYPE_COLD:
             self.hvac_mode = "heat"
 

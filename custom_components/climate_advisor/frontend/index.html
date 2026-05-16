@@ -608,6 +608,13 @@
       </div>
     </div>
   </div>
+
+  <div class="card">
+    <h2>Prediction Engines</h2>
+    <div id="engine-status">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -1620,6 +1627,7 @@
   if (tm.k_vent != null) envParamRows.push({ label: 'Air exchange', value: `${Math.abs(tm.k_vent).toFixed(2)} /hr` });
   if (tm.k_vent_window != null) envParamRows.push({ label: 'Ventilated loss rate', value: `${Math.abs(tm.k_vent_window).toFixed(2)} /hr (windows open)` });
   if (tm.k_solar != null) envParamRows.push({ label: 'Solar gain', value: `${tm.k_solar.toFixed(2)} ${unitLabel}/hr·sun` });
+  if (tm.solar_phase_offset_h != null) envParamRows.push({ label: 'Solar peak lag', value: `${tm.solar_phase_offset_h.toFixed(1)}h (peak at ${13 + Math.round(tm.solar_phase_offset_h)}:00)` });
   if (tm.avg_r_squared_passive != null && envConf !== 'none') {
     envParamRows.push({ label: 'Avg fit quality', value: `${Math.round(tm.avg_r_squared_passive * 100)}%` });
   }
@@ -1966,6 +1974,56 @@
     } catch (e) {
       document.getElementById('automation-state').innerHTML =
         '<p style="color:var(--danger)">Failed to load: ' + e.message + '</p>';
+    }
+  }
+
+  async function loadEngineStatus() {
+    const el = document.getElementById('engine-status');
+    if (!el) return;
+    try {
+      const data = await apiFetch('engines');
+      const unitSym = data.unit === 'celsius' ? '°C' : '°F';
+
+      function engineRow(key, label, unit) {
+        const info = data[key];
+        if (!info || !info.active) {
+          return `<tr><td>${escapeHtml(label)}</td><td style="color:var(--text-secondary)">(not yet active)</td></tr>`;
+        }
+        const value = info.value != null ? Number(info.value).toFixed(4) + (unit || '') : '—';
+        const conf = info.confidence ? escapeHtml(info.confidence) + ' confidence' : '';
+        const obs = info.obs_count != null ? escapeHtml(String(info.obs_count)) + ' obs' : '';
+        const since = info.since ? 'since ' + escapeHtml(info.since) : '';
+        const detail = [conf, obs, since].filter(Boolean).join(' · ');
+        return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}${detail ? '<span class="kv-desc">' + detail + '</span>' : ''}</td></tr>`;
+      }
+
+      function hvacRow() {
+        const info = data.k_active_hvac;
+        if (!info || !info.active) {
+          return `<tr><td>k_active_hvac</td><td style="color:var(--text-secondary)">(not yet active)</td></tr>`;
+        }
+        const heat = info.value?.heat != null ? Number(info.value.heat).toFixed(4) : '—';
+        const cool = info.value?.cool != null ? Number(info.value.cool).toFixed(4) : '—';
+        const since = info.since ? 'since ' + escapeHtml(info.since) : '';
+        return `<tr><td>k_active_hvac</td><td>heat=${escapeHtml(heat)} cool=${escapeHtml(cool)} ${unitSym}/hr${since ? '<span class="kv-desc">' + since + '</span>' : ''}</td></tr>`;
+      }
+
+      const odeVer = escapeHtml(data.ode_version || 'unknown');
+      const eligible = data.physics_eligible ? '<span style="color:var(--success)">YES</span>' : '<span style="color:var(--danger)">NO</span>';
+      const eligibleReason = data.physics_eligible_reason ? '<span class="kv-desc">' + escapeHtml(data.physics_eligible_reason) + '</span>' : '';
+
+      el.innerHTML = `
+        <table class="kv-table">
+          ${engineRow('k_passive', 'k_passive', ' hr⁻¹')}
+          ${engineRow('k_solar', 'k_solar', ` ${unitSym}/hr`)}
+          ${engineRow('solar_phase_offset_h', 'solar_phase_offset', 'h')}
+          ${engineRow('k_vent_window', 'k_vent_window', ' hr⁻¹')}
+          ${hvacRow()}
+          <tr><td>Physics ODE</td><td>${odeVer}, eligible: ${eligible}${eligibleReason}</td></tr>
+        </table>
+      `;
+    } catch (e) {
+      if (el) el.innerHTML = '<p style="color:var(--danger)">Failed to load: ' + e.message + '</p>';
     }
   }
 
@@ -2651,6 +2709,7 @@
     loadBriefing();
     loadChart();
     loadAutomationState();
+    loadEngineStatus();
     loadLearning();
     loadSettings();
     loadAIData();
@@ -2684,7 +2743,7 @@
 
   async function _pollCycle() {
     try {
-      await Promise.all([loadStatus(), loadBriefing(), loadAutomationState(), loadLearning()]);
+      await Promise.all([loadStatus(), loadBriefing(), loadAutomationState(), loadEngineStatus(), loadLearning()]);
       if (_authFailCount > 0) {
         _authFailCount = 0;
         console.info('Climate Advisor: auth recovered, resuming normal polling');

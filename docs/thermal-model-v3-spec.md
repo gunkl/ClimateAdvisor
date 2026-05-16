@@ -14,35 +14,44 @@
 | How does `ventilated_decay` commit path choose between 1-param and 2-param OLS? | When solar factor range across samples ≥ 0.30, the 2-param path fires first and — if bounds pass — commits both `k_env` and `k_solar`, bypassing 1-param entirely. If 2-param fails bounds/R², the 1-param path runs as fallback. | [§OLS Functions — compute\_k\_env\_solar](#compute_k_env_solar) |
 | What is the EWMA alpha for each confidence grade and which observation types write `k_passive`? | Alpha: high = 0.30, medium = 0.15, low = 0.05. Only `passive`, `heat`, and `cool` modes write `k_passive`; `fan_only` writes `k_vent`; `ventilated` writes `k_vent_window`; `solar` writes `k_solar`. | [§EWMA Update](#ewma-update-_update_thermal_model_cache) |
 | How does the dual-estimator framework select between endpoint and block-averaged OLS per overnight window? | Both estimators always run; an 8-row decision table selects based on R²_B and 30% relative agreement. On disagreement, Estimator A (endpoint) wins. On R²_B ≥ 0.50 and agreement, B wins with medium grade (α=0.15). | [§Dual Estimator Framework](#dual-estimator-framework) |
+| Where is the solar factor formula defined and what does `phase_offset_h` do? | `_solar_factor(local_hour, phase_offset_h)` shifts the sinusoidal solar input peak by `phase_offset_h` hours. With the default offset=2 the peak falls at local hour 15 (3pm) instead of 13 (1pm). | [§Solar Factor](#solar-factor) |
+| How is `solar_phase_offset_h` learned from chart_log? | Daytime passive windows (HVAC off, fan off, windows closed) are scanned for the indoor temperature peak hour. `phase_obs = peak_hour − 13` is accumulated via EWMA (α=0.10), clamped to [0, 4]. | [§Solar Phase Offset Learning](#solar-phase-offset-learning) |
+| What is engine visibility and where is it exposed? | `get_engine_status()` returns per-engine `active`, `value`, and `since` fields; `k_passive` and `k_solar` additionally include `confidence` and `obs_count`. Exposed at REST `/api/climate_advisor/engines`, dashboard Debug tab, AI investigator context, and `tools/engine_status.py`. | [§Engine Visibility](#engine-visibility) |
 
 ---
 
 ## Scope
 
 **Files:**
-- `learning.py` — OLS functions (`compute_k_passive`, `compute_k_passive_blocks`, `compute_k_env_solar`, `compute_k_active`, `compute_k_active_single_point`), commit routing (`_commit_event_from_dict`), EWMA update (`_update_thermal_model_cache`), model output (`get_thermal_model`, `record_thermal_observation`)
-- `coordinator.py` — observation orchestration (`_sample_all_observations`, `_start_hvac_observation`, `_start_decay_observation`, `_end_hvac_active_phase`, `_check_hvac_stabilization`, `_evaluate_rolling_window`, `_commit_rolling_window_obs`, `_commit_observation_if_sufficient`, `_abandon_observation`, `_commit_observation`), ODE prediction (`_build_predicted_indoor_future`, `_simulate_indoor_physics`, `_simulate_indoor_physics_v3`), dual-estimator chart_log fit (`_is_solar_hour`, `_select_estimator`, `_extract_passive_windows`, `_passive_endpoint_estimate`, `_run_passive_chart_log_fit`, `_extract_ventilated_windows`, `_ventilated_endpoint_estimate`, `_run_ventilated_chart_log_fit`)
+- `learning.py` — OLS functions (`compute_k_passive`, `compute_k_passive_blocks`, `compute_k_env_solar`, `compute_k_active`, `compute_k_active_single_point`), commit routing (`_commit_event_from_dict`), EWMA update (`_update_thermal_model_cache`), model output (`get_thermal_model`, `record_thermal_observation`), solar phase learning (`update_solar_phase_offset`), engine visibility (`get_engine_status`)
+- `coordinator.py` — observation orchestration (`_sample_all_observations`, `_start_hvac_observation`, `_start_decay_observation`, `_end_hvac_active_phase`, `_check_hvac_stabilization`, `_evaluate_rolling_window`, `_commit_rolling_window_obs`, `_commit_observation_if_sufficient`, `_abandon_observation`, `_commit_observation`), ODE prediction (`_build_predicted_indoor_future`, `_simulate_indoor_physics`, `_simulate_indoor_physics_v3`), dual-estimator chart_log fit (`_is_solar_hour`, `_select_estimator`, `_extract_passive_windows`, `_passive_endpoint_estimate`, `_run_passive_chart_log_fit`, `_extract_ventilated_windows`, `_ventilated_endpoint_estimate`, `_run_ventilated_chart_log_fit`), solar factor (`_solar_factor`), solar phase offset learning (`_estimate_solar_phase_offset`, `_run_solar_phase_chart_log_fit`)
 
 **Line ranges (verified against source):**
 
 | Function | File | Start line |
 |---|---|---|
-| `compute_k_passive` | learning.py | 185 |
-| `compute_k_env_solar` | learning.py | 283 |
-| `compute_k_active` | learning.py | 359 |
-| `compute_k_active_single_point` | learning.py | 418 |
-| `record_thermal_observation` | learning.py | 693 |
-| `_update_thermal_model_cache` | learning.py | 713 |
-| `get_thermal_model` | learning.py | 831 |
-| `_commit_event_from_dict` | learning.py | 974 |
-| `_start_hvac_observation` | coordinator.py | 2495 |
-| `_sample_all_observations` | coordinator.py | 2595 |
-| `_check_hvac_stabilization` | coordinator.py | 2931 |
-| `_evaluate_rolling_window` | coordinator.py | 3232 |
-| `_commit_rolling_window_obs` | coordinator.py | 3303 |
-| `_build_predicted_indoor_future` | coordinator.py | 4245 |
-| `_simulate_indoor_physics` | coordinator.py | 4037 |
-| `_simulate_indoor_physics_v3` | coordinator.py | 4094 |
+| `compute_k_passive` | learning.py | 187 |
+| `compute_k_passive_blocks` | learning.py | 285 |
+| `compute_k_env_solar` | learning.py | 370 |
+| `compute_k_active` | learning.py | 446 |
+| `compute_k_active_single_point` | learning.py | 505 |
+| `record_thermal_observation` | learning.py | 734 |
+| `_update_thermal_model_cache` | learning.py | 754 |
+| `get_thermal_model` | learning.py | 1028 |
+| `_commit_event_from_dict` | learning.py | 1127 |
+| `update_solar_phase_offset` | learning.py | 902 |
+| `get_engine_status` | learning.py | 959 |
+| `_start_hvac_observation` | coordinator.py | 2429 |
+| `_sample_all_observations` | coordinator.py | 2527 |
+| `_check_hvac_stabilization` | coordinator.py | 3468 |
+| `_evaluate_rolling_window` | coordinator.py | 3777 |
+| `_commit_rolling_window_obs` | coordinator.py | 3848 |
+| `_run_solar_phase_chart_log_fit` | coordinator.py | 3311 |
+| `_simulate_indoor_physics` | coordinator.py | 4595 |
+| `_simulate_indoor_physics_v3` | coordinator.py | 4723 |
+| `_build_predicted_indoor_future` | coordinator.py | 4905 |
+| `_solar_factor` | coordinator.py | 4640 |
+| `_estimate_solar_phase_offset` | coordinator.py | 4661 |
 
 **Out of scope for this spec:** suggestion generation, weather bias, daily record lifecycle, automation engine, briefing text.
 
@@ -482,6 +491,245 @@ On startup, if `_passive_k_backfill_v2` is `False`, `_run_passive_chart_log_fit(
 ### Symmetric Application
 
 `_run_ventilated_chart_log_fit` follows the same structure: extract windows with solar guard → per-window run A + B + `_select_estimator` → `record_thermal_observation`. The ventilated path writes to `k_vent_window` rather than `k_passive`, but the estimator machinery (`compute_k_passive_blocks`, `_passive_endpoint_estimate`, `_select_estimator`) is reused unchanged.
+
+---
+
+## Solar Factor
+
+**Scope:** `_solar_factor(local_hour, phase_offset_h)` in `coordinator.py`. Determines how much solar gain to add to the ODE at a given local hour. Used by `_simulate_indoor_physics_v3`, `_build_predicted_indoor_future`, ventilated-decay sample injection, and the `solar_gain` observation trigger.
+
+### Signature
+
+```python
+def _solar_factor(
+    local_hour,                                              # int | float; local clock hour
+    phase_offset_h=THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT,   # default = 2 (peak at 3pm)
+) -> float
+```
+
+**Pre-conditions:**
+- `local_hour` must be an `int` or `float`; any other type returns `0.0`
+- `phase_offset_h` is read from `get_thermal_model()["solar_phase_offset_h"]` at each call site, falling back to `THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2` when the learned value is not yet available
+
+### Algorithm
+
+```python
+effective_hour = int(local_hour) - int(round(phase_offset_h))
+if effective_hour < THERMAL_SOLAR_DAYTIME_START_H:   # 8
+    return 0.0
+if effective_hour >= THERMAL_SOLAR_DAYTIME_END_H:    # 18
+    return 0.0
+# sin curve over [8, 18), peak at effective_hour = 13
+angle = (effective_hour - THERMAL_SOLAR_DAYTIME_START_H) / (THERMAL_SOLAR_DAYTIME_END_H - THERMAL_SOLAR_DAYTIME_START_H) * π
+return max(0.0, sin(angle))
+```
+
+`effective_hour = 13` → `sin(π/2) = 1.0` (global maximum).
+
+### Peak Mapping by Offset
+
+| `phase_offset_h` | `effective_hour` at `local_hour = 13 + offset` | Solar factor | Real-world peak |
+|---|---|---|---|
+| 0 | 13 | 1.0 | 1:00 PM (old hard-coded behavior) |
+| 1 | 13 | 1.0 | 2:00 PM |
+| 2 | 13 | 1.0 | 3:00 PM (default prior — `THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT`) |
+| 3 | 13 | 1.0 | 4:00 PM |
+| 4 | 13 | 1.0 | 5:00 PM |
+
+### Algebraic Correctness
+
+The formula satisfies `_solar_factor(13 + n, n) == 1.0` for all integer `n` in [0, 4]:
+
+```
+effective_hour = int(13 + n) - int(round(n)) = 13
+sin(angle at effective_hour=13) = sin(π/2) = 1.0
+```
+
+This is the scientific proof for test `test_peak_at_15_with_offset_two` (and all offset variants).
+
+### Call-site update pattern
+
+All existing `_solar_factor(hour)` calls must be updated to pass `phase_offset_h`. The coordinator reads the offset once per prediction cycle:
+
+```python
+_phase_offset = self._solar_phase_offset  # float; updated each _async_update_data
+# … per-hour loop:
+sf = _solar_factor(h, _phase_offset)
+```
+
+`self._solar_phase_offset` is an instance attribute initialised to `THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT` and refreshed from `get_thermal_model()["solar_phase_offset_h"]` on each coordinator update cycle.
+
+### Invariants
+
+- Return value is always in [0.0, 1.0]
+- Returns `0.0` when `local_hour` is not a numeric type (guards against `MagicMock` test stubs)
+- Returns `0.0` for `effective_hour < 8` or `effective_hour >= 18` regardless of offset
+
+---
+
+## Solar Phase Offset Learning
+
+**Scope:** `_estimate_solar_phase_offset`, `_run_solar_phase_chart_log_fit`, and `update_solar_phase_offset` in `coordinator.py` / `learning.py`. Learns the home's thermal lag from chart_log daytime passive windows. Writes `solar_phase_offset_h` to `thermal_model_cache` via EWMA.
+
+### Core Concept
+
+Buildings with high thermal mass absorb solar radiation through the afternoon and re-radiate it as heat into the interior, causing the indoor temperature peak to lag the solar peak by 2–4 hours. This lag is home-specific and must be learned, not hard-coded. The phase offset calibrates `_solar_factor` to match the home's actual thermal inertia.
+
+### Phase Observation Formula
+
+```
+phase_obs = actual_indoor_peak_hour - 13
+```
+
+`actual_indoor_peak_hour` is the local hour of the maximum indoor temperature in the chart_log window. The value 13 is the no-offset solar peak hour. A `phase_obs` of 2 means the indoor peak occurred at 3pm — exactly 2 hours after the no-offset solar peak.
+
+### EWMA Update Formula
+
+```python
+new_value = (1 - THERMAL_SOLAR_PHASE_ALPHA) × solar_phase_offset_h
+           + THERMAL_SOLAR_PHASE_ALPHA × clamp(phase_obs, THERMAL_SOLAR_PHASE_OFFSET_MIN, THERMAL_SOLAR_PHASE_OFFSET_MAX)
+```
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `THERMAL_SOLAR_PHASE_ALPHA` | 0.10 | Slow EWMA — building physics changes only with major renovation |
+| `THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT` | 2 | Prior before any learning (peak at 3pm) |
+| `THERMAL_SOLAR_PHASE_OFFSET_MIN` | 0 | Lower clamp bound (no advance of solar peak) |
+| `THERMAL_SOLAR_PHASE_OFFSET_MAX` | 4 | Upper clamp bound (peak at 5pm maximum) |
+
+**First observation:** Initialises `solar_phase_offset_h` directly to the clamped `phase_obs` — no EWMA blend on the first update (same pattern as all other thermal parameters).
+
+### Valid Window Criteria
+
+A chart_log window is eligible for a phase observation only when all six conditions are met:
+
+1. **HVAC off throughout:** `hvac` field is not `"heating"` or `"cooling"` for every entry
+2. **Fan off throughout:** `fan` field is falsy for every entry
+3. **Windows closed throughout:** `windows_open` field is `False` for every entry
+4. **Daytime span:** all entries fall within local hours 08:00–20:00
+5. **Minimum window span:** `last_entry_ts − first_entry_ts >= THERMAL_SOLAR_PHASE_MIN_WINDOW_H (4h)`
+6. **Minimum entry count:** `len(window_entries) >= THERMAL_SOLAR_PHASE_MIN_ENTRIES (3)`
+7. **Sufficient solar signal:** `max(indoor) − min(indoor) >= THERMAL_SOLAR_PHASE_MIN_DT_F (1.5°F)` — distinguishes a real solar rise from sensor noise
+8. **Not a leading peak:** the maximum indoor temperature must NOT be the first entry — a first-entry peak means the window captured the tail of a prior peak, not a rise. A last-entry peak is acceptable (the window end may have truncated a still-rising temperature)
+
+### Rejection Codes
+
+| Code | Condition | Constant |
+|---|---|---|
+| `REJECT_TOO_FEW_SAMPLES` | `len(window_entries) < THERMAL_SOLAR_PHASE_MIN_ENTRIES` | Existing constant |
+| `REJECT_WINDOW_TOO_SHORT` | Window span < `THERMAL_SOLAR_PHASE_MIN_WINDOW_H` | New in v0.3.46 |
+| `REJECT_SMALL_DELTA` | Indoor ΔT < `THERMAL_SOLAR_PHASE_MIN_DT_F` | Existing constant |
+| `REJECT_NO_INTERIOR_PEAK` | Peak is at the first entry (`peak_idx == 0`) — a last-entry peak is accepted | New in v0.3.46 |
+
+### New Functions
+
+**`_estimate_solar_phase_offset(window_entries) → (float | None, str | None)`**
+
+- **Input:** list of chart_log entry dicts (fields: `ts`, `indoor`, `outdoor`, `hvac`, `fan`, `windows_open`)
+- **Pre-conditions:** all valid window criteria above
+- **Computation:** find `idx = argmax(indoor values)`; reject if `idx == 0` (leading peak, not a rise); compute `phase_obs = local_hour(ts[idx]) − 13`
+- **Post-conditions:** returns `(phase_obs_clamped, None)` on success; `(None, reject_code)` on any failure
+- **Invariant:** exactly one of `phase_obs` or `reject_code` is non-None
+
+**`_run_solar_phase_chart_log_fit(backfill=False)`**
+
+- **Purpose:** iterates daytime passive windows in the chart_log and calls `_estimate_solar_phase_offset` on each, calling `self.learning.update_solar_phase_offset(phase_obs, THERMAL_SOLAR_PHASE_ALPHA)` on each accepted window. When `backfill=True`, scans the last 30 days; when `backfill=False`, scans only the last 2 days (most-recent qualifying window only via `windows[-1:]`)
+- **Backfill flag:** `_solar_phase_backfill: bool` persisted in state. On startup, if `False`, runs in `backfill=True` mode over the last 30 days and sets flag to `True`
+- **Call site:** called once at startup (inside the chart_log processing block in `_async_update_data`) when `_solar_phase_backfill` is `False`. No incremental per-cycle call is made after the backfill flag is set
+
+**`learning.update_solar_phase_offset(observed_h, alpha)`**
+
+- Applies EWMA update to `thermal_model_cache["solar_phase_offset_h"]`
+- On first call (value is `None`), initialises directly: `solar_phase_offset_h = clamp(observed_h, MIN, MAX)`
+- Sets `first_active_date_phase_offset` to today's ISO date string on the first call
+- Thread-safe: called only from the coordinator's async context
+
+### `_build_learning_health` update
+
+`REJECT_WINDOW_TOO_SHORT` and `REJECT_NO_INTERIOR_PEAK` must be added to `all_reason_codes` in `_build_learning_health()` in `coordinator.py` so they appear in the rejection summary exposed to the AI investigator and dashboard.
+
+---
+
+## Engine Visibility
+
+**Scope:** `get_engine_status()` in `learning.py`; `first_active_date_*` fields in `thermal_model_cache`; REST endpoint in `api.py`; dashboard card in `index.html`; AI context in `ai_skills_activity.py`; CLI tool `tools/engine_status.py`.
+
+### Per-Parameter Activation Tracking
+
+When `_update_thermal_model_cache` writes a parameter for the first time (transition from `None` → first real value), it also sets the corresponding `first_active_date_*` field to today's ISO date string (e.g., `"2026-04-01"`). The field is never overwritten on subsequent updates.
+
+| Cache field | Tracks first activation of |
+|---|---|
+| `first_active_date_passive` | `k_passive` |
+| `first_active_date_solar` | `k_solar` |
+| `first_active_date_phase_offset` | `solar_phase_offset_h` |
+| `first_active_date_vent_window` | `k_vent_window` |
+| `first_active_date_hvac` | `k_active_heat` or `k_active_cool` (whichever is first) |
+
+All five fields are initialised to `None` in `thermal_model_cache` and included in the learning JSON on every persist cycle.
+
+### `get_engine_status()` Return Shape
+
+`learning.get_engine_status() → dict`
+
+```python
+{
+  "k_passive": {
+    "active": bool,          # True when k_passive is not None
+    "value": float | None,   # current thermal_model_cache["k_passive"]
+    "confidence": str,       # "none" | "low" | "medium" | "high"
+    "obs_count": int,        # observation_count_passive + observation_count_fan_only + observation_count_heat + observation_count_cool
+    "since": str | None,     # first_active_date_passive (ISO date) or None
+  },
+  "k_solar": {
+    "active": bool,
+    "value": float | None,
+    "confidence": str,       # derived from observation_count_solar (same grade thresholds as k_passive)
+    "obs_count": int,        # observation_count_solar
+    "since": str | None,     # first_active_date_solar
+  },
+  "solar_phase_offset_h": {
+    "active": bool,          # True when solar_phase_offset_h is not None
+    "value": float | None,
+    "since": str | None,     # first_active_date_phase_offset
+  },
+  "k_vent_window": {
+    "active": bool,
+    "value": float | None,
+    "since": str | None,     # first_active_date_vent_window
+  },
+  "k_active_hvac": {
+    "active": bool,                                  # True when k_active_heat or k_active_cool is not None
+    "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool
+    "since": str | None,                             # first_active_date_hvac
+  },
+  "ode_version": str,        # "v3" when k_solar or k_vent present; "basic" otherwise
+  "physics_eligible": bool,  # True when the ODE prediction path is currently active
+  "physics_eligible_reason": str,  # human-readable explanation of eligibility state
+}
+```
+
+**`physics_eligible_reason` values** (returned by `get_engine_status()`; bridge-home state is not reflected here — bridge activation is determined in `_build_predicted_indoor_future`):
+
+| Condition | Reason string |
+|---|---|
+| `k_passive is None` | `"k_passive not yet learned"` |
+| `k_passive >= 0` (wrong sign) | `"k_passive has wrong sign"` |
+| `confidence_k_passive == "none"` | `"confidence insufficient (none)"` |
+| `k_passive < 0` and `confidence != "none"` | `f"k_passive + confidence={conf_k_passive}"` (e.g. `"k_passive + confidence=low"`) |
+
+### Exposure Points
+
+| Consumer | Mechanism |
+|---|---|
+| REST API | `GET /api/climate_advisor/engines` returns `get_engine_status()` JSON directly |
+| Dashboard Debug tab | "Prediction Engines" card in `index.html`; table: engine \| active \| value \| confidence \| since; auto-refreshes with status panel |
+| AI investigator | `ACTIVE_PREDICTION_ENGINES` section prepended to activity context in `ai_skills_activity.py`; plain-text table for LLM consumption |
+| CLI tool | `tools/engine_status.py` reads learning DB via SSH (same pattern as `tools/learning_db.py`), prints formatted table; `--history` flag also tails `ha_logs.py --thermal` and greps for engine activation events |
+
+### `get_thermal_model()` additions
+
+`solar_phase_offset_h` and all five `first_active_date_*` fields are included in the `get_thermal_model()` return dict. Downstream consumers (`coordinator.py`, `api.py`, `ai_skills_activity.py`) read from this output, not from `thermal_model_cache` directly.
 
 ---
 

@@ -112,12 +112,14 @@ from .const import (
     OCCUPANCY_VACATION,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
+    REJECT_NO_INTERIOR_PEAK,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
     REJECT_OLS_WRONG_SIGN,
     REJECT_SMALL_DELTA,
     REJECT_TOO_FEW_BLOCKS,
     REJECT_TOO_FEW_SAMPLES,
+    REJECT_WINDOW_TOO_SHORT,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -155,6 +157,13 @@ from .const import (
     THERMAL_SOLAR_FACTOR_MIN_RANGE,
     THERMAL_SOLAR_MIN_RATE_F_PER_HR,
     THERMAL_SOLAR_MIN_SAMPLES,
+    THERMAL_SOLAR_PHASE_ALPHA,
+    THERMAL_SOLAR_PHASE_MIN_DT_F,
+    THERMAL_SOLAR_PHASE_MIN_ENTRIES,
+    THERMAL_SOLAR_PHASE_MIN_WINDOW_H,
+    THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT,
+    THERMAL_SOLAR_PHASE_OFFSET_MAX,
+    THERMAL_SOLAR_PHASE_OFFSET_MIN,
     THERMAL_SOLAR_SAMPLE_INTERVAL_S,
     THERMAL_VENT_MIN_SAMPLES,
     THERMAL_VENT_MIN_SIGNAL_F,
@@ -165,7 +174,7 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
-from .learning import DailyRecord, LearningEngine
+from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .state import StatePersistence
 from .temperature import convert_delta, format_temp, from_fahrenheit, to_fahrenheit
 
@@ -295,6 +304,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Dual-estimator backfill flags (v2): runs block-OLS alongside endpoint estimator
         self._passive_k_backfill_v2: bool = False
         self._vent_k_backfill_v2: bool = False
+        # Solar phase offset (Issue #147)
+        self._solar_phase_offset: float = THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+        self._solar_phase_backfill: bool = False
 
         # Occupancy state machine
         self._occupancy_mode: str = OCCUPANCY_HOME
@@ -550,6 +562,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Dual-estimator backfill flags (v2)
         self._passive_k_backfill_v2 = bool(state.get("passive_k_backfill_v2", False))
         self._vent_k_backfill_v2 = bool(state.get("vent_k_backfill_v2", False))
+        # Solar phase offset backfill flag (Issue #147)
+        self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
 
         # Prediction archive — restore only on same-day restores (already gated above)
         raw_archive = state.get("pred_archive")
@@ -636,6 +650,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "vent_k_backfilled": self._vent_k_backfilled,
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
             "vent_k_backfill_v2": self._vent_k_backfill_v2,
+            "solar_phase_backfill": self._solar_phase_backfill,
         }
 
     async def _async_save_state(self) -> None:
@@ -1142,6 +1157,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._run_ventilated_chart_log_fit(backfill=True)
                         self._vent_k_backfill_v2 = True
                         _LOGGER.info("chart_log_endpoint v2: ventilated k_vent_window dual-estimator backfill complete")
+                    if not self._solar_phase_backfill:
+                        self._run_solar_phase_chart_log_fit(backfill=True)
+                        self._solar_phase_backfill = True
+                        _LOGGER.info("chart_log solar_phase: phase offset backfill complete")
 
             # Refresh the thermal model on every 30-min cycle, not just at the daily
             # briefing. get_thermal_model() is a pure computation (no I/O), so calling it
@@ -1156,10 +1175,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     outdoor_temp_f=self._last_outdoor_temp,
                     solar_factor=_solar_factor(dt_util.now().hour),
                 )
+                self._solar_phase_offset = (
+                    self.automation_engine._thermal_model.get("solar_phase_offset_h")
+                    or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+                )
                 _LOGGER.debug(
-                    "thermal model refreshed (30-min cycle): confidence=%s k_passive=%s",
+                    "thermal model refreshed (30-min cycle): confidence=%s k_passive=%s solar_phase_offset=%.1f",
                     self.automation_engine._thermal_model.get("confidence", "none"),
                     self.automation_engine._thermal_model.get("k_passive"),
+                    self._solar_phase_offset,
                 )
 
             # Compute and cache ODE prediction for ceiling guard + chart reuse
@@ -1811,6 +1835,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 solar_factor=_solar_factor(now.hour),
             )
             self.automation_engine._thermal_model = thermal_model
+            self._solar_phase_offset = thermal_model.get("solar_phase_offset_h") or THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
         else:
             thermal_model = {}
             self.automation_engine._thermal_model = {}
@@ -2589,7 +2614,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
                     if _elapsed_since_last >= _interval_s:
                         if obs_type == OBS_TYPE_VENTILATED_DECAY:
-                            sample["solar_factor"] = _solar_factor(now.hour)
+                            _sf_offset = getattr(self, "_solar_phase_offset", THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT)
+                            sample["solar_factor"] = _solar_factor(now.hour, _sf_offset)
                         samples_list.append(sample)
                         obs["last_sample_time"] = now.isoformat()
 
@@ -3027,7 +3053,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         for window in target_windows:
             result_a = self._passive_endpoint_estimate(window)
-            b_raw = self.learning.compute_k_passive_blocks(window)
+            b_raw = compute_k_passive_blocks(window)
             result_b = (
                 {"k": b_raw[0], "r_squared": b_raw[1], "source": "block_ols", "grade": "low"}
                 if b_raw is not None and b_raw[0] is not None
@@ -3225,7 +3251,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         for window in target_windows:
             result_a = self._ventilated_endpoint_estimate(window)
-            b_raw = self.learning.compute_k_passive_blocks(window)
+            b_raw = compute_k_passive_blocks(window)
             result_b = (
                 {"k": b_raw[0], "r_squared": b_raw[1], "source": "block_ols", "grade": "low"}
                 if b_raw is not None and b_raw[0] is not None
@@ -3278,6 +3304,118 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if committed > 0:
             _LOGGER.info(
                 "chart_log vent: committed %d observations%s",
+                committed,
+                " (backfill)" if backfill else "",
+            )
+
+    def _run_solar_phase_chart_log_fit(self, *, backfill: bool = False) -> None:
+        """Estimate solar_phase_offset_h from daytime passive chart_log windows.
+
+        Regime: HVAC=off, fan=off, windows_open=False, daytime local hours (8–20).
+        Calls _estimate_solar_phase_offset() for each qualifying window.
+        On success, updates EWMA via self.learning.update_solar_phase_offset().
+
+        If backfill=True, processes up to 30 days of history (called once at startup).
+        If backfill=False, processes only the most recent qualifying window.
+        """
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None:
+            return
+        entries = list(getattr(chart_log, "_entries", []))
+        if not entries:
+            return
+
+        days = 30 if backfill else 2
+        cutoff = dt_util.now() - timedelta(days=days)
+        windows: list[list[dict]] = []
+        current: list[dict] = []
+
+        def _flush_solar() -> None:
+            if len(current) < THERMAL_SOLAR_PHASE_MIN_ENTRIES:
+                current.clear()
+                return
+            # Only keep windows that are clearly daytime (start hour 8–20)
+            try:
+                ts0 = datetime.fromisoformat(current[0]["ts"])
+                if ts0.tzinfo is None:
+                    ts0 = ts0.replace(tzinfo=UTC)
+                local0 = dt_util.as_local(ts0)
+                if 8 <= local0.hour < 20:
+                    windows.append(list(current))
+            except (ValueError, KeyError):
+                pass
+            current.clear()
+
+        for entry in entries:
+            ts_str = entry.get("ts", "")
+            if not ts_str:
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+            except ValueError:
+                continue
+            if ts < cutoff:
+                continue
+
+            indoor = entry.get("indoor")
+            outdoor = entry.get("outdoor")
+            hvac = str(entry.get("hvac", "")).lower()
+            fan = str(entry.get("fan", "")).lower()
+            windows_open = entry.get("windows_open", False)
+
+            if indoor is None or outdoor is None:
+                _flush_solar()
+                continue
+
+            # Regime: HVAC off, fan off, windows closed
+            _hvac_off = hvac in ("off", "idle", "")
+            _fan_off = fan in ("off", "false", "")
+            if not (_hvac_off and _fan_off and not windows_open):
+                _flush_solar()
+                continue
+
+            # Daytime guard: entry must be in local hours 8–20
+            try:
+                local_ts = dt_util.as_local(ts)
+            except Exception:
+                _flush_solar()
+                continue
+            if not (8 <= local_ts.hour < 20):
+                _flush_solar()
+                continue
+
+            current.append(entry)
+
+        _flush_solar()
+
+        if not windows:
+            return
+
+        target_windows = windows if backfill else windows[-1:]
+        committed = 0
+
+        for window in target_windows:
+            obs, reject_reason = _estimate_solar_phase_offset(window)
+            if obs is None:
+                _LOGGER.debug(
+                    "chart_log solar_phase: rejected window (%d entries): %s",
+                    len(window),
+                    reject_reason,
+                )
+                continue
+            self.learning.update_solar_phase_offset(obs, THERMAL_SOLAR_PHASE_ALPHA)
+            committed += 1
+            _LOGGER.debug(
+                "chart_log solar_phase: committed obs=%.2f (window %d entries)",
+                obs,
+                len(window),
+            )
+
+        if committed > 0:
+            _LOGGER.info(
+                "chart_log solar_phase: committed %d phase observations%s",
                 committed,
                 " (backfill)" if backfill else "",
             )
@@ -3551,6 +3689,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             REJECT_OLS_WRONG_SIGN,
             REJECT_OLS_BOUNDS,
             REJECT_ABANDONED,
+            REJECT_WINDOW_TOO_SHORT,
+            REJECT_NO_INTERIOR_PEAK,
         ]
         _hvac_mode_to_obs_type = {
             "passive": OBS_TYPE_PASSIVE_DECAY,
@@ -4179,6 +4319,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "observation_count_swing_cool": thermal_model.get("observation_count_swing_cool", 0),
                 "confidence_swing_heat": thermal_model.get("confidence_swing_heat", "none"),
                 "confidence_swing_cool": thermal_model.get("confidence_swing_cool", "none"),
+                "solar_phase_offset_h": thermal_model.get("solar_phase_offset_h"),
             },
             "state_log": log_entries,
             "target_band": [
@@ -4497,16 +4638,87 @@ def _simulate_indoor_physics(
     return t_next
 
 
-def _solar_factor(local_hour: int) -> float:
-    """Return a 0–1 solar intensity factor for the given local hour."""
+def _solar_factor(
+    local_hour: int,
+    phase_offset_h: float = THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT,
+) -> float:
+    """Return a 0–1 solar intensity factor for the given local hour.
+
+    phase_offset_h shifts the effective peak: effective_hour = local_hour − offset.
+    With offset=0 the peak is at local hour 13. With the default offset=2 the peak
+    is at local hour 15 (3pm), matching typical thermal-mass lag.
+    """
     try:
-        local_hour = int(local_hour)
+        h = int(local_hour)
     except (TypeError, ValueError):
         return 0.0
-    if local_hour < THERMAL_SOLAR_DAYTIME_START_H or local_hour >= THERMAL_SOLAR_DAYTIME_END_H:
+    effective_hour = h - int(round(phase_offset_h))
+    if effective_hour < THERMAL_SOLAR_DAYTIME_START_H or effective_hour >= THERMAL_SOLAR_DAYTIME_END_H:
         return 0.0
     span = (THERMAL_SOLAR_DAYTIME_END_H - THERMAL_SOLAR_DAYTIME_START_H) / 2.0
-    return math.sin(math.pi * (local_hour - THERMAL_SOLAR_DAYTIME_START_H) / (span * 2))
+    return math.sin(math.pi * (effective_hour - THERMAL_SOLAR_DAYTIME_START_H) / (span * 2))
+
+
+def _estimate_solar_phase_offset(
+    window_entries: list[dict],
+) -> tuple[float | None, str | None]:
+    """Estimate solar phase offset from a daytime passive window.
+
+    Returns (phase_obs, None) on success, (None, reject_reason) on failure.
+    phase_obs = actual_indoor_peak_hour − 13, clamped to [OFFSET_MIN, OFFSET_MAX].
+
+    Quality gates:
+      - ≥ THERMAL_SOLAR_PHASE_MIN_ENTRIES entries
+      - window span ≥ THERMAL_SOLAR_PHASE_MIN_WINDOW_H hours
+      - indoor ΔT ≥ THERMAL_SOLAR_PHASE_MIN_DT_F°F
+      - peak is interior (not first or last entry)
+    """
+    if len(window_entries) < THERMAL_SOLAR_PHASE_MIN_ENTRIES:
+        return None, REJECT_TOO_FEW_SAMPLES
+
+    # Parse timestamps
+    try:
+        times = [datetime.fromisoformat(str(e["ts"])) for e in window_entries]
+    except (KeyError, ValueError, TypeError):
+        return None, REJECT_TOO_FEW_SAMPLES
+
+    # Window span check
+    span_h = (times[-1] - times[0]).total_seconds() / 3600.0
+    if span_h < THERMAL_SOLAR_PHASE_MIN_WINDOW_H:
+        return None, REJECT_WINDOW_TOO_SHORT
+
+    # Extract indoor temps
+    try:
+        indoor_temps = [float(e["indoor"]) for e in window_entries]
+    except (KeyError, ValueError, TypeError):
+        return None, REJECT_SMALL_DELTA
+
+    # Indoor ΔT check
+    temp_range = max(indoor_temps) - min(indoor_temps)
+    if temp_range < THERMAL_SOLAR_PHASE_MIN_DT_F:
+        return None, REJECT_SMALL_DELTA
+
+    # Peak must not be at the first entry — a first-entry peak means the window
+    # captured the tail of a prior peak, not the rise. A last-entry peak is
+    # acceptable: the window end may have truncated a still-rising temperature.
+    peak_idx = indoor_temps.index(max(indoor_temps))
+    if peak_idx == 0:
+        return None, REJECT_NO_INTERIOR_PEAK
+
+    # Peak local hour — prefer as_local(); fall back to raw UTC hour if the
+    # as_local result is not a real datetime (e.g. in test stubs).
+    peak_time = times[peak_idx]
+    peak_local = dt_util.as_local(peak_time)
+    peak_hour = peak_local.hour if isinstance(peak_local, datetime) else peak_time.hour
+
+    # phase_obs = peak_hour − 13, clamped to [MIN, MAX]
+    phase_obs = float(peak_hour - 13)
+    phase_obs_clamped = max(
+        float(THERMAL_SOLAR_PHASE_OFFSET_MIN),
+        min(float(THERMAL_SOLAR_PHASE_OFFSET_MAX), phase_obs),
+    )
+
+    return phase_obs_clamped, None
 
 
 def _simulate_indoor_physics_v3(
@@ -4817,6 +5029,11 @@ def _build_predicted_indoor_future(
     _k_solar: float | None = None
     _k_vent_window: float | None = None
     _k_passive_via_bridge: bool = False
+    # _phase_offset: when model has a learned value use it; otherwise 0.0 preserves
+    # pre-feature behavior for callers that do not supply solar_phase_offset_h.
+    # (THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT=2 is applied by the coordinator's
+    # self._solar_phase_offset instance attribute, not by this standalone function.)
+    _phase_offset: float = 0.0
     if thermal_model and current_indoor_temp is not None:
         _conf = thermal_model.get("confidence", "none")
         _conf_k_passive = thermal_model.get("confidence_k_passive")
@@ -4826,6 +5043,8 @@ def _build_predicted_indoor_future(
         _k_vent = thermal_model.get("k_vent")
         _k_solar = thermal_model.get("k_solar")
         _k_vent_window = thermal_model.get("k_vent_window")
+        _raw_phase = thermal_model.get("solar_phase_offset_h")
+        _phase_offset = float(_raw_phase) if _raw_phase is not None else 0.0
         # Gate bridge: when k_passive is absent but k_vent_window is learned, use it as
         # a proxy k_passive so the ODE can activate for thermally inert homes that only
         # have ventilated observations.  k_vent_window is always ≤ 0 for valid commits
@@ -5001,7 +5220,7 @@ def _build_predicted_indoor_future(
                     comfort_cool=comfort_cool,
                     k_vent=_k_vent,
                     k_solar=_k_solar,
-                    solar_factor=_solar_factor(local_ts.hour),
+                    solar_factor=_solar_factor(local_ts.hour, _phase_offset),
                     ventilation_active=False,
                 )
             else:

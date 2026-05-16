@@ -4319,6 +4319,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "observation_count_swing_cool": thermal_model.get("observation_count_swing_cool", 0),
                 "confidence_swing_heat": thermal_model.get("confidence_swing_heat", "none"),
                 "confidence_swing_cool": thermal_model.get("confidence_swing_cool", "none"),
+                "solar_phase_offset_h": thermal_model.get("solar_phase_offset_h"),
             },
             "state_log": log_entries,
             "target_band": [

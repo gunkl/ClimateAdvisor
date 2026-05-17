@@ -126,7 +126,11 @@ A sample is appended only when `elapsed_since_last_sample >= interval_s`. Each s
 
 **Sample accumulation:** Active phase samples every coordinator poll (no decimation gate). Post-heat phase uses `THERMAL_HVAC_POST_HEAT_SAMPLE_INTERVAL_S` (5 min). Post-heat samples go into `post_heat_samples`.
 
-**Active → post_heat transition:** `_end_hvac_active_phase(obs_type)` fires when `hvac_action` leaves `"heating"`/`"cooling"`. Sets `_phase="post_heat"`, records `active_end`, computes `session_minutes`.
+**Active → post_heat transition:** `_end_hvac_active_phase(obs_type)` fires when `hvac_action` leaves `"heating"`/`"cooling"`. Before transitioning:
+1. Appends a final active sample at the exact HVAC-off moment (so swing uses the true shutoff temperature, not the most-recent 30-min poll value).
+2. Updates `peak_indoor_f` to `max(prior_peak, final_indoor_temp)` — never lowers the peak.
+
+Then sets `_phase="post_heat"`, records `active_end`, computes `session_minutes`.
 
 **Commit decision (`_check_hvac_stabilization`):** Minimum post-heat samples before commit attempt:
 - No proxy: `THERMAL_MIN_POST_HEAT_SAMPLES = 4`

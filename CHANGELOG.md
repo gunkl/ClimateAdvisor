@@ -3,6 +3,34 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.3.47] — 2026-05-17
+
+### Fixed
+
+- **AI activity report: k_active_hvac shows None** (#149): `_format_engine_status_for_ai`
+  read `hvac_info.get("k_active_heat")` directly — always None. The real shape nests
+  these values under `hvac_info["value"]["heat"]` and `hvac_info["value"]["cool"]`. Fixed
+  to read nested keys; added chain tests covering the full `get_engine_status()` →
+  formatter path.
+
+- **AI activity report: comfort band false positives** (#149): The cross-validation check
+  flagged any indoor temp below `comfort_heat` with zero tolerance. Thermostat deadband
+  (±0.5–1.5°F) made these false alarms routine. The check now acquires
+  `swing_heat_f_display` / `swing_cool_f_display` from the thermal model (default
+  `THERMAL_SWING_DEFAULT_F` = 1.5°F) and only flags when the shortfall strictly exceeds
+  the learned swing.
+
+- **AI activity report: section repetition** (#149): Added `DEDUPLICATION RULE` to
+  `_SYSTEM_PROMPT` with exclusive section role definitions. SUMMARY / TIMELINE /
+  DECISIONS / ANOMALIES / DIAGNOSTICS each have a non-overlapping scope; one-line
+  cross-references are allowed, verbatim restatement is not.
+
+- **Thermal: HVAC swing peak capture at HVAC-off** (#149): `_end_hvac_active_phase`
+  previously did not sample indoor temperature at the HVAC-off moment. `peak_indoor_f`
+  was updated only at 30-min poll cycles, making swing measurements based on stale data.
+  The method now appends a final active sample at HVAC-off and updates `peak_indoor_f`
+  if the shutoff temperature exceeds the prior peak.
+
 ## [0.3.26] — 2026-04-22
 
 ### Added

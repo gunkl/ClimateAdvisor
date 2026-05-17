@@ -26,6 +26,19 @@ what is already documented there. Key pending decisions:
 - `windows_opened` compliance should track outcome quality (energy + temp), not just schedule adherence
 - Repeated overrides in same context = learned preference; single overrides = note but don't learn yet
 
+## Investigation Protocol
+
+When investigating any symptom (wrong values, unexpected behavior, report inaccuracies), follow this mandatory order before opening any `.py` file:
+
+1. **Docs first** — read the relevant Tier 3 spec in `docs/`, then Tier 2, then CLAUDE.md. Use `docs/00-PROJECT-INSTRUCTIONS.md` Anchors table as the entry point; `docs/02-ARCHITECTURE-REFERENCE.md` as secondary routing index.
+2. **Logs second** — `python tools/ha_logs.py --lines 3000` filtered for the relevant subsystem.
+3. **DB / live data third** — `python tools/learning_db.py --model` or `--rejections`; cross-reference reported value against DB value.
+4. **Code last** — only after a specific hypothesis has been formed from steps 1–3.
+
+Skipping to code without completing steps 1–3 is a process violation. The Coordinator must redirect the agent to restart from step 1.
+
+**Root cause of this rule:** Explore agents went directly to source code (Issue #149) without reading the Tier 3 spec or fetching live data first. The spec at `docs/ai-skills-spec.md` and `docs/thermal-model-v3-spec.md` answers most structure questions without opening a `.py` file. Live data (ha_logs, learning_db) provides ground-truth values that make hypotheses falsifiable before code is read.
+
 ## Skills
 
 The following custom skills are available to enhance your workflow:

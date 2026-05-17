@@ -24,6 +24,7 @@ from .const import (
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
     ATTR_TREND,
+    THERMAL_SWING_DEFAULT_F,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,7 +55,18 @@ L <= T <= H. Verify the arithmetic directly against supplied numeric values befo
 any comfort characterization statement. The cross-validation section already contains \
 this check — reference it rather than re-deriving.
 ## DIAGNOSTICS
-System health observations: sensor connectivity, automation engine status, learning state.\
+System health observations: sensor connectivity, automation engine status, learning state.
+
+SECTION ROLES ARE EXCLUSIVE:
+- SUMMARY: current state only. No analysis, no decisions, no explanations.
+- TIMELINE: chronological events only. No "why" analysis.
+- DECISIONS: explain WHY each automation action was taken. Do NOT re-describe what Timeline already covered.
+- ANOMALIES: items that deviate from expected behavior ONLY. Do NOT re-explain decisions already in Decisions. \
+Reference [FLAG] items briefly — do not construct a full explanatory narrative.
+- DIAGNOSTICS: subsystem health only. Do NOT repeat anomalies or decisions.
+
+DEDUPLICATION RULE: Do not repeat any fact or analysis already covered in a prior section. \
+A one-line cross-reference ("see Decisions") is acceptable; re-stating the same analysis verbatim is not.\
 """
 
 
@@ -92,11 +104,12 @@ def _format_engine_status_for_ai(engine_status: dict) -> str:
     lines.append(_engine_line("solar_phase_offset_h", "solar_phase_offset_h", "h"))
     lines.append(_engine_line("k_vent_window", "k_vent_window", " hr⁻¹"))
 
-    # k_active_hvac has a different shape
+    # k_active_hvac has a different shape — values nested under "value": {"heat": ..., "cool": ...}
     hvac_info = engine_status.get("k_active_hvac", {})
     if isinstance(hvac_info, dict) and hvac_info.get("active"):
-        heat = hvac_info.get("k_active_heat")
-        cool = hvac_info.get("k_active_cool")
+        _hvac_value = hvac_info.get("value") or {}
+        heat = _hvac_value.get("heat")
+        cool = _hvac_value.get("cool")
         since = hvac_info.get("since", "")
         heat_str = f"{heat:.4f}" if isinstance(heat, float) else str(heat)
         cool_str = f"{cool:.4f}" if isinstance(cool, float) else str(cool)
@@ -216,16 +229,36 @@ async def async_build_activity_context(
                 f"[WARNING] hvac_mode=off but hvac_action={hvac_action!r} — "
                 "possible stale coordinator data or thermostat reporting bug"
             )
+    # Acquire thermostat swing/deadband — suppress flags for within-swing shortfalls.
+    _swing_heat_f = THERMAL_SWING_DEFAULT_F
+    _swing_cool_f = THERMAL_SWING_DEFAULT_F
+    _temp_unit = options.get("temp_unit", "fahrenheit")
+    if hasattr(coordinator, "learning") and callable(getattr(coordinator.learning, "get_thermal_model", None)):
+        try:
+            _thermal = coordinator.learning.get_thermal_model()
+            _swing_heat_f = _thermal.get("swing_heat_f_display", THERMAL_SWING_DEFAULT_F)
+            _swing_cool_f = _thermal.get("swing_cool_f_display", THERMAL_SWING_DEFAULT_F)
+            if _temp_unit == "celsius":
+                _swing_heat_f *= 5.0 / 9.0
+                _swing_cool_f *= 5.0 / 9.0
+        except Exception:
+            pass
     try:
         ch = float(comfort_heat)
         cc = float(comfort_cool)
         ct = float(current_temp)
-        if ct < ch:
-            state_flags.append(f"[FLAG] Indoor {ct}\u00b0F < comfort_heat {ch}\u00b0F — below comfort band")
-        elif ct > cc:
-            state_flags.append(f"[FLAG] Indoor {ct}\u00b0F > comfort_cool {cc}\u00b0F — above comfort band")
+        if (ch - ct) > _swing_heat_f:
+            state_flags.append(
+                f"[FLAG] Indoor {ct}°F < comfort_heat {ch}°F — "
+                f"below by {ch - ct:.1f}°F (deadband: {_swing_heat_f:.1f}°F)"
+            )
+        elif (ct - cc) > _swing_cool_f:
+            state_flags.append(
+                f"[FLAG] Indoor {ct}°F > comfort_cool {cc}°F — "
+                f"above by {ct - cc:.1f}°F (deadband: {_swing_cool_f:.1f}°F)"
+            )
         else:
-            state_flags.append(f"[OK] Indoor {ct}\u00b0F is within comfort band [{ch}\u2013{cc}\u00b0F]")
+            state_flags.append(f"[OK] Indoor {ct}°F is within comfort band [{ch}–{cc}°F]")
     except (ValueError, TypeError):
         pass
 

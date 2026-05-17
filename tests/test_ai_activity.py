@@ -75,6 +75,9 @@ def _make_coordinator(
     coord._today_record = MagicMock()
     coord._today_record.hvac_runtime_minutes = 0.0
     coord._hvac_on_since = None
+    # Return None from get_thermal_model so the swing acquisition try-block falls
+    # back to THERMAL_SWING_DEFAULT_F instead of a MagicMock that breaks :.1f formatting.
+    coord.learning.get_thermal_model.return_value = None
     return coord
 
 
@@ -190,7 +193,7 @@ class TestActivityCrossValidationSection:
         assert "[WARNING]" not in ctx
 
     def test_flag_when_temp_below_comfort_heat(self):
-        """[FLAG] emitted when indoor temp < comfort_heat."""
+        """[FLAG] emitted when indoor temp < comfort_heat by more than swing."""
         ctx = _build_context(
             hvac_mode="heat",
             hvac_action="heating",
@@ -199,10 +202,10 @@ class TestActivityCrossValidationSection:
             comfort_cool=76.0,
         )
         assert "[FLAG]" in ctx
-        assert "below comfort band" in ctx
+        assert "below by" in ctx
 
     def test_flag_when_temp_above_comfort_cool(self):
-        """[FLAG] emitted when indoor temp > comfort_cool."""
+        """[FLAG] emitted when indoor temp > comfort_cool by more than swing."""
         ctx = _build_context(
             hvac_mode="cool",
             hvac_action="cooling",
@@ -211,7 +214,7 @@ class TestActivityCrossValidationSection:
             comfort_cool=76.0,
         )
         assert "[FLAG]" in ctx
-        assert "above comfort band" in ctx
+        assert "above by" in ctx
 
     def test_no_flag_when_temp_at_comfort_heat_boundary(self):
         """Temp == comfort_heat is in-band (L <= T is true)."""

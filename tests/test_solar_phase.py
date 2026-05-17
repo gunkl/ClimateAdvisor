@@ -639,6 +639,64 @@ class TestEngineStatus:
         for key in required_meta_keys:
             assert key in status, f"Missing meta key {key!r} in get_engine_status() response"
 
+    def test_engine_status_k_active_hvac_value_shape(self):
+        """get_engine_status()["k_active_hvac"]["value"] is a dict with "heat" and "cool" keys.
+
+        Contract test — guards the shape that _format_engine_status_for_ai must read.
+        MUST PASS before and after fix (this verifies the learning.py shape is correct).
+        """
+        import tempfile
+        from pathlib import Path
+
+        tmp = Path(tempfile.mkdtemp())
+        learning = LearningEngine(storage_path=tmp)
+
+        # Inject a k_active_heat value directly into the thermal cache
+        if learning._state.thermal_model_cache is None:
+            learning._state.thermal_model_cache = {}
+        learning._state.thermal_model_cache["k_active_heat"] = 5.0
+
+        status = learning.get_engine_status()
+        hvac_entry = status.get("k_active_hvac", {})
+        assert "value" in hvac_entry, f"k_active_hvac entry must have a 'value' key.\nGot: {hvac_entry}"
+        value_dict = hvac_entry["value"]
+        assert isinstance(value_dict, dict), (
+            f"k_active_hvac['value'] must be a dict with 'heat'/'cool' keys.\nGot: {value_dict!r}"
+        )
+        assert "heat" in value_dict, f"k_active_hvac['value'] must have a 'heat' key.\nGot: {value_dict}"
+        assert "cool" in value_dict, f"k_active_hvac['value'] must have a 'cool' key.\nGot: {value_dict}"
+
+    def test_format_engine_status_reads_nested_value_key(self):
+        """_format_engine_status_for_ai with k_active_heat=5.0 → "5.0" in output.
+
+        MUST FAIL before Fix A: _format_engine_status_for_ai reads
+        hvac_info.get("k_active_heat") (returns None) instead of
+        hvac_info["value"]["heat"] (returns 5.0).
+        MUST PASS after Fix A.
+        """
+        import tempfile
+        from pathlib import Path
+
+        from custom_components.climate_advisor.ai_skills_activity import _format_engine_status_for_ai
+
+        tmp = Path(tempfile.mkdtemp())
+        learning = LearningEngine(storage_path=tmp)
+
+        if learning._state.thermal_model_cache is None:
+            learning._state.thermal_model_cache = {}
+        learning._state.thermal_model_cache["k_active_heat"] = 5.0
+
+        status = learning.get_engine_status()
+        result = _format_engine_status_for_ai(status)
+
+        assert "5.0" in result, (
+            f"Expected '5.0' in _format_engine_status_for_ai output with k_active_heat=5.0.\n"
+            f"Got:\n{result}\n"
+            "Bug A: _format_engine_status_for_ai reads hvac_info.get('k_active_heat') "
+            "directly from the dict top level, but get_engine_status() nests the value "
+            "under hvac_info['value']['heat']."
+        )
+
 
 # ── TestMildDayDynamicScheduling ─────────────────────────────────────────────
 

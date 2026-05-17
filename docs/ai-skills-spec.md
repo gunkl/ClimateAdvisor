@@ -177,6 +177,7 @@ Assembles nine labeled sections in fixed order. Data sources per section:
 | `LEARNING` | `coordinator.data` | See [Context omissions](#context-omissions) |
 | `CONFIGURATION` | `coordinator.config` | Comfort temps, setback temps, wake/sleep/briefing times |
 | `ACTIVE FEATURES` | `coordinator.config` | Boolean feature flags |
+| `ACTIVE PREDICTION ENGINES` | `coordinator.learning.get_engine_status()` formatted by `_format_engine_status_for_ai()` | See [Active Prediction Engines](#active-prediction-engines) |
 
 **Fresh HVAC runtime** is computed as `_today_record.hvac_runtime_minutes + session_elapsed_minutes` where `session_elapsed` is computed from `coordinator._hvac_on_since` at call time. This makes the runtime accurate regardless of coordinator.data staleness (up to 30 min between coordinator update cycles).
 
@@ -201,12 +202,46 @@ Two flags are computed and inserted into `STATE CROSS-VALIDATION` before the Cla
 
 Suppression condition: if `hvac_action == "fan"` AND `fan_status` is any of `"active"`, `"running (manual override)"`, or `"running (untracked)"` → no flag is emitted (CA knowingly activated the fan). For heating and cooling actions, no suppression applies — the warning always fires.
 
-**2. Comfort band check:** attempts `float(current_temp)`, `float(comfort_heat)`, `float(comfort_cool)`. If all three parse successfully:
-- `current_temp < comfort_heat` → `[FLAG] Indoor X°F < comfort_heat Y°F — below comfort band`
-- `current_temp > comfort_cool` → `[FLAG] Indoor X°F > comfort_cool Y°F — above comfort band`
+**2. Comfort band check (deadband-aware):** acquires thermostat swing values from `learning.get_thermal_model()` before the check — `swing_heat_f_display` and `swing_cool_f_display`. Falls back to `THERMAL_SWING_DEFAULT_F` (1.5°F) if the learning engine is unavailable or the model is not yet populated. Celsius conversion is applied when `temp_unit == "celsius"`.
+
+Then attempts `float(current_temp)`, `float(comfort_heat)`, `float(comfort_cool)`. If all three parse successfully:
+- `(comfort_heat - current_temp) > swing_heat` → `[FLAG] Indoor X°F < comfort_heat Y°F — below by N.M°F (deadband: D.D°F)`
+- `(current_temp - comfort_cool) > swing_cool` → `[FLAG] Indoor X°F > comfort_cool Y°F — above by N.M°F (deadband: D.D°F)`
 - Otherwise → `[OK] Indoor X°F is within comfort band [Y–Z°F]`
 
-If any value fails `float()` conversion (e.g., `"unknown"`), the comfort band check is silently skipped.
+The strict `>` (not `>=`) means a shortfall exactly equal to the swing does NOT flag — this matches thermostat deadband semantics where the measured offset is within expected thermal noise. A 1°F shortfall against a 1.5°F learned swing should never produce a false alarm.
+
+If any value fails `float()` conversion (e.g., `"unknown"`), the comfort band check is silently skipped. If `_swing_heat_f` or `_swing_cool_f` is not a valid float, the same try/except silently skips the check.
+
+### Active Prediction Engines
+
+`_format_engine_status_for_ai(engine_status: dict) → str`
+
+Formats the `get_engine_status()` return value from `LearningEngine` as a multi-line string for the `ACTIVE PREDICTION ENGINES` context section.
+
+**k_active_hvac shape exception:** All engines except `k_active_hvac` store their learned value directly in `engine_status["k_active_hvac"]["value"]` as a flat scalar. `k_active_hvac` is the exception — its `"value"` key is a `dict` with `"heat"` and `"cool"` sub-keys:
+
+```python
+# All other engines (flat scalar):
+engine_status["k_passive"]["value"]           # float | None
+
+# k_active_hvac only (nested dict):
+engine_status["k_active_hvac"]["value"]["heat"]   # float | None
+engine_status["k_active_hvac"]["value"]["cool"]   # float | None
+```
+
+**Active gate:** An engine is displayed as active when `value is not None` (or for k_active_hvac: either `heat is not None or cool is not None`). A `"since"` date is included when available; if the engine was active before date tracking was introduced (pre-v0.3.46), it displays as `"pre-v0.3.46"`.
+
+### System Prompt Deduplication Rule
+
+`_SYSTEM_PROMPT` includes a `DEDUPLICATION RULE` requiring each section to be exclusive:
+- `SUMMARY`: current state only — no analysis, no decisions
+- `TIMELINE`: chronological events only — no "why" analysis
+- `DECISIONS`: explain WHY each action was taken — do NOT re-describe Timeline content
+- `ANOMALIES`: deviations from expected behavior only — do NOT re-explain Decisions
+- `DIAGNOSTICS`: subsystem health only — do NOT repeat anomalies or decisions
+
+A one-line cross-reference (`"see Decisions"`) is acceptable; restating the same analysis verbatim is not.
 
 ### Response Parser
 

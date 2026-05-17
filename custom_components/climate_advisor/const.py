@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.46"
+VERSION = "0.3.47"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.3.47": [
+        "Fix #149: AI activity report — k_active_hvac heat/cool values now display correctly"
+        " (property path fixed: hvac_info['value']['heat/cool'] instead of direct key lookup)",
+        "Fix #149: Comfort band [FLAG] now suppressed when indoor/outdoor gap is within thermostat swing deadband",
+        "Fix #149: Activity report section deduplication rule added to system prompt",
+        "Fix #149: HVAC peak indoor temp now captured at exact HVAC-off moment (not only at poll cycles)",
+    ],
     "0.3.44": [
         "Fix #143: _get_forecast() date-keyed dict replaces blind-index fallback"
         " — briefing tomorrow-high now always reads the correct forecast entry"
@@ -196,6 +203,20 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_not_covered": [
             "_get_forecast() fallback branch — fallback block not addressed in this fix; fixed in Issue #143",
         ],
+    },
+    149: {
+        "version_fixed": "0.3.47",
+        "title": (
+            "Activity report quality: k_active_hvac property path, comfort-band deadband,"
+            " section deduplication, swing peak capture"
+        ),
+        "scope_covered": [
+            "k_active_hvac heat/cool values now appear in AI activity context",
+            "Comfort band [FLAG] suppressed when gap <= thermostat swing deadband",
+            "Activity report section deduplication rule added to system prompt",
+            "HVAC peak temperature captured at exact HVAC-off moment for accurate swing measurement",
+        ],
+        "scope_not_covered": [],
     },
 }
 

@@ -3449,6 +3449,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if obs is None or obs.get("_phase") != "active":
             return
         now = dt_util.now()
+
+        # Capture indoor temp at the exact HVAC-off moment so swing uses the true shutoff temperature.
+        _final_indoor = self._get_indoor_temp()
+        if _final_indoor is not None:
+            try:
+                _elapsed = (
+                    now - dt_util.parse_datetime(obs.get("active_start", now.isoformat()))
+                ).total_seconds() / 60.0
+            except Exception:
+                _elapsed = 0.0
+            active_samples = obs.get("active_samples", [])
+            if len(active_samples) < THERMAL_MAX_ACTIVE_SAMPLES:
+                active_samples.append(self._get_current_sample(_elapsed))
+            _cur_peak = obs.get("peak_indoor_f")
+            if obs_type == OBS_TYPE_HVAC_COOL:
+                # For cooling, peak is the minimum (lowest indoor temp reached)
+                if _cur_peak is None or _final_indoor < _cur_peak:
+                    obs["peak_indoor_f"] = _final_indoor
+            else:
+                # For heating (and any other type), peak is the maximum
+                if _cur_peak is None or _final_indoor > _cur_peak:
+                    obs["peak_indoor_f"] = _final_indoor
+
         obs["_phase"] = "post_heat"
         obs["active_end"] = now.isoformat()
 

@@ -555,6 +555,7 @@
       <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Target band</label>
       <label id="overlay-humidity-label"><input type="checkbox" id="overlay-humidity" onchange="toggleOverlay('humidity')"> Humidity</label>
       <label id="overlay-feelslike-label"><input type="checkbox" id="overlay-feelslike" onchange="toggleOverlay('feelslike')"> Feels-like</label>
+      <label id="overlay-setpoint-label"><input type="checkbox" id="overlay-setpoint" onchange="toggleOverlay('setpoint')"> Thermostat Setpoint</label>
     </div>
   </div>
 
@@ -930,6 +931,8 @@
     comfort_border:'rgba(76, 175, 80, 0.30)',
     humidity:      'rgba(156, 39, 176, 0.70)',   // purple
     feelslike:     'rgba(0, 188, 212, 0.70)',    // cyan
+    setpoint:      'rgb(160, 32, 240)',           // purple/magenta
+    setpoint_fill: 'rgba(160, 32, 240, 0.35)',   // faint for off-mode forward-fill
   };
 
   // Map hvac action string → colour
@@ -1159,6 +1162,31 @@
     const humidityPts  = log.filter(e => e.humidity  != null).map(e => ({ x: _parseTs(e.ts), y: e.humidity }));
     const feelsLikePts = log.filter(e => e.feelslike != null).map(e => ({ x: _parseTs(e.ts), y: e.feelslike }));
 
+    // Thermostat Setpoint: historical (past) + predicted (future), forward-filling nulls as faint off-mode segments
+    const setpointVisible = document.getElementById('overlay-setpoint')?.checked ?? false;
+    let _lastKnownSp = null;
+    const setpointHistPts = [];   // solid — past active setpoints + faint forward-fill
+    const setpointPredPts = [];   // dashed — future predicted setpoints + faint forward-fill
+    for (const pt of (chartData.historical_setpoint || [])) {
+      const ts = _parseTs(pt.ts);
+      if (pt.setpoint != null) {
+        _lastKnownSp = pt.setpoint;
+        setpointHistPts.push({ x: ts, y: pt.setpoint, _ff: false });
+      } else if (_lastKnownSp != null) {
+        setpointHistPts.push({ x: ts, y: _lastKnownSp, _ff: true });
+      }
+    }
+    for (const pt of (chartData.predicted_setpoint || [])) {
+      const ts = _parseTs(pt.ts);
+      if (pt.setpoint != null) {
+        _lastKnownSp = pt.setpoint;
+        setpointPredPts.push({ x: ts, y: pt.setpoint, _ff: false });
+      } else if (_lastKnownSp != null) {
+        setpointPredPts.push({ x: ts, y: _lastKnownSp, _ff: true });
+      }
+    }
+    const setpointHasData = setpointHistPts.length > 0 || setpointPredPts.length > 0;
+
     const datasets = [
       {
         label: 'Predicted Outdoor',
@@ -1217,16 +1245,20 @@
     if (targetBandUpperDs) datasets.push(targetBandUpperDs);
     if (targetBandLowerDs) datasets.push(targetBandLowerDs);
 
-    // Always add humidity/feels-like datasets so toggleOverlay() can find them.
+    // Always add humidity/feels-like/setpoint datasets so toggleOverlay() can find them.
     // Disable the checkbox if no data is available for the selected range.
     const humidityCheck = document.getElementById('overlay-humidity');
     const feelslikeCheck = document.getElementById('overlay-feelslike');
+    const setpointCheck = document.getElementById('overlay-setpoint');
     const humidityLabel = document.getElementById('overlay-humidity-label');
     const feelslikeLabel = document.getElementById('overlay-feelslike-label');
+    const setpointLabel = document.getElementById('overlay-setpoint-label');
     if (humidityCheck) humidityCheck.disabled = humidityPts.length === 0;
     if (feelslikeCheck) feelslikeCheck.disabled = feelsLikePts.length === 0;
+    if (setpointCheck) setpointCheck.disabled = !setpointHasData;
     if (humidityLabel) humidityLabel.classList.toggle('no-data', humidityPts.length === 0);
     if (feelslikeLabel) feelslikeLabel.classList.toggle('no-data', feelsLikePts.length === 0);
+    if (setpointLabel) setpointLabel.classList.toggle('no-data', !setpointHasData);
 
     datasets.push({
       label: 'Humidity %',
@@ -1255,6 +1287,48 @@
       yAxisID: 'y',
       hidden: !feelsLikeVisible || feelsLikePts.length === 0,
       order: 7,
+    });
+
+    // Thermostat Setpoint — two sub-datasets: solid past, dashed future.
+    // Off-mode forward-filled points use faint colour on both sub-datasets.
+    // Use per-point segment styling via a custom borderColor function that reads _ff.
+    datasets.push({
+      label: 'Thermostat Setpoint',
+      type: 'line',
+      data: setpointHistPts,
+      borderColor: CHART_COLORS.setpoint,
+      borderWidth: 2,
+      pointRadius: 0,
+      pointStyle: 'line',
+      tension: 0,
+      stepped: true,
+      yAxisID: 'y',
+      hidden: !setpointVisible || !setpointHasData,
+      order: 8,
+      segment: {
+        borderColor: (ctx) => (ctx.p0?.raw?._ff ? CHART_COLORS.setpoint_fill : CHART_COLORS.setpoint),
+        borderWidth: (ctx) => (ctx.p0?.raw?._ff ? 1 : 2),
+      },
+    });
+    datasets.push({
+      label: '_setpoint_pred',
+      type: 'line',
+      data: setpointPredPts,
+      borderColor: CHART_COLORS.setpoint,
+      borderWidth: 2,
+      borderDash: [6, 4],
+      pointRadius: 0,
+      pointStyle: 'line',
+      tension: 0,
+      stepped: true,
+      yAxisID: 'y',
+      hidden: !setpointVisible || !setpointHasData,
+      order: 8,
+      segment: {
+        borderColor: (ctx) => (ctx.p0?.raw?._ff ? CHART_COLORS.setpoint_fill : CHART_COLORS.setpoint),
+        borderDash: (ctx) => (ctx.p0?.raw?._ff ? [3, 6] : [6, 4]),
+        borderWidth: (ctx) => (ctx.p0?.raw?._ff ? 1 : 2),
+      },
     });
 
     const nowMs = Date.now();
@@ -1736,6 +1810,7 @@
       comfort_band: 'Target Band',
       humidity: 'Humidity %',
       feelslike: 'Feels-like',
+      setpoint: 'Thermostat Setpoint',
     };
     const label = labelMap[name];
     if (!label) return;
@@ -1743,6 +1818,13 @@
     if (name === 'comfort_band') {
       _tempChart.data.datasets.forEach(d => {
         if (d.label === 'Target Band' || d.label === '_target_band_lower') {
+          d.hidden = !d.hidden;
+        }
+      });
+    } else if (name === 'setpoint') {
+      // Toggle both the historical (solid) and predicted (dashed) sub-datasets
+      _tempChart.data.datasets.forEach(d => {
+        if (d.label === 'Thermostat Setpoint' || d.label === '_setpoint_pred') {
           d.hidden = !d.hidden;
         }
       });

@@ -594,6 +594,13 @@ class DailyRecord:
     observed_high_f: float | None = None  # actual max from outdoor temp history
     observed_low_f: float | None = None  # actual min from outdoor temp history
 
+    # Bedtime setback tracking
+    setback_heat_applied_f: float | None = None
+    setback_cool_applied_f: float | None = None
+    setback_depth_f: float | None = None
+    setback_was_adaptive: bool | None = None
+    setback_skipped_reason: str | None = None
+
 
 @dataclass
 class LearningState:

@@ -262,6 +262,9 @@ class AutomationEngine:
         # Event log callback — set by coordinator after construction
         self._emit_event_callback: Any | None = None
 
+        # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
+        self._today_record: Any | None = None
+
         # Issue #96: classification event dedup — track last emitted (day_type, hvac_mode) pair
         self._last_classification_applied: tuple[str, str] | None = None
         # Issue #96: override event dedup — track last emission time
@@ -1900,6 +1903,13 @@ class AutomationEngine:
         # Issue #85: vacation/away already has a setback — don't override it with sleep temps
         if self._occupancy_mode in (OCCUPANCY_VACATION, OCCUPANCY_AWAY):
             _LOGGER.info("Bedtime skipped — %s mode (setback already active)", self._occupancy_mode)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "bedtime_setback_skipped",
+                    {"reason": "occupancy", "occupancy": self._occupancy_mode},
+                )
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "occupancy"
             return
 
         self.clear_manual_override()
@@ -1912,11 +1922,45 @@ class AutomationEngine:
 
         c = self._current_classification
         if not c:
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "no_classification"
+            return
+
+        if c.hvac_mode not in ("heat", "cool"):
+            _LOGGER.info("Bedtime — HVAC mode is %s, no setback needed", c.hvac_mode)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "bedtime_setback_skipped",
+                    {"reason": "hvac_off", "occupancy": self._occupancy_mode},
+                )
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "hvac_off"
             return
 
         unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             bedtime_target = compute_bedtime_setback(self.config, self._thermal_model, c)
+            depth_f = abs(self.config["comfort_heat"] - bedtime_target)
+            was_adaptive = (
+                self._thermal_model is not None
+                and self._thermal_model.get("confidence", "none") != "none"
+                and (self._thermal_model.get("k_active_heat") or 0) > 0
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "bedtime_setback",
+                    {
+                        "mode": "heat",
+                        "target_f": bedtime_target,
+                        "depth_f": depth_f,
+                        "adaptive": was_adaptive,
+                        "modifier": c.setback_modifier,
+                    },
+                )
+            if self._today_record is not None:
+                self._today_record.setback_heat_applied_f = bedtime_target
+                self._today_record.setback_depth_f = depth_f
+                self._today_record.setback_was_adaptive = was_adaptive
             await self._set_temperature(
                 bedtime_target,
                 reason=(
@@ -1927,6 +1971,27 @@ class AutomationEngine:
             )
         elif c.hvac_mode == "cool":
             bedtime_target = compute_bedtime_setback(self.config, self._thermal_model, c)
+            depth_f = abs(self.config["comfort_cool"] - bedtime_target)
+            was_adaptive = (
+                self._thermal_model is not None
+                and self._thermal_model.get("confidence", "none") != "none"
+                and (self._thermal_model.get("k_active_cool") or 0) > 0
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "bedtime_setback",
+                    {
+                        "mode": "cool",
+                        "target_f": bedtime_target,
+                        "depth_f": depth_f,
+                        "adaptive": was_adaptive,
+                        "modifier": c.setback_modifier,
+                    },
+                )
+            if self._today_record is not None:
+                self._today_record.setback_cool_applied_f = bedtime_target
+                self._today_record.setback_depth_f = depth_f
+                self._today_record.setback_was_adaptive = was_adaptive
             await self._set_temperature(
                 bedtime_target,
                 reason=(

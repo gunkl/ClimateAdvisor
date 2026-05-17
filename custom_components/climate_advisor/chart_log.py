@@ -127,6 +127,7 @@ class ChartStateLog:
         windows_recommended: bool = False,
         pred_outdoor: float | None = None,
         pred_indoor: float | None = None,
+        setpoint: float | None = None,
         event: str | None = None,
         ts: str | None = None,
     ) -> None:
@@ -144,6 +145,7 @@ class ChartStateLog:
             "windows_recommended": windows_recommended,
             "pred_outdoor": pred_outdoor,
             "pred_indoor": pred_indoor,
+            "setpoint": setpoint,
         }
         if event is not None:
             entry["event"] = event
@@ -251,6 +253,7 @@ class ChartStateLog:
 
             pred_outdoor_vals = [e["pred_outdoor"] for e in group if e.get("pred_outdoor") is not None]
             pred_indoor_vals = [e["pred_indoor"] for e in group if e.get("pred_indoor") is not None]
+            setpoint_vals = [e["setpoint"] for e in group if e.get("setpoint") is not None]
 
             summary: dict[str, Any] = {
                 "ts": bucket_key,
@@ -264,6 +267,7 @@ class ChartStateLog:
                     round(sum(pred_outdoor_vals) / len(pred_outdoor_vals), 1) if pred_outdoor_vals else None
                 ),
                 "pred_indoor": (round(sum(pred_indoor_vals) / len(pred_indoor_vals), 1) if pred_indoor_vals else None),
+                "setpoint": round(sum(setpoint_vals) / len(setpoint_vals), 1) if setpoint_vals else None,
             }
             if events:
                 summary["event"] = events
@@ -291,6 +295,7 @@ class ChartStateLog:
 
             pred_outdoor_vals = [e["pred_outdoor"] for e in group if e.get("pred_outdoor") is not None]
             pred_indoor_vals = [e["pred_indoor"] for e in group if e.get("pred_indoor") is not None]
+            setpoint_vals = [e["setpoint"] for e in group if e.get("setpoint") is not None]
 
             summary: dict[str, Any] = {
                 "ts": f"{day_key}T00:00:00+00:00",
@@ -310,6 +315,7 @@ class ChartStateLog:
                 "pred_indoor_avg": (
                     round(sum(pred_indoor_vals) / len(pred_indoor_vals), 1) if pred_indoor_vals else None
                 ),
+                "setpoint": round(sum(setpoint_vals) / len(setpoint_vals), 1) if setpoint_vals else None,
             }
             if events:
                 summary["events"] = events

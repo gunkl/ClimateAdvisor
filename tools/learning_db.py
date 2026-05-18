@@ -504,12 +504,12 @@ def _print_daily_records(db: dict, n: int = 30) -> None:
         mode = rec.get("hvac_mode_recommended", "?")
         heat = rec.get("setback_heat_applied_f")
         cool = rec.get("setback_cool_applied_f")
-        applied = f"{heat:.1f}°F" if heat is not None else (f"{cool:.1f}°F" if cool is not None else "—")
+        applied = f"{heat:.1f}°F" if heat is not None else (f"{cool:.1f}°F" if cool is not None else "--")
         depth = rec.get("setback_depth_f")
-        depth_str = f"{depth:.1f}°F" if depth is not None else "—"
+        depth_str = f"{depth:.1f}°F" if depth is not None else "--"
         adaptive = rec.get("setback_was_adaptive")
-        adaptive_str = "yes" if adaptive is True else ("no" if adaptive is False else "—")
-        skipped = rec.get("setback_skipped_reason") or "—"
+        adaptive_str = "yes" if adaptive is True else ("no" if adaptive is False else "--")
+        skipped = rec.get("setback_skipped_reason") or "--"
 
         row = (
             _pad(str(date), 12)

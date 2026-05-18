@@ -4377,6 +4377,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "historical_setpoint": [
                 {"ts": e["ts"], "setpoint": _conv(e["setpoint"])} for e in _extract_historical_setpoint(log_entries)
             ],
+            "defense_lines": _compute_defense_lines(_conv_band),
+            "predicted_activity": _compute_predicted_activity(
+                _conv_band,
+                forecast_outdoor,
+                predicted_indoor,
+                self._current_classification,
+                self.config,
+            ),
             "unit": unit,
         }
 
@@ -5645,6 +5653,69 @@ def _extract_historical_setpoint(log_entries: list[dict]) -> list[dict]:
         if not ts:
             continue
         result.append({"ts": ts, "setpoint": e.get("setpoint")})
+    return result
+
+
+def _compute_defense_lines(target_band: list[dict]) -> list[dict]:
+    """Return [{ts, heat, cool}] from target_band — always both bounds, never null.
+
+    Unlike _derive_predicted_setpoint (single bound per hvac_mode), this always
+    exposes both the heat-defense threshold (lower) and cool-defense threshold (upper)
+    so the frontend can render them as always-present automation intent lines.
+    """
+    return [{"ts": e["ts"], "heat": e.get("lower"), "cool": e.get("upper")} for e in target_band]
+
+
+def _compute_predicted_activity(
+    target_band: list[dict],
+    forecast_outdoor: list[dict],
+    predicted_indoor: list[dict],
+    classification: Any | None,
+    config: dict,
+) -> list[dict]:
+    """Per forecast hour: hvac_mode intent, fan_active, windows_recommended.
+
+    All temperature values must be in the same display unit; band bounds are used
+    for comparisons so no separate comfort-temp conversion is needed.
+    """
+    outdoor_by_ts = {e["ts"]: e.get("temp") for e in forecast_outdoor if e.get("ts")}
+    indoor_by_ts = {e["ts"]: e.get("temp") for e in predicted_indoor if e.get("ts")}
+    hvac_mode = getattr(classification, "hvac_mode", "off") if classification is not None else "off"
+    fan_mode = str(config.get("fan_mode", "auto"))
+    natural_vent_delta = float(config.get("natural_vent_delta", 5.0))
+
+    result = []
+    for band_entry in target_band:
+        ts = band_entry.get("ts")
+        if not ts:
+            continue
+        band_lower = band_entry.get("lower")
+        band_upper = band_entry.get("upper")
+        outdoor = outdoor_by_ts.get(ts)
+        indoor = indoor_by_ts.get(ts)
+
+        if fan_mode == "on":
+            fan_active = True
+        elif outdoor is not None and indoor is not None and band_upper is not None:
+            fan_active = bool(outdoor < indoor and outdoor < band_upper + natural_vent_delta and indoor > band_upper)
+        else:
+            fan_active = False
+
+        if outdoor is not None and indoor is not None and band_lower is not None and band_upper is not None:
+            windows_recommended = bool(
+                outdoor >= band_lower and outdoor <= band_upper + 2.0 and outdoor < indoor and indoor > band_upper
+            )
+        else:
+            windows_recommended = False
+
+        result.append(
+            {
+                "ts": ts,
+                "hvac_mode": hvac_mode,
+                "fan_active": fan_active,
+                "windows_recommended": windows_recommended,
+            }
+        )
     return result
 
 

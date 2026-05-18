@@ -334,3 +334,285 @@ class TestExtractHistoricalSetpoint:
         assert "historical_setpoint" in src, (
             "get_chart_data() does not return 'historical_setpoint' — Part 4c not implemented"
         )
+
+
+# ===========================================================================
+# Issue #153 — _compute_defense_lines helper in coordinator.py
+# ===========================================================================
+
+
+class TestComputeDefenseLines:
+    """coordinator.py must expose _compute_defense_lines(target_band).
+
+    Always returns both heat (lower) and cool (upper) bounds regardless of HVAC mode.
+    """
+
+    def _import_helper(self):
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        return mod._compute_defense_lines
+
+    def _make_band(self, entries: list[tuple[str, float, float]]) -> list[dict]:
+        return [{"ts": ts, "lower": lower, "upper": upper} for ts, lower, upper in entries]
+
+    def test_returns_heat_and_cool_keys(self) -> None:
+        """Each entry has 'ts', 'heat', and 'cool' keys."""
+        fn = self._import_helper()
+        band = self._make_band([("2026-05-18T06:00:00+00:00", 68.0, 76.0)])
+        result = fn(band)
+        assert len(result) == 1
+        assert set(result[0].keys()) == {"ts", "heat", "cool"}
+
+    def test_heat_maps_to_lower_bound(self) -> None:
+        """'heat' value == target_band 'lower' for each entry."""
+        fn = self._import_helper()
+        band = self._make_band(
+            [
+                ("2026-05-18T06:00:00+00:00", 68.0, 76.0),
+                ("2026-05-18T22:00:00+00:00", 60.0, 76.0),  # setback at bedtime
+            ]
+        )
+        result = fn(band)
+        assert result[0]["heat"] == 68.0
+        assert result[1]["heat"] == 60.0  # setback step visible
+
+    def test_cool_maps_to_upper_bound(self) -> None:
+        """'cool' value == target_band 'upper' for each entry."""
+        fn = self._import_helper()
+        band = self._make_band(
+            [
+                ("2026-05-18T06:00:00+00:00", 68.0, 76.0),
+                ("2026-05-18T22:00:00+00:00", 68.0, 82.0),  # setback raises cool
+            ]
+        )
+        result = fn(band)
+        assert result[0]["cool"] == 76.0
+        assert result[1]["cool"] == 82.0  # setback step visible
+
+    def test_always_non_null_regardless_of_hvac_mode(self) -> None:
+        """No hvac_mode argument — both bounds always populated."""
+        fn = self._import_helper()
+        band = self._make_band(
+            [
+                ("2026-05-18T10:00:00+00:00", 68.0, 76.0),
+                ("2026-05-18T11:00:00+00:00", 68.0, 76.0),
+            ]
+        )
+        result = fn(band)
+        for entry in result:
+            assert entry["heat"] is not None
+            assert entry["cool"] is not None
+
+    def test_empty_band_returns_empty_list(self) -> None:
+        """Empty target_band → empty result."""
+        fn = self._import_helper()
+        assert fn([]) == []
+
+    def test_ts_preserved(self) -> None:
+        """Timestamps pass through unchanged."""
+        fn = self._import_helper()
+        ts = "2026-05-18T22:30:00+00:00"
+        band = self._make_band([(ts, 60.0, 82.0)])
+        result = fn(band)
+        assert result[0]["ts"] == ts
+
+    def test_defense_lines_key_in_get_chart_data(self) -> None:
+        """get_chart_data() source must reference 'defense_lines' key."""
+        import importlib
+        import inspect
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        src = inspect.getsource(mod.ClimateAdvisorCoordinator.get_chart_data)
+        assert "defense_lines" in src, (
+            "get_chart_data() does not return 'defense_lines' — Issue #153 Part 1 not implemented"
+        )
+
+
+# ===========================================================================
+# Issue #153 — _compute_predicted_activity helper in coordinator.py
+# ===========================================================================
+
+
+class TestComputePredictedActivity:
+    """coordinator.py must expose _compute_predicted_activity(target_band, forecast_outdoor,
+    predicted_indoor, classification, config).
+
+    Returns [{ts, hvac_mode, fan_active, windows_recommended}] per forecast hour.
+    """
+
+    def _import_helper(self):
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        return mod._compute_predicted_activity
+
+    def _make_band(self, ts: str, lower: float = 68.0, upper: float = 76.0) -> list[dict]:
+        return [{"ts": ts, "lower": lower, "upper": upper}]
+
+    def _make_forecast(self, ts: str, temp: float) -> list[dict]:
+        return [{"ts": ts, "temp": temp}]
+
+    def _make_predicted_indoor(self, ts: str, temp: float) -> list[dict]:
+        return [{"ts": ts, "temp": temp}]
+
+    def _make_classification(self, hvac_mode: str = "heat"):
+        from unittest.mock import MagicMock
+
+        c = MagicMock()
+        c.hvac_mode = hvac_mode
+        return c
+
+    def _base_config(self, **overrides) -> dict:
+        cfg = {
+            "comfort_heat": 68.0,
+            "comfort_cool": 76.0,
+            "natural_vent_delta": 5.0,
+            "fan_mode": "auto",
+        }
+        cfg.update(overrides)
+        return cfg
+
+    # --- output shape ---
+
+    def test_returns_list_with_correct_keys(self) -> None:
+        """Each entry has ts, hvac_mode, fan_active, windows_recommended."""
+        fn = self._import_helper()
+        ts = "2026-05-18T14:00:00+00:00"
+        result = fn(
+            self._make_band(ts),
+            self._make_forecast(ts, 65.0),
+            self._make_predicted_indoor(ts, 72.0),
+            self._make_classification("heat"),
+            self._base_config(),
+        )
+        assert len(result) == 1
+        entry = result[0]
+        assert set(entry.keys()) >= {"ts", "hvac_mode", "fan_active", "windows_recommended"}
+
+    def test_empty_band_returns_empty_list(self) -> None:
+        """Empty target_band → empty result."""
+        fn = self._import_helper()
+        result = fn([], [], [], None, self._base_config())
+        assert result == []
+
+    # --- hvac_mode ---
+
+    def test_hvac_mode_from_classification(self) -> None:
+        """hvac_mode in output matches classification.hvac_mode."""
+        fn = self._import_helper()
+        ts = "2026-05-18T14:00:00+00:00"
+        result = fn(
+            self._make_band(ts),
+            self._make_forecast(ts, 65.0),
+            self._make_predicted_indoor(ts, 72.0),
+            self._make_classification("cool"),
+            self._base_config(),
+        )
+        assert result[0]["hvac_mode"] == "cool"
+
+    def test_hvac_mode_off_when_no_classification(self) -> None:
+        """No classification (None) → hvac_mode == 'off'."""
+        fn = self._import_helper()
+        ts = "2026-05-18T14:00:00+00:00"
+        result = fn(
+            self._make_band(ts),
+            self._make_forecast(ts, 72.0),
+            self._make_predicted_indoor(ts, 72.0),
+            None,  # no classification
+            self._base_config(),
+        )
+        assert result[0]["hvac_mode"] == "off"
+
+    # --- fan_active ---
+
+    def test_fan_active_natural_vent_conditions(self) -> None:
+        """Fan engages when outdoor < indoor AND indoor > comfort_cool."""
+        fn = self._import_helper()
+        ts = "2026-05-18T16:00:00+00:00"
+        result = fn(
+            self._make_band(ts, lower=68.0, upper=76.0),
+            self._make_forecast(ts, 70.0),  # outdoor 70 < indoor 78
+            self._make_predicted_indoor(ts, 78.0),  # indoor above cool comfort
+            self._make_classification("off"),
+            self._base_config(comfort_cool=76.0),
+        )
+        assert result[0]["fan_active"] is True
+
+    def test_fan_not_active_when_outdoor_warmer_than_indoor(self) -> None:
+        """Fan off when outdoor >= indoor (no benefit from ventilation)."""
+        fn = self._import_helper()
+        ts = "2026-05-18T14:00:00+00:00"
+        result = fn(
+            self._make_band(ts, lower=68.0, upper=76.0),
+            self._make_forecast(ts, 80.0),  # outdoor 80 > indoor 72
+            self._make_predicted_indoor(ts, 72.0),
+            self._make_classification("off"),
+            self._base_config(),
+        )
+        assert result[0]["fan_active"] is False
+
+    def test_fan_active_when_fan_mode_on(self) -> None:
+        """Fan always active when fan_mode='on' (continuous circulation)."""
+        fn = self._import_helper()
+        ts = "2026-05-18T02:00:00+00:00"
+        result = fn(
+            self._make_band(ts, lower=60.0, upper=82.0),
+            self._make_forecast(ts, 55.0),  # cold outdoor — would normally not trigger
+            self._make_predicted_indoor(ts, 65.0),  # indoor below comfort_cool
+            self._make_classification("heat"),
+            self._base_config(fan_mode="on"),
+        )
+        assert result[0]["fan_active"] is True
+
+    # --- windows_recommended ---
+
+    def test_windows_recommended_when_outdoor_pleasant_indoor_warm(self) -> None:
+        """Windows recommended when outdoor in comfort zone and indoor is above comfort_cool."""
+        fn = self._import_helper()
+        ts = "2026-05-18T08:00:00+00:00"
+        result = fn(
+            self._make_band(ts, lower=68.0, upper=76.0),
+            self._make_forecast(ts, 72.0),  # outdoor in comfort zone
+            self._make_predicted_indoor(ts, 79.0),  # indoor above cool ceiling
+            self._make_classification("off"),
+            self._base_config(comfort_heat=68.0, comfort_cool=76.0),
+        )
+        assert result[0]["windows_recommended"] is True
+
+    def test_windows_not_recommended_when_outdoor_too_cold(self) -> None:
+        """Windows not recommended when outdoor below comfort_heat."""
+        fn = self._import_helper()
+        ts = "2026-05-18T06:00:00+00:00"
+        result = fn(
+            self._make_band(ts, lower=68.0, upper=76.0),
+            self._make_forecast(ts, 45.0),  # outdoor too cold
+            self._make_predicted_indoor(ts, 72.0),
+            self._make_classification("heat"),
+            self._base_config(comfort_heat=68.0, comfort_cool=76.0),
+        )
+        assert result[0]["windows_recommended"] is False
+
+    def test_windows_not_recommended_when_outdoor_warmer_than_indoor(self) -> None:
+        """Windows not recommended when outdoor >= indoor (would heat the house)."""
+        fn = self._import_helper()
+        ts = "2026-05-18T15:00:00+00:00"
+        result = fn(
+            self._make_band(ts, lower=68.0, upper=76.0),
+            self._make_forecast(ts, 82.0),  # outdoor 82 > indoor 78
+            self._make_predicted_indoor(ts, 78.0),
+            self._make_classification("off"),
+            self._base_config(),
+        )
+        assert result[0]["windows_recommended"] is False
+
+    def test_predicted_activity_key_in_get_chart_data(self) -> None:
+        """get_chart_data() source must reference 'predicted_activity' key."""
+        import importlib
+        import inspect
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        src = inspect.getsource(mod.ClimateAdvisorCoordinator.get_chart_data)
+        assert "predicted_activity" in src, (
+            "get_chart_data() does not return 'predicted_activity' — Issue #153 Part 2 not implemented"
+        )

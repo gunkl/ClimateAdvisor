@@ -555,7 +555,7 @@
       <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Target band</label>
       <label id="overlay-humidity-label"><input type="checkbox" id="overlay-humidity" onchange="toggleOverlay('humidity')"> Humidity</label>
       <label id="overlay-feelslike-label"><input type="checkbox" id="overlay-feelslike" onchange="toggleOverlay('feelslike')"> Feels-like</label>
-      <label id="overlay-setpoint-label"><input type="checkbox" id="overlay-setpoint" onchange="toggleOverlay('setpoint')"> Thermostat Setpoint</label>
+      <label id="overlay-setpoint-label"><input type="checkbox" id="overlay-setpoint" checked onchange="toggleOverlay('setpoint')"> Automation Setpoints</label>
     </div>
   </div>
 
@@ -933,6 +933,8 @@
     feelslike:     'rgba(0, 188, 212, 0.70)',    // cyan
     setpoint:      'rgb(160, 32, 240)',           // purple/magenta
     setpoint_fill: 'rgba(160, 32, 240, 0.35)',   // faint for off-mode forward-fill
+    heatSetpoint:  '#F59E0B',                    // amber — heat defense line
+    coolSetpoint:  '#3B82F6',                    // blue — cool defense line
   };
 
   // Map hvac action string → colour
@@ -976,7 +978,7 @@
   }
 
   // Draw horizontal activity timeline above the temperature chart
-  function drawActivityTimeline(log, rangeMin, rangeMax, chartLeftPx, chartRightPx) {
+  function drawActivityTimeline(log, rangeMin, rangeMax, chartLeftPx, chartRightPx, predictedActivity) {
     const canvas = document.getElementById('activity-chart');
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
@@ -1064,6 +1066,43 @@
     });
 
     // Rounded caps: none needed — rectangles look clean as segments
+
+    // Draw predicted future activity segments (40% opacity)
+    const pred = (predictedActivity || []).slice().sort((a, b) => _parseTs(a.ts) - _parseTs(b.ts));
+    if (pred.length > 0) {
+      const hvacFutureMap = {
+        heating: 'rgba(239,83,80,0.4)',
+        cooling: 'rgba(66,165,245,0.4)',
+        fan:     'rgba(102,187,106,0.3)',
+      };
+      pred.forEach((e, i) => {
+        const segStart = Math.max(rangeMin, _parseTs(e.ts));
+        const segEnd   = Math.min(rangeMax, i < pred.length - 1 ? _parseTs(pred[i + 1].ts) : rangeMax);
+        if (segEnd <= rangeMin || segStart >= rangeMax) return;
+        const x0 = xPx(segStart);
+        const x1 = xPx(segEnd);
+        const w  = Math.max(1, x1 - x0);
+
+        // HVAC future row
+        const hv = (e.hvac_mode || '').toLowerCase();
+        if (hvacFutureMap[hv]) {
+          ctx.fillStyle = hvacFutureMap[hv];
+          ctx.fillRect(x0, 0, w, rowH);
+        }
+
+        // Fan future row
+        if (e.fan_active) {
+          ctx.fillStyle = 'rgba(102,187,106,0.3)';
+          ctx.fillRect(x0, 24, w, rowH);
+        }
+
+        // Win Rec future row
+        if (e.windows_recommended) {
+          ctx.fillStyle = 'rgba(255,179,0,0.4)';
+          ctx.fillRect(x0, 48, w, rowH);
+        }
+      });
+    }
 
     // "Now" tick on timeline
     const nowX = xPx(Date.now());
@@ -1162,30 +1201,15 @@
     const humidityPts  = log.filter(e => e.humidity  != null).map(e => ({ x: _parseTs(e.ts), y: e.humidity }));
     const feelsLikePts = log.filter(e => e.feelslike != null).map(e => ({ x: _parseTs(e.ts), y: e.feelslike }));
 
-    // Thermostat Setpoint: historical (past) + predicted (future), forward-filling nulls as faint off-mode segments
-    const setpointVisible = document.getElementById('overlay-setpoint')?.checked ?? false;
-    let _lastKnownSp = null;
-    const setpointHistPts = [];   // solid — past active setpoints + faint forward-fill
-    const setpointPredPts = [];   // dashed — future predicted setpoints + faint forward-fill
-    for (const pt of (chartData.historical_setpoint || [])) {
-      const ts = _parseTs(pt.ts);
-      if (pt.setpoint != null) {
-        _lastKnownSp = pt.setpoint;
-        setpointHistPts.push({ x: ts, y: pt.setpoint, _ff: false });
-      } else if (_lastKnownSp != null) {
-        setpointHistPts.push({ x: ts, y: _lastKnownSp, _ff: true });
-      }
-    }
-    for (const pt of (chartData.predicted_setpoint || [])) {
-      const ts = _parseTs(pt.ts);
-      if (pt.setpoint != null) {
-        _lastKnownSp = pt.setpoint;
-        setpointPredPts.push({ x: ts, y: pt.setpoint, _ff: false });
-      } else if (_lastKnownSp != null) {
-        setpointPredPts.push({ x: ts, y: _lastKnownSp, _ff: true });
-      }
-    }
-    const setpointHasData = setpointHistPts.length > 0 || setpointPredPts.length > 0;
+    // Automation Setpoints: heat/cool defense lines from backend defense_lines array.
+    // defense_lines are always fully populated — no forward-fill needed.
+    const setpointVisible = document.getElementById('overlay-setpoint')?.checked ?? true;
+    const setpointHistPts = [];   // kept for backward-compat (no longer drives display)
+    const setpointPredPts = [];   // kept for backward-compat (no longer drives display)
+    const heatLinePts = (chartData.defense_lines || []).map(e => ({ x: new Date(e.ts), y: e.heat }));
+    const coolLinePts = (chartData.defense_lines || []).map(e => ({ x: new Date(e.ts), y: e.cool }));
+    const defenseHasData = heatLinePts.length > 0 || coolLinePts.length > 0;
+    const setpointHasData = defenseHasData; // alias used by legacy hidden guards below
 
     const datasets = [
       {
@@ -1289,46 +1313,32 @@
       order: 7,
     });
 
-    // Thermostat Setpoint — two sub-datasets: solid past, dashed future.
-    // Off-mode forward-filled points use faint colour on both sub-datasets.
-    // Use per-point segment styling via a custom borderColor function that reads _ff.
+    // Automation Setpoints — heat defense (amber) and cool defense (blue), stepped lines.
     datasets.push({
-      label: 'Thermostat Setpoint',
+      label: 'Heat Setpoint',
       type: 'line',
-      data: setpointHistPts,
-      borderColor: CHART_COLORS.setpoint,
+      data: heatLinePts,
+      borderColor: CHART_COLORS.heatSetpoint,
       borderWidth: 2,
       pointRadius: 0,
-      pointStyle: 'line',
       tension: 0,
-      stepped: true,
+      stepped: 'before',
       yAxisID: 'y',
-      hidden: !setpointVisible || !setpointHasData,
+      hidden: !defenseHasData,
       order: 8,
-      segment: {
-        borderColor: (ctx) => (ctx.p0?.raw?._ff ? CHART_COLORS.setpoint_fill : CHART_COLORS.setpoint),
-        borderWidth: (ctx) => (ctx.p0?.raw?._ff ? 1 : 2),
-      },
     });
     datasets.push({
-      label: '_setpoint_pred',
+      label: 'Cool Setpoint',
       type: 'line',
-      data: setpointPredPts,
-      borderColor: CHART_COLORS.setpoint,
+      data: coolLinePts,
+      borderColor: CHART_COLORS.coolSetpoint,
       borderWidth: 2,
-      borderDash: [6, 4],
       pointRadius: 0,
-      pointStyle: 'line',
       tension: 0,
-      stepped: true,
+      stepped: 'before',
       yAxisID: 'y',
-      hidden: !setpointVisible || !setpointHasData,
+      hidden: !defenseHasData,
       order: 8,
-      segment: {
-        borderColor: (ctx) => (ctx.p0?.raw?._ff ? CHART_COLORS.setpoint_fill : CHART_COLORS.setpoint),
-        borderDash: (ctx) => (ctx.p0?.raw?._ff ? [3, 6] : [6, 4]),
-        borderWidth: (ctx) => (ctx.p0?.raw?._ff ? 1 : 2),
-      },
     });
 
     const nowMs = Date.now();
@@ -1455,7 +1465,7 @@
                 const btn = document.getElementById('chart-zoom-reset');
                 if (btn) btn.classList.add('visible');
                 const xs = chart.scales.x;
-                drawActivityTimeline((_lastChartData?.state_log || []), xs.min, xs.max, xs.left, xs.right);
+                drawActivityTimeline((_lastChartData?.state_log || []), xs.min, xs.max, xs.left, xs.right, (_lastChartData?.predicted_activity || []));
               },
             },
             pan: { enabled: false },
@@ -1588,10 +1598,10 @@
     // Sync activity timeline AFTER Chart.js has computed its x-axis pixel bounds
     if (_tempChart?.scales?.x) {
       const xs = _tempChart.scales.x;
-      drawActivityTimeline(log, xs.min, xs.max, xs.left, xs.right);
+      drawActivityTimeline(log, xs.min, xs.max, xs.left, xs.right, (chartData.predicted_activity || []));
     } else {
       const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
-      drawActivityTimeline(log, rMin, rMax);
+      drawActivityTimeline(log, rMin, rMax, null, null, (chartData.predicted_activity || []));
     }
   }
 
@@ -1797,7 +1807,7 @@
       _tempChart.resetZoom();
       const xs = _tempChart.scales.x;
       const { min: rMin, max: rMax } = _rangeToWindow(_chartRange);
-      drawActivityTimeline((_lastChartData?.state_log || []), rMin, rMax, xs.left, xs.right);
+      drawActivityTimeline((_lastChartData?.state_log || []), rMin, rMax, xs.left, xs.right, (_lastChartData?.predicted_activity || []));
     }
     _chartZoomed = false;
     const btn = document.getElementById('chart-zoom-reset');
@@ -1810,7 +1820,7 @@
       comfort_band: 'Target Band',
       humidity: 'Humidity %',
       feelslike: 'Feels-like',
-      setpoint: 'Thermostat Setpoint',
+      setpoint: '_setpoint',  // handled by dedicated branch below; entry kept so !label guard passes
     };
     const label = labelMap[name];
     if (!label) return;
@@ -1822,9 +1832,9 @@
         }
       });
     } else if (name === 'setpoint') {
-      // Toggle both the historical (solid) and predicted (dashed) sub-datasets
+      // Toggle both heat and cool defense lines
       _tempChart.data.datasets.forEach(d => {
-        if (d.label === 'Thermostat Setpoint' || d.label === '_setpoint_pred') {
+        if (d.label === 'Heat Setpoint' || d.label === 'Cool Setpoint') {
           d.hidden = !d.hidden;
         }
       });
@@ -2852,7 +2862,7 @@
     loadChart();
     if (_lastChartData && _tempChart?.scales?.x) {
       const xs = _tempChart.scales.x;
-      drawActivityTimeline(_lastChartData.state_log || [], xs.min, xs.max, xs.left, xs.right);
+      drawActivityTimeline(_lastChartData.state_log || [], xs.min, xs.max, xs.left, xs.right, (_lastChartData?.predicted_activity || []));
     }
   });
 

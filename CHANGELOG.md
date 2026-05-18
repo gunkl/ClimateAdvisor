@@ -3,6 +3,25 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.3.49] — 2026-05-18
+
+### Added
+
+- **Chart: Automation Setpoints overlay** (#153): Replaces the "Thermostat Setpoint"
+  overlay (which was empty all warm season because it read the hardware `target_temperature`
+  attribute, null when HVAC is off). The new overlay reads two always-present defense lines
+  derived from the target band schedule: a heat threshold (amber, lower bound) and a cool
+  threshold (blue, upper bound). Both are on by default. The setback step at bedtime is now
+  clearly visible as the heat line drops from `comfort_heat` to the configured sleep setpoint
+  at `sleep_time` and rises again at `wake_time`.
+
+- **Chart: Future activity bars** (#153): HVAC, Fan, and Windows Recommended activity bars
+  now extend into the future with predicted state shown at 40% opacity. Predictions derive
+  from today's classification (`hvac_mode` intent), natural ventilation conditions computed
+  from the hourly forecast, and windows-recommended logic applied to forecast outdoor vs.
+  predicted indoor temperatures. A vertical separator marks the now boundary between solid
+  historical bars and faint future bars.
+
 ## [0.3.48] — 2026-05-17
 
 ### Added

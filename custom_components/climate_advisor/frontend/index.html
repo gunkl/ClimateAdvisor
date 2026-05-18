@@ -933,8 +933,8 @@
     feelslike:     'rgba(0, 188, 212, 0.70)',    // cyan
     setpoint:      'rgb(160, 32, 240)',           // purple/magenta
     setpoint_fill: 'rgba(160, 32, 240, 0.35)',   // faint for off-mode forward-fill
-    heatSetpoint:  '#EF4444',                    // red — heat defense line
-    coolSetpoint:  '#22C55E',                    // green — cool defense line
+    heatSetpoint:  'rgba(239, 68, 68, 0.55)',     // muted red — heat defense line
+    coolSetpoint:  'rgba(34, 197, 94, 0.55)',    // muted green — cool defense line
   };
 
   // Map hvac action string → colour
@@ -1313,7 +1313,7 @@
       order: 7,
     });
 
-    // Automation Setpoints — heat defense (amber) and cool defense (blue), stepped lines.
+    // Automation Setpoints — heat defense (red) and cool defense (green), smooth lines.
     datasets.push({
       label: 'Heat Setpoint',
       type: 'line',
@@ -1322,7 +1322,6 @@
       borderWidth: 2,
       pointRadius: 0,
       tension: 0,
-      stepped: 'before',
       yAxisID: 'y',
       hidden: !defenseHasData,
       order: 8,
@@ -1335,7 +1334,6 @@
       borderWidth: 2,
       pointRadius: 0,
       tension: 0,
-      stepped: 'before',
       yAxisID: 'y',
       hidden: !defenseHasData,
       order: 8,

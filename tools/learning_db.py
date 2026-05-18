@@ -467,21 +467,103 @@ def _print_live_pipeline(pipeline: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# main
+# Section F: Nightly setback records
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def _print_daily_records(db: dict, n: int = 30) -> None:
+    """Print last N nightly setback records."""
+    records = db.get("records")
+    if not isinstance(records, list):
+        print("Nightly Setback Records")
+        print("-----------------------")
+        print("(no records found in learning DB)")
+        print()
+        return
+
+    last = records[-n:] if len(records) >= n else records
+    print(f"Nightly Setback Records (last {len(last)} of {len(records)})")
+    print("-" * 70)
+    header = (
+        _pad("Date", 12)
+        + _pad("DayType", 9)
+        + _pad("Mode", 6)
+        + _pad("Applied", 9)
+        + _pad("Depth", 8)
+        + _pad("Adaptive", 10)
+        + "Skipped"
+    )
+    print(header)
+    print("-" * 70)
+
+    for rec in last:
+        if not isinstance(rec, dict):
+            continue
+        date = rec.get("date", "?")
+        day_type = rec.get("day_type", "?")
+        mode = rec.get("hvac_mode_recommended", "?")
+        heat = rec.get("setback_heat_applied_f")
+        cool = rec.get("setback_cool_applied_f")
+        applied = f"{heat:.1f}°F" if heat is not None else (f"{cool:.1f}°F" if cool is not None else "—")
+        depth = rec.get("setback_depth_f")
+        depth_str = f"{depth:.1f}°F" if depth is not None else "—"
+        adaptive = rec.get("setback_was_adaptive")
+        adaptive_str = "yes" if adaptive is True else ("no" if adaptive is False else "—")
+        skipped = rec.get("setback_skipped_reason") or "—"
+
+        row = (
+            _pad(str(date), 12)
+            + _pad(str(day_type), 9)
+            + _pad(str(mode), 6)
+            + _pad(applied, 9)
+            + _pad(depth_str, 8)
+            + _pad(adaptive_str, 10)
+            + skipped
+        )
+        print(row)
+
+    if not last:
+        print("  (no records yet)")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Climate Advisor thermal learning DB diagnostic")
     parser.add_argument("--rejections", action="store_true", help="Show rejection log only")
     parser.add_argument("--committed", action="store_true", help="Show committed observations only")
     parser.add_argument("--model", action="store_true", help="Show model summary only")
     parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
     parser.add_argument("--last", type=int, default=5, metavar="N", help="Last N rejections per type (default 5)")
+    parser.add_argument(
+        "--daily",
+        type=int,
+        nargs="?",
+        const=30,
+        default=None,
+        metavar="N",
+        help="Show last N nightly setback records (default 30)",
+    )
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    parser = _build_parser()
     args = parser.parse_args()
 
     # Determine which sections to show
-    section_flag = args.rejections or args.committed or args.model or args.thermal
+    show_daily = args.daily is not None
+    daily_n = args.daily if args.daily is not None else 30
+    section_flag = args.rejections or args.committed or args.model or args.thermal or show_daily
     show_model = args.model or args.thermal or not section_flag
     show_rejections = args.rejections or not section_flag
     show_committed = args.committed or not section_flag
@@ -504,6 +586,9 @@ def main() -> None:
 
     if show_thermal:
         _print_chart_log_endpoint_obs(db)
+
+    if show_daily:
+        _print_daily_records(db, n=daily_n)
 
     # Live pending observations via REST API (optional)
     _load_dotenv()

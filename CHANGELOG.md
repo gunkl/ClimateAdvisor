@@ -3,6 +3,31 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.3.48] — 2026-05-17
+
+### Added
+
+- **Bedtime setback visibility** (#151): `handle_bedtime()` now emits `bedtime_setback` and
+  `bedtime_setback_skipped` events to the structured event log, making all skip/fire paths
+  observable by the AI investigator. `DailyRecord` gains five new fields:
+  `setback_heat_applied_f`, `setback_cool_applied_f`, `setback_depth_f`,
+  `setback_was_adaptive`, and `setback_skipped_reason`. Previously, the on-mode warm/mild
+  nights took a silent pass (correct behavior); that pass is now logged as `reason="hvac_off"`.
+  Doc error in §6a: Away row now correctly says "Skip" rather than "Apply bedtime setback".
+
+- **`learning_db.py --daily [N]`** (#151): New `--daily` flag prints the last N nightly
+  setback records (date, day type, mode, applied temp, depth, adaptive flag, skip reason).
+  Default: 30 nights. Useful for diagnosing whether setback has been firing on heat/cool
+  nights or silently skipping all warm-season nights.
+
+- **Chart: Thermostat Setpoint overlay** (#151): The chart now captures the thermostat's
+  `target_temperature` at every 30-min poll and exposes two new API fields:
+  `historical_setpoint` (actual past setpoints) and `predicted_setpoint` (derived from
+  the target band — lower bound in heat mode, upper in cool mode, null in off mode). The
+  dashboard renders these as a stepped purple/magenta line with solid past, dashed future,
+  and faint-dotted forward-fill during off-mode periods. Toggle via the Thermostat Setpoint
+  overlay checkbox.
+
 ## [0.3.47] — 2026-05-17
 
 ### Fixed

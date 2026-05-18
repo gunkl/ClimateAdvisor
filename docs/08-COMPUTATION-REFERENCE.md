@@ -504,10 +504,22 @@ The automation engine tracks `_occupancy_mode` internally (synced by the coordin
 |---|---|---|---|
 | `apply_classification()` (30-min cycle) | Apply comfort temps | Reapply away setback | Skip entirely |
 | `handle_morning_wakeup()` | Restore comfort | Skip (no wakeup) | Skip (no wakeup) |
-| `handle_bedtime()` | Apply bedtime setback | Apply bedtime setback | Skip (vacation setback preserved) |
+| `handle_bedtime()` | Apply bedtime setback | **Skip** (away setback maintained by 30-min `apply_classification()` cycle) | Skip (vacation setback preserved) |
 | `_set_temperature_for_mode()` (safety net) | Apply comfort | Redirect → `handle_occupancy_away()` | Redirect → `handle_occupancy_vacation()` |
 
 The `_set_temperature_for_mode()` safety net catches all indirect callers (door/window resume, grace expiry, economizer deactivation) so comfort temps are never applied while away/vacation.
+
+**`handle_bedtime()` skip paths — HVAC mode off (mild/warm nights):** When the current day classification has `hvac_mode = "off"` (mild or warm day, no heating/cooling required), `handle_bedtime()` logs a skip and emits a `bedtime_setback_skipped` event. No setpoint change is made — the comfort floor for the following morning is protected by the 30-min `apply_classification()` guard in §6b rather than a bedtime setpoint.
+
+**Structured skip events (Issue #151):** All skip paths emit `bedtime_setback_skipped` to the event log with a `reason` field:
+
+| `reason` value | Trigger condition |
+|---|---|
+| `"occupancy"` | `_occupancy_mode` is `away` or `vacation` at bedtime |
+| `"hvac_off"` | Classification `hvac_mode` is not `heat` or `cool` (mild/warm night) |
+| `"no_classification"` | No current classification available at bedtime time |
+
+Fire paths emit `bedtime_setback` with `{mode, target_f, depth_f, adaptive, modifier}`. Both event types are visible in the AI investigator's structured event log.
 
 **Test coverage:** `tests/test_occupancy_automation.py` — 18 tests covering all cells above.
 

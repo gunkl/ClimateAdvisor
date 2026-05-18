@@ -1428,6 +1428,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif self._last_predicted_indoor:
                 _pred_indoor_val = self._last_predicted_indoor[0].get("temp")  # warmup fallback
             _chart_hvac_poll = self._read_chart_hvac_action()
+            # Read thermostat setpoint and convert to °F for chart_log storage.
+            _setpoint_f: float | None = None
+            _chart_unit = self.config.get("temp_unit", "fahrenheit")
+            _climate_state = self.hass.states.get(self.config["climate_entity"])
+            if _climate_state and _climate_state.state in ("heat", "cool"):
+                _raw_sp = _climate_state.attributes.get("target_temperature")
+                if _raw_sp is not None:
+                    _setpoint_f = to_fahrenheit(float(_raw_sp), _chart_unit)
             _LOGGER.debug(
                 "chart_log append: event=30min_poll hvac=%r fan=%s",
                 _chart_hvac_poll,
@@ -1444,6 +1452,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 else False,
                 pred_outdoor=_pred_outdoor_val,
                 pred_indoor=_pred_indoor_val,
+                setpoint=_setpoint_f,
             )
             self._chart_log.save()
             _LOGGER.debug(
@@ -4299,6 +4308,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except (ValueError, TypeError):
                 continue
 
+        _raw_band = list(
+            _compute_target_band_schedule(
+                _band_timestamps,
+                self.config,
+                self._occupancy_mode,
+                now,
+                setback_modifier=(
+                    getattr(self._current_classification, "setback_modifier", 0.0)
+                    if self._current_classification is not None
+                    else 0.0
+                ),
+                thermal_model=thermal_model,
+                classification=self._current_classification,
+            )
+        )
+        _hvac_mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
+        _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
+
         return {
             "predicted_indoor": predicted_indoor,
             "forecast_outdoor": forecast_outdoor,
@@ -4345,21 +4372,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "solar_phase_offset_h": thermal_model.get("solar_phase_offset_h"),
             },
             "state_log": log_entries,
-            "target_band": [
-                {"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])}
-                for e in _compute_target_band_schedule(
-                    _band_timestamps,
-                    self.config,
-                    self._occupancy_mode,
-                    now,
-                    setback_modifier=(
-                        getattr(self._current_classification, "setback_modifier", 0.0)
-                        if self._current_classification is not None
-                        else 0.0
-                    ),
-                    thermal_model=thermal_model,
-                    classification=self._current_classification,
-                )
+            "target_band": _conv_band,
+            "predicted_setpoint": _derive_predicted_setpoint(_conv_band, _hvac_mode),
+            "historical_setpoint": [
+                {"ts": e["ts"], "setpoint": _conv(e["setpoint"])} for e in _extract_historical_setpoint(log_entries)
             ],
             "unit": unit,
         }
@@ -5598,6 +5614,38 @@ def _extract_current_hour_forecast_temp(
         except (ValueError, TypeError):
             continue
     return best_temp
+
+
+def _derive_predicted_setpoint(
+    target_band: list[dict],
+    hvac_mode: str | None,
+) -> list[dict]:
+    """Derive predicted setpoint list from target_band entries.
+
+    Heat mode: lower bound; cool mode: upper bound; off/None: null.
+    """
+    result = []
+    for entry in target_band:
+        ts = entry.get("ts")
+        if hvac_mode == "heat":
+            sp = entry.get("lower")
+        elif hvac_mode == "cool":
+            sp = entry.get("upper")
+        else:
+            sp = None
+        result.append({"ts": ts, "setpoint": sp})
+    return result
+
+
+def _extract_historical_setpoint(log_entries: list[dict]) -> list[dict]:
+    """Extract {ts, setpoint} pairs from state_log entries."""
+    result = []
+    for e in log_entries:
+        ts = e.get("ts")
+        if not ts:
+            continue
+        result.append({"ts": ts, "setpoint": e.get("setpoint")})
+    return result
 
 
 def _parse_time(time_str: str) -> time:

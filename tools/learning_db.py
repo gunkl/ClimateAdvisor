@@ -210,7 +210,7 @@ def _print_model_summary(db: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _print_rejection_log(db: dict, last_n: int) -> None:
+def _print_rejection_log(db: dict, last_n: int, filter_type: str | None = None) -> None:
     rejection_log = db.get("rejection_log")
     if not isinstance(rejection_log, dict):
         print("Rejection Log")
@@ -222,11 +222,32 @@ def _print_rejection_log(db: dict, last_n: int) -> None:
     print("Rejection Log")
     print("-------------")
 
+    # Summary: top reason codes across all types (or filtered type)
+    _reason_totals: dict[str, int] = {}
+    _types_to_scan = [filter_type] if filter_type else list(rejection_log.keys())
+    for _ot in _types_to_scan:
+        _entries = rejection_log.get(_ot)
+        if not isinstance(_entries, list):
+            continue
+        for _e in _entries:
+            if not isinstance(_e, dict):
+                continue
+            _rc = str(_e.get("reason_code", _e.get("reason", "unknown")))
+            _reason_totals[_rc] = _reason_totals.get(_rc, 0) + 1
+    if _reason_totals:
+        _top = sorted(_reason_totals.items(), key=lambda x: -x[1])[:5]
+        _summary = ", ".join(f"{rc} ({n})" for rc, n in _top)
+        print(f"Top rejection reasons: {_summary}")
+        print()
+
     any_printed = False
-    for obs_type in OBS_TYPES:
+
+    obs_types_to_show = [filter_type] if filter_type else OBS_TYPES
+    for obs_type in obs_types_to_show:
         entries = rejection_log.get(obs_type)
         if not entries:
-            print(f"{obs_type}: no rejections")
+            if not filter_type:
+                print(f"{obs_type}: no rejections")
             continue
 
         if not isinstance(entries, list):
@@ -260,20 +281,23 @@ def _print_rejection_log(db: dict, last_n: int) -> None:
             )
         any_printed = True
 
-    # Also print any obs_types in the log that aren't in our canonical list
-    for obs_type, entries in rejection_log.items():
-        if obs_type not in OBS_TYPES and entries:
-            reversed_entries = list(reversed(entries)) if isinstance(entries, list) else []
-            total = len(reversed_entries)
-            shown = reversed_entries[:last_n]
-            print(f"{obs_type} [{total} total, showing last {min(last_n, total)}] (unknown type):")
-            for entry in shown:
-                if isinstance(entry, dict):
-                    print(f"  {entry}")
-            any_printed = True
+    # Also print any obs_types in the log that aren't in our canonical list (when not filtered)
+    if not filter_type:
+        for obs_type, entries in rejection_log.items():
+            if obs_type not in OBS_TYPES and entries:
+                reversed_entries = list(reversed(entries)) if isinstance(entries, list) else []
+                total = len(reversed_entries)
+                shown = reversed_entries[:last_n]
+                print(f"{obs_type} [{total} total, showing last {min(last_n, total)}] (unknown type):")
+                for entry in shown:
+                    if isinstance(entry, dict):
+                        print(f"  {entry}")
+                any_printed = True
 
-    if not any_printed:
+    if not any_printed and not filter_type:
         print("(no rejections recorded)")
+    elif not any_printed and filter_type:
+        print(f"(no rejections recorded for type '{filter_type}')")
 
     print()
 
@@ -532,13 +556,118 @@ def _print_daily_records(db: dict, n: int = 30) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Section G: Pending observations (from persisted learning DB JSON)
+# ---------------------------------------------------------------------------
+
+
+def _print_pending_observations(db: dict) -> None:
+    """Print pending_observations persisted in the learning DB JSON.
+
+    This shows observations that were in-flight when HA last persisted state.
+    Fields: obs_type, _phase, elapsed (from start_time), sample counts, peak_indoor_f.
+    """
+    pending = db.get("pending_observations")
+    print("Pending Observations (persisted)")
+    print("-" * 70)
+
+    if not isinstance(pending, dict) or not pending:
+        print("  No pending observations")
+        print()
+        return
+
+    import contextlib
+    import datetime as _dt_mod
+
+    _now_str = None
+    with contextlib.suppress(Exception):
+        _now_str = _dt_mod.datetime.now(_dt_mod.UTC).isoformat()
+
+    def _elapsed_str(start_str: str | None) -> str:
+        if not start_str or not _now_str:
+            return "?"
+        try:
+            start = _dt_mod.datetime.fromisoformat(start_str)
+            now = _dt_mod.datetime.fromisoformat(_now_str)
+            elapsed_s = (now - start).total_seconds()
+            mins = int(elapsed_s / 60)
+            return f"{mins}min"
+        except Exception:
+            return "?"
+
+    header = (
+        _pad("Type", 22)
+        + _pad("Phase", 12)
+        + _pad("Elapsed", 10)
+        + _pad("active_n", 10)
+        + _pad("post_n", 8)
+        + _pad("samples_n", 11)
+        + "peak_indoor"
+    )
+    print(header)
+    print("-" * 70)
+
+    for obs_type in OBS_TYPES:
+        obs = pending.get(obs_type)
+        if not isinstance(obs, dict):
+            continue
+        phase = obs.get("_phase", "active")
+        elapsed = _elapsed_str(obs.get("start_time"))
+        n_active = len(obs.get("active_samples", []))
+        n_post = len(obs.get("post_heat_samples", []))
+        n_samples = len(obs.get("samples", []))
+        peak = obs.get("peak_indoor_f")
+        peak_str = f"{peak:.1f}F" if isinstance(peak, float) else "-"
+
+        row = (
+            _pad(obs_type, 22)
+            + _pad(phase, 12)
+            + _pad(elapsed, 10)
+            + _pad(str(n_active), 10)
+            + _pad(str(n_post), 8)
+            + _pad(str(n_samples), 11)
+            + peak_str
+        )
+        print(row)
+
+    # Print any obs_types not in canonical list
+    for obs_type, obs in pending.items():
+        if obs_type not in OBS_TYPES and isinstance(obs, dict):
+            phase = obs.get("_phase", "?")
+            elapsed = _elapsed_str(obs.get("start_time"))
+            n_active = len(obs.get("active_samples", []))
+            n_post = len(obs.get("post_heat_samples", []))
+            n_samples = len(obs.get("samples", []))
+            peak = obs.get("peak_indoor_f")
+            peak_str = f"{peak:.1f}F" if isinstance(peak, float) else "-"
+            row = (
+                _pad(f"{obs_type} (unknown)", 22)
+                + _pad(phase, 12)
+                + _pad(elapsed, 10)
+                + _pad(str(n_active), 10)
+                + _pad(str(n_post), 8)
+                + _pad(str(n_samples), 11)
+                + peak_str
+            )
+            print(row)
+
+    print()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Climate Advisor thermal learning DB diagnostic")
     parser.add_argument("--rejections", action="store_true", help="Show rejection log only")
     parser.add_argument("--committed", action="store_true", help="Show committed observations only")
     parser.add_argument("--model", action="store_true", help="Show model summary only")
     parser.add_argument("--thermal", action="store_true", help="Show chart_log endpoint observations only")
+    parser.add_argument("--pending", action="store_true", help="Show persisted pending observations")
     parser.add_argument("--last", type=int, default=5, metavar="N", help="Last N rejections per type (default 5)")
+    parser.add_argument(
+        "--type",
+        dest="obs_type",
+        metavar="TYPE",
+        help="Filter --rejections to a specific obs_type (e.g. hvac_cool)",
+    )
     parser.add_argument(
         "--daily",
         type=int,
@@ -563,7 +692,9 @@ def main() -> None:
     # Determine which sections to show
     show_daily = args.daily is not None
     daily_n = args.daily if args.daily is not None else 30
-    section_flag = args.rejections or args.committed or args.model or args.thermal or show_daily
+    show_pending = getattr(args, "pending", False)
+    filter_type = getattr(args, "obs_type", None)
+    section_flag = args.rejections or args.committed or args.model or args.thermal or show_daily or show_pending
     show_model = args.model or args.thermal or not section_flag
     show_rejections = args.rejections or not section_flag
     show_committed = args.committed or not section_flag
@@ -579,13 +710,16 @@ def main() -> None:
         _print_model_summary(db)
 
     if show_rejections:
-        _print_rejection_log(db, last_n=args.last)
+        _print_rejection_log(db, last_n=args.last, filter_type=filter_type)
 
     if show_committed:
         _print_committed(db)
 
     if show_thermal:
         _print_chart_log_endpoint_obs(db)
+
+    if show_pending:
+        _print_pending_observations(db)
 
     if show_daily:
         _print_daily_records(db, n=daily_n)

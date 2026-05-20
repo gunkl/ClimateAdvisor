@@ -9,7 +9,8 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 |---|---|---|
 | What is the recommended first debugging step for any unexpected HVAC behavior? | Check the four key sensor entities in order: `sensor.climate_advisor_day_type` (classification), `sensor.climate_advisor_last_action_reason` (why), `sensor.climate_advisor_contact_status` (door/window pause), `sensor.climate_advisor_occupancy_mode`. | [§Common Debugging Scenarios](09-DEBUGGING-GUIDE.md#common-debugging-scenarios) |
 | How do you pull Climate Advisor logs and filter for thermal activity? | `python3 tools/ha_logs.py --thermal` for last 2000 thermal-relevant lines; `--lines 5000` for deeper history. Docker log files on HAOS persist for days — do not assume rotation without checking. | [§3. Container Logs (Real-Time)](09-DEBUGGING-GUIDE.md#3-container-logs-real-time) |
-| What is the step-by-step diagnostic sequence for "thermal model confidence is none"? | 1. `python3 tools/learning_db.py --rejections` (structured rejection log, no token needed). 2. `python3 tools/thermal_health.py` (active observations, needs HA_TOKEN). 3. `python3 tools/ha_logs.py --thermal`. | [§Debugging Thermal Model Learning](09-DEBUGGING-GUIDE.md#debugging-thermal-model-learning) |
+| What is the step-by-step diagnostic sequence for "thermal model confidence is none"? | 1. `python3 tools/learning_db.py --rejections` (structured rejection log, no token needed). 2. `python3 tools/learning_db.py --pending` (in-flight observations). 3. `python3 tools/thermal_health.py` (active observations, needs HA_TOKEN). 4. `python3 tools/ha_logs.py --thermal`. | [§Debugging Thermal Model Learning](09-DEBUGGING-GUIDE.md#debugging-thermal-model-learning) |
+| How do you diagnose `k_active_cool=None` on a home where AC has been running all season? | Run `--rejections --type hvac_cool` to check n values and reason codes. `n=0` with elapsed > 0 on coordinator < v0.3.50 indicates the key-shadow bug (fixed in v0.3.50). `new_session_started` repeatedly means short-cycling. Run `--pending` during a live AC cycle to confirm samples are accumulating. | [§"k_active_cool is None despite AC running all summer"](09-DEBUGGING-GUIDE.md#k_active_cool-is-none-despite-ac-running-all-summer-hvac-observation-debugging) |
 | What does the Temperature Forecast chart show and how do you use it for diagnosis? | Four activity bars (HVAC, Fan, Windows Recommended, Windows Open) plus indoor/outdoor temperature lines, predicted curves, and target band shading. Drag-to-zoom any region; 1-year data in chart_log survives HA restarts. | [§2. Temperature Forecast Chart (Visual History)](09-DEBUGGING-GUIDE.md#2-temperature-forecast-chart-visual-history) |
 | Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
@@ -202,11 +203,21 @@ See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governi
 **Step 1 — Check the structured rejection log (primary tool):**
 ```bash
 python3 tools/learning_db.py --rejections
+python3 tools/learning_db.py --rejections --type hvac_cool   # filter by obs type
 ```
 This reads `climate_advisor_learning.json` directly via SSH and shows every rejection event
-with timestamps, reason codes, elapsed time, R², and delta-T. No HA_URL/HA_TOKEN needed.
+with timestamps, reason codes, elapsed time, R², and delta-T. A summary of top rejection
+reasons is shown at the bottom. No HA_URL/HA_TOKEN needed.
 
-**Step 2 — Check current active observations:**
+**Step 2 — Check in-flight observations:**
+```bash
+python3 tools/learning_db.py --pending
+```
+Shows any observations currently active in the pipeline: type, phase, elapsed time, sample
+count, and peak indoor temperature. Run during a live HVAC cycle to confirm samples are
+accumulating.
+
+**Step 3 — Check current active observations (live system):**
 ```bash
 python3 tools/thermal_health.py   # requires HA_URL + HA_TOKEN in .env or environment
 ```
@@ -232,13 +243,48 @@ Look for:
 | Rejections show `abandoned`, elapsed < 5 min | Condition-change abort (window closed, HVAC started) | Normal if window briefly closed; look for restart immediately after |
 | No rejections AND count stays 0 | Observation never started | Check `hvac_action` / window sensor state; thermal trigger eval logs |
 
-**Step 5 — Check the full learning DB:**
+### "k_active_cool is None despite AC running all summer" (HVAC observation debugging)
+
+Use this workflow when `--model` shows `k_active_cool=None` or `k_active_heat=None` and
+the HVAC has definitely been running.
+
+```bash
+# 1. Confirm zero committed observations for the HVAC type
+python3 tools/learning_db.py --committed          # look for hvac_cool/hvac_heat rows
+
+# 2. Check rejection log filtered to the HVAC type
+python3 tools/learning_db.py --rejections --type hvac_cool
+
+# 3. Check for in-flight observations during a live cycle
+python3 tools/learning_db.py --pending
+
+# 4. Cross-check model state
+python3 tools/learning_db.py --model
+```
+
+**Interpreting rejection log results:**
+
+| `--rejections --type hvac_cool` shows | Likely cause | Action |
+|---|---|---|
+| `n=0` entries with `elapsed > 0 min` on coordinator < v0.3.50 | Key-shadow bug: `"samples": []` shadowed `active_samples` | Upgrade to v0.3.50 — all HVAC obs discarded before fix |
+| `new_session_started` repeated many times | Short-cycling thermostat: post-heat window interrupted by next HVAC start | Event-driven sampling (v0.3.50+) improves this; single-point fallback may commit |
+| `plateau_guard: insufficient post-heat decay` repeated | Indoor temp didn't drop ≥ 0.3°F in post-heat phase | Efficient/short-cycle system; normal if occasional |
+| `n=0, delta_t=0.00°F` on coordinator ≥ v0.3.50 | Sensor quantization: 1°F thermostat can't see 0.3–0.8°F HVAC effect | Single-point fallback kicks in if `T_start` vs `T_peak` delta ≥ `THERMAL_HVAC_MIN_SIGNAL_F (0.5°F)` |
+| `--pending` shows obs with samples but `--committed` = 0 | Observation accumulated but commit path failed (OLS returning None) | Check `--model` for `k_passive` — if absent, bridge proxy not available; commit may be deferred |
+
+**Step 5 — Check in-flight observations (v0.3.50+):**
+```bash
+python3 tools/learning_db.py --pending
+```
+Shows any observations currently in `pending_observations` — type, phase (`active`/`post_heat`), elapsed time, sample counts, and peak indoor temperature. Use this to confirm an observation is accumulating samples during a live HVAC cycle.
+
+**Step 6 — Check the full learning DB:**
 ```bash
 python3 tools/learning_db.py
 ```
 Shows model summary, all committed observations, and rejection log in one report.
 
-**Step 6 — Check nightly setback history (v0.3.48+):**
+**Step 7 — Check nightly setback history (v0.3.48+):**
 ```bash
 python3 tools/learning_db.py --daily        # last 30 nights
 python3 tools/learning_db.py --daily 60     # last 60 nights

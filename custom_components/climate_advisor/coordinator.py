@@ -1119,22 +1119,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             _obs["session_mode"] = session_mode
                             self._pending_observations[_obs_type] = _obs
                         else:
-                            samples = _obs.get("samples", _obs.get("active_samples", []))
-                            min_s = {
-                                OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
-                                OBS_TYPE_FAN_ONLY_DECAY: THERMAL_FAN_MIN_SAMPLES,
-                                OBS_TYPE_VENTILATED_DECAY: THERMAL_VENT_MIN_SAMPLES,
-                                OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
-                                OBS_TYPE_HVAC_HEAT: THERMAL_MIN_POST_HEAT_SAMPLES,
-                                OBS_TYPE_HVAC_COOL: THERMAL_MIN_POST_HEAT_SAMPLES,
-                            }.get(_obs_type, 10)
+                            # Bug 2 fix: For HVAC obs, check the right sample list based
+                            # on the current phase.  Pre-fix obs had 'samples': [] which
+                            # shadowed active_samples in the generic fallback, causing all
+                            # HVAC observations to be discarded on every HA restart.
+                            _hvac_types_sr = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
+                            if _obs_type in _hvac_types_sr:
+                                _phase_sr = _obs.get("_phase", "active")
+                                if _phase_sr == "post_heat":
+                                    samples = _obs.get("post_heat_samples", [])
+                                    min_s = THERMAL_MIN_POST_HEAT_SAMPLES
+                                else:
+                                    # Active phase: any sample is worth recovering so
+                                    # post-heat observation window can continue after restart.
+                                    samples = _obs.get("active_samples", [])
+                                    # Fall back to generic 'samples' key for pre-fix persisted obs
+                                    if not samples:
+                                        samples = _obs.get("samples", [])
+                                    min_s = 1
+                            else:
+                                samples = _obs.get("samples", _obs.get("active_samples", []))
+                                min_s = {
+                                    OBS_TYPE_PASSIVE_DECAY: THERMAL_PASSIVE_MIN_SAMPLES,
+                                    OBS_TYPE_FAN_ONLY_DECAY: THERMAL_FAN_MIN_SAMPLES,
+                                    OBS_TYPE_VENTILATED_DECAY: THERMAL_VENT_MIN_SAMPLES,
+                                    OBS_TYPE_SOLAR_GAIN: THERMAL_SOLAR_MIN_SAMPLES,
+                                }.get(_obs_type, 10)
                             if len(samples) >= min_s:
                                 self._pending_observations[_obs_type] = _obs
                                 _LOGGER.info(
-                                    "Startup: recovered v3 observation type=%s obs_id=%s samples=%d",
+                                    "Startup: recovered v3 observation type=%s obs_id=%s samples=%d phase=%s",
                                     _obs_type,
                                     _obs.get("obs_id", "?"),
                                     len(samples),
+                                    _obs.get("_phase", "active"),
                                 )
 
                 # Chart_log endpoint estimator backfill (Issue #137): run once on first startup
@@ -2269,6 +2287,60 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 self._chart_log.save()
 
+        # Bug 3 fix: Event-driven sampling for active HVAC observations.
+        # The 5-min polling tick (_sample_all_observations) can miss short HVAC cycles
+        # (<5 min) entirely, leaving active_samples with only the 1 initial sample.
+        # With n=1 there are 0 consecutive pairs — OLS cannot run and k_active is never
+        # fitted.  Adding a sample here on every thermostat state change (temperature
+        # update, attribute change) during an active HVAC session ensures short cycles
+        # accumulate enough samples for OLS.
+        # Guard: only sample if HVAC is still actively heating/cooling (same phase),
+        # and at least 60 seconds have elapsed since the last sample to avoid flooding.
+        if new_action in ("heating", "cooling") and old_action == new_action:
+            _active_obs_type = OBS_TYPE_HVAC_HEAT if new_action == "heating" else OBS_TYPE_HVAC_COOL
+            self._ensure_pending_observations()
+            _active_obs = self._pending_observations.get(_active_obs_type)
+            _obs_phase_ok = _active_obs is not None and _active_obs.get("_phase") == "active"
+            if _obs_phase_ok and _active_obs.get("status") == "monitoring":
+                _active_start_str = _active_obs.get("active_start")
+                try:
+                    _active_start_ts = dt_util.parse_datetime(_active_start_str) if _active_start_str else None
+                    _elapsed_active = (
+                        (dt_util.now() - _active_start_ts).total_seconds() / 60.0 if _active_start_ts else 0.0
+                    )
+                except Exception:
+                    _elapsed_active = 0.0
+                # Decimation gate: at least 60 s between event-driven samples
+                _last_evt_str = _active_obs.get("last_event_sample_time")
+                _elapsed_since_last = 61.0  # default: allow first sample
+                if _last_evt_str:
+                    try:
+                        _last_evt_ts = dt_util.parse_datetime(_last_evt_str)
+                        if _last_evt_ts:
+                            _elapsed_since_last = (dt_util.now() - _last_evt_ts).total_seconds()
+                    except Exception:
+                        pass
+                if _elapsed_since_last >= 60.0:
+                    _evt_sample = self._get_current_sample(_elapsed_active)
+                    _active_samples = _active_obs.get("active_samples", [])
+                    from custom_components.climate_advisor.const import (
+                        THERMAL_MAX_ACTIVE_SAMPLES as _THERMAL_MAX_ACTIVE,
+                    )
+
+                    if len(_active_samples) < _THERMAL_MAX_ACTIVE:
+                        _active_samples.append(_evt_sample)
+                        _active_obs["last_event_sample_time"] = dt_util.now().isoformat()
+                        _ind = _evt_sample.get("indoor_temp_f")
+                        _cur_peak = _active_obs.get("peak_indoor_f")
+                        if _ind and (_cur_peak is None or _ind > _cur_peak):
+                            _active_obs["peak_indoor_f"] = _ind
+                        _LOGGER.debug(
+                            "Event-driven HVAC sample added: type=%s n_active=%d elapsed=%.1fmin",
+                            _active_obs_type,
+                            len(_active_samples),
+                            _elapsed_active,
+                        )
+
         # Detect manual override: temperature changed but not by us
         new_temp = new_state.attributes.get("temperature")
         old_temp = old_state.attributes.get("temperature")
@@ -2488,7 +2560,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "obs_id": str(_uuid_mod.uuid4()),
             "start_time": now.isoformat(),
             "status": "monitoring",
-            "samples": [],
+            # NOTE: HVAC obs intentionally omit 'samples' key.  Non-HVAC (passive, fan,
+            # vent, solar) use 'samples'.  HVAC obs use 'active_samples' (active phase)
+            # and 'post_heat_samples' (post-heat phase).  Adding a 'samples': [] here
+            # would shadow active_samples in every fallback read that uses
+            # obs.get('samples', obs.get('active_samples', [])), causing n=0 in
+            # rejection logs and discarding all HVAC obs on restart. (Bug 1 fix)
             "flags_at_start": {},
             "schema_version": 1,
             # HVAC-specific fields (compatible with _commit_event_from_dict HVAC path)
@@ -3646,7 +3723,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         elapsed_minutes = int((dt_util.now() - _start_ts).total_seconds() / 60)
                 except Exception:
                     pass
-        samples = obs.get("samples", obs.get("active_samples", []))
+        # Bug 1 fix: For HVAC obs, prefer active_samples (or post_heat_samples when in
+        # post_heat phase) over the generic 'samples' key.  Pre-fix HVAC obs dicts had
+        # 'samples': [] which shadows active_samples in the fallback chain, causing n=0
+        # to be logged even when active_samples has real data.
+        _obs_type_ab = obs.get("obs_type", obs_type)
+        _hvac_types_ab = {OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL}
+        if _obs_type_ab in _hvac_types_ab:
+            _phase_ab = obs.get("_phase", "active")
+            samples = obs.get("post_heat_samples", []) if _phase_ab == "post_heat" else obs.get("active_samples", [])
+            # If still empty, fall back to generic 'samples' (legacy migration path)
+            if not samples:
+                samples = obs.get("samples", [])
+        else:
+            samples = obs.get("samples", obs.get("active_samples", []))
         delta_f = 0.0
         if len(samples) >= 2:
             first = samples[0].get("indoor_temp_f", samples[0].get("indoor_f", 0))

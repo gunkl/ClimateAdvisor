@@ -3,6 +3,59 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.3.50] — 2026-05-18
+
+### Fixed
+
+- **Thermal: `"samples": []` key removed from HVAC obs dict** (#156): `_start_hvac_observation`
+  created the observation dict with both `"samples": []` and `"active_samples": []`. Because
+  Python dicts return the first matching key, `obs.get("samples", ...)` always returned `[]`
+  regardless of how many samples had accumulated in `active_samples`. All HVAC observations
+  were silently discarded at commit time — `k_active_cool` and `k_active_heat` could never be
+  learned despite AC or heat cycling normally. `"samples"` key removed; all HVAC commit paths
+  now read `active_samples` and `post_heat_samples` explicitly.
+
+- **Thermal: Startup recovery now correctly handles HVAC pending observations** (#156):
+  The startup recovery loop (run on HA restart to continue or abandon in-flight observations)
+  used `obs.get("samples", [])` for all types. For HVAC types, this always returned `[]` due
+  to the key-shadow bug, so every pending HVAC observation was abandoned with `n=0` on every
+  HA restart. Recovery is now phase-aware: `post_heat` phase reads `post_heat_samples`
+  (min_s = `THERMAL_MIN_POST_HEAT_SAMPLES`); `active` phase reads `active_samples`
+  (min_s = 1 — any sample worth recovering). Backward-compat fallback retained for
+  pre-fix persisted observations.
+
+- **Thermal: `_abandon_observation` now reports real sample count in rejection log** (#156):
+  Rejection log `n` field was always computed from `obs.get("samples", [])` — the shadowed
+  empty list — so all HVAC rejection entries showed `n=0` regardless of actual sample count.
+  Fixed to read the correct key per type (`active_samples` for HVAC active-phase,
+  `post_heat_samples` for post-heat, `samples` for rolling-window types).
+
+### Added
+
+- **Thermal: Event-driven sampling during active HVAC phase** (#156): `_async_thermostat_changed`
+  now appends a sample to `active_samples` whenever a thermostat state change occurs while HVAC
+  action is active. A 60-second decimation gate prevents duplicate samples. Short HVAC cycles
+  (1–4 min) that complete between 5-min polling ticks previously accumulated only 1 sample
+  (0 OLS pairs); they now accumulate 3–10 event-driven samples, making `compute_k_active_single_point`
+  much more likely to succeed on short-cycling thermostats.
+
+- **`learning_db.py --pending` flag** (#156): Shows in-flight observations from the
+  `pending_observations` dict — type, phase (`active`/`post_heat`), elapsed time, sample
+  counts, and peak indoor temperature. Run during a live HVAC cycle to confirm samples are
+  accumulating correctly.
+
+- **`learning_db.py --rejections` enhancements** (#156): The rejection log output now includes
+  a top-reason summary table at the bottom (reason code, count, percentage). New `--type TYPE`
+  filter narrows output to a specific obs_type (e.g., `--rejections --type hvac_cool`).
+
+- **AI investigator: Thermal pipeline health coverage** (#156): A new
+  `=== THERMAL OBSERVATION PIPELINE ===` context section is added to the investigator's
+  context. Per-type rows show committed/rejected counts, top rejection reason codes, and
+  `NEVER LEARNED` flags when `k_active_cool` or `k_active_heat` is `None`. Pending in-flight
+  observations are listed with phase and sample count. `THERMAL PIPELINE HEALTH rules` in the
+  system prompt instruct the AI to flag 0-committed HVAC types and repeated `new_session_started`
+  abandonments as pipeline failures rather than leaving them implicit in null model fields.
+
 ## [0.3.49] — 2026-05-18
 
 ### Added

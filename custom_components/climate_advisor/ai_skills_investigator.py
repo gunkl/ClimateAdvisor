@@ -27,6 +27,12 @@ from .const import (
     CONF_AI_INVESTIGATOR_MAX_TOKENS,
     CONF_AI_INVESTIGATOR_MODEL,
     CONF_AI_INVESTIGATOR_REASONING,
+    OBS_TYPE_FAN_ONLY_DECAY,
+    OBS_TYPE_HVAC_COOL,
+    OBS_TYPE_HVAC_HEAT,
+    OBS_TYPE_PASSIVE_DECAY,
+    OBS_TYPE_SOLAR_GAIN,
+    OBS_TYPE_VENTILATED_DECAY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -108,10 +114,168 @@ Concrete steps to resolve each identified issue. Map each action to the relevant
 List every assumption made during this investigation and your overall confidence that the\
  analysis is complete given the available data.
 
+THERMAL PIPELINE HEALTH rules:
+- If hvac_heat or hvac_cool shows 0 committed observations AND HVAC has run: flag as observation\
+ pipeline failure — expected to learn within first few cycles under normal conditions.
+- If k_active_cool = NEVER LEARNED and AC has run in recent history: flag as pipeline failure;\
+ suggest checking rejection log and pending observations for the hvac_cool type.
+- If rejection log shows >=3 new_session_started abandonments for an HVAC type: flag as possible\
+ short-cycling thermostat — HVAC cycles too short to capture post-heat samples between 5-min ticks.
+- If rejection log shows n=0 rejections with delta_t=0.00°F: flag as possible sensor quantization\
+ issue — thermostat reports 1°F resolution; suggest using a finer-grained sensor entity.
+- If chart_log endpoint observations = 0: suggest running\
+ python tools/thermal_replay.py --chart-log --write to backfill from historical data.
+- Do NOT report k_active_cool=None as normal gap if AC has been running — it is a diagnostic flag\
+ requiring investigation, not a routine "not yet learned" state.
+- Source counts: "source_endpoint_count" and "source_block_ols_count" in the pipeline section\
+ show how many observations came from the chart_log estimator vs online OLS. If both are 0,\
+ no passive decay data has been committed at all.
+
 TONE
 Scientific, evidence-based, methodical. Prefer "no evidence of X" over "X is fine". Never\
  fabricate data or invent explanations — if the data does not support a conclusion, say so.\
 """
+
+
+def _build_thermal_pipeline_context(coordinator) -> str:
+    """Build THERMAL OBSERVATION PIPELINE section for the investigator context.
+
+    Calls coordinator._build_learning_health() and coordinator._build_thermal_pipeline_summary()
+    to surface per-obs-type rejection counts, pending observation state, and engine status so the
+    AI can distinguish 'k_active_cool=None because never learned' from 'pipeline failure'.
+
+    Each obs_type row shows:
+      committed / total_attempts, top rejection reason, NEVER LEARNED flag if k_active_* is None.
+    Pending observations show phase, elapsed time, and sample count.
+    """
+    from .ai_skills_activity import _format_engine_status_for_ai  # noqa: PLC0415
+
+    lines: list[str] = ["=== THERMAL OBSERVATION PIPELINE ==="]
+
+    # --- Per-type health from _build_learning_health() ---
+    try:
+        health: dict = (
+            coordinator._build_learning_health()
+            if callable(getattr(coordinator, "_build_learning_health", None))
+            else {}
+        )
+    except Exception:
+        health = {}
+
+    # Retrieve current thermal model so we can flag NEVER LEARNED parameters
+    try:
+        learning = getattr(coordinator, "learning", None)
+        thermal: dict = (learning.get_thermal_model() if learning is not None else {}) or {}
+    except Exception:
+        thermal = {}
+
+    k_active_cool = thermal.get("k_active_cool")
+    k_active_heat = thermal.get("k_active_heat")
+
+    all_obs_types = [
+        OBS_TYPE_HVAC_HEAT,
+        OBS_TYPE_HVAC_COOL,
+        OBS_TYPE_PASSIVE_DECAY,
+        OBS_TYPE_FAN_ONLY_DECAY,
+        OBS_TYPE_VENTILATED_DECAY,
+        OBS_TYPE_SOLAR_GAIN,
+    ]
+
+    lines.append("Per-type rejection summary:")
+    hvac_heat_committed = 0
+    hvac_cool_committed = 0
+    hvac_heat_total_rejected = 0
+    hvac_cool_total_rejected = 0
+
+    for obs_type in all_obs_types:
+        type_health = health.get(obs_type, {})
+        committed = type_health.get("committed", 0)
+        rejections_by_code: dict = type_health.get("rejections", {})
+        total_rejected = sum(rejections_by_code.values())
+        top_reason = (
+            max(rejections_by_code, key=lambda k: rejections_by_code[k], default="n/a") if total_rejected else "n/a"
+        )
+        top_count = rejections_by_code.get(top_reason, 0) if top_reason != "n/a" else 0
+
+        # Track HVAC totals for pipeline failure detection
+        if obs_type == OBS_TYPE_HVAC_HEAT:
+            hvac_heat_committed = committed
+            hvac_heat_total_rejected = total_rejected
+        elif obs_type == OBS_TYPE_HVAC_COOL:
+            hvac_cool_committed = committed
+            hvac_cool_total_rejected = total_rejected
+
+        # Build suffix markers
+        suffix_parts: list[str] = []
+        if obs_type == OBS_TYPE_HVAC_COOL and k_active_cool is None:
+            suffix_parts.append("NEVER LEARNED — k_active_cool is None")
+        if obs_type == OBS_TYPE_HVAC_HEAT and k_active_heat is None:
+            suffix_parts.append("NEVER LEARNED — k_active_heat is None")
+        suffix = f"  [{', '.join(suffix_parts)}]" if suffix_parts else ""
+
+        top_str = f"top reason: {top_reason} x{top_count}" if top_reason != "n/a" else "no rejections"
+        lines.append(f"  {obs_type}: {committed} committed, {total_rejected} rejected ({top_str}){suffix}")
+
+    # Pipeline failure detection
+    hvac_total_committed = hvac_heat_committed + hvac_cool_committed
+    hvac_total_rejected = hvac_heat_total_rejected + hvac_cool_total_rejected
+    if hvac_total_committed == 0 and hvac_total_rejected > 0:
+        lines.append(
+            f"  *** PIPELINE FAILURE INDICATOR: 0 committed HVAC observations,"
+            f" {hvac_total_rejected} rejections — pipeline is not learning from HVAC cycles ***"
+        )
+
+    # Source estimator counts
+    endpoint_count = health.get("source_endpoint_count", 0)
+    block_ols_count = health.get("source_block_ols_count", 0)
+    lines.append(f"  chart_log endpoint observations: {endpoint_count}")
+    lines.append(f"  block-OLS observations: {block_ols_count}")
+    if endpoint_count == 0 and block_ols_count == 0:
+        lines.append(
+            "  NOTE: 0 chart_log observations — consider running"
+            " python tools/thermal_replay.py --chart-log --write to backfill"
+        )
+
+    # --- Pending observations from _build_thermal_pipeline_summary() ---
+    lines.append("")
+    lines.append("Pending observations:")
+    try:
+        pipeline_summary: dict = (
+            coordinator._build_thermal_pipeline_summary()
+            if callable(getattr(coordinator, "_build_thermal_pipeline_summary", None))
+            else {}
+        )
+        pending: list = pipeline_summary.get("pending", [])
+        if pending:
+            for obs in pending:
+                obs_type_str = obs.get("obs_type", "?")
+                status = obs.get("status", "?")
+                elapsed = obs.get("elapsed_minutes")
+                samples = obs.get("sample_count", 0)
+                elapsed_str = f"{elapsed}min" if elapsed is not None else "?"
+                lines.append(f"  {obs_type_str}: status={status}, elapsed={elapsed_str}, samples={samples}")
+        else:
+            lines.append("  none active")
+    except Exception:
+        lines.append("  unavailable")
+
+    # --- Engine status ---
+    lines.append("")
+    lines.append("Engine status:")
+    try:
+        if learning is not None and hasattr(learning, "get_engine_status"):
+            engine_status = learning.get_engine_status()
+            from .ai_skills_activity import _format_engine_status_for_ai  # noqa: PLC0415, F811
+
+            engine_lines = _format_engine_status_for_ai(engine_status)
+            lines.append(engine_lines)
+        else:
+            lines.append("  unavailable")
+    except Exception:
+        lines.append("  unavailable")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _build_version_context(coordinator) -> str:
@@ -389,6 +553,15 @@ async def async_build_investigator_context(
     except Exception:
         _LOGGER.warning("investigator: failed to access learning engine — skipping")
         lines += ["=== LEARNING ===", "  unavailable", ""]
+
+    # ------------------------------------------------------------------
+    # 3b. Thermal observation pipeline health (Issue #156)
+    # ------------------------------------------------------------------
+    try:
+        lines.append(_build_thermal_pipeline_context(coordinator))
+    except Exception:
+        _LOGGER.warning("investigator: failed to build thermal pipeline context — skipping")
+        lines += ["=== THERMAL OBSERVATION PIPELINE ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
     # 4. Event log

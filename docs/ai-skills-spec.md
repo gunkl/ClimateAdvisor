@@ -14,6 +14,8 @@
 | What learning suggestion data does `activity_report` omit from its context? | Only the count of pending suggestions and the list of `suggestion_type` values are included. Raw suggestion text, evidence dicts, and confidence values are never sent to Claude by this skill. | [activity\_report — context omissions](#context-omissions) |
 | When is the `activity_report` contradiction warning suppressed? | The `hvac_mode=off` + active `hvac_action` warning is suppressed when `fan_status` is any of `"active"`, `"running (manual override)"`, or `"running (untracked)"` — all cases where CA knowingly has the fan running. | [Cross-validation suppression](#cross-validation) |
 | What sensitive config key does the `investigator` strip before including config in context? | `ai_api_key` is removed via `.pop()` on a copy of `coordinator.config` before the config block is serialised into the context string. No other config keys are redacted. | [investigator — config redaction](#config-redaction) |
+| What does the `THERMAL OBSERVATION PIPELINE` section in the investigator context show? | Per-type committed/rejected counts with top reason codes, NEVER LEARNED flags when `k_active_cool` or `k_active_heat` is None, pending in-flight observations, and engine status. Added in v0.3.50. | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
+| What rules govern the AI investigator's thermal pipeline health diagnosis? | Three THERMAL PIPELINE HEALTH rules in the system prompt: flag 0 committed HVAC obs as pipeline failure; flag `k_active_cool=NEVER LEARNED` with recent AC history as failure; flag ≥ 3 `new_session_started` abandonments as short-cycling. | [§THERMAL PIPELINE HEALTH System Prompt Rules](#thermal-pipeline-health-system-prompt-rules) |
 | Does the registry cache skill responses? | No. The registry has no response cache. Every `async_execute()` call builds a fresh context, calls Claude, and parses a new response. | [Caching](#caching) |
 | What invariant holds for `async_execute()` with respect to exceptions? | `async_execute()` never raises to the caller. Every exception inside context building, Claude call, parsing, and fallback invocation is caught and surfaced as a structured error dict. | [Invariants](#invariants) |
 
@@ -304,10 +306,38 @@ Assembles seven numbered context blocks. Each block is wrapped in its own `try/e
 | 3 | `LEARNING — WEATHER BIAS` | `learning.get_weather_bias()` |
 | 3 | `LEARNING — ACTIVE SUGGESTIONS` | `learning.generate_suggestions()` — full suggestion text and evidence included |
 | 3 | `LEARNING — LAST 14 DAILY RECORDS` | `learning._state.records[-14:]` — direct internal access |
+| 3 | `THERMAL OBSERVATION PIPELINE` | `_build_thermal_pipeline_context(coordinator)` — per-type committed/rejected counts, top reason codes, pending observations, NEVER LEARNED flags (added v0.3.50, Issue #156) |
 | 4 | `EVENT LOG` | `coordinator._event_log[-200:]` filtered to last N hours (`kwargs.get("hours", 48)`) |
 | 5 | `RECENT AI ACTIVITY REPORTS` | `coordinator.get_ai_report_history()[-3:]` — timestamp and summary only |
 | 6 | `CONFIGURATION` | `coordinator.config` copy with `ai_api_key` stripped |
 | 7 | `CA OPERATIONAL DESIGN` | Hardcoded prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
+
+### Thermal Observation Pipeline Context
+
+`_build_thermal_pipeline_context(coordinator) → str`
+
+Added in v0.3.50 (Issue #156). Builds the `=== THERMAL OBSERVATION PIPELINE ===` section appended at the end of block 3. Purpose: let the AI distinguish `k_active_cool=None because never tried` from `k_active_cool=None because every attempt failed` vs. `k_active_cool=None because pipeline bug silently discarded all observations`.
+
+**Per-type rows:** For each obs_type (`hvac_heat`, `hvac_cool`, `passive_decay`, `fan_only_decay`, `ventilated_decay`, `solar_gain`), the section shows:
+- Committed count / total attempts (committed + rejected)
+- Top rejection reason code and occurrence count (or `"no rejections"`)
+- `NEVER LEARNED — k_active_cool is None` flag when obs_type is `hvac_cool` and `k_active_cool` is `None`
+- `NEVER LEARNED — k_active_heat is None` flag when obs_type is `hvac_heat` and `k_active_heat` is `None`
+
+**Pending observations:** Any in-flight observations from `coordinator._pending_observations` are listed with type, phase (`active`/`post_heat`), elapsed minutes, and sample count.
+
+**Engine status:** `get_engine_status()` output is appended via `_format_engine_status_for_ai()`.
+
+**Section-local guard:** The entire call is wrapped in a `try/except` in `async_build_investigator_context`. On failure, the section reads `"  unavailable"` and assembly continues.
+
+### THERMAL PIPELINE HEALTH System Prompt Rules
+
+The investigator's `_SYSTEM_PROMPT` includes `THERMAL PIPELINE HEALTH rules:` that instruct the AI to:
+- Flag `hvac_heat`/`hvac_cool` with 0 committed observations as a pipeline failure when HVAC has run — expected to learn within first few cycles under normal conditions
+- Flag `k_active_cool=NEVER LEARNED` when AC has run in recent history as a pipeline failure; suggest checking rejection log and pending observations for `hvac_cool`
+- Flag ≥ 3 `new_session_started` abandonments for an HVAC type as possible short-cycling thermostat (cycles too short to capture post-heat samples between 5-min ticks)
+
+These rules make pipeline failures explicit rather than leaving them to be inferred from null values in the thermal model section.
 
 **Appended after the seven blocks (not try/except guarded separately):**
 - Version/release notes: last 5 entries from `RELEASE_NOTES` in `const.py`

@@ -204,6 +204,26 @@ KNOWN_FIXES: dict[int, dict] = {
             "_get_forecast() fallback branch — fallback block not addressed in this fix; fixed in Issue #143",
         ],
     },
+    156: {
+        "version_fixed": "0.3.50",
+        "title": "HVAC thermal observations never committed — samples key shadow bug",
+        "scope_covered": [
+            "samples key removed from HVAC obs dict in _start_hvac_observation",
+            "startup recovery now correctly reads active_samples for HVAC obs types",
+            "rejection log now reports real sample count (not always n=0)",
+            "rejection log entries for all abandonment paths including new_session_started",
+            "AI investigator context includes thermal pipeline health section",
+            "k_active_cool=None shown as NEVER LEARNED in investigator context",
+            "per-obs-type rejection counts in investigator context",
+            "get_engine_status() included in investigator context",
+            "learning_db --pending flag shows in-flight observations",
+        ],
+        "scope_not_covered": [
+            "Real-time rejection streaming (capped in-memory log)",
+            "Chart_log backfill auto-trigger (still manual or restart-triggered)",
+            "Automatic sensor resolution upgrade (still manual config)",
+        ],
+    },
     149: {
         "version_fixed": "0.3.47",
         "title": (

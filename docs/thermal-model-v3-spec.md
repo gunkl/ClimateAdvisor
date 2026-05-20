@@ -17,6 +17,8 @@
 | Where is the solar factor formula defined and what does `phase_offset_h` do? | `_solar_factor(local_hour, phase_offset_h)` shifts the sinusoidal solar input peak by `phase_offset_h` hours. With the default offset=2 the peak falls at local hour 15 (3pm) instead of 13 (1pm). | [§Solar Factor](#solar-factor) |
 | How is `solar_phase_offset_h` learned from chart_log? | Daytime passive windows (HVAC off, fan off, windows closed) are scanned for the indoor temperature peak hour. `phase_obs = peak_hour − 13` is accumulated via EWMA (α=0.10), clamped to [0, 4]. | [§Solar Phase Offset Learning](#solar-phase-offset-learning) |
 | What is engine visibility and where is it exposed? | `get_engine_status()` returns per-engine `active`, `value`, and `since` fields; `k_passive` and `k_solar` additionally include `confidence` and `obs_count`. Exposed at REST `/api/climate_advisor/engines`, dashboard Debug tab, AI investigator context, and `tools/engine_status.py`. | [§Engine Visibility](#engine-visibility) |
+| Why does `k_active_cool` stay `None` despite AC cycling normally? | Two v0.3.50 bugs can cause this: (1) the `"samples": []` key shadow — `_start_hvac_observation` created a `"samples"` key that was always returned instead of `"active_samples"`; (2) startup recovery discarded all HVAC pending obs by reading the wrong key. Both fixed in v0.3.50. Check `--rejections --type hvac_cool` for `n=0` entries with elapsed > 0. | [§Observation Pipeline Failure Modes](#observation-pipeline-failure-modes) |
+| What rejection codes indicate normal operation vs. pipeline failure for HVAC obs types? | `new_session_started` (short-cycling), `plateau_guard` (insufficient post-heat decay), and `n=0 delta_t=0.00°F` (sensor quantization) are expected on some homes. `n=0` with elapsed > 0 in pre-v0.3.50 coordinators indicates the key-shadow bug. | [§Known Rejection Patterns](#known-rejection-patterns) |
 
 ---
 
@@ -734,6 +736,61 @@ All five fields are initialised to `None` in `thermal_model_cache` and included 
 ### `get_thermal_model()` additions
 
 `solar_phase_offset_h` and all five `first_active_date_*` fields are included in the `get_thermal_model()` return dict. Downstream consumers (`coordinator.py`, `api.py`, `ai_skills_activity.py`) read from this output, not from `thermal_model_cache` directly.
+
+---
+
+## Observation Pipeline Failure Modes
+
+This section documents failure modes in the HVAC observation pipeline that have been diagnosed and fixed, and known operational rejection patterns. Understanding these modes is essential when interpreting `--rejections` output or investigating `k_active_cool=None` on a home with active AC cycling.
+
+### Fixed: `"samples": []` Key Shadow (Issue #156)
+
+**Root cause:** `_start_hvac_observation` previously created the observation dict with both a `"samples": []` key and an `"active_samples": []` key. Any code that called `obs.get("samples", ...)` received the empty `[]` immediately — the `"active_samples"` key (where real data was appended) was never reached.
+
+**Symptoms:** `k_active_cool=None` and `k_active_heat=None` despite HVAC cycling normally. Rejection log would show `n=0` for hvac_heat/hvac_cool entries with non-zero elapsed time. The 5-min polling tick was appending samples to `active_samples`, but commit-path code reading `"samples"` always saw an empty list.
+
+**Resolution (v0.3.50):** The `"samples": []` key was removed from the HVAC obs dict at creation time. Only `"active_samples"` and `"post_heat_samples"` are used for HVAC types. The commit-path and startup-recovery code was updated to read these keys explicitly.
+
+**Detection:** If `--rejections --type hvac_cool` shows repeated entries with `n=0` and elapsed > 0, and the coordinator version predates v0.3.50, this is the likely cause.
+
+### Fixed: Startup Recovery Discarding All HVAC Pending Observations (Issue #156)
+
+**Root cause:** The startup recovery loop (run on HA restart to decide whether in-flight observations are worth continuing or should be abandoned) used `obs.get("samples", [])` for all observation types. For HVAC types with the `"samples"` shadow bug, this always returned `[]`, and recovery immediately abandoned every pending HVAC observation with `n=0`.
+
+**Resolution (v0.3.50):** Startup recovery is now phase-aware for HVAC types:
+- `_phase == "post_heat"`: reads `post_heat_samples`, requires `min_s = THERMAL_MIN_POST_HEAT_SAMPLES (4)`
+- `_phase == "active"` (default): reads `active_samples`, requires `min_s = 1` — any sample is worth recovering so the post-heat window can continue after restart
+- Backward-compat fallback: if `active_samples` is empty (pre-fix persisted obs), falls back to `obs.get("samples", [])`
+
+Non-HVAC types (passive_decay, fan_only_decay, etc.) use the generic `obs.get("samples", obs.get("active_samples", []))` path.
+
+### Fixed: `_abandon_observation` Reporting n=0 (Issue #156)
+
+**Root cause:** The rejection log entry's `n` field was always computed from `obs.get("samples", [])` — the shadowed empty list — rather than the actual sample count.
+
+**Resolution (v0.3.50):** `_abandon_observation` now reads sample count from the correct key per type: `active_samples` for HVAC active-phase observations, `post_heat_samples` for post-heat, and `samples` for rolling-window types. Rejection log entries now show real sample counts.
+
+**Debugging note:** Rejection log entries with `n=0` and elapsed > a few minutes in pre-v0.3.50 coordinators are a strong signal that the shadow bug was active — those observations had real data that wasn't being counted.
+
+### Enhancement: Event-Driven Sampling (Issue #156)
+
+**Context:** The 5-min polling tick (`_sample_all_observations`) can miss short HVAC cycles entirely. A cycle that starts and ends between two polling ticks produces only 1 initial sample — yielding 0 consecutive pairs for OLS. `k_active` is never fitted.
+
+**Resolution (v0.3.50):** `_async_thermostat_changed` now appends a sample to `active_samples` when HVAC action is active at the time of any thermostat state change (temperature update, attribute change). A 60-second decimation gate prevents duplicate samples within the same minute.
+
+**Effect:** Short cycles (1–4 min) now accumulate 3–10 event-driven samples if the thermostat is chatty, making single-point fallback (`compute_k_active_single_point`) much more likely to succeed for these sessions.
+
+### Known Rejection Patterns
+
+These rejection patterns in `--rejections` output are expected and do not indicate bugs:
+
+| Rejection reason / pattern | Meaning | Action |
+|---|---|---|
+| `new_session_started` (repeated for hvac_cool/hvac_heat) | HVAC started a new session before the previous post-heat window finished. Most common on short-cycling thermostats or systems with rapid cycling. | Expected on short-cycling systems. If count is high relative to committed obs, the home may never reach `THERMAL_MIN_POST_HEAT_SAMPLES` before the next cycle. |
+| `n=0, delta_t=0.00°F` on HVAC types (coordinator ≥ v0.3.50) | Sensor quantization — the thermostat's 1°F resolution cannot resolve 0.3–0.8°F temperature change in short cycles. Both active_samples and post_heat_samples have real data, but consecutive pairs produce rate ≈ 0. | Normal on short-cycle homes. Event-driven sampling (v0.3.50) and the single-point fallback mitigate this. |
+| `plateau_guard: insufficient post-heat decay` | The post-heat phase ended without the indoor temperature dropping `THERMAL_HVAC_MIN_DECAY_F (0.3°F)` below the peak. Common on efficient systems or when HVAC duty cycle is very short. | Threshold was reduced from 1.0°F to 0.3°F in v0.3.22. If still firing, the system may have a very tight thermostat deadband. |
+| `max_window_exceeded` on rolling types | Passive/fan/vent observation ran for 4 hours without meeting signal threshold. | Not a bug — the 240-min hard cap forces a commit or abandon when signal is never sufficient. |
+| `REJECT_OLS_BAD_FIT` (R² < 0.20) on passive_decay | Consecutive 5-min pair OLS on 1°F thermostat data structurally fails; see §Dual Estimator Framework. | The chart_log dual-estimator (Estimator B) handles this. Active passive_decay observations supplement with real-time data. |
 
 ---
 

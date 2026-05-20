@@ -987,9 +987,14 @@
     return min;
   }
 
-  // Return the latest timestamp (ms) found across state_log, actual_indoor, actual_outdoor
+  // Return the latest timestamp (ms) found across historical and prediction arrays.
+  // Including predicted_indoor and forecast_outdoor lets _dataWindowEnd reach the
+  // prediction horizon so the user can scroll forward into future forecast data.
   function _getDataMaxTs(data) {
-    const sources = [data.state_log, data.actual_indoor, data.actual_outdoor].filter(Boolean);
+    const sources = [
+      data.state_log, data.actual_indoor, data.actual_outdoor,
+      data.predicted_indoor, data.forecast_outdoor,
+    ].filter(Boolean);
     let max = null;
     for (const arr of sources) {
       for (const e of arr) {
@@ -1007,8 +1012,9 @@
   function shiftChartWindow(direction) {
     const step = _rangeStep(_chartRange);
     _windowOffset += direction * step;
-    // Clamp forward: don't navigate past now
-    if (_windowOffset > 0) _windowOffset = 0;
+    // Clamp forward: don't navigate past the prediction horizon (future data in live fetch)
+    const maxOffset = (_dataWindowEnd !== null) ? _dataWindowEnd - Date.now() : 0;
+    if (_windowOffset > maxOffset) _windowOffset = maxOffset;
     const { min: vpStart, max: vpEnd } = _rangeToWindow(_chartRange);
     // Backward: viewport start before data window — re-fetch past
     if (_dataWindowStart !== null && vpStart < _dataWindowStart) {
@@ -1025,8 +1031,8 @@
       }
       return;
     }
-    // Snap to live when close enough to now (handles live-mode forward clamp)
-    if (_windowOffset >= -step / 2 && _dataWindowEnd !== null) {
+    // Snap to live when navigating backward back close to present
+    if (_windowOffset < 0 && _windowOffset >= -step / 2 && _dataWindowEnd !== null) {
       _windowOffset = 0;
       loadChart();
       return;

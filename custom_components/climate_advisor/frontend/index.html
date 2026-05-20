@@ -2699,10 +2699,32 @@
       _cachedInvestigationReports = sorted;
       container.innerHTML = sorted.map((entry, idx) => {
         const ts = new Date(entry.timestamp).toLocaleString();
-        const summary = (entry.result && entry.result.data && entry.result.data.summary)
-          ? entry.result.data.summary
-          : (entry.result && entry.result.error ? entry.result.error : 'No summary available');
         const source = (entry.result && entry.result.source) ? entry.result.source : 'unknown';
+        const data = (entry.result && entry.result.data) ? entry.result.data : {};
+        const invSections = [
+          { key: 'summary',             label: 'Investigation Summary' },
+          { key: 'incongruities',       label: 'Incongruities Found' },
+          { key: 'data_quality',        label: 'Data Quality Issues' },
+          { key: 'errors_warnings',     label: 'System Errors / Warnings' },
+          { key: 'hypotheses',          label: 'Hypotheses' },
+          { key: 'recommended_actions', label: 'Recommended Actions' },
+          { key: 'assumptions',         label: 'Assumptions & Confidence' },
+        ];
+        const sectionsHtml = invSections.map(({ key, label }) => {
+          const content = (data[key] || '').trim();
+          if (!content) return '';
+          return '<div style="margin-top:0.75rem;">'
+            + '<div style="font-size:0.75rem; font-weight:600; color:var(--text-primary);'
+            + ' text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.25rem;">'
+            + escapeHtml(label) + '</div>'
+            + '<p style="font-size:0.8rem; margin:0; color:var(--text-secondary);'
+            + ' white-space:pre-wrap; line-height:1.5;">' + escapeHtml(content) + '</p>'
+            + '</div>';
+        }).join('');
+        const bodyHtml = sectionsHtml
+          || (entry.result && entry.result.error
+            ? '<p style="font-size:0.8rem; margin:0.5rem 0 0; color:var(--text-secondary);">' + escapeHtml(entry.result.error) + '</p>'
+            : '<p style="font-size:0.8rem; margin:0.5rem 0 0; color:var(--text-secondary);">No report data available.</p>');
         return '<details style="margin-bottom:0.5rem;">'
           + '<summary style="cursor:pointer; font-size:0.85rem; padding:0.25rem 0; display:flex; align-items:center; gap:0.5rem;">'
           + '<span><strong>' + escapeHtml(ts) + '</strong>'
@@ -2710,7 +2732,7 @@
           + '<button class="btn secondary" style="font-size:0.75rem; padding:0.15rem 0.5rem; margin-left:auto;" '
           + 'onclick="event.stopPropagation(); downloadInvestigationReportByIndex(' + idx + ')">⬇ Download</button>'
           + '</summary>'
-          + '<p style="font-size:0.8rem; margin:0.5rem 0 0; color:var(--text-secondary);">' + escapeHtml(summary) + '</p>'
+          + '<div style="padding:0 0.25rem 0.5rem;">' + bodyHtml + '</div>'
           + '</details>';
       }).join('');
     } catch (_err) {

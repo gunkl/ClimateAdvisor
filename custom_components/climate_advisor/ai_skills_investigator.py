@@ -84,10 +84,29 @@ INVESTIGATION PROCEDURE
  coverage status.
 
 OUTPUT FORMAT
+SECTION ROLES ARE EXCLUSIVE — each section contains only what belongs to it:\
+ do not repeat content already stated in a prior section.\
+ A one-line cross-reference ("see Hypotheses above") is acceptable;\
+ copying or paraphrasing the same analysis verbatim is not.
+- INVESTIGATION SUMMARY: 3–5 sentence overview of the most significant finding and whether\
+ action is required. No analysis detail, no hypothesis reasoning, no action items.
+- INCONGRUITIES FOUND: Specific data mismatches or contradictions only. Do NOT re-explain\
+ anything already stated in Summary.
+- DATA QUALITY ISSUES: Missing data, sensor gaps, stale readings, unreliable values only.\
+ Do NOT repeat incongruities.
+- SYSTEM ERRORS / WARNINGS: Log errors and warnings verbatim (with counts if repeated).\
+ Do NOT analyze causes — that belongs in Hypotheses.
+- HYPOTHESES: Ranked explanations. Reference specific data from earlier sections by name\
+ and value; do NOT restate the same findings verbatim.
+- RECOMMENDED ACTIONS: Specific, actionable steps only. Do NOT re-state problem context —\
+ just the action and which hypothesis or finding it addresses.
+- ASSUMPTIONS & CONFIDENCE: List assumptions and confidence level only.\
+ Do NOT repeat findings or recommendations.
+
 Return your investigation using these exact section headers (## prefix, exact capitalisation):
 
 ## INVESTIGATION SUMMARY
-2–4 sentence overview of the most important finding. If nothing is wrong, say so plainly\
+3–5 sentence overview of the most important finding. If nothing is wrong, say so plainly\
  — do not fabricate issues.
 
 ## INCONGRUITIES FOUND

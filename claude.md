@@ -459,6 +459,25 @@ gh issue create --title "Feature: Description" --body "..."
 gh issue create --title "Fix: Description" --body "..."
 ```
 
+### CRITICAL: Issue Number Discipline
+
+**NEVER guess or pre-assign an issue number.** GitHub assigns the number when the issue is created. Always create the issue first, capture the real number from the `gh issue create` output, then use that exact number everywhere:
+
+- worktree name: `ClimateAdvisor-issue-<N>`
+- branch name: `fix/<N>-short-description` or `feature/<N>-short-description`
+- commit message: `Fix #<N>: ...` or `Feat #<N>: ...`
+- PR title: same as commit message
+
+**Correct order of operations:**
+```
+1. gh issue create ... → returns https://github.com/.../issues/<N>
+2. git worktree add ../ClimateAdvisor-issue-<N> -b fix/<N>-description
+3. implement, commit with "Fix #<N>: ..."
+4. gh pr create --title "Fix #<N>: ..."
+```
+
+If a worktree was created before the issue number was known, rename it or note the mismatch — do not propagate wrong numbers into commit messages or PR titles.
+
 ### Issue Requirements
 - Every feature/fix should have a tracking issue
 - Include summary, requirements, implementation checklist
@@ -468,10 +487,11 @@ gh issue create --title "Fix: Description" --body "..."
 ### Example Workflow
 ```
 1. User requests feature
-2. Claude creates GitHub issue with requirements
-3. Claude implements feature
-4. Claude updates issue with completion status
-5. User reviews and commits
+2. Claude creates GitHub issue → captures real issue number
+3. Claude creates worktree + branch using that number
+4. Claude implements feature
+5. Claude updates issue with completion status
+6. User reviews and commits
 ```
 
 ## Effective Prompting

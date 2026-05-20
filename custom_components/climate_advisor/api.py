@@ -652,9 +652,9 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
 
         focus: str = str(body.get("focus", ""))
         try:
-            hours: int = max(1, min(int(body.get("hours", 48)), 168))
+            hours: int = max(1, min(int(body.get("hours", 168)), 720))
         except (ValueError, TypeError):
-            hours = 48
+            hours = 168
 
         if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
             return self.json_message("AI features are not enabled", status_code=403)

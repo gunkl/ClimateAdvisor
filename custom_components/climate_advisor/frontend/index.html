@@ -695,6 +695,14 @@
       Scientific cross-source analysis to find incongruities, data issues, and system errors.
       Requires AI and Investigative Agent to be enabled in settings.
     </p>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+      <label style="font-size:0.85rem;">Time window:</label>
+      <select id="investigation-range" style="font-size:0.85rem;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
+        <option value="24">Last 1 day</option>
+        <option value="168" selected>Last 7 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+    </div>
     <div style="margin-bottom: 0.75rem;">
       <textarea id="investigation-focus"
         placeholder="Optional: describe what you'd like investigated (e.g. 'why is window compliance 0%')..."
@@ -2700,7 +2708,8 @@
     }, 2500);
 
     try {
-      const body = { hours: 48 };
+      const hours = parseInt(document.getElementById('investigation-range').value, 10) || 168;
+      const body = { hours };
       if (focus) body.focus = focus;
       const result = await apiFetch('ai_investigate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 

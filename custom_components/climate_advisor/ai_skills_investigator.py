@@ -380,6 +380,10 @@ async def async_build_investigator_context(
     """
     lines: list[str] = ["=== Climate Advisor Investigator Context ===", ""]
 
+    # Time window — controls event log cutoff and daily records lookback
+    hours: int = min(max(int(kwargs.get("hours", 168)), 1), 720)
+    daily_records_days: int = min((hours + 23) // 24 + 1, 30)
+
     # Focus question (optional caller override)
     focus: str = kwargs.get("focus", "")
     if focus:
@@ -538,16 +542,16 @@ async def async_build_investigator_context(
                 _LOGGER.warning("investigator: generate_suggestions() failed")
                 lines += ["=== LEARNING — ACTIVE SUGGESTIONS ===", "  unavailable", ""]
 
-            # Last 14 daily records
+            # Daily records — window determined by caller's hours parameter
             try:
                 state_obj = getattr(learning, "_state", None)
                 records: list[Any] = []
                 if state_obj is not None:
                     raw_records = getattr(state_obj, "records", None)
                     if isinstance(raw_records, list):
-                        records = raw_records[-14:]
+                        records = raw_records[-daily_records_days:]
 
-                lines.append("=== LEARNING — LAST 14 DAILY RECORDS ===")
+                lines.append(f"=== LEARNING — LAST {daily_records_days} DAILY RECORDS ===")
                 if records:
                     for rec in records:
                         if isinstance(rec, dict):
@@ -566,7 +570,7 @@ async def async_build_investigator_context(
                 lines.append("")
             except Exception:
                 _LOGGER.warning("investigator: failed to read daily records")
-                lines += ["=== LEARNING — LAST 14 DAILY RECORDS ===", "  unavailable", ""]
+                lines += [f"=== LEARNING — LAST {daily_records_days} DAILY RECORDS ===", "  unavailable", ""]
         else:
             lines += ["=== LEARNING ===", "  learning engine not available", ""]
     except Exception:
@@ -586,7 +590,6 @@ async def async_build_investigator_context(
     # 4. Event log
     # ------------------------------------------------------------------
     try:
-        hours: int = int(kwargs.get("hours", 48))
         cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
         event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
         recent_events: list[Any] = []
@@ -871,7 +874,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                 if state_obj is not None:
                     raw_records = getattr(state_obj, "records", None)
                     if isinstance(raw_records, list):
-                        for rec in raw_records[-14:]:
+                        for rec in raw_records[-30:]:
                             if not isinstance(rec, dict):
                                 continue
                             date_val = rec.get("date", "?")

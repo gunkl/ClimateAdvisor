@@ -664,6 +664,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         report_entry = {
             "timestamp": dt_util.now().isoformat(),
+            "report_type": "activity",
             "result": result,
         }
         self._ai_report_history.append(report_entry)
@@ -700,7 +701,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with open(filepath, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                self._ai_report_history = data[-AI_REPORT_HISTORY_CAP:]
+                cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+                recent = [e for e in data if isinstance(e, dict) and e.get("timestamp", "") >= cutoff]
+                self._ai_report_history = recent[-AI_REPORT_HISTORY_CAP:]
                 _LOGGER.debug("Loaded %d AI reports from disk", len(self._ai_report_history))
             else:
                 _LOGGER.warning("AI reports file has unexpected format, starting fresh")
@@ -715,11 +718,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Return the AI report history for dashboard display."""
         return list(self._ai_report_history)
 
+    def delete_ai_report(self, timestamp: str) -> bool:
+        """Remove an activity report by timestamp. Returns True if removed."""
+        before = len(self._ai_report_history)
+        self._ai_report_history = [e for e in self._ai_report_history if e.get("timestamp") != timestamp]
+        return len(self._ai_report_history) < before
+
     async def async_store_investigation_report(self, result: dict) -> None:
         """Store an investigation report result in history and persist to disk."""
 
         entry = {
             "timestamp": dt_util.now().isoformat(),
+            "report_type": "investigation",
             "result": result,
         }
         self._investigation_report_history.append(entry)
@@ -730,6 +740,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def get_investigation_report_history(self) -> list[dict]:
         """Return a copy of the investigation report history."""
         return list(self._investigation_report_history)
+
+    def delete_investigation_report(self, timestamp: str) -> bool:
+        """Remove an investigation report by timestamp. Returns True if removed."""
+        before = len(self._investigation_report_history)
+        self._investigation_report_history = [
+            e for e in self._investigation_report_history if e.get("timestamp") != timestamp
+        ]
+        return len(self._investigation_report_history) < before
 
     def _save_investigation_reports(self) -> None:
         """Save investigation report history to disk (atomic write)."""
@@ -761,7 +779,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             with open(filepath, encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                self._investigation_report_history = data[-INVESTIGATION_REPORT_HISTORY_CAP:]
+                cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+                recent = [e for e in data if isinstance(e, dict) and e.get("timestamp", "") >= cutoff]
+                self._investigation_report_history = recent[-INVESTIGATION_REPORT_HISTORY_CAP:]
                 _LOGGER.debug(
                     "Loaded %d investigation reports from disk",
                     len(self._investigation_report_history),

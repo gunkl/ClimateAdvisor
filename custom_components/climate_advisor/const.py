@@ -1203,11 +1203,11 @@ AI_RETRY_BASE_DELAY_SECONDS = 1.0  # exponential backoff: 1s, 2s, 4s
 AI_REQUEST_HISTORY_CAP = 50
 
 # Persisted report history
-AI_REPORT_HISTORY_CAP = 10
+AI_REPORT_HISTORY_CAP = 60
 AI_REPORTS_FILE = "climate_advisor_ai_reports.json"
 
 # Investigation report history (Issue #82)
-INVESTIGATION_REPORT_HISTORY_CAP = 20
+INVESTIGATION_REPORT_HISTORY_CAP = 60
 INVESTIGATION_REPORTS_FILE = "climate_advisor_investigation_reports.json"
 
 # Sensor attributes for AI status
@@ -1219,3 +1219,4 @@ API_AI_ACTIVITY = f"{API_BASE}/ai_activity"
 API_AI_REPORTS = f"{API_BASE}/ai_reports"
 API_AI_INVESTIGATE = f"{API_BASE}/ai_investigate"
 API_INVESTIGATION_REPORTS = f"{API_BASE}/investigation_reports"
+API_DELETE_REPORT = f"{API_BASE}/delete_report"

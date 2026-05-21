@@ -21,6 +21,7 @@ from .const import (
     API_CANCEL_OVERRIDE,
     API_CHART_DATA,
     API_CONFIG,
+    API_DELETE_REPORT,
     API_ENGINES,
     API_EVENT_LOG,
     API_FORCE_RECLASSIFY,
@@ -652,9 +653,9 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
 
         focus: str = str(body.get("focus", ""))
         try:
-            hours: int = max(1, min(int(body.get("hours", 48)), 168))
+            hours: int = max(1, min(int(body.get("hours", 168)), 720))
         except (ValueError, TypeError):
-            hours = 48
+            hours = 168
 
         if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
             return self.json_message("AI features are not enabled", status_code=403)
@@ -757,6 +758,43 @@ class ClimateAdvisorEnginesView(HomeAssistantView):
         return self.json(status)
 
 
+class ClimateAdvisorDeleteReportView(HomeAssistantView):
+    """POST /api/climate_advisor/delete_report — delete a report by type + timestamp."""
+
+    url = API_DELETE_REPORT
+    name = "api:climate_advisor:delete_report"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"error": "invalid_json"}, status_code=400)
+
+        report_type = body.get("report_type", "")
+        timestamp = body.get("timestamp", "")
+        if not timestamp:
+            return self.json({"error": "missing_timestamp"}, status_code=400)
+
+        if report_type == "activity":
+            found = coordinator.delete_ai_report(timestamp)
+            if found:
+                await hass.async_add_executor_job(coordinator._save_ai_reports)
+        elif report_type == "investigation":
+            found = coordinator.delete_investigation_report(timestamp)
+            if found:
+                await hass.async_add_executor_job(coordinator._save_investigation_reports)
+        else:
+            return self.json({"error": "invalid_type"}, status_code=400)
+
+        return self.json({"success": True, "found": found})
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -777,6 +815,7 @@ API_VIEWS = [
     ClimateAdvisorAIReportsView,
     ClimateAdvisorInvestigateView,
     ClimateAdvisorInvestigationReportsView,
+    ClimateAdvisorDeleteReportView,
     ClimateAdvisorEventLogView,
     ClimateAdvisorEnginesView,
 ]

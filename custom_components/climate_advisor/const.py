@@ -4,9 +4,30 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.52"
+VERSION = "0.3.53"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.3.53": [
+        "Fix #170: Setpoint-only overrides now enter manual grace period immediately"
+        " — CA no longer resets thermostat after user adjusts target temperature without changing mode"
+        " (handle_setpoint_override() bypasses confirmation window; CONFIG_METADATA description corrected)",
+    ],
+    "0.3.52": [
+        "Feat #166: AI Investigation Analysis — feedback loop (helpful/not helpful/wrong),"
+        " unified investigation view with history tab, GitHub issue submission from the dashboard",
+        "Feat #164: Chart forward navigation into predicted future"
+        " — '>' button advances beyond current time using physics-simulated indoor ODE results",
+        "Fix #162: Chart forward navigation after historical re-fetch"
+        " — advances from the retrieved anchor timestamp instead of jumping to current time",
+    ],
+    "0.3.51": [
+        "Fix #158: Investigation history panel shows full report text"
+        " — AI no longer duplicates findings across sections in multi-section reports",
+    ],
+    "0.3.50": [
+        "Fix #156: HVAC thermal observations never committed — 'samples' key shadow bug"
+        " in _start_hvac_observation() fixed; startup recovery, rejection log, and AI investigator context updated",
+    ],
     "0.3.47": [
         "Fix #149: AI activity report — k_active_hvac heat/cool values now display correctly"
         " (property path fixed: hvac_info['value']['heat/cool'] instead of direct key lookup)",
@@ -237,6 +258,78 @@ KNOWN_FIXES: dict[int, dict] = {
             "HVAC peak temperature captured at exact HVAC-off moment for accurate swing measurement",
         ],
         "scope_not_covered": [],
+    },
+    158: {
+        "version_fixed": "0.3.51",
+        "title": "Investigation history full report + AI deduplication",
+        "scope_covered": [
+            "Investigation history panel shows full report text (not just summary)",
+            "AI system prompt gains deduplication rule — findings not repeated across sections",
+        ],
+        "scope_not_covered": [],
+    },
+    160: {
+        "version_fixed": "0.3.52",
+        "title": "Temperature Forecast chart historical navigation via before_ts anchor",
+        "scope_covered": [
+            "/api/climate_advisor/chart_data?before_ts=<epoch> endpoint parameter",
+            "Chart backward '<' navigation fetches historical window anchored before current view",
+            "Chart log lookback bounded by available chart_log retention (~365 days)",
+        ],
+        "scope_not_covered": [
+            "Forward navigation into future (addressed in Issue #164)",
+        ],
+    },
+    162: {
+        "version_fixed": "0.3.52",
+        "title": "Chart forward navigation after historical re-fetch",
+        "scope_covered": [
+            "Chart '>' button after backward navigation re-anchors to the retrieved window"
+            " rather than jumping directly to current time",
+        ],
+        "scope_not_covered": [],
+    },
+    164: {
+        "version_fixed": "0.3.52",
+        "title": "Chart forward navigation into predicted future temperatures",
+        "scope_covered": [
+            "Chart '>' button beyond latest historical data advances into the physics-simulated"
+            " predicted indoor ODE window",
+            "Predicted window fetched via before_ts pointing past current time",
+        ],
+        "scope_not_covered": [],
+    },
+    166: {
+        "version_fixed": "0.3.52",
+        "title": "AI Investigation Analysis — feedback loop, unified view, GitHub integration",
+        "scope_covered": [
+            "Feedback buttons (helpful / not helpful / wrong) on each investigation result",
+            "Unified investigation view with tabbed history of prior reports",
+            "GitHub issue submission modal — pre-filled from investigation findings",
+            "Feedback outcome stored in investigation history record",
+            "Cancel button in GitHub issue modal closes the dialog without submitting",
+        ],
+        "scope_not_covered": [],
+    },
+    170: {
+        "version_fixed": "0.3.53",
+        "title": "Setpoint-only manual override detection — immediate grace period entry",
+        "scope_covered": [
+            "automation.handle_setpoint_override() — new method confirms setpoint change"
+            " as manual override immediately (no confirmation window)",
+            "coordinator._async_thermostat_changed() now calls handle_setpoint_override()"
+            " when temperature changes and all CA-command guards pass",
+            "apply_classification() returns early while override is active — no temperature reset",
+            "handle_setpoint_override() is a no-op if _manual_override_active or"
+            " _override_confirm_pending is already True (no double-trigger)",
+            "CONFIG_METADATA description for manual_grace_seconds updated to document"
+            " both mode-change and setpoint-change trigger paths",
+            "docs/08-COMPUTATION-REFERENCE.md Section 11 updated with setpoint override path",
+        ],
+        "scope_not_covered": [
+            "Setpoint changes made by HA automations (treated same as user changes;"
+            " will trigger grace — use _temp_command_pending guard to suppress if needed)",
+        ],
     },
 }
 
@@ -587,8 +680,9 @@ CONFIG_METADATA = {
     "manual_grace_seconds": {
         "label": "Manual Grace Period (minutes)",
         "description": (
-            "After you manually turn HVAC back on during a sensor pause, this grace window prevents re-pausing."
-            " Gives you time to close up without the system cycling."
+            "After you manually change the thermostat — either the HVAC mode or the target temperature —"
+            " CA waits this many minutes before resuming automated setpoint control."
+            " Also prevents re-pausing if a door/window opens during this window. Default: 30 minutes."
         ),
         "category": "sensors",
         "display_transform": "seconds_to_minutes",

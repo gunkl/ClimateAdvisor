@@ -257,3 +257,64 @@ class TestBuildPredictedIndoorFuturePhysics:
         }
         result = self._call(entries, now=now, indoor=65.0, model=model)
         assert len(result) == 5
+
+
+class TestSleepSetbackPhysics:
+    """Tests for ODE behavior with sleep setback setpoints (Issue #172).
+
+    Before fix: sleep_heat (e.g. 64°F) < comfort_heat (70°F) causes the cooling
+    branch to fire (setpoint <= comfort_cool AND t_start > setpoint), driving
+    predicted indoor down 6°F in one step. These tests enforce the correct behavior
+    when hvac_mode is passed explicitly.
+    """
+
+    def test_heat_mode_no_cooling_when_above_sleep_setback(self):
+        """In heat mode, indoor above sleep setback → Q=0 (passive decay only, no sudden drop)."""
+        t_next = _simulate_indoor_physics(
+            70.0,  # t_start: indoor at sleep time
+            52.0,  # t_outdoor
+            -0.054,  # k_passive
+            5.0,  # k_active
+            1.0,  # dt_hours
+            64.0,  # setpoint = sleep_heat < comfort_heat — triggers bug without fix
+            comfort_heat=70,
+            comfort_cool=75,
+            hvac_mode="heat",
+        )
+        # Passive decay only: 52 + (70-52)*exp(-0.054) ≈ 69.3°F
+        # Wrong cooling (pre-fix) gives: 70 → 64°F in one step
+        assert t_next > 64.0, f"Wrong cooling fired: {t_next:.2f}°F (expected >64)"
+        assert t_next < 70.0, f"No passive decay occurred: {t_next:.2f}°F (expected <70)"
+
+    def test_heat_mode_heats_when_below_sleep_setback(self):
+        """In heat mode, indoor below sleep setback → heating fires and clamps at setpoint."""
+        t_next = _simulate_indoor_physics(
+            62.0,  # t_start: below sleep_heat
+            52.0,
+            -0.054,
+            5.0,
+            1.0,
+            64.0,  # setpoint = sleep_heat
+            comfort_heat=70,
+            comfort_cool=75,
+            hvac_mode="heat",
+        )
+        assert t_next == pytest.approx(64.0, abs=0.1), (
+            f"Expected heating to clamp at sleep setback 64°F, got {t_next:.2f}°F"
+        )
+
+    def test_cool_mode_no_heating_when_below_sleep_setback(self):
+        """In cool mode, indoor below sleep_cool → Q=0 (no wrong upward heating spike)."""
+        t_next = _simulate_indoor_physics(
+            72.0,  # t_start: indoor at night
+            65.0,  # t_outdoor
+            -0.054,
+            5.0,
+            1.0,
+            78.0,  # setpoint = sleep_cool > comfort_cool — triggers wrong heating without fix
+            comfort_heat=70,
+            comfort_cool=75,
+            hvac_mode="cool",
+        )
+        # Passive decay: 65+(72-65)*exp(-0.054) ≈ 71.6°F. Wrong heating spikes up toward 78.
+        assert t_next <= 72.0, f"Wrong heating fired: {t_next:.2f}°F (expected ≤72)"

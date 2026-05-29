@@ -4784,26 +4784,34 @@ def _simulate_indoor_physics(
     *,
     comfort_heat: float,
     comfort_cool: float,
+    hvac_mode: str | None = None,
 ) -> float:
     """Advance indoor temperature by dt_hours using the two-parameter ODE.
 
     dT/dt = k_passive * (T - T_outdoor) + Q
     Q = k_active when HVAC is driving toward setpoint, 0 otherwise.
 
-    Q sign: for heating k_active > 0; for cooling k_active < 0.
-    HVAC is considered active when:
-    - setpoint >= comfort_heat and T < setpoint (heating needed)
-    - setpoint <= comfort_cool and T > setpoint (cooling needed)
+    Pass hvac_mode="heat" or "cool" for correct behavior with sleep setback setpoints
+    (sleep_heat < comfort_heat). When hvac_mode is None, falls back to threshold
+    inference — only valid for comfort-range setpoints.
     """
     import math
 
     k_p = k_passive
     q = 0.0
     if setpoint is not None and k_active is not None:
-        if setpoint >= comfort_heat and t_start < setpoint:
-            q = abs(k_active)  # heating: always positive
-        elif setpoint <= comfort_cool and t_start > setpoint:
-            q = -abs(k_active)  # cooling: always negative
+        if hvac_mode == "heat":
+            if t_start < setpoint:
+                q = abs(k_active)
+        elif hvac_mode == "cool":
+            if t_start > setpoint:
+                q = -abs(k_active)
+        else:
+            # legacy: threshold inference — backward-compat for callers without hvac_mode
+            if setpoint >= comfort_heat and t_start < setpoint:
+                q = abs(k_active)  # heating: always positive
+            elif setpoint <= comfort_cool and t_start > setpoint:
+                q = -abs(k_active)  # cooling: always negative
 
     exp_kp = math.exp(k_p * dt_hours)
     t_next = (
@@ -4916,16 +4924,25 @@ def _simulate_indoor_physics_v3(
     k_solar: float | None = None,
     solar_factor: float = 0.0,
     ventilation_active: bool = False,
+    hvac_mode: str | None = None,
 ) -> float:
     """Advance indoor temperature using the v3 ODE with ventilation and solar terms."""
     k_eff = k_passive + (k_vent if (ventilation_active and k_vent is not None) else 0.0)
 
     q_hvac = 0.0
     if setpoint is not None and k_active is not None:
-        if setpoint >= comfort_heat and t_start < setpoint:
-            q_hvac = abs(k_active)
-        elif setpoint <= comfort_cool and t_start > setpoint:
-            q_hvac = -abs(k_active)
+        if hvac_mode == "heat":
+            if t_start < setpoint:
+                q_hvac = abs(k_active)
+        elif hvac_mode == "cool":
+            if t_start > setpoint:
+                q_hvac = -abs(k_active)
+        else:
+            # legacy: threshold inference — backward-compat for callers without hvac_mode
+            if setpoint >= comfort_heat and t_start < setpoint:
+                q_hvac = abs(k_active)
+            elif setpoint <= comfort_cool and t_start > setpoint:
+                q_hvac = -abs(k_active)
 
     q_solar = (k_solar * solar_factor) if (k_solar is not None) else 0.0
     q_total = q_hvac + q_solar
@@ -5194,6 +5211,16 @@ def _build_predicted_indoor_future(
         return "heat"
 
     day_modes = {d: _day_mode(t) for d, t in day_highs.items()}
+    # Override today's mode with the current classification — _day_mode() only sees
+    # remaining forecast entries, which in the evening are cold night temps (max<60°F
+    # even on a 68°F day), causing a spurious "heat" mode that triggers the Q_hvac bug.
+    _today_date = dt_util.as_local(now).date()
+    if classification is not None and hasattr(classification, "hvac_mode"):
+        day_modes[_today_date] = classification.hvac_mode
+        _LOGGER.debug(
+            "_build_predicted_indoor_future: today mode overridden from classification: %s",
+            classification.hvac_mode,
+        )
     _LOGGER.debug(
         "_build_predicted_indoor_future: %d days classified: %s",
         len(day_modes),
@@ -5403,6 +5430,7 @@ def _build_predicted_indoor_future(
                     k_solar=_k_solar,
                     solar_factor=_solar_factor(local_ts.hour, _phase_offset),
                     ventilation_active=False,
+                    hvac_mode=mode,
                 )
             else:
                 _t_current = _simulate_indoor_physics(
@@ -5414,6 +5442,7 @@ def _build_predicted_indoor_future(
                     setpoint,
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,
+                    hvac_mode=mode,
                 )
             temp = _t_current
         else:

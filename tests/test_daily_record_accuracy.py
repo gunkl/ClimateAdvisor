@@ -407,3 +407,170 @@ class TestManualOverridesTracking:
         asyncio.run(coord._async_thermostat_changed(event))
 
         assert coord._today_record.override_details == []
+
+
+# ---------------------------------------------------------------------------
+# TestDailyRecordBriefingPreservation — Issue #176
+# ---------------------------------------------------------------------------
+
+
+class TestDailyRecordBriefingPreservation:
+    """Accumulated DailyRecord counters must survive _async_send_briefing() re-firing.
+
+    Regression for Issue #176: after an HA restart mid-day, async_restore_state()
+    correctly restores _today_record, but _async_send_briefing() then unconditionally
+    created a fresh DailyRecord with all counters at zero. The fix preserves same-day
+    accumulated fields when the record's date matches today.
+    """
+
+    def test_daily_record_survives_briefing_after_restart(self):
+        """Counters accumulated before restart are preserved when briefing fires again.
+
+        Scenario: HA restarts with hvac_runtime_minutes=19.8 already in _today_record.
+        _async_send_briefing() fires on the same calendar day. The new record must
+        keep the accumulated counters rather than resetting to zero.
+        """
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+
+        hass = MagicMock()
+        hass.services = MagicMock()
+        hass.services.async_call = AsyncMock()
+        hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+        coord.hass = hass
+
+        # Pre-restart accumulated record — date matches patched dt_util.now() "2026-04-05"
+        coord._today_record = _make_today_record(
+            date="2026-04-05",
+            hvac_runtime_minutes=19.8,
+            manual_overrides=3,
+            comfort_violations_minutes=12.0,
+        )
+
+        # Coordinator state
+        coord._briefing_sent_today = False
+        coord._automation_enabled = False  # exits early after DailyRecord creation
+        coord._current_classification = None
+        coord._occupancy_mode = "home"
+        coord._last_predicted_indoor = []
+        coord._last_briefing = ""
+        coord._last_briefing_short = ""
+        coord._briefing_day_type = None
+        coord._solar_phase_offset = 0.0
+        coord.config = {
+            "learning_enabled": False,
+            "push_briefing": False,
+            "email_briefing": False,
+            "notify_service": "notify.test",
+        }
+
+        ae = MagicMock()
+        ae.apply_classification = AsyncMock()
+        ae._thermal_model = {}
+        ae._natural_vent_active = False
+        ae._fan_override_active = False
+        coord.automation_engine = ae
+
+        learning = MagicMock()
+        learning.get_thermal_model = MagicMock(return_value={})
+        learning.generate_suggestions = MagicMock(return_value=[])
+        learning.get_last_suggestion_keys = MagicMock(return_value=[])
+        coord.learning = learning
+
+        coord._get_forecast = AsyncMock(return_value=MagicMock(current_outdoor_temp=65.0))
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        coord._apply_outdoor_windows_gate = MagicMock()
+        coord._build_briefing_text = MagicMock(return_value=("briefing text", "short"))
+        coord._build_learning_health = MagicMock(return_value={})
+        coord._get_indoor_temp = MagicMock(return_value=72.0)
+        coord._async_save_state = AsyncMock()
+
+        cls = _make_classification()
+        send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
+        _fake_now = datetime(2026, 4, 5, 10, 0, 0)
+
+        with (
+            patch("custom_components.climate_advisor.coordinator.classify_day", return_value=cls),
+            patch("custom_components.climate_advisor.coordinator._build_predicted_indoor_future", return_value=[]),
+            patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util,
+        ):
+            mock_dt_util.now.return_value = _fake_now
+            asyncio.run(send_briefing(_fake_now))
+
+        assert coord._today_record.hvac_runtime_minutes == 19.8, (
+            f"hvac_runtime_minutes was reset to {coord._today_record.hvac_runtime_minutes} "
+            "(expected 19.8 — DailyRecord not preserving accumulated counters after restart)"
+        )
+        assert coord._today_record.manual_overrides == 3
+        assert coord._today_record.comfort_violations_minutes == 12.0
+
+    def test_briefing_starts_fresh_on_new_day(self):
+        """When _today_record.date != today, counters are NOT carried over (next-day reset)."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+
+        hass = MagicMock()
+        hass.services = MagicMock()
+        hass.services.async_call = AsyncMock()
+        hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+        coord.hass = hass
+
+        # Yesterday's record — different date
+        coord._today_record = _make_today_record(
+            date="2026-04-04",  # yesterday; dt_util.now() returns 2026-04-05
+            hvac_runtime_minutes=95.0,
+            manual_overrides=5,
+        )
+
+        coord._briefing_sent_today = False
+        coord._automation_enabled = False
+        coord._current_classification = None
+        coord._occupancy_mode = "home"
+        coord._last_predicted_indoor = []
+        coord._last_briefing = ""
+        coord._last_briefing_short = ""
+        coord._briefing_day_type = None
+        coord._solar_phase_offset = 0.0
+        coord.config = {
+            "learning_enabled": False,
+            "push_briefing": False,
+            "email_briefing": False,
+            "notify_service": "notify.test",
+        }
+
+        ae = MagicMock()
+        ae.apply_classification = AsyncMock()
+        ae._thermal_model = {}
+        ae._natural_vent_active = False
+        ae._fan_override_active = False
+        coord.automation_engine = ae
+
+        learning = MagicMock()
+        learning.get_thermal_model = MagicMock(return_value={})
+        learning.generate_suggestions = MagicMock(return_value=[])
+        learning.get_last_suggestion_keys = MagicMock(return_value=[])
+        coord.learning = learning
+
+        coord._get_forecast = AsyncMock(return_value=MagicMock(current_outdoor_temp=65.0))
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
+        coord._apply_outdoor_windows_gate = MagicMock()
+        coord._build_briefing_text = MagicMock(return_value=("briefing text", "short"))
+        coord._build_learning_health = MagicMock(return_value={})
+        coord._get_indoor_temp = MagicMock(return_value=72.0)
+        coord._async_save_state = AsyncMock()
+
+        cls = _make_classification()
+        send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
+        _fake_now = datetime(2026, 4, 5, 10, 0, 0)
+
+        with (
+            patch("custom_components.climate_advisor.coordinator.classify_day", return_value=cls),
+            patch("custom_components.climate_advisor.coordinator._build_predicted_indoor_future", return_value=[]),
+            patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util,
+        ):
+            mock_dt_util.now.return_value = _fake_now
+            asyncio.run(send_briefing(_fake_now))
+
+        # Yesterday's counters must NOT carry over — fresh day
+        assert coord._today_record.hvac_runtime_minutes == 0.0
+        assert coord._today_record.manual_overrides == 0

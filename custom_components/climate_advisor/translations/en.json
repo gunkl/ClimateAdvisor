@@ -143,6 +143,7 @@
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
           "ai_settings": "AI Settings (Claude)",
+          "github_settings": "GitHub Integration",
           "save": "Save & Close"
         }
       },
@@ -351,6 +352,18 @@
           "ai_investigator_max_tokens": "Maximum token length for investigator reports (256-16384). 8192 recommended.",
           "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
         }
+      },
+      "github_settings": {
+        "title": "GitHub Integration",
+        "description": "Configure GitHub issue submission for investigation reports.\nCurrent token: {token_status}",
+        "data": {
+          "github_token": "GitHub Personal Access Token",
+          "github_repo": "GitHub Repository (owner/repo)"
+        },
+        "data_description": {
+          "github_token": "Token with issues:write scope. Leave blank to keep existing token.",
+          "github_repo": "Repository to submit issues to, e.g. gunkl/ClimateAdvisor."
+        }
       }
     },
     "error": {
@@ -362,7 +375,8 @@
       "ai_connection_failed": "Could not connect to Claude API. Check your API key and try again.",
       "ai_key_required": "API key is required when AI features are enabled.",
       "ai_temperature_out_of_range": "Temperature must be between 0.0 and 1.0.",
-      "ai_max_tokens_out_of_range": "Max tokens value is out of the allowed range for this field."
+      "ai_max_tokens_out_of_range": "Max tokens value is out of the allowed range for this field.",
+      "github_repo_invalid": "Repository must be in owner/repo format (e.g. myuser/MyRepo)."
     }
   },
   "issues": {

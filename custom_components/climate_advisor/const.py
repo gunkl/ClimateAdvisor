@@ -331,6 +331,21 @@ KNOWN_FIXES: dict[int, dict] = {
             " will trigger grace — use _temp_command_pending guard to suppress if needed)",
         ],
     },
+    180: {
+        "version_fixed": "0.3.54",
+        "title": "GitHub issue submission modal — restored from uncommitted worktree code",
+        "scope_covered": [
+            "CONF_GITHUB_TOKEN / CONF_GITHUB_REPO constants added to const.py",
+            "ClimateAdvisorSubmitGithubIssueView — POST /api/climate_advisor/submit_github_issue",
+            "config_flow async_step_github_settings() — token + repo config fields",
+            "frontend modal — openGithubIssueModal, closeGithubIssueModal, submitGithubIssue",
+            "_formatCurrentReport() — formats current investigation report as issue body",
+        ],
+        "scope_not_covered": [
+            "API_REFINE_REPORT / investigation refinement — excluded from this PR",
+            "Annotation toolbar and rating buttons — excluded from this PR",
+        ],
+    },
 }
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
@@ -338,6 +353,10 @@ GITHUB_REPO_URL = "https://github.com/gunkl/ClimateAdvisor"
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_CONTEXT_TIMEOUT = 5.0  # seconds — skip if API is slow
 GITHUB_ISSUES_LIMIT = 15  # max issues to include in context
+
+CONF_GITHUB_TOKEN = "github_token"
+CONF_GITHUB_REPO = "github_repo"
+API_SUBMIT_GITHUB_ISSUE = "/api/climate_advisor/submit_github_issue"
 
 # Default setpoints (°F)
 DEFAULT_COMFORT_HEAT = 70

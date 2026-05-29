@@ -31,6 +31,7 @@ from .const import (
     API_RESUME_FROM_PAUSE,
     API_SEND_BRIEFING,
     API_STATUS,
+    API_SUBMIT_GITHUB_ISSUE,
     API_TOGGLE_AUTOMATION,
     ATTR_AUTOMATION_STATUS,
     ATTR_COMPLIANCE_SCORE,
@@ -48,6 +49,8 @@ from .const import (
     ATTR_TREND_MAGNITUDE,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_GITHUB_REPO,
+    CONF_GITHUB_TOKEN,
     CONFIG_METADATA,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
@@ -795,6 +798,73 @@ class ClimateAdvisorDeleteReportView(HomeAssistantView):
         return self.json({"success": True, "found": found})
 
 
+class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
+    """POST /api/climate_advisor/submit_github_issue — create a GitHub issue from a report."""
+
+    url = API_SUBMIT_GITHUB_ISSUE
+    name = "api:climate_advisor:submit_github_issue"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        import aiohttp
+
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        token = coordinator.config.get(CONF_GITHUB_TOKEN, "")
+        repo = coordinator.config.get(CONF_GITHUB_REPO, "")
+        if not token or not repo:
+            return self.json({"success": False, "error": "not_configured"})
+
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"error": "invalid_json"}, status_code=400)
+
+        title = str(body.get("title", "")).strip()
+        issue_body = str(body.get("body", "")).strip()
+        labels = body.get("labels", ["bug"])
+
+        if not title:
+            return self.json({"error": "missing_title"}, status_code=400)
+        if not isinstance(labels, list):
+            labels = ["bug"]
+
+        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+        session = async_get_clientsession(hass)
+        try:
+            resp = await session.post(
+                f"https://api.github.com/repos/{repo}/issues",
+                json={"title": title, "body": issue_body, "labels": labels},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+        except Exception:
+            _LOGGER.exception("GitHub issue submission: network error")
+            return self.json({"success": False, "error": "network_error"})
+
+        if resp.status == 201:
+            issue = await resp.json()
+            return self.json(
+                {
+                    "success": True,
+                    "issue_url": issue.get("html_url", ""),
+                    "issue_number": issue.get("number"),
+                }
+            )
+
+        # Never log the token — log only the HTTP status
+        _LOGGER.warning("GitHub issue submission: API returned status %d", resp.status)
+        return self.json({"success": False, "error": f"github_api_{resp.status}"})
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -816,6 +886,7 @@ API_VIEWS = [
     ClimateAdvisorInvestigateView,
     ClimateAdvisorInvestigationReportsView,
     ClimateAdvisorDeleteReportView,
+    ClimateAdvisorSubmitGithubIssueView,
     ClimateAdvisorEventLogView,
     ClimateAdvisorEnginesView,
 ]

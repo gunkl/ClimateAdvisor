@@ -38,6 +38,8 @@ from .const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
+    CONF_GITHUB_REPO,
+    CONF_GITHUB_TOKEN,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
     CONF_HOME_TOGGLE,
@@ -127,6 +129,7 @@ OPTIONS_MENU_OPTIONS = [
     "notifications",
     "advanced",
     "ai_settings",
+    "github_settings",
     "save",
 ]
 
@@ -1306,6 +1309,59 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             data_schema=schema,
             errors=errors,
             description_placeholders={"key_status": key_status},
+        )
+
+    # ---- GitHub Integration ----
+
+    async def async_step_github_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """GitHub Integration — token and repository for issue submission."""
+        errors: dict[str, str] = {}
+        current = self.config_entry.data
+
+        if user_input is not None:
+            new_token = user_input.get(CONF_GITHUB_TOKEN, "").strip()
+            repo = user_input.get(CONF_GITHUB_REPO, "").strip()
+
+            import re
+
+            if repo and not re.match(r"^[^/]+/[^/]+$", repo):
+                errors[CONF_GITHUB_REPO] = "github_repo_invalid"
+
+            if not errors:
+                merged: dict[str, Any] = {}
+                # Preserve existing token if field left blank
+                if new_token:
+                    merged[CONF_GITHUB_TOKEN] = new_token
+                elif current.get(CONF_GITHUB_TOKEN):
+                    merged[CONF_GITHUB_TOKEN] = current[CONF_GITHUB_TOKEN]
+                else:
+                    merged.pop(CONF_GITHUB_TOKEN, None)
+                merged[CONF_GITHUB_REPO] = repo
+                self._updates.update(merged)
+                return await self.async_step_init()
+
+        existing_token = current.get(CONF_GITHUB_TOKEN, "")
+        token_status = "configured" if existing_token else "not configured"
+
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_GITHUB_TOKEN, default=""): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_GITHUB_REPO,
+                    default=current.get(CONF_GITHUB_REPO, ""),
+                ): selector.TextSelector(selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="github_settings",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={"token_status": token_status},
         )
 
     # ---- Save & Close ----

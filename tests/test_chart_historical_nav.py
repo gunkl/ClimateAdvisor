@@ -19,13 +19,15 @@ import types
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ── HA module stubs (must happen before importing climate_advisor) ──────────
 if "homeassistant" not in sys.modules:
     from conftest import _install_ha_stubs
 
     _install_ha_stubs()
 
-# Patch dt_util.now before importing coordinator modules
+# Patch dt_util stubs so coordinator imports resolve correctly.
 _FAKE_NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
 sys.modules["homeassistant.util.dt"].now = lambda: _FAKE_NOW
 sys.modules["homeassistant.util.dt"].parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
@@ -90,6 +92,22 @@ class TestGetEntriesBeforeAnchor:
     FAILS before implementation because get_entries() has no before= param.
     """
 
+    @pytest.fixture(autouse=True)
+    def _freeze_chart_log_now(self):
+        """Freeze chart_log.dt_util.now() to _FAKE_NOW for all tests in this class.
+
+        chart_log.py binds dt_util via `from homeassistant.util import dt as dt_util`.
+        In full-suite runs, earlier test files can overwrite sys.modules["homeassistant.util"].dt.now
+        to return real wall-clock time, which breaks time-relative assertions here.
+        Patching the attribute on the already-bound module object ensures isolation.
+        """
+        from custom_components.climate_advisor import chart_log as _chart_log_mod
+
+        orig = _chart_log_mod.dt_util.now
+        _chart_log_mod.dt_util.now = lambda: _FAKE_NOW
+        yield
+        _chart_log_mod.dt_util.now = orig
+
     def test_get_entries_before_anchor_filters_past_window(self, tmp_path):
         """Entries after the anchor must be excluded.
 
@@ -145,6 +163,16 @@ class TestGetChartDataBeforeTs:
 
     FAILS before implementation because get_chart_data() has no before_ts param.
     """
+
+    @pytest.fixture(autouse=True)
+    def _freeze_chart_log_now(self):
+        """Freeze chart_log.dt_util.now() to _FAKE_NOW for all tests in this class."""
+        from custom_components.climate_advisor import chart_log as _chart_log_mod
+
+        orig = _chart_log_mod.dt_util.now
+        _chart_log_mod.dt_util.now = lambda: _FAKE_NOW
+        yield
+        _chart_log_mod.dt_util.now = orig
 
     def _make_coord_with_chart_log(self, tmp_path):
         """Build a minimal coordinator stub with a populated _chart_log."""

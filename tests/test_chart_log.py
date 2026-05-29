@@ -35,6 +35,17 @@ def _build_ha_stubs() -> None:
 
 _build_ha_stubs()
 
+# chart_log.py binds dt_util via `from homeassistant.util import dt as dt_util`, which
+# resolves to sys.modules["homeassistant.util"].dt.  When conftest MagicMock stubs are
+# installed first (full suite run), _build_ha_stubs() exits early and that attribute is
+# a MagicMock whose .now() returns another MagicMock — incompatible with datetime math.
+# Unconditionally set a real now() on the actual bound object so _maybe_prune() works.
+# Uses datetime.now(UTC) — real wall-clock time — because test_chart_log.py helpers
+# also use real wall-clock via _ago(hours=...) so no fixed fake time is needed.
+import custom_components.climate_advisor.chart_log as _chart_log_mod_init  # noqa: E402
+
+_chart_log_mod_init.dt_util.now = lambda: datetime.now(UTC)
+
 # Now it's safe to import the module under test
 from custom_components.climate_advisor.chart_log import ChartStateLog  # noqa: E402
 

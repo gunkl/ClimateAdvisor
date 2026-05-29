@@ -1643,6 +1643,7 @@ class TestOptionsFlowMenu:
             "notifications",
             "advanced",
             "ai_settings",
+            "github_settings",
             "save",
         ]
         assert expected == OPTIONS_MENU_OPTIONS

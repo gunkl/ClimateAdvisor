@@ -29,6 +29,7 @@ The automation logic table and all threshold constants in this document are expr
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
 | When does the ODE ceiling guard fire on a warm day and what activates AC? | The guard scans the predicted indoor curve on every 30-min cycle. When outdoor > indoor AND a breach above `comfort_cool` is predicted within the computed lead time (or 120-min fallback), the guard sets HVAC to cool at `comfort_cool`. Guard skips when no calibrated model, occupancy is away/vacation, or nat-vent can keep indoor below the ceiling. | [§6c. Warm-Day ODE Ceiling Guard](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136) |
 | How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
+| What invariant must `_async_send_briefing()` maintain when replacing `_today_record`? | It must copy all accumulated counters (`hvac_runtime_minutes`, `comfort_violations_minutes`, etc.) from the existing same-day record before constructing the new one. Creating a fresh `DailyRecord` unconditionally resets all counters to zero (Issue #176 bug). | [DailyRecord Persistence Invariant](08-COMPUTATION-REFERENCE.md#dailyrecord-persistence-invariant-issue-176) |
 
 ## 1. Day Classification
 
@@ -534,6 +535,34 @@ Fire paths emit `bedtime_setback` with `{mode, target_f, depth_f, adaptive, modi
 All five fields default to `None` at record creation. On a fire night, `setback_skipped_reason` stays `None`; on a skip night, all applied-value fields stay `None`. Accessible via `learning_db.py --daily` (see §Diagnostic Tools).
 
 **Test coverage:** `tests/test_occupancy_automation.py` — 18 tests covering all cells above; `tests/test_bedtime_setback.py` — full fire/skip/field coverage.
+
+---
+
+> **DailyRecord Persistence Invariant (Issue #176)**
+>
+> `DailyRecord` counters accumulate throughout the day and are persisted to
+> `climate_advisor_state.json`. When `_async_send_briefing()` creates an updated record
+> after classification (e.g., after HA restart), it **MUST preserve all already-accumulated
+> counters** from the existing same-day record before replacing it.
+>
+> Fields that must be preserved:
+> `hvac_runtime_minutes`, `comfort_violations_minutes`, `manual_overrides`,
+> `thermal_session_count`, `occupancy_away_minutes`, `windows_opened`,
+> `window_open_actual_time`, `override_details`.
+>
+> **Violation:** creating a fresh `DailyRecord(...)` unconditionally resets all counters to
+> zero, causing `hvac_runtime_today` to show `0.0` after a mid-day HA restart.
+>
+> **Fix pattern:** before constructing the new record, check whether `self._today_record`
+> already exists for today's date, and carry forward all accumulated counter fields into
+> the new `DailyRecord(...)` constructor call. Additionally, `_async_save_state()` must be
+> called on every HVAC on→off transition (after `_flush_hvac_runtime()`) so that state is
+> never more than one HVAC cycle stale at restart time.
+>
+> **Test coverage:** `tests/test_daily_record_accuracy.py` —
+> `test_daily_record_survives_briefing_after_restart`
+
+---
 
 ### 6b. Warm-Day Comfort-Floor Guard
 

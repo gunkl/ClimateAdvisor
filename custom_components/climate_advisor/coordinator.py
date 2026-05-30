@@ -1915,9 +1915,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             predicted_indoor=self._last_predicted_indoor,
         )
 
-        # Initialize today's learning record
+        # Initialize today's learning record, preserving any counters already accumulated
+        # today (e.g. after an HA restart mid-day that fires briefing again).
+        _today_str = dt_util.now().strftime("%Y-%m-%d")
+        _prev = self._today_record if (self._today_record and self._today_record.date == _today_str) else None
         self._today_record = DailyRecord(
-            date=dt_util.now().strftime("%Y-%m-%d"),
+            date=_today_str,
             day_type=classification.day_type,
             trend_direction=classification.trend_direction,
             windows_recommended=classification.windows_recommended,
@@ -1926,6 +1929,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 classification.window_close_time.isoformat() if classification.window_close_time else None
             ),
             hvac_mode_recommended=classification.hvac_mode,
+            hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
+            comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
+            manual_overrides=_prev.manual_overrides if _prev else 0,
+            thermal_session_count=_prev.thermal_session_count if _prev else 0,
+            occupancy_away_minutes=_prev.occupancy_away_minutes if _prev else 0.0,
+            windows_opened=_prev.windows_opened if _prev else False,
+            window_open_actual_time=_prev.window_open_actual_time if _prev else None,
+            override_details=list(_prev.override_details) if _prev else [],
         )
 
         # Capture raw forecast high/low for weather bias learning
@@ -2256,6 +2267,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for _hvac_ot in (OBS_TYPE_HVAC_HEAT, OBS_TYPE_HVAC_COOL):
                 self._end_hvac_active_phase(_hvac_ot)
             self._hvac_on_since = None
+            self.hass.async_create_task(self._async_save_state())
         elif was_running and is_running and old_action != new_action:
             # heat_cool mode: hvac_action switched heating↔cooling mid-session
             if old_action in running_actions and new_action in running_actions:

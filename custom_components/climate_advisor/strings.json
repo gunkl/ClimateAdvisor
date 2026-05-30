@@ -82,7 +82,7 @@
           "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode. 'Both' uses both.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
-          "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned — it offsets naturally based on when HA started."
+          "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned \u00e2\u20ac\u201d it offsets naturally based on when HA started."
         }
       },
       "occupancy": {
@@ -210,7 +210,7 @@
           "fan_mode": "Fan Control Mode",
           "fan_entity": "Fan Entity",
           "fan_min_runtime_per_hour": "Fan Minimum Runtime Per Hour",
-          "natural_vent_delta": "Natural ventilation window (°F above comfort)"
+          "natural_vent_delta": "Natural ventilation window (\u00c2\u00b0F above comfort)"
         },
         "data_description": {
           "door_window_sensors": "Select any binary sensor entities to monitor, including binary sensor groups that bundle multiple sensors together.",
@@ -221,8 +221,8 @@
           "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode. 'Both' uses both.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
-          "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned — it offsets naturally based on when HA started.",
-          "natural_vent_delta": "When a door or window opens and outdoor temperature is within this many degrees above your cooling comfort setpoint, Climate Advisor uses the fan for natural ventilation instead of pausing HVAC. Default is 3°F."
+          "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned \u00e2\u20ac\u201d it offsets naturally based on when HA started.",
+          "natural_vent_delta": "When a door or window opens and outdoor temperature is within this many degrees above your cooling comfort setpoint, Climate Advisor uses the fan for natural ventilation instead of pausing HVAC. Default is 3\u00c2\u00b0F."
         }
       },
       "occupancy": {
@@ -348,7 +348,7 @@
           "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight).",
           "ai_investigator_enabled": "Enable the investigative agent (requires AI to be enabled). Performs deep cross-source analysis to find incongruities and data issues.",
           "ai_investigator_model": "Which Claude model the investigator uses. Opus recommended for deep analysis; Sonnet is more cost-effective.",
-          "ai_investigator_reasoning_effort": "How much extended thinking the investigator uses. High recommended — the agent reasons through multiple hypotheses.",
+          "ai_investigator_reasoning_effort": "How much extended thinking the investigator uses. High recommended \u00e2\u20ac\u201d the agent reasons through multiple hypotheses.",
           "ai_investigator_max_tokens": "Maximum token length for investigator reports (256-16384). 8192 recommended.",
           "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
         }
@@ -382,7 +382,6 @@
   "issues": {
     "weather_entity_not_found": {
       "title": "Weather entity not found",
-      "description": "The configured weather entity `{entity_id}` no longer exists in Home Assistant. This usually happens when a weather integration is renamed or reinstalled.\n\nClick **Fix** below to select the correct weather entity.",
       "fix_flow": {
         "step": {
           "init": {

@@ -2,7 +2,17 @@
 
 An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
 
-**Current version: 0.3.26**
+**Current version: 0.3.54**
+
+## Dashboard
+
+| Temperature Forecast | Current Status |
+|---|---|
+| ![Temperature Forecast — 3-day view showing predicted vs actual indoor/outdoor temperatures with HVAC and window activity bars](docs/screenshots/forecast_3d.png) | ![Status tab showing current day type, HVAC mode, compliance score, and today's strategy briefing](docs/screenshots/status.png) |
+
+| 24-hour View (prediction accuracy) | AI Investigation & Activity Reports |
+|---|---|
+| ![24-hour forecast showing overnight prediction vs actual with target band](docs/screenshots/forecast_24h.png) | ![AI tab showing status, learning suggestions, and report generation controls](docs/screenshots/ai.png) |
 
 ## Architecture Overview
 

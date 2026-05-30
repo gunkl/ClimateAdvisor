@@ -705,6 +705,28 @@
       <button class="btn secondary" onclick="copyCurrentReport()" style="font-size:0.8rem;">Copy for Bug Report</button>
       <button class="btn secondary" onclick="downloadCurrentReport()" style="font-size:0.8rem;">&#x2B07; Download Report</button>
       <button class="btn secondary" onclick="downloadFullLogs()" style="font-size:0.8rem;">Download Full Logs</button>
+      <button class="btn secondary" id="github-issue-btn" onclick="window.openGithubIssueModal()" style="font-size:0.8rem;">&#x1F41B; Submit GitHub Issue</button>
+    </div>
+  </div>
+
+  <!-- GitHub Issue Modal -->
+  <div id="github-issue-modal" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.5);align-items:center;justify-content:center;">
+    <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:20px;width:min(560px,90vw);max-height:80vh;overflow-y:auto;box-shadow:0 4px 20px rgba(0,0,0,0.4);">
+      <h3 style="margin:0 0 12px;">Submit GitHub Issue</h3>
+      <div id="github-modal-not-configured" style="display:none;color:var(--warning);font-size:0.85rem;margin-bottom:10px;">
+        GitHub integration is not configured. Add your token and repository in HA Settings &#x2192; Devices &amp; Services &#x2192; Climate Advisor &#x2192; Configure &#x2192; GitHub Integration.
+      </div>
+      <label style="font-size:0.82rem;display:block;margin-bottom:4px;">Title</label>
+      <input id="github-issue-title" type="text" style="width:100%;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);font-size:0.82rem;margin-bottom:10px;">
+      <label style="font-size:0.82rem;display:block;margin-bottom:4px;">Body</label>
+      <textarea id="github-issue-body" style="width:100%;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);font-size:0.78rem;resize:vertical;min-height:140px;font-family:monospace;margin-bottom:10px;"></textarea>
+      <label style="font-size:0.82rem;display:block;margin-bottom:4px;">Labels (comma-separated)</label>
+      <input id="github-issue-labels" type="text" value="bug" style="width:100%;box-sizing:border-box;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);font-size:0.82rem;margin-bottom:14px;">
+      <div id="github-issue-status" style="font-size:0.8rem;margin-bottom:10px;color:var(--text-secondary);"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button class="btn secondary" onclick="window.closeGithubIssueModal()" style="font-size:0.8rem;">Cancel</button>
+        <button class="btn primary" id="github-submit-btn" onclick="window.submitGithubIssue()" style="font-size:0.8rem;">Submit Issue</button>
+      </div>
     </div>
   </div>
 
@@ -2913,6 +2935,72 @@
     return lines.join('\n');
   }
 
+  // ---- GitHub Issue Modal ----
+
+  function openGithubIssueModal() {
+    if (!_currentReport) return;
+    const modal = document.getElementById('github-issue-modal');
+    const result = _currentReport.result || {};
+    const data = result.data || {};
+    const rType = _currentReport.reportType === 'investigation' ? 'Investigative Analysis' : 'Activity Report';
+    const ts = _currentReport.timestamp ? new Date(_currentReport.timestamp).toLocaleString() : '';
+    const summary = (data.summary || '').replace(/\s+/g, ' ').trim().substring(0, 120);
+    document.getElementById('github-issue-title').value = summary
+      ? 'Climate Advisor: ' + summary.substring(0, 80)
+      : 'Climate Advisor: ' + rType + ' — ' + ts;
+    document.getElementById('github-issue-body').value = _formatCurrentReport();
+    document.getElementById('github-issue-labels').value = 'bug';
+    document.getElementById('github-issue-status').textContent = '';
+    document.getElementById('github-modal-not-configured').style.display = 'none';
+    document.getElementById('github-submit-btn').disabled = false;
+    modal.style.display = 'flex';
+  }
+
+  function closeGithubIssueModal() {
+    document.getElementById('github-issue-modal').style.display = 'none';
+  }
+
+  async function submitGithubIssue() {
+    const statusEl = document.getElementById('github-issue-status');
+    const submitBtn = document.getElementById('github-submit-btn');
+    const title = document.getElementById('github-issue-title').value.trim();
+    const body = document.getElementById('github-issue-body').value.trim();
+    const labelsRaw = document.getElementById('github-issue-labels').value;
+    const labels = labelsRaw.split(',').map(l => l.trim()).filter(Boolean);
+    if (!title) { statusEl.textContent = 'Title is required.'; return; }
+    statusEl.textContent = 'Submitting...';
+    submitBtn.disabled = true;
+    const token = await getAuthToken();
+    try {
+      const resp = await fetch('/api/climate_advisor/submit_github_issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ title, body, labels }),
+      });
+      const data = await resp.json();
+      if (data.success) {
+        statusEl.innerHTML = 'Issue created: <a href="' + escapeHtml(data.issue_url) + '" target="_blank" rel="noopener">#' + data.issue_number + '</a>';
+        submitBtn.disabled = true;
+        document.querySelector('#github-issue-modal .btn.secondary').textContent = 'Close';
+      } else if (data.error === 'not_configured') {
+        document.getElementById('github-modal-not-configured').style.display = 'block';
+        statusEl.textContent = '';
+        submitBtn.disabled = false;
+      } else {
+        statusEl.textContent = 'Failed: ' + (data.error || 'unknown error');
+        submitBtn.disabled = false;
+      }
+    } catch (e) {
+      statusEl.textContent = 'Network error: ' + e.message;
+      submitBtn.disabled = false;
+    }
+  }
+
+  // Close modal on backdrop click
+  document.getElementById('github-issue-modal').addEventListener('click', function(evt) {
+    if (evt.target === this) closeGithubIssueModal();
+  });
+
   // Expose AI tab functions to window for onclick handlers
   window.runReport = runReport;
   window.updateReportTypeUI = updateReportTypeUI;
@@ -2925,6 +3013,9 @@
   window.deleteReport = deleteReport;
   window.downloadFullLogs = downloadFullLogs;
   window.downloadDebugLogs = downloadDebugLogs;
+  window.openGithubIssueModal = openGithubIssueModal;
+  window.closeGithubIssueModal = closeGithubIssueModal;
+  window.submitGithubIssue = submitGithubIssue;
 
   // --- Initial load (retry until auth token is available) ---
   function loadAll() {

@@ -4,9 +4,28 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.53"
+VERSION = "0.3.54"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.3.54": [
+        "Fix #172: Predicted indoor temperature no longer drops suddenly at sleep time"
+        " — ODE uses classification.hvac_mode for today's mode (prevents evening forecast-high flip);"
+        " hvac_mode passed explicitly to both ODE functions (prevents wrong Q branch on sleep setback)",
+        "Fix #174: chart_log time sourcing unified — dt_util.now() replaces datetime.now(UTC)"
+        " in get_entries() and _maybe_prune() for consistent behavior across production and tests",
+        "Fix #176: DailyRecord accumulated counters survive HA restart mid-day"
+        " — _async_send_briefing() preserves hvac_runtime_minutes, manual_overrides, and 6 other"
+        " fields when replacing _today_record on same calendar day; state saved on HVAC off",
+        "Feat #177: AI Investigator noise reduction"
+        " — abandonment reasons pre-classified (operational vs quality-failure),"
+        " count discrepancy ≤1 suppressed as flush lag, pending observations removed from context;"
+        " new investigate-ca-report Claude Code skill with 5-phase triage taxonomy",
+        "Feat #180: GitHub issue submission modal restored"
+        " — Submit GitHub Issue button in investigation panel, config flow GitHub Integration step,"
+        " default title 'Climate Advisor: Investigative Analysis'",
+        "Feat #186: window_compliance denominator in AI investigator context"
+        " — shows '0.6667 (2 of 3 windows-recommended days)' to prevent AI misinterpretation",
+    ],
     "0.3.53": [
         "Fix #170: Setpoint-only overrides now enter manual grace period immediately"
         " — CA no longer resets thermostat after user adjusts target temperature without changing mode"
@@ -340,11 +359,72 @@ KNOWN_FIXES: dict[int, dict] = {
             "config_flow async_step_github_settings() — token + repo config fields",
             "frontend modal — openGithubIssueModal, closeGithubIssueModal, submitGithubIssue",
             "_formatCurrentReport() — formats current investigation report as issue body",
+            "Default GitHub issue title changed to 'Climate Advisor: <report_type>'",
         ],
         "scope_not_covered": [
             "API_REFINE_REPORT / investigation refinement — excluded from this PR",
             "Annotation toolbar and rating buttons — excluded from this PR",
         ],
+    },
+    172: {
+        "version_fixed": "0.3.54",
+        "title": "Predicted indoor temperature drops at sleep time — ODE mode flip + wrong Q branch",
+        "scope_covered": [
+            "_build_predicted_indoor_future: today's mode overridden with classification.hvac_mode"
+            " — prevents evening flip to 'heat' when only cold night forecast entries remain",
+            "_simulate_indoor_physics() and _simulate_indoor_physics_v3(): hvac_mode parameter added,"
+            " explicit mode dispatch replaces threshold inference; legacy fallback preserved",
+            "Both ODE call sites in _build_predicted_indoor_future pass hvac_mode=mode",
+        ],
+        "scope_not_covered": [],
+    },
+    174: {
+        "version_fixed": "0.3.54",
+        "title": "chart_log uses datetime.now(UTC) bypassing dt_util mock in tests",
+        "scope_covered": [
+            "ChartStateLog._maybe_prune() uses dt_util.now() instead of datetime.now(UTC)",
+            "ChartStateLog.get_entries() uses dt_util.now() as default anchor when before= is None",
+            "test_chart_historical_nav.py: autouse fixtures freeze chart_log.dt_util.now to _FAKE_NOW",
+            "test_chart_log.py: dt_util.now patched on the already-bound module object",
+        ],
+        "scope_not_covered": [],
+    },
+    176: {
+        "version_fixed": "0.3.54",
+        "title": "DailyRecord accumulated counters reset on HA restart mid-day",
+        "scope_covered": [
+            "_async_send_briefing() preserves same-day accumulated fields when replacing _today_record:"
+            " hvac_runtime_minutes, comfort_violations_minutes, manual_overrides, thermal_session_count,"
+            " occupancy_away_minutes, windows_opened, window_open_actual_time, override_details",
+            "State saved via async_create_task(_async_save_state()) after each HVAC on→off transition",
+        ],
+        "scope_not_covered": [],
+    },
+    177: {
+        "version_fixed": "0.3.54",
+        "title": "AI Investigator noise reduction + investigate-ca-report triage skill",
+        "scope_covered": [
+            "_build_thermal_pipeline_context(): abandonment reasons split — 'abandoned' coded as"
+            " operational interruption [expected], all other codes as quality-failure [signal]",
+            "System prompt: count discrepancy of ≤1 between model cache and pipeline counts"
+            " suppressed as EWMA flush lag",
+            "Pending (in-flight) observations removed from investigator context — moved to activity report",
+            "New Claude Code skill: .claude/skills/investigate-ca-report.md —"
+            " 5-phase triage with ACTIONABLE/TIME-DEPENDENT/CONTEXTUAL/NOISE/RESOLVED taxonomy,"
+            " monitoring issue workflow, HISTORICAL ARTIFACT rule, 6-column triage table",
+        ],
+        "scope_not_covered": [],
+    },
+    186: {
+        "version_fixed": "0.3.54",
+        "title": "window_compliance denominator in AI investigator context",
+        "scope_covered": [
+            "get_compliance_summary() returns window_compliance_denominator"
+            " (count of days where windows were recommended, not total recording days)",
+            "_fmt_window_compliance() formats as '0.6667 (2 of 3 windows-recommended days)'"
+            " — prevents AI from treating denominator as total recording window",
+        ],
+        "scope_not_covered": [],
     },
 }
 

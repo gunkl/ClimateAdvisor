@@ -1,13 +1,13 @@
 {
   "domain": "climate_advisor",
   "name": "Climate Advisor",
-  "codeowners": ["@yourgithubuser"],
+  "codeowners": ["@gunkl"],
   "config_flow": true,
   "dependencies": ["weather", "climate"],
-  "documentation": "https://github.com/yourgithubuser/ha-climate-advisor",
+  "documentation": "https://github.com/gunkl/ClimateAdvisor",
   "homeassistant": "2024.6.0",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/yourgithubuser/ha-climate-advisor/issues",
+  "issue_tracker": "https://github.com/gunkl/ClimateAdvisor/issues",
   "requirements": ["anthropic>=0.49.0"],
   "version": "0.3.54"
 }

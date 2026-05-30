@@ -33,8 +33,8 @@ An intelligent HVAC management integration that uses weather forecasts, occupanc
 │        ▼          ▼       ▼       ▼          ▼               │
 │  ┌──────────┐ ┌────────┐ ┌─────┐ ┌────────┐ ┌─────────┐      │
 │  │Automation│ │Briefing│ │ API │ │Sensors │ │ State   │      │
-│  │ Engine   │ │  Gen   │ │     │ │ (13x)  │ │Persist  │      │
-│  │          │ │        │ │12   │ │+ 1     │ │         │      │
+│  │ Engine   │ │  Gen   │ │     │ │ (18x)  │ │Persist  │      │
+│  │          │ │        │ │22   │ │+ 1     │ │         │      │
 │  │• HVAC    │ │• Daily │ │REST │ │switch  │ │• Save / │      │
 │  │• Door/win│ │  email │ │end- │ │        │ │  restore│      │
 │  │• Occupy  │ │• TLDR  │ │point│ │• Status│ │  across │      │
@@ -108,9 +108,13 @@ After 14+ days of data, the learning engine starts analyzing patterns:
 - **Comfort violations**: Suggests less aggressive setbacks if the house is uncomfortable too often
 - **Door pauses**: Identifies problem doors and offers to adjust monitoring
 
-### AI Investigator
+### AI Features
 
-Climate Advisor includes a Claude-powered Activity Report accessible from the dashboard. When a Claude API key is configured in settings, the AI Investigator analyzes recent system activity — HVAC decisions, automation events, anomalies, and thermal performance — and returns a structured report with a timeline, decision rationale, and diagnostics. On-demand analysis can also be triggered via the `climate_advisor.ai_activity_report` service.
+Climate Advisor includes two Claude-powered AI capabilities, each requiring a Claude API key in settings:
+
+**Activity Report** (`ai_enabled`) — analyzes recent system activity and returns a structured report with a timeline, HVAC decision rationale, anomalies, and thermal performance diagnostics. Triggered on demand from the AI tab or via the `climate_advisor.ai_activity_report` service.
+
+**AI Investigator** (`ai_investigator_enabled`) — performs deep cross-source analysis to detect incongruities between the thermal model, pipeline statistics, compliance data, and event log. Returns hypotheses with confidence levels and recommended actions. Results appear in the Investigation panel on the AI tab, where findings can be submitted directly as GitHub issues (requires GitHub token configured under Settings → GitHub Integration).
 
 ### Sleep Temperature Configuration
 
@@ -118,16 +122,27 @@ Separate `sleep_heat` and `sleep_cool` setpoints can be configured to define bed
 
 ### Natural Ventilation Directional Guard
 
-Phase 1 of the natural ventilation guard prevents counterproductive ventilation: nat vent activation is blocked when outdoor temperature is warmer than indoor (cooling intent) or cooler than indoor (heating intent). This ensures ventilation is only opened when it will move indoor temperature in the desired direction.
+The natural ventilation directional guard prevents counterproductive ventilation: nat vent activation is blocked when outdoor temperature would move indoor temperature in the wrong direction. A hysteresis band and reactivation lockout prevent rapid cycling. The guard also preserves an active nat vent session through HVAC-off classification events so natural cooling is not prematurely cancelled.
 
-### Thermal Observation Architecture (v2)
+### Thermal Observation Architecture (v3)
 
-The thermal model uses a two-parameter first-order physics ODE to characterize how the house envelope and HVAC system move indoor temperature over time:
+The thermal model uses a physics ODE to characterize how the house envelope and HVAC system move indoor temperature over time:
 
-- **`k_passive`** (hr⁻¹, always negative) — envelope decay rate; how fast the house drifts toward outdoor temperature without HVAC
-- **`k_active_heat` / `k_active_cool`** (°F/hr) — net HVAC contribution above envelope exchange
+```
+dT/dt = (k_passive + k_vent_eff) × (T_out − T_in) + k_solar × solar_factor + Q_hvac
+```
 
-Parameters are extracted from the full post-HVAC decay curve and active-phase samples via OLS regression — not from a single start/end temperature delta. This eliminates the zero-rate observations caused by thermostat sensor lag that affected the previous scalar model. The physics-based predicted temperature curve shown in the dashboard is driven by these parameters.
+Six parallel observation types run concurrently, each targeting a different thermal parameter:
+
+| Observation type | What it measures |
+|---|---|
+| `hvac_heat` / `hvac_cool` | Active HVAC heating/cooling rate (`k_active_heat`, `k_active_cool`) |
+| `passive_decay` | Envelope loss rate without HVAC or ventilation (`k_passive`) |
+| `fan_only_decay` | Ventilation effect with fan only (`k_vent`) |
+| `ventilated_decay` | Open-window ventilation rate (`k_vent_window`) |
+| `solar_gain` | Solar heating contribution (`k_solar`) with learned phase offset |
+
+Parameters are extracted via OLS regression over the full decay or active-phase curve — not from a single start/end delta. Confidence levels (`none` / `low` / `medium` / `high`) are tracked per parameter independently. Physics-based prediction activates when any parameter has confidence above `none`, so homes without HVAC cycles can still benefit from passive decay observations. The predicted indoor curve in the dashboard uses all available parameters.
 
 ## Installation
 
@@ -135,7 +150,7 @@ Parameters are extracted from the full post-HVAC decay curve and active-phase sa
 
 1. Open HACS in Home Assistant
 2. Click the three dots → Custom repositories
-3. Add `https://github.com/yourgithubuser/ha-climate-advisor` as an Integration
+3. Add `https://github.com/gunkl/ClimateAdvisor` as an Integration
 4. Search for "Climate Advisor" and install
 5. Restart Home Assistant
 6. Go to Settings → Integrations → Add Integration → Climate Advisor
@@ -153,30 +168,34 @@ The setup wizard walks you through these steps:
 ### Step 1: Core Entities
 - **Weather Entity**: Your forecast provider (e.g., `weather.home`)
 - **Climate Entity**: Your thermostat (e.g., `climate.living_room`)
-- **Setpoints**: Separate comfort and setback temperatures for heating and cooling
 - **Notification Service**: Where to send briefings (e.g., `notify.mobile_app_phone`)
-- **Email Notifications**: Toggle on/off
 
-### Step 2: Temperature Sources
+### Step 2: Temperature Unit
+Choose Fahrenheit or Celsius. This setting controls all displayed values and setpoint inputs throughout the integration.
+
+### Step 3: Setpoints
+Separate comfort and setback temperatures for heating and cooling, plus optional `sleep_heat` / `sleep_cool` bedtime setpoints.
+
+### Step 4: Temperature Sources
 Choose where indoor and outdoor temperature readings come from:
 - Weather service (recommended for outdoor)
 - Dedicated sensor entity
 - Input number helper
 - Climate entity fallback (indoor only)
 
-### Step 3: Door/Window Sensors
+### Step 5: Door/Window Sensors
 - Select any binary sensors to monitor (HVAC pauses when open)
 - Configure sensor polarity (for inverted sensors)
 - Set debounce time (default 5 minutes) and grace periods
 - **Fan control**: Choose fan mode (disabled, whole-house fan, HVAC fan, or both) and select fan entity
 
-### Step 4: Occupancy
+### Step 6: Occupancy
 - Home/away toggle entity (optional)
 - Vacation toggle entity (optional)
 - Guest toggle entity (optional)
 - Polarity inversion for each toggle
 
-### Step 5: Schedule
+### Step 7: Schedule
 Set your wake time, bedtime, and when you want the daily briefing.
 
 ### Options Flow (Edit After Setup)
@@ -184,10 +203,11 @@ All settings are editable after setup, plus advanced options:
 - **Learning enabled**: Toggle the learning engine on/off
 - **Aggressive savings**: More aggressive energy-saving strategies
 - **AI Investigator**: Enable Claude-powered activity analysis; requires a Claude API key
+- **GitHub Integration**: Configure a GitHub personal access token and repository for submitting investigation reports as GitHub issues directly from the dashboard
 
 ## Entities Created
 
-### Sensors (13)
+### Sensors (18)
 
 | Sensor | Description |
 |--------|-------------|
@@ -196,14 +216,19 @@ All settings are editable after setup, plus advanced options:
 | `sensor.climate_advisor_next_action` | Next recommended human action |
 | `sensor.climate_advisor_daily_briefing` | Today's briefing TLDR (full text in attributes) |
 | `sensor.climate_advisor_comfort_score` | Comfort compliance percentage |
-| `sensor.climate_advisor_status` | Integration status |
+| `sensor.climate_advisor_status` | Integration status (active/grace/override/paused) |
 | `sensor.climate_advisor_next_automation` | Next scheduled automation action |
 | `sensor.climate_advisor_next_automation_time` | When the next automation runs |
 | `sensor.climate_advisor_occupancy` | Current occupancy mode (home/away/vacation/guest) |
 | `sensor.climate_advisor_last_action_time` | Timestamp of last HVAC action |
 | `sensor.climate_advisor_last_action_reason` | Why the last HVAC action was taken |
-| `sensor.climate_advisor_fan_status` | Fan status (active / inactive / override — on / override — off / disabled); attributes include `fan_override_since` and `fan_running` |
+| `sensor.climate_advisor_fan_status` | Fan status: `active`, `running (manual override)`, `running (untracked)`, `inactive`, `off (manual override)`, `disabled`; attributes include `fan_override_since` and `fan_running` |
 | `sensor.climate_advisor_contact_status` | Door/window sensor summary with per-sensor details |
+| `sensor.climate_advisor_ai_status` | AI feature status (enabled/disabled, model, request counts, monthly cost) |
+| `sensor.climate_advisor_indoor_temperature` | Current indoor temperature (mirrors climate entity) |
+| `sensor.climate_advisor_outdoor_temperature` | Current outdoor temperature from configured source |
+| `sensor.climate_advisor_forecast_high` | Today's forecast high temperature |
+| `sensor.climate_advisor_forecast_low` | Today's forecast low temperature |
 
 ### Switches (1)
 
@@ -286,22 +311,32 @@ Climate Advisor includes a built-in dashboard panel accessible from the HA sideb
 
 ### REST API Endpoints
 
-The dashboard is powered by 12 REST API endpoints under `/api/climate_advisor/`:
+The dashboard is powered by 22 REST API endpoints under `/api/climate_advisor/`:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/status` | GET | Current state overview |
 | `/briefing` | GET | Briefing text (supports `?verbosity=` param) |
-| `/chart_data` | GET | Temperature chart data |
+| `/chart_data` | GET | Temperature chart data (supports `?before_ts=` for historical navigation) |
 | `/automation_state` | GET | Automation engine debug state |
 | `/learning` | GET | Learning records and suggestions |
 | `/config` | GET | All settings with metadata |
+| `/ai_status` | GET | AI feature status, model, request counts, and cost |
+| `/ai_activity` | GET/POST | Trigger or retrieve activity report |
+| `/ai_reports` | GET | Persisted activity report history |
+| `/ai_investigate` | POST | Trigger deep investigator analysis |
+| `/investigation_reports` | GET | Persisted investigation report history |
+| `/engines` | GET | Prediction engine status and thermal model parameters |
+| `/event_log` | GET | Recent automation events ring buffer |
 | `/force_reclassify` | POST | Trigger reclassification |
 | `/send_briefing` | POST | Resend daily briefing |
 | `/respond_suggestion` | POST | Accept/dismiss a suggestion |
 | `/cancel_override` | POST | Cancel manual override |
+| `/cancel_fan_override` | POST | Cancel fan manual override |
 | `/resume_from_pause` | POST | Resume from contact sensor pause |
 | `/toggle_automation` | POST | Toggle automation on/off |
+| `/delete_report` | POST | Delete a persisted AI report |
+| `/submit_github_issue` | POST | Submit investigation findings as a GitHub issue (requires token) |
 
 ### Lovelace Card Example
 
@@ -353,8 +388,8 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Per-sensor pause tracking and granular daily records (#12)
 - [x] Override direction/timing/magnitude analysis (#12)
 - [x] Built-in dashboard panel with status, briefing, classification, learning, settings, and debug tabs
-- [x] 12 REST API endpoints powering the dashboard
-- [x] 13 sensor entities + 1 automation switch
+- [x] REST API endpoints powering the dashboard (now 22)
+- [x] Sensor entities + 1 automation switch (now 18 sensors)
 - [x] Observe-only mode (disable automation without uninstalling) (#19)
 - [x] Economizer two-phase cooling strategy (AC cool-down, ventilation maintain) (#27)
 - [x] Whole-house fan and HVAC fan mode support (#25)
@@ -369,17 +404,29 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] 250-char notification limit for short notifications (#21)
 - [x] Startup race condition handling for weather entity (#36)
 
-### Phase 2.5: Thermal Learning & AI Investigator (v0.3.24–v0.3.26) — Shipped
+### Phase 2.5: Thermal Learning & AI Investigator (v0.3.24–v0.3.54) — Shipped
 - [x] Thermal model v2: two-parameter physics ODE (`k_passive` + `k_active_heat`/`k_active_cool`) replacing scalar rate model (#114)
 - [x] `PendingThermalEvent` state machine with post-heat decay curve OLS regression
 - [x] Pending thermal event persisted across HA restarts
 - [x] Optimized pre-heat/pre-cool timing and setback depth based on thermal performance
 - [x] Claude API client with circuit breaker, retry, rate limiting, and budget tracking (`claude_api.py`)
 - [x] AI skills framework — pluggable registry for AI analysis capabilities (`ai_skills.py`)
-- [x] AI Investigator (Activity Report skill): timeline, HVAC decisions, anomalies, diagnostics (`ai_skills_activity.py`)
+- [x] AI Activity Report: timeline, HVAC decisions, anomalies, diagnostics (`ai_skills_activity.py`)
 - [x] Persistent 1-year chart log ring buffer for temperature/HVAC/fan/event data (`chart_log.py`)
 - [x] Sleep temperature setpoints (`sleep_heat` / `sleep_cool`) distinct from away setback
-- [x] Natural ventilation directional guard — Phase 1: blocks nat vent when outdoor temp opposes intent (#115)
+- [x] Natural ventilation directional guard with hysteresis and reactivation lockout (#115)
+- [x] Dynamic Target Band: chart shows actual system targets (comfort/sleep/setback/vacation) (#119)
+- [x] Thermal model v3: six parallel observation types (`hvac_heat`, `hvac_cool`, `passive_decay`, `fan_only_decay`, `ventilated_decay`, `solar_gain`); extended ODE with k_vent and k_solar terms; `k_passive` collectable without HVAC cycles (#121)
+- [x] Dual-estimator framework for `k_passive` and `k_vent_window` (block-OLS + chart_log endpoint) (#146)
+- [x] Solar phase offset learning via chart_log daytime passive windows (#147)
+- [x] Chart historical navigation with before_ts anchor parameter (#160)
+- [x] Chart forward navigation into physics-simulated predicted future (#164)
+- [x] AI Investigation Analysis: unified view, report history, feedback buttons (#166)
+- [x] AI Investigator: deep cross-source analysis with KNOWN_FIXES registry, hypothesis generation (#177 noise reduction)
+- [x] GitHub issue submission from investigation panel with config flow GitHub Integration step (#180)
+- [x] Setpoint-only manual overrides enter manual grace period immediately (#170)
+- [x] DailyRecord accumulated counters survive HA restart (#176)
+- [x] Predicted indoor evening drop fixed: ODE mode uses classification for today (#172)
 
 ### Phase 3: Seasonal & Cost Intelligence (v0.3+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)
@@ -418,9 +465,9 @@ custom_components/climate_advisor/
 ├── briefing.py          # Daily briefing text generation
 ├── automation.py        # HVAC control logic (incl. economizer, fan)
 ├── learning.py          # Pattern tracking and suggestion engine
-├── sensor.py            # 13 HA sensor entities for dashboards
+├── sensor.py            # 18 HA sensor entities for dashboards
 ├── switch.py            # Automation enable/disable switch
-├── api.py               # 12 REST API endpoints for dashboard panel
+├── api.py               # 22 REST API endpoints for dashboard panel
 ├── state.py             # State persistence across restarts
 ├── repairs.py           # HA repairs flow for config issues
 ├── claude_api.py        # Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking

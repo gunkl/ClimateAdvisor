@@ -478,6 +478,98 @@ gh issue create --title "Fix: Description" --body "..."
 
 If a worktree was created before the issue number was known, rename it or note the mismatch — do not propagate wrong numbers into commit messages or PR titles.
 
+**Deploying from a worktree**: `.deploy.env` is gitignored and absent from new worktrees.
+Copy it before deploying: `cp ../ClimateAdvisor/.deploy.env .deploy.env`
+
+**Multi-branch deploy rule**: Never deploy from an individual fix worktree — each deploy
+uploads the full `custom_components/climate_advisor/` directory, overwriting all prior fixes.
+Always create a `deploy/staging` branch that contains ALL fixes that should be on the server:
+
+```bash
+# 1. Create staging from the branch with the largest coordinator.py overlap (usually the latest)
+git checkout -b deploy/staging origin/fix/<most-complete-branch>
+
+# 2. Merge all other pending branches (order matters for coordinator.py conflicts)
+git merge origin/fix/<branch-2>    # chart_log, tests — clean
+git merge origin/fix/<branch-3>    # different coordinator.py section — clean
+git merge origin/feat/<branch-4>   # unrelated files — clean
+
+# 3. Deploy from the main repo checkout (or a worktree if already branched elsewhere)
+python tools/deploy.py
+
+# 4. Tag what's deployed (local only)
+git tag -f deployed/current HEAD
+
+# 5. After all PRs merge to main: reset staging
+git checkout main && git pull
+git tag -f deployed/current HEAD
+git branch -d deploy/staging
+```
+
+**Conflict resolution**: coordinator.py conflicts between ODE section (~4700+) and
+briefing/daily-record section (~1800–2300) are independent — accept all changes from both.
+
+**Choosing the staging base**: if two branches touch the same file, use the one whose
+changes on that file are logically "first" as the base; merge the other on top.
+
+**Rebuild staging from main when it diverges** (don't try to fix a stale staging branch):
+```bash
+git checkout main && git branch -D deploy/staging
+git checkout -b deploy/staging origin/main
+git merge origin/release/<version>   # or other pending branches
+```
+
+---
+
+### Release Process (CRITICAL — must follow this order)
+
+**Never tag a release before the version bump is committed to main.**
+
+#### Step 1 — Version bump first (before deploying or tagging)
+Create a `release/X.Y.Z` branch from main:
+```bash
+gh issue create --title "Release vX.Y.Z — version bump, RELEASE_NOTES, KNOWN_FIXES"
+git worktree add ../ClimateAdvisor-release-XYZ -b release/X.Y.Z main
+```
+In the release worktree, update:
+- `const.py`: `VERSION = "X.Y.Z"`, add `RELEASE_NOTES["X.Y.Z"]`, add `KNOWN_FIXES` for all issues since last release
+- `manifest.json`: `"version": "X.Y.Z"`
+- Run tests, commit, push, create PR
+
+**What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry
+must have `scope_covered` (exact code paths fixed) and `scope_not_covered` (explicit gaps).
+
+**What goes in RELEASE_NOTES**: Each entry is one line per issue, describing the user-visible change.
+
+#### Step 2 — Deploy (after version bump PR is ready, before merging to main)
+Build staging from main + release branch:
+```bash
+git checkout -b deploy/staging origin/main
+git merge origin/release/X.Y.Z
+python tests; python tools/deploy.py
+git tag -f deployed/current HEAD
+```
+
+#### Step 3 — User validates on the deployed instance
+
+#### Step 4 — Create draft release (before merge, so notes are ready)
+```bash
+gh release create --draft vX.Y.Z --title "vX.Y.Z — [summary]" --notes "..."
+```
+Draft releases can be reviewed before publishing. Do NOT publish until the release PR is merged.
+
+#### Step 5 — User merges release PR to main
+
+#### Step 6 — User publishes the release
+After merge: `gh release edit vX.Y.Z --draft=false`
+Or publish via GitHub UI.
+
+#### Common mistakes to avoid
+- **Never bump VERSION in individual fix worktrees** — it causes merge conflicts and confusion
+- **Never deploy from individual fix worktrees** — see Multi-branch deploy rule above
+- **Never create a versioned release until the version bump is in main**
+- **const.py VERSION and manifest.json version must always match** — enforced by test_version_sync.py
+
 ### Issue Requirements
 - Every feature/fix should have a tracking issue
 - Include summary, requirements, implementation checklist

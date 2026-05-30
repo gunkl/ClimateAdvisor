@@ -155,7 +155,7 @@ class ChartStateLog:
 
     def _maybe_prune(self) -> None:
         """Prune entries older than max_days, at most once per hour."""
-        now = datetime.now(UTC)
+        now = dt_util.now()
         if self._last_prune is not None and (now - self._last_prune) < timedelta(hours=1):
             return
         self._last_prune = now
@@ -193,7 +193,7 @@ class ChartStateLog:
         - > 30 days (1y): daily summaries
         """
         range_days = self._range_str_to_days(range_str)
-        anchor = before if before is not None else datetime.now(UTC)
+        anchor = before if before is not None else dt_util.now()
         cutoff = anchor - timedelta(days=range_days)
 
         filtered = [e for e in self._entries if self._entry_after(e, cutoff)]

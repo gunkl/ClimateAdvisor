@@ -82,6 +82,11 @@ INVESTIGATION PROCEDURE
  was scoped to path A; path B was explicitly not covered — candidate gap or incomplete fix."\
  When scope metadata is available, do not write "could not verify" — name the path and its\
  coverage status.
+9. COUNT DISCREPANCY SUPPRESSION RULE: If `observation_count_heat` or `observation_count_cool`\
+ in LEARNING — THERMAL MODEL differs from the corresponding pipeline committed count by exactly\
+ 1, this is consistent with EWMA flush lag (the model EWMA updates asynchronously after each\
+ commit). Do NOT surface a gap of exactly 1 as an incongruity. Only flag if the gap exceeds 1\
+ or if the same gap appears to have grown compared to a prior report.
 
 OUTPUT FORMAT
 SECTION ROLES ARE EXCLUSIVE — each section contains only what belongs to it:\
@@ -200,6 +205,25 @@ def _build_thermal_pipeline_context(coordinator) -> str:
         OBS_TYPE_SOLAR_GAIN,
     ]
 
+    # Reason codes that indicate the observation was interrupted by normal system operation.
+    # These are expected on active days; a high count is NOT a quality failure.
+    # All operational interruptions are stored under the "abandoned" reason_code in the
+    # rejection log (the operational sub-reason is captured in the log message but not
+    # persisted separately in the health dict).
+    _OPERATIONAL_CODES = {"abandoned"}
+
+    # Reason codes that indicate a signal quality problem worth flagging.
+    _QUALITY_FAILURE_CODES = {
+        "too_few_samples",
+        "too_few_blocks",
+        "small_delta",
+        "ols_bad_fit",
+        "ols_wrong_sign",
+        "ols_bounds",
+        "window_too_short",
+        "no_interior_peak",
+    }
+
     lines.append("Per-type rejection summary:")
     hvac_heat_committed = 0
     hvac_cool_committed = 0
@@ -211,10 +235,13 @@ def _build_thermal_pipeline_context(coordinator) -> str:
         committed = type_health.get("committed", 0)
         rejections_by_code: dict = type_health.get("rejections", {})
         total_rejected = sum(rejections_by_code.values())
-        top_reason = (
-            max(rejections_by_code, key=lambda k: rejections_by_code[k], default="n/a") if total_rejected else "n/a"
-        )
-        top_count = rejections_by_code.get(top_reason, 0) if top_reason != "n/a" else 0
+
+        # Split rejections into operational interruptions vs quality failures
+        operational_count = sum(rejections_by_code.get(rc, 0) for rc in _OPERATIONAL_CODES)
+        quality_failures: dict[str, int] = {
+            rc: cnt for rc, cnt in rejections_by_code.items() if rc in _QUALITY_FAILURE_CODES and cnt > 0
+        }
+        quality_count = sum(quality_failures.values())
 
         # Track HVAC totals for pipeline failure detection
         if obs_type == OBS_TYPE_HVAC_HEAT:
@@ -232,8 +259,19 @@ def _build_thermal_pipeline_context(coordinator) -> str:
             suffix_parts.append("NEVER LEARNED — k_active_heat is None")
         suffix = f"  [{', '.join(suffix_parts)}]" if suffix_parts else ""
 
-        top_str = f"top reason: {top_reason} x{top_count}" if top_reason != "n/a" else "no rejections"
-        lines.append(f"  {obs_type}: {committed} committed, {total_rejected} rejected ({top_str}){suffix}")
+        lines.append(f"  {obs_type}: {committed} committed, {total_rejected} rejected{suffix}")
+        if total_rejected == 0:
+            lines.append("    — no rejections")
+        else:
+            if operational_count > 0:
+                lines.append(f"    — operational interruptions: {operational_count} [expected on active days]")
+            if quality_count > 0:
+                qf_parts = ", ".join(
+                    f"{rc} x{cnt}" for rc, cnt in sorted(quality_failures.items(), key=lambda x: -x[1])
+                )
+                lines.append(f"    — quality failures: {quality_count} ({qf_parts})")
+            elif total_rejected > 0:
+                lines.append("    — no quality failures")
 
     # Pipeline failure detection
     hvac_total_committed = hvac_heat_committed + hvac_cool_committed
@@ -254,29 +292,6 @@ def _build_thermal_pipeline_context(coordinator) -> str:
             "  NOTE: 0 chart_log observations — consider running"
             " python tools/thermal_replay.py --chart-log --write to backfill"
         )
-
-    # --- Pending observations from _build_thermal_pipeline_summary() ---
-    lines.append("")
-    lines.append("Pending observations:")
-    try:
-        pipeline_summary: dict = (
-            coordinator._build_thermal_pipeline_summary()
-            if callable(getattr(coordinator, "_build_thermal_pipeline_summary", None))
-            else {}
-        )
-        pending: list = pipeline_summary.get("pending", [])
-        if pending:
-            for obs in pending:
-                obs_type_str = obs.get("obs_type", "?")
-                status = obs.get("status", "?")
-                elapsed = obs.get("elapsed_minutes")
-                samples = obs.get("sample_count", 0)
-                elapsed_str = f"{elapsed}min" if elapsed is not None else "?"
-                lines.append(f"  {obs_type_str}: status={status}, elapsed={elapsed_str}, samples={samples}")
-        else:
-            lines.append("  none active")
-    except Exception:
-        lines.append("  unavailable")
 
     # --- Engine status ---
     lines.append("")

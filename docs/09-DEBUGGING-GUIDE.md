@@ -14,6 +14,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | What does the Temperature Forecast chart show and how do you use it for diagnosis? | Four activity bars (HVAC, Fan, Windows Recommended, Windows Open) plus indoor/outdoor temperature lines, predicted curves, and target band shading. Drag-to-zoom any region; 1-year data in chart_log survives HA restarts. Use Prev/Next buttons to scroll the data window to any past point in time (Issue #160). | [§2. Temperature Forecast Chart (Visual History)](09-DEBUGGING-GUIDE.md#2-temperature-forecast-chart-visual-history) |
 | Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
+| How do you decide if a finding in an AI investigator report is a real bug or noise? | Apply the 5-category taxonomy: ACTIONABLE / TIME-DEPENDENT / CONTEXTUAL / NOISE / RESOLVED. Count discrepancies ≤ 1, high abandonment from operational interruptions, and pending-observation speculation are all NOISE. | [§Interpreting AI Investigator Reports — Noise Taxonomy](09-DEBUGGING-GUIDE.md#interpreting-ai-investigator-reports--noise-taxonomy) |
 
 ## Primary Debugging Data Sources
 
@@ -153,6 +154,43 @@ AI reports are stored at `climate_advisor_ai_reports.json` in the HA config root
 ### Circuit Breaker
 
 The circuit breaker trips after **5 consecutive failures** (`AI_CIRCUIT_BREAKER_THRESHOLD = 5`) and enters a cooldown period of **5 minutes** (`AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS = 300`) before attempting requests again. While the circuit is open, all AI requests return immediately without calling the Claude API. The `circuit_breaker` attribute of the AI status sensor shows the current state (`closed` = normal, `open` = tripped).
+
+---
+
+## Interpreting AI Investigator Reports — Noise Taxonomy
+
+Not all findings in a CA AI investigator report represent real bugs or user-actionable issues.
+Use this taxonomy to classify findings before acting on them:
+
+| Category | Definition | Example |
+|---|---|---|
+| **ACTIONABLE** | Real issue requiring investigation or fix | `hvac_runtime_today = 0.0` mid-day (counter reset by restart) |
+| **TIME-DEPENDENT** | Cannot classify without more data over time | `solar_gain: 0 commits` on active-HVAC hot days — check after quiet days |
+| **CONTEXTUAL** | Technically real but fully explained by operational conditions | `ventilated_decay: 32 abandoned` (normal contact-open events) |
+| **NOISE** | Implementation detail user should never see | `observation_count_cool` off by 1 (flush lag) |
+| **RESOLVED** | Covered by a KNOWN_FIXES entry in current version | Off-by-one in HVAC observation count → Issue #156 [COVERED] |
+
+**Common noise patterns:**
+
+- **Count discrepancies ≤ 1** between thermal model cache and rejection log: NOISE (transient EWMA flush lag, not a bug)
+- **High abandonment rates** where top reason is `hvac_started` or `sensor_opened`: NOISE if committed count > 0 (operational interruptions are expected)
+- **Pending / in-flight observation speculation** (e.g., "this observation has 0 samples at 4.4 minutes — may fail"): NOISE (unknown outcome; pending obs belong in the activity report, not the investigator)
+- **chart_log endpoint count 1–5** when block-OLS count > 0: NOISE (not at the hard "both = 0" threshold)
+- **96%+ abandonment on hot days with active HVAC**: NOISE — `passive_decay` is constantly interrupted by HVAC cycles on days when the system is actively heating or cooling; the committed count is what matters
+
+**Classifying a finding step-by-step:**
+
+1. Is it covered by a `KNOWN_FIXES` entry at the current CA version? → **RESOLVED**
+2. Is it a count discrepancy ≤ 1 or a flush-lag artifact? → **NOISE**
+3. Is it speculation about a pending (in-flight) observation? → **NOISE**
+4. Is the abandonment rate driven entirely by operational interruptions (`hvac_started`, `sensor_opened`, `fan_activated`) with committed count > 0? → **NOISE**
+5. Is the anomaly only visible on one class of day (hot, active-HVAC) but cannot be confirmed without quiet-day data? → **TIME-DEPENDENT**
+6. Is the anomaly technically present but fully explained by the current operating context? → **CONTEXTUAL**
+7. Everything else → **ACTIONABLE** — investigate with logs and DB tools before forming a hypothesis
+
+Use `/investigate-ca-report <issue-url>` to run systematic triage via the dedicated skill.
+
+**Reference:** `docs/09-DEBUGGING-GUIDE.md` — this section. Noise taxonomy is also documented in the `investigate-ca-report` skill at `.claude/skills/investigate-ca-report.md`.
 
 ---
 

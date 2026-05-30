@@ -161,6 +161,22 @@ Scientific, evidence-based, methodical. Prefer "no evidence of X" over "X is fin
 """
 
 
+def _fmt_window_compliance(compliance: dict) -> str:
+    """Format window_compliance with its denominator for unambiguous AI interpretation.
+
+    Produces e.g. "0.6667 (2 of 3 windows-recommended days)" so the AI cannot
+    mistake the denominator for the total recording window.
+    """
+    val = compliance.get("window_compliance")
+    denom = compliance.get("window_compliance_denominator", 0)
+    if val is None:
+        return "none (no windows-recommended days in window)"
+    if denom == 0:
+        return f"{val} (denominator=0)"
+    numerator = round(val * denom)
+    return f"{val:.4f} ({numerator} of {denom} windows-recommended days)"
+
+
 def _build_thermal_pipeline_context(coordinator) -> str:
     """Build THERMAL OBSERVATION PIPELINE section for the investigator context.
 
@@ -488,7 +504,7 @@ async def async_build_investigator_context(
                 compliance: dict[str, Any] = learning.get_compliance_summary() or {}
                 lines += [
                     "=== LEARNING — COMPLIANCE SUMMARY ===",
-                    f"  window_compliance:              {compliance.get('window_compliance', 'unknown')}",
+                    f"  window_compliance:              {_fmt_window_compliance(compliance)}",
                     f"  avg_daily_hvac_runtime_minutes: {compliance.get('avg_daily_hvac_runtime_minutes', 'unknown')}",
                     f"  comfort_score:                  {compliance.get('comfort_score', 'unknown')}",
                     f"  total_manual_overrides:         {compliance.get('total_manual_overrides', 'unknown')}",

@@ -1954,6 +1954,7 @@ class LearningEngine:
             "status": "active",
             "days_recorded": len(records),
             "window_compliance": window_compliance,
+            "window_compliance_denominator": len(window_days),
             "avg_daily_hvac_runtime_minutes": avg_runtime,
             "comfort_score": comfort_score,
             "total_manual_overrides": sum(r.get("manual_overrides", 0) for r in recent),

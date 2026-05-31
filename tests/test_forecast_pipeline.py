@@ -1,12 +1,14 @@
-"""Tests for _get_forecast() date-keyed dict matching (Issue #143).
+"""Tests for _get_forecast() date-keyed dict matching (Issues #143, #190).
 
 Covers:
 1. API starts from tomorrow — forecast array has no today entry
 2. Normal full forecast — both today and tomorrow present
 3. Core regression guard — today_high != tomorrow_high when API starts from tomorrow
 4. Empty forecast — all temperatures fall back to current_outdoor
-5. UTC midnight datetimes — entries timestamped at UTC midnight are matched by UTC
-   calendar date, not shifted to the previous local day (the production root cause)
+5. UTC midnight datetimes — entries timestamped at UTC midnight matched by raw date
+   against local today (not UTC date, not local-converted date) — fixes #190
+6. Evening UTC rollover — 7pm PDT where UTC date is already tomorrow; tomorrow's
+   forecast must still show local tomorrow, not day-after-tomorrow
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,18 +33,26 @@ _TODAY = date(2026, 5, 15)
 _TOMORROW = _TODAY + timedelta(days=1)
 _CURRENT_OUTDOOR = 65.0
 
-# dt_util.utcnow() mock — 06:00 UTC on today (= 11pm PDT prev day, but UTC date = today)
-_NOW_UTC = datetime(2026, 5, 15, 13, 0, 0, tzinfo=UTC)  # 1pm UTC = 6am PDT
+# PDT = UTC-7
+_PDT = timezone(-timedelta(hours=7))
+
+# dt_util.now() mock — 6am PDT on today (UTC date == local date, no rollover)
+_NOW_LOCAL = datetime(2026, 5, 15, 6, 0, 0, tzinfo=_PDT)
+
+# dt_util.now() mock for the evening rollover scenario — 7pm PDT May 15
+# UTC equivalent: 2am May 16 — UTC date is already May 16, but local date is still May 15
+_NOW_LOCAL_EVENING = datetime(2026, 5, 15, 19, 0, 0, tzinfo=_PDT)
 
 
 def _make_entry(d: date, temp: float, *, utc_midnight: bool = False) -> dict:
     """Forecast entry for the given date.
 
     utc_midnight=True: timestamps at UTC midnight (e.g. 2026-05-16T00:00:00+00:00).
-    In PDT (UTC-7) this shifts to 5pm the previous local day — the production case.
+    The raw date portion is the API's intended forecast date. In PDT (UTC-7) this
+    shifts to 5pm the previous local day if converted — which is why we use raw date.
 
     utc_midnight=False (default): timestamps at local noon with -07:00 offset.
-    UTC date == local date in this case.
+    Raw date == local date in this case.
     """
     dt_str = f"{d.isoformat()}T00:00:00+00:00" if utc_midnight else f"{d.isoformat()}T12:00:00-07:00"
     return {
@@ -95,13 +105,13 @@ def _make_coordinator_stub(forecast_data: list) -> MagicMock:
     return coord
 
 
-def _run_get_forecast(coord) -> object:
-    """Run _get_forecast() with dt_util.utcnow patched to _NOW_UTC."""
+def _run_get_forecast(coord, *, now_local: datetime = _NOW_LOCAL) -> object:
+    """Run _get_forecast() with dt_util.now patched to the given local datetime."""
 
     async def run():
         with patch(
-            "custom_components.climate_advisor.coordinator.dt_util.utcnow",
-            return_value=_NOW_UTC,
+            "custom_components.climate_advisor.coordinator.dt_util.now",
+            return_value=now_local,
         ):
             return await coord._get_forecast()
 
@@ -167,21 +177,18 @@ class TestForecastDateMatching:
         assert result.today_high == pytest.approx(_CURRENT_OUTDOOR)
         assert result.tomorrow_high == pytest.approx(_CURRENT_OUTDOOR)
 
-    def test_utc_midnight_entries_matched_by_utc_calendar_date(self, tmp_path: Path):
-        """UTC midnight timestamps must match by UTC date, not local date.
+    def test_utc_midnight_entries_matched_by_raw_date(self, tmp_path: Path):
+        """UTC midnight timestamps are matched by their raw date, not local-converted date.
 
-        Production root cause: weather APIs like Open-Meteo and some HA integrations
-        return daily forecast entries timestamped at UTC midnight. In PDT (UTC-7),
-        2026-05-16T00:00:00+00:00 converts to 2026-05-15T17:00-07:00 (local), which
-        has local date 2026-05-15 (TODAY). Using local date would bucket tomorrow's
-        entry as today and day+2 as tomorrow — same off-by-one as the original bug.
+        Weather APIs like Open-Meteo return entries at UTC midnight. The raw date
+        portion (2026-05-16 in 2026-05-16T00:00:00+00:00) is the API's intended
+        forecast date. This is compared directly against the local calendar date.
 
-        Using UTC date: 2026-05-16T00:00:00+00:00 has UTC date 2026-05-16 → tomorrow. ✓
+        If we converted to local PDT first: 2026-05-16T00:00:00Z → 2026-05-15T17:00 PDT
+        → local date 2026-05-15 (today) — wrong, this is tomorrow's forecast.
+
+        Raw date: 2026-05-16 compared against local today 2026-05-15 → tomorrow. ✓
         """
-        # Entries timestamped at UTC midnight — the production problematic format.
-        # _TODAY = 2026-05-15, _TOMORROW = 2026-05-16
-        # UTC midnight for _TODAY  → UTC date 2026-05-15 → should be today_fc
-        # UTC midnight for _TOMORROW → UTC date 2026-05-16 → should be tomorrow_fc
         forecast = [
             _make_entry(_TODAY, 72.0, utc_midnight=True),
             _make_entry(_TOMORROW, 79.0, utc_midnight=True),
@@ -191,9 +198,34 @@ class TestForecastDateMatching:
         result = _run_get_forecast(coord)
 
         assert result is not None
-        assert result.today_high == pytest.approx(72.0), (
-            "UTC midnight today entry must match today, not be shifted to yesterday"
-        )
+        assert result.today_high == pytest.approx(72.0), "UTC midnight today entry must match today via raw date"
         assert result.tomorrow_high == pytest.approx(79.0), (
-            "UTC midnight tomorrow entry must match tomorrow, not be shifted to today"
+            "UTC midnight tomorrow entry must match tomorrow via raw date"
+        )
+
+    def test_evening_utc_rollover_no_off_by_one(self, tmp_path: Path):
+        """Evening scenario: 7pm PDT May 15 — UTC has rolled to May 16 but local is still May 15.
+
+        Issue #190: using dt_util.utcnow() at this time returns date May 16, causing
+        the May 16 forecast entry (local tomorrow) to be labeled 'today' and the
+        May 17 entry (local day-after-tomorrow) to be labeled 'tomorrow'.
+
+        Fix: dt_util.now().date() = May 15 (local). Raw date May 16 = local tomorrow. ✓
+        """
+        # UTC midnight entries: the production format
+        forecast = [
+            _make_entry(_TODAY, 72.0, utc_midnight=True),  # May 15 — local today
+            _make_entry(_TOMORROW, 91.0, utc_midnight=True),  # May 16 — local tomorrow
+            _make_entry(_TOMORROW + timedelta(days=1), 68.0, utc_midnight=True),  # May 17
+        ]
+        coord = _make_coordinator_stub(forecast)
+        # Simulate 7pm PDT May 15 (UTC = 2am May 16 — UTC date already rolled over)
+        result = _run_get_forecast(coord, now_local=_NOW_LOCAL_EVENING)
+
+        assert result is not None
+        assert result.today_high == pytest.approx(72.0), (
+            "REGRESSION #190: today_high should be May 15 entry (72°F), not May 16 (91°F)"
+        )
+        assert result.tomorrow_high == pytest.approx(91.0), (
+            "REGRESSION #190: tomorrow_high should be May 16 entry (91°F), not May 17 (68°F)"
         )

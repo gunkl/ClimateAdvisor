@@ -54,6 +54,11 @@ RELEASE_NOTES: dict[str, list[str]] = {
         "Fix #149: Activity report section deduplication rule added to system prompt",
         "Fix #149: HVAC peak indoor temp now captured at exact HVAC-off moment (not only at poll cycles)",
     ],
+    "0.3.55": [
+        "Fix #190: _get_forecast() switches to local date + raw forecast date —"
+        " tomorrow's forecast no longer shows day-after-tomorrow in evening hours"
+        " (UTC rollover bug in negative UTC offset timezones)",
+    ],
     "0.3.44": [
         "Fix #143: _get_forecast() date-keyed dict replaces blind-index fallback"
         " — briefing tomorrow-high now always reads the correct forecast entry"
@@ -143,6 +148,20 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_not_covered": [
             "Thermal mass / phase lag — ODE is still first-order, solar peak timing not addressed",
             "In-memory consecutive-pair OLS on 5-min samples — still structurally limited by 1°F quantization",
+        ],
+    },
+    190: {
+        "version_fixed": "0.3.55",
+        "title": "_get_forecast() evening UTC rollover — tomorrow shows day-after-tomorrow after 5pm PDT",
+        "scope_covered": [
+            "coordinator._get_forecast() — reference date now uses dt_util.now().date() (local)"
+            " instead of dt_util.utcnow().date() (UTC)",
+            "forecast entry bucketing now uses fc_obj.date() (raw) instead of astimezone(UTC).date()"
+            " — API's intended date is preserved without timezone conversion",
+            "briefing tomorrow-high — correct at all hours in all timezones",
+        ],
+        "scope_not_covered": [
+            "_get_hourly_forecast_data() — hourly entries use per-hour timestamps and were not affected by this bug",
         ],
     },
     143: {

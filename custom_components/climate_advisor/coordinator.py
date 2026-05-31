@@ -1681,14 +1681,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         today_fc = None
         tomorrow_fc = None
         if forecast:
-            # Use UTC calendar date for matching. Daily forecast entries from
-            # HA weather integrations are often timestamped at UTC midnight
-            # (e.g. 2026-05-16T00:00:00+00:00). Converting to local time shifts
-            # that to 5pm PDT on 2026-05-15 — making tomorrow's entry appear to
-            # be today's. Matching on UTC date keeps the API's intended calendar
-            # day regardless of local timezone offset.
-            now_utc = dt_util.utcnow()
-            now_date = now_utc.date()
+            # Use local calendar date for "today" and extract the raw date from
+            # each forecast entry without timezone conversion. Weather APIs that
+            # use UTC midnight timestamps (e.g. 2026-05-31T00:00:00Z) intend
+            # the date portion (2026-05-31) as the forecast date — comparing
+            # that raw date against the local calendar date is correct at all
+            # hours. Using UTC for "now" breaks in the evening when UTC has
+            # rolled to the next calendar day but local time hasn't (Issue #190).
+            now_local = dt_util.now()
+            now_date = now_local.date()
             tomorrow_date = now_date + timedelta(days=1)
             _LOGGER.debug(
                 "_get_forecast raw datetimes (first 5): %s",
@@ -1699,7 +1700,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fc_dt = entry.get("datetime", "")
                 try:
                     fc_obj = datetime.fromisoformat(fc_dt)
-                    fc_date = fc_obj.astimezone(UTC).date() if fc_obj.tzinfo else fc_obj.date()
+                    # Raw date: no tz conversion. API date intent, compared against local now_date.
+                    fc_date = fc_obj.date()
                     forecast_by_date.setdefault(fc_date, entry)
                 except (ValueError, TypeError):
                     continue
@@ -1708,13 +1710,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             available_dates = sorted(forecast_by_date.keys())
             if today_fc is None and available_dates:
                 _LOGGER.warning(
-                    "_get_forecast: no entry for today (%s UTC); available dates: %s",
+                    "_get_forecast: no entry for today (%s local); available dates: %s",
                     now_date,
                     available_dates,
                 )
             if tomorrow_fc is None and available_dates:
                 _LOGGER.warning(
-                    "_get_forecast: no entry for tomorrow (%s UTC); available dates: %s",
+                    "_get_forecast: no entry for tomorrow (%s local); available dates: %s",
                     tomorrow_date,
                     available_dates,
                 )

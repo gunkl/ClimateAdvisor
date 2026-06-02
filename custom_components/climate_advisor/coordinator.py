@@ -2404,6 +2404,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pass  # Non-numeric temps, skip detail recording
             _LOGGER.debug("Possible manual override detected: %s -> %s", old_temp, new_temp)
             await self._async_save_state()
+            # Setpoint-only override: mode matches classification but user moved the setpoint.
+            # Trigger the same override confirmation + grace mechanism as a mode change.
+            ae = self.automation_engine
+            if (
+                not ae._manual_override_active
+                and not ae._override_confirm_pending
+                and self._current_classification is not None
+                and new_state.state == self._current_classification.hvac_mode
+            ):
+                _LOGGER.info(
+                    "Setpoint-only manual override detected: %s -> %s (mode=%s matches classification)",
+                    old_temp,
+                    new_temp,
+                    new_state.state,
+                )
+                ae.handle_manual_override(
+                    source="setpoint",
+                    old_mode=old_state.state,
+                    new_mode=new_state.state,
+                    classification_mode=self._current_classification.hvac_mode,
+                )
 
         # Detect manual fan_mode attribute changes on thermostat (Issue #37)
         new_fan_mode = new_state.attributes.get("fan_mode")

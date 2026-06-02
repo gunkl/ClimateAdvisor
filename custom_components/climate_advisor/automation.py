@@ -254,6 +254,7 @@ class AutomationEngine:
         self._override_confirm_cancel: Any | None = None
         self._override_confirm_time: str | None = None
         self._override_confirm_mode: str | None = None
+        self._override_confirm_source: str | None = None  # "setpoint" or "normal"
 
         # Minimum fan runtime per hour — rolling cycle (Issue #77)
         self._fan_min_runtime_active: bool = False  # True if THIS feature activated the fan
@@ -380,6 +381,7 @@ class AutomationEngine:
             self._override_confirm_pending = False
             self._override_confirm_time = None
             self._override_confirm_mode = None
+            self._override_confirm_source = None
         if self._manual_override_active:
             if self._emit_event_callback:
                 self._emit_event_callback(
@@ -515,6 +517,7 @@ class AutomationEngine:
     def handle_manual_override(
         self,
         *,
+        source: str = "normal",
         old_mode: str | None = None,
         new_mode: str | None = None,
         classification_mode: str | None = None,
@@ -528,12 +531,14 @@ class AutomationEngine:
         are silently ignored.
 
         Args:
+            source: "normal" for mode-change overrides, "setpoint" for
+                    temperature-only changes where mode still matches classification.
             old_mode: Previous hvac_mode (from coordinator for enriched event payload).
             new_mode: New hvac_mode detected.
             classification_mode: What classification expects (for event payload).
         """
         self.start_override_confirmation(
-            source="normal",
+            source=source,
             old_mode=old_mode,
             new_mode=new_mode,
             classification_mode=classification_mode,
@@ -573,6 +578,7 @@ class AutomationEngine:
         self._override_confirm_pending = True
         self._override_confirm_time = dt_util.now().isoformat()
         self._override_confirm_mode = detected_mode
+        self._override_confirm_source = source
         _LOGGER.info(
             "Potential %s override detected (mode=%s) — confirming in %d minutes",
             source,
@@ -610,8 +616,11 @@ class AutomationEngine:
             current_state = self.hass.states.get(self.climate_entity)
             current_mode = current_state.state if current_state else "unknown"
             cls_mode = self._current_classification.hvac_mode if self._current_classification else None
-            if current_mode not in ("unavailable", "unknown") and current_mode != cls_mode:
-                # Still divergent — formally confirm the override
+            # For setpoint overrides: mode may still match classification, but
+            # the user deliberately moved the setpoint — always take PATH A.
+            _setpoint_override = source == "setpoint"
+            if _setpoint_override or (current_mode not in ("unavailable", "unknown") and current_mode != cls_mode):
+                # PATH A: Still divergent (or deliberate setpoint override) — formally confirm
                 _LOGGER.warning(
                     "Override confirmed after %d minutes (mode=%s, classification wants %s)",
                     confirm_seconds // 60,
@@ -621,6 +630,7 @@ class AutomationEngine:
                 self._override_confirm_pending = False
                 self._override_confirm_time = None
                 self._override_confirm_mode = None
+                self._override_confirm_source = None
                 self._confirm_override(current_mode)
                 if self._emit_event_callback:
                     self._emit_event_callback(
@@ -628,7 +638,7 @@ class AutomationEngine:
                         {"mode": current_mode, "confirm_delay_seconds": confirm_seconds},
                     )
             else:
-                # State resolved — transient event, no override
+                # PATH B: State resolved — transient event, no override
                 _LOGGER.info(
                     "Potential override self-resolved (detected=%s, current=%s) — no action taken",
                     self._override_confirm_mode,
@@ -637,6 +647,7 @@ class AutomationEngine:
                 self._override_confirm_pending = False
                 self._override_confirm_time = None
                 self._override_confirm_mode = None
+                self._override_confirm_source = None
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_self_resolved",

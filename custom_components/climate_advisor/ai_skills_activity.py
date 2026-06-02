@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -38,7 +39,11 @@ Return your analysis with these exact section headers (use ## for headers):
 ## SUMMARY
 2-3 sentence overview of the current situation.
 ## TIMELINE
-Chronological summary of significant recent events and state changes.
+Chronological summary built from the EVENT LOG section. List each automation setpoint
+action, manual override (with setpoint values from MANUAL OVERRIDES TODAY), and contact
+sensor event in time order. For each override show: when it started, what setpoint was
+set, and how long it lasted (or "ongoing" if still active). If automation re-asserted
+after an override cleared, show that full sequence explicitly.
 ## DECISIONS
 Why each automation action was taken, with the logic explained.
 When fan_status is active while hvac_mode is off, explicitly trace the fan state to \
@@ -262,6 +267,111 @@ async def async_build_activity_context(
     except (ValueError, TypeError):
         pass
 
+    # --- Event log (last 12h, chronological) ---
+    event_log_lines: list[str] = []
+    event_log_count = 0
+    try:
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=12)
+        raw_log: list[Any] = getattr(coordinator, "_event_log", []) or []
+        recent_events: list[dict] = []
+        for entry in raw_log:
+            if not isinstance(entry, dict):
+                continue
+            raw_time = entry.get("time")
+            if raw_time is None:
+                recent_events.append(entry)
+                continue
+            if isinstance(raw_time, datetime.datetime):
+                event_dt = raw_time if raw_time.tzinfo else raw_time.replace(tzinfo=datetime.UTC)
+            else:
+                try:
+                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                except ValueError:
+                    recent_events.append(entry)
+                    continue
+            if event_dt >= cutoff:
+                recent_events.append(entry)
+
+        event_log_count = len(recent_events)
+        if event_log_count > 60:
+            omitted = event_log_count - 60
+            recent_events = recent_events[-60:]
+            event_log_lines.append(f"  (... {omitted} older events omitted)")
+
+        if recent_events:
+            for entry in recent_events:
+                raw_time = entry.get("time", "")
+                etype = entry.get("type", "unknown")
+                try:
+                    if isinstance(raw_time, datetime.datetime):
+                        local_dt = dt_util.as_local(raw_time) if raw_time.tzinfo else raw_time
+                    else:
+                        event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                        local_dt = dt_util.as_local(event_dt) if event_dt.tzinfo else event_dt
+                    time_str = local_dt.strftime("%H:%M")
+                except Exception:
+                    time_str = str(raw_time)[:5]
+                extras = {k: v for k, v in entry.items() if k not in ("time", "type")}
+                extras_str = " ".join(f"{k}={v}" for k, v in extras.items())
+                if extras_str:
+                    event_log_lines.append(f"  {time_str} — {etype}: {extras_str}")
+                else:
+                    event_log_lines.append(f"  {time_str} — {etype}")
+        else:
+            event_log_lines.append("  (no events in last 12h)")
+    except Exception:
+        _LOGGER.warning("activity_report: failed to build event log section — skipping")
+        event_log_lines = ["  (unavailable)"]
+
+    # --- Manual overrides today ---
+    override_detail_lines: list[str] = []
+    try:
+        today_record = getattr(coordinator, "_today_record", None)
+        override_count = 0
+        override_details: list[dict] = []
+        if today_record is not None:
+            override_count = getattr(today_record, "manual_overrides", 0)
+            override_details = list(getattr(today_record, "override_details", []) or [])
+
+        override_detail_lines.append(f"  Count:             {override_count}")
+        if override_details:
+            for i, d in enumerate(override_details, 1):
+                t = d.get("time", "??:??")
+                old_t = d.get("old_temp", "?")
+                new_t = d.get("new_temp", "?")
+                direction = d.get("direction", "?")
+                magnitude = d.get("magnitude", "?")
+                sign = "+" if direction == "up" else "-"
+                override_detail_lines.append(f"  #{i}  {t}  {old_t}°F → {new_t}°F  ({sign}{magnitude}°F, {direction})")
+        else:
+            override_detail_lines.append("  (no setpoint overrides recorded today)")
+
+        ae = getattr(coordinator, "automation_engine", None)
+        if ae is not None and getattr(ae, "_manual_override_active", False):
+            override_time_str = getattr(ae, "_manual_override_time", None)
+            if override_time_str:
+                try:
+                    override_dt = datetime.datetime.fromisoformat(str(override_time_str))
+                    now_local = dt_util.now()
+                    duration_seconds = (now_local - override_dt).total_seconds()
+                    duration_min = max(0, round(duration_seconds / 60))
+                    local_start = dt_util.as_local(override_dt) if override_dt.tzinfo else override_dt
+                    override_detail_lines.append(
+                        f"  Current override:  active since {local_start.strftime('%H:%M')}, "
+                        f"duration {duration_min} min (ongoing)"
+                    )
+                except Exception:
+                    override_detail_lines.append("  Current override:  active (duration unknown)")
+            else:
+                override_detail_lines.append("  Current override:  active (start time unknown)")
+        else:
+            override_detail_lines.append("  Current override:  none active")
+    except Exception:
+        _LOGGER.warning("activity_report: failed to build override detail section — skipping")
+        override_detail_lines = ["  (unavailable)"]
+
     # --- Format context block ---
     lines = [
         "=== Climate Advisor Activity Report Context ===",
@@ -314,6 +424,12 @@ async def async_build_activity_context(
         "",
         "## ACTIVE PREDICTION ENGINES",
         *(engine_status_block.splitlines() if engine_status_block else ["  (unavailable)"]),
+        "",
+        f"## EVENT LOG (last 12h, {event_log_count} events)",
+        *event_log_lines,
+        "",
+        "## MANUAL OVERRIDES TODAY",
+        *override_detail_lines,
     ]
 
     return "\n".join(lines)

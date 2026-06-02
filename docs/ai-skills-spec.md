@@ -166,7 +166,7 @@ Response persistence (history storage, timestamps) is the responsibility of `coo
 
 `async_build_activity_context(hass, coordinator, **kwargs) → str`
 
-Assembles nine labeled sections in fixed order. Data sources per section:
+Assembles eleven labeled sections in fixed order. Data sources per section:
 
 | Section label | Data source | Notes |
 |---|---|---|
@@ -180,6 +180,8 @@ Assembles nine labeled sections in fixed order. Data sources per section:
 | `CONFIGURATION` | `coordinator.config` | Comfort temps, setback temps, wake/sleep/briefing times |
 | `ACTIVE FEATURES` | `coordinator.config` | Boolean feature flags |
 | `ACTIVE PREDICTION ENGINES` | `coordinator.learning.get_engine_status()` formatted by `_format_engine_status_for_ai()` | See [Active Prediction Engines](#active-prediction-engines) |
+| `EVENT LOG` | `coordinator._event_log` filtered to last 12h | See [Event Log](#event-log) |
+| `MANUAL OVERRIDES TODAY` | `coordinator._today_record.override_details` + live `coordinator.automation_engine` state | See [Manual Overrides Today](#manual-overrides-today) |
 
 **Fresh HVAC runtime** is computed as `_today_record.hvac_runtime_minutes + session_elapsed_minutes` where `session_elapsed` is computed from `coordinator._hvac_on_since` at call time. This makes the runtime accurate regardless of coordinator.data staleness (up to 30 min between coordinator update cycles).
 
@@ -195,6 +197,48 @@ The `LEARNING` section includes only:
 - Confidence values or thresholds
 
 This enforces invariant 7 from `ai-integration.md`: suggestion text is not sent to Claude by this skill.
+
+### Event Log
+
+`coordinator._event_log` is a ring-buffer capped at `EVENT_LOG_CAP` entries. The activity report filters to events in the last 12 hours (cutoff = `datetime.now(UTC) - timedelta(hours=12)`). If more than 60 events match, the oldest are dropped and a `(... N older events omitted)` note is prepended. Each entry renders as:
+
+```
+  HH:MM — <event_type>: key=value key=value ...
+```
+
+Times are converted to HA local timezone for display. The list is chronological (oldest first within the window). Representative event types:
+- `apply_classification` — automation applied a day classification setpoint
+- `override_confirm_pending` — debounce window started for detected setpoint change
+- `override_confirmed` — override accepted after 10-min confirmation; includes `confirmed_after_seconds`
+- `manual_override_cleared` — override cleared; includes `was_mode` and `duration_seconds`
+- `grace_expired` — grace period ended, automation may resume
+- `sensor_opened` / `door_pause` — contact sensor events
+
+If the event log is empty or no events fall in the window, the section shows `(no events in last 12h)`. Any exception during log parsing is caught and logged at WARNING; the section shows `(unavailable)` rather than failing the context build.
+
+### Manual Overrides Today
+
+Provides a structured per-override record using two sources:
+
+**`coordinator._today_record.override_details`** — list of dicts appended each time a manual setpoint change is confirmed (distinct from automation commands). Each entry: `{time: "HH:MM", old_temp: float, new_temp: float, direction: "up"|"down", magnitude: float}`. This covers setpoint changes; for mode changes use the event log.
+
+**Current override state from `coordinator.automation_engine`:**
+- `_manual_override_active: bool` — is an override active right now?
+- `_manual_override_time: str | None` — ISO timestamp (HA local TZ) when the current override was confirmed
+
+Formatted output:
+```
+## MANUAL OVERRIDES TODAY
+  Count:             3
+  #1  17:02  72.0°F → 74.0°F  (+2.0°F, up)
+  #2  18:44  72.0°F → 75.0°F  (+3.0°F, up)
+  #3  21:10  72.0°F → 74.0°F  (+2.0°F, up)
+  Current override:  active since 21:10, duration 47 min (ongoing)
+```
+
+If `override_details` is empty: `(no setpoint overrides recorded today)`. If no override is currently active: `Current override: none active`. Duration is computed as `(dt_util.now() - override_dt).total_seconds() / 60` rounded to nearest minute. Any exception is caught and logged at WARNING.
+
+**12h window vs. full-day coverage:** The 12h EVENT LOG window may exclude early-morning events for late-afternoon reports. `override_details` is not window-filtered — it accumulates all day, so all setpoint override timestamps are always present in MANUAL OVERRIDES TODAY regardless of report time.
 
 ### Cross-Validation
 
@@ -238,7 +282,7 @@ engine_status["k_active_hvac"]["value"]["cool"]   # float | None
 
 `_SYSTEM_PROMPT` includes a `DEDUPLICATION RULE` requiring each section to be exclusive:
 - `SUMMARY`: current state only — no analysis, no decisions
-- `TIMELINE`: chronological events only — no "why" analysis
+- `TIMELINE`: chronological events built from the EVENT LOG — automation setpoint actions, manual overrides (with setpoint values from MANUAL OVERRIDES TODAY and durations), contact sensor events. Each override must state when it started, what setpoint was set, and how long it lasted ("ongoing" if still active). No "why" analysis.
 - `DECISIONS`: explain WHY each action was taken — do NOT re-describe Timeline content
 - `ANOMALIES`: deviations from expected behavior only — do NOT re-explain Decisions
 - `DIAGNOSTICS`: subsystem health only — do NOT repeat anomalies or decisions

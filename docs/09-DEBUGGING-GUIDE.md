@@ -15,7 +15,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
 | How do you decide if a finding in an AI investigator report is a real bug or noise? | Apply the 5-category taxonomy: ACTIONABLE / TIME-DEPENDENT / CONTEXTUAL / NOISE / RESOLVED. Count discrepancies ≤ 1, high abandonment from operational interruptions, and pending-observation speculation are all NOISE. | [§Interpreting AI Investigator Reports — Noise Taxonomy](09-DEBUGGING-GUIDE.md#interpreting-ai-investigator-reports--noise-taxonomy) |
-| How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 6 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), and 30s guard too wide (#202). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
+| How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 7 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), 30s guard too wide (#202), and bedtime/wakeup unconditional clear (BW #204 — fixed). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
 
 ## Primary Debugging Data Sources
 
@@ -421,6 +421,7 @@ This section documents known ways a user-initiated thermostat change can be sile
 | PATH-B | Self-resolve discards short deliberate overrides | `automation.py:630–644` PATH B treats quick mode revert as transient — no grace granted | Design gap | [#200](https://github.com/gunkl/ClimateAdvisor/issues/200) |
 | 2nd | Second override during active override silently ignored | `coordinator.py:2172` gates override detection on `not _manual_override_active` | Design gap | [#201](https://github.com/gunkl/ClimateAdvisor/issues/201) |
 | 30s | 30-second guard too wide for setpoint changes | `coordinator.py:2387` uses 30s vs 3s for mode changes — user changes within 30s of CA command are dropped | Design gap | [#202](https://github.com/gunkl/ClimateAdvisor/issues/202) |
+| BW | Bedtime/wakeup handler unconditionally clears active override | `automation.py:1926` (`handle_bedtime_setback`) and `automation.py:2025` (`handle_morning_wakeup`) called `clear_manual_override()` unconditionally — override silently wiped at scheduled sleep/wake time even with active grace | Fixed — Issue #204 | [#204](https://github.com/gunkl/ClimateAdvisor/issues/204) |
 
 ### Bypass #1 — Setpoint-only change (Issue #197)
 
@@ -451,3 +452,25 @@ handle_manual_override called source=setpoint
 **Root cause**: `automation.py:2303–2304` contains an explicit comment: "Grace timers cannot be restored — clear on restart." `_manual_override_active=True` is restored (line 2286) but the `_grace_expired` timer is not rescheduled. The flag stays set until the `clear_manual_override` service is called.
 
 **Diagnostic**: `_manual_override_active=True` persists in `sensor.climate_advisor_status` attributes for more than 4 hours after a CA restart with no user interaction.
+
+### BW — Bedtime/wakeup handler unconditionally clears override (Issue #204) — FIXED
+
+**Symptom**: User sets a manual thermostat temperature shortly before the configured `sleep_time` or `wake_time`. Override grace starts (90 min by default). At the scheduled time, CA silently resets the thermostat to the setback temperature with no notification. `sensor.climate_advisor_last_action_reason` shows bedtime or wakeup setback — no indication that a manual override was active.
+
+**Root cause**: `handle_bedtime_setback()` (automation.py:1926) and `handle_morning_wakeup()` (automation.py:2025) called `clear_manual_override()` unconditionally before applying the sleep/wake setpoint. Neither checked `_manual_override_active` before proceeding.
+
+A secondary root cause: `clear_manual_override()` had no `reason` parameter, so all four callsites were indistinguishable in logs — making diagnosis require a full code trace.
+
+**Fix (Issue #204)**: Both handlers now check `_manual_override_active` before proceeding. If `True`, the handler skips entirely and emits `bedtime_setback_skipped` / `morning_wakeup_skipped`. `clear_manual_override()` now takes a `reason=` parameter logged at INFO.
+
+**Diagnostic log pattern (post-fix)**:
+```
+# Override active at sleep_time — expect this log, NO thermostat change:
+[climate_advisor] handle_bedtime_setback: skipping — manual override active (_manual_override_active=True)
+[climate_advisor] Event: bedtime_setback_skipped
+
+# Override not active at sleep_time — normal setback path:
+[climate_advisor] clear_manual_override called — reason=bedtime_setback
+```
+
+**Cross-reference**: [Grace Periods Spec — What Clears a Manual Override](grace-periods-spec.md#what-clears-a-manual-override)

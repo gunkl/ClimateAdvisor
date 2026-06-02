@@ -13,6 +13,7 @@
 | Is grace state persisted across HA restarts? | No. `restore_state()` explicitly sets `_grace_active = False` and `_last_resume_source = None`. Pause state (`_paused_by_door`, `_pre_pause_mode`) IS persisted. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage) |
 | What happens to an active grace period when occupancy changes? | The engine has no explicit occupancy-triggered grace cancellation. Grace timers run to expiry regardless of occupancy transitions; occupancy handlers (`handle_occupancy_away`, `handle_occupancy_home`) do not call `_cancel_grace_timers()`. | [§ Occupancy Interaction](#occupancy-interaction) |
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
+| What are all the callsites that clear a manual override, and under what conditions? | Six callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears). Every clear is logged at INFO with a `reason=` parameter. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
 
 ---
 
@@ -340,3 +341,34 @@ This means an occupancy transition, a fan override, or a dashboard cancel that c
 ### Persistence
 
 `_override_confirm_pending` and its companion variables are **not persisted** across HA restarts. `restore_state()` does not restore them. On restart, any in-flight confirmation window is silently abandoned and the flags reset to `False`. This is intentional — an HA restart is itself a transient event, and the mode state that triggered the confirmation may no longer reflect user intent after restart.
+
+---
+
+## What Clears a Manual Override
+
+`clear_manual_override()` is the single function that deactivates `_manual_override_active` and cancels any pending override confirmation window. Every callsite must be traceable in logs.
+
+### `reason` parameter (post-Issue #204 fix)
+
+`clear_manual_override()` now accepts a `reason: str` keyword argument. Every call logs at INFO level:
+
+```
+[climate_advisor] clear_manual_override called — reason=<reason>
+```
+
+This makes every clear event attributable in `python tools/ha_logs.py --full` without a lengthy investigation. Before this fix, all four callsites were indistinguishable in logs.
+
+### Callsite inventory
+
+| # | Callsite | Location | Condition | Behaviour after Issue #204 fix |
+|---|---|---|---|---|
+| 1 | `_grace_expired()` — planned window branch | `automation.py:~1500` | Grace timer fires while within a planned window period | Always clears — intended; override was established before a window period |
+| 2 | `_grace_expired()` — re-pause branch | `automation.py:~1510` | Grace timer fires; sensor still open; re-pause scheduled | Always clears — the re-pause re-establishes HVAC-off state; prior override no longer meaningful |
+| 3 | `_grace_expired()` — normal expiry branch | `automation.py:~1520` | Grace timer fires; all sensors closed | Always clears — intended; grace window has elapsed normally |
+| 4 | `handle_bedtime_setback()` | `automation.py:1926` | Configured `sleep_time` fires | **Skips entirely if `_manual_override_active=True`** — emits `bedtime_setback_skipped` event; logs skip at INFO. Clears only if override is not active. |
+| 5 | `handle_morning_wakeup()` | `automation.py:2025` | Configured `wake_time` fires | **Skips entirely if `_manual_override_active=True`** — emits `morning_wakeup_skipped` event; logs skip at INFO. Clears only if override is not active. |
+| 6 | `clear_manual_override` HA service call | `automation.py` service handler | User explicitly calls the service from UI or automation | Always clears — explicit user intent |
+
+### Invariant
+
+After Issue #204: no scheduled timer (bedtime, wakeup) may call `clear_manual_override()` while `_manual_override_active=True`. Only grace expiry (callsites 1–3) and the explicit service call (callsite 6) may unconditionally clear an active override. All other callsites must check the flag first.

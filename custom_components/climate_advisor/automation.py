@@ -372,7 +372,7 @@ class AutomationEngine:
 
         self._revisit_cancel = async_call_later(self.hass, REVISIT_DELAY_SECONDS, _revisit_fired)
 
-    def clear_manual_override(self) -> None:
+    def clear_manual_override(self, reason: str = "grace_expired") -> None:
         """Clear the manual override flag (called at transition points)."""
         if self._override_confirm_pending:
             if self._override_confirm_cancel:
@@ -392,7 +392,8 @@ class AutomationEngine:
                     },
                 )
             _LOGGER.info(
-                "Clearing manual override (was %s since %s)",
+                "Clearing manual override — reason=%s (was %s since %s)",
+                reason,
                 self._manual_override_mode,
                 self._manual_override_time,
             )
@@ -1681,7 +1682,7 @@ class AutomationEngine:
                 self._grace_end_time = None
                 self._manual_grace_cancel = None
                 self._automation_grace_cancel = None
-                self.clear_manual_override()
+                self.clear_manual_override(reason="grace_expired")
                 return
 
             # If any contact sensor is still open, re-pause instead of clearing
@@ -1695,7 +1696,7 @@ class AutomationEngine:
                 self._grace_end_time = None
                 self._manual_grace_cancel = None
                 self._automation_grace_cancel = None
-                self.clear_manual_override()
+                self.clear_manual_override(reason="grace_expired")
                 if self._emit_event_callback:
                     self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
                 self.hass.async_create_task(self._re_pause_for_open_sensor())
@@ -1706,7 +1707,7 @@ class AutomationEngine:
             self._grace_end_time = None
             self._manual_grace_cancel = None
             self._automation_grace_cancel = None
-            self.clear_manual_override()
+            self.clear_manual_override(reason="grace_expired")
             _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
             if self._emit_event_callback:
                 self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
@@ -1923,7 +1924,18 @@ class AutomationEngine:
                 self._today_record.setback_skipped_reason = "occupancy"
             return
 
-        self.clear_manual_override()
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Bedtime setback skipped — manual override active (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback("bedtime_setback_skipped", {"reason": "manual_override"})
+            return
+
+        _LOGGER.warning("Bedtime setback: clearing any pending override state before applying sleep setback")
+        self.clear_manual_override(reason="bedtime")
 
         # Deactivate fan at bedtime (fan running overnight is noisy/wasteful)
         if self._fan_active and not self._fan_override_active:
@@ -2022,7 +2034,18 @@ class AutomationEngine:
             )
             return
 
-        self.clear_manual_override()
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Morning wakeup skipped — manual override active (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback("morning_wakeup_skipped", {"reason": "manual_override"})
+            return
+
+        _LOGGER.warning("Morning wakeup: clearing any pending override state before restoring comfort")
+        self.clear_manual_override(reason="morning_wakeup")
 
         # Deactivate fan if still running from overnight
         if self._fan_active:

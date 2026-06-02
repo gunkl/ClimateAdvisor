@@ -156,8 +156,12 @@ class TestManualOverrideProtection:
         assert engine._manual_override_mode is None
         assert engine._manual_override_time is None
 
-    def test_bedtime_clears_override(self):
-        """handle_bedtime() should clear any active manual override."""
+    def test_bedtime_preserves_override_when_active(self):
+        """handle_bedtime() must NOT clear an active manual override (guard added in Issue #192).
+
+        When the user has manually changed the thermostat, bedtime setback is skipped
+        entirely so the override is not silently wiped. The override stays in effect.
+        """
         engine = _make_automation_engine()
         engine._manual_override_active = True
         engine._manual_override_mode = "cool"
@@ -168,11 +172,15 @@ class TestManualOverrideProtection:
 
         asyncio.run(engine.handle_bedtime())
 
-        assert engine._manual_override_active is False
-        assert engine._manual_override_mode is None
+        assert engine._manual_override_active is True
+        assert engine._manual_override_mode == "cool"
 
-    def test_morning_wakeup_clears_override(self):
-        """handle_morning_wakeup() should clear any active manual override."""
+    def test_morning_wakeup_preserves_override_when_active(self):
+        """handle_morning_wakeup() must NOT clear an active manual override (guard added in Issue #192).
+
+        When the user has manually changed the thermostat, morning wakeup is skipped
+        entirely so the override is not silently wiped. The override stays in effect.
+        """
         engine = _make_automation_engine()
         engine._manual_override_active = True
         engine._manual_override_mode = "heat"
@@ -183,8 +191,8 @@ class TestManualOverrideProtection:
 
         asyncio.run(engine.handle_morning_wakeup())
 
-        assert engine._manual_override_active is False
-        assert engine._manual_override_mode is None
+        assert engine._manual_override_active is True
+        assert engine._manual_override_mode == "heat"
 
     def test_handle_manual_override_sets_override_and_starts_grace(self):
         """handle_manual_override() should set override and activate grace period."""

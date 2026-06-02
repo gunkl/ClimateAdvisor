@@ -264,6 +264,7 @@ class ClimateAdvisorComplianceSensor(ClimateAdvisorBaseSensor):
                     "last_rejection_reason": (h["last_rejection"]["reason_code"] if h.get("last_rejection") else None),
                 }
                 for obs_type, h in health.items()
+                if isinstance(h, dict)
             }
             if health
             else {}

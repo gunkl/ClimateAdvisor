@@ -15,6 +15,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
 | How do you decide if a finding in an AI investigator report is a real bug or noise? | Apply the 5-category taxonomy: ACTIONABLE / TIME-DEPENDENT / CONTEXTUAL / NOISE / RESOLVED. Count discrepancies ≤ 1, high abandonment from operational interruptions, and pending-observation speculation are all NOISE. | [§Interpreting AI Investigator Reports — Noise Taxonomy](09-DEBUGGING-GUIDE.md#interpreting-ai-investigator-reports--noise-taxonomy) |
+| How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 6 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), and 30s guard too wide (#202). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
 
 ## Primary Debugging Data Sources
 
@@ -396,3 +397,57 @@ To see these in real-time:
 ```bash
 python3 tools/ha_logs.py --lines 200 --filter "automation\|coordinator"
 ```
+
+---
+
+## Override Bypass Inventory
+
+This section documents known ways a user-initiated thermostat change can be silently ignored or reversed by CA. Use it when a user reports that manual changes to the thermostat are not being respected.
+
+### Quick triage checklist
+
+1. Check `sensor.climate_advisor_last_action_reason` — was CA the last actor?
+2. Check HA logs for `handle_manual_override` — was the override detected at all?
+3. Check if the user changed mode, setpoint, or both — the detection paths differ.
+4. Check if CA restarted (look for `Climate Advisor reloaded` in logs) within the override window.
+
+### Bypass inventory
+
+| # | Name | Scope | Status | Issue |
+|---|------|-------|--------|-------|
+| 1 | Setpoint-only change not treated as override | `coordinator.py:2382–2406` — setpoint change block never calls `handle_manual_override()` | Confirmed bug | [#197](https://github.com/gunkl/ClimateAdvisor/issues/197) |
+| RC-1 | Override confirm state lost on restart | `automation.py restore_state()` never restores `override_confirm_pending` / `override_confirm_time` — 10-min gate is lost | Confirmed bug | [#198](https://github.com/gunkl/ClimateAdvisor/issues/198) |
+| RC-2 | Grace timer not restored on restart | `automation.py:2303–2304` explicitly discards grace timer — `_manual_override_active` stays True indefinitely | Confirmed bug | [#199](https://github.com/gunkl/ClimateAdvisor/issues/199) |
+| PATH-B | Self-resolve discards short deliberate overrides | `automation.py:630–644` PATH B treats quick mode revert as transient — no grace granted | Design gap | [#200](https://github.com/gunkl/ClimateAdvisor/issues/200) |
+| 2nd | Second override during active override silently ignored | `coordinator.py:2172` gates override detection on `not _manual_override_active` | Design gap | [#201](https://github.com/gunkl/ClimateAdvisor/issues/201) |
+| 30s | 30-second guard too wide for setpoint changes | `coordinator.py:2387` uses 30s vs 3s for mode changes — user changes within 30s of CA command are dropped | Design gap | [#202](https://github.com/gunkl/ClimateAdvisor/issues/202) |
+
+### Bypass #1 — Setpoint-only change (Issue #197)
+
+**Symptom**: User raises setpoint (e.g. 72→76°F) with no mode change; CA re-applies 72°F at the next 30-min cycle.
+
+**Root cause**: `_async_thermostat_changed` in coordinator.py only increments the daily override counter for setpoint changes — it never calls `handle_manual_override()`. The mode-change path calls `handle_manual_override()`, but the setpoint-change path does not.
+
+**Diagnostic log pattern** (absence = bypass is active):
+```
+# You should NOT see this for a setpoint-only change until the fix lands:
+handle_manual_override called source=setpoint
+```
+
+**Fix scope**: Call `handle_manual_override(source="setpoint")` from the setpoint-change block; adjust `_confirm_override_expired` PATH B to treat `source="setpoint"` as always confirmed (mode equality does not imply setpoint agreement).
+
+### RC-1 — Override confirm state lost on restart (Issue #198)
+
+**Symptom**: CA restarts while in the 10-minute override confirmation window; override is cleared immediately after restart instead of holding for the remaining window.
+
+**Root cause**: `restore_state()` in automation.py (lines 2280–2315) does not restore `_override_confirm_pending`, `_override_confirm_time`, or `_override_confirm_mode`. These fields are serialized by `get_serializable_state()` but silently dropped on restore.
+
+**Diagnostic**: Correlate a CA reload event in logs with a sudden `_manual_override_active → False` transition within minutes of an override being set.
+
+### RC-2 — Grace timer not restored on restart (Issue #199)
+
+**Symptom**: After a CA restart, the manual override flag remains active indefinitely — CA never re-applies its schedule.
+
+**Root cause**: `automation.py:2303–2304` contains an explicit comment: "Grace timers cannot be restored — clear on restart." `_manual_override_active=True` is restored (line 2286) but the `_grace_expired` timer is not rescheduled. The flag stays set until the `clear_manual_override` service is called.
+
+**Diagnostic**: `_manual_override_active=True` persists in `sensor.climate_advisor_status` attributes for more than 4 hours after a CA restart with no user interaction.

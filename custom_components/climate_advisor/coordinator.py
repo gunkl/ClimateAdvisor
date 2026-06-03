@@ -2143,9 +2143,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # turns HVAC back on, so old_state could still be the pre-pause
         # mode (e.g. "cool"). The paused_by_door flag is authoritative.
         if self.automation_engine.is_paused_by_door and new_state.state not in ("off", "unavailable", "unknown"):
-            if not self.automation_engine._hvac_command_pending and not self._is_recent_hvac_command(
-                threshold_seconds=3.0
-            ):
+            _any_command_pending = (
+                self.automation_engine._hvac_command_pending
+                or self.automation_engine._fan_command_pending
+                or self.automation_engine._temp_command_pending
+            )
+            if not _any_command_pending and not self._is_recent_hvac_command(threshold_seconds=3.0):
                 _LOGGER.info(
                     "Manual HVAC override detected during door/window pause: %s -> %s",
                     old_state.state,
@@ -2162,8 +2165,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             else:
                 _LOGGER.debug(
                     "Skipping pause-override detection: HVAC mode change was automation-initiated "
-                    "(pending=%s, recent_command=%s)",
+                    "(hvac_pending=%s, fan_pending=%s, temp_pending=%s, recent_command=%s)",
                     self.automation_engine._hvac_command_pending,
+                    self.automation_engine._fan_command_pending,
+                    self.automation_engine._temp_command_pending,
                     self._is_recent_hvac_command(threshold_seconds=3.0),
                 )
         elif (
@@ -2171,6 +2176,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and new_state.state not in ("unavailable", "unknown")
             and not self.automation_engine._manual_override_active
             and not self.automation_engine._hvac_command_pending
+            and not self.automation_engine._fan_command_pending
+            and not self.automation_engine._temp_command_pending
             and not self._is_recent_hvac_command()
             and self._current_classification
             and new_state.state != self._current_classification.hvac_mode

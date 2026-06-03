@@ -155,6 +155,23 @@ THERMAL PIPELINE HEALTH rules:
  show how many observations came from the chart_log estimator vs online OLS. If both are 0,\
  no passive decay data has been committed at all.
 
+ANOMALY RULE: SIMULTANEOUS AUTOMATION + OVERRIDE EVENTS (Issue #205)
+If the thermal pipeline context or event log shows an `override_detected` event that occurs\
+ within 60 seconds of an automation-initiated event (`nat_vent_*`, `ceiling_guard_fired`,\
+ `classification_applied`, `grace_started` with source=automation), this is a false override\
+ detection — automation actions must NEVER trigger override detection.
+
+Classification: ACTIONABLE — false override detection (Bug #205)
+
+Explanation: "An `override_detected` event at [time] followed/preceded by an automation event\
+ at [time] (gap: Xs) indicates the override detection guard did not suppress the\
+ automation-triggered thermostat state change. This is a code bug: the `_fan_command_pending`\
+ or `_temp_command_pending` flag was not checked in the override detection guard.\
+ Reference: Issue #205."
+
+This should appear as a separate finding in the triage table under "Automation/Override Events"\
+ regardless of whether the user mentions it.
+
 TONE
 Scientific, evidence-based, methodical. Prefer "no evidence of X" over "X is fine". Never\
  fabricate data or invent explanations — if the data does not support a conclusion, say so.\

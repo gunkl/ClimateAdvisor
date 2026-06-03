@@ -408,6 +408,109 @@ class TestAsyncBuildActivityContext:
         assert isinstance(context, str)
         assert len(context) > 0
 
+    def test_context_uses_hours_kwarg_for_event_log_cutoff(self):
+        """hours kwarg controls event log cutoff — old events excluded, recent included."""
+        import datetime
+
+        coord = _mock_coordinator()
+        hass = _mock_hass()
+        now = datetime.datetime.now(datetime.UTC)
+        coord._event_log = [
+            {"time": (now - datetime.timedelta(hours=30)).isoformat(), "type": "old_event"},
+            {"time": (now - datetime.timedelta(hours=2)).isoformat(), "type": "recent_event"},
+        ]
+        coord.learning._state.records = []
+
+        context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
+
+        assert "old_event" not in context
+        assert "recent_event" in context
+
+    def test_context_with_6h_excludes_day_old_events(self):
+        """hours=6 filters out events older than 6 hours."""
+        import datetime
+
+        coord = _mock_coordinator()
+        hass = _mock_hass()
+        now = datetime.datetime.now(datetime.UTC)
+        coord._event_log = [
+            {"time": (now - datetime.timedelta(hours=10)).isoformat(), "type": "ten_hour_event"},
+            {"time": (now - datetime.timedelta(hours=3)).isoformat(), "type": "three_hour_event"},
+        ]
+        coord.learning._state.records = []
+
+        context = asyncio.run(async_build_activity_context(hass, coord, hours=6))
+
+        assert "ten_hour_event" not in context
+        assert "three_hour_event" in context
+
+    def test_context_multi_day_includes_historical_summaries(self):
+        """hours=168 triggers HISTORICAL DAILY SUMMARIES section with past records."""
+        import datetime
+
+        coord = _mock_coordinator()
+        hass = _mock_hass()
+        coord._event_log = []
+        today = datetime.date.today()
+        coord.learning._state.records = [
+            {
+                "date": (today - datetime.timedelta(days=i)).isoformat(),
+                "day_type": "mild",
+                "hvac_runtime_minutes": 30 * i,
+                "manual_overrides": i,
+                "comfort_violations_minutes": 0,
+                "avg_indoor_temp": 71.0,
+                "observed_high_f": 74.0,
+                "observed_low_f": 62.0,
+            }
+            for i in range(1, 6)
+        ]
+
+        context = asyncio.run(async_build_activity_context(hass, coord, hours=168))
+
+        assert "HISTORICAL DAILY SUMMARIES" in context
+        for i in range(1, 6):
+            assert (today - datetime.timedelta(days=i)).isoformat() in context
+
+    def test_context_single_day_no_historical_summaries(self):
+        """hours=24 does NOT include HISTORICAL DAILY SUMMARIES section."""
+        import datetime
+
+        coord = _mock_coordinator()
+        hass = _mock_hass()
+        coord._event_log = []
+        today = datetime.date.today()
+        coord.learning._state.records = [
+            {
+                "date": (today - datetime.timedelta(days=1)).isoformat(),
+                "day_type": "mild",
+                "hvac_runtime_minutes": 30,
+                "manual_overrides": 0,
+                "comfort_violations_minutes": 0,
+                "avg_indoor_temp": 71.0,
+                "observed_high_f": 74.0,
+                "observed_low_f": 62.0,
+            }
+        ]
+
+        context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
+
+        assert "HISTORICAL DAILY SUMMARIES" not in context
+
+    def test_context_event_log_header_reflects_hours(self):
+        """Event log section header shows the actual hours value, not a hardcoded '24h'."""
+        coord = _mock_coordinator()
+        hass = _mock_hass()
+        coord._event_log = []
+        coord.learning._state.records = []
+
+        context = asyncio.run(async_build_activity_context(hass, coord, hours=48))
+
+        # Should say "2d" or "48h" — must NOT say "last 12h" or "last 24h"
+        assert "last 12h" not in context
+        assert "last 24h" not in context
+        assert "EVENT LOG" in context
+
 
 # ---------------------------------------------------------------------------
 # TestRegisterActivitySkill

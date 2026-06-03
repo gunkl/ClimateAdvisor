@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -38,7 +39,30 @@ Return your analysis with these exact section headers (use ## for headers):
 ## SUMMARY
 2-3 sentence overview of the current situation.
 ## TIMELINE
-Chronological summary of significant recent events and state changes.
+Output a markdown table with three columns: Time | Event | Source
+
+Column definitions:
+- **Time**: HH:MM (24-hour format)
+- **Event**: One-line description (max 80 chars). Compress consecutive same-type \
+automation events into one row with count and time range, e.g. "Warm-day setback \
+applied ×10" with time range in the Event column. Do NOT use sub-bullets or nested lists.
+- **Source**: Exactly one of: `automation`, `manual`, or `unknown`
+
+Source mapping rules:
+- Events with source_label=automation in the event log → `automation`
+- Events with source_label=manual → `manual`
+- override_detected, override_confirmed, manual_override records → `manual`
+- nat_vent_* events, ceiling_guard_fired, classification_applied, \
+grace_started{source=automation} → `automation`
+- sensor_opened, sensor_all_closed (hardware events) → `unknown`
+- Events without source_label and not matching above → `unknown`
+
+Example output:
+| Time | Event | Source |
+|---|---|---|
+| 05:32–10:02 | Warm-day setback applied ×10 | automation |
+| 06:13 | Setpoint raised 79°F → 80°F (+1°F) | manual |
+| 11:02 | Natural ventilation exit (outdoor 69°F = indoor 69°F) | automation |
 ## DECISIONS
 Why each automation action was taken, with the logic explained.
 When fan_status is active while hvac_mode is off, explicitly trace the fan state to \
@@ -125,6 +149,64 @@ def _format_engine_status_for_ai(engine_status: dict) -> str:
     lines.append(f"  ODE: {ode_ver}, eligible: {eligible}{reason_str}")
 
     return "\n".join(lines)
+
+
+_AUTO_EVENT_TYPES = frozenset(
+    {
+        "ceiling_guard_fired",
+        "classification_applied",
+        "warm_day_setback_applied",
+        "warm_day_comfort_gap",
+    }
+)
+
+_MANUAL_EVENT_TYPES = frozenset(
+    {
+        "override_detected",
+        "override_confirmed",
+        "override_cleared",
+        "override_self_resolved",
+    }
+)
+
+_UNKNOWN_EVENT_TYPES = frozenset(
+    {
+        "sensor_opened",
+        "sensor_all_closed",
+    }
+)
+
+
+def _event_source_label(event_type: str, data: dict) -> str | None:
+    """Return source label for an event, or None if unknown/default.
+
+    Returns one of 'automation', 'manual', or None (caller treats None as unknown).
+    """
+    # Explicit source field takes precedence
+    source = data.get("source")
+    if source in ("automation", "manual"):
+        return source
+
+    # nat_vent_* prefix → automation
+    if event_type.startswith("nat_vent_"):
+        return "automation"
+
+    # grace_started / grace_expired with source field
+    if event_type in ("grace_started", "grace_expired"):
+        if source in ("automation", "manual"):
+            return source
+        return None
+
+    if event_type in _AUTO_EVENT_TYPES:
+        return "automation"
+
+    if event_type in _MANUAL_EVENT_TYPES:
+        return "manual"
+
+    if event_type in _UNKNOWN_EVENT_TYPES:
+        return "unknown"
+
+    return None
 
 
 async def async_build_activity_context(
@@ -315,6 +397,63 @@ async def async_build_activity_context(
         "## ACTIVE PREDICTION ENGINES",
         *(engine_status_block.splitlines() if engine_status_block else ["  (unavailable)"]),
     ]
+
+    # --- Event log (last 24 h, one line per event with source_label) ---
+    try:
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=24)
+        raw_event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
+        event_lines: list[str] = []
+
+        for entry in raw_event_log[-200:]:
+            if not isinstance(entry, dict):
+                continue
+            raw_time = entry.get("time")
+            # Filter by cutoff when a parseable timestamp is present
+            if raw_time is not None:
+                if isinstance(raw_time, datetime.datetime):
+                    event_dt = raw_time
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                else:
+                    try:
+                        event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                        if event_dt.tzinfo is None:
+                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                    except ValueError:
+                        event_dt = None
+                if event_dt is not None and event_dt < cutoff:
+                    continue
+
+            # Format: "HH:MM — event_type: key=value ... [source_label=X]"
+            if isinstance(raw_time, datetime.datetime):
+                time_str = raw_time.strftime("%H:%M")
+            elif raw_time is not None:
+                try:
+                    _dt = datetime.datetime.fromisoformat(str(raw_time))
+                    time_str = _dt.strftime("%H:%M")
+                except ValueError:
+                    time_str = str(raw_time)
+            else:
+                time_str = "??:??"
+
+            event_type = str(entry.get("type", "unknown"))
+            data_fields = {k: v for k, v in entry.items() if k not in ("time", "type")}
+            fields_str = " ".join(f"{k}={v}" for k, v in data_fields.items())
+
+            label = _event_source_label(event_type, data_fields)
+            label_str = f" source_label={label}" if label is not None else ""
+
+            line = f"  {time_str} — {event_type}: {fields_str}{label_str}".rstrip(": ")
+            event_lines.append(line)
+
+        lines += [
+            "",
+            f"## EVENT LOG (last 24h, {len(event_lines)} events)",
+            *(event_lines if event_lines else ["  (no events in last 24h)"]),
+        ]
+    except Exception:
+        _LOGGER.warning("activity_report: failed to read event log — skipping")
+        lines += ["", "## EVENT LOG", "  (unavailable)"]
 
     return "\n".join(lines)
 

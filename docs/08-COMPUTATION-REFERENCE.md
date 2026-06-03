@@ -30,6 +30,7 @@ The automation logic table and all threshold constants in this document are expr
 | When does the ODE ceiling guard fire on a warm day and what activates AC? | The guard scans the predicted indoor curve on every 30-min cycle. When outdoor > indoor AND a breach above `comfort_cool` is predicted within the computed lead time (or 120-min fallback), the guard sets HVAC to cool at `comfort_cool`. Guard skips when no calibrated model, occupancy is away/vacation, or nat-vent can keep indoor below the ceiling. | [§6c. Warm-Day ODE Ceiling Guard](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136) |
 | How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
 | What invariant must `_async_send_briefing()` maintain when replacing `_today_record`? | It must copy all accumulated counters (`hvac_runtime_minutes`, `comfort_violations_minutes`, etc.) from the existing same-day record before constructing the new one. Creating a fresh `DailyRecord` unconditionally resets all counters to zero (Issue #176 bug). | [DailyRecord Persistence Invariant](08-COMPUTATION-REFERENCE.md#dailyrecord-persistence-invariant-issue-176) |
+| Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
 
 ## 1. Day Classification
 
@@ -833,6 +834,32 @@ Fan override detection runs in two places:
 
 2. **`_async_thermostat_changed()`** — the existing thermostat state listener is extended to also inspect the thermostat's `fan_mode` attribute (for `fan_mode == hvac_fan` or `both`). If the fan_mode attribute changes while `_fan_command_pending` is clear, a fan override is recorded using the same fields.
 
+#### Compound command-pending guard in `_async_thermostat_changed()` (Issue #205/206)
+
+`_async_thermostat_changed()` contains two override-detection paths: the **normal path** (checks `hvac_mode` / `hvac_action` for HVAC changes) and the **pause-path** (checks for thermostat state changes while `_paused_by_door` is `True`). Both paths share the same suppression guard — before acting on any state change as a user override, the listener checks whether the change was automation-issued by testing:
+
+```python
+if self._hvac_command_pending or self._fan_command_pending or self._temp_command_pending:
+    return  # change was automation-issued; ignore
+```
+
+All three flags must be tested together. Testing only `_hvac_command_pending` is incorrect because **automation sequences frequently call `_deactivate_fan()` before `_set_hvac_mode()`** (for example, natural ventilation exit). In that sequence:
+
+1. `_deactivate_fan()` sets `_fan_command_pending = True` and issues the fan-off service call.
+2. The thermostat state listener fires while `_fan_command_pending` is `True` but `_hvac_command_pending` is still `False`.
+3. If only `_hvac_command_pending` is checked, the guard is bypassed — the listener misidentifies the automation's own fan-off as a user manual override and starts an unwanted grace period.
+
+The fix (Issue #206) expands the guard at both the pause-path and normal-path detection sites to `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending`. If **any** of the three flags is `True`, the state change is treated as automation-issued and suppressed.
+
+**`_is_recent_hvac_command(threshold_seconds=3.0)`** is a secondary guard that inspects `_hvac_command_time` to catch race conditions where the flag was already cleared before the listener fired. It does not replace the flag check — it is an additional fallback for sub-second timing races.
+
+| Guard | Type | Purpose |
+|---|---|---|
+| `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending` | Flag check (synchronous) | Primary: suppresses both pause-path and normal-path override detection during any automation-issued command sequence |
+| `_is_recent_hvac_command(threshold_seconds=3.0)` | Timestamp check | Secondary fallback: catches races where the command flag was cleared before the HA state-change event arrived |
+
+**Test coverage:** `tests/test_override_automation_boundary.py` — compound guard invariant.
+
 Fan override is **separate** from HVAC override. The two override states are tracked independently and do not interfere with each other. Fan override uses the same grace period duration as manual HVAC override (`DEFAULT_MANUAL_GRACE_SECONDS`), but the timers run independently.
 
 Fan override is **cleared** at transition points where the integration takes deliberate control of the fan (bedtime, morning wakeup — see Section 9c).
@@ -881,7 +908,7 @@ The sensor also exposes these attributes:
 | All monitored sensors close | Restore HVAC to `pre_pause_mode`; restore comfort temperature; start **automation** grace period |
 | User manually turns HVAC on during pause | Clears pause state; starts **manual** grace period; manual override activated |
 | User clicks "Resume HVAC (override pause)" button | Clears pause state; restores classification's recommended HVAC mode; starts **manual** grace period; status set to `"resumed — door/window override"` |
-| `_hvac_command_pending` flag | Set `True` before any system-issued HVAC service call (including pause set-to-off); prevents `_async_thermostat_changed()` from misidentifying the system's own change as a user manual override. Cleared after the service call completes. `_hvac_command_time` records the timestamp of the command for additional recency checks. |
+| Command-pending flags (`_hvac_command_pending`, `_fan_command_pending`, `_temp_command_pending`) | Each flag is set `True` immediately before the integration issues the corresponding service call and cleared after it completes. `_async_thermostat_changed()` checks **all three** flags: if any is `True`, the state change is treated as automation-issued and both the pause-path and normal-path override detection are suppressed. This compound check is required because automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()` — the fan command sets `_fan_command_pending` but `_hvac_command_pending` is still `False`. Checking only `_hvac_command_pending` bypasses the guard. `_hvac_command_time` records the timestamp of the last HVAC command for the secondary `_is_recent_hvac_command()` timestamp guard. See §9b for the full guard specification. |
 
 ---
 

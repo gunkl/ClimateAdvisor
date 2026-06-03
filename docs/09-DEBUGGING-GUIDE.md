@@ -143,6 +143,8 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status,sensor
 
 The `ai_activity_report` service triggers an on-demand AI analysis of recent automation behavior. This is useful for diagnosing unexpected HVAC decisions — the report includes a timeline, key decisions, anomalies, and diagnostics drawn from current system state.
 
+**`hours` parameter (v0.3.55+):** The service accepts an optional `hours` parameter that controls how far back the event log and context window reach. Default is 24h. For reports requesting more than 36 hours, the report automatically appends **HISTORICAL DAILY SUMMARIES** — a per-day rollup from the DailyRecord history covering the requested window. This provides useful context for multi-day investigations without requiring the user to run the investigator skill.
+
 ```bash
 # Check report history file directly
 python3 tools/ha_logs.py --history --entity sensor.climate_advisor_ai_status --hours 24
@@ -415,7 +417,7 @@ This section documents known ways a user-initiated thermostat change can be sile
 
 | # | Name | Scope | Status | Issue |
 |---|------|-------|--------|-------|
-| 1 | Setpoint-only change not treated as override | `coordinator.py:2382–2406` — setpoint change block never calls `handle_manual_override()` | Confirmed bug | [#197](https://github.com/gunkl/ClimateAdvisor/issues/197) |
+| 1 | Setpoint-only change not treated as override | `coordinator.py` — setpoint change block now calls `handle_manual_override(source="setpoint")` and enters the manual grace period | Fixed — v0.3.55 | [#197](https://github.com/gunkl/ClimateAdvisor/issues/197) |
 | RC-1 | Override confirm state lost on restart | `automation.py restore_state()` never restores `override_confirm_pending` / `override_confirm_time` — 10-min gate is lost | Confirmed bug | [#198](https://github.com/gunkl/ClimateAdvisor/issues/198) |
 | RC-2 | Grace timer not restored on restart | `automation.py:2303–2304` explicitly discards grace timer — `_manual_override_active` stays True indefinitely | Confirmed bug | [#199](https://github.com/gunkl/ClimateAdvisor/issues/199) |
 | PATH-B | Self-resolve discards short deliberate overrides | `automation.py:630–644` PATH B treats quick mode revert as transient — no grace granted | Design gap | [#200](https://github.com/gunkl/ClimateAdvisor/issues/200) |
@@ -423,19 +425,19 @@ This section documents known ways a user-initiated thermostat change can be sile
 | 30s | 30-second guard too wide for setpoint changes | `coordinator.py:2387` uses 30s vs 3s for mode changes — user changes within 30s of CA command are dropped | Design gap | [#202](https://github.com/gunkl/ClimateAdvisor/issues/202) |
 | BW | Bedtime/wakeup handler unconditionally clears active override | `automation.py:1926` (`handle_bedtime_setback`) and `automation.py:2025` (`handle_morning_wakeup`) called `clear_manual_override()` unconditionally — override silently wiped at scheduled sleep/wake time even with active grace | Fixed — Issue #204 | [#204](https://github.com/gunkl/ClimateAdvisor/issues/204) |
 
-### Bypass #1 — Setpoint-only change (Issue #197)
+### Bypass #1 — Setpoint-only change (Issue #197) — FIXED
 
-**Symptom**: User raises setpoint (e.g. 72→76°F) with no mode change; CA re-applies 72°F at the next 30-min cycle.
+**Symptom (pre-fix)**: User raises setpoint (e.g. 72→76°F) with no mode change; CA re-applies 72°F at the next 30-min cycle.
 
-**Root cause**: `_async_thermostat_changed` in coordinator.py only increments the daily override counter for setpoint changes — it never calls `handle_manual_override()`. The mode-change path calls `handle_manual_override()`, but the setpoint-change path does not.
+**Root cause**: `_async_thermostat_changed` in coordinator.py only incremented the daily override counter for setpoint changes — it never called `handle_manual_override()`. The mode-change path called `handle_manual_override()`, but the setpoint-change path did not.
 
-**Diagnostic log pattern** (absence = bypass is active):
+**Fix (v0.3.55)**: The setpoint-change block now calls `handle_manual_override(source="setpoint")` and enters the standard manual grace period. PATH B `_confirm_override_expired` treats `source="setpoint"` as always confirmed (mode equality does not imply setpoint agreement).
+
+**Diagnostic log pattern (post-fix)**:
 ```
-# You should NOT see this for a setpoint-only change until the fix lands:
+# A setpoint-only change now produces:
 handle_manual_override called source=setpoint
 ```
-
-**Fix scope**: Call `handle_manual_override(source="setpoint")` from the setpoint-change block; adjust `_confirm_override_expired` PATH B to treat `source="setpoint"` as always confirmed (mode equality does not imply setpoint agreement).
 
 ### RC-1 — Override confirm state lost on restart (Issue #198)
 

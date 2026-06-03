@@ -916,7 +916,7 @@ The sensor also exposes these attributes:
 
 | Type | Trigger | Default Duration | Configurable? | Effect | Notify on Expiry (default) |
 |---|---|---|---|---|---|
-| Manual | User overrides thermostat (including during a sensor pause) or clicks "Resume HVAC (override pause)" | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | No (`CONF_MANUAL_GRACE_NOTIFY = False`) |
+| Manual | User overrides thermostat — mode change **or setpoint-only change** (v0.3.55+, Issue #197) — or clicks "Resume HVAC (override pause)" | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | No (`CONF_MANUAL_GRACE_NOTIFY = False`) |
 | Automation | Climate Advisor resumes HVAC after all sensors close | `300s` (5 min) | Yes — `CONF_AUTOMATION_GRACE_PERIOD` | Blocks door/window sensor from immediately re-pausing HVAC | Yes (`CONF_AUTOMATION_GRACE_NOTIFY = True`) |
 
 Both grace periods are cancelled and reset on HA restart. Only one grace timer of each type is active at a time; starting a new one cancels the previous.
@@ -1558,4 +1558,4 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 
 ---
 
-_Last Updated: 2026-05-08_
+_Last Updated: 2026-06-03_

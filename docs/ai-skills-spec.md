@@ -12,6 +12,7 @@
 | What six keys does `async_execute()` always return, and what does each hold on the error path? | `success=False`, `source="error"`, `data={}`, `error="<message>"`, `input_context=""` (or the assembled context if available), `raw_response=""`. All six keys are always present regardless of which code path is taken. | [Return contract](#return-contract) |
 | When is the fallback invoked instead of returning an error result? | The fallback is invoked when: (a) the context builder raises and a fallback is defined, or (b) `ClaudeResponse.success=False` or the response parser raises, and a fallback is defined. If no fallback is defined, `_error_result()` is returned instead. | [Fallback trigger conditions](#fallback-trigger-conditions) |
 | What learning suggestion data does `activity_report` omit from its context? | Only the count of pending suggestions and the list of `suggestion_type` values are included. Raw suggestion text, evidence dicts, and confidence values are never sent to Claude by this skill. | [activity\_report — context omissions](#context-omissions) |
+| How does the `hours` parameter affect the `activity_report` context, and when are historical daily summaries included? | `hours` (default 24) controls the EVENT LOG cutoff window. When `hours > 36`, a HISTORICAL DAILY SUMMARIES section is appended covering daily records for the full window. | [§ Event Log](#event-log) · [§ Historical daily summaries](#12h-window-vs-full-day-coverage) |
 | When is the `activity_report` contradiction warning suppressed? | The `hvac_mode=off` + active `hvac_action` warning is suppressed when `fan_status` is any of `"active"`, `"running (manual override)"`, or `"running (untracked)"` — all cases where CA knowingly has the fan running. | [Cross-validation suppression](#cross-validation) |
 | What sensitive config key does the `investigator` strip before including config in context? | `ai_api_key` is removed via `.pop()` on a copy of `coordinator.config` before the config block is serialised into the context string. No other config keys are redacted. | [investigator — config redaction](#config-redaction) |
 | What does the `THERMAL OBSERVATION PIPELINE` section in the investigator context show? | Per-type committed/rejected counts with top reason codes, NEVER LEARNED flags when `k_active_cool` or `k_active_heat` is None, pending in-flight observations, and engine status. Added in v0.3.50. | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
@@ -166,7 +167,7 @@ Response persistence (history storage, timestamps) is the responsibility of `coo
 
 `async_build_activity_context(hass, coordinator, **kwargs) → str`
 
-Assembles eleven labeled sections in fixed order. Data sources per section:
+Assembles eleven to twelve labeled sections in fixed order (twelve when `hours > 36`). Data sources per section:
 
 | Section label | Data source | Notes |
 |---|---|---|
@@ -180,8 +181,9 @@ Assembles eleven labeled sections in fixed order. Data sources per section:
 | `CONFIGURATION` | `coordinator.config` | Comfort temps, setback temps, wake/sleep/briefing times |
 | `ACTIVE FEATURES` | `coordinator.config` | Boolean feature flags |
 | `ACTIVE PREDICTION ENGINES` | `coordinator.learning.get_engine_status()` formatted by `_format_engine_status_for_ai()` | See [Active Prediction Engines](#active-prediction-engines) |
-| `EVENT LOG` | `coordinator._event_log` filtered to last 12h | See [Event Log](#event-log) |
+| `EVENT LOG` | `coordinator._event_log` filtered to last N hours (`kwargs.get("hours", 24)`) | See [Event Log](#event-log) |
 | `MANUAL OVERRIDES TODAY` | `coordinator._today_record.override_details` + live `coordinator.automation_engine` state | See [Manual Overrides Today](#manual-overrides-today) |
+| `HISTORICAL DAILY SUMMARIES` | `coordinator.learning` daily records for the requested window | **Conditional:** only present when `kwargs.get("hours", 24) > 36`; omitted for standard ≤36h reports |
 
 **Fresh HVAC runtime** is computed as `_today_record.hvac_runtime_minutes + session_elapsed_minutes` where `session_elapsed` is computed from `coordinator._hvac_on_since` at call time. This makes the runtime accurate regardless of coordinator.data staleness (up to 30 min between coordinator update cycles).
 
@@ -200,7 +202,7 @@ This enforces invariant 7 from `ai-integration.md`: suggestion text is not sent 
 
 ### Event Log
 
-`coordinator._event_log` is a ring-buffer capped at `EVENT_LOG_CAP` entries. The activity report filters to events in the last 12 hours (cutoff = `datetime.now(UTC) - timedelta(hours=12)`). If more than 60 events match, the oldest are dropped and a `(... N older events omitted)` note is prepended. Each entry renders as:
+`coordinator._event_log` is a ring-buffer capped at `EVENT_LOG_CAP` entries. The activity report filters to events in the last N hours where N = `kwargs.get("hours", 24)` (v0.3.55+; previously hardcoded 12h). The cutoff is `datetime.now(UTC) - timedelta(hours=hours)`. If more than 60 events match, the oldest are dropped and a `(... N older events omitted)` note is prepended. Each entry renders as:
 
 ```
   HH:MM — <event_type>: key=value key=value ...
@@ -238,7 +240,9 @@ Formatted output:
 
 If `override_details` is empty: `(no setpoint overrides recorded today)`. If no override is currently active: `Current override: none active`. Duration is computed as `(dt_util.now() - override_dt).total_seconds() / 60` rounded to nearest minute. Any exception is caught and logged at WARNING.
 
-**12h window vs. full-day coverage:** The 12h EVENT LOG window may exclude early-morning events for late-afternoon reports. `override_details` is not window-filtered — it accumulates all day, so all setpoint override timestamps are always present in MANUAL OVERRIDES TODAY regardless of report time.
+**`hours` window vs. full-day coverage:** The EVENT LOG window may exclude early-morning events for late-afternoon reports when `hours=24`. `override_details` is not window-filtered — it accumulates all day, so all setpoint override timestamps are always present in MANUAL OVERRIDES TODAY regardless of report time.
+
+**Historical daily summaries (>36h reports, v0.3.55+):** When `hours > 36`, the context builder appends a `HISTORICAL DAILY SUMMARIES` section drawn from `DailyRecord` history. Each daily row includes: date, day type, HVAC runtime minutes, comfort violations minutes, manual override count, and bedtime setback depth (if applied). This provides multi-day context without requiring the investigator skill. The section is appended after MANUAL OVERRIDES TODAY and is omitted entirely when `hours ≤ 36`.
 
 ### Cross-Validation
 

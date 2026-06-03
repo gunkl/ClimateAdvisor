@@ -416,64 +416,6 @@ async def async_build_activity_context(
     except (ValueError, TypeError):
         pass
 
-    # --- Event log (last 12h, chronological) ---
-    event_log_lines: list[str] = []
-    event_log_count = 0
-    try:
-        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=12)
-        raw_log: list[Any] = getattr(coordinator, "_event_log", []) or []
-        recent_events: list[dict] = []
-        for entry in raw_log:
-            if not isinstance(entry, dict):
-                continue
-            raw_time = entry.get("time")
-            if raw_time is None:
-                recent_events.append(entry)
-                continue
-            if isinstance(raw_time, datetime.datetime):
-                event_dt = raw_time if raw_time.tzinfo else raw_time.replace(tzinfo=datetime.UTC)
-            else:
-                try:
-                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
-                    if event_dt.tzinfo is None:
-                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
-                except ValueError:
-                    recent_events.append(entry)
-                    continue
-            if event_dt >= cutoff:
-                recent_events.append(entry)
-
-        event_log_count = len(recent_events)
-        if event_log_count > 60:
-            omitted = event_log_count - 60
-            recent_events = recent_events[-60:]
-            event_log_lines.append(f"  (... {omitted} older events omitted)")
-
-        if recent_events:
-            for entry in recent_events:
-                raw_time = entry.get("time", "")
-                etype = entry.get("type", "unknown")
-                try:
-                    if isinstance(raw_time, datetime.datetime):
-                        local_dt = dt_util.as_local(raw_time) if raw_time.tzinfo else raw_time
-                    else:
-                        event_dt = datetime.datetime.fromisoformat(str(raw_time))
-                        local_dt = dt_util.as_local(event_dt) if event_dt.tzinfo else event_dt
-                    time_str = local_dt.strftime("%H:%M")
-                except Exception:
-                    time_str = str(raw_time)[:5]
-                extras = {k: v for k, v in entry.items() if k not in ("time", "type")}
-                extras_str = " ".join(f"{k}={v}" for k, v in extras.items())
-                if extras_str:
-                    event_log_lines.append(f"  {time_str} — {etype}: {extras_str}")
-                else:
-                    event_log_lines.append(f"  {time_str} — {etype}")
-        else:
-            event_log_lines.append("  (no events in last 12h)")
-    except Exception:
-        _LOGGER.warning("activity_report: failed to build event log section — skipping")
-        event_log_lines = ["  (unavailable)"]
-
     # --- Manual overrides today ---
     override_detail_lines: list[str] = []
     try:
@@ -573,9 +515,6 @@ async def async_build_activity_context(
         "",
         "## ACTIVE PREDICTION ENGINES",
         *(engine_status_block.splitlines() if engine_status_block else ["  (unavailable)"]),
-        "",
-        f"## EVENT LOG (last 12h, {event_log_count} events)",
-        *event_log_lines,
         "",
         "## MANUAL OVERRIDES TODAY",
         *override_detail_lines,

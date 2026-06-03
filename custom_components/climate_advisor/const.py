@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.54"
+VERSION = "0.3.55"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.54": [
@@ -58,6 +58,21 @@ RELEASE_NOTES: dict[str, list[str]] = {
         "Fix #190: _get_forecast() switches to local date + raw forecast date —"
         " tomorrow's forecast no longer shows day-after-tomorrow in evening hours"
         " (UTC rollover bug in negative UTC offset timezones)",
+        "Feat #193: AI activity report gains event log section and override detail section"
+        " — recent events and manual override history visible in generated reports",
+        "Fix #197: Setpoint-only thermostat change now enters manual grace period"
+        " — user adjusting target temperature without changing mode correctly detected as override",
+        "Fix #203: Sensor health comprehension guarded against int instrumentation keys"
+        " — integration no longer raises TypeError on health data with numeric keys",
+        "Fix #204: Bedtime setback and morning wakeup respect active manual override"
+        " — automation defers scheduled setpoint changes when user has active override in effect",
+        "Fix #205/#206: Three activity report and override detection fixes:"
+        " false override_detected events from automation fan actions eliminated (compound command-pending guard);"
+        " timeline now renders as markdown table with Time|Event|Source columns;"
+        " markdown tables render correctly in the dashboard panel (frontend renderer added)",
+        "Fix #208: Activity report time window now respected — event log filters to requested"
+        " hours (was hardcoded 24h); reports >36h include HISTORICAL DAILY SUMMARIES"
+        " per-day table from learning records",
     ],
     "0.3.44": [
         "Fix #143: _get_forecast() date-keyed dict replaces blind-index fallback"
@@ -162,6 +177,84 @@ KNOWN_FIXES: dict[int, dict] = {
         ],
         "scope_not_covered": [
             "_get_hourly_forecast_data() — hourly entries use per-hour timestamps and were not affected by this bug",
+        ],
+    },
+    193: {
+        "version_fixed": "0.3.55",
+        "title": "AI activity report event log and override detail sections",
+        "scope_covered": [
+            "async_build_activity_context() includes EVENT LOG section (last N events, filtered by hours)",
+            "async_build_activity_context() includes MANUAL OVERRIDES TODAY section"
+            " from _today_record.override_details",
+            "_event_source_label() annotates each event line with source_label=automation/manual/unknown",
+        ],
+        "scope_not_covered": [
+            "Historical override details from past days (only today's overrides included)",
+        ],
+    },
+    197: {
+        "version_fixed": "0.3.55",
+        "title": "Setpoint-only thermostat change triggers manual override grace period",
+        "scope_covered": [
+            "_async_thermostat_changed(): setpoint change without mode change now calls handle_setpoint_override()",
+            "handle_setpoint_override() enters grace period immediately (no confirmation window)",
+            "Override detection correctly fires for temperature-only user adjustments",
+        ],
+        "scope_not_covered": [
+            "Setpoint changes initiated by CA itself — guarded by _temp_command_pending flag",
+        ],
+    },
+    203: {
+        "version_fixed": "0.3.55",
+        "title": "Sensor health comprehension TypeError on int instrumentation keys",
+        "scope_covered": [
+            "sensor.py _compute_sensor_health(): isinstance(k, str) guard on key iteration",
+            "Prevents TypeError when coordinator.data contains numeric keys from HA instrumentation",
+        ],
+        "scope_not_covered": [],
+    },
+    204: {
+        "version_fixed": "0.3.55",
+        "title": "Bedtime setback and morning wakeup respect active manual override",
+        "scope_covered": [
+            "automation.py apply_bedtime_setback(): checks _manual_override_active before setting setpoints",
+            "automation.py apply_morning_wakeup(): same guard applied symmetrically",
+            "clear_manual_override() callsites audited — override cleared at correct lifecycle points",
+        ],
+        "scope_not_covered": [
+            "Mid-day scheduled classification re-application — already guarded separately",
+        ],
+    },
+    206: {
+        "version_fixed": "0.3.55",
+        "title": "False override detection + activity report table format",
+        "scope_covered": [
+            "coordinator.py _async_thermostat_changed() pause-path guard now checks"
+            " _hvac_command_pending OR _fan_command_pending OR _temp_command_pending",
+            "Normal override path same compound-flag expansion",
+            "Activity report timeline system prompt updated to request markdown table (Time|Event|Source)",
+            "_event_source_label() maps event types to automation/manual/unknown for source column",
+            "frontend index.html renderMarkdown() added — parses | table | syntax to HTML <table>",
+            "renderMarkdown() also converts **bold** to <strong> in all AI report sections",
+        ],
+        "scope_not_covered": [
+            "Retroactive correction of prior false override_detected events in learning DB",
+            "Residual race if _hvac_command_pending clears before HA state propagates (>3s latency)",
+        ],
+    },
+    208: {
+        "version_fixed": "0.3.55",
+        "title": "Activity report hours parameter ignored — hardcoded 24h filter",
+        "scope_covered": [
+            "async_build_activity_context() extracts hours from **kwargs (was silently ignored)",
+            "Both event log cutoffs now use the requested window (was hardcoded 12h/24h)",
+            "Event log section header shows actual hours value (_fmt_hours helper)",
+            "Reports with hours>36 include HISTORICAL DAILY SUMMARIES from learning._state.records",
+            "System prompt updated: two-part Timeline when historical summaries present",
+        ],
+        "scope_not_covered": [
+            "Event log ring buffer covers only ~50-60h — 7d event detail unavailable for older days",
+            "Chart log temperature trend not included (DailyRecord high/low used instead)",
         ],
     },
     143: {

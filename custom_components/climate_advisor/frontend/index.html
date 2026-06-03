@@ -2592,7 +2592,7 @@
         if (!text) return;
         html += '<div style="margin-bottom:12px"><h3 style="font-size:0.9rem;margin-bottom:4px;color:var(--primary)">'
           + sectionLabels[key] + '</h3>'
-          + '<div style="font-size:0.85rem;white-space:pre-wrap;line-height:1.5">' + escapeHtml(text) + '</div></div>';
+          + '<div style="font-size:0.85rem;line-height:1.5">' + renderMarkdown(text) + '</div></div>';
       });
     } else {
       const sections = [
@@ -2626,6 +2626,49 @@
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+  }
+
+  function renderMarkdown(text) {
+    const lines = text.split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const trimmed = lines[i].trim();
+      if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
+        const tableLines = [];
+        while (i < lines.length && lines[i].trim().startsWith('|')) {
+          tableLines.push(lines[i]);
+          i++;
+        }
+        out.push(_mdTableToHtml(tableLines));
+      } else {
+        out.push(_mdInline(escapeHtml(lines[i])));
+        i++;
+      }
+    }
+    return out.join('<br>');
+  }
+
+  function _mdTableToHtml(lines) {
+    const isSep = l => /^\|[\s\-:|]+\|$/.test(l.trim());
+    let html = '<table style="border-collapse:collapse;width:100%;font-size:0.85rem;margin:6px 0">';
+    let head = true;
+    for (const line of lines) {
+      if (isSep(line)) { html += '</thead><tbody>'; head = false; continue; }
+      const cells = line.split('|').slice(1, -1).map(c => _mdInline(escapeHtml(c.trim())));
+      if (head) {
+        html += '<thead><tr>' + cells.map(c => `<th style="padding:4px 10px;border-bottom:1px solid var(--border);text-align:left;font-weight:600">${c}</th>`).join('') + '</tr>';
+      } else {
+        html += '<tr>' + cells.map(c => `<td style="padding:4px 10px;border-bottom:1px solid rgba(255,255,255,0.05)">${c}</td>`).join('') + '</tr>';
+      }
+    }
+    if (!head) html += '</tbody>';
+    html += '</table>';
+    return html;
+  }
+
+  function _mdInline(escaped) {
+    return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   }
 
   function copyCurrentReport() {

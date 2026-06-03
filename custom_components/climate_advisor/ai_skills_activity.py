@@ -39,13 +39,21 @@ Return your analysis with these exact section headers (use ## for headers):
 ## SUMMARY
 2-3 sentence overview of the current situation.
 ## TIMELINE
-Output a markdown table with three columns: Time | Event | Source
+Output a markdown table with four columns: Time | Event | Settings | Source
 
 Column definitions:
 - **Time**: HH:MM (24-hour format)
 - **Event**: One-line description (max 80 chars). Compress consecutive same-type \
 automation events into one row with count and time range, e.g. "Warm-day setback \
 applied ×10" with time range in the Event column. Do NOT use sub-bullets or nested lists.
+- **Settings**: Thermostat settings changed by this event. Use the following rules:
+  - If event data has `old_hvac_mode` and `new_hvac_mode` fields that differ → show "mode: X→Y"
+  - If event data also has `new_setpoint_f` or `old_setpoint` → append ", setpoint: A→B°F" \
+(round to 1 decimal if needed)
+  - For `override_detected` events → use `old_mode`→`new_mode` from event data for the mode change
+  - Leave Settings blank (empty cell) if no settings fields are present in the event data
+  - Events that do not change thermostat settings (grace_started, sensor_opened, \
+sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) → empty Settings cell
 - **Source**: Exactly one of: `automation`, `manual`, or `unknown`
 
 Source mapping rules:
@@ -58,17 +66,17 @@ grace_started{source=automation} → `automation`
 - Events without source_label and not matching above → `unknown`
 
 Example output:
-| Time | Event | Source |
-|---|---|---|
-| 05:32–10:02 | Warm-day setback applied ×10 | automation |
-| 06:13 | Setpoint raised 79°F → 80°F (+1°F) | manual |
-| 11:02 | Natural ventilation exit (outdoor 69°F = indoor 69°F) | automation |
+| Time | Event | Settings | Source |
+|---|---|---|---|
+| 05:32–10:02 | Warm-day setback applied ×10 | mode: heat→off | automation |
+| 06:13 | Setpoint raised 79°F → 80°F (+1°F) | setpoint: 79.0→80.0°F | manual |
+| 11:02 | Natural ventilation exit (outdoor 69°F = indoor 69°F) | | automation |
 
 If a HISTORICAL DAILY SUMMARIES section is present in the context:
 - Produce a two-part Timeline:
   Part 1 — Per-day summary table with columns: Date | Day Type | HVAC Runtime | Overrides | Notes
             Use one row per day from HISTORICAL DAILY SUMMARIES.
-  Part 2 — The standard per-event table (Time | Event | Source) for the period
+  Part 2 — The standard per-event table (Time | Event | Settings | Source) for the period
             covered by the EVENT LOG (most recent ~2 days).
 - In SUMMARY: describe trends across the full period, not just the current state.
 - In ANOMALIES: flag patterns that repeat across multiple days (e.g. daily overrides, recurring violations).

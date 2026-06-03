@@ -19,7 +19,8 @@ import asyncio
 import importlib
 import sys
 import types
-from unittest.mock import AsyncMock, MagicMock
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── HA module stubs (must happen before importing climate_advisor) ──
 if "homeassistant" not in sys.modules:
@@ -27,7 +28,6 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
-from datetime import datetime  # noqa: E402
 
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 2, 10, 0, 0)
 
@@ -339,3 +339,153 @@ class TestCeilingGuardNoFalseOverride:
         asyncio.run(coord._async_thermostat_changed(event))
 
         coord.automation_engine.handle_manual_override_during_pause.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for expected-state suppression tests
+# ---------------------------------------------------------------------------
+
+_FIXED_NOW = datetime(2026, 6, 2, 10, 0, 0)
+
+
+def _make_expected_state_stub(
+    *,
+    last_commanded_mode: str | None,
+    last_commanded_seconds_ago: float | None,
+    paused_by_door: bool = True,
+    classification=None,
+):
+    """Build a coordinator stub with explicit _last_commanded_hvac_* fields.
+
+    All three command-pending flags are False so the pending-guard is not active.
+    _is_recent_hvac_command returns False so the race guard is not active.
+    The _is_expected_confirmation logic is exercised purely through the
+    _last_commanded_hvac_mode / _last_commanded_hvac_time values.
+    """
+    coord = _make_thermostat_coord_stub(
+        hvac_command_pending=False,
+        fan_command_pending=False,
+        temp_command_pending=False,
+        paused_by_door=paused_by_door,
+        classification=classification,
+    )
+
+    ae = coord.automation_engine
+    ae._last_commanded_hvac_mode = last_commanded_mode
+    if last_commanded_seconds_ago is not None and last_commanded_mode is not None:
+        ae._last_commanded_hvac_time = _FIXED_NOW - timedelta(seconds=last_commanded_seconds_ago)
+    else:
+        ae._last_commanded_hvac_time = None
+
+    return coord
+
+
+# ---------------------------------------------------------------------------
+# TestExpectedStateSuppress
+# ---------------------------------------------------------------------------
+
+
+class TestExpectedStateSuppress:
+    """Tests for expected-state override suppression (Issue #206 — Settings column / cloud lag).
+
+    When the thermostat is confirming an automation command (same mode, within 2 minutes),
+    the state-change must NOT be treated as a user override. This covers cloud-thermostat
+    lag where _hvac_command_pending may already be cleared by the time the HA event fires.
+    """
+
+    def test_expected_state_suppresses_pause_path(self):
+        """Thermostat confirms automation command within grace window → no override during pause.
+
+        _last_commanded_hvac_mode="cool", commanded 5s ago, new_state="cool" → matches.
+        Expected: _is_expected_confirmation=True → handle_manual_override_during_pause NOT called.
+        """
+        coord = _make_expected_state_stub(
+            last_commanded_mode="cool",
+            last_commanded_seconds_ago=5,
+            paused_by_door=True,
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        with patch.object(mod.dt_util, "now", return_value=_FIXED_NOW):
+            event = _make_event("off", "cool")
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.handle_manual_override_during_pause.assert_not_called()
+
+    def test_expected_state_window_expires(self):
+        """After the 120-second grace window, the confirmation is no longer expected → override fires.
+
+        _last_commanded_hvac_time = now - 130s → total_seconds()=130 >= 120 → _is_expected_confirmation=False.
+        With all pending flags False and no recent command, the pause-path override must fire.
+        """
+        coord = _make_expected_state_stub(
+            last_commanded_mode="cool",
+            last_commanded_seconds_ago=130,
+            paused_by_door=True,
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        with patch.object(mod.dt_util, "now", return_value=_FIXED_NOW):
+            event = _make_event("off", "cool")
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.handle_manual_override_during_pause.assert_called_once()
+
+    def test_user_override_different_mode_detected(self):
+        """Commanded mode was "cool" but thermostat changed to "heat" → not an expected state.
+
+        _is_expected_confirmation=False because new_state.state != _last_commanded_hvac_mode.
+        With paused_by_door=True and no pending flags, the override must be detected.
+        """
+        coord = _make_expected_state_stub(
+            last_commanded_mode="cool",
+            last_commanded_seconds_ago=10,
+            paused_by_door=True,
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        with patch.object(mod.dt_util, "now", return_value=_FIXED_NOW):
+            event = _make_event("off", "heat")  # different from commanded "cool"
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.handle_manual_override_during_pause.assert_called_once()
+
+    def test_expected_state_suppresses_normal_path(self):
+        """Not paused; classification wants "off" but automation commanded "cool" 5s ago.
+
+        Thermostat confirms "cool" — this is automation-expected, NOT a user override.
+        The non-pause elif block checks `and not _is_expected_confirmation`, so it must not fire.
+        """
+        classification = _make_classification(hvac_mode="off")
+        coord = _make_expected_state_stub(
+            last_commanded_mode="cool",
+            last_commanded_seconds_ago=5,
+            paused_by_door=False,
+            classification=classification,
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        with patch.object(mod.dt_util, "now", return_value=_FIXED_NOW):
+            event = _make_event("off", "cool")  # cool != classification.hvac_mode="off"
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        # Non-pause path: handle_manual_override must NOT be called
+        coord.automation_engine.handle_manual_override.assert_not_called()
+
+    def test_no_last_commanded_mode_falls_through(self):
+        """When _last_commanded_hvac_mode is None, _is_expected_confirmation is False.
+
+        With paused_by_door=True, all pending flags False, and no recent command,
+        the genuine override path fires normally.
+        """
+        coord = _make_expected_state_stub(
+            last_commanded_mode=None,
+            last_commanded_seconds_ago=None,
+            paused_by_door=True,
+        )
+
+        # No dt_util patch needed — _is_expected_confirmation short-circuits at None check
+        event = _make_event("off", "cool")
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.handle_manual_override_during_pause.assert_called_once()

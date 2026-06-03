@@ -511,6 +511,37 @@ class TestAsyncBuildActivityContext:
         assert "last 24h" not in context
         assert "EVENT LOG" in context
 
+    def test_ceiling_guard_event_includes_settings_fields(self):
+        """ceiling_guard_fired event with Settings column fields appears verbatim in context.
+
+        The AI skill prompt documents that ceiling_guard_fired events can carry
+        old_hvac_mode, new_hvac_mode, and new_setpoint_f fields for the Settings column.
+        This test verifies that those fields survive the event-log serialization path
+        and are present in the context string passed to the AI.
+        """
+        import datetime
+
+        coord = _mock_coordinator()
+        hass = _mock_hass()
+        now = datetime.datetime.now(datetime.UTC)
+        coord._event_log = [
+            {
+                "time": (now - datetime.timedelta(hours=1)).isoformat(),
+                "type": "ceiling_guard_fired",
+                "old_hvac_mode": "off",
+                "new_hvac_mode": "cool",
+                "new_setpoint_f": 78.0,
+            }
+        ]
+        coord.learning._state.records = []
+
+        context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
+
+        assert "ceiling_guard_fired" in context
+        assert "old_hvac_mode=off" in context
+        assert "new_hvac_mode=cool" in context
+        assert "new_setpoint_f=78.0" in context
+
 
 # ---------------------------------------------------------------------------
 # TestRegisterActivitySkill

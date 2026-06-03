@@ -2136,6 +2136,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state or not old_state:
             return
 
+        # Expected-state confirmation suppression: if thermostat is confirming an automation
+        # command (same mode, within 2 minutes), this is not a user override.
+        # Covers cloud-thermostat lag where _hvac_command_pending is already cleared by the time
+        # the state-change event arrives (e.g. 3–30s for Ecobee/Nest cloud round-trips).
+        _last_cmd_mode = self.automation_engine._last_commanded_hvac_mode
+        _last_cmd_time = self.automation_engine._last_commanded_hvac_time
+        _is_expected_confirmation = (
+            _last_cmd_mode is not None
+            and _last_cmd_time is not None
+            and new_state.state == _last_cmd_mode
+            and (dt_util.now() - _last_cmd_time).total_seconds() < 120
+        )
+
         # Detect manual HVAC override during a door/window pause.
         # Note: we intentionally do NOT require old_state == "off" here.
         # The async _set_hvac_mode("off") service call may not have
@@ -2148,7 +2161,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 or self.automation_engine._fan_command_pending
                 or self.automation_engine._temp_command_pending
             )
-            if not _any_command_pending and not self._is_recent_hvac_command(threshold_seconds=3.0):
+            if _is_expected_confirmation:
+                _LOGGER.debug(
+                    "Skipping pause-override: thermostat confirmed automation command (mode=%s, commanded %.1fs ago)",
+                    _last_cmd_mode,
+                    (dt_util.now() - _last_cmd_time).total_seconds(),
+                )
+            elif not _any_command_pending and not self._is_recent_hvac_command(threshold_seconds=3.0):
                 _LOGGER.info(
                     "Manual HVAC override detected during door/window pause: %s -> %s",
                     old_state.state,
@@ -2179,6 +2198,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._fan_command_pending
             and not self.automation_engine._temp_command_pending
             and not self._is_recent_hvac_command()
+            and not _is_expected_confirmation
             and self._current_classification
             and new_state.state != self._current_classification.hvac_mode
         ):

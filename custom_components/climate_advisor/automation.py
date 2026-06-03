@@ -241,6 +241,8 @@ class AutomationEngine:
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
+        self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
+        self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
         # Natural ventilation mode (Issue #73)
         self._natural_vent_active: bool = False
@@ -726,6 +728,7 @@ class AutomationEngine:
             classification.trend_direction,
             format_temp_delta(classification.trend_magnitude, unit),
         )
+        _old_mode_cls = _cs.state if _cs else None
         _cls_key = (classification.day_type, classification.hvac_mode)
         if _cls_key != self._last_classification_applied:
             self._last_classification_applied = _cls_key
@@ -736,6 +739,7 @@ class AutomationEngine:
                         "day_type": classification.day_type,
                         "hvac_mode": classification.hvac_mode,
                         "trend": classification.trend_direction,
+                        "old_hvac_mode": _old_mode_cls,
                     },
                 )
         else:
@@ -828,7 +832,11 @@ class AutomationEngine:
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "warm_day_setback_applied",
-                        {"day_type": classification.day_type, "thermostat_mode": _current_mode},
+                        {
+                            "day_type": classification.day_type,
+                            "thermostat_mode": _current_mode,
+                            "old_hvac_mode": _current_mode,
+                        },
                     )
 
         # ODE ceiling guard (Issue #136): if thermal model predicts indoor will breach
@@ -929,6 +937,12 @@ class AutomationEngine:
                             _lead_min,
                             _k_active_cool,
                         )
+                        _cs_cg = self.hass.states.get(self.climate_entity)
+                        _old_mode_cg = _cs_cg.state if _cs_cg else None
+                        _old_setpoint_raw_cg = _cs_cg.attributes.get("temperature") if _cs_cg else None
+                        _old_setpoint_f_cg = (
+                            to_fahrenheit(_old_setpoint_raw_cg, unit) if _old_setpoint_raw_cg is not None else None
+                        )
                         await self._set_hvac_mode(
                             "cool",
                             reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
@@ -944,6 +958,10 @@ class AutomationEngine:
                                     "breach_time": _breach_ts.isoformat(),
                                     "hours_to_breach": round(_hours_to_breach, 1),
                                     "lead_time_min": round(_lead_min),
+                                    "old_hvac_mode": _old_mode_cg,
+                                    "new_hvac_mode": "cool",
+                                    "new_setpoint_f": _comfort_cool_cg,
+                                    "old_setpoint_f": _old_setpoint_f_cg,
                                 },
                             )
                     else:
@@ -972,6 +990,8 @@ class AutomationEngine:
             return
         self._hvac_command_pending = True
         self._hvac_command_time = dt_util.now()
+        self._last_commanded_hvac_mode = mode
+        self._last_commanded_hvac_time = dt_util.now()
         _cs_reaffirm = self.hass.states.get(self.climate_entity)
         if _cs_reaffirm and _cs_reaffirm.state == mode:
             _LOGGER.debug("_set_hvac_mode: thermostat already %r — re-affirming", mode)

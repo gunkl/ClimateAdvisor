@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,14 @@ Return your analysis with these exact section headers (use ## for headers):
 2-3 sentence overview of the current situation.
 ## TIMELINE
 Chronological summary of significant recent events and state changes.
+If a HISTORICAL DAILY SUMMARIES section is present in the context:
+- Produce a two-part Timeline:
+  Part 1 — Per-day summary table with columns: Date | Day Type | HVAC Runtime | Overrides | Notes
+            Use one row per day from HISTORICAL DAILY SUMMARIES.
+  Part 2 — The standard per-event table (Time | Event | Source) for the period
+            covered by the EVENT LOG (most recent ~2 days).
+- In SUMMARY: describe trends across the full period, not just the current state.
+- In ANOMALIES: flag patterns that repeat across multiple days (e.g. daily overrides, recurring violations).
 ## DECISIONS
 Why each automation action was taken, with the logic explained.
 When fan_status is active while hvac_mode is off, explicitly trace the fan state to \
@@ -68,6 +77,66 @@ Reference [FLAG] items briefly — do not construct a full explanatory narrative
 DEDUPLICATION RULE: Do not repeat any fact or analysis already covered in a prior section. \
 A one-line cross-reference ("see Decisions") is acceptable; re-stating the same analysis verbatim is not.\
 """
+
+
+def _fmt_hours(h: float) -> str:
+    """Format a float hours value as a human-readable string."""
+    if h < 24:
+        return f"{int(h)}h"
+    days = h / 24
+    return f"{int(days)}d" if days == int(days) else f"{days:.1f}d"
+
+
+def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
+    """Return context lines for historical daily records when hours > 36."""
+    try:
+        days_back = max(1, int(hours / 24))
+        today_str = datetime.date.today().isoformat()
+        cutoff_date = (datetime.date.today() - datetime.timedelta(days=days_back)).isoformat()
+        records: list[dict] = (
+            getattr(coordinator, "learning", None)
+            and getattr(coordinator.learning, "_state", None)
+            and getattr(coordinator.learning._state, "records", [])
+            or []
+        )
+        past = [
+            r
+            for r in records
+            if isinstance(r, dict) and r.get("date", "") > cutoff_date and r.get("date", "") < today_str
+        ]
+        if not past:
+            return ["", "## HISTORICAL DAILY SUMMARIES", "  (no past records available)"]
+
+        header = f"## HISTORICAL DAILY SUMMARIES (last {days_back} days, excluding today)"
+        col_hdr = "  Date       | DayType | HVAC(min) | Overrides | Viol(min) | AvgIndoor | ObsHigh/Low"
+        sep = "  -----------|---------|-----------|-----------|-----------|-----------|------------"
+        rows = []
+        for r in sorted(past, key=lambda x: x.get("date", "")):
+            date = r.get("date", "?")
+            day_type = str(r.get("day_type", "?"))[:7]
+            hvac_min = int(r.get("hvac_runtime_minutes", 0) or 0)
+            overrides = int(r.get("manual_overrides", 0) or 0)
+            viol_min = int(r.get("comfort_violations_minutes", 0) or 0)
+            avg_in = r.get("avg_indoor_temp")
+            avg_in_str = f"{avg_in:.1f}°F" if isinstance(avg_in, (int, float)) else "n/a"
+            obs_high = r.get("observed_high_f")
+            obs_low = r.get("observed_low_f")
+            hl_str = (
+                f"{obs_high:.0f}°F/{obs_low:.0f}°F"
+                if isinstance(obs_high, (int, float)) and isinstance(obs_low, (int, float))
+                else "n/a"
+            )
+            row = (
+                f"  {date} | {day_type:<7} | {hvac_min:<9} | {overrides:<9}"
+                f" | {viol_min:<9} | {avg_in_str:<9} | {hl_str}"
+            )
+            rows.append(row)
+
+        note = "  Note: event log ring buffer covers ~50-60h; use daily summaries for context beyond that."
+        return ["", header, col_hdr, sep, *rows, note]
+    except Exception:
+        _LOGGER.warning("activity_report: failed to build daily summaries — skipping")
+        return []
 
 
 def _format_engine_status_for_ai(engine_status: dict) -> str:
@@ -137,6 +206,9 @@ async def async_build_activity_context(
     Gathers current system state from coordinator and HA and formats it as a
     structured text block suitable for Claude analysis.
     """
+    hours: float = float(kwargs.get("hours", 24))
+    hours = max(1.0, min(hours, 168.0))  # clamp to frontend range 1–168h
+
     data: dict[str, Any] = coordinator.data or {}
     options: dict[str, Any] = coordinator.config or {}
 
@@ -315,6 +387,53 @@ async def async_build_activity_context(
         "## ACTIVE PREDICTION ENGINES",
         *(engine_status_block.splitlines() if engine_status_block else ["  (unavailable)"]),
     ]
+
+    # --- Event log ---
+    try:
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+        event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
+        event_lines: list[str] = []
+        for entry in event_log[-200:]:
+            if not isinstance(entry, dict):
+                continue
+            raw_time = entry.get("time")
+            if raw_time is None:
+                event_lines.append(f"  {entry.get('type', 'unknown')}: {entry.get('reason', entry.get('message', ''))}")
+                continue
+            if isinstance(raw_time, datetime.datetime):
+                event_dt = raw_time
+                if event_dt.tzinfo is None:
+                    event_dt = event_dt.replace(tzinfo=datetime.UTC)
+            else:
+                try:
+                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                except ValueError:
+                    event_lines.append(
+                        f"  {entry.get('type', 'unknown')}: {entry.get('reason', entry.get('message', ''))}"
+                    )
+                    continue
+            if event_dt >= cutoff:
+                ts = str(raw_time)[:19]
+                etype = entry.get("type", "unknown")
+                reason = entry.get("reason", entry.get("message", ""))
+                source = entry.get("source", "")
+                source_str = f" [{source}]" if source else ""
+                event_lines.append(f"  {ts} | {etype}{source_str}: {reason}")
+        event_log_count = len(event_lines)
+        log_body = event_lines if event_lines else ["  (no events in period)"]
+        lines += [
+            "",
+            f"## EVENT LOG (last {_fmt_hours(hours)}, {event_log_count} events)",
+            *log_body,
+        ]
+    except Exception:
+        _LOGGER.warning("activity_report: failed to read event log — skipping")
+        lines += ["", "## EVENT LOG", "  unavailable"]
+
+    if hours > 36:
+        lines += _build_daily_summaries(coordinator, hours)
 
     return "\n".join(lines)
 

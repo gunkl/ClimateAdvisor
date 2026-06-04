@@ -54,7 +54,11 @@ applied ×10" with time range in the Event column. Do NOT use sub-bullets or nes
   - Leave Settings blank (empty cell) if no settings fields are present in the event data
   - Events that do not change thermostat settings (grace_started, sensor_opened, \
 sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) → empty Settings cell
-- **Source**: Exactly one of: `automation`, `manual`, or `unknown`
+- **Source**: Exactly one of: `automation`, `manual`, `system`, or `unknown`
+
+Special event types:
+- system_restarted: HA restart boundary marker. Events ABOVE are from the prior session \
+(recovered_events field = count of pre-restart events preserved). Leave Settings blank.
 
 Source mapping rules:
 - Events with source_label=automation in the event log → `automation`
@@ -253,12 +257,17 @@ _UNKNOWN_EVENT_TYPES = frozenset(
     }
 )
 
+_SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({"system_restarted"})
+
 
 def _event_source_label(event_type: str, data: dict) -> str | None:
     """Return source label for an event, or None if unknown/default.
 
-    Returns one of 'automation', 'manual', or None (caller treats None as unknown).
+    Returns one of 'automation', 'manual', 'system', or None (caller treats None as unknown).
     """
+    if event_type in _SYSTEM_EVENT_TYPES:
+        return "system"
+
     # Explicit source field takes precedence
     source = data.get("source")
     if source in ("automation", "manual"):

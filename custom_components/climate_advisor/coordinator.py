@@ -581,6 +581,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self.hass.async_add_executor_job(self._load_ai_reports)
             await self.hass.async_add_executor_job(self._load_investigation_reports)
 
+        # Restore event log ring buffer and emit restart boundary marker
+        saved_log = state.get("event_log")
+        if isinstance(saved_log, list):
+            self._event_log = saved_log[-EVENT_LOG_CAP:]
+        self._emit_event("system_restarted", {"recovered_events": len(self._event_log)})
+
         _LOGGER.info("State restore complete")
 
     def _build_state_dict(self) -> dict[str, Any]:
@@ -651,6 +657,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
             "vent_k_backfill_v2": self._vent_k_backfill_v2,
             "solar_phase_backfill": self._solar_phase_backfill,
+            "event_log": list(self._event_log),
         }
 
     async def _async_save_state(self) -> None:

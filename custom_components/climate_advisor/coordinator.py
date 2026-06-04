@@ -2155,7 +2155,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # propagated to HA's state machine yet when the user quickly
         # turns HVAC back on, so old_state could still be the pre-pause
         # mode (e.g. "cool"). The paused_by_door flag is authoritative.
-        if self.automation_engine.is_paused_by_door and new_state.state not in ("off", "unavailable", "unknown"):
+        # We DO require old_state != new_state to skip attribute-only events
+        # (e.g. hvac_action idle→cooling) where the HVAC mode didn't change.
+        if (
+            self.automation_engine.is_paused_by_door
+            and old_state.state != new_state.state
+            and new_state.state not in ("off", "unavailable", "unknown")
+        ):
             _any_command_pending = (
                 self.automation_engine._hvac_command_pending
                 or self.automation_engine._fan_command_pending

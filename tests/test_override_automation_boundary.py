@@ -489,3 +489,25 @@ class TestExpectedStateSuppress:
         asyncio.run(coord._async_thermostat_changed(event))
 
         coord.automation_engine.handle_manual_override_during_pause.assert_called_once()
+
+    def test_hvac_action_change_does_not_trigger_pause_override(self):
+        """Attribute-only event (hvac_action idle→cooling, mode stays "cool") must NOT override.
+
+        Root cause of Round 3 regression: pause path lacked old_state.state != new_state.state
+        guard. HA emits state_changed for hvac_action attribute changes even when HVAC mode
+        is unchanged. After the 120s expected-state window expired, these events fired false
+        overrides (~20 min after ceiling guard).
+
+        old_state.state = "cool", new_state.state = "cool" → mode didn't change → skip.
+        """
+        coord = _make_expected_state_stub(
+            last_commanded_mode=None,  # window expired / no active suppression
+            last_commanded_seconds_ago=None,
+            paused_by_door=True,
+        )
+
+        # Simulate hvac_action attribute change: mode stays "cool" throughout
+        event = _make_event("cool", "cool")
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.handle_manual_override_during_pause.assert_not_called()

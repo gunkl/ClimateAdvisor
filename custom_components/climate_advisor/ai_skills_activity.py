@@ -54,8 +54,8 @@ applied ×10" with time range in the Event column. Do NOT use sub-bullets or nes
   - Leave Settings blank (empty cell) if no settings fields are present in the event data
   - Events that do not change thermostat settings (grace_started, sensor_opened, \
 sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) → empty Settings cell
+  - nat_vent_ceiling_escalation: escalates from nat-vent to HVAC cooling; Settings: mode: off->cool
 - **Source**: Exactly one of: `automation`, `manual`, `system`, or `unknown`
-
 Special event types:
 - system_restarted: HA restart boundary marker. Events ABOVE are from the prior session \
 (recovered_events field = count of pre-restart events preserved). Leave Settings blank.
@@ -238,6 +238,7 @@ _AUTO_EVENT_TYPES = frozenset(
         "classification_applied",
         "warm_day_setback_applied",
         "warm_day_comfort_gap",
+        "nat_vent_ceiling_escalation",
     }
 )
 

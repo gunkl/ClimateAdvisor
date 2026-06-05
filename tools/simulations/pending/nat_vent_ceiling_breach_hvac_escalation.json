@@ -1,0 +1,60 @@
+{
+  "name": "nat_vent_ceiling_breach_hvac_escalation",
+  "description": "Nat-vent escalation to HVAC cooling when indoor exceeds comfort_cool",
+  "source": "synthetic",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "When nat-vent is active and indoor rises above comfort_cool, no automatic exit occurs in simulator (ODE ceiling guard not simulated), but the scenario documents expected production behavior where ceiling guard would fire AC",
+    "observed_behavior": "nat_vent_active with indoor 76F > comfort_cool 74F; simulator has no ODE model to trigger ceiling guard",
+    "expected_behavior": "In production: ceiling guard would evaluate and fire AC. In simulator: nat_vent continues (documents gap in simulator)."
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-21T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 68.0,
+      "note": "Morning: indoor 72F, outdoor 68F (cooling available)"
+    },
+    {
+      "time": "2026-05-21T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification"
+    },
+    {
+      "time": "2026-05-21T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 68F < indoor 72F, indoor > comfort_heat 70F, outdoor <= threshold 77F — nat vent activates"
+    },
+    {
+      "time": "2026-05-21T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "Mid-morning: indoor has climbed to 76F (above comfort_cool 74F) while outdoor remains 68F. Simulator continues nat vent (no ODE model). In production, ceiling guard would fire."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-21T08:05:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opens with favorable conditions: outdoor 68F < indoor 72F, outdoor <= threshold 77F, indoor > comfort_heat 70F"
+    },
+    {
+      "at": "2026-05-21T10:00:00",
+      "expect": "natural_ventilation",
+      "simulator_support": false,
+      "reason": "In production: indoor 76F > comfort_cool 74F triggers ODE ceiling guard to fire AC. Simulator cannot evaluate ODE predictions (requires thermal model state). Documents gap: simulator lacks ODE prediction logic for ceiling guard."
+    }
+  ]
+}

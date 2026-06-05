@@ -1,0 +1,41 @@
+{
+  "name": "startup_indoor_above_cool_sensors_closed",
+  "description": "Startup comfort recovery when indoor above comfort_cool and sensors closed",
+  "source": "synthetic",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "On startup when indoor exceeds comfort_cool with sensors closed and nat-vent inactive, ceiling guard fires AC for comfort recovery",
+    "observed_behavior": "startup state with indoor 76F > comfort_cool 74F, sensors closed, nat_vent_active=False",
+    "expected_behavior": "ceiling_guard fires, HVAC set to cool at comfort_cool"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-22T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "Warm day restart: indoor 76F above comfort_cool 74F, outdoor 68F (could cool, but sensors closed)"
+    },
+    {
+      "time": "2026-05-22T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification: hvac_mode=off normally, but indoor exceeds comfort_cool — comfort ceiling guard should fire"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-22T08:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification with indoor 76F > comfort_cool 74F and sensors closed — in production, comfort ceiling guard fires AC at comfort_cool; simulator records classification_applied as baseline"
+    }
+  ]
+}

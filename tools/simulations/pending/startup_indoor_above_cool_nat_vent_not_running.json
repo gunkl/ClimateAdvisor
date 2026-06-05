@@ -1,0 +1,53 @@
+{
+  "name": "startup_indoor_above_cool_nat_vent_not_running",
+  "description": "Startup: ceiling guard fires before nat-vent can activate",
+  "source": "synthetic",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "When startup has indoor exceeding comfort_cool, ceiling guard in production blocks nat-vent activation. Simulator lacks ceiling guard logic.",
+    "observed_behavior": "startup with indoor 76F > comfort_cool 74F, sensors open — simulator activates nat vent",
+    "expected_behavior": "In production: ceiling guard would block nat vent. In simulator: gap in logic means nat vent activates even with breached ceiling."
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-23T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "Warm day restart: indoor 76F above comfort_cool 74F, outdoor 68F"
+    },
+    {
+      "time": "2026-05-23T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Classification cycle runs first"
+    },
+    {
+      "time": "2026-05-23T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Sensor opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F. In production, ceiling breach would block nat vent. Simulator activates it (gap in ceiling guard)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-23T08:01:00",
+      "expect": "classification_applied",
+      "reason": "Classification applied. In production, comfort ceiling guard would override."
+    },
+    {
+      "at": "2026-05-23T08:05:00",
+      "expect": "natural_ventilation",
+      "simulator_support": false,
+      "reason": "Simulator activates nat vent (no ceiling guard logic). In production: ceiling guard would block because indoor 76F > comfort_cool 74F. Documents gap: simulator needs ceiling guard to block nat vent activation when indoor exceeds comfort_cool."
+    }
+  ]
+}

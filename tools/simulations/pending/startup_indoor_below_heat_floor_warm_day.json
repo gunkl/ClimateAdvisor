@@ -1,0 +1,41 @@
+{
+  "name": "startup_indoor_below_heat_floor_warm_day",
+  "description": "Startup heating recovery on warm day with cold indoor",
+  "source": "synthetic",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "On warm day startup when indoor is below comfort_heat floor despite warm outdoor, heating comfort guard fires to recover comfort",
+    "observed_behavior": "warm day with indoor 65F < comfort_heat 70F and outdoor 80F",
+    "expected_behavior": "warm_day_comfort_floor guard fires, heat set to comfort_heat 70F"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-24T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 80.0,
+      "note": "Warm day morning: outdoor 80F (very hot), but indoor only 65F (below comfort_heat 70F). This is unusual but possible after cold night."
+    },
+    {
+      "time": "2026-05-24T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification would normally say hvac_mode=off, but indoor 65F < comfort_heat 70F — warm-day comfort-floor guard should fire heat"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-24T08:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification but indoor 65F < comfort_heat 70F — warm-day comfort-floor guard in production fires heat to restore comfort floor. Simulator records classification_applied as baseline; production would override to heat mode."
+    }
+  ]
+}

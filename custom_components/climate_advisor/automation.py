@@ -975,6 +975,18 @@ class AutomationEngine:
                             _lead_min,
                             _k_active_cool,
                         )
+                        if self._natural_vent_active:
+                            await self._deactivate_fan(reason="ceiling guard override -- nat-vent to active cooling")
+                            self._natural_vent_active = False
+                            if self._emit_event_callback:
+                                self._emit_event_callback(
+                                    "nat_vent_ceiling_escalation",
+                                    {
+                                        "indoor": _indoor_cg,
+                                        "outdoor": _outdoor,
+                                        "comfort_cool": _comfort_cool_cg,
+                                    },
+                                )
                         _cs_cg = self.hass.states.get(self.climate_entity)
                         _old_mode_cg = _cs_cg.state if _cs_cg else None
                         _old_setpoint_raw_cg = _cs_cg.attributes.get("temperature") if _cs_cg else None
@@ -1514,6 +1526,13 @@ class AutomationEngine:
         if self._natural_vent_active:
             comfort_heat = float(self.config.get("comfort_heat", 70))
             indoor = self._get_indoor_temp_f()
+            if self._natural_vent_active and indoor is not None and comfort_cool is not None and indoor > comfort_cool:
+                _LOGGER.warning(
+                    "Nat-vent active but indoor %.1fF > comfort_cool %.1fF --"
+                    " ceiling guard will evaluate on next classification cycle",
+                    indoor,
+                    comfort_cool,
+                )
             if indoor is not None and indoor <= comfort_heat:
                 self._natural_vent_active = False
                 await self._deactivate_fan(

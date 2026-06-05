@@ -56,6 +56,7 @@ Column definitions:
   - grace_started: use trigger field in the Event description, NOT in Settings. Settings column stays blank for grace_started.
   - Leave Settings blank (empty cell) if no settings fields are present in the event data
   - Events that do not change thermostat settings (grace_started, sensor_opened, sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) -> empty Settings cell
+  - nat_vent_ceiling_escalation: nat-vent escalated to HVAC cooling because indoor exceeded comfort_cool. Settings: mode: off->cool
 - **Source**: Exactly one of: `automation`, `manual`, `sensor`, or `system`
 
 Special event types:
@@ -237,6 +238,7 @@ _AUTO_EVENT_TYPES = frozenset(
         "warm_day_state_confirmed",
         "warm_day_setback_applied",
         "warm_day_comfort_gap",
+        "nat_vent_ceiling_escalation",
     }
 )
 

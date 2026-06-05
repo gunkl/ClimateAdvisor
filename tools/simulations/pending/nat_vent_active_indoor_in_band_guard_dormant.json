@@ -1,0 +1,59 @@
+{
+  "name": "nat_vent_active_indoor_in_band_guard_dormant",
+  "description": "Regression guard: ceiling guard correctly dormant when nat-vent active and indoor within band",
+  "source": "synthetic",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "When nat-vent is active and indoor is within comfort band (comfort_heat < indoor < comfort_cool), ceiling guard stays dormant",
+    "observed_behavior": "nat_vent_active=True with indoor 73F within band [70F, 74F], outdoor 65F",
+    "expected_behavior": "ceiling guard dormant, nat_vent continues, no HVAC intervention"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-05-25T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.5,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 72.5F, outdoor 65F (favorable for nat vent)"
+    },
+    {
+      "time": "2026-05-25T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification"
+    },
+    {
+      "time": "2026-05-25T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 65F < indoor 72.5F, indoor > comfort_heat 70F, outdoor <= threshold 77F — nat vent activates"
+    },
+    {
+      "time": "2026-05-25T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Mid-morning: indoor 73F still within comfort band [70F, 74F], outdoor 65F (still favorable). Nat vent continues to provide free cooling. Ceiling guard should remain dormant — this is correct behavior."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-25T08:05:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opens with favorable conditions: outdoor 65F < indoor 72.5F, outdoor <= threshold 77F, indoor > comfort_heat 70F — nat vent activates"
+    },
+    {
+      "at": "2026-05-25T10:00:00",
+      "expect": "natural_ventilation",
+      "reason": "REGRESSION GUARD: temp_update with nat_vent_active and indoor 73F within band [70F, 74F] — ceiling guard dormant, nat vent continues. No HVAC change. This guards against broken ceiling guard logic that incorrectly fires when nat vent is already handling cooling."
+    }
+  ]
+}

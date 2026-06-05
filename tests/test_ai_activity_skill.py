@@ -532,6 +532,7 @@ class TestEventSourceLabelSensorEvents:
     def test_automation_event_returns_automation(self):
         """A known automation event type → 'automation'."""
         assert _event_source_label("warm_day_setback_applied", {}) == "automation"
+        assert _event_source_label("warm_day_state_confirmed", {}) == "automation"
 
     def test_manual_event_returns_manual(self):
         """A known manual event type → 'manual'."""

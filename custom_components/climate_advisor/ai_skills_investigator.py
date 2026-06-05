@@ -48,14 +48,14 @@ EPISTEMOLOGICAL DISCIPLINE
 NUMERIC VERIFICATION RULE: Before stating that any temperature, percentage, or count
 value is "within," "inside," "in range," or similar, verify the arithmetic explicitly.
 A temperature T is within comfort band [L, H] only if L <= T <= H. Never infer
-"within range" from proximity or narrative context — check the inequality directly
+"within range" from proximity or narrative context â€” check the inequality directly
 against the supplied numeric values. If you cannot verify the claim with the supplied
 data, say "cannot verify" rather than guessing.
 
 Always be explicit about the category of every claim you make:
 - CONFIRMED FACT: the value is directly present in the supplied data
 - INFERENCE: a conclusion deduced from a pattern across multiple data points
-- ASSUMPTION: a guess made in the absence of direct evidence — always label these
+- ASSUMPTION: a guess made in the absence of direct evidence â€” always label these
 
 INVESTIGATION PROCEDURE
 1. Read all supplied data sections before drawing any conclusion.
@@ -66,44 +66,44 @@ INVESTIGATION PROCEDURE
    - Override counts that are implausibly high (>50 in a short window)
    - Timestamps that are in the future, in the wrong timezone, or precede the system installation
    - Zeroed counters that should accumulate over time (runtime, observation counts)
-   - Thermal rates (heating/cooling °F per hour) outside physically plausible bounds
+   - Thermal rates (heating/cooling Â°F per hour) outside physically plausible bounds
    - Weather bias corrections that exceed the configured cap
 4. Check the event log for any entries whose type contains "error" or "warning". Quote the\
  relevant event fields verbatim.
-5. Generate 2–5 ranked hypotheses about what may be wrong or inconsistent. Rank by confidence\
+5. Generate 2â€“5 ranked hypotheses about what may be wrong or inconsistent. Rank by confidence\
  (highest first). Each hypothesis must cite at least one evidence item.
 6. For every cited data value use the format: [source: <data_key>, value: <X>]
-7. Where data is missing or unavailable, state explicitly: "Could not verify <X> — data not\
+7. Where data is missing or unavailable, state explicitly: "Could not verify <X> â€” data not\
  present."
 8. CROSS-CHECK AGAINST KNOWN-FIXED ISSUES: When an anomaly matches a pattern in the\
  KNOWN-FIXED ISSUES section, check whether the observed code path has a [COVERED] or\
- [NOT COVERED] marker. If [COVERED]: state "Issue #X fixed this path in vX.Y — treat as\
+ [NOT COVERED] marker. If [COVERED]: state "Issue #X fixed this path in vX.Y â€” treat as\
  resolved unless current data directly contradicts." If [NOT COVERED]: state "Issue #X\
- was scoped to path A; path B was explicitly not covered — candidate gap or incomplete fix."\
- When scope metadata is available, do not write "could not verify" — name the path and its\
+ was scoped to path A; path B was explicitly not covered â€” candidate gap or incomplete fix."\
+ When scope metadata is available, do not write "could not verify" â€” name the path and its\
  coverage status.
 9. COUNT DISCREPANCY SUPPRESSION RULE: If `observation_count_heat` or `observation_count_cool`\
- in LEARNING — THERMAL MODEL differs from the corresponding pipeline committed count by exactly\
+ in LEARNING â€” THERMAL MODEL differs from the corresponding pipeline committed count by exactly\
  1, this is consistent with EWMA flush lag (the model EWMA updates asynchronously after each\
  commit). Do NOT surface a gap of exactly 1 as an incongruity. Only flag if the gap exceeds 1\
  or if the same gap appears to have grown compared to a prior report.
 
 OUTPUT FORMAT
-SECTION ROLES ARE EXCLUSIVE — each section contains only what belongs to it:\
+SECTION ROLES ARE EXCLUSIVE â€” each section contains only what belongs to it:\
  do not repeat content already stated in a prior section.\
  A one-line cross-reference ("see Hypotheses above") is acceptable;\
  copying or paraphrasing the same analysis verbatim is not.
-- INVESTIGATION SUMMARY: 3–5 sentence overview of the most significant finding and whether\
+- INVESTIGATION SUMMARY: 3â€“5 sentence overview of the most significant finding and whether\
  action is required. No analysis detail, no hypothesis reasoning, no action items.
 - INCONGRUITIES FOUND: Specific data mismatches or contradictions only. Do NOT re-explain\
  anything already stated in Summary.
 - DATA QUALITY ISSUES: Missing data, sensor gaps, stale readings, unreliable values only.\
  Do NOT repeat incongruities.
 - SYSTEM ERRORS / WARNINGS: Log errors and warnings verbatim (with counts if repeated).\
- Do NOT analyze causes — that belongs in Hypotheses.
+ Do NOT analyze causes â€” that belongs in Hypotheses.
 - HYPOTHESES: Ranked explanations. Reference specific data from earlier sections by name\
  and value; do NOT restate the same findings verbatim.
-- RECOMMENDED ACTIONS: Specific, actionable steps only. Do NOT re-state problem context —\
+- RECOMMENDED ACTIONS: Specific, actionable steps only. Do NOT re-state problem context â€”\
  just the action and which hypothesis or finding it addresses.
 - ASSUMPTIONS & CONFIDENCE: List assumptions and confidence level only.\
  Do NOT repeat findings or recommendations.
@@ -111,8 +111,8 @@ SECTION ROLES ARE EXCLUSIVE — each section contains only what belongs to it:\
 Return your investigation using these exact section headers (## prefix, exact capitalisation):
 
 ## INVESTIGATION SUMMARY
-3–5 sentence overview of the most important finding. If nothing is wrong, say so plainly\
- — do not fabricate issues.
+3â€“5 sentence overview of the most important finding. If nothing is wrong, say so plainly\
+ â€” do not fabricate issues.
 
 ## INCONGRUITIES FOUND
 List every place where two data sources contradict each other. Use bullet points. If none,\
@@ -140,16 +140,16 @@ List every assumption made during this investigation and your overall confidence
 
 THERMAL PIPELINE HEALTH rules:
 - If hvac_heat or hvac_cool shows 0 committed observations AND HVAC has run: flag as observation\
- pipeline failure — expected to learn within first few cycles under normal conditions.
+ pipeline failure â€” expected to learn within first few cycles under normal conditions.
 - If k_active_cool = NEVER LEARNED and AC has run in recent history: flag as pipeline failure;\
  suggest checking rejection log and pending observations for the hvac_cool type.
 - If rejection log shows >=3 new_session_started abandonments for an HVAC type: flag as possible\
- short-cycling thermostat — HVAC cycles too short to capture post-heat samples between 5-min ticks.
-- If rejection log shows n=0 rejections with delta_t=0.00°F: flag as possible sensor quantization\
- issue — thermostat reports 1°F resolution; suggest using a finer-grained sensor entity.
+ short-cycling thermostat â€” HVAC cycles too short to capture post-heat samples between 5-min ticks.
+- If rejection log shows n=0 rejections with delta_t=0.00Â°F: flag as possible sensor quantization\
+ issue â€” thermostat reports 1Â°F resolution; suggest using a finer-grained sensor entity.
 - If chart_log endpoint observations = 0: suggest running\
  python tools/thermal_replay.py --chart-log --write to backfill from historical data.
-- Do NOT report k_active_cool=None as normal gap if AC has been running — it is a diagnostic flag\
+- Do NOT report k_active_cool=None as normal gap if AC has been running â€” it is a diagnostic flag\
  requiring investigation, not a routine "not yet learned" state.
 - Source counts: "source_endpoint_count" and "source_block_ols_count" in the pipeline section\
  show how many observations came from the chart_log estimator vs online OLS. If both are 0,\
@@ -159,9 +159,9 @@ ANOMALY RULE: SIMULTANEOUS AUTOMATION + OVERRIDE EVENTS (Issue #205)
 If the thermal pipeline context or event log shows an `override_detected` event that occurs\
  within 60 seconds of an automation-initiated event (`nat_vent_*`, `ceiling_guard_fired`,\
  `classification_applied`, `grace_started` with source=automation), this is a false override\
- detection — automation actions must NEVER trigger override detection.
+ detection â€” automation actions must NEVER trigger override detection.
 
-Classification: ACTIONABLE — false override detection (Bug #205)
+Classification: ACTIONABLE â€” false override detection (Bug #205)
 
 Explanation: "An `override_detected` event at [time] followed/preceded by an automation event\
  at [time] (gap: Xs) indicates the override detection guard did not suppress the\
@@ -174,7 +174,7 @@ This should appear as a separate finding in the triage table under "Automation/O
 
 TONE
 Scientific, evidence-based, methodical. Prefer "no evidence of X" over "X is fine". Never\
- fabricate data or invent explanations — if the data does not support a conclusion, say so.\
+ fabricate data or invent explanations â€” if the data does not support a conclusion, say so.\
 """
 
 
@@ -287,24 +287,24 @@ def _build_thermal_pipeline_context(coordinator) -> str:
         # Build suffix markers
         suffix_parts: list[str] = []
         if obs_type == OBS_TYPE_HVAC_COOL and k_active_cool is None:
-            suffix_parts.append("NEVER LEARNED — k_active_cool is None")
+            suffix_parts.append("NEVER LEARNED â€” k_active_cool is None")
         if obs_type == OBS_TYPE_HVAC_HEAT and k_active_heat is None:
-            suffix_parts.append("NEVER LEARNED — k_active_heat is None")
+            suffix_parts.append("NEVER LEARNED â€” k_active_heat is None")
         suffix = f"  [{', '.join(suffix_parts)}]" if suffix_parts else ""
 
         lines.append(f"  {obs_type}: {committed} committed, {total_rejected} rejected{suffix}")
         if total_rejected == 0:
-            lines.append("    — no rejections")
+            lines.append("    â€” no rejections")
         else:
             if operational_count > 0:
-                lines.append(f"    — operational interruptions: {operational_count} [expected on active days]")
+                lines.append(f"    â€” operational interruptions: {operational_count} [expected on active days]")
             if quality_count > 0:
                 qf_parts = ", ".join(
                     f"{rc} x{cnt}" for rc, cnt in sorted(quality_failures.items(), key=lambda x: -x[1])
                 )
-                lines.append(f"    — quality failures: {quality_count} ({qf_parts})")
+                lines.append(f"    â€” quality failures: {quality_count} ({qf_parts})")
             elif total_rejected > 0:
-                lines.append("    — no quality failures")
+                lines.append("    â€” no quality failures")
 
     # Pipeline failure detection
     hvac_total_committed = hvac_heat_committed + hvac_cool_committed
@@ -312,7 +312,7 @@ def _build_thermal_pipeline_context(coordinator) -> str:
     if hvac_total_committed == 0 and hvac_total_rejected > 0:
         lines.append(
             f"  *** PIPELINE FAILURE INDICATOR: 0 committed HVAC observations,"
-            f" {hvac_total_rejected} rejections — pipeline is not learning from HVAC cycles ***"
+            f" {hvac_total_rejected} rejections â€” pipeline is not learning from HVAC cycles ***"
         )
 
     # Source estimator counts
@@ -322,7 +322,7 @@ def _build_thermal_pipeline_context(coordinator) -> str:
     lines.append(f"  block-OLS observations: {block_ols_count}")
     if endpoint_count == 0 and block_ols_count == 0:
         lines.append(
-            "  NOTE: 0 chart_log observations — consider running"
+            "  NOTE: 0 chart_log observations â€” consider running"
             " python tools/thermal_replay.py --chart-log --write to backfill"
         )
 
@@ -361,17 +361,17 @@ def _build_version_context(coordinator) -> str:
 def _build_known_fixes_context(coordinator) -> str:
     """Inject KNOWN_FIXES behavioral invariant registry into investigator context.
 
-    Provides scope boundaries so the analyzer can state '[COVERED] — resolved'
-    or '[NOT COVERED] — potential gap' rather than hedging 'could not verify.'
+    Provides scope boundaries so the analyzer can state '[COVERED] â€” resolved'
+    or '[NOT COVERED] â€” potential gap' rather than hedging 'could not verify.'
     """
     from .const import KNOWN_FIXES  # noqa: PLC0415
 
     if not KNOWN_FIXES:
         return ""
-    lines = ["## KNOWN-FIXED ISSUES (scope-bounded — use for cross-check, step 8)"]
+    lines = ["## KNOWN-FIXED ISSUES (scope-bounded â€” use for cross-check, step 8)"]
     for issue_num in sorted(KNOWN_FIXES.keys(), reverse=True):
         fix = KNOWN_FIXES[issue_num]
-        lines.append(f"\nIssue #{issue_num} — fixed in v{fix['version_fixed']}: {fix['title']}")
+        lines.append(f"\nIssue #{issue_num} â€” fixed in v{fix['version_fixed']}: {fix['title']}")
         for covered in fix.get("scope_covered", []):
             lines.append(f"  [COVERED] {covered}")
         for gap in fix.get("scope_not_covered", []):
@@ -428,7 +428,7 @@ async def async_build_investigator_context(
     """
     lines: list[str] = ["=== Climate Advisor Investigator Context ===", ""]
 
-    # Time window — controls event log cutoff and daily records lookback
+    # Time window â€” controls event log cutoff and daily records lookback
     hours: int = min(max(int(kwargs.get("hours", 168)), 1), 720)
     daily_records_days: int = min((hours + 23) // 24 + 1, 30)
 
@@ -449,7 +449,7 @@ async def async_build_investigator_context(
         day_type = data.get(ATTR_DAY_TYPE, "unknown")
         trend = data.get(ATTR_TREND, "unknown")
         hvac_action = data.get(ATTR_HVAC_ACTION, "unknown")
-        # Compute fresh runtime — coordinator.data may be up to 30 min stale
+        # Compute fresh runtime â€” coordinator.data may be up to 30 min stale
         _base_runtime = coordinator._today_record.hvac_runtime_minutes if coordinator._today_record is not None else 0.0
         _session_elapsed = (
             (dt_util.now() - coordinator._hvac_on_since).total_seconds() / 60.0
@@ -483,7 +483,7 @@ async def async_build_investigator_context(
             "",
         ]
     except Exception:
-        _LOGGER.warning("investigator: failed to read coordinator.data — skipping current state")
+        _LOGGER.warning("investigator: failed to read coordinator.data â€” skipping current state")
         lines += ["=== CURRENT STATE ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
@@ -507,7 +507,7 @@ async def async_build_investigator_context(
             "",
         ]
     except Exception:
-        _LOGGER.warning("investigator: failed to read HVAC entity state — skipping")
+        _LOGGER.warning("investigator: failed to read HVAC entity state â€” skipping")
         lines += ["=== HVAC ENTITY ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
@@ -520,28 +520,28 @@ async def async_build_investigator_context(
             try:
                 compliance: dict[str, Any] = learning.get_compliance_summary() or {}
                 lines += [
-                    "=== LEARNING — COMPLIANCE SUMMARY ===",
+                    "=== LEARNING â€” COMPLIANCE SUMMARY ===",
                     f"  window_compliance:              {_fmt_window_compliance(compliance)}",
                     f"  avg_daily_hvac_runtime_minutes: {compliance.get('avg_daily_hvac_runtime_minutes', 'unknown')}",
                     f"  comfort_score:                  {compliance.get('comfort_score', 'unknown')}",
                     f"  total_manual_overrides:         {compliance.get('total_manual_overrides', 'unknown')}",
                     f"  pending_suggestions:            {compliance.get('pending_suggestions', 'unknown')}",
-                    "  NOTE — window_compliance scope: the value above uses the last 14 days only",
+                    "  NOTE â€” window_compliance scope: the value above uses the last 14 days only",
                     "  (get_compliance_summary() 14-day window). The suggestion engine uses full",
                     "  historical records. A discrepancy between compliance summary and suggestion",
                     "  engine values is expected when non-compliant days exist outside the 14-day",
-                    "  window — this is not a calculation bug.",
+                    "  window â€” this is not a calculation bug.",
                     "",
                 ]
             except Exception:
                 _LOGGER.warning("investigator: get_compliance_summary() failed")
-                lines += ["=== LEARNING — COMPLIANCE SUMMARY ===", "  unavailable", ""]
+                lines += ["=== LEARNING â€” COMPLIANCE SUMMARY ===", "  unavailable", ""]
 
             # Thermal model
             try:
                 thermal: dict[str, Any] = learning.get_thermal_model() or {}
                 lines += [
-                    "=== LEARNING — THERMAL MODEL ===",
+                    "=== LEARNING â€” THERMAL MODEL ===",
                     f"  heating_rate_f_per_hour:   {thermal.get('heating_rate_f_per_hour', 'unknown')}",
                     f"  cooling_rate_f_per_hour:   {thermal.get('cooling_rate_f_per_hour', 'unknown')}",
                     f"  confidence:                {thermal.get('confidence', 'unknown')}",
@@ -551,13 +551,13 @@ async def async_build_investigator_context(
                 ]
             except Exception:
                 _LOGGER.warning("investigator: get_thermal_model() failed")
-                lines += ["=== LEARNING — THERMAL MODEL ===", "  unavailable", ""]
+                lines += ["=== LEARNING â€” THERMAL MODEL ===", "  unavailable", ""]
 
             # Weather bias
             try:
                 bias: dict[str, Any] = learning.get_weather_bias() or {}
                 lines += [
-                    "=== LEARNING — WEATHER BIAS ===",
+                    "=== LEARNING â€” WEATHER BIAS ===",
                     f"  high_bias:          {bias.get('high_bias', 'unknown')}",
                     f"  low_bias:           {bias.get('low_bias', 'unknown')}",
                     f"  confidence:         {bias.get('confidence', 'unknown')}",
@@ -566,12 +566,12 @@ async def async_build_investigator_context(
                 ]
             except Exception:
                 _LOGGER.warning("investigator: get_weather_bias() failed")
-                lines += ["=== LEARNING — WEATHER BIAS ===", "  unavailable", ""]
+                lines += ["=== LEARNING â€” WEATHER BIAS ===", "  unavailable", ""]
 
             # Active suggestions
             try:
                 suggestions: list[Any] = learning.generate_suggestions() or []
-                lines.append("=== LEARNING — ACTIVE SUGGESTIONS ===")
+                lines.append("=== LEARNING â€” ACTIVE SUGGESTIONS ===")
                 if suggestions:
                     for idx, sug in enumerate(suggestions, start=1):
                         if isinstance(sug, dict):
@@ -588,9 +588,9 @@ async def async_build_investigator_context(
                 lines.append("")
             except Exception:
                 _LOGGER.warning("investigator: generate_suggestions() failed")
-                lines += ["=== LEARNING — ACTIVE SUGGESTIONS ===", "  unavailable", ""]
+                lines += ["=== LEARNING â€” ACTIVE SUGGESTIONS ===", "  unavailable", ""]
 
-            # Daily records — window determined by caller's hours parameter
+            # Daily records â€” window determined by caller's hours parameter
             try:
                 state_obj = getattr(learning, "_state", None)
                 records: list[Any] = []
@@ -599,7 +599,7 @@ async def async_build_investigator_context(
                     if isinstance(raw_records, list):
                         records = raw_records[-daily_records_days:]
 
-                lines.append(f"=== LEARNING — LAST {daily_records_days} DAILY RECORDS ===")
+                lines.append(f"=== LEARNING â€” LAST {daily_records_days} DAILY RECORDS ===")
                 if records:
                     for rec in records:
                         if isinstance(rec, dict):
@@ -618,11 +618,11 @@ async def async_build_investigator_context(
                 lines.append("")
             except Exception:
                 _LOGGER.warning("investigator: failed to read daily records")
-                lines += [f"=== LEARNING — LAST {daily_records_days} DAILY RECORDS ===", "  unavailable", ""]
+                lines += [f"=== LEARNING â€” LAST {daily_records_days} DAILY RECORDS ===", "  unavailable", ""]
         else:
             lines += ["=== LEARNING ===", "  learning engine not available", ""]
     except Exception:
-        _LOGGER.warning("investigator: failed to access learning engine — skipping")
+        _LOGGER.warning("investigator: failed to access learning engine â€” skipping")
         lines += ["=== LEARNING ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
@@ -631,7 +631,7 @@ async def async_build_investigator_context(
     try:
         lines.append(_build_thermal_pipeline_context(coordinator))
     except Exception:
-        _LOGGER.warning("investigator: failed to build thermal pipeline context — skipping")
+        _LOGGER.warning("investigator: failed to build thermal pipeline context â€” skipping")
         lines += ["=== THERMAL OBSERVATION PIPELINE ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
@@ -685,7 +685,7 @@ async def async_build_investigator_context(
                 lines.append(f"    {entry}")
         lines.append("")
     except Exception:
-        _LOGGER.warning("investigator: failed to read event log — skipping")
+        _LOGGER.warning("investigator: failed to read event log â€” skipping")
         lines += ["=== EVENT LOG ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
@@ -710,7 +710,7 @@ async def async_build_investigator_context(
         else:
             lines += ["=== RECENT AI ACTIVITY REPORTS ===", "  get_ai_report_history not available", ""]
     except Exception:
-        _LOGGER.warning("investigator: failed to read AI report history — skipping")
+        _LOGGER.warning("investigator: failed to read AI report history â€” skipping")
         lines += ["=== RECENT AI ACTIVITY REPORTS ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
@@ -724,10 +724,10 @@ async def async_build_investigator_context(
         _comfort_cool = cfg.get("comfort_cool", "unknown")
         lines += [
             "=== CONFIGURATION ===",
-            f"  comfort_heat (lower bound): {_comfort_heat} — indoor must be >= this to be in comfort band",
-            f"  comfort_cool (upper bound): {_comfort_cool} — indoor must be <= this to be in comfort band",
-            f"  comfort_band: [{_comfort_heat}, {_comfort_cool}]°F"
-            " — temperature T is in-band only if comfort_heat <= T <= comfort_cool",
+            f"  comfort_heat (lower bound): {_comfort_heat} â€” indoor must be >= this to be in comfort band",
+            f"  comfort_cool (upper bound): {_comfort_cool} â€” indoor must be <= this to be in comfort band",
+            f"  comfort_band: [{_comfort_heat}, {_comfort_cool}]Â°F"
+            " â€” temperature T is in-band only if comfort_heat <= T <= comfort_cool",
             f"  setback_heat:    {cfg.get('setback_heat', 'unknown')}",
             f"  setback_cool:    {cfg.get('setback_cool', 'unknown')}",
             f"  wake_time:       {cfg.get('wake_time', 'unknown')}",
@@ -739,11 +739,11 @@ async def async_build_investigator_context(
             "",
         ]
     except Exception:
-        _LOGGER.warning("investigator: failed to read config — skipping")
+        _LOGGER.warning("investigator: failed to read config â€” skipping")
         lines += ["=== CONFIGURATION ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
-    # 7. CA operational design — prevents the AI from hallucinating
+    # 7. CA operational design â€” prevents the AI from hallucinating
     #    explanations for states that CA itself controls (#113)
     # ------------------------------------------------------------------
     lines += [
@@ -756,32 +756,34 @@ async def async_build_investigator_context(
         "  - It is a post-command thermostat transient (fan_status='running (untracked)')",
         "",
         "fan_status values explained:",
-        "  inactive                  — fan is off; CA has no record of activating it",
-        "  active                    — CA commanded the fan on (natural vent or HVAC fan-only)",
-        "  running (manual override) — fan running; user overrode CA's command at the thermostat",
-        "  running (untracked)       — thermostat reports fan on but CA's _fan_active=False;",
+        "  inactive                  â€” fan is off; CA has no record of activating it",
+        "  active                    â€” CA commanded the fan on (natural vent or HVAC fan-only)",
+        "  running (manual override) â€” fan running; user overrode CA's command at the thermostat",
+        "  running (untracked)       â€” thermostat reports fan on but CA's _fan_active=False;",
         "                             typical after HA restart, or post-heat blowdown transient",
-        "  off (manual override)     — _fan_override_active=True AND _fan_active=False; user turned",
+        "  off (manual override)     â€” _fan_override_active=True AND _fan_active=False; user turned",
         "                             the fan on at the thermostat (setting _fan_override_active=True),",
         "                             then turned it off before the grace period expired. The override",
         "                             is still in effect (grace period not yet cleared), physical fan is off.",
-        "  disabled                  — fan control feature is turned off in configuration",
+        "  disabled                  â€” fan control feature is turned off in configuration",
         "",
-        "Heating/cooling deadband (thermostat behavior — not a CA fault):",
-        "  Thermostats have a built-in deadband. Heating fires when indoor drops ~1-2°F",
+        "Heating/cooling deadband (thermostat behavior â€” not a CA fault):",
+        "  Thermostats have a built-in deadband. Heating fires when indoor drops ~1-2Â°F",
         "  below the setpoint and runs until slightly above. If CA commanded heat mode",
-        "  at comfort_heat=68°F and indoor=67°F, the thermostat reporting hvac_action=idle",
-        "  or hvac_action=fan is expected deadband behavior — not a CA failure.",
+        "  at comfort_heat=68Â°F and indoor=67Â°F, the thermostat reporting hvac_action=idle",
+        "  or hvac_action=fan is expected deadband behavior â€” not a CA failure.",
         "",
         "Warm-day comfort floor guard:",
-        "  When day_type is warm/hot, CA sets hvac_mode=off — but ONLY after indoor reaches",
+        "  When day_type is warm/hot, CA sets hvac_mode=off â€” but ONLY after indoor reaches",
         "  comfort_heat. If indoor < comfort_heat at automation time, CA heats first",
         "  (event: warm_day_comfort_gap) then shuts off. A brief morning heating cycle on",
         "  a warm day is intentional. This guard prevents comfort violations at shutoff.",
-        "  The warm_day_setback_applied event fires on EVERY 30-minute coordinator update",
-        "  cycle while the warm-day condition holds — it is NOT a once-per-day event.",
-        "  Seeing 60 or more firings in 48 hours is expected normal behavior on a sustained",
-        "  warm day, not a runaway loop or bug.",
+        "The warm_day_state_confirmed event fires every 30 min when the thermostat is already off"
+        " (heartbeat) — no service call is made.",
+        "The warm_day_setback_applied event fires when an actual setpoint or mode change is needed"
+        " (cool→setback_cool, heat→setback_heat, or hard off).",
+        "High event counts for warm_day_state_confirmed on sustained warm days are expected normal"
+        " behavior — 60+ firings in 48 hours is typical.",
         "",
         "Natural ventilation / economizer maintain phase:",
         "  CA can set hvac_mode=off AND fan_mode=on simultaneously for fan-only air",
@@ -798,7 +800,7 @@ async def async_build_investigator_context(
     # Version and release notes (Issue #105)
     lines.append(_build_version_context(coordinator))
 
-    # Behavioral invariant registry — scope-bounded fix history (Issue #144)
+    # Behavioral invariant registry â€” scope-bounded fix history (Issue #144)
     lines.append(_build_known_fixes_context(coordinator))
 
     # GitHub issues context (Issue #105)
@@ -865,7 +867,7 @@ def parse_investigation_response(raw_text: str) -> dict[str, Any]:
 
     _flush()
 
-    # Always restore full_text — _flush() cannot overwrite it because it is not in _header_map
+    # Always restore full_text â€” _flush() cannot overwrite it because it is not in _header_map
     sections["full_text"] = raw_text
     return sections
 
@@ -926,7 +928,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                             if not isinstance(rec, dict):
                                 continue
                             date_val = rec.get("date", "?")
-                            # `window_compliance` does NOT exist on DailyRecord — it is
+                            # `window_compliance` does NOT exist on DailyRecord â€” it is
                             # only an aggregate in get_compliance_summary(). Use the two
                             # per-record fields that do exist: windows_recommended and
                             # windows_opened (True only when recommended AND opened).
@@ -954,7 +956,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
                         if float(window_compliance) == 0.0:
                             incongruity_parts.append(
                                 "window_compliance is 0.0 but a 'low_window_compliance'"
-                                " suggestion exists — compliance counter may be zeroed incorrectly"
+                                " suggestion exists â€” compliance counter may be zeroed incorrectly"
                             )
                     except (TypeError, ValueError):
                         pass
@@ -1001,7 +1003,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     if total_issues == 0:
         summary_parts.append(
             "Fallback scan found no obvious incongruities, data quality issues, or system errors."
-            " AI analysis was unavailable — a full investigation requires the Claude API."
+            " AI analysis was unavailable â€” a full investigation requires the Claude API."
         )
     else:
         summary_parts.append(
@@ -1019,7 +1021,7 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
         "errors_warnings": (
             "\n".join(errors_parts) if errors_parts else "No errors or warnings in the supplied window."
         ),
-        "hypotheses": "AI unavailable — hypotheses require cross-source analysis by Claude.",
+        "hypotheses": "AI unavailable â€” hypotheses require cross-source analysis by Claude.",
         "recommended_actions": "Restore AI connectivity and re-run the full investigator skill.",
         "assumptions": "Fallback only scans deterministic patterns; deep inference was not performed.",
         "full_text": "",

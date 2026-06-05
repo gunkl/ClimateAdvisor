@@ -801,56 +801,81 @@ class AutomationEngine:
                 _current_mode = _cs_state.state if _cs_state else "unknown"
                 _setback_heat = self.config.get("setback_heat")
                 _setback_cool = self.config.get("setback_cool")
-                if _current_mode == "heat":
+                _setpoint_changed = False
+                _old_setpoint_f: float | None = None
+
+                if _current_mode == "off":
+                    # Thermostat already off — heartbeat, no service call needed.
+                    pass
+                elif _current_mode == "heat":
                     await self._set_temperature(
                         _setback_heat,
                         reason=f"warm-day setback: {classification.day_type} day, heating suppressed at setback_heat",
                     )
+                    _setpoint_changed = True
                 elif _current_mode == "cool":
                     # Capture old setpoint before adjustment
                     _cs = self.hass.states.get(self.climate_entity)
                     _old_setpoint_raw = _cs.attributes.get("temperature") if _cs else None
                     unit = self.config.get("temp_unit", "fahrenheit")
                     _old_setpoint_f = to_fahrenheit(_old_setpoint_raw, unit) if _old_setpoint_raw is not None else None
-
-                    await self._set_temperature(
-                        _setback_cool,
-                        reason=f"warm-day setback: {classification.day_type} day, cooling suppressed at setback_cool",
-                    )
+                    # Guard: skip service call if setpoint is already at setback_cool
+                    if _old_setpoint_f is not None and abs(_old_setpoint_f - _setback_cool) <= 0.5:
+                        pass  # Already at setback — heartbeat only
+                    else:
+                        await self._set_temperature(
+                            _setback_cool,
+                            reason=(
+                                f"warm-day setback: {classification.day_type} day, cooling suppressed at setback_cool"
+                            ),
+                        )
+                        _setpoint_changed = True
                 elif _current_mode in ("heat_cool", "auto"):
                     await self._set_temperature_dual(
                         _setback_heat,
                         _setback_cool,
                         reason=f"warm-day setback: {classification.day_type} day, dual setpoints prevent HVAC running",
                     )
+                    _setpoint_changed = True
                 else:
                     _LOGGER.warning(
-                        "warm-day setback: thermostat in unknown mode %r — falling back to hard off",
+                        "warm-day setback: thermostat in unknown mode %r -- falling back to hard off",
                         _current_mode,
                     )
                     await self._set_hvac_mode(
                         "off",
                         reason=(
-                            f"daily classification — {classification.day_type} day,"
+                            f"daily classification -- {classification.day_type} day,"
                             f" HVAC not needed (unknown mode={_current_mode})"
                         ),
                     )
+                    _setpoint_changed = True
+
                 if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "warm_day_setback_applied",
-                        {
-                            "day_type": classification.day_type,
-                            "thermostat_mode": _current_mode,
-                            **(
-                                {
-                                    "old_setpoint_f": _old_setpoint_f,
-                                    "new_setpoint_f": _setback_cool,
-                                }
-                                if _current_mode == "cool"
-                                else {}
-                            ),
-                        },
-                    )
+                    if _setpoint_changed:
+                        self._emit_event_callback(
+                            "warm_day_setback_applied",
+                            {
+                                "day_type": classification.day_type,
+                                "thermostat_mode": _current_mode,
+                                **(
+                                    {
+                                        "old_setpoint_f": _old_setpoint_f,
+                                        "new_setpoint_f": _setback_cool,
+                                    }
+                                    if _current_mode == "cool"
+                                    else {}
+                                ),
+                            },
+                        )
+                    else:
+                        self._emit_event_callback(
+                            "warm_day_state_confirmed",
+                            {
+                                "day_type": classification.day_type,
+                                "thermostat_mode": _current_mode,
+                            },
+                        )
 
         # ODE ceiling guard (Issue #136): if thermal model predicts indoor will breach
         # comfort_cool within lead_time AND outdoor is already warmer than indoor

@@ -432,9 +432,9 @@ class TestWarmDaySetbackEventPayload:
         assert payload["new_setpoint_f"] == 82.0
 
     def test_warm_day_setback_no_setpoint_when_already_off(self):
-        """Thermostat in 'off' mode (unknown path) → event does NOT have setpoint fields."""
+        """Thermostat in 'off' mode → emits warm_day_state_confirmed (heartbeat), no service call."""
         engine = _make_engine(comfort_heat=70.0)
-        # 'off' falls through to the else/unknown branch → hard-off, no setpoint fields
+        # Thermostat already off — new split: no service call, emits warm_day_state_confirmed
         climate_state = MagicMock()
         climate_state.state = "off"
         climate_state.attributes.get.return_value = 72.0  # indoor temp
@@ -446,11 +446,46 @@ class TestWarmDaySetbackEventPayload:
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
-        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
-        assert len(setback_events) == 1
-        payload = setback_events[0][1]
-        assert "old_setpoint_f" not in payload, "old_setpoint_f must NOT be present for non-cool mode"
-        assert "new_setpoint_f" not in payload, "new_setpoint_f must NOT be present for non-cool mode"
+        # No service call — thermostat is already off
+        assert len(_hvac_calls(engine)) == 0, "no hvac_mode call when thermostat already off"
+        assert len(_temp_calls(engine)) == 0, "no set_temperature call when thermostat already off"
+
+        # Event is warm_day_state_confirmed, not warm_day_setback_applied
+        confirmed = [e for e in events if e[0] == "warm_day_state_confirmed"]
+        applied = [e for e in events if e[0] == "warm_day_setback_applied"]
+        assert len(confirmed) == 1, "warm_day_state_confirmed must fire for already-off thermostat"
+        assert len(applied) == 0, "warm_day_setback_applied must NOT fire for already-off thermostat"
+        payload = confirmed[0][1]
+        assert payload["day_type"] == "warm"
+        assert payload["thermostat_mode"] == "off"
+        assert "old_setpoint_f" not in payload
+        assert "new_setpoint_f" not in payload
+
+    def test_warm_day_setback_confirmed_when_setpoint_already_correct(self):
+        """Mode=cool, setpoint already at setback_cool → warm_day_state_confirmed, no service call."""
+        engine = _make_engine(comfort_heat=70.0, config_overrides={"setback_cool": 82.0})
+        # Setpoint = 82.0°F (exactly equal to setback_cool) — within 0.5°F guard
+        self._set_climate_state_with_setpoint(engine, "cool", indoor_temp=72.0, setpoint=82.0)
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(c))
+
+        # No service call — setpoint already at setback
+        assert len(_hvac_calls(engine)) == 0, "no hvac_mode call when setpoint already correct"
+        assert len(_temp_calls(engine)) == 0, "no set_temperature call when setpoint already correct"
+
+        # Event is warm_day_state_confirmed
+        confirmed = [e for e in events if e[0] == "warm_day_state_confirmed"]
+        applied = [e for e in events if e[0] == "warm_day_setback_applied"]
+        assert len(confirmed) == 1, "warm_day_state_confirmed must fire when setpoint already at setback"
+        assert len(applied) == 0, "warm_day_setback_applied must NOT fire when no change needed"
+        payload = confirmed[0][1]
+        assert payload["thermostat_mode"] == "cool"
+        assert "old_setpoint_f" not in payload
+        assert "new_setpoint_f" not in payload
 
     def test_warm_day_setback_no_setpoint_when_heat_mode(self):
         """Thermostat in 'heat' mode → event does NOT have setpoint fields."""

@@ -55,8 +55,11 @@ Column definitions:
   - nat_vent_comfort_floor_exit / nat_vent_predicted_floor_exit: if fan_mode_change present â†’ "fan: onâ†’auto"; if hvac_mode_restored present â†’ prepend "mode: offâ†’X, "
   - grace_started: use trigger field in the Event description, NOT in Settings. Settings column stays blank for grace_started.
   - Leave Settings blank (empty cell) if no settings fields are present in the event data
-  - Events that do not change thermostat settings (grace_started, sensor_opened, sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) â†’ empty Settings cell
-- **Source**: Exactly one of: `automation`, `manual`, or `sensor`
+  - Events that do not change thermostat settings (grace_started, sensor_opened, sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) -> empty Settings cell
+- **Source**: Exactly one of: `automation`, `manual`, `sensor`, or `system`
+
+Special event types:
+- system_restarted: HA restart boundary marker. Events ABOVE are from the prior session (recovered_events field = count of pre-restart events preserved). Leave Settings blank.
 
 Source mapping rules:
 - Events with source_label=automation in the event log â†’ `automation`
@@ -253,12 +256,17 @@ _UNKNOWN_EVENT_TYPES = frozenset(
     }
 )
 
+_SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({"system_restarted"})
+
 
 def _event_source_label(event_type: str, data: dict) -> str | None:
     """Return source label for an event, or None if unknown/default.
 
-    Returns one of 'automation', 'manual', or None (caller treats None as unknown).
+    Returns one of 'automation', 'manual', 'system', or None (caller treats None as unknown).
     """
+    if event_type in _SYSTEM_EVENT_TYPES:
+        return "system"
+
     # Explicit source field takes precedence
     source = data.get("source")
     if source in ("automation", "manual"):

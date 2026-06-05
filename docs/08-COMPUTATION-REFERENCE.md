@@ -581,7 +581,7 @@ When `apply_classification()` runs and the day type is `warm` or `hot` with HVAC
 
 **30-minute convergence:** `apply_classification()` is called on every coordinator update (every 30 min). Once indoor temperature reaches `comfort_heat`, the guard condition is no longer met and the next update sets HVAC off normally. No separate timer is needed.
 
-**Event frequency — `warm_day_setback_applied`:** This event fires on every 30-minute coordinator update cycle while the warm-day condition persists — not once per day. Sixty or more firings in 48 hours is expected on a sustained warm day. High event counts for this type are not a loop or a bug.
+**Event frequency — `warm_day_state_confirmed` / `warm_day_setback_applied`:** `warm_day_state_confirmed` fires on every 30-minute coordinator update cycle while the thermostat is already in the correct warm-day state (mode=off, no setpoint change needed) — not once per day. Sixty or more firings in 48 hours is expected on a sustained warm day; this is a heartbeat, not a loop or a bug. `warm_day_setback_applied` fires only when an actual setpoint or mode change is made (e.g., resetting the setpoint from a ceiling guard's 74°F back to the 79°F setback value), which is infrequent.
 
 **Test coverage:** `tests/test_warm_day_comfort_gap.py`
 

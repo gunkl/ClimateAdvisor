@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 from custom_components.climate_advisor.ai_skills import AISkillRegistry
 from custom_components.climate_advisor.ai_skills_activity import (
+    _event_source_label,
     activity_fallback,
     async_build_activity_context,
     parse_activity_response,
@@ -496,6 +497,52 @@ class TestAsyncBuildActivityContext:
         context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
 
         assert "HISTORICAL DAILY SUMMARIES" not in context
+
+
+# ---------------------------------------------------------------------------
+# Issue #216 — _event_source_label sensor event classification
+# ---------------------------------------------------------------------------
+
+
+class TestEventSourceLabelSensorEvents:
+    """Verify _event_source_label classifies sensor hardware events correctly (Issue #216).
+
+    sensor_opened and sensor_all_closed are physical HA state-change events;
+    they should always return 'sensor', not 'automation' or 'manual'.
+    """
+
+    def test_sensor_opened_returns_sensor(self):
+        """sensor_opened → 'sensor' regardless of event data."""
+        assert _event_source_label("sensor_opened", {}) == "sensor"
+
+    def test_sensor_all_closed_returns_sensor(self):
+        """sensor_all_closed → 'sensor' regardless of event data."""
+        assert _event_source_label("sensor_all_closed", {}) == "sensor"
+
+    def test_sensor_opened_with_data_returns_sensor(self):
+        """sensor_opened with payload data → still 'sensor'."""
+        data = {"entity": "binary_sensor.front_door", "result": "paused", "hvac_mode_change": "heat→off"}
+        assert _event_source_label("sensor_opened", data) == "sensor"
+
+    def test_sensor_all_closed_with_data_returns_sensor(self):
+        """sensor_all_closed with payload data → still 'sensor'."""
+        data = {"was_paused": True, "was_nat_vent": False}
+        assert _event_source_label("sensor_all_closed", data) == "sensor"
+
+    def test_automation_event_returns_automation(self):
+        """A known automation event type → 'automation'."""
+        assert _event_source_label("warm_day_setback_applied", {}) == "automation"
+        assert _event_source_label("warm_day_state_confirmed", {}) == "automation"
+
+    def test_manual_event_returns_manual(self):
+        """A known manual event type → 'manual'."""
+        assert _event_source_label("override_detected", {}) == "manual"
+
+    def test_nat_vent_prefix_returns_automation(self):
+        """nat_vent_* prefix → 'automation'."""
+        assert _event_source_label("nat_vent_comfort_floor_exit", {}) == "automation"
+        assert _event_source_label("nat_vent_predicted_floor_exit", {}) == "automation"
+        assert _event_source_label("nat_vent_outdoor_rise_exit", {}) == "automation"
 
     def test_context_event_log_header_reflects_hours(self):
         """Event log section header shows the actual hours value, not a hardcoded '24h'."""

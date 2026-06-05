@@ -483,6 +483,129 @@ class TestGracePeriodDuration:
         assert DEFAULT_AUTOMATION_GRACE_SECONDS == 300
 
 
+# ---------------------------------------------------------------------------
+# Issue #216 — sensor_opened event payload fields (nat_vent result)
+# ---------------------------------------------------------------------------
+
+
+class TestSensorOpenedEventPayloadNatVent:
+    """Verify sensor_opened event includes hvac_mode_change and fan_mode_change
+    when the result is natural_ventilation (Issue #216).
+    """
+
+    def _make_engine_for_nat_vent(self, outdoor_temp: float = 65.0, indoor_temp: float = 72.0) -> AutomationEngine:
+        """Build an engine pre-configured for a nat-vent scenario."""
+        engine = _make_automation_engine(
+            config_overrides={
+                "comfort_cool": 75.0,
+                "comfort_heat": 70.0,
+            }
+        )
+        # Set up climate state (provides indoor temp via current_temperature attribute)
+        climate_state = MagicMock()
+        climate_state.state = "heat"
+        climate_state.attributes.get.return_value = indoor_temp
+        engine.hass.states.get.return_value = climate_state
+
+        # Inject outdoor temperature directly (normally set by coordinator)
+        engine._last_outdoor_temp = outdoor_temp
+        # No hourly forecast → skip forecast guard
+        engine._hourly_forecast_temps = []
+        return engine
+
+    def test_sensor_opened_nat_vent_includes_hvac_and_fan_mode(self):
+        """sensor_opened with nat_vent result → event has hvac_mode_change and fan_mode_change."""
+        engine = self._make_engine_for_nat_vent(outdoor_temp=65.0, indoor_temp=72.0)
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        with patch("custom_components.climate_advisor.automation.async_call_later"):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        opened_events = [e for e in events if e[0] == "sensor_opened"]
+        assert len(opened_events) == 1
+        payload = opened_events[0][1]
+        assert payload.get("result") == "natural_ventilation"
+        assert "hvac_mode_change" in payload, "hvac_mode_change must be present for nat_vent result"
+        assert "fan_mode_change" in payload, "fan_mode_change must be present for nat_vent result"
+        # hvac transitions to off; fan transitions to on
+        assert payload["hvac_mode_change"].endswith("→off")
+        assert payload["fan_mode_change"] == "auto→on"
+
+    def test_sensor_opened_paused_result_has_hvac_mode_change(self):
+        """sensor_opened with paused result → event has hvac_mode_change field."""
+        engine = _make_automation_engine()
+        # outdoor warmer than indoor → no nat-vent → pause path
+        climate_state = MagicMock()
+        climate_state.state = "heat"
+        climate_state.attributes.get.return_value = 72.0
+        engine.hass.states.get.return_value = climate_state
+        engine._last_outdoor_temp = 80.0  # outdoor > indoor → no nat-vent
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        with patch("custom_components.climate_advisor.automation.async_call_later"):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        opened_events = [e for e in events if e[0] == "sensor_opened"]
+        assert len(opened_events) == 1
+        payload = opened_events[0][1]
+        assert payload.get("result") == "paused"
+        assert "hvac_mode_change" in payload, "hvac_mode_change must be present for paused result"
+        assert payload["hvac_mode_change"] == "heat→off"
+
+
+# ---------------------------------------------------------------------------
+# Issue #216 — grace_started event payload trigger field
+# ---------------------------------------------------------------------------
+
+
+class TestGraceStartedEventTrigger:
+    """Verify grace_started event includes a trigger field with the correct value
+    for each of the five grace trigger paths (Issue #216).
+    """
+
+    def test_grace_started_sensor_closed_resume_trigger(self):
+        """Door/window closed → grace_started event has trigger='sensor_closed_resume'."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "heat"
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        with patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()):
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        grace_events = [e for e in events if e[0] == "grace_started"]
+        assert len(grace_events) == 1
+        payload = grace_events[0][1]
+        assert "trigger" in payload, "grace_started event must have a trigger field"
+        assert payload["trigger"] == "sensor_closed_resume"
+
+    def test_grace_started_override_confirmed_trigger(self):
+        """Manual override confirmed → grace_started event has trigger='override_confirmed'.
+
+        _confirm_override() is the private method that formalises a manual override
+        and calls _start_grace_period(trigger='override_confirmed').
+        """
+        engine = _make_automation_engine()
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        with patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()):
+            engine._confirm_override("cool")
+
+        grace_events = [e for e in events if e[0] == "grace_started"]
+        assert len(grace_events) == 1
+        payload = grace_events[0][1]
+        assert "trigger" in payload, "grace_started event must have a trigger field"
+        assert payload["trigger"] == "override_confirmed"
+
+
 class TestGracePeriodNotifications:
     """Tests for grace period notification toggles."""
 

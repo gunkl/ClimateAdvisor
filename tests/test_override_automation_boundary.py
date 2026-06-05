@@ -511,3 +511,81 @@ class TestExpectedStateSuppress:
         asyncio.run(coord._async_thermostat_changed(event))
 
         coord.automation_engine.handle_manual_override_during_pause.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestWarmDayHvacActionCycling (Regression test for commit 5b3edbe)
+# ---------------------------------------------------------------------------
+
+
+class TestWarmDayHvacActionCycling:
+    """Regression test for warm_day_state_confirmed split (commit 5b3edbe).
+
+    Issue: Removing the heartbeat _set_hvac_mode("off") call on warm days when mode
+    is already off stales _hvac_command_time. The audit claims this could cause false
+    override detection when hvac_action cycles (idle→cooling) with mode still off.
+
+    Counter-hypothesis: The old_state.state != new_state.state guard (commit 56ba2a7)
+    blocks hvac_action attribute changes from reaching the 3-second guard, because
+    mode stays "off" during hvac_action cycling, making old_state.state == new_state.state.
+
+    This test validates the counter-hypothesis:
+    - PASS: old_state != new_state guard works, no false override on attribute-only changes
+    - FAIL: regression is real, heartbeat timer refresh fix needed
+    """
+
+    def test_warm_day_hvac_action_cycling_no_false_override(self):
+        """Warm day, thermostat mode stays 'off', but hvac_action cycles (idle→cooling).
+
+        Simulates the scenario from commit 5b3edbe regression audit:
+        - _hvac_command_time is stale (10 minutes ago, no recent service call)
+        - _last_commanded_hvac_mode is stale or None
+        - Thermostat emits state_changed with old_state.state == new_state.state == "off"
+          but different hvac_action attribute (attribute-only event)
+
+        Expected: NO override detected.
+        Mechanism: old_state.state == new_state.state prevents override paths from firing.
+        """
+        coord = _make_thermostat_coord_stub(
+            hvac_command_pending=False,
+            fan_command_pending=False,
+            temp_command_pending=False,
+            paused_by_door=True,  # pause path active
+        )
+
+        # Stale _hvac_command_time (10 minutes ago)
+        ae = coord.automation_engine
+        ae._hvac_command_time = datetime(2026, 6, 2, 9, 50, 0)  # 10 min before _FIXED_NOW (10:00)
+        ae._last_commanded_hvac_mode = None  # stale
+        ae._last_commanded_hvac_time = None
+
+        # State change: mode stays "off", hvac_action changes (attribute-only event)
+        # old_state.state == new_state.state == "off" — should skip override detection
+        event = _make_event("off", "off")  # both old and new state are "off"
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        # Should NOT detect override — old_state.state == new_state.state guards both paths
+        coord.automation_engine.handle_manual_override_during_pause.assert_not_called()
+
+    def test_warm_day_state_off_to_off_attribute_change_normal_path(self):
+        """Complement: normal path (not paused) also skips attribute-only changes."""
+        classification = _make_classification(hvac_mode="off")
+        coord = _make_thermostat_coord_stub(
+            hvac_command_pending=False,
+            fan_command_pending=False,
+            temp_command_pending=False,
+            paused_by_door=False,  # normal path
+            classification=classification,
+        )
+
+        ae = coord.automation_engine
+        ae._hvac_command_time = datetime(2026, 6, 2, 9, 50, 0)  # stale
+        ae._last_commanded_hvac_mode = None
+        ae._last_commanded_hvac_time = None
+
+        # Attribute-only event: mode stays "off"
+        event = _make_event("off", "off")
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        # Normal-path override check also requires old_state != new_state, so it must not fire
+        coord.automation_engine.handle_manual_override.assert_not_called()

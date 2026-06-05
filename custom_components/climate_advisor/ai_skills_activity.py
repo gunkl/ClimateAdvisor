@@ -1,5 +1,7 @@
 """Activity Report AI skill for Climate Advisor."""
 
+# ruff: noqa: E501  # _SYSTEM_PROMPT contains intentionally long AI instruction lines that cannot be wrapped
+
 from __future__ import annotations
 
 import datetime
@@ -32,8 +34,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _SKILL_NAME = "activity_report"
 
-_SYSTEM_PROMPT = """\
-You are an HVAC automation diagnostic assistant for Climate Advisor, a Home Assistant integration.
+_SYSTEM_PROMPT = """You are an HVAC automation diagnostic assistant for Climate Advisor, a Home Assistant integration.
 Analyze the provided system state and sensor data.
 Return your analysis with these exact section headers (use ## for headers):
 ## SUMMARY
@@ -43,27 +44,32 @@ Output a markdown table with four columns: Time | Event | Settings | Source
 
 Column definitions:
 - **Time**: HH:MM (24-hour format)
-- **Event**: One-line description (max 80 chars). Compress consecutive same-type \
-automation events into one row with count and time range, e.g. "Warm-day setback \
-applied ×10" with time range in the Event column. Do NOT use sub-bullets or nested lists.
+- **Event**: One-line description (max 80 chars). Compress consecutive same-type automation events into one row with count and time range, e.g. "Warm-day setback applied ×10" with time range in the Event column. Do NOT use sub-bullets or nested lists.
 - **Settings**: Thermostat settings changed by this event. Use the following rules:
   - If event data has `old_hvac_mode` and `new_hvac_mode` fields that differ → show "mode: X→Y"
-  - If event data also has `new_setpoint_f` or `old_setpoint` → append ", setpoint: A→B°F" \
-(round to 1 decimal if needed)
+  - If event data also has `new_setpoint_f` or `old_setpoint` → append ", setpoint: A→B°F" (round to 1 decimal if needed)
   - For `override_detected` events → use `old_mode`→`new_mode` from event data for the mode change
+  - warm_day_setback_applied: if old_setpoint_f/new_setpoint_f present → "setpoint: A→B°F". If absent, this is a heartbeat confirmation (no change); leave Settings blank.
+  - sensor_opened: if hvac_mode_change present → render it; if fan_mode_change present → append it. Example: "mode: cool→off, fan: auto→on"
+  - nat_vent_comfort_floor_exit / nat_vent_predicted_floor_exit: if fan_mode_change present → "fan: on→auto"; if hvac_mode_restored present → prepend "mode: off→X, "
+  - grace_started: use trigger field in the Event description, NOT in Settings. Settings column stays blank for grace_started.
   - Leave Settings blank (empty cell) if no settings fields are present in the event data
-  - Events that do not change thermostat settings (grace_started, sensor_opened, \
-sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) → empty Settings cell
-- **Source**: Exactly one of: `automation`, `manual`, or `unknown`
+  - Events that do not change thermostat settings (grace_started, sensor_opened, sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) → empty Settings cell
+- **Source**: Exactly one of: `automation`, `manual`, or `sensor`
 
 Source mapping rules:
 - Events with source_label=automation in the event log → `automation`
 - Events with source_label=manual → `manual`
 - override_detected, override_confirmed, manual_override records → `manual`
-- nat_vent_* events, ceiling_guard_fired, classification_applied, \
-grace_started{source=automation} → `automation`
-- sensor_opened, sensor_all_closed (hardware events) → `unknown`
-- Events without source_label and not matching above → `unknown`
+- nat_vent_* events, ceiling_guard_fired, classification_applied, grace_started{source=automation} → `automation`
+- sensor_opened, sensor_all_closed (hardware events) → `sensor`
+- Events without source_label and not matching above → `sensor`
+
+Grace period triggers: grace_started events do not always follow an override_detected event. Five trigger paths exist (shown in the trigger field): override_confirmed, fan_manual_override, sensor_closed_resume, nat_vent_exit_resume, dashboard_resume. Show the trigger value in the Event description to explain the context.
+
+Warm-day setback grouping rule:
+- warm_day_setback_applied events WITH setpoint fields = active setpoint reset (during ceiling guard cooling window). Do NOT collapse these; show each with its Settings entry.
+- warm_day_setback_applied events WITHOUT setpoint fields = heartbeat confirmations (mode already correct, no thermostat change). Collapse consecutive runs as "Warm-day setback ×N (HH:MM–HH:MM)".
 
 Example output:
 | Time | Event | Settings | Source |
@@ -82,19 +88,11 @@ If a HISTORICAL DAILY SUMMARIES section is present in the context:
 - In ANOMALIES: flag patterns that repeat across multiple days (e.g. daily overrides, recurring violations).
 ## DECISIONS
 Why each automation action was taken, with the logic explained.
-When fan_status is active while hvac_mode is off, explicitly trace the fan state to \
-the logged automation action that caused it (e.g., "Fan activated — natural \
-ventilation: outdoor X°F ≤ threshold"). Do not describe the state in isolation.
+When fan_status is active while hvac_mode is off, explicitly trace the fan state to the logged automation action that caused it (e.g., "Fan activated — natural ventilation: outdoor X°F ≤ threshold"). Do not describe the state in isolation.
 ## ANOMALIES
 Anything unusual: long runtimes, frequent cycling, comfort violations, unexpected states.
-IMPORTANT: The STATE CROSS-VALIDATION section in the context contains pre-computed flags. \
-If it contains [WARNING] or [FLAG] entries, call each one out explicitly here — do NOT \
-construct explanatory narratives around contradictions. Treat them as data quality issues \
-or potential hardware bugs requiring investigation.
-NUMERIC VERIFICATION RULE: A temperature T is within comfort band [L, H] only if \
-L <= T <= H. Verify the arithmetic directly against supplied numeric values before making \
-any comfort characterization statement. The cross-validation section already contains \
-this check — reference it rather than re-deriving.
+IMPORTANT: The STATE CROSS-VALIDATION section in the context contains pre-computed flags. If it contains [WARNING] or [FLAG] entries, call each one out explicitly here — do NOT construct explanatory narratives around contradictions. Treat them as data quality issues or potential hardware bugs requiring investigation.
+NUMERIC VERIFICATION RULE: A temperature T is within comfort band [L, H] only if L <= T <= H. Verify the arithmetic directly against supplied numeric values before making any comfort characterization statement. The cross-validation section already contains this check — reference it rather than re-deriving.
 ## DIAGNOSTICS
 System health observations: sensor connectivity, automation engine status, learning state.
 
@@ -102,13 +100,10 @@ SECTION ROLES ARE EXCLUSIVE:
 - SUMMARY: current state only. No analysis, no decisions, no explanations.
 - TIMELINE: chronological events only. No "why" analysis.
 - DECISIONS: explain WHY each automation action was taken. Do NOT re-describe what Timeline already covered.
-- ANOMALIES: items that deviate from expected behavior ONLY. Do NOT re-explain decisions already in Decisions. \
-Reference [FLAG] items briefly — do not construct a full explanatory narrative.
+- ANOMALIES: items that deviate from expected behavior ONLY. Do NOT re-explain decisions already in Decisions. Reference [FLAG] items briefly — do not construct a full explanatory narrative.
 - DIAGNOSTICS: subsystem health only. Do NOT repeat anomalies or decisions.
 
-DEDUPLICATION RULE: Do not repeat any fact or analysis already covered in a prior section. \
-A one-line cross-reference ("see Decisions") is acceptable; re-stating the same analysis verbatim is not.\
-"""
+DEDUPLICATION RULE: Do not repeat any fact or analysis already covered in a prior section. A one-line cross-reference ("see Decisions") is acceptable; re-stating the same analysis verbatim is not."""
 
 
 def _fmt_hours(h: float) -> str:
@@ -150,11 +145,11 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
             overrides = int(r.get("manual_overrides", 0) or 0)
             viol_min = int(r.get("comfort_violations_minutes", 0) or 0)
             avg_in = r.get("avg_indoor_temp")
-            avg_in_str = f"{avg_in:.1f}°F" if isinstance(avg_in, (int, float)) else "n/a"
+            avg_in_str = f"{avg_in:.1f}Â°F" if isinstance(avg_in, (int, float)) else "n/a"
             obs_high = r.get("observed_high_f")
             obs_low = r.get("observed_low_f")
             hl_str = (
-                f"{obs_high:.0f}°F/{obs_low:.0f}°F"
+                f"{obs_high:.0f}Â°F/{obs_low:.0f}Â°F"
                 if isinstance(obs_high, (int, float)) and isinstance(obs_low, (int, float))
                 else "n/a"
             )
@@ -167,7 +162,7 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
         note = "  Note: event log ring buffer covers ~50-60h; use daily summaries for context beyond that."
         return ["", header, col_hdr, sep, *rows, note]
     except Exception:
-        _LOGGER.warning("activity_report: failed to build daily summaries — skipping")
+        _LOGGER.warning("activity_report: failed to build daily summaries â€” skipping")
         return []
 
 
@@ -200,12 +195,12 @@ def _format_engine_status_for_ai(engine_status: dict) -> str:
         detail = ", ".join(str(p) for p in parts)
         return f"  {label}: ({detail}) [ACTIVE]"
 
-    lines.append(_engine_line("k_passive", "k_passive", " hr⁻¹"))
-    lines.append(_engine_line("k_solar", "k_solar", " °F/hr"))
+    lines.append(_engine_line("k_passive", "k_passive", " hrâ»Â¹"))
+    lines.append(_engine_line("k_solar", "k_solar", " Â°F/hr"))
     lines.append(_engine_line("solar_phase_offset_h", "solar_phase_offset_h", "h"))
-    lines.append(_engine_line("k_vent_window", "k_vent_window", " hr⁻¹"))
+    lines.append(_engine_line("k_vent_window", "k_vent_window", " hrâ»Â¹"))
 
-    # k_active_hvac has a different shape — values nested under "value": {"heat": ..., "cool": ...}
+    # k_active_hvac has a different shape â€” values nested under "value": {"heat": ..., "cool": ...}
     hvac_info = engine_status.get("k_active_hvac", {})
     if isinstance(hvac_info, dict) and hvac_info.get("active"):
         _hvac_value = hvac_info.get("value") or {}
@@ -215,7 +210,7 @@ def _format_engine_status_for_ai(engine_status: dict) -> str:
         heat_str = f"{heat:.4f}" if isinstance(heat, float) else str(heat)
         cool_str = f"{cool:.4f}" if isinstance(cool, float) else str(cool)
         since_str = f", since {since}" if since else ""
-        lines.append(f"  k_active_hvac: heat={heat_str} cool={cool_str} °F/hr{since_str} [ACTIVE]")
+        lines.append(f"  k_active_hvac: heat={heat_str} cool={cool_str} Â°F/hr{since_str} [ACTIVE]")
     else:
         lines.append("  k_active_hvac: (not yet active)")
 
@@ -264,7 +259,7 @@ def _event_source_label(event_type: str, data: dict) -> str | None:
     if source in ("automation", "manual"):
         return source
 
-    # nat_vent_* prefix → automation
+    # nat_vent_* prefix â†’ automation
     if event_type.startswith("nat_vent_"):
         return "automation"
 
@@ -281,7 +276,7 @@ def _event_source_label(event_type: str, data: dict) -> str | None:
         return "manual"
 
     if event_type in _UNKNOWN_EVENT_TYPES:
-        return "unknown"
+        return "sensor"  # physical HA sensor state change (door/window open/close)
 
     return None
 
@@ -297,7 +292,7 @@ async def async_build_activity_context(
     structured text block suitable for Claude analysis.
     """
     hours: float = float(kwargs.get("hours", 24))
-    hours = max(1.0, min(hours, 168.0))  # clamp to frontend range 1–168h
+    hours = max(1.0, min(hours, 168.0))  # clamp to frontend range 1â€“168h
 
     data: dict[str, Any] = coordinator.data or {}
     options: dict[str, Any] = coordinator.config or {}
@@ -306,7 +301,7 @@ async def async_build_activity_context(
     day_type = data.get(ATTR_DAY_TYPE, "unknown")
     trend = data.get(ATTR_TREND, "unknown")
     hvac_action = data.get(ATTR_HVAC_ACTION, "unknown")
-    # Compute fresh runtime — coordinator.data may be up to 30 min stale
+    # Compute fresh runtime â€” coordinator.data may be up to 30 min stale
     _base_runtime = coordinator._today_record.hvac_runtime_minutes if coordinator._today_record is not None else 0.0
     _session_elapsed = (
         (dt_util.now() - coordinator._hvac_on_since).total_seconds() / 60.0
@@ -388,10 +383,10 @@ async def async_build_activity_context(
             pass  # Expected: CA activated HVAC fan-only mode for natural ventilation
         else:
             state_flags.append(
-                f"[WARNING] hvac_mode=off but hvac_action={hvac_action!r} — "
+                f"[WARNING] hvac_mode=off but hvac_action={hvac_action!r} â€” "
                 "possible stale coordinator data or thermostat reporting bug"
             )
-    # Acquire thermostat swing/deadband — suppress flags for within-swing shortfalls.
+    # Acquire thermostat swing/deadband â€” suppress flags for within-swing shortfalls.
     _swing_heat_f = THERMAL_SWING_DEFAULT_F
     _swing_cool_f = THERMAL_SWING_DEFAULT_F
     _temp_unit = options.get("temp_unit", "fahrenheit")
@@ -411,16 +406,16 @@ async def async_build_activity_context(
         ct = float(current_temp)
         if (ch - ct) > _swing_heat_f:
             state_flags.append(
-                f"[FLAG] Indoor {ct}°F < comfort_heat {ch}°F — "
-                f"below by {ch - ct:.1f}°F (deadband: {_swing_heat_f:.1f}°F)"
+                f"[FLAG] Indoor {ct}Â°F < comfort_heat {ch}Â°F â€” "
+                f"below by {ch - ct:.1f}Â°F (deadband: {_swing_heat_f:.1f}Â°F)"
             )
         elif (ct - cc) > _swing_cool_f:
             state_flags.append(
-                f"[FLAG] Indoor {ct}°F > comfort_cool {cc}°F — "
-                f"above by {ct - cc:.1f}°F (deadband: {_swing_cool_f:.1f}°F)"
+                f"[FLAG] Indoor {ct}Â°F > comfort_cool {cc}Â°F â€” "
+                f"above by {ct - cc:.1f}Â°F (deadband: {_swing_cool_f:.1f}Â°F)"
             )
         else:
-            state_flags.append(f"[OK] Indoor {ct}°F is within comfort band [{ch}–{cc}°F]")
+            state_flags.append(f"[OK] Indoor {ct}Â°F is within comfort band [{ch}â€“{cc}Â°F]")
     except (ValueError, TypeError):
         pass
 
@@ -443,7 +438,9 @@ async def async_build_activity_context(
                 direction = d.get("direction", "?")
                 magnitude = d.get("magnitude", "?")
                 sign = "+" if direction == "up" else "-"
-                override_detail_lines.append(f"  #{i}  {t}  {old_t}°F → {new_t}°F  ({sign}{magnitude}°F, {direction})")
+                override_detail_lines.append(
+                    f"  #{i}  {t}  {old_t}Â°F â†’ {new_t}Â°F  ({sign}{magnitude}Â°F, {direction})"
+                )
         else:
             override_detail_lines.append("  (no setpoint overrides recorded today)")
 
@@ -468,7 +465,7 @@ async def async_build_activity_context(
         else:
             override_detail_lines.append("  Current override:  none active")
     except Exception:
-        _LOGGER.warning("activity_report: failed to build override detail section — skipping")
+        _LOGGER.warning("activity_report: failed to build override detail section â€” skipping")
         override_detail_lines = ["  (unavailable)"]
 
     # --- Format context block ---
@@ -554,7 +551,7 @@ async def async_build_activity_context(
                 if event_dt is not None and event_dt < cutoff:
                     continue
 
-            # Format: "HH:MM — event_type: key=value ... [source_label=X]"
+            # Format: "HH:MM â€” event_type: key=value ... [source_label=X]"
             if isinstance(raw_time, datetime.datetime):
                 time_str = raw_time.strftime("%H:%M")
             elif raw_time is not None:
@@ -573,7 +570,7 @@ async def async_build_activity_context(
             label = _event_source_label(event_type, data_fields)
             label_str = f" source_label={label}" if label is not None else ""
 
-            line = f"  {time_str} — {event_type}: {fields_str}{label_str}".rstrip(": ")
+            line = f"  {time_str} â€” {event_type}: {fields_str}{label_str}".rstrip(": ")
             event_lines.append(line)
 
         lines += [
@@ -582,7 +579,7 @@ async def async_build_activity_context(
             *(event_lines if event_lines else [f"  (no events in last {_fmt_hours(hours)})"]),
         ]
     except Exception:
-        _LOGGER.warning("activity_report: failed to read event log — skipping")
+        _LOGGER.warning("activity_report: failed to read event log â€” skipping")
         lines += ["", "## EVENT LOG", "  (unavailable)"]
 
     if hours > 36:
@@ -630,7 +627,7 @@ def parse_activity_response(raw_response: str) -> dict[str, Any]:
             current_lines = []
             header_name = stripped[3:].strip().upper()
             current_key = _header_map.get(header_name)
-            # Unrecognised header — discard content until next known header
+            # Unrecognised header â€” discard content until next known header
             if current_key is None:
                 _LOGGER.debug(
                     "Activity response parser: unknown header '%s', skipping",
@@ -668,7 +665,7 @@ def activity_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
 
     timeline_parts = []
     if last_action_time and last_action_time != "unknown":
-        timeline_parts.append(f"{last_action_time} — {last_action_reason or 'action taken'}")
+        timeline_parts.append(f"{last_action_time} â€” {last_action_reason or 'action taken'}")
     if next_action and next_action != "unknown":
         timeline_parts.append(f"Next: {next_action} at {next_action_time or 'unscheduled'}")
     timeline = "\n".join(timeline_parts) if timeline_parts else "No recent events recorded."

@@ -377,3 +377,94 @@ class TestWarmDaySetbackInsteadOfOff:
         service_temp = calls[0].args[2]["temperature"]
         # from_fahrenheit(60, "celsius") = (60-32)*5/9 = 15.555... ≈ 15.6
         assert abs(service_temp - 15.6) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# Issue #216 — warm_day_setback_applied event payload fields
+# ---------------------------------------------------------------------------
+
+
+class TestWarmDaySetbackEventPayload:
+    """Verify warm_day_setback_applied event includes setpoint fields for cool mode
+    and omits them for other modes (Issue #216).
+    """
+
+    def _set_climate_state_with_setpoint(
+        self,
+        engine: AutomationEngine,
+        thermostat_mode: str,
+        indoor_temp: float = 72.0,
+        setpoint: float = 75.0,
+    ) -> None:
+        """Configure climate state with both current_temperature and temperature setpoint."""
+        climate_state = MagicMock()
+        climate_state.state = thermostat_mode
+
+        def _attr_get(key, default=None):
+            if key == "current_temperature":
+                return indoor_temp
+            if key == "temperature":
+                return setpoint
+            return default
+
+        climate_state.attributes.get.side_effect = _attr_get
+        engine.hass.states.get.return_value = climate_state
+
+    def test_warm_day_setback_includes_setpoint_when_cool(self):
+        """Thermostat in 'cool' mode → event has old_setpoint_f and new_setpoint_f fields."""
+        engine = _make_engine(comfort_heat=70.0, config_overrides={"setback_cool": 82.0})
+        self._set_climate_state_with_setpoint(engine, "cool", indoor_temp=72.0, setpoint=75.0)
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(c))
+
+        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
+        assert len(setback_events) == 1
+        payload = setback_events[0][1]
+        assert payload["thermostat_mode"] == "cool"
+        assert "old_setpoint_f" in payload, "old_setpoint_f must be present for cool mode"
+        assert "new_setpoint_f" in payload, "new_setpoint_f must be present for cool mode"
+        # old setpoint was 75°F (read from thermostat); new is setback_cool=82°F
+        assert payload["old_setpoint_f"] == 75.0
+        assert payload["new_setpoint_f"] == 82.0
+
+    def test_warm_day_setback_no_setpoint_when_already_off(self):
+        """Thermostat in 'off' mode (unknown path) → event does NOT have setpoint fields."""
+        engine = _make_engine(comfort_heat=70.0)
+        # 'off' falls through to the else/unknown branch → hard-off, no setpoint fields
+        climate_state = MagicMock()
+        climate_state.state = "off"
+        climate_state.attributes.get.return_value = 72.0  # indoor temp
+        engine.hass.states.get.return_value = climate_state
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(c))
+
+        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
+        assert len(setback_events) == 1
+        payload = setback_events[0][1]
+        assert "old_setpoint_f" not in payload, "old_setpoint_f must NOT be present for non-cool mode"
+        assert "new_setpoint_f" not in payload, "new_setpoint_f must NOT be present for non-cool mode"
+
+    def test_warm_day_setback_no_setpoint_when_heat_mode(self):
+        """Thermostat in 'heat' mode → event does NOT have setpoint fields."""
+        engine = _make_engine(comfort_heat=70.0)
+        _set_climate_state(engine, "heat", indoor_temp=72.0)
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(c))
+
+        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
+        assert len(setback_events) == 1
+        payload = setback_events[0][1]
+        assert "old_setpoint_f" not in payload
+        assert "new_setpoint_f" not in payload

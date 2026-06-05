@@ -434,7 +434,7 @@ class AutomationEngine:
             "Fan manual override activated at %s",
             self._fan_override_time,
         )
-        self._start_grace_period("manual")
+        self._start_grace_period("manual", trigger="fan_manual_override")
 
     def clear_fan_override(self) -> None:
         """Clear the fan override flag (called at transition points)."""
@@ -668,7 +668,7 @@ class AutomationEngine:
             "Manual override activated: mode=%s",
             self._manual_override_mode,
         )
-        self._start_grace_period("manual")
+        self._start_grace_period("manual", trigger="override_confirmed")
 
     async def apply_classification(
         self,
@@ -807,6 +807,12 @@ class AutomationEngine:
                         reason=f"warm-day setback: {classification.day_type} day, heating suppressed at setback_heat",
                     )
                 elif _current_mode == "cool":
+                    # Capture old setpoint before adjustment
+                    _cs = self.hass.states.get(self.climate_entity)
+                    _old_setpoint_raw = _cs.attributes.get("temperature") if _cs else None
+                    unit = self.config.get("temp_unit", "fahrenheit")
+                    _old_setpoint_f = to_fahrenheit(_old_setpoint_raw, unit) if _old_setpoint_raw is not None else None
+
                     await self._set_temperature(
                         _setback_cool,
                         reason=f"warm-day setback: {classification.day_type} day, cooling suppressed at setback_cool",
@@ -835,7 +841,14 @@ class AutomationEngine:
                         {
                             "day_type": classification.day_type,
                             "thermostat_mode": _current_mode,
-                            "old_hvac_mode": _current_mode,
+                            **(
+                                {
+                                    "old_setpoint_f": _old_setpoint_f,
+                                    "new_setpoint_f": _setback_cool,
+                                }
+                                if _current_mode == "cool"
+                                else {}
+                            ),
                         },
                     )
 
@@ -1312,6 +1325,10 @@ class AutomationEngine:
                                     )
 
             if not _skip_nat_vent:
+                # Capture mode before nat_vent changes
+                _old_mode_nv = self.hass.states.get(self.climate_entity)
+                _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
+
                 nat_vent_reason = (
                     f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
                     f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
@@ -1327,7 +1344,15 @@ class AutomationEngine:
                     nat_vent_threshold,
                 )
                 if self._emit_event_callback:
-                    self._emit_event_callback("sensor_opened", {"entity": entity_id, "result": "natural_ventilation"})
+                    self._emit_event_callback(
+                        "sensor_opened",
+                        {
+                            "entity": entity_id,
+                            "result": "natural_ventilation",
+                            "hvac_mode_change": f"{_old_mode_nv}→off",
+                            "fan_mode_change": "auto→on",
+                        },
+                    )
                 return
 
         # Get current mode before pausing
@@ -1338,7 +1363,14 @@ class AutomationEngine:
         if self._pre_pause_mode and self._pre_pause_mode != "off":
             self._paused_by_door = True
             if self._emit_event_callback:
-                self._emit_event_callback("sensor_opened", {"entity": entity_id, "result": "paused"})
+                self._emit_event_callback(
+                    "sensor_opened",
+                    {
+                        "entity": entity_id,
+                        "result": "paused",
+                        "hvac_mode_change": f"{self._pre_pause_mode}→off",
+                    },
+                )
             await self._set_hvac_mode(
                 "off",
                 reason=f"door/window open — {entity_id}, was {self._pre_pause_mode} mode",
@@ -1381,7 +1413,7 @@ class AutomationEngine:
                         c,
                         reason="door/window closed — restoring comfort after natural ventilation",
                     )
-                    self._start_grace_period("automation")
+                    self._start_grace_period("automation", trigger="sensor_closed_resume")
             return
 
         if not self._paused_by_door:
@@ -1398,7 +1430,7 @@ class AutomationEngine:
                     self._current_classification,
                     reason="door/window closed — restoring comfort",
                 )
-            self._start_grace_period("automation")
+            self._start_grace_period("automation", trigger="sensor_closed_resume")
         self._pre_pause_mode = None
 
     async def check_natural_vent_conditions(self) -> None:
@@ -1473,7 +1505,14 @@ class AutomationEngine:
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "nat_vent_comfort_floor_exit",
-                        {"indoor_temp": indoor, "comfort_heat": comfort_heat},
+                        {
+                            "indoor_temp": indoor,
+                            "comfort_heat": comfort_heat,
+                            "fan_mode_change": "on→auto",
+                            "hvac_mode_restored": (
+                                self._current_classification.hvac_mode if self._current_classification else "unknown"
+                            ),
+                        },
                     )
                 if self._current_classification:
                     c = self._current_classification
@@ -1486,7 +1525,7 @@ class AutomationEngine:
                             c,
                             reason="natural vent comfort-floor exit \u2014 restoring comfort",
                         )
-                        self._start_grace_period("automation")
+                        self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                 return
 
         # Phase 2: proactive floor exit — predict floor crossing before it happens
@@ -1520,7 +1559,15 @@ class AutomationEngine:
                             if self._emit_event_callback:
                                 self._emit_event_callback(
                                     "nat_vent_predicted_floor_exit",
-                                    {"time_to_floor_hr": round(time_to_floor, 2)},
+                                    {
+                                        "time_to_floor_hr": round(time_to_floor, 2),
+                                        "fan_mode_change": "on→auto",
+                                        "hvac_mode_restored": (
+                                            self._current_classification.hvac_mode
+                                            if self._current_classification
+                                            else "unknown"
+                                        ),
+                                    },
                                 )
                             if self._current_classification:
                                 c = self._current_classification
@@ -1533,7 +1580,7 @@ class AutomationEngine:
                                         c,
                                         reason="nat vent proactive floor exit — restoring comfort",
                                     )
-                                    self._start_grace_period("automation")
+                                    self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                             return
 
         # NEW (Issue #115): exit if outdoor ≥ indoor — airflow now heating not cooling
@@ -1662,10 +1709,10 @@ class AutomationEngine:
                     reason="user resumed from door/window pause",
                 )
 
-        self._start_grace_period("manual")
+        self._start_grace_period("manual", trigger="dashboard_resume")
         return restore_mode
 
-    def _start_grace_period(self, source: str) -> None:
+    def _start_grace_period(self, source: str, trigger: str = "") -> None:
         """Start a grace period after HVAC is resumed.
 
         Args:
@@ -1751,7 +1798,10 @@ class AutomationEngine:
 
         _LOGGER.info("Started %s grace period (%d seconds)", source, duration)
         if self._emit_event_callback:
-            self._emit_event_callback("grace_started", {"source": source, "duration_seconds": duration})
+            self._emit_event_callback(
+                "grace_started",
+                {"source": source, "duration_seconds": duration, "trigger": trigger},
+            )
 
     def _cancel_grace_timers(self) -> None:
         """Cancel any active grace period timers."""

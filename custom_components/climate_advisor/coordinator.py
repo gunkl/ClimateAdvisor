@@ -1524,6 +1524,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
         self._pred_archive = {k: v for k, v in self._pred_archive.items() if k >= _archive_expire_cutoff}
 
+        # Detect and emit post-cycle incidents
+        self._detect_and_emit_incidents()
+
         return result
 
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
@@ -4160,6 +4163,134 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._event_log.append(entry)
         if len(self._event_log) > EVENT_LOG_CAP:
             self._event_log.pop(0)
+
+    def _emit_incident(self, incident_class: str, incident_id: str, extra: dict | None = None) -> None:
+        """Emit an incident_detected event into the event log."""
+        payload: dict = {
+            "incident_class": incident_class,
+            "incident_id": incident_id,
+            "comfort_cool": self.config.get("comfort_cool"),
+            "comfort_heat": self.config.get("comfort_heat"),
+            "occupancy_mode": (self.automation_engine._occupancy_mode if self.automation_engine else None),
+        }
+        if extra:
+            payload.update(extra)
+        self._emit_event("incident_detected", payload)
+
+    def _detect_and_emit_incidents(self) -> None:
+        """Scan recent event_log and state for noteworthy production incidents.
+
+        Emits incident_detected events for patterns that should trigger
+        auto-scenario generation in the simulation feedback loop.
+        """
+        now = dt_util.now()
+        recent_events = [
+            e for e in self._event_log[-20:] if e.get("time", "") >= (now - timedelta(minutes=35)).isoformat()
+        ]
+        event_types = [e.get("type") for e in recent_events]
+
+        if "occupancy_change" in event_types or any(
+            t in event_types for t in ["occupancy_away", "occupancy_home", "occupancy_vacation"]
+        ):
+            occ_event = next(
+                (
+                    e
+                    for e in recent_events
+                    if e.get("type") in ["occupancy_change", "occupancy_away", "occupancy_home", "occupancy_vacation"]
+                ),
+                None,
+            )
+            if occ_event:
+                self._emit_incident(
+                    "occupancy_transition",
+                    occ_event.get("time", now.isoformat()),
+                    extra={
+                        "occupancy_mode": self.automation_engine._occupancy_mode if self.automation_engine else None,
+                        "manual_override_active": (
+                            self.automation_engine._manual_override_active if self.automation_engine else None
+                        ),
+                    },
+                )
+
+        override_events = [e for e in recent_events if e.get("type") == "override_detected"]
+        automation_event_types = {
+            "classification_applied",
+            "warm_day_setback_applied",
+            "warm_day_state_confirmed",
+            "ceiling_guard_fired",
+            "nat_vent_ceiling_escalation",
+        }
+        for ov_event in override_events:
+            ov_time_str = ov_event.get("time", "")
+            if not ov_time_str:
+                continue
+            try:
+                ov_time = datetime.fromisoformat(ov_time_str)
+            except (ValueError, TypeError):
+                continue
+            preceding = [
+                e for e in recent_events if e.get("type") in automation_event_types and e.get("time", "") < ov_time_str
+            ]
+            if preceding:
+                last_auto = preceding[-1]
+                try:
+                    last_auto_time = datetime.fromisoformat(last_auto.get("time", ""))
+                    gap_seconds = (ov_time - last_auto_time).total_seconds()
+                    if gap_seconds < 60:
+                        self._emit_incident(
+                            "rapid_override_after_automation",
+                            ov_time_str,
+                            extra={
+                                "automation_event_type": last_auto.get("type"),
+                                "gap_seconds": round(gap_seconds),
+                            },
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+        current_data = self.data or {}
+        indoor = current_data.get("indoor_temp")
+        comfort_cool = self.config.get("comfort_cool")
+        comfort_heat = self.config.get("comfort_heat")
+        if indoor and comfort_cool and indoor > comfort_cool + 0.5:
+            recent_violations = [
+                e
+                for e in self._event_log[-50:]
+                if e.get("type") == "incident_detected"
+                and e.get("incident_class") == "comfort_violation"
+                and e.get("time", "") >= (now - timedelta(minutes=30)).isoformat()
+            ]
+            if not recent_violations:
+                self._emit_incident(
+                    "comfort_violation",
+                    now.isoformat(),
+                    extra={
+                        "indoor_f": indoor,
+                        "outdoor_f": current_data.get("outdoor_temp"),
+                        "hvac_mode": current_data.get("hvac_mode"),
+                        "nat_vent_active": (
+                            self.automation_engine._natural_vent_active if self.automation_engine else None
+                        ),
+                    },
+                )
+        elif indoor and comfort_heat and indoor < comfort_heat - 0.5:
+            recent_violations = [
+                e
+                for e in self._event_log[-50:]
+                if e.get("type") == "incident_detected"
+                and e.get("incident_class") == "comfort_undertemp"
+                and e.get("time", "") >= (now - timedelta(minutes=30)).isoformat()
+            ]
+            if not recent_violations:
+                self._emit_incident(
+                    "comfort_undertemp",
+                    now.isoformat(),
+                    extra={
+                        "indoor_f": indoor,
+                        "outdoor_f": current_data.get("outdoor_temp"),
+                        "hvac_mode": current_data.get("hvac_mode"),
+                    },
+                )
 
     def _compute_automation_status(self) -> str:
         """Compute the current automation status string."""

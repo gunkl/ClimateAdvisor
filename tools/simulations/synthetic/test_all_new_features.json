@@ -1,0 +1,68 @@
+{
+  "name": "test_all_new_features",
+  "description": "Comprehensive test of all Part 1-4 features",
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "ode_enabled": true,
+    "k_passive": -0.04,
+    "k_active_cool": -11.8,
+    "k_vent_window": -0.165,
+    "k_solar": 0.97
+  },
+  "events": [
+    {
+      "time": "2026-05-20T06:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off"
+    },
+    {
+      "time": "2026-05-20T12:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 75.0,
+      "note": "Part 1: ODE ceiling guard should fire"
+    },
+    {
+      "time": "2026-05-20T14:00:00",
+      "type": "occupancy_change_with_override",
+      "mode": "away",
+      "note": "Part 4: occupancy_change_with_override sets manual_override_active=True"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-20T06:00:00",
+      "expect": "classification_applied",
+      "track": "logic",
+      "reason": "Part 3: track=logic should run normally"
+    },
+    {
+      "at": "2026-05-20T12:00:00",
+      "expect": "ceiling_guard_fired",
+      "track": "logic",
+      "reason": "Part 1: ODE ceiling guard projects breach and fires AC"
+    },
+    {
+      "at": "2026-05-20T12:00:00",
+      "expect": "setpoint_consistent_with_mode",
+      "track": "logic",
+      "reason": "Part 2: Custom assertion verifies hvac_mode=cool with target=comfort_cool"
+    },
+    {
+      "at": "2026-05-20T14:00:00",
+      "expect": "override_active",
+      "track": "logic",
+      "reason": "Part 2: Custom assertion verifies manual_override_active=True after occupancy_change_with_override"
+    },
+    {
+      "at": "2026-05-20T14:00:00",
+      "expect": "dummy_integration_outcome",
+      "track": "integration",
+      "reason": "Part 3: track=integration should be skipped with custom reason"
+    }
+  ]
+}

@@ -215,6 +215,7 @@ Times are converted to HA local timezone for display. The list is chronological 
 - `manual_override_cleared` — override cleared; includes `was_mode` and `duration_seconds`
 - `grace_expired` — grace period ended, automation may resume
 - `sensor_opened` / `door_pause` — contact sensor events
+- `incident_detected` — emitted by the coordinator's incident detector (not the automation engine); fields: `incident_class`, `incident_id`, `indoor_f`, `outdoor_f`, `hvac_mode`, `comfort_cool`, `comfort_heat`. At most one per incident class per 30-min cycle. The proactive variant (`setpoint_mode_inconsistency`) may appear at command time rather than post-cycle. See [Incident Classes](incident-classes.md) for the full class list.
 
 If the event log is empty or no events fall in the window, the section shows `(no events in last 12h)`. Any exception during log parsing is caught and logged at WARNING; the section shows `(unavailable)` rather than failing the context build.
 

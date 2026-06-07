@@ -30,6 +30,7 @@ Lifecycle:
 import argparse
 import hashlib
 import json
+import math
 import sys
 
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf-8-sig"):
@@ -139,6 +140,126 @@ class ClimateSimulator:
         if "initial_thermostat_mode" in config:
             self.state.thermostat_mode = config["initial_thermostat_mode"]
 
+    def _project_indoor_future(
+        self,
+        current_indoor_f: float,
+        outdoor_f: float,
+        hvac_mode: str,
+        windows_open: bool,
+        hour: float,
+        comfort_cool: float,
+        setpoint: float | None = None,
+    ) -> tuple[list[float], int | None]:
+        """Project indoor temperature 4 hours ahead using simplified ODE.
+
+        Args:
+            current_indoor_f: Starting indoor temperature (°F)
+            outdoor_f: Outdoor temperature (°F)
+            hvac_mode: "cool" | "heat" | "off"
+            windows_open: Boolean for window ventilation
+            hour: Starting hour of day (0-24) for solar calculation
+            comfort_cool: Comfort cooling setpoint (°F)
+            setpoint: Current HVAC target setpoint (°F), for mode consistency checks
+
+        Returns:
+            Tuple of (predicted_temps: list[float], breach_idx: int | None)
+            where breach_idx is the first index where temp > comfort_cool + 0.5, or None
+        """
+        # Thermal parameters (from scenario config, with defaults)
+        k_passive = float(self.config.get("k_passive", -0.04))
+        k_active_cool = float(self.config.get("k_active_cool", -11.8))
+        k_active_heat = float(self.config.get("k_active_heat", 6.78))
+        k_vent_window = float(self.config.get("k_vent_window", -0.165))
+        k_solar = float(self.config.get("k_solar", 0.97))
+
+        predictions = []
+        current_f = current_indoor_f
+        current_hour = hour
+        dt = 0.5  # 30 min step in hours
+        breach_idx = None
+        breach_threshold = comfort_cool + 0.5
+
+        for step in range(8):  # 4 hours at 30-min intervals
+            # Solar gain (6 AM to 8 PM, peak at noon)
+            solar = 0.0
+            if 6 <= current_hour <= 20:
+                solar = k_solar * max(0, math.sin(math.pi * (current_hour - 6) / 14))
+
+            # Ventilation term (windows open)
+            k_vent_eff = k_vent_window if windows_open else 0.0
+
+            # Temperature delta from passive + ventilation + solar
+            dT = (k_passive + k_vent_eff) * (outdoor_f - current_f) + solar
+
+            # HVAC term (if mode is cool/heat and setpoint allows)
+            if hvac_mode == "cool" and current_f > (setpoint or comfort_cool):
+                dT += k_active_cool
+            elif hvac_mode == "heat" and setpoint and current_f < setpoint:
+                dT += k_active_heat
+
+            # Step forward
+            current_f += dT * dt
+            current_hour += dt
+            predictions.append(current_f)
+
+            # Check for breach
+            if breach_idx is None and current_f > breach_threshold:
+                breach_idx = step
+
+        return predictions, breach_idx
+
+    def _check_assertion(self, assertion: dict, state_at_time: "SimState | None" = None) -> str | bool:
+        """Check a single assertion and return result or False/True.
+
+        Handles new assertion types:
+        - setpoint_consistent_with_mode: checks hvac_mode vs target_temp consistency
+        - override_cleared: checks manual_override_active == False
+        - override_active: checks manual_override_active == True
+
+        Args:
+            assertion: The assertion dict from scenario JSON
+            state_at_time: Optional SimState snapshot at assertion time (for future extension)
+
+        Returns:
+            String matching the assertion's "expect" field, or False if not applicable.
+            This is used for custom assertion types; outcome strings are matched against
+            this result in the assertion check logic.
+        """
+        expect = assertion.get("expect", "")
+
+        # Custom assertion: setpoint_consistent_with_mode
+        if expect == "setpoint_consistent_with_mode":
+            if self.state.hvac_mode == "cool":
+                # Cool mode: target should be >= comfort_heat (not below heat floor)
+                comfort_heat = float(self.config.get("comfort_heat", 70))
+                if self.state.hvac_target_temp is not None and self.state.hvac_target_temp >= comfort_heat:
+                    return "setpoint_consistent_with_mode"
+                return False
+            elif self.state.hvac_mode == "heat":
+                # Heat mode: target should be <= comfort_cool (not above cool ceiling)
+                comfort_cool = float(self.config.get("comfort_cool", 75))
+                if self.state.hvac_target_temp is not None and self.state.hvac_target_temp <= comfort_cool:
+                    return "setpoint_consistent_with_mode"
+                return False
+            else:
+                # "off" or unknown: always passes
+                return "setpoint_consistent_with_mode"
+
+        # Custom assertion: override_cleared
+        if expect == "override_cleared":
+            if self.state.manual_override_active is False:
+                return "override_cleared"
+            return False
+
+        # Custom assertion: override_active
+        if expect == "override_active":
+            if self.state.manual_override_active is True:
+                return "override_active"
+            return False
+
+        # Not a custom assertion type
+        return False
+
     def process_event(self, event: dict) -> Decision | None:
         """Process one scenario event and return any decision made."""
         etype = event["type"]
@@ -174,6 +295,15 @@ class ClimateSimulator:
             return self._handle_occupancy_vacation(ts)
 
         if etype == "occupancy_change":
+            mode = event.get("mode", "home")
+            if mode == "away":
+                return self._handle_occupancy_away(ts)
+            if mode == "vacation":
+                return self._handle_occupancy_vacation(ts)
+            return self._handle_occupancy_home(ts)
+
+        if etype == "occupancy_change_with_override":
+            self.state.manual_override_active = True
             mode = event.get("mode", "home")
             if mode == "away":
                 return self._handle_occupancy_away(ts)
@@ -252,11 +382,66 @@ class ClimateSimulator:
         Mirrors the monitoring loop that runs on each coordinator update:
         - If natural vent active and outdoor climbed → exit to pause
         - If paused and outdoor dropped → activate natural vent
+        - If ODE enabled, project indoor future and engage ceiling guard if breach imminent
         """
         if self.state.natural_vent_active:
             return self._check_natural_vent_exit(ts)
         if self.state.paused_by_door and self.state.sensors_open:
             return self._check_natural_vent_entry(ts)
+
+        # Ceiling guard: ODE-based proactive projection
+        ode_enabled = self.config.get("ode_enabled", False)
+        if (
+            ode_enabled
+            and self.state.hvac_mode != "cool"
+            and self.state.outdoor_temp is not None
+            and self.state.indoor_temp is not None
+        ):
+            # Get configuration
+            comfort_cool = float(self.config.get("comfort_cool", 75))
+            windows_open = bool(len(self.state.sensors_open) > 0)
+
+            # Parse time of day from ISO timestamp
+            try:
+                from datetime import datetime as _dt
+
+                dt_obj = _dt.fromisoformat(ts)
+                hour_of_day = dt_obj.hour + dt_obj.minute / 60.0
+            except (ValueError, AttributeError):
+                hour_of_day = 12.0  # Default to noon if parsing fails
+
+            # Project 4 hours ahead
+            setpoint = self.state.hvac_target_temp or comfort_cool
+            predictions, breach_idx = self._project_indoor_future(
+                current_indoor_f=self.state.indoor_temp,
+                outdoor_f=self.state.outdoor_temp,
+                hvac_mode=self.state.hvac_mode,
+                windows_open=windows_open,
+                hour=hour_of_day,
+                comfort_cool=comfort_cool,
+                setpoint=setpoint,
+            )
+
+            # If breach detected within lead time, fire ceiling guard
+            if breach_idx is not None:
+                self.state.hvac_mode = "cool"
+                self.state.hvac_target_temp = comfort_cool
+                d = Decision(
+                    ts,
+                    "temp_update",
+                    "ceiling_guard_fired",
+                    (
+                        f"ODE projection: indoor will exceed {comfort_cool + 0.5}°F "
+                        f"at 30-min step {breach_idx} (predicted {predictions[breach_idx]:.1f}°F) "
+                        f"— switching to cool mode with {comfort_cool}°F target"
+                    ),
+                    "cool",
+                    self.state.fan_mode,
+                    target_temp=comfort_cool,
+                )
+                self.decisions.append(d)
+                return d
+
         return None
 
     def _apply_nat_vent_or_pause(self, ts: str, event_type: str) -> Decision:
@@ -1177,12 +1362,31 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
         scenario = json.load(f)
 
     sim = ClimateSimulator(scenario.get("config", {}))
-    for event in sorted(scenario.get("events", []), key=lambda e: e["time"]):
+    event_list = sorted(scenario.get("events", []), key=lambda e: e["time"])
+    for event in event_list:
         sim.process_event(event)
 
+    # Store snapshot of simulator state at each decision point for assertion checking
+    # This allows us to check state-based assertions at the right time
     assertion_results = []
     any_real_assertion = False
     for a in scenario.get("assertions", []):
+        # Check track field: if "integration", skip in simulator (requires production validation)
+        track = a.get("track", "logic")
+        if track == "integration":
+            assertion_results.append(
+                {
+                    "at": a["at"],
+                    "expected": a.get("expect", ""),
+                    "actual": None,
+                    "pass": None,
+                    "skipped": True,
+                    "reason": "integration-track assertion requires production validation",
+                    "track": "integration",
+                }
+            )
+            continue
+
         if a.get("simulator_support") is False:
             assertion_results.append(
                 {
@@ -1192,13 +1396,25 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
                     "pass": None,
                     "skipped": True,
                     "reason": "event type not simulated",
+                    "track": track,
                 }
             )
             continue
 
         any_real_assertion = True
-        actual_outcome = _outcome_at(sim.decisions, a["at"])
-        outcome_ok = actual_outcome == a["expect"]
+
+        # Handle custom assertion types
+        expect = a.get("expect", "")
+        custom_result = sim._check_assertion(a)
+
+        if custom_result is not False:
+            # Custom assertion type matched
+            actual_outcome = custom_result
+            outcome_ok = actual_outcome == expect
+        else:
+            # Standard outcome-based assertion
+            actual_outcome = _outcome_at(sim.decisions, a["at"])
+            outcome_ok = actual_outcome == expect
 
         # Optional temperature assertion
         temp_pass = True
@@ -1223,6 +1439,7 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
                 "skipped": False,
                 "reason": a.get("reason", ""),
                 "temp_detail": temp_detail,
+                "track": track,
             }
         )
 

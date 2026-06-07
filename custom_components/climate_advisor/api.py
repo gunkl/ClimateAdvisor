@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 from dataclasses import asdict
 from datetime import timedelta
+from pathlib import Path
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -15,6 +18,7 @@ from .const import (
     API_AI_INVESTIGATE,
     API_AI_REPORTS,
     API_AI_STATUS,
+    API_APPROVE_PENDING_TEST,
     API_AUTOMATION_STATE,
     API_BRIEFING,
     API_CANCEL_FAN_OVERRIDE,
@@ -27,8 +31,10 @@ from .const import (
     API_FORCE_RECLASSIFY,
     API_INVESTIGATION_REPORTS,
     API_LEARNING,
+    API_PENDING_TESTS,
     API_RESPOND_SUGGESTION,
     API_RESUME_FROM_PAUSE,
+    API_RUN_SIMULATION_LOOP,
     API_SEND_BRIEFING,
     API_STATUS,
     API_SUBMIT_GITHUB_ISSUE,
@@ -865,6 +871,193 @@ class ClimateAdvisorSubmitGithubIssueView(HomeAssistantView):
         return self.json({"success": False, "error": f"github_api_{resp.status}"})
 
 
+# Simulation worktree paths — primary (worktree) and fallback (integration-relative)
+_WORKTREE_PENDING_STATS = Path(
+    "c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-simulation-loop"
+    "/tools/simulations/results/pending_stats.json"
+)
+_INTEGRATION_ROOT = Path(__file__).parent.parent.parent  # custom_components/climate_advisor/../..
+_FALLBACK_PENDING_STATS = _INTEGRATION_ROOT / "tools" / "simulations" / "results" / "pending_stats.json"
+
+_WORKTREE_PENDING_DIR = Path(
+    "c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-simulation-loop/tools/simulations/pending"
+)
+_FALLBACK_PENDING_DIR = _INTEGRATION_ROOT / "tools" / "simulations" / "pending"
+
+_WORKTREE_GOLDEN_DIR = Path(
+    "c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-simulation-loop/tools/simulations/golden"
+)
+_FALLBACK_GOLDEN_DIR = _INTEGRATION_ROOT / "tools" / "simulations" / "golden"
+
+_WORKTREE_TOOLS_DIR = Path("c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-simulation-loop/tools")
+_FALLBACK_TOOLS_DIR = _INTEGRATION_ROOT / "tools"
+
+_SCENARIO_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _resolve_paths(primary: Path, fallback: Path) -> Path:
+    """Return primary path if it exists, else fallback."""
+    return primary if primary.exists() else fallback
+
+
+class ClimateAdvisorPendingTestsView(HomeAssistantView):
+    """GET /api/climate_advisor/pending_tests — list pending simulation scenarios."""
+
+    url = API_PENDING_TESTS
+    name = "api:climate_advisor:pending_tests"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        stats_path = _resolve_paths(_WORKTREE_PENDING_STATS, _FALLBACK_PENDING_STATS)
+        if not stats_path.exists():
+            return self.json({"pending_tests": [], "total": 0})
+
+        try:
+            import json
+
+            raw = stats_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return self.json({"pending_tests": [], "total": 0})
+        except Exception:
+            _LOGGER.warning("pending_tests: failed to read %s", stats_path)
+            return self.json({"pending_tests": [], "total": 0})
+
+        tests = []
+        for name, entry in data.items():
+            if not isinstance(entry, dict):
+                continue
+            tests.append(
+                {
+                    "name": name,
+                    "incident_class": entry.get("incident_class", ""),
+                    "first_seen": entry.get("first_seen", ""),
+                    "runs": entry.get("runs", 0),
+                    "logic_passes": entry.get("logic_passes", 0),
+                    "logic_failures": entry.get("logic_failures", 0),
+                    "logic_skips": entry.get("logic_skips", 0),
+                    "integration_passes": entry.get("integration_passes", 0),
+                    "integration_failures": entry.get("integration_failures", 0),
+                    "last_run": entry.get("last_run", ""),
+                    "last_passed": entry.get("last_passed"),
+                }
+            )
+
+        # Sort: failing first, then by last_run descending
+        tests.sort(key=lambda t: (t["last_passed"] is not False, t["last_run"] or ""), reverse=False)
+
+        return self.json({"pending_tests": tests, "total": len(tests)})
+
+
+class ClimateAdvisorApprovePendingTestView(HomeAssistantView):
+    """POST /api/climate_advisor/approve_pending_test — promote a pending scenario to golden."""
+
+    url = API_APPROVE_PENDING_TEST
+    name = "api:climate_advisor:approve_pending_test"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return self.json({"status": "error", "detail": "invalid_json"}, status_code=400)
+
+        scenario_name = body.get("scenario_name", "")
+
+        # Security: reject path traversal and non-safe characters
+        if not scenario_name or not _SCENARIO_NAME_RE.match(scenario_name):
+            return self.json(
+                {"status": "error", "detail": "scenario_name must be alphanumeric plus _ and - only"},
+                status_code=400,
+            )
+
+        # Locate the pending file
+        pending_dir = _resolve_paths(_WORKTREE_PENDING_DIR, _FALLBACK_PENDING_DIR)
+        golden_dir = _WORKTREE_GOLDEN_DIR if _WORKTREE_PENDING_DIR.exists() else _FALLBACK_GOLDEN_DIR
+        tools_dir = _WORKTREE_TOOLS_DIR if _WORKTREE_PENDING_DIR.exists() else _FALLBACK_TOOLS_DIR
+
+        pending_file = pending_dir / f"{scenario_name}.json"
+        if not pending_file.exists():
+            return self.json(
+                {"status": "error", "detail": f"Pending scenario not found: {scenario_name}"},
+                status_code=404,
+            )
+
+        # Step 1: sign the scenario
+        try:
+            result = subprocess.run(
+                ["python", str(tools_dir / "simulate.py"), "--sign", scenario_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(tools_dir.parent),
+            )
+            if result.returncode != 0:
+                _LOGGER.warning("approve_pending_test --sign failed: %s", result.stderr[:500])
+                return self.json(
+                    {"status": "error", "detail": f"Sign failed: {result.stderr[:200]}"},
+                    status_code=500,
+                )
+        except subprocess.TimeoutExpired:
+            return self.json({"status": "error", "detail": "Sign timed out"}, status_code=500)
+        except Exception as exc:
+            return self.json({"status": "error", "detail": str(exc)}, status_code=500)
+
+        # Step 2: move pending → golden
+        golden_dir.mkdir(parents=True, exist_ok=True)
+        golden_file = golden_dir / f"{scenario_name}.json"
+        try:
+            pending_file.rename(golden_file)
+        except Exception as exc:
+            return self.json({"status": "error", "detail": f"Move failed: {exc}"}, status_code=500)
+
+        # Step 3: check integrity
+        try:
+            result = subprocess.run(
+                ["python", str(tools_dir / "simulate.py"), "--check-integrity"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(tools_dir.parent),
+            )
+            if result.returncode != 0:
+                _LOGGER.warning("approve_pending_test --check-integrity failed: %s", result.stderr[:500])
+                return self.json(
+                    {"status": "error", "detail": f"Integrity check failed: {result.stderr[:200]}"},
+                    status_code=500,
+                )
+        except subprocess.TimeoutExpired:
+            return self.json({"status": "error", "detail": "Integrity check timed out"}, status_code=500)
+        except Exception as exc:
+            return self.json({"status": "error", "detail": str(exc)}, status_code=500)
+
+        _LOGGER.info("approve_pending_test: promoted %s to golden", scenario_name)
+        return self.json({"status": "approved", "scenario": scenario_name})
+
+
+class ClimateAdvisorRunSimulationLoopView(HomeAssistantView):
+    """POST /api/climate_advisor/run_simulation_loop — trigger one simulation loop pass."""
+
+    url = API_RUN_SIMULATION_LOOP
+    name = "api:climate_advisor:run_simulation_loop"
+    requires_auth = True
+
+    async def post(self, request: web.Request) -> web.Response:
+        tools_dir = _WORKTREE_TOOLS_DIR if _WORKTREE_TOOLS_DIR.exists() else _FALLBACK_TOOLS_DIR
+        try:
+            subprocess.Popen(
+                ["python", str(tools_dir / "simulation_loop.py"), "--once"],
+                cwd=str(tools_dir.parent),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            _LOGGER.warning("run_simulation_loop: failed to start process: %s", exc)
+            return self.json({"status": "error", "detail": str(exc)}, status_code=500)
+
+        return self.json({"status": "started"})
+
+
 # All views to register
 API_VIEWS = [
     ClimateAdvisorStatusView,
@@ -889,4 +1082,7 @@ API_VIEWS = [
     ClimateAdvisorSubmitGithubIssueView,
     ClimateAdvisorEventLogView,
     ClimateAdvisorEnginesView,
+    ClimateAdvisorPendingTestsView,
+    ClimateAdvisorApprovePendingTestView,
+    ClimateAdvisorRunSimulationLoopView,
 ]

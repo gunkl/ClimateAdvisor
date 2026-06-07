@@ -1,0 +1,47 @@
+{
+  "name": "away_occupancy_override_cleared",
+  "description": "Leaving home with an active manual override: override should be cleared on occupancy-away transition",
+  "source": "issue-report",
+  "issue": 220,
+  "notes": [
+    "Before Issue #220 fix, handle_occupancy_away() did not call clear_manual_override().",
+    "A manual override set while home would persist into away mode, causing the system to skip",
+    "setback application on every subsequent classification cycle until the user returned.",
+    "The occupancy_change_with_override event type sets manual_override_active=True then",
+    "transitions to away — this simulates a user who overrode the thermostat just before leaving.",
+    "This scenario FAILS before the fix and passes after."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74
+  },
+  "events": [
+    {
+      "time": "2026-06-10T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "note": "Morning classification — warm day, HVAC off"
+    },
+    {
+      "time": "2026-06-10T08:30:00",
+      "type": "occupancy_change_with_override",
+      "mode": "away",
+      "note": "User leaves home with an active manual override (e.g. bumped thermostat before leaving). Override must be cleared on away transition."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T08:30:00",
+      "expect": "override_cleared",
+      "track": "logic",
+      "reason": "Leaving home should clear any active manual override so classification cycles apply setback correctly while away"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Away occupancy transition clears manual_override_active flag",
+    "observed_behavior": "FAILS before fix: manual_override_active remains True after away transition; override_cleared assertion returns False",
+    "expected_behavior": "override_cleared passes: manual_override_active=False after occupancy_change_with_override to away"
+  }
+}

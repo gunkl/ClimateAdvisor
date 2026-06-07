@@ -1088,6 +1088,43 @@ class AutomationEngine:
                 reason,
             )
             return
+        # Check setpoint is appropriate for current HVAC mode
+        _current_mode_state = self.hass.states.get(self.climate_entity)
+        _current_mode = _current_mode_state.state if _current_mode_state else None
+        if _current_mode == "cool" and temperature < (self.config.get("comfort_heat", 70) - 1.0):
+            _LOGGER.error(
+                "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
+                temperature,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "setpoint_mode_inconsistency",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": _current_mode,
+                        "setpoint_f": temperature,
+                        "comfort_heat": self.config.get("comfort_heat", 70),
+                        "comfort_cool": self.config.get("comfort_cool", 76),
+                    },
+                )
+        elif _current_mode == "heat" and temperature > (self.config.get("comfort_cool", 76) + 1.0):
+            _LOGGER.error(
+                "SETPOINT INCONSISTENCY: heat mode but target %.1fF is above comfort_cool threshold",
+                temperature,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "setpoint_mode_inconsistency",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": _current_mode,
+                        "setpoint_f": temperature,
+                        "comfort_heat": self.config.get("comfort_heat", 70),
+                        "comfort_cool": self.config.get("comfort_cool", 76),
+                    },
+                )
         self._temp_command_pending = True
         try:
             await self.hass.services.async_call(

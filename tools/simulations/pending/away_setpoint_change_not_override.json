@@ -1,0 +1,68 @@
+{
+  "name": "away_setpoint_change_not_override",
+  "description": "Setback re-application while away must not be misdetected as a manual override",
+  "source": "issue-report",
+  "issue": 221,
+  "notes": [
+    "Before Issue #221 fix, when the coordinator applied setback_cool (79F) on a classification",
+    "cycle while away, the thermostat_changed listener would see the setpoint change and flag it",
+    "as a manual override (manual_override_active=True). This would suppress all future setback",
+    "applications until the user returned home.",
+    "The root cause: coordinator's _async_thermostat_changed lacked an 'expected-state' guard",
+    "to distinguish CA-issued setpoint changes from user-initiated ones.",
+    "This scenario is marked track='integration' because the simulator does not model the",
+    "coordinator's _async_thermostat_changed listener — it requires production validation.",
+    "The simulator-level assertion confirms setback IS applied (pre-condition); the integration",
+    "assertion documents the production behavior that must be validated separately."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 61,
+    "setback_cool": 79
+  },
+  "events": [
+    {
+      "time": "2026-06-10T08:00:00",
+      "type": "occupancy_change",
+      "mode": "away",
+      "note": "System is in away mode from the start of this scenario"
+    },
+    {
+      "time": "2026-06-10T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "note": "Hot day classification — cool mode; away setback (79F) should be applied and must NOT trigger override detection"
+    },
+    {
+      "time": "2026-06-10T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 84.0,
+      "note": "Steady state check: system in away mode 30 min after setback was applied"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T08:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "logic",
+      "reason": "Pre-condition: classification while away applies setback_cool (79F) — this is the setpoint change that must NOT be detected as an override in production"
+    },
+    {
+      "at": "2026-06-10T08:00:00",
+      "expect": "override_not_detected",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "Integration assertion — requires production validation. The coordinator's _async_thermostat_changed must NOT set manual_override_active=True when CA itself issued the setback setpoint change. Simulator cannot model _async_thermostat_changed (no listener layer). Validate in production by confirming override flag remains False after a classification-cycle setback while away."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "CA-issued setback setpoint change while away is not flagged as a manual override",
+    "observed_behavior": "Simulator confirms setback_applied (79F) passes. Production validation required for override_not_detected — this is a coordinator listener-layer behavior outside simulator scope.",
+    "expected_behavior": "setback_applied (79F) at classification event; manual_override_active remains False in production after CA-issued setpoint change"
+  }
+}

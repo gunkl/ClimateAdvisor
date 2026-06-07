@@ -1,0 +1,63 @@
+{
+  "name": "test_ode_ceiling_guard",
+  "description": "Test ODE ceiling guard and new assertion types",
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "ode_enabled": true,
+    "k_passive": -0.04,
+    "k_active_cool": -11.8,
+    "k_vent_window": -0.165,
+    "k_solar": 0.97
+  },
+  "events": [
+    {
+      "time": "2026-05-20T06:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "note": "Warm day classification"
+    },
+    {
+      "time": "2026-05-20T12:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 75.0,
+      "note": "Ceiling guard should fire with ODE projection"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-05-20T06:00:00",
+      "expect": "classification_applied",
+      "track": "logic",
+      "reason": "Warm day classification applied"
+    },
+    {
+      "at": "2026-05-20T12:00:00",
+      "expect": "ceiling_guard_fired",
+      "track": "logic",
+      "reason": "ODE ceiling guard fired"
+    },
+    {
+      "at": "2026-05-20T12:00:00",
+      "expect": "setpoint_consistent_with_mode",
+      "track": "logic",
+      "reason": "Setpoint consistent with cool mode"
+    },
+    {
+      "at": "2026-05-20T12:00:00",
+      "expect": "override_cleared",
+      "track": "logic",
+      "reason": "Override should be cleared"
+    },
+    {
+      "at": "2026-05-20T12:00:00",
+      "expect": "some_outcome",
+      "track": "integration",
+      "reason": "Integration assertion should be skipped"
+    }
+  ]
+}

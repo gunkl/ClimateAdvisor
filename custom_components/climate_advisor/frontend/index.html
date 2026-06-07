@@ -489,6 +489,14 @@
 .tm-health-row:last-child { border-bottom: none; }
 .tm-health-row-label { color: var(--text-primary, inherit); }
 .tm-health-row-value { color: var(--text-secondary, #666); text-align: right; }
+.test-row { display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--border); }
+.test-row:last-child { border-bottom: none; }
+.test-name { flex:1; font-size:13px; font-family:monospace; }
+.test-meta { display:flex; gap:8px; font-size:12px; color:var(--text-secondary); flex-wrap:wrap; }
+.test-failing .test-name { color:var(--warning); }
+.badge-class { background:var(--primary-light); color:var(--text); }
+.btn-approve { background:var(--success); color:white; border:none; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:12px; }
+.btn-small { font-size:11px; padding:3px 10px; }
 </style>
 <script src="hammer.min.js"></script>
 <script src="chart.umd.min.js"></script>
@@ -503,6 +511,7 @@
   <button class="tab-btn" data-tab="debug">Debug</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
   <button class="tab-btn" data-tab="ai">AI</button>
+  <button class="tab-btn" data-tab="tests">Tests</button>
 </div>
 
 <div id="tab-status" class="tab-content active">
@@ -749,6 +758,21 @@
 
 </div>
 
+<div id="tab-tests" class="tab-content">
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+      <h2 style="margin-bottom:0">Pending Simulation Tests</h2>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span id="pending-tests-count" class="badge unknown">--</span>
+        <button class="btn secondary btn-small" onclick="runSimulationLoop()">Run Loop Now</button>
+      </div>
+    </div>
+    <div id="pending-tests-list">
+      <div style="color:var(--text-secondary);font-size:0.85rem;">Loading...</div>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   'use strict';
@@ -763,6 +787,7 @@
       if (btn.dataset.tab === 'status') loadChart();
       if (btn.dataset.tab === 'settings') loadSettings();
       if (btn.dataset.tab === 'ai') loadAIData();
+      if (btn.dataset.tab === 'tests') loadPendingTests();
     });
   });
 
@@ -3086,6 +3111,60 @@
     }
   }
   initLoad();
+
+  // --- Pending simulation tests ---
+  async function loadPendingTests() {
+    try {
+      const data = await apiFetch('pending_tests');
+      const countEl = document.getElementById('pending-tests-count');
+      if (countEl) countEl.textContent = data.total || 0;
+      const list = document.getElementById('pending-tests-list');
+      if (!list) return;
+      if (!data.pending_tests || data.pending_tests.length === 0) {
+        list.innerHTML = '<div style="color:var(--text-secondary);font-size:0.85rem;">No pending tests</div>';
+        return;
+      }
+      list.innerHTML = data.pending_tests.map(t => {
+        const failClass = t.last_passed === false ? ' test-failing' : '';
+        return '<div class="test-row' + failClass + '">' +
+          '<div class="test-name">' + escapeHtml(t.name) + '</div>' +
+          '<div class="test-meta">' +
+          '<span class="badge badge-class">' + escapeHtml(t.incident_class || '') + '</span>' +
+          '<span>Logic: ' + (t.logic_passes || 0) + '/' + (t.runs || 0) + ' pass</span>' +
+          '<span>Fail: ' + (t.logic_failures || 0) + '</span>' +
+          '<span>Last: ' + (t.last_run ? new Date(t.last_run).toLocaleString() : 'never') + '</span>' +
+          '</div>' +
+          '<button class="btn-approve" onclick="approvePendingTest(\'' + escapeHtml(t.name) + '\')">Approve</button>' +
+          '</div>';
+      }).join('');
+    } catch (e) {
+      const list = document.getElementById('pending-tests-list');
+      if (list) list.innerHTML = '<div style="color:var(--danger);font-size:0.85rem;">Failed to load pending tests</div>';
+    }
+  }
+
+  async function approvePendingTest(name) {
+    if (!confirm('Approve "' + name + '" and move to golden?')) return;
+    try {
+      const data = await apiFetch('approve_pending_test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({scenario_name: name})
+      });
+      if (data.status === 'approved') {
+        await loadPendingTests();
+      } else {
+        alert('Error: ' + (data.detail || 'Unknown error'));
+      }
+    } catch (e) { alert('Request failed: ' + e); }
+  }
+
+  async function runSimulationLoop() {
+    try {
+      await apiFetch('run_simulation_loop', {method: 'POST'});
+      setTimeout(loadPendingTests, 3000);
+    } catch (e) { alert('Failed to start simulation loop: ' + e); }
+  }
 
   // --- Auto-refresh with backoff on auth failure ---
   let _authFailCount = 0;

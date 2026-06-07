@@ -28,6 +28,7 @@ def _make_engine(config_overrides: dict | None = None) -> AutomationEngine:
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+    hass.states.get.return_value = MagicMock(state="cool")  # default thermostat state for #222 actual_mode lookup
 
     config = {
         "comfort_heat": 70,

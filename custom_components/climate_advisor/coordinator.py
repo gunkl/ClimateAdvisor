@@ -1008,6 +1008,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
         return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
 
+    def _is_recent_temp_command(self, threshold_seconds: float = 30.0) -> bool:
+        """Check if a temperature setpoint command was issued recently (race guard)."""
+        cmd_time = self.automation_engine._temp_command_time
+        if cmd_time is None:
+            return False
+        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+
     def _any_sensor_open(self) -> bool:
         """Return True if any monitored contact sensor is currently open."""
         return any(self._is_sensor_open(s) for s in self._resolved_sensors)
@@ -2425,6 +2432,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._temp_command_pending
             and not self.automation_engine._hvac_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
+            and not self._is_recent_temp_command(threshold_seconds=30.0)
         ):
             self._today_record.manual_overrides += 1
             try:

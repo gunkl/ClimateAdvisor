@@ -240,6 +240,7 @@ class AutomationEngine:
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
+        self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
@@ -1089,6 +1090,7 @@ class AutomationEngine:
             )
             return
         self._temp_command_pending = True
+        self._temp_command_time = dt_util.now()
         try:
             await self.hass.services.async_call(
                 "climate",
@@ -1122,6 +1124,7 @@ class AutomationEngine:
             )
             return
         self._temp_command_pending = True
+        self._temp_command_time = dt_util.now()
         try:
             await self.hass.services.async_call(
                 "climate",

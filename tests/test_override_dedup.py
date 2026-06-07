@@ -161,6 +161,7 @@ def _make_thermostat_coordinator_stub(
     ae._fan_command_pending = fan_command_pending
     ae._fan_override_active = fan_override_active
     ae._temp_command_pending = temp_command_pending
+    ae._temp_command_time = None  # no recent temp command by default
     ae._fan_active = False
     ae._natural_vent_active = False
     ae.handle_manual_override_during_pause = AsyncMock()
@@ -171,6 +172,9 @@ def _make_thermostat_coordinator_stub(
     coord._current_classification = _make_classification()
     coord._today_record = DailyRecord(date="2026-04-10", day_type="mild", trend_direction="stable")
     coord._async_save_state = AsyncMock()
+
+    # _is_recent_temp_command: no recent temp command in these dedup tests
+    coord._is_recent_temp_command = MagicMock(return_value=False)
 
     # Mock _is_recent_hvac_command based on hvac_command_age_seconds:
     # Returns True (within threshold) if age < threshold, else False.

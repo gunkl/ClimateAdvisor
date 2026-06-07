@@ -742,6 +742,10 @@ class ClimateSimulator:
 
         No HVAC mode change; temperature setback only.
         """
+        # Clear manual override on occupancy transition -- mirrors automation.py handle_occupancy_away()
+        if self.state.manual_override_active:
+            self.state.manual_override_active = False
+            self.state.manual_override_mode = None
         self.state.occupancy = "away"
         c = self.state.classification
         if not c:
@@ -844,6 +848,10 @@ class ClimateSimulator:
 
     def _handle_occupancy_vacation(self, ts: str) -> Decision:
         """Apply vacation (deeper) setback — mirrors handle_occupancy_vacation()."""
+        # Clear manual override on occupancy transition -- mirrors automation.py handle_occupancy_vacation()
+        if self.state.manual_override_active:
+            self.state.manual_override_active = False
+            self.state.manual_override_mode = None
         self.state.occupancy = "vacation"
         c = self.state.classification
         if not c:

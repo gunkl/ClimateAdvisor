@@ -665,6 +665,90 @@ def save_scenario(scenario: dict, output_dir: Path) -> Path:
     return filepath
 
 
+def extract_from_issue(issue_number: int, output_dir: Path) -> Path | None:
+    """Fetch GitHub issue body and extract embedded incident JSON block."""
+    import re
+
+    result = subprocess.run(
+        ["gh", "issue", "view", str(issue_number), "--json", "body"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: Could not fetch issue #{issue_number}: {result.stderr}", file=sys.stderr)
+        return None
+
+    body = json.loads(result.stdout).get("body", "")
+    # Find JSON code block containing "incident_class" (typically after "## Incident Package")
+    match = re.search(r'```json\s*\n(\{.*?"incident_class".*?\})\s*\n```', body, re.DOTALL)
+    if not match:
+        print(f"No incident package found in issue #{issue_number}", file=sys.stderr)
+        return None
+
+    try:
+        data = json.loads(match.group(1))
+    except Exception as e:
+        print(f"ERROR: Could not parse incident JSON: {e}", file=sys.stderr)
+        return None
+
+    incident_class = data.get("incident_class", "unknown")
+    name = f"{incident_class}_from_issue_{issue_number}"
+    out_path = output_dir / f"{name}.json"
+
+    # Build a minimal BSpec-compatible scenario directly from incident package fields
+    chart_log_window = data.get("chart_log_window", [])
+    event_log_window = data.get("event_log_window", [])
+
+    events: list[dict] = []
+    for entry in chart_log_window:
+        ts_str = entry.get("ts", "")
+        indoor = entry.get("indoor")
+        outdoor = entry.get("outdoor")
+        hvac = entry.get("hvac", "off")
+        fan = entry.get("fan", False)
+        windows_open = entry.get("windows_open", False)
+        if indoor is not None:
+            event: dict = {"time": ts_str, "type": "temp_update", "indoor_f": indoor}
+            if outdoor is not None:
+                event["outdoor_f"] = outdoor
+            event["note"] = f"hvac={hvac}, fan={fan}, windows_open={windows_open}"
+            events.append(event)
+
+    for evt in event_log_window:
+        events.append(evt)
+
+    scenario = {
+        "name": name,
+        "description": f"From GitHub issue #{issue_number}: {incident_class}",
+        "source": "build_historical_scenario --from-issue",
+        "issue": f"#{issue_number}",
+        "notes": [
+            f"Extracted from GitHub issue #{issue_number}.",
+            "Manual review recommended before simulation.",
+        ],
+        "config": {
+            "comfort_cool": data.get("comfort_cool", 74),
+            "comfort_heat": data.get("comfort_heat", 70),
+        },
+        "verdict": {
+            "type": "pending",
+            "summary": f"Real {incident_class} incident from issue #{issue_number}",
+            "observed_behavior": "N/A (pending simulation)",
+            "expected_behavior": "N/A (pending simulation)",
+        },
+        "events": events,
+        "assertions": [],
+        "anonymized": True,
+    }
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as f:
+        json.dump(scenario, f, indent=2)
+
+    print(f"-> Saved: {out_path}")
+    return out_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build pending simulation scenarios from historical chart_log and event_log.",
@@ -696,8 +780,19 @@ def main() -> None:
         default=str(PENDING_DIR),
         help="Output directory for pending scenarios (default: tools/simulations/pending/)",
     )
+    parser.add_argument(
+        "--from-issue",
+        type=int,
+        metavar="N",
+        help="Extract incident package from GitHub issue #N and create pending BSpec",
+    )
 
     args = parser.parse_args()
+
+    if args.from_issue:
+        output_dir = Path(args.output_dir)
+        extract_from_issue(args.from_issue, output_dir)
+        return
 
     try:
         config = load_config()

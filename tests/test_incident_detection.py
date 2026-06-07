@@ -284,15 +284,12 @@ class TestSimulateNewFeatures:
         # Skipped assertions must not cause a FAIL
         assert result["passed"] is not False, "skipped integration assertion must not cause overall FAIL"
 
-    def test_override_cleared_fails_for_bug_220(self, tmp_path: Path) -> None:
-        """away_occupancy_override_cleared scenario: override_cleared assertion FAILS before fix.
+    def test_override_cleared_passes_after_bug_220_fix(self, tmp_path: Path) -> None:
+        """away_occupancy_override_cleared scenario: override_cleared assertion PASSES after fix.
 
-        Bug #220: _handle_occupancy_away() does not call clear_manual_override().
-        The occupancy_change_with_override event sets manual_override_active=True then
-        transitions to away (hvac_mode=off → no_action). override_cleared expects
-        manual_override_active=False, but it remains True → assertion fails.
-
-        This test verifies the failure is the override_cleared assertion, not a crash.
+        Fix #220: _handle_occupancy_away() now calls clear_manual_override(), and
+        _handle_occupancy_away() in simulate.py clears manual_override_active.
+        The scenario documents that occupancy-away transitions must clear overrides.
         """
         bspec_path = (
             Path(__file__).parent.parent / "tools" / "simulations" / "pending" / "away_occupancy_override_cleared.json"
@@ -301,13 +298,6 @@ class TestSimulateNewFeatures:
 
         result = run_scenario(bspec_path, state="pending")
 
-        # The scenario should fail (bug not fixed)
-        assert result["passed"] is False, "away_occupancy_override_cleared should FAIL before bug #220 is fixed"
-
-        # Confirm it fails on the override_cleared assertion, not a crash
-        override_assertions = [
-            a for a in result["assertions"] if a.get("expected") == "override_cleared" and a.get("pass") is False
-        ]
-        assert len(override_assertions) >= 1, (
-            f"Expected override_cleared to FAIL, got assertion results: {result['assertions']}"
+        assert result["passed"] is True, (
+            f"away_occupancy_override_cleared should PASS after bug #220 is fixed. Assertions: {result['assertions']}"
         )

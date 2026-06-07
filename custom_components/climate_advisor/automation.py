@@ -1923,18 +1923,15 @@ class AutomationEngine:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
             return
 
+        # Use actual thermostat mode as ground truth — classification mode may differ
+        # if the day started in one mode but the nightly reclassification switched it
+        # (e.g., started hot → cool mode, reclassified to heat at night; without this
+        # guard, we would apply setback_heat while the AC is still in cool mode)
+        actual_state = self.hass.states.get(self.climate_entity)
+        actual_mode = actual_state.state if actual_state else c.hvac_mode
+
         unit = self.config.get("temp_unit", "fahrenheit")
-        if c.hvac_mode == "heat":
-            setback = self.config["setback_heat"] + c.setback_modifier
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"occupancy away — heat setback"
-                    f" (base {format_temp(self.config['setback_heat'], unit)}"
-                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
-                ),
-            )
-        elif c.hvac_mode == "cool":
+        if actual_mode == "cool":
             setback = self.config["setback_cool"] - c.setback_modifier
             await self._set_temperature(
                 setback,
@@ -1944,10 +1941,20 @@ class AutomationEngine:
                     f" - modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
+        elif actual_mode == "heat":
+            setback = self.config["setback_heat"] + c.setback_modifier
+            await self._set_temperature(
+                setback,
+                reason=(
+                    f"occupancy away — heat setback"
+                    f" (base {format_temp(self.config['setback_heat'], unit)}"
+                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
+                ),
+            )
         else:
             _LOGGER.info(
-                "Occupancy away — HVAC mode is '%s', no setback needed",
-                c.hvac_mode,
+                "Occupancy away — HVAC mode is %r, no setback needed",
+                actual_mode,
             )
 
     async def handle_occupancy_home(self) -> None:
@@ -2003,8 +2010,23 @@ class AutomationEngine:
         if not c:
             return
 
+        # Use actual thermostat mode as ground truth — same guard as handle_occupancy_away()
+        actual_state = self.hass.states.get(self.climate_entity)
+        actual_mode = actual_state.state if actual_state else c.hvac_mode
+
         unit = self.config.get("temp_unit", "fahrenheit")
-        if c.hvac_mode == "heat":
+        if actual_mode == "cool":
+            setback = self.config["setback_cool"] - c.setback_modifier + VACATION_SETBACK_EXTRA
+            await self._set_temperature(
+                setback,
+                reason=(
+                    f"vacation mode — deep cool setback"
+                    f" (base {format_temp(self.config['setback_cool'], unit)}"
+                    f" - modifier {format_temp_delta(c.setback_modifier, unit)}"
+                    f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
+                ),
+            )
+        elif actual_mode == "heat":
             setback = self.config["setback_heat"] + c.setback_modifier - VACATION_SETBACK_EXTRA
             await self._set_temperature(
                 setback,
@@ -2015,16 +2037,10 @@ class AutomationEngine:
                     f" - vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
                 ),
             )
-        elif c.hvac_mode == "cool":
-            setback = self.config["setback_cool"] - c.setback_modifier + VACATION_SETBACK_EXTRA
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"vacation mode — deep cool setback"
-                    f" (base {format_temp(self.config['setback_cool'], unit)}"
-                    f" - modifier {format_temp_delta(c.setback_modifier, unit)}"
-                    f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
-                ),
+        else:
+            _LOGGER.info(
+                "Occupancy vacation — HVAC mode is %r, no setback needed",
+                actual_mode,
             )
 
     async def handle_bedtime(self) -> None:

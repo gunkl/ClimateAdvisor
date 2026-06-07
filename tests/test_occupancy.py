@@ -378,6 +378,8 @@ class TestVacationSetback:
         engine = _make_automation_engine()
         c = _make_classification(day_type="cold", hvac_mode="heat", setback_modifier=2.0)
         engine._current_classification = c
+        # Actual thermostat mode must match so the heat branch is entered
+        engine.hass.states.get.return_value = _make_state("heat")
 
         asyncio.run(engine.handle_occupancy_vacation())
 
@@ -395,6 +397,8 @@ class TestVacationSetback:
         engine = _make_automation_engine()
         c = _make_classification(day_type="hot", hvac_mode="cool", setback_modifier=2.0)
         engine._current_classification = c
+        # Actual thermostat mode must match so the cool branch is entered
+        engine.hass.states.get.return_value = _make_state("cool")
 
         asyncio.run(engine.handle_occupancy_vacation())
 
@@ -422,6 +426,8 @@ class TestVacationSetback:
         engine.dry_run = True
         c = _make_classification(day_type="cold", hvac_mode="heat", setback_modifier=0.0)
         engine._current_classification = c
+        # Actual thermostat mode must match so the heat branch is entered
+        engine.hass.states.get.return_value = _make_state("heat")
 
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             asyncio.run(engine.handle_occupancy_vacation())

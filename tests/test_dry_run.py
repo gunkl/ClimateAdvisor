@@ -239,6 +239,11 @@ class TestDryRunHighLevelLogic:
             hvac_mode="heat",
             setback_modifier=0.0,
         )
+        # Provide actual thermostat state matching classification so the setback
+        # branch is entered (handle_occupancy_away now reads actual mode)
+        mock_state = MagicMock()
+        mock_state.state = "heat"
+        engine.hass.states.get.return_value = mock_state
 
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             asyncio.run(engine.handle_occupancy_away())

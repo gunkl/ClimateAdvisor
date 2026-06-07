@@ -1918,6 +1918,13 @@ class AutomationEngine:
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Occupancy transition to away — clearing manual override (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason="occupancy_away")
         c = self._current_classification
         if not c:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
@@ -2006,6 +2013,13 @@ class AutomationEngine:
     async def handle_occupancy_vacation(self) -> None:
         """Handle vacation mode — apply deeper setback for extended away."""
         self._occupancy_mode = OCCUPANCY_VACATION
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Occupancy transition to vacation — clearing manual override (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason="occupancy_vacation")
         c = self._current_classification
         if not c:
             return

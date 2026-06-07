@@ -350,21 +350,73 @@ def check_consecutive_failures(stats: dict, config: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _bootstrap_pending_bspecs(stats: dict) -> int:
+    """Run simulate.py on authored pending BSpecs that have no recent result.
+
+    This runs WITHOUT HA access — simulate.py is pure Python. It ensures that
+    manually authored scenarios appear in pending_stats.json immediately on the
+    first loop run, without needing a production incident to trigger them.
+    """
+    pending_dir = REPO_ROOT / "tools" / "simulations" / "pending"
+    if not pending_dir.exists():
+        return 0
+
+    count = 0
+    now = datetime.now(UTC)
+    for f in sorted(pending_dir.glob("*.json")):
+        name = f.stem
+        entry = stats.get(name, {})
+        last_run = entry.get("last_run", "")
+        if last_run:
+            try:
+                age = (now - datetime.fromisoformat(last_run)).total_seconds()
+                if age < 86400:  # skip if run in last 24 hours
+                    continue
+            except (ValueError, TypeError):
+                pass
+        print(f"  [bootstrap] running simulate.py on authored BSpec: {name}")
+        sim_result = run_simulate(f)  # run_simulate expects a Path
+        if sim_result is not None:
+            update_stats(
+                stats,
+                name,
+                entry.get("incident_class", "authored"),
+                sim_result,
+                entry.get("first_seen") or now.isoformat(),
+            )
+            count += 1
+        else:
+            print(f"  [bootstrap] simulate.py returned no result for {name}", file=sys.stderr)
+
+    return count
+
+
 def run_once(config: dict, hours: int, dry_run: bool) -> int:
-    """Single pass: fetch, filter, process new incidents. Returns count processed."""
+    """Single pass: bootstrap authored BSpecs, then fetch and process new incidents."""
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    stats: dict = _read_json(STATS_PATH, {})
+
+    # Phase 1: Bootstrap — run simulate.py on authored pending BSpecs (no HA needed).
+    # This ensures manually authored scenarios appear in the Tests tab immediately.
+    bootstrap_count = _bootstrap_pending_bspecs(stats)
+    if bootstrap_count:
+        print(f"[bootstrap] ran {bootstrap_count} authored BSpec(s)")
+        _write_json_atomic(STATS_PATH, stats)
+
     ha_url = config.get("HA_URL", "")
     ha_token = config.get("HA_TOKEN", "")
 
     if not ha_url or not ha_token:
-        print("ERROR: HA_URL and HA_TOKEN must be set in tools/.env or tools/.deploy.env", file=sys.stderr)
-        return 0
+        print("WARNING: HA_URL/HA_TOKEN not set — skipping incident fetch. Bootstrap only.", file=sys.stderr)
+        return bootstrap_count
 
+    # Phase 2: Incident polling — process new production incidents from HA.
     print(f"Fetching event_log (last {hours}h) from {ha_url}...", file=sys.stderr)
     try:
         entries = fetch_event_log(ha_url, ha_token, hours)
     except Exception as exc:
         print(f"ERROR: Failed to fetch event_log: {exc}", file=sys.stderr)
-        return 0
+        return bootstrap_count
 
     incidents = [e for e in entries if e.get("type") == "incident_detected"]
     print(f"Found {len(incidents)} incident_detected event(s).")
@@ -375,11 +427,9 @@ def run_once(config: dict, hours: int, dry_run: bool) -> int:
             inc_class = inc.get("incident_class", "?")
             inc_time = inc.get("time", "?")
             print(f"  [dry-run] id={inc_id!r} class={inc_class!r} at={inc_time!r}")
-        return 0
+        return bootstrap_count
 
     processed: dict = _read_json(PROCESSED_PATH, {})
-    stats: dict = _read_json(STATS_PATH, {})
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     processed_count = 0
 

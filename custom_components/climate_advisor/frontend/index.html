@@ -3160,10 +3160,25 @@
   }
 
   async function runSimulationLoop() {
+    const btn = document.querySelector('.btn[onclick="runSimulationLoop()"], .btn-small[onclick="runSimulationLoop()"]');
+    const originalText = btn ? btn.textContent : 'Run Loop Now';
+    if (btn) { btn.textContent = 'Running…'; btn.disabled = true; }
     try {
-      await apiFetch('run_simulation_loop', {method: 'POST'});
-      setTimeout(loadPendingTests, 3000);
-    } catch (e) { alert('Failed to start simulation loop: ' + e); }
+      const result = await apiFetch('run_simulation_loop', {method: 'POST'});
+      if (result && result.status === 'error') {
+        if (btn) { btn.textContent = originalText; btn.disabled = false; }
+        alert('Loop error: ' + (result.detail || 'Unknown error'));
+        return;
+      }
+      // Give the bootstrap + simulate.py time to run on all pending BSpecs
+      await new Promise(r => setTimeout(r, 6000));
+      await loadPendingTests();
+      if (btn) { btn.textContent = 'Done ✓'; }
+      setTimeout(() => { if (btn) { btn.textContent = originalText; btn.disabled = false; } }, 2000);
+    } catch (e) {
+      if (btn) { btn.textContent = originalText; btn.disabled = false; }
+      alert('Failed to start simulation loop: ' + e);
+    }
   }
 
   // --- Auto-refresh with backoff on auth failure ---

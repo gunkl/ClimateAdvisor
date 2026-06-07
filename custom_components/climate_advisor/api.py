@@ -908,29 +908,34 @@ class ClimateAdvisorPendingTestsView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request: web.Request) -> web.Response:
+        import json as _json
+
+        # Enumerate pending BSpec files directly — these always exist regardless of
+        # whether simulation_loop.py has run yet.
+        pending_dir = _WORKTREE_PENDING_DIR if _WORKTREE_PENDING_DIR.exists() else _FALLBACK_PENDING_DIR
+        bspec_files = sorted(pending_dir.glob("*.json")) if pending_dir.exists() else []
+
+        # Load run statistics if available (populated by simulation_loop.py)
+        stats: dict = {}
         stats_path = _resolve_paths(_WORKTREE_PENDING_STATS, _FALLBACK_PENDING_STATS)
-        if not stats_path.exists():
-            return self.json({"pending_tests": [], "total": 0})
+        if stats_path.exists():
+            try:
+                raw = stats_path.read_text(encoding="utf-8")
+                loaded = _json.loads(raw)
+                if isinstance(loaded, dict):
+                    stats = loaded
+            except Exception:
+                _LOGGER.warning("pending_tests: failed to read %s", stats_path)
 
-        try:
-            import json
-
-            raw = stats_path.read_text(encoding="utf-8")
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                return self.json({"pending_tests": [], "total": 0})
-        except Exception:
-            _LOGGER.warning("pending_tests: failed to read %s", stats_path)
-            return self.json({"pending_tests": [], "total": 0})
-
+        # Merge: every BSpec file gets an entry; stats fill in run history if available
         tests = []
-        for name, entry in data.items():
-            if not isinstance(entry, dict):
-                continue
+        for f in bspec_files:
+            name = f.stem
+            entry = stats.get(name, {})
             tests.append(
                 {
                     "name": name,
-                    "incident_class": entry.get("incident_class", ""),
+                    "incident_class": entry.get("incident_class", "authored"),
                     "first_seen": entry.get("first_seen", ""),
                     "runs": entry.get("runs", 0),
                     "logic_passes": entry.get("logic_passes", 0),
@@ -1044,10 +1049,20 @@ class ClimateAdvisorRunSimulationLoopView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         tools_dir = _WORKTREE_TOOLS_DIR if _WORKTREE_TOOLS_DIR.exists() else _FALLBACK_TOOLS_DIR
+        repo_root = tools_dir.parent
+
+        # Pre-validate .env so we surface config problems instead of silently failing
+        env_exists = any((p / name).exists() for p in (tools_dir, repo_root) for name in (".env", ".deploy.env"))
+        if not env_exists:
+            return self.json(
+                {"status": "error", "detail": "No .env file found — set HA_URL and HA_TOKEN"},
+                status_code=400,
+            )
+
         try:
             subprocess.Popen(
                 ["python", str(tools_dir / "simulation_loop.py"), "--once"],
-                cwd=str(tools_dir.parent),
+                cwd=str(repo_root),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )

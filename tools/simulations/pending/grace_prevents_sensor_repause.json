@@ -1,0 +1,68 @@
+{
+  "name": "grace_prevents_sensor_repause",
+  "description": "After user resumes from door/window pause, 90-min grace blocks immediate re-pause when same sensor opens again",
+  "source": "synthetic",
+  "issue": 227,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-06-10T14:00:00",
+      "type": "classification",
+      "hvac_mode": "cool",
+      "day_type": "warm",
+      "note": "Warm day, cooling active"
+    },
+    {
+      "time": "2026-06-10T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 85.0,
+      "note": "Hot outdoor — nat-vent not viable (above threshold)"
+    },
+    {
+      "time": "2026-06-10T14:31:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Door opens, automation pauses HVAC"
+    },
+    {
+      "time": "2026-06-10T14:45:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.front_door",
+      "note": "Door closes, automation resumes"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T14:31:00",
+      "expect": "paused",
+      "track": "logic",
+      "reason": "Sensor open causes HVAC pause"
+    },
+    {
+      "at": "2026-06-10T14:45:00",
+      "expect": "resumed",
+      "track": "logic",
+      "reason": "Sensor closes, automation resumes from pause"
+    },
+    {
+      "at": "2026-06-10T14:46:00",
+      "expect": "no_action",
+      "track": "integration",
+      "reason": "If door opens again within 90-min grace window, automation should NOT re-pause. Requires grace period state tracking — integration track.",
+      "simulator_support": false
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace period prevents immediate re-pause after user resumes from door/window pause",
+    "observed_behavior": "Door opens within grace → automation ignores sensor for grace duration",
+    "expected_behavior": "90-min grace prevents sensor chatter from causing repeated pause/resume cycles after user intervenes"
+  }
+}

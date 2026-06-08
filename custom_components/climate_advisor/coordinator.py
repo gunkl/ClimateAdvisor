@@ -542,6 +542,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if auto_state:
             self.automation_engine.restore_state(auto_state)
 
+        # Restore grace period timer if grace was active when state was saved (Issue #227)
+        ae = self.automation_engine
+        if getattr(ae, "_grace_active", False) and getattr(ae, "_grace_end_time", None):
+            try:
+                import datetime as _dt
+
+                end_time = _dt.datetime.fromisoformat(ae._grace_end_time)
+                remaining = (end_time - _dt.datetime.now(_dt.UTC)).total_seconds()
+                if remaining <= 0:
+                    # Grace expired during the restart — clear immediately
+                    _LOGGER.info(
+                        "Grace period expired during HA restart (end_time=%s) — clearing override immediately",
+                        ae._grace_end_time,
+                    )
+                    ae._grace_active = False
+                    ae._grace_end_time = None
+                    ae.clear_manual_override(reason="grace_expired_on_restart")
+                    # Let the first coordinator cycle re-apply classification (within 30s)
+                else:
+                    # Grace still active — re-schedule the expiry callback
+                    _LOGGER.info(
+                        "Restoring grace timer after HA restart: %.0f seconds remaining",
+                        remaining,
+                    )
+                    ae._reschedule_grace_timer(remaining)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Could not restore grace timer (end_time=%s): %s — clearing override as safety",
+                    getattr(ae, "_grace_end_time", None),
+                    exc,
+                )
+                ae._grace_active = False
+                ae._grace_end_time = None
+                ae.clear_manual_override(reason="grace_restore_failed")
+
         # Observe-only mode
         self._automation_enabled = state.get("automation_enabled", True)
         self.automation_engine.dry_run = not self._automation_enabled
@@ -1004,6 +1039,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _is_recent_hvac_command(self, threshold_seconds: float = 3.0) -> bool:
         """Check if an HVAC command was issued very recently (race guard)."""
         cmd_time = self.automation_engine._hvac_command_time
+        if cmd_time is None:
+            return False
+        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+
+    def _is_recent_temp_command(self, threshold_seconds: float = 30.0) -> bool:
+        """Check if a temperature setpoint command was issued recently (race guard)."""
+        cmd_time = self.automation_engine._temp_command_time
         if cmd_time is None:
             return False
         return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
@@ -1516,6 +1558,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Purge archive entries older than 7 days (bounded at ≤336 entries at 30-min resolution).
         _archive_expire_cutoff = int((dt_util.now() - timedelta(days=7)).timestamp())
         self._pred_archive = {k: v for k, v in self._pred_archive.items() if k >= _archive_expire_cutoff}
+
+        # Detect and emit post-cycle incidents
+        self._detect_and_emit_incidents()
 
         return result
 
@@ -2425,6 +2470,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._temp_command_pending
             and not self.automation_engine._hvac_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
+            and not self._is_recent_temp_command(threshold_seconds=30.0)
         ):
             self._today_record.manual_overrides += 1
             try:
@@ -4152,6 +4198,134 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._event_log.append(entry)
         if len(self._event_log) > EVENT_LOG_CAP:
             self._event_log.pop(0)
+
+    def _emit_incident(self, incident_class: str, incident_id: str, extra: dict | None = None) -> None:
+        """Emit an incident_detected event into the event log."""
+        payload: dict = {
+            "incident_class": incident_class,
+            "incident_id": incident_id,
+            "comfort_cool": self.config.get("comfort_cool"),
+            "comfort_heat": self.config.get("comfort_heat"),
+            "occupancy_mode": (self.automation_engine._occupancy_mode if self.automation_engine else None),
+        }
+        if extra:
+            payload.update(extra)
+        self._emit_event("incident_detected", payload)
+
+    def _detect_and_emit_incidents(self) -> None:
+        """Scan recent event_log and state for noteworthy production incidents.
+
+        Emits incident_detected events for patterns that should trigger
+        auto-scenario generation in the simulation feedback loop.
+        """
+        now = dt_util.now()
+        recent_events = [
+            e for e in self._event_log[-20:] if e.get("time", "") >= (now - timedelta(minutes=35)).isoformat()
+        ]
+        event_types = [e.get("type") for e in recent_events]
+
+        if "occupancy_change" in event_types or any(
+            t in event_types for t in ["occupancy_away", "occupancy_home", "occupancy_vacation"]
+        ):
+            occ_event = next(
+                (
+                    e
+                    for e in recent_events
+                    if e.get("type") in ["occupancy_change", "occupancy_away", "occupancy_home", "occupancy_vacation"]
+                ),
+                None,
+            )
+            if occ_event:
+                self._emit_incident(
+                    "occupancy_transition",
+                    occ_event.get("time", now.isoformat()),
+                    extra={
+                        "occupancy_mode": self.automation_engine._occupancy_mode if self.automation_engine else None,
+                        "manual_override_active": (
+                            self.automation_engine._manual_override_active if self.automation_engine else None
+                        ),
+                    },
+                )
+
+        override_events = [e for e in recent_events if e.get("type") == "override_detected"]
+        automation_event_types = {
+            "classification_applied",
+            "warm_day_setback_applied",
+            "warm_day_state_confirmed",
+            "ceiling_guard_fired",
+            "nat_vent_ceiling_escalation",
+        }
+        for ov_event in override_events:
+            ov_time_str = ov_event.get("time", "")
+            if not ov_time_str:
+                continue
+            try:
+                ov_time = datetime.fromisoformat(ov_time_str)
+            except (ValueError, TypeError):
+                continue
+            preceding = [
+                e for e in recent_events if e.get("type") in automation_event_types and e.get("time", "") < ov_time_str
+            ]
+            if preceding:
+                last_auto = preceding[-1]
+                try:
+                    last_auto_time = datetime.fromisoformat(last_auto.get("time", ""))
+                    gap_seconds = (ov_time - last_auto_time).total_seconds()
+                    if gap_seconds < 60:
+                        self._emit_incident(
+                            "rapid_override_after_automation",
+                            ov_time_str,
+                            extra={
+                                "automation_event_type": last_auto.get("type"),
+                                "gap_seconds": round(gap_seconds),
+                            },
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+        current_data = self.data or {}
+        indoor = current_data.get("indoor_temp")
+        comfort_cool = self.config.get("comfort_cool")
+        comfort_heat = self.config.get("comfort_heat")
+        if indoor and comfort_cool and indoor > comfort_cool + 0.5:
+            recent_violations = [
+                e
+                for e in self._event_log[-50:]
+                if e.get("type") == "incident_detected"
+                and e.get("incident_class") == "comfort_violation"
+                and e.get("time", "") >= (now - timedelta(minutes=30)).isoformat()
+            ]
+            if not recent_violations:
+                self._emit_incident(
+                    "comfort_violation",
+                    now.isoformat(),
+                    extra={
+                        "indoor_f": indoor,
+                        "outdoor_f": current_data.get("outdoor_temp"),
+                        "hvac_mode": current_data.get("hvac_mode"),
+                        "nat_vent_active": (
+                            self.automation_engine._natural_vent_active if self.automation_engine else None
+                        ),
+                    },
+                )
+        elif indoor and comfort_heat and indoor < comfort_heat - 0.5:
+            recent_violations = [
+                e
+                for e in self._event_log[-50:]
+                if e.get("type") == "incident_detected"
+                and e.get("incident_class") == "comfort_undertemp"
+                and e.get("time", "") >= (now - timedelta(minutes=30)).isoformat()
+            ]
+            if not recent_violations:
+                self._emit_incident(
+                    "comfort_undertemp",
+                    now.isoformat(),
+                    extra={
+                        "indoor_f": indoor,
+                        "outdoor_f": current_data.get("outdoor_temp"),
+                        "hvac_mode": current_data.get("hvac_mode"),
+                    },
+                )
 
     def _compute_automation_status(self) -> str:
         """Compute the current automation status string."""

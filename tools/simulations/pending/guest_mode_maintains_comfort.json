@@ -1,0 +1,65 @@
+{
+  "name": "guest_mode_maintains_comfort",
+  "description": "Warm day with occupancy=guest. Classification applies comfort setpoints (not away setback). Sensor open triggers pause (guest mode does not suppress pausing). Verifies guest mode runs automation normally without away-mode setback.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "The simulator SimState.occupancy is 'home' | 'away' | 'vacation'. Guest mode is not yet a distinct",
+    "occupancy value in the simulator. Setting guest mode via config initial_occupancy is not supported.",
+    "This scenario uses occupancy='home' as a proxy for guest behavior (same logic path — no setback).",
+    "When the simulator gains guest occupancy support, update this scenario to use occupancy_change guest.",
+    "simulator_support: false on the guest-specific assertion; logic-track assertions for pause behavior.",
+    "Covers Priority 4 guest mode from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "initial_occupancy": "home"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 80.0,
+      "note": "Warm morning: indoor 74.5F (just above comfort_cool), outdoor 80F — too warm for nat-vent"
+    },
+    {
+      "time": "2026-07-15T09:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Warm-day classification with guest at home — should apply comfort_cool=74F (not setback)"
+    },
+    {
+      "time": "2026-07-15T11:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Guest opens front door — should trigger pause (outdoor too warm for nat-vent)"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T09:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Guest occupancy: classification applies comfort_cool=74F — same as home mode, no away setback",
+      "simulator_support": true
+    },
+    {
+      "at": "2026-07-15T11:00:00",
+      "expect": "paused",
+      "reason": "Guest mode does not suppress door/window pausing — outdoor 80F > threshold, pause fires",
+      "simulator_support": true
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Guest mode runs automation normally: comfort setpoints applied, pausing unaffected",
+    "observed_behavior": "classification_applied (74F) at 9 AM; paused on sensor_open at 11 AM",
+    "expected_behavior": "Guest occupancy = home-mode comfort (no setback); normal pause behavior on sensor open"
+  }
+}

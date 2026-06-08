@@ -1,0 +1,96 @@
+{
+  "name": "grace_full_lifecycle_clean_expiry",
+  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). Sensor stays closed. Grace expires at 13:15 with all sensors closed → automation resumes cleanly. Classification cycle at 13:30 applies normally.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests the normal (clean) grace expiry path: pause → sensor closes → grace expires cleanly → classification resumes.",
+    "Gap 2 (grace expiry re-check) is pending in simulate.py, but the CLEAN expiry path already works:",
+    "  - grace_end event clears grace_active; no sensors open; no re-pause.",
+    "  - The next classification event applies normally since paused_by_door=False after resumed.",
+    "All assertions in this scenario are logic-track — no Gap 2 required for the clean path.",
+    "Contrast with grace_full_lifecycle_sensor_still_open.json which tests the re-pause path."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 300
+  },
+  "events": [
+    {
+      "time": "2026-07-15T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon. Outdoor too warm for nat vent."
+    },
+    {
+      "time": "2026-07-15T12:31:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at 74F."
+    },
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door opens. Nat vent ineligible (outdoor too warm). Automation pauses."
+    },
+    {
+      "time": "2026-07-15T13:10:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.back_door",
+      "note": "Door closes. All sensors closed → automation resumes, grace period begins (5 min)."
+    },
+    {
+      "time": "2026-07-15T13:10:01",
+      "type": "grace_start",
+      "note": "Grace period marker: grace_active=True. Sensor stays closed through grace window."
+    },
+    {
+      "time": "2026-07-15T13:15:00",
+      "type": "grace_end",
+      "note": "Grace expires at 13:15. All sensors are still closed → clean expiry, no re-pause."
+    },
+    {
+      "time": "2026-07-15T13:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "30-min classification cycle. Grace is gone, no sensors open — classification applies normally."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:00:00",
+      "expect": "paused",
+      "reason": "Sensor opens with outdoor (88F) > indoor (76F) — nat vent ineligible. Automation pauses.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-15T13:10:00",
+      "expect": "resumed",
+      "reason": "All sensors closed — automation resumes. Grace period begins.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-15T13:30:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Grace expired cleanly (sensors stayed closed). Classification cycle at 13:30 applies normally: warm day, cool mode, comfort_cool=74F.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace period expires cleanly when sensors stay closed; classification resumes normally",
+    "observed_behavior": "paused (13:00) → resumed (13:10) → grace expires cleanly (13:15) → classification_applied (13:30, 74F)",
+    "expected_behavior": "When no sensor opens during the grace window, automation resumes without re-pause after grace expires"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "name": "strong_warming_trend_aggressive_setback",
+  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. Setback target = comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) + setback_modifier(-3) = 74F (floored by logic: modifier is subtracted from comfort-cool direction). Verifies modifier deepens cool setback.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "setback_modifier = -3.0 (negative = stronger/more aggressive pre-cooling setback).",
+    "Simulator _compute_bedtime_setback() for cool:",
+    "  raw = comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) + setback_modifier(-3) = 74F",
+    "  ceiling = setback_cool(79)",
+    "  target = min(74, 79) = 74F",
+    "So setback is 74F — same as comfort_cool. This makes sense: a -3 modifier exactly cancels the",
+    "default 3F depth, resulting in no net setback depth (cooling all the way to comfort target overnight).",
+    "The key assertion is that setback_applied fires with the modifier-adjusted target (74F, NOT 77F).",
+    "The modifier is passed in the classification event's setback_modifier field.",
+    "Covers Priority 7 warming trend setback from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "setback_modifier": -3.0,
+      "note": "Warm-day classification with strong warming trend modifier (-3.0). Tomorrow forecast +15F above today."
+    },
+    {
+      "time": "2026-07-15T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 78.0,
+      "note": "Evening: indoor 73F, outdoor 78F — AC running"
+    },
+    {
+      "time": "2026-07-15T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime: cool setback with modifier. raw=74+3+(-3)=74F. ceiling=79F. target=74F."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Warm-day classification applied: cool mode at comfort_cool=74F; setback_modifier=-3.0 stored for bedtime"
+    },
+    {
+      "at": "2026-07-15T22:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 74.0,
+      "reason": "Bedtime cool setback with modifier: comfort_cool(74) + depth(3) + modifier(-3) = 74F. Modifier deepens setback toward comfort target — maximally pre-cools for the hot tomorrow."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Strong warming trend modifier (-3.0) reduces cool setback target to comfort floor (74F) for aggressive pre-cooling",
+    "observed_behavior": "classification_applied (74F, modifier=-3.0) → setback_applied (74F) at bedtime",
+    "expected_behavior": "setback_modifier=-3.0 on cool day: bedtime target = comfort_cool+3-3 = comfort_cool (74F); deepest valid pre-cooling setback"
+  }
+}

@@ -455,16 +455,22 @@ class TestAutomationRestoreState:
             {
                 "paused_by_door": True,
                 "pre_pause_mode": "heat",
-                "grace_active": True,  # Should be cleared on restore
+                "grace_active": True,
                 "last_resume_source": "automation",
+                "grace_end_time": "2099-01-01T00:00:00+00:00",
+                "grace_duration_seconds": 5400,
             }
         )
 
         assert engine._paused_by_door is True
         assert engine._pre_pause_mode == "heat"
-        # Grace timers are cleared on restart
-        assert engine._grace_active is False
-        assert engine._last_resume_source is None
+        # Grace state is preserved by restore_state (Issue #227);
+        # the coordinator's async_restore_state decides whether to
+        # re-schedule or clear the timer based on the remaining time.
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "automation"
+        assert engine._grace_end_time == "2099-01-01T00:00:00+00:00"
+        assert engine._grace_duration_seconds == 5400
 
     def test_restore_empty_state(self):
         from custom_components.climate_advisor.automation import AutomationEngine

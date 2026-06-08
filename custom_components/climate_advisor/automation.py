@@ -211,6 +211,7 @@ class AutomationEngine:
         self._grace_active = False
         self._last_resume_source: str | None = None
         self._grace_end_time: str | None = None
+        self._grace_duration_seconds: int = 0
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -240,6 +241,7 @@ class AutomationEngine:
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
+        self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
@@ -386,11 +388,14 @@ class AutomationEngine:
             self._override_confirm_source = None
         if self._manual_override_active:
             if self._emit_event_callback:
+                _cs = self.hass.states.get(self.climate_entity) if self.hass else None
+                _old_setpoint_raw = _cs.attributes.get("temperature") if _cs else None
                 self._emit_event_callback(
                     "override_cleared",
                     {
                         "was_mode": self._manual_override_mode,
                         "active_since": self._manual_override_time,
+                        "old_setpoint_f": _old_setpoint_raw,
                     },
                 )
             _LOGGER.info(
@@ -1088,7 +1093,45 @@ class AutomationEngine:
                 reason,
             )
             return
+        # Check setpoint is appropriate for current HVAC mode
+        _current_mode_state = self.hass.states.get(self.climate_entity)
+        _current_mode = _current_mode_state.state if _current_mode_state else None
+        if _current_mode == "cool" and temperature < (self.config.get("comfort_heat", 70) - 1.0):
+            _LOGGER.error(
+                "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
+                temperature,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "setpoint_mode_inconsistency",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": _current_mode,
+                        "setpoint_f": temperature,
+                        "comfort_heat": self.config.get("comfort_heat", 70),
+                        "comfort_cool": self.config.get("comfort_cool", 76),
+                    },
+                )
+        elif _current_mode == "heat" and temperature > (self.config.get("comfort_cool", 76) + 1.0):
+            _LOGGER.error(
+                "SETPOINT INCONSISTENCY: heat mode but target %.1fF is above comfort_cool threshold",
+                temperature,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "setpoint_mode_inconsistency",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": _current_mode,
+                        "setpoint_f": temperature,
+                        "comfort_heat": self.config.get("comfort_heat", 70),
+                        "comfort_cool": self.config.get("comfort_cool", 76),
+                    },
+                )
         self._temp_command_pending = True
+        self._temp_command_time = dt_util.now()
         try:
             await self.hass.services.async_call(
                 "climate",
@@ -1122,6 +1165,7 @@ class AutomationEngine:
             )
             return
         self._temp_command_pending = True
+        self._temp_command_time = dt_util.now()
         try:
             await self.hass.services.async_call(
                 "climate",
@@ -1572,6 +1616,26 @@ class AutomationEngine:
                         self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                 return
 
+        # Priority 2b: Away mode ceiling exit — nat-vent exits at home comfort ceiling while away
+        # (away setback is higher than comfort_cool, but nat-vent only free-cools within home band)
+        if self._natural_vent_active and self._occupancy_mode == OCCUPANCY_AWAY:
+            _indoor_away = self._get_indoor_temp_f()
+            if _indoor_away is not None and comfort_cool is not None and _indoor_away >= comfort_cool:
+                _LOGGER.info(
+                    "Nat-vent away-mode ceiling exit: indoor %.1fF >= comfort_cool %.1fF while away",
+                    _indoor_away,
+                    comfort_cool,
+                )
+                self._natural_vent_active = False
+                await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
+                # Do NOT pause — just let away setback handle HVAC
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_away_ceiling_exit",
+                        {"indoor": _indoor_away, "comfort_cool": comfort_cool},
+                    )
+                return
+
         # Phase 2: proactive floor exit — predict floor crossing before it happens
         if self._natural_vent_active:
             thermal = self._thermal_model or {}
@@ -1777,62 +1841,16 @@ class AutomationEngine:
 
         self._grace_active = True
         self._last_resume_source = source
+        self._grace_duration_seconds = duration
         self._grace_end_time = (dt_util.now() + timedelta(seconds=duration)).isoformat()
 
         @callback
         def _grace_expired(_now: Any) -> None:
             """Grace period has elapsed — re-check sensors before clearing."""
-            # If within planned window period, sensors open is expected — just clear grace
-            if self._is_within_planned_window_period():
-                _LOGGER.info(
-                    "%s grace expired during planned window period — sensors open as expected, clearing grace",
-                    source,
-                )
-                self._grace_active = False
-                self._last_resume_source = None
-                self._grace_end_time = None
-                self._manual_grace_cancel = None
-                self._automation_grace_cancel = None
-                self.clear_manual_override(reason="grace_expired")
-                return
+            self._on_grace_expired(source, duration, should_notify)
 
-            # If any contact sensor is still open, re-pause instead of clearing
-            if self._sensor_check_callback and self._sensor_check_callback():
-                _LOGGER.info(
-                    "%s grace expired but sensor(s) still open — re-pausing HVAC",
-                    source,
-                )
-                self._grace_active = False
-                self._last_resume_source = None
-                self._grace_end_time = None
-                self._manual_grace_cancel = None
-                self._automation_grace_cancel = None
-                self.clear_manual_override(reason="grace_expired")
-                if self._emit_event_callback:
-                    self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
-                self.hass.async_create_task(self._re_pause_for_open_sensor())
-                return
-
-            self._grace_active = False
-            self._last_resume_source = None
-            self._grace_end_time = None
-            self._manual_grace_cancel = None
-            self._automation_grace_cancel = None
-            self.clear_manual_override(reason="grace_expired")
-            _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
-            if self._emit_event_callback:
-                self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
-
-            if should_notify:
-                self.hass.async_create_task(
-                    self._notify(
-                        f"⏱️ {source.capitalize()} grace period expired "
-                        f"({duration // 60} minutes). HVAC will now respond "
-                        f"normally to door/window sensor changes.",
-                        "Climate Advisor",
-                        notification_type="grace_expired",
-                    )
-                )
+            # Converge to correct scheduled state (bedtime setback or current classification)
+            self.hass.async_create_task(self._apply_current_scheduled_state())
 
         cancel = async_call_later(self.hass, duration, _grace_expired)
         if source == "manual":
@@ -1846,6 +1864,89 @@ class AutomationEngine:
                 "grace_started",
                 {"source": source, "duration_seconds": duration, "trigger": trigger},
             )
+
+    def _on_grace_expired(self, source: str, duration: int, should_notify: bool) -> None:
+        """Handle grace period expiry — re-check sensors then clear state.
+
+        Extracted from the inner callback in ``_start_grace_period`` so it can
+        also be invoked from ``_reschedule_grace_timer`` after an HA restart.
+        """
+        # If within planned window period, sensors open is expected — just clear grace
+        if self._is_within_planned_window_period():
+            _LOGGER.info(
+                "%s grace expired during planned window period — sensors open as expected, clearing grace",
+                source,
+            )
+            self._grace_active = False
+            self._last_resume_source = None
+            self._grace_end_time = None
+            self._manual_grace_cancel = None
+            self._automation_grace_cancel = None
+            self.clear_manual_override(reason="grace_expired")
+            return
+
+        # If any contact sensor is still open, re-pause instead of clearing
+        if self._sensor_check_callback and self._sensor_check_callback():
+            _LOGGER.info(
+                "%s grace expired but sensor(s) still open — re-pausing HVAC",
+                source,
+            )
+            self._grace_active = False
+            self._last_resume_source = None
+            self._grace_end_time = None
+            self._manual_grace_cancel = None
+            self._automation_grace_cancel = None
+            self.clear_manual_override(reason="grace_expired")
+            if self._emit_event_callback:
+                self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
+            self.hass.async_create_task(self._re_pause_for_open_sensor())
+            return
+
+        self._grace_active = False
+        self._last_resume_source = None
+        self._grace_end_time = None
+        self._manual_grace_cancel = None
+        self._automation_grace_cancel = None
+        self.clear_manual_override(reason="grace_expired")
+        _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
+        if self._emit_event_callback:
+            self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
+
+        if should_notify:
+            self.hass.async_create_task(
+                self._notify(
+                    f"⏱️ {source.capitalize()} grace period expired "
+                    f"({duration // 60} minutes). HVAC will now respond "
+                    f"normally to door/window sensor changes.",
+                    "Climate Advisor",
+                    notification_type="grace_expired",
+                )
+            )
+
+    def _reschedule_grace_timer(self, remaining_seconds: float) -> None:
+        """Re-create the grace expiry callback after an HA restart.
+
+        Called by the coordinator's ``async_restore_state`` when persisted state
+        shows an active grace period that still has time remaining.
+        """
+        source = self._last_resume_source or "manual"
+        duration = int(self._grace_duration_seconds)
+        should_notify = False  # Don't notify on re-scheduled expiry after restart
+
+        @callback
+        def _grace_expired_restored(_now: Any) -> None:
+            self._on_grace_expired(source, duration, should_notify)
+
+        cancel = async_call_later(self.hass, remaining_seconds, _grace_expired_restored)
+        if source == "manual":
+            self._manual_grace_cancel = cancel
+        else:
+            self._automation_grace_cancel = cancel
+        _LOGGER.info(
+            "Grace timer re-created after restart: %s grace, %.0f seconds remaining",
+            source,
+            remaining_seconds,
+        )
 
     def _cancel_grace_timers(self) -> None:
         """Cancel any active grace period timers."""
@@ -1912,26 +2013,73 @@ class AutomationEngine:
             # HVAC already off, just set the pause flag
             self._paused_by_door = True
 
+    async def _apply_current_scheduled_state(self, reason: str = "grace_expired") -> None:
+        """After override clears, converge to the scheduled automation state.
+
+        Determines what state automation would be in right now if no manual override
+        had occurred, and applies it. Ensures automation always converges back to the
+        correct state after a grace period expires.
+        """
+        from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+        now = dt_util.now()
+
+        # Determine if we're in a bedtime window (after sleep_time OR before wake_time)
+        sleep_time = self.config.get("sleep_time")  # e.g. "22:30"
+        wake_time = self.config.get("wake_time")  # e.g. "07:00"
+
+        if sleep_time and wake_time:
+            try:
+                from datetime import time as dt_time  # noqa: PLC0415
+
+                sleep_h, sleep_m = map(int, sleep_time.split(":"))
+                wake_h, wake_m = map(int, wake_time.split(":"))
+                now_time = now.time().replace(second=0, microsecond=0)
+                sleep_t = dt_time(sleep_h, sleep_m)
+                wake_t = dt_time(wake_h, wake_m)
+
+                # Bedtime window: after sleep_time OR before wake_time
+                in_bedtime_window = now_time >= sleep_t or now_time < wake_t
+                if in_bedtime_window:
+                    _LOGGER.info(
+                        "Grace expired: in bedtime window (%s–%s) — applying bedtime setback",
+                        sleep_time,
+                        wake_time,
+                    )
+                    await self.handle_bedtime()
+                    return
+            except (ValueError, AttributeError):
+                pass  # malformed config — fall through to classification
+
+        # Otherwise apply current classification
+        if self._current_classification:
+            _LOGGER.info("Grace expired: applying current classification")
+            await self.apply_classification(self._current_classification)
+
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Occupancy transition to away — clearing manual override (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason="occupancy_away")
         c = self._current_classification
         if not c:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
             return
 
+        # Use actual thermostat mode as ground truth — classification mode may differ
+        # if the day started in one mode but the nightly reclassification switched it
+        # (e.g., started hot → cool mode, reclassified to heat at night; without this
+        # guard, we would apply setback_heat while the AC is still in cool mode)
+        actual_state = self.hass.states.get(self.climate_entity)
+        actual_mode = actual_state.state if actual_state else c.hvac_mode
+
         unit = self.config.get("temp_unit", "fahrenheit")
-        if c.hvac_mode == "heat":
-            setback = self.config["setback_heat"] + c.setback_modifier
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"occupancy away — heat setback"
-                    f" (base {format_temp(self.config['setback_heat'], unit)}"
-                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
-                ),
-            )
-        elif c.hvac_mode == "cool":
+        if actual_mode == "cool":
             setback = self.config["setback_cool"] - c.setback_modifier
             await self._set_temperature(
                 setback,
@@ -1941,10 +2089,20 @@ class AutomationEngine:
                     f" - modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
+        elif actual_mode == "heat":
+            setback = self.config["setback_heat"] + c.setback_modifier
+            await self._set_temperature(
+                setback,
+                reason=(
+                    f"occupancy away — heat setback"
+                    f" (base {format_temp(self.config['setback_heat'], unit)}"
+                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
+                ),
+            )
         else:
             _LOGGER.info(
-                "Occupancy away — HVAC mode is '%s', no setback needed",
-                c.hvac_mode,
+                "Occupancy away — HVAC mode is %r, no setback needed",
+                actual_mode,
             )
 
     async def handle_occupancy_home(self) -> None:
@@ -1996,12 +2154,34 @@ class AutomationEngine:
     async def handle_occupancy_vacation(self) -> None:
         """Handle vacation mode — apply deeper setback for extended away."""
         self._occupancy_mode = OCCUPANCY_VACATION
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Occupancy transition to vacation — clearing manual override (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason="occupancy_vacation")
         c = self._current_classification
         if not c:
             return
 
+        # Use actual thermostat mode as ground truth — same guard as handle_occupancy_away()
+        actual_state = self.hass.states.get(self.climate_entity)
+        actual_mode = actual_state.state if actual_state else c.hvac_mode
+
         unit = self.config.get("temp_unit", "fahrenheit")
-        if c.hvac_mode == "heat":
+        if actual_mode == "cool":
+            setback = self.config["setback_cool"] - c.setback_modifier + VACATION_SETBACK_EXTRA
+            await self._set_temperature(
+                setback,
+                reason=(
+                    f"vacation mode — deep cool setback"
+                    f" (base {format_temp(self.config['setback_cool'], unit)}"
+                    f" - modifier {format_temp_delta(c.setback_modifier, unit)}"
+                    f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
+                ),
+            )
+        elif actual_mode == "heat":
             setback = self.config["setback_heat"] + c.setback_modifier - VACATION_SETBACK_EXTRA
             await self._set_temperature(
                 setback,
@@ -2012,16 +2192,10 @@ class AutomationEngine:
                     f" - vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
                 ),
             )
-        elif c.hvac_mode == "cool":
-            setback = self.config["setback_cool"] - c.setback_modifier + VACATION_SETBACK_EXTRA
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"vacation mode — deep cool setback"
-                    f" (base {format_temp(self.config['setback_cool'], unit)}"
-                    f" - modifier {format_temp_delta(c.setback_modifier, unit)}"
-                    f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
-                ),
+        else:
+            _LOGGER.info(
+                "Occupancy vacation — HVAC mode is %r, no setback needed",
+                actual_mode,
             )
 
     async def handle_bedtime(self) -> None:
@@ -2448,9 +2622,12 @@ class AutomationEngine:
                 self._last_welcome_home_notified = None
         else:
             self._last_welcome_home_notified = None
-        # Grace timers cannot be restored — clear on restart
-        self._grace_active = False
-        self._last_resume_source = None
+        # Restore grace period state so coordinator can decide whether to
+        # re-schedule the timer or clear it (Issue #227).
+        self._grace_active = state.get("grace_active", False)
+        self._last_resume_source = state.get("last_resume_source")
+        self._grace_end_time = state.get("grace_end_time")
+        self._grace_duration_seconds = int(state.get("grace_duration_seconds", 0))
         _LOGGER.info(
             "Restored automation state: paused=%s, pre_pause_mode=%s, "
             "last_action=%s, manual_override=%s, fan_active=%s, fan_override=%s",
@@ -2470,6 +2647,7 @@ class AutomationEngine:
             "grace_active": self._grace_active,
             "last_resume_source": self._last_resume_source,
             "grace_end_time": self._grace_end_time,
+            "grace_duration_seconds": self._grace_duration_seconds,
             "dry_run": self.dry_run,
             "economizer_active": self._economizer_active,
             "economizer_phase": self._economizer_phase,

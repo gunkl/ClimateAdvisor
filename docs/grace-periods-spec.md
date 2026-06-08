@@ -13,7 +13,7 @@
 | Is grace state persisted across HA restarts? | Yes (fixed v0.3.56 / #227). `async_restore_state()` re-schedules the grace timer with remaining duration; if already expired during restart, override is cleared immediately. Pause state (`_paused_by_door`, `_pre_pause_mode`) was already persisted. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage) |
 | What happens to an active grace period when occupancy changes? | The engine has no explicit occupancy-triggered grace cancellation. Grace timers run to expiry regardless of occupancy transitions; occupancy handlers (`handle_occupancy_away`, `handle_occupancy_home`) do not call `_cancel_grace_timers()`. | [§ Occupancy Interaction](#occupancy-interaction) |
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
-| What are all the callsites that clear a manual override, and under what conditions? | Six callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears). Every clear is logged at INFO with a `reason=` parameter. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
+| What are all the callsites that clear a manual override, and under what conditions? | Seven callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
 
 ---
 
@@ -373,6 +373,11 @@ This makes every clear event attributable in `python tools/ha_logs.py --full` wi
 | 4 | `handle_bedtime_setback()` | `automation.py:1926` | Configured `sleep_time` fires | **Skips entirely if `_manual_override_active=True`** — emits `bedtime_setback_skipped` event; logs skip at INFO. Clears only if override is not active. |
 | 5 | `handle_morning_wakeup()` | `automation.py:2025` | Configured `wake_time` fires | **Skips entirely if `_manual_override_active=True`** — emits `morning_wakeup_skipped` event; logs skip at INFO. Clears only if override is not active. |
 | 6 | `clear_manual_override` HA service call | `automation.py` service handler | User explicitly calls the service from UI or automation | Always clears — explicit user intent |
+| 7 | `handle_occupancy_away()` / `handle_occupancy_vacation()` | `automation.py` occupancy handlers | Occupancy transitions to away/vacation while `_manual_override_active=True` | Calls `clear_manual_override(reason="occupancy_away")` / `clear_manual_override(reason="occupancy_vacation")` before applying setback. Fixed in staging (issue #220). Note: `handle_occupancy_home()` does **NOT** call `clear_manual_override()` — returning home restores comfort via `_set_temperature_for_mode()` without touching the override flag. |
+
+### Note — Away/vacation setback and override detection (Issue #221)
+
+Away/vacation setback setpoint changes are guarded by `_is_recent_temp_command(30s)` in the coordinator's setpoint-change detection block (fix #221). When CA issues a setback setpoint command via `handle_occupancy_away()` or `handle_occupancy_vacation()`, `_set_temperature()` records a `_temp_command_time` timestamp. Any thermostat echo arriving within 30 s is suppressed and does not trigger a manual override detection. This prevents the automation's own setback from opening a spurious grace period.
 
 ### Invariant
 

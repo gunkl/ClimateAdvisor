@@ -749,6 +749,7 @@
 
 </div>
 
+
 <script>
 (function() {
   'use strict';
@@ -3003,16 +3004,32 @@
     document.getElementById('github-issue-modal').style.display = 'none';
   }
 
+  async function _appendIncidentPackage(body) {
+    try {
+      const evtResp = await apiFetch('event_log?hours=2');
+      const incidents = (evtResp.events || []).filter(e => e.type === 'incident_detected');
+      if (incidents.length > 0) {
+        const latest = incidents[incidents.length - 1];
+        body += '\n\n## Incident Package\n<details>\n<summary>Diagnostic data for scenario reproduction</summary>\n\n```json\n' +
+          JSON.stringify(latest, null, 2) + '\n```\n</details>';
+      }
+    } catch (e) {
+      // Non-fatal: proceed without incident data
+    }
+    return body;
+  }
+
   async function submitGithubIssue() {
     const statusEl = document.getElementById('github-issue-status');
     const submitBtn = document.getElementById('github-submit-btn');
     const title = document.getElementById('github-issue-title').value.trim();
-    const body = document.getElementById('github-issue-body').value.trim();
+    let body = document.getElementById('github-issue-body').value.trim();
     const labelsRaw = document.getElementById('github-issue-labels').value;
     const labels = labelsRaw.split(',').map(l => l.trim()).filter(Boolean);
     if (!title) { statusEl.textContent = 'Title is required.'; return; }
     statusEl.textContent = 'Submitting...';
     submitBtn.disabled = true;
+    body = await _appendIncidentPackage(body);
     const token = await getAuthToken();
     try {
       const resp = await fetch('/api/climate_advisor/submit_github_issue', {

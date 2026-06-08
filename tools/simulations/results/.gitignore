@@ -1,0 +1,3 @@
+# Validation Records are ephemeral - not tracked in git
+*.json
+!.gitignore

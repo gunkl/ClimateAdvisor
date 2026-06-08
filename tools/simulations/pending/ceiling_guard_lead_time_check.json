@@ -1,0 +1,64 @@
+{
+  "name": "ceiling_guard_lead_time_check",
+  "description": "Warm day, ODE enabled, HVAC off. Two temp_update events test the ceiling guard lead-time gate (Gap 1). At 09:00: indoor=73F, outdoor=90F — ODE projects no breach in 4-hour window (solar gain too weak at hour=9) → guard does NOT fire. At 12:00: indoor=74.6F, outdoor=90F — breach predicted at step 0 (30 min), within lead time → ceiling guard fires.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests Gap 1: ceiling guard lead-time check in simulate.py.",
+    "Gap 1 is already implemented: if breach_hours > lead_min/60, guard does not fire.",
+    "09:00 assertion: ODE at hour=9 with indoor=73F gives dT=-0.075°F/step (solar < passive loss) — indoor DECREASES, never reaches breach threshold (74.5F). breach_idx=None → within_lead_time=False → no decision recorded → no_decision.",
+    "12:00 assertion: ODE at hour=12 with indoor=74.6F. Step 0: dT=(-0.04)*(90-74.6)+0.946=0.33; T=74.765>74.5 → breach_idx=0, breach_hours=0.0. indoor > comfort_cool → lead_min=((74.6-74.0)/11.8)*60*1.3=3.97, clamped to 30.0. within_lead_time=(0.0<=0.5)=True → ceiling_guard_fired.",
+    "Both assertions are logic-track (simulator_support: true). Gap 1 is closed in simulate.py.",
+    "k_active_cool=-11.8 (negative = cooling contribution to dT). lead-time uses abs(k_active_cool)=11.8."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "k_passive": -0.04,
+    "k_active_cool": -11.8,
+    "k_active_heat": 6.78,
+    "ode_enabled": true
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 90.0,
+      "note": "Morning: indoor=73F, outdoor=90F, HVAC off. ODE at hour=9: solar gain < passive loss → indoor decreases. No breach predicted in 4-hour window."
+    },
+    {
+      "time": "2026-07-15T12:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.6,
+      "outdoor_f": 90.0,
+      "note": "Noon: indoor=74.6F (above comfort_cool=74F), outdoor=90F, HVAC off. ODE at hour=12: breach at step 0 (30min). Lead_min=30min. Guard fires."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T09:00:00",
+      "expect": "no_decision",
+      "reason": "ODE projects no breach in 4-hour window at 09:00 (indoor=73F decreasing). Ceiling guard does not fire. No prior events — _outcome_at returns no_decision.",
+      "track": "logic",
+      "simulator_support": true
+    },
+    {
+      "at": "2026-07-15T12:00:00",
+      "expect": "ceiling_guard_fired",
+      "expect_temp": 74.0,
+      "reason": "ODE at hour=12: indoor=74.6F → step-0 breach (74.765F > 74.5F threshold). breach_hours=0.0 <= lead_min/60=0.5. Ceiling guard fires: switches to cool mode at comfort_cool=74F.",
+      "track": "logic",
+      "simulator_support": true
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Ceiling guard lead-time gate: guard suppressed when breach is far (no breach in 4hr window); guard fires when breach is imminent (30 min)",
+    "observed_behavior": "no_decision at 09:00 (no breach) → ceiling_guard_fired at 12:00 (breach at 30min, within lead time)",
+    "expected_behavior": "Ceiling guard only activates when ODE predicts an imminent comfort ceiling breach, not proactively hours in advance"
+  }
+}

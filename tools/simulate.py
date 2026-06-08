@@ -109,6 +109,10 @@ class SimState:
     # Thermostat mode tracking (Issue #96) — independent of classification hvac_mode
     thermostat_mode: str = "off"  # actual thermostat running mode: "heat"|"cool"|"heat_cool"|"off"
 
+    # Override confirmation delay (Gap 3) — pending state before override is accepted
+    override_confirm_pending: bool = False
+    override_confirm_time: str | None = None  # ISO timestamp when pending started
+
 
 @dataclass
 class Decision:
@@ -331,8 +335,7 @@ class ClimateSimulator:
             return None
 
         if etype == "grace_end":
-            self.state.grace_active = False
-            return None
+            return self._handle_grace_end(ts)
 
         if etype == "thermostat_state_changed":
             return self._handle_thermostat_state_changed(ts, event)
@@ -382,12 +385,20 @@ class ClimateSimulator:
         Mirrors the monitoring loop that runs on each coordinator update:
         - If natural vent active and outdoor climbed → exit to pause
         - If paused and outdoor dropped → activate natural vent
+        - If override confirmation pending, check elapsed time and confirm/resolve
         - If ODE enabled, project indoor future and engage ceiling guard if breach imminent
         """
         if self.state.natural_vent_active:
             return self._check_natural_vent_exit(ts)
         if self.state.paused_by_door and self.state.sensors_open:
             return self._check_natural_vent_entry(ts)
+
+        # Gap 3: Override confirmation delay — check whether pending override should be
+        # confirmed (timeout elapsed + mode still diverges) or self-resolved (mode returned).
+        if self.state.override_confirm_pending:
+            override_decision = self._check_override_confirmation(ts)
+            if override_decision is not None:
+                return override_decision
 
         # Ceiling guard: ODE-based proactive projection
         ode_enabled = self.config.get("ode_enabled", False)
@@ -422,8 +433,24 @@ class ClimateSimulator:
                 setpoint=setpoint,
             )
 
-            # If breach detected within lead time, fire ceiling guard
+            # Gap 1: Lead-time check — only fire ceiling guard when breach is imminent.
+            # Production fires only when hours_to_breach <= lead_min / 60.
             if breach_idx is not None:
+                breach_hours = breach_idx * 0.5  # 30-min steps → hours
+                k_active_cool_val = abs(float(self.config.get("k_active_cool", 11.8)))
+                indoor_now = self.state.indoor_temp
+                if indoor_now is not None and indoor_now > comfort_cool:
+                    # Already above comfort ceiling — lead time is how long to cool back down
+                    lead_min = ((indoor_now - comfort_cool) / k_active_cool_val) * 60 * 1.3
+                else:
+                    # Indoor at or below comfort ceiling — default 30-min minimum
+                    lead_min = 30.0
+                lead_min = max(30.0, min(240.0, lead_min))
+                within_lead_time = breach_hours <= (lead_min / 60.0)
+            else:
+                within_lead_time = False
+
+            if within_lead_time:
                 self.state.hvac_mode = "cool"
                 self.state.hvac_target_temp = comfort_cool
                 d = Decision(
@@ -433,6 +460,7 @@ class ClimateSimulator:
                     (
                         f"ODE projection: indoor will exceed {comfort_cool + 0.5}°F "
                         f"at 30-min step {breach_idx} (predicted {predictions[breach_idx]:.1f}°F) "
+                        f"within lead_min={lead_min:.0f} min "
                         f"— switching to cool mode with {comfort_cool}°F target"
                     ),
                     "cool",
@@ -581,6 +609,107 @@ class ClimateSimulator:
         self.decisions.append(d)
         return d
 
+    def _handle_grace_end(self, ts: str) -> Decision | None:
+        """Gap 2: Grace period expiry re-check — mirrors automation.py grace-end behavior.
+
+        When grace expires, production re-checks whether any sensors are still open.
+        If sensors remain open: clear grace_active and re-pause (don't resume).
+        If all sensors closed: clear grace_active and emit resumed.
+        """
+        self.state.grace_active = False
+        if self.state.sensors_open:
+            # Sensor(s) still open — re-pause instead of resuming
+            self.state.paused_by_door = True
+            d = Decision(
+                ts,
+                "grace_end",
+                "paused",
+                f"grace expired with {len(self.state.sensors_open)} sensor(s) still open — re-pausing",
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+        # All sensors closed — clean expiry, automation resumes
+        d = Decision(
+            ts,
+            "grace_end",
+            "resumed",
+            "grace expired cleanly — all sensors closed, resuming automation",
+            self.state.hvac_mode,
+            self.state.fan_mode,
+        )
+        self.decisions.append(d)
+        return d
+
+    def _check_override_confirmation(self, ts: str) -> Decision | None:
+        """Gap 3: Override confirmation delay — check whether pending override is confirmed or self-resolved.
+
+        Called from _check_conditions_on_temp_update when override_confirm_pending is True.
+        Mirrors automation.py 10-minute confirmation window before accepting a manual override:
+        - If elapsed >= override_confirm_seconds AND thermostat mode still diverges from
+          classification → confirm override, emit override_confirmed.
+        - If thermostat mode returned to classification mode before timeout → emit
+          override_self_resolved, clear pending state.
+        """
+        from datetime import datetime as _dt
+
+        if self.state.override_confirm_time is None:
+            return None
+
+        try:
+            start = _dt.fromisoformat(self.state.override_confirm_time)
+            now = _dt.fromisoformat(ts)
+        except (ValueError, AttributeError):
+            return None
+
+        confirm_seconds = float(self.config.get("override_confirm_seconds", 600))
+        elapsed = (now - start).total_seconds()
+
+        c = self.state.classification
+        classification_mode = c.hvac_mode if c else None
+
+        # Check if thermostat returned to classification mode (self-resolved)
+        if classification_mode is not None and self.state.thermostat_mode == classification_mode:
+            self.state.override_confirm_pending = False
+            self.state.override_confirm_time = None
+            d = Decision(
+                ts,
+                "temp_update",
+                "override_self_resolved",
+                (
+                    f"thermostat returned to classification mode ({classification_mode}) "
+                    f"before confirm timeout ({elapsed:.0f}s < {confirm_seconds:.0f}s) "
+                    f"— override not accepted"
+                ),
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        # Check if confirmation timeout has elapsed with mode still diverging
+        if elapsed >= confirm_seconds:
+            self.state.override_confirm_pending = False
+            self.state.override_confirm_time = None
+            self.state.manual_override_active = True
+            d = Decision(
+                ts,
+                "temp_update",
+                "override_confirmed",
+                (
+                    f"thermostat mode ({self.state.thermostat_mode}) diverged from "
+                    f"classification ({classification_mode}) for {elapsed:.0f}s "
+                    f">= confirm timeout {confirm_seconds:.0f}s — override accepted"
+                ),
+                self.state.hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        return None
+
     # ------------------------------------------------------------------
     # Planned window period gate (mirrors automation.py)
     # ------------------------------------------------------------------
@@ -711,6 +840,36 @@ class ClimateSimulator:
             )
             self.decisions.append(d)
             return d
+
+        # Gap 4: Warm-day comfort gap guard — mirrors apply_classification() in automation.py.
+        # When classifier says "off" but indoor is still below comfort_heat, production heats
+        # to comfort_heat before going off. Emit warm_day_comfort_gap instead of applying off.
+        # Gated by config "warm_day_comfort_gap_guard": true to avoid breaking existing golden
+        # scenarios that were written before this guard was ported to the simulator.
+        if (
+            self.config.get("warm_day_comfort_gap_guard", False)
+            and c.hvac_mode == "off"
+            and self.state.indoor_temp is not None
+        ):
+            comfort_heat = float(self.config.get("comfort_heat", 70))
+            if self.state.indoor_temp < comfort_heat:
+                self.state.hvac_mode = "heat"
+                self.state.hvac_target_temp = comfort_heat
+                d = Decision(
+                    ts,
+                    "classification",
+                    "warm_day_comfort_gap",
+                    (
+                        f"warm-day classification: hvac_mode=off but indoor "
+                        f"{self.state.indoor_temp}°F < comfort_heat {comfort_heat}°F "
+                        f"— heating to comfort_heat before going off"
+                    ),
+                    "heat",
+                    self.state.fan_mode,
+                    target_temp=comfort_heat,
+                )
+                self.decisions.append(d)
+                return d
 
         # Normal classification: apply comfort temperature (or off)
         self.state.hvac_mode = c.hvac_mode
@@ -1325,7 +1484,36 @@ class ClimateSimulator:
             self.decisions.append(d)
             return d
 
-        # No stale-clear fired — nat vent guard protected fan_active
+        # Gap 3: Override detection — if thermostat mode diverges from classification,
+        # start the override confirmation delay (mirrors automation.py 10-min confirm window).
+        # Only start if: not already pending/active, no stale-clear fired, not manual override.
+        c = self.state.classification
+        if (
+            c is not None
+            and not self.state.manual_override_active
+            and not self.state.override_confirm_pending
+            and new_hvac_mode != c.hvac_mode
+            and new_hvac_mode not in ("off",)  # thermostat going off is normal; not an override
+        ):
+            self.state.override_confirm_pending = True
+            self.state.override_confirm_time = ts
+            d = Decision(
+                ts,
+                "thermostat_state_changed",
+                "override_detected",
+                (
+                    f"thermostat mode ({new_hvac_mode}) diverges from classification "
+                    f"({c.hvac_mode}) — starting {self.config.get('override_confirm_seconds', 600)}s "
+                    f"confirmation window"
+                ),
+                new_hvac_mode,
+                self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+        # No stale-clear fired and no override detected — nat vent guard protected fan_active,
+        # or thermostat change is consistent with classification / no classification set.
         d = Decision(
             ts,
             "thermostat_state_changed",

@@ -1,0 +1,104 @@
+{
+  "name": "vacation_mode_full_lifecycle",
+  "description": "Home → vacation at 10:00 (deep setback applied); three classification cycles fire and reapply vacation setback; user returns at 16:00 (comfort restored). Verifies vacation setback depth and classification-cycle setback maintenance.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "VACATION_SETBACK_EXTRA = 3.0F. setback_cool=79, so vacation cool target = 79 + 3 = 82F.",
+    "The simulator _handle_occupancy_vacation() produces 'setback_applied' (not 'deep_setback_applied').",
+    "Classification cycles while vacation call _handle_occupancy_vacation() → 'setback_applied' each time.",
+    "comfort_restored fires on occupancy_home with comfort_cool=74F.",
+    "Covers Priority 4 vacation lifecycle from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Morning classification at home — cool mode, comfort_cool=74F"
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "occupancy_vacation",
+      "note": "User leaves for vacation — deep cool setback: setback_cool(79) + VACATION_SETBACK_EXTRA(3) = 82F"
+    },
+    {
+      "time": "2026-07-15T10:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "30-min classification cycle while on vacation — must reapply vacation setback (82F), NOT comfort"
+    },
+    {
+      "time": "2026-07-15T11:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Second classification cycle while on vacation — setback maintained"
+    },
+    {
+      "time": "2026-07-15T11:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Third classification cycle while on vacation — setback maintained"
+    },
+    {
+      "time": "2026-07-15T16:00:00",
+      "type": "occupancy_home",
+      "note": "User returns home — comfort_cool (74F) restored"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T08:00:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Initial morning classification at home — cool mode at comfort_cool=74F"
+    },
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 82.0,
+      "reason": "Vacation setback: setback_cool(79) + VACATION_SETBACK_EXTRA(3) = 82F"
+    },
+    {
+      "at": "2026-07-15T10:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 82.0,
+      "reason": "Classification while vacation reapplies vacation setback (82F) — comfort NOT restored"
+    },
+    {
+      "at": "2026-07-15T11:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 82.0,
+      "reason": "Second classification cycle while vacation — setback maintained at 82F"
+    },
+    {
+      "at": "2026-07-15T11:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 82.0,
+      "reason": "Third classification cycle while vacation — setback maintained at 82F"
+    },
+    {
+      "at": "2026-07-15T16:00:00",
+      "expect": "comfort_restored",
+      "expect_temp": 74.0,
+      "reason": "occupancy_home — comfort_cool (74F) restored after vacation"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Vacation sets deep setback; classification cycles maintain it; return restores comfort",
+    "observed_behavior": "setback_applied (82F) on vacation and each classification cycle; comfort_restored (74F) on return",
+    "expected_behavior": "Deep vacation setback maintained across classification cycles; full comfort restore on home return"
+  }
+}

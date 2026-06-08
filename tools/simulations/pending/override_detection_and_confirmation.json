@@ -1,0 +1,97 @@
+{
+  "name": "override_detection_and_confirmation",
+  "description": "Warm day, HVAC in cool mode at comfort_cool (74F). User bumps thermostat to heat mode at 14:00. After 10-minute confirm period passes (14:10), override is confirmed. Classification cycle at 14:30 is suppressed by active override.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests the full override detection → confirmation → classification suppression lifecycle.",
+    "Gap 3 (override confirmation delay) is NOT yet in simulate.py — override_detected and override_confirmed assertions are marked track:integration.",
+    "What the simulator CAN test today: classification with manual_override_active=True produces no_action (not classification_applied).",
+    "The manual_override_active flag must be set via config initial state for the logic-track assertion to work.",
+    "Once Gap 3 is closed in simulate.py, the integration assertions can be promoted to logic-track."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "cool"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 85.0,
+      "note": "Warm summer afternoon. Indoor at comfort_cool=74F. HVAC holding cool mode."
+    },
+    {
+      "time": "2026-07-15T13:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at comfort_cool=74F."
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "User bumps thermostat to heat mode. Override detection fires. 10-minute confirm window starts."
+    },
+    {
+      "time": "2026-07-15T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 87.0,
+      "note": "10 minutes have elapsed. Thermostat still in heat mode → override confirmed."
+    },
+    {
+      "time": "2026-07-15T14:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Scheduled 30-min classification cycle. Override is active — should be suppressed."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Initial warm-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "override_detected",
+      "reason": "Thermostat state changed to heat mode while classification says cool — override detection fires.",
+      "track": "integration",
+      "simulator_support": false,
+      "note": "Requires Gap 3 (override confirmation delay) in simulate.py. Simulator thermostat_state_changed handler only manages stale-fan-clear, not override detection."
+    },
+    {
+      "at": "2026-07-15T14:10:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes elapsed with thermostat still in heat mode → override_confirm_seconds=600 expired → override confirmed.",
+      "track": "integration",
+      "simulator_support": false,
+      "note": "Requires Gap 3 in simulate.py. Once gap is closed this becomes a logic-track assertion."
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "no_action",
+      "reason": "Classification cycle while manual_override_active=True produces no_action (override suppresses classification). Simulator does implement this path in _handle_classification().",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Override detected on thermostat mode change, confirmed after 10-min delay, suppresses subsequent classification",
+    "observed_behavior": "classification_applied (cool, 74F) → override_detected (14:00) → override_confirmed (14:10) → no_action on classification (14:30)",
+    "expected_behavior": "CA respects user's manual override and stops re-applying classification until override clears"
+  }
+}

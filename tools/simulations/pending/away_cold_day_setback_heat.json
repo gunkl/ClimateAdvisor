@@ -1,0 +1,89 @@
+{
+  "name": "away_cold_day_setback_heat",
+  "description": "Cold day (high 45F): home at start, classification applies heat mode. User leaves at 09:00 — setback should use setback_HEAT (62F), NOT setback_cool. User returns at 17:00 — comfort_heat (70F) restored. Verifies cold-day away setback selects the correct setback direction.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Key assertion: setback_applied with target=62F (setback_heat), not 79F (setback_cool).",
+    "The simulator _handle_occupancy_away() branches on classification.hvac_mode:",
+    "  hvac_mode='heat' → uses setback_heat (62F)",
+    "  hvac_mode='cool' → uses setback_cool (79F)",
+    "Cold-day classification: hvac_mode='heat'. Away → setback_heat(62) + modifier(0) = 62F.",
+    "comfort_restored on return: comfort_heat=70F.",
+    "Covers Priority 6b away_cold_day from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-01-15T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 32.0,
+      "note": "Cold winter morning: indoor 69F (slightly below comfort_heat=70F), outdoor 32F"
+    },
+    {
+      "time": "2026-01-15T08:01:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "Cold-day classification: hvac_mode=heat, comfort_heat=70F target"
+    },
+    {
+      "time": "2026-01-15T09:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves — cold day so setback should be setback_heat=62F (NOT setback_cool)"
+    },
+    {
+      "time": "2026-01-15T12:00:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "Classification cycle while away — should reapply heat setback (62F)"
+    },
+    {
+      "time": "2026-01-15T17:00:00",
+      "type": "occupancy_home",
+      "note": "User returns — restore comfort_heat=70F"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-15T08:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 70.0,
+      "reason": "Cold-day classification: heat mode at comfort_heat=70F"
+    },
+    {
+      "at": "2026-01-15T09:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 62.0,
+      "reason": "Away on cold/heat day: setback_heat=62F applied (NOT setback_cool — cold day test)"
+    },
+    {
+      "at": "2026-01-15T12:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 62.0,
+      "reason": "Classification while away on cold day: heat setback reapplied (62F), comfort NOT restored"
+    },
+    {
+      "at": "2026-01-15T17:00:00",
+      "expect": "comfort_restored",
+      "expect_temp": 70.0,
+      "reason": "occupancy_home on cold/heat day: comfort_heat=70F restored"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cold-day away setback uses setback_heat (62F), not setback_cool; comfort restored on return",
+    "observed_behavior": "classification_applied (heat, 70F) → setback_applied (62F) on away → setback maintained on cycle → comfort_restored (70F) on return",
+    "expected_behavior": "Away setback on cold/heat day targets setback_heat, mirroring the setback direction of the active classification"
+  }
+}

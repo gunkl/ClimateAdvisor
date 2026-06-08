@@ -1,0 +1,80 @@
+{
+  "name": "bedtime_skipped_manual_override_active",
+  "description": "Warm day: user bumps thermostat at 21:00 (override confirmed). Bedtime fires at 22:30. In production, an active manual override suppresses bedtime setback. The simulator currently clears override at bedtime and applies setback — so this assertion is simulator_support:false pending Gap 3 (override confirm delay) fix.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Production behavior (Issue #204): if manual_override_active at bedtime, setback is skipped.",
+    "Simulator current behavior: _handle_bedtime() sets manual_override_active=False unconditionally,",
+    "then applies setback regardless. So 'bedtime_setback_skipped' is NOT produced by the simulator.",
+    "This scenario uses simulator_support:false on the skip assertion until Gap 3 (override confirm)",
+    "is implemented and bedtime logic respects the override flag.",
+    "The override_confirmed assertion is also simulator_support:false (Gap 3 — confirm delay not modeled).",
+    "Covers Priority 5 bedtime+override from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Afternoon classification — cool mode at comfort_cool=74F"
+    },
+    {
+      "time": "2026-07-15T21:00:00",
+      "type": "thermostat_state_changed",
+      "new_hvac_mode": "heat",
+      "new_target_temp": 72.0,
+      "note": "User bumps thermostat to heat/72F — override detection starts 10-min confirm window"
+    },
+    {
+      "time": "2026-07-15T21:10:00",
+      "type": "thermostat_state_changed",
+      "new_hvac_mode": "heat",
+      "new_target_temp": 72.0,
+      "note": "10-min confirm window passes with override still active — override_confirmed fires in production"
+    },
+    {
+      "time": "2026-07-15T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime fires while override active — in production: setback skipped; in simulator: setback applied (Gap 3)"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Afternoon classification at home — cool mode at comfort_cool=74F"
+    },
+    {
+      "at": "2026-07-15T21:10:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes after initial override detection, thermostat still diverges — override confirmed",
+      "simulator_support": false,
+      "track": "integration",
+      "gap": "Gap 3 (override confirm delay) not yet in simulator — override accepted immediately, no 'override_confirmed' outcome"
+    },
+    {
+      "at": "2026-07-15T22:30:00",
+      "expect": "bedtime_setback_skipped",
+      "reason": "Manual override active at bedtime — setback suppressed to avoid fighting user's intent",
+      "simulator_support": false,
+      "track": "integration",
+      "gap": "Simulator _handle_bedtime() clears override and applies setback unconditionally; production checks override first"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Manual override active at bedtime: setback skipped (production); simulator does not yet model this",
+    "observed_behavior": "production: override_confirmed at 21:10, bedtime_setback_skipped at 22:30",
+    "expected_behavior": "Bedtime setback suppressed when manual override is active (Issue #204 fix validation)"
+  }
+}

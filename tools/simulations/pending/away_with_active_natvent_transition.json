@@ -1,0 +1,76 @@
+{
+  "name": "away_with_active_natvent_transition",
+  "description": "Warm day: nat-vent running at home (fan on, window open). User leaves (occupancy_away) at 15:00. In production, the away transition deactivates nat-vent and applies away setback. The simulator _handle_occupancy_away() applies setback but does NOT deactivate natural_vent_active state — nat-vent exit is simulator_support:false.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Production behavior: handle_occupancy_away() calls _deactivate_natural_ventilation() if nat-vent is active,",
+    "then applies setback. The simulator _handle_occupancy_away() does not check natural_vent_active.",
+    "So in the simulator, natural_vent_active state persists after the away transition (incorrect).",
+    "The setback_applied assertion IS logic-track (simulator correctly applies setback on away).",
+    "The nat-vent exit assertion is simulator_support:false.",
+    "Covers Priority 6b away_natvent_transition from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.5,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 73.5F, outdoor 65F — nat-vent favorable"
+    },
+    {
+      "time": "2026-07-15T09:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Warm-day classification at home — cool mode, comfort_cool=74F"
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor=65F < indoor=73.5F, indoor > comfort_heat=70F — nat-vent activates"
+    },
+    {
+      "time": "2026-07-15T15:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves while nat-vent is active. Production: deactivate nat-vent, apply away setback (79F)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open: outdoor=65F < indoor=73.5F, indoor > comfort_heat=70F, threshold=74+3=77F → nat-vent activates"
+    },
+    {
+      "at": "2026-07-15T15:00:00",
+      "expect": "nat_vent_exit",
+      "reason": "occupancy_away while nat-vent active — production deactivates nat-vent before applying setback",
+      "simulator_support": false,
+      "track": "integration",
+      "gap": "Simulator _handle_occupancy_away() does not deactivate natural_vent_active. Production handle_occupancy_away() calls _deactivate_natural_ventilation() first."
+    },
+    {
+      "at": "2026-07-15T15:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "reason": "Away setback applied after nat-vent deactivation: setback_cool=79F on warm/cool day",
+      "simulator_support": true
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Away transition deactivates nat-vent then applies setback (production); simulator skips nat-vent exit",
+    "observed_behavior": "production: natural_ventilation → nat_vent_exit on away → setback_applied (79F)",
+    "expected_behavior": "Leaving home while nat-vent is active: nat-vent deactivated, fan stopped, away setback applied"
+  }
+}

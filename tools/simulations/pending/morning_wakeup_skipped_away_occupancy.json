@@ -1,0 +1,67 @@
+{
+  "name": "morning_wakeup_skipped_away_occupancy",
+  "description": "Away mode with bedtime setback already active. Wakeup event fires at 07:00 while occupancy=away. In production, wakeup is skipped when away. The simulator currently restores comfort on wakeup regardless of occupancy — assertion is simulator_support:false pending wakeup occupancy guard.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Production behavior: handle_morning_wakeup() checks occupancy — if away/vacation, skip restore.",
+    "Simulator current behavior: _handle_wakeup() does not check occupancy; always calls comfort_restored.",
+    "This scenario uses simulator_support:false on the skip assertion until the wakeup occupancy guard",
+    "is ported to the simulator.",
+    "The bedtime setback assertion IS logic-track (simulator applies it correctly).",
+    "Covers Priority 5 wakeup+away from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-14T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Previous day classification — cool mode at comfort_cool=74F"
+    },
+    {
+      "time": "2026-07-14T18:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves — away setback applied (setback_cool=79F)"
+    },
+    {
+      "time": "2026-07-14T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime fires while away — setback applied (cool: 74+3=77F, but away setback is 79F so stays at 79F)"
+    },
+    {
+      "time": "2026-07-15T07:00:00",
+      "type": "wakeup",
+      "note": "Wakeup fires while still away — production skips restore; simulator incorrectly calls comfort_restored"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-14T18:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "reason": "Away setback: setback_cool=79F applied when user leaves"
+    },
+    {
+      "at": "2026-07-15T07:00:00",
+      "expect": "morning_wakeup_skipped",
+      "reason": "Wakeup while occupancy=away — comfort restore suppressed; setback maintained",
+      "simulator_support": false,
+      "track": "integration",
+      "gap": "Simulator _handle_wakeup() does not check occupancy; always produces comfort_restored. Needs occupancy guard port from automation.py handle_morning_wakeup()."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Wakeup skipped while away: setback maintained, comfort NOT restored (production only)",
+    "observed_behavior": "production: setback_applied (79F) on away; morning_wakeup_skipped at 07:00",
+    "expected_behavior": "Morning wakeup respects away mode — no comfort restore while user is away"
+  }
+}

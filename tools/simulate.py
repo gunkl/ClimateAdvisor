@@ -400,7 +400,15 @@ class ClimateSimulator:
         - If override confirmation pending, check elapsed time and confirm/resolve
         - If ODE enabled, project indoor future and engage ceiling guard if breach imminent
         """
-        if self.state.natural_vent_active:
+        # Ceiling guard takes priority over nat-vent exit checks when indoor is already
+        # above the comfort ceiling — nat-vent should be cleared and cooling engaged.
+        # Only bypass the nat-vent short-circuit when ODE is enabled AND indoor > comfort_cool.
+        _ode_enabled = self.config.get("ode_enabled", False)
+        _comfort_cool_guard = float(self.config.get("comfort_cool", 75))
+        _indoor_above_ceiling = (
+            _ode_enabled and self.state.indoor_temp is not None and self.state.indoor_temp > _comfort_cool_guard
+        )
+        if self.state.natural_vent_active and not _indoor_above_ceiling:
             return self._check_natural_vent_exit(ts)
         if self.state.paused_by_door and self.state.sensors_open:
             return self._check_natural_vent_entry(ts)
@@ -465,6 +473,11 @@ class ClimateSimulator:
             if within_lead_time:
                 self.state.hvac_mode = "cool"
                 self.state.hvac_target_temp = comfort_cool
+                # Clear nat-vent state when ceiling guard escalates to active cooling
+                if self.state.natural_vent_active:
+                    self.state.natural_vent_active = False
+                    self.state.fan_active = False
+                    self.state.fan_mode = "auto"
                 d = Decision(
                     ts,
                     "temp_update",

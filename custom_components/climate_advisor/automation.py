@@ -211,6 +211,7 @@ class AutomationEngine:
         self._grace_active = False
         self._last_resume_source: str | None = None
         self._grace_end_time: str | None = None
+        self._grace_duration_seconds: int = 0
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -386,11 +387,14 @@ class AutomationEngine:
             self._override_confirm_source = None
         if self._manual_override_active:
             if self._emit_event_callback:
+                _cs = self.hass.states.get(self.climate_entity) if self.hass else None
+                _old_setpoint_raw = _cs.attributes.get("temperature") if _cs else None
                 self._emit_event_callback(
                     "override_cleared",
                     {
                         "was_mode": self._manual_override_mode,
                         "active_since": self._manual_override_time,
+                        "old_setpoint_f": _old_setpoint_raw,
                     },
                 )
             _LOGGER.info(
@@ -1814,62 +1818,13 @@ class AutomationEngine:
 
         self._grace_active = True
         self._last_resume_source = source
+        self._grace_duration_seconds = duration
         self._grace_end_time = (dt_util.now() + timedelta(seconds=duration)).isoformat()
 
         @callback
         def _grace_expired(_now: Any) -> None:
             """Grace period has elapsed — re-check sensors before clearing."""
-            # If within planned window period, sensors open is expected — just clear grace
-            if self._is_within_planned_window_period():
-                _LOGGER.info(
-                    "%s grace expired during planned window period — sensors open as expected, clearing grace",
-                    source,
-                )
-                self._grace_active = False
-                self._last_resume_source = None
-                self._grace_end_time = None
-                self._manual_grace_cancel = None
-                self._automation_grace_cancel = None
-                self.clear_manual_override(reason="grace_expired")
-                return
-
-            # If any contact sensor is still open, re-pause instead of clearing
-            if self._sensor_check_callback and self._sensor_check_callback():
-                _LOGGER.info(
-                    "%s grace expired but sensor(s) still open — re-pausing HVAC",
-                    source,
-                )
-                self._grace_active = False
-                self._last_resume_source = None
-                self._grace_end_time = None
-                self._manual_grace_cancel = None
-                self._automation_grace_cancel = None
-                self.clear_manual_override(reason="grace_expired")
-                if self._emit_event_callback:
-                    self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
-                self.hass.async_create_task(self._re_pause_for_open_sensor())
-                return
-
-            self._grace_active = False
-            self._last_resume_source = None
-            self._grace_end_time = None
-            self._manual_grace_cancel = None
-            self._automation_grace_cancel = None
-            self.clear_manual_override(reason="grace_expired")
-            _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
-            if self._emit_event_callback:
-                self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
-
-            if should_notify:
-                self.hass.async_create_task(
-                    self._notify(
-                        f"⏱️ {source.capitalize()} grace period expired "
-                        f"({duration // 60} minutes). HVAC will now respond "
-                        f"normally to door/window sensor changes.",
-                        "Climate Advisor",
-                        notification_type="grace_expired",
-                    )
-                )
+            self._on_grace_expired(source, duration, should_notify)
 
         cancel = async_call_later(self.hass, duration, _grace_expired)
         if source == "manual":
@@ -1883,6 +1838,89 @@ class AutomationEngine:
                 "grace_started",
                 {"source": source, "duration_seconds": duration, "trigger": trigger},
             )
+
+    def _on_grace_expired(self, source: str, duration: int, should_notify: bool) -> None:
+        """Handle grace period expiry — re-check sensors then clear state.
+
+        Extracted from the inner callback in ``_start_grace_period`` so it can
+        also be invoked from ``_reschedule_grace_timer`` after an HA restart.
+        """
+        # If within planned window period, sensors open is expected — just clear grace
+        if self._is_within_planned_window_period():
+            _LOGGER.info(
+                "%s grace expired during planned window period — sensors open as expected, clearing grace",
+                source,
+            )
+            self._grace_active = False
+            self._last_resume_source = None
+            self._grace_end_time = None
+            self._manual_grace_cancel = None
+            self._automation_grace_cancel = None
+            self.clear_manual_override(reason="grace_expired")
+            return
+
+        # If any contact sensor is still open, re-pause instead of clearing
+        if self._sensor_check_callback and self._sensor_check_callback():
+            _LOGGER.info(
+                "%s grace expired but sensor(s) still open — re-pausing HVAC",
+                source,
+            )
+            self._grace_active = False
+            self._last_resume_source = None
+            self._grace_end_time = None
+            self._manual_grace_cancel = None
+            self._automation_grace_cancel = None
+            self.clear_manual_override(reason="grace_expired")
+            if self._emit_event_callback:
+                self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
+            self.hass.async_create_task(self._re_pause_for_open_sensor())
+            return
+
+        self._grace_active = False
+        self._last_resume_source = None
+        self._grace_end_time = None
+        self._manual_grace_cancel = None
+        self._automation_grace_cancel = None
+        self.clear_manual_override(reason="grace_expired")
+        _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
+        if self._emit_event_callback:
+            self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
+
+        if should_notify:
+            self.hass.async_create_task(
+                self._notify(
+                    f"⏱️ {source.capitalize()} grace period expired "
+                    f"({duration // 60} minutes). HVAC will now respond "
+                    f"normally to door/window sensor changes.",
+                    "Climate Advisor",
+                    notification_type="grace_expired",
+                )
+            )
+
+    def _reschedule_grace_timer(self, remaining_seconds: float) -> None:
+        """Re-create the grace expiry callback after an HA restart.
+
+        Called by the coordinator's ``async_restore_state`` when persisted state
+        shows an active grace period that still has time remaining.
+        """
+        source = self._last_resume_source or "manual"
+        duration = int(self._grace_duration_seconds)
+        should_notify = False  # Don't notify on re-scheduled expiry after restart
+
+        @callback
+        def _grace_expired_restored(_now: Any) -> None:
+            self._on_grace_expired(source, duration, should_notify)
+
+        cancel = async_call_later(self.hass, remaining_seconds, _grace_expired_restored)
+        if source == "manual":
+            self._manual_grace_cancel = cancel
+        else:
+            self._automation_grace_cancel = cancel
+        _LOGGER.info(
+            "Grace timer re-created after restart: %s grace, %.0f seconds remaining",
+            source,
+            remaining_seconds,
+        )
 
     def _cancel_grace_timers(self) -> None:
         """Cancel any active grace period timers."""
@@ -2499,9 +2537,12 @@ class AutomationEngine:
                 self._last_welcome_home_notified = None
         else:
             self._last_welcome_home_notified = None
-        # Grace timers cannot be restored — clear on restart
-        self._grace_active = False
-        self._last_resume_source = None
+        # Restore grace period state so coordinator can decide whether to
+        # re-schedule the timer or clear it (Issue #227).
+        self._grace_active = state.get("grace_active", False)
+        self._last_resume_source = state.get("last_resume_source")
+        self._grace_end_time = state.get("grace_end_time")
+        self._grace_duration_seconds = int(state.get("grace_duration_seconds", 0))
         _LOGGER.info(
             "Restored automation state: paused=%s, pre_pause_mode=%s, "
             "last_action=%s, manual_override=%s, fan_active=%s, fan_override=%s",
@@ -2521,6 +2562,7 @@ class AutomationEngine:
             "grace_active": self._grace_active,
             "last_resume_source": self._last_resume_source,
             "grace_end_time": self._grace_end_time,
+            "grace_duration_seconds": self._grace_duration_seconds,
             "dry_run": self.dry_run,
             "economizer_active": self._economizer_active,
             "economizer_phase": self._economizer_phase,

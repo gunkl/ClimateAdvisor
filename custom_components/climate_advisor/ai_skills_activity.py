@@ -54,6 +54,7 @@ Column definitions:
   - sensor_opened: if hvac_mode_change present â†’ render it; if fan_mode_change present â†’ append it. Example: "mode: coolâ†’off, fan: autoâ†’on"
   - nat_vent_comfort_floor_exit / nat_vent_predicted_floor_exit: if fan_mode_change present â†’ "fan: onâ†’auto"; if hvac_mode_restored present â†’ prepend "mode: offâ†’X, "
   - grace_started: use trigger field in the Event description, NOT in Settings. Settings column stays blank for grace_started.
+  - override_cleared: if old_setpoint_f present → show "was X°F (manual setpoint)" in Settings.
   - Leave Settings blank (empty cell) if no settings fields are present in the event data
   - Events that do not change thermostat settings (grace_started, sensor_opened, sensor_all_closed, nat_vent_outdoor_rise_exit, etc.) -> empty Settings cell
   - nat_vent_ceiling_escalation: nat-vent escalated to HVAC cooling because indoor exceeded comfort_cool. Settings: mode: off->cool
@@ -96,7 +97,9 @@ If a HISTORICAL DAILY SUMMARIES section is present in the context:
 - In ANOMALIES: flag patterns that repeat across multiple days (e.g. daily overrides, recurring violations).
 ## DECISIONS
 Why each automation action was taken, with the logic explained.
-When fan_status is active while hvac_mode is off, explicitly trace the fan state to the logged automation action that caused it (e.g., "Fan activated â€” natural ventilation: outdoor XÂ°F â‰¤ threshold"). Do not describe the state in isolation.
+When fan_status is active while hvac_mode is off, explicitly trace the fan state to the logged automation action that caused it (e.g., “Fan activated — natural ventilation: outdoor X°F ≤ threshold”). Do not describe the state in isolation.
+- grace_started with trigger=dashboard_resume: the user manually resumed automation from the dashboard; the grace period prevents door/window sensors from immediately re-pausing. In DECISIONS, describe this as expected behavior: “90-min buffer against sensor re-trigger after user resume.”
+- When override_cleared and grace_started appear at the same timestamp: the user both cancelled an active override AND resumed from pause — show these as one coordinated action in DECISIONS.
 ## ANOMALIES
 Anything unusual: long runtimes, frequent cycling, comfort violations, unexpected states.
 IMPORTANT: The STATE CROSS-VALIDATION section in the context contains pre-computed flags. If it contains [WARNING] or [FLAG] entries, call each one out explicitly here â€” do NOT construct explanatory narratives around contradictions. Treat them as data quality issues or potential hardware bugs requiring investigation.

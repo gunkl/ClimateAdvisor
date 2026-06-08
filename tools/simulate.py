@@ -261,6 +261,18 @@ class ClimateSimulator:
                 return "override_active"
             return False
 
+        # Custom assertion: nat_vent_still_active — nat-vent flag is True in current state
+        if expect == "nat_vent_still_active":
+            if self.state.natural_vent_active is True:
+                return "nat_vent_still_active"
+            return False
+
+        # Custom assertion: nat_vent_not_active — nat-vent flag is False in current state
+        if expect == "nat_vent_not_active":
+            if self.state.natural_vent_active is False:
+                return "nat_vent_not_active"
+            return False
+
         # Not a custom assertion type
         return False
 

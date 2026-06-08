@@ -61,10 +61,9 @@
     },
     {
       "at": "2026-07-15T15:00:00",
-      "expect": "natural_ventilation",
-      "track": "integration",
-      "simulator_support": false,
-      "reason": "After away transition, nat-vent should still be active (production does not exit nat-vent on occupancy change). Integration-track: requires checking _natural_vent_active flag in coordinator state after the away event."
+      "expect": "nat_vent_still_active",
+      "track": "logic",
+      "reason": "After away transition, nat-vent state flag must still be True. Production does not exit nat-vent on occupancy change — only the setpoint changes. Checks SimState.natural_vent_active directly."
     }
   ],
   "verdict": {

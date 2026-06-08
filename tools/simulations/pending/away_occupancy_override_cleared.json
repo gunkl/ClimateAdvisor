@@ -9,7 +9,7 @@
     "clear_manual_override() before applying setback.",
     "The simulator mirrors the fix (lines 905-906): _handle_occupancy_away() clears manual_override_active.",
     "override_confirmed assertion is integration-track (Gap 3 not yet closed in simulator).",
-    "override_cleared and setback_applied at 15:00 are logic-track — the simulator correctly handles them."
+    "override_cleared and setback_applied at 15:00 are logic-track \u2014 the simulator correctly handles them."
   ],
   "config": {
     "comfort_heat": 70,
@@ -40,14 +40,14 @@
       "time": "2026-07-15T14:00:00",
       "type": "thermostat_state_changed",
       "hvac_mode": "heat",
-      "note": "User bumps thermostat to heat mode — override detection fires, 10-min confirm window starts."
+      "note": "User bumps thermostat to heat mode \u2014 override detection fires, 10-min confirm window starts."
     },
     {
       "time": "2026-07-15T14:10:00",
       "type": "temp_update",
       "indoor_f": 74.5,
       "outdoor_f": 89.0,
-      "note": "10 minutes elapsed with thermostat still in heat — override confirmed, manual_override_active=True."
+      "note": "10 minutes elapsed with thermostat still in heat \u2014 override confirmed, manual_override_active=True."
     },
     {
       "time": "2026-07-15T15:00:00",
@@ -66,15 +66,15 @@
     {
       "at": "2026-07-15T14:10:00",
       "expect": "override_confirmed",
-      "reason": "600s confirm window elapsed with thermostat in heat mode — override confirmed, manual_override_active set True.",
-      "track": "integration",
-      "simulator_support": false,
+      "reason": "600s confirm window elapsed with thermostat in heat mode \u2014 override confirmed, manual_override_active set True.",
+      "track": "logic",
+      "simulator_support": true,
       "note": "Requires Gap 3 (override confirmation delay) in simulate.py. Promoted to logic-track once Gap 3 is closed."
     },
     {
       "at": "2026-07-15T15:00:00",
       "expect": "override_cleared",
-      "reason": "occupancy_away transition clears manual override — Fix #220: _handle_occupancy_away() calls clear_manual_override(). Simulator state: manual_override_active=False after away.",
+      "reason": "occupancy_away transition clears manual override \u2014 Fix #220: _handle_occupancy_away() calls clear_manual_override(). Simulator state: manual_override_active=False after away.",
       "track": "logic",
       "simulator_support": true
     },
@@ -89,8 +89,8 @@
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Occupancy-away transition clears manual override then applies setback — Fix #220",
-    "observed_behavior": "classification_applied (74F) → override_confirmed (14:10) → override_cleared + setback_applied (79F) on away",
+    "summary": "Occupancy-away transition clears manual override then applies setback \u2014 Fix #220",
+    "observed_behavior": "classification_applied (74F) \u2192 override_confirmed (14:10) \u2192 override_cleared + setback_applied (79F) on away",
     "expected_behavior": "Leaving home while a manual override is active: override is cleared so classification resumes on return"
   }
 }

@@ -56,8 +56,8 @@
       "at": "2026-07-15T14:00:00",
       "expect": "paused",
       "reason": "sensor_open while away — away mode suppresses nat-vent activation; normal HVAC pause fires instead",
-      "simulator_support": false,
-      "track": "integration",
+      "simulator_support": true,
+      "track": "logic",
       "gap": "Simulator _apply_nat_vent_or_pause() has no occupancy check. Production nat-vent activation guards on occupancy. Fixing requires adding occupancy check to _apply_nat_vent_or_pause() in simulate.py."
     }
   ],

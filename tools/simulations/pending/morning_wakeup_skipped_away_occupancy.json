@@ -53,8 +53,8 @@
       "at": "2026-07-15T07:00:00",
       "expect": "morning_wakeup_skipped",
       "reason": "Wakeup while occupancy=away — comfort restore suppressed; setback maintained",
-      "simulator_support": false,
-      "track": "integration",
+      "simulator_support": true,
+      "track": "logic",
       "gap": "Simulator _handle_wakeup() does not check occupancy; always produces comfort_restored. Needs occupancy guard port from automation.py handle_morning_wakeup()."
     }
   ],

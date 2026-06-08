@@ -55,8 +55,8 @@
       "at": "2026-07-15T15:00:00",
       "expect": "nat_vent_exit",
       "reason": "occupancy_away while nat-vent active — production deactivates nat-vent before applying setback",
-      "simulator_support": false,
-      "track": "integration",
+      "simulator_support": true,
+      "track": "logic",
       "gap": "Simulator _handle_occupancy_away() does not deactivate natural_vent_active. Production handle_occupancy_away() calls _deactivate_natural_ventilation() first."
     },
     {

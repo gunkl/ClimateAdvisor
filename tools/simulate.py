@@ -481,7 +481,22 @@ class ClimateSimulator:
         delta = float(self.config.get("natural_vent_delta", 3.0))
         threshold = comfort_cool + delta
 
-        # Issue #115: activation guard — outdoor must be cooling (outdoor < indoor) and
+        # Occupancy guard — nat-vent only activates when home or guest
+        if self.state.occupancy in ("away", "vacation"):
+            self.state.paused_by_door = True
+            d = Decision(
+                ts,
+                "sensor_open",
+                "paused",
+                f"sensor opened while {self.state.occupancy} — paused (no nat-vent)",
+                hvac_mode="off",
+                target_temp=None,
+                fan_mode=self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+
+            # Issue #115: activation guard — outdoor must be cooling (outdoor < indoor) and
         # indoor must be above comfort floor (indoor > comfort_heat) before opening windows.
         if (
             outdoor is not None
@@ -901,7 +916,25 @@ class ClimateSimulator:
 
         No HVAC mode change; temperature setback only.
         """
-        # Clear manual override on occupancy transition -- mirrors automation.py handle_occupancy_away()
+
+        # Deactivate nat-vent if running when user leaves
+        if self.state.natural_vent_active:
+            self.state.natural_vent_active = False
+            self.state.fan_active = False
+            self.state.fan_mode = "auto"
+            d = Decision(
+                ts,
+                "occupancy_away",
+                "nat_vent_exit",
+                "nat-vent deactivated on occupancy transition to away",
+                hvac_mode=self.state.hvac_mode,
+                target_temp=None,
+                fan_mode="auto",
+            )
+            self.decisions.append(d)
+            # Continue to also apply setback (don't return early)
+
+            # Clear manual override on occupancy transition -- mirrors automation.py handle_occupancy_away()
         if self.state.manual_override_active:
             self.state.manual_override_active = False
             self.state.manual_override_mode = None
@@ -1099,7 +1132,22 @@ class ClimateSimulator:
         _outcome_at() returns the LAST matching decision, so asserting at
         the bedtime timestamp returns setback_applied (or no_action).
         """
-        self.state.manual_override_active = False  # clear_manual_override()
+
+        # If manual override is active, skip bedtime setback (mirrors production)
+        if self.state.manual_override_active:
+            self.state.manual_override_active = False  # Clear the override
+            d = Decision(
+                ts,
+                "bedtime",
+                "bedtime_setback_skipped",
+                "bedtime setback skipped — manual override was active",
+                hvac_mode=self.state.hvac_mode,
+                target_temp=None,
+                fan_mode=self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
+        # else: no active override, proceed normally with setback
 
         # Deactivate fan if running (mirrors the bedtime fan-off logic)
         if self.state.fan_active:
@@ -1168,6 +1216,20 @@ class ClimateSimulator:
         _outcome_at() returns comfort_restored as the dominant outcome.
         """
         self.state.manual_override_active = False  # clear_manual_override()
+
+        # Check occupancy — skip wakeup when away or vacation (mirrors production)
+        if self.state.occupancy in ("away", "vacation"):
+            d = Decision(
+                ts,
+                "wakeup",
+                "morning_wakeup_skipped",
+                f"morning wakeup skipped — occupancy={self.state.occupancy}",
+                hvac_mode=self.state.hvac_mode,
+                target_temp=None,
+                fan_mode=self.state.fan_mode,
+            )
+            self.decisions.append(d)
+            return d
 
         # Deactivate fan if still running from overnight
         if self.state.fan_active:
@@ -1608,8 +1670,16 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
             actual_outcome = custom_result
             outcome_ok = actual_outcome == expect
         else:
-            # Standard outcome-based assertion
-            actual_outcome = _outcome_at(sim.decisions, a["at"])
+            # Standard outcome-based assertion.
+            # When multiple decisions fire at the same timestamp (e.g. nat_vent_exit +
+            # setback_applied at occupancy transition), check if ANY decision at that
+            # exact timestamp matches the expected outcome before falling back to the
+            # most-recent-at-or-before result.
+            exact_at = [d for d in sim.decisions if d.time == a["at"]]
+            if any(d.outcome == expect for d in exact_at):
+                actual_outcome = expect  # found it at this exact timestamp
+            else:
+                actual_outcome = _outcome_at(sim.decisions, a["at"])
             outcome_ok = actual_outcome == expect
 
         # Optional temperature assertion

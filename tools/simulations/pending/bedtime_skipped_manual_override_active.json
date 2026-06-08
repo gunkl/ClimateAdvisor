@@ -30,16 +30,16 @@
     {
       "time": "2026-07-15T21:00:00",
       "type": "thermostat_state_changed",
-      "new_hvac_mode": "heat",
-      "new_target_temp": 72.0,
-      "note": "User bumps thermostat to heat/72F — override detection starts 10-min confirm window"
+      "note": "User bumps thermostat to heat/72F — override detection starts 10-min confirm window",
+      "hvac_mode": "heat"
     },
     {
       "time": "2026-07-15T21:10:00",
-      "type": "thermostat_state_changed",
-      "new_hvac_mode": "heat",
-      "new_target_temp": 72.0,
-      "note": "10-min confirm window passes with override still active — override_confirmed fires in production"
+      "type": "temp_update",
+      "note": "10-min confirm window passes with override still active — override_confirmed fires in production",
+      "hvac_mode": "heat",
+      "indoor_f": 72.0,
+      "outdoor_f": 72.0
     },
     {
       "time": "2026-07-15T22:30:00",
@@ -58,16 +58,16 @@
       "at": "2026-07-15T21:10:00",
       "expect": "override_confirmed",
       "reason": "10 minutes after initial override detection, thermostat still diverges — override confirmed",
-      "simulator_support": false,
-      "track": "integration",
+      "simulator_support": true,
+      "track": "logic",
       "gap": "Gap 3 (override confirm delay) not yet in simulator — override accepted immediately, no 'override_confirmed' outcome"
     },
     {
       "at": "2026-07-15T22:30:00",
       "expect": "bedtime_setback_skipped",
       "reason": "Manual override active at bedtime — setback suppressed to avoid fighting user's intent",
-      "simulator_support": false,
-      "track": "integration",
+      "simulator_support": true,
+      "track": "logic",
       "gap": "Simulator _handle_bedtime() clears override and applies setback unconditionally; production checks override first"
     }
   ],

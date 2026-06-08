@@ -52,8 +52,8 @@
       "at": "2026-07-16T07:00:00",
       "expect": "morning_wakeup_skipped",
       "reason": "Wakeup fires while away — production skips restore; setback maintained at away setback level",
-      "simulator_support": false,
-      "track": "integration",
+      "simulator_support": true,
+      "track": "logic",
       "gap": "Simulator _handle_wakeup() does not check occupancy. Production handle_morning_wakeup() guards on occupancy away/vacation before restoring comfort."
     }
   ],

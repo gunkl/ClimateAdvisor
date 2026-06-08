@@ -762,8 +762,13 @@ class TestGracePeriodExpiry:
         # Fire the expiry callback
         grace_callback(None)
 
-        # Should NOT have scheduled a notification task
-        engine.hass.async_create_task.assert_not_called()
+        # Should NOT have scheduled a notification task (convergence task is expected but not notify)
+        notify_calls = [
+            call
+            for call in engine.hass.async_create_task.call_args_list
+            if hasattr(call.args[0], "__qualname__") and "_notify" in call.args[0].__qualname__
+        ]
+        assert notify_calls == [], f"No notification task should be scheduled, got: {notify_calls}"
 
     def test_door_open_during_grace_is_blocked(self):
         """Opening a door during active grace period does not pause HVAC."""

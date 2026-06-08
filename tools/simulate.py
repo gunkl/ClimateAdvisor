@@ -917,24 +917,13 @@ class ClimateSimulator:
         No HVAC mode change; temperature setback only.
         """
 
-        # Deactivate nat-vent if running when user leaves
-        if self.state.natural_vent_active:
-            self.state.natural_vent_active = False
-            self.state.fan_active = False
-            self.state.fan_mode = "auto"
-            d = Decision(
-                ts,
-                "occupancy_away",
-                "nat_vent_exit",
-                "nat-vent deactivated on occupancy transition to away",
-                hvac_mode=self.state.hvac_mode,
-                target_temp=None,
-                fan_mode="auto",
-            )
-            self.decisions.append(d)
-            # Continue to also apply setback (don't return early)
+        # NOTE: Production handle_occupancy_away() does NOT deactivate nat-vent.
+        # When the user leaves while nat-vent is running, production only changes the
+        # setpoint to setback_cool/heat. Nat-vent continues until a natural exit condition
+        # fires (outdoor rises, comfort floor hit, threshold exceeded). Do NOT deactivate
+        # nat-vent here — that would be simulator-only fiction.
 
-            # Clear manual override on occupancy transition -- mirrors automation.py handle_occupancy_away()
+        # Clear manual override on occupancy transition -- mirrors automation.py handle_occupancy_away()
         if self.state.manual_override_active:
             self.state.manual_override_active = False
             self.state.manual_override_mode = None
@@ -1670,16 +1659,10 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
             actual_outcome = custom_result
             outcome_ok = actual_outcome == expect
         else:
-            # Standard outcome-based assertion.
-            # When multiple decisions fire at the same timestamp (e.g. nat_vent_exit +
-            # setback_applied at occupancy transition), check if ANY decision at that
-            # exact timestamp matches the expected outcome before falling back to the
-            # most-recent-at-or-before result.
-            exact_at = [d for d in sim.decisions if d.time == a["at"]]
-            if any(d.outcome == expect for d in exact_at):
-                actual_outcome = expect  # found it at this exact timestamp
-            else:
-                actual_outcome = _outcome_at(sim.decisions, a["at"])
+            # Standard outcome-based assertion — last decision at or before timestamp wins.
+            # This mirrors production semantics: decisions are applied sequentially and
+            # the last one is the dominant outcome.
+            actual_outcome = _outcome_at(sim.decisions, a["at"])
             outcome_ok = actual_outcome == expect
 
         # Optional temperature assertion

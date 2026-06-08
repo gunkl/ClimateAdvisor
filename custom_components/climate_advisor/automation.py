@@ -1834,6 +1834,9 @@ class AutomationEngine:
                     )
                 )
 
+            # Converge to correct scheduled state (bedtime setback or current classification)
+            self.hass.async_create_task(self._apply_current_scheduled_state())
+
         cancel = async_call_later(self.hass, duration, _grace_expired)
         if source == "manual":
             self._manual_grace_cancel = cancel
@@ -1911,6 +1914,49 @@ class AutomationEngine:
         elif state and state.state == "off":
             # HVAC already off, just set the pause flag
             self._paused_by_door = True
+
+    async def _apply_current_scheduled_state(self, reason: str = "grace_expired") -> None:
+        """After override clears, converge to the scheduled automation state.
+
+        Determines what state automation would be in right now if no manual override
+        had occurred, and applies it. Ensures automation always converges back to the
+        correct state after a grace period expires.
+        """
+        from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+        now = dt_util.now()
+
+        # Determine if we're in a bedtime window (after sleep_time OR before wake_time)
+        sleep_time = self.config.get("sleep_time")  # e.g. "22:30"
+        wake_time = self.config.get("wake_time")  # e.g. "07:00"
+
+        if sleep_time and wake_time:
+            try:
+                from datetime import time as dt_time  # noqa: PLC0415
+
+                sleep_h, sleep_m = map(int, sleep_time.split(":"))
+                wake_h, wake_m = map(int, wake_time.split(":"))
+                now_time = now.time().replace(second=0, microsecond=0)
+                sleep_t = dt_time(sleep_h, sleep_m)
+                wake_t = dt_time(wake_h, wake_m)
+
+                # Bedtime window: after sleep_time OR before wake_time
+                in_bedtime_window = now_time >= sleep_t or now_time < wake_t
+                if in_bedtime_window:
+                    _LOGGER.info(
+                        "Grace expired: in bedtime window (%s–%s) — applying bedtime setback",
+                        sleep_time,
+                        wake_time,
+                    )
+                    await self.handle_bedtime()
+                    return
+            except (ValueError, AttributeError):
+                pass  # malformed config — fall through to classification
+
+        # Otherwise apply current classification
+        if self._current_classification:
+            _LOGGER.info("Grace expired: applying current classification")
+            await self.apply_classification(self._current_classification)
 
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""

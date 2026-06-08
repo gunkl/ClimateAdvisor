@@ -542,6 +542,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if auto_state:
             self.automation_engine.restore_state(auto_state)
 
+        # Restore grace period timer if grace was active when state was saved (Issue #227)
+        ae = self.automation_engine
+        if getattr(ae, "_grace_active", False) and getattr(ae, "_grace_end_time", None):
+            try:
+                import datetime as _dt
+
+                end_time = _dt.datetime.fromisoformat(ae._grace_end_time)
+                remaining = (end_time - _dt.datetime.now(_dt.UTC)).total_seconds()
+                if remaining <= 0:
+                    # Grace expired during the restart — clear immediately
+                    _LOGGER.info(
+                        "Grace period expired during HA restart (end_time=%s) — clearing override immediately",
+                        ae._grace_end_time,
+                    )
+                    ae._grace_active = False
+                    ae._grace_end_time = None
+                    ae.clear_manual_override(reason="grace_expired_on_restart")
+                    # Let the first coordinator cycle re-apply classification (within 30s)
+                else:
+                    # Grace still active — re-schedule the expiry callback
+                    _LOGGER.info(
+                        "Restoring grace timer after HA restart: %.0f seconds remaining",
+                        remaining,
+                    )
+                    ae._reschedule_grace_timer(remaining)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Could not restore grace timer (end_time=%s): %s — clearing override as safety",
+                    getattr(ae, "_grace_end_time", None),
+                    exc,
+                )
+                ae._grace_active = False
+                ae._grace_end_time = None
+                ae.clear_manual_override(reason="grace_restore_failed")
+
         # Observe-only mode
         self._automation_enabled = state.get("automation_enabled", True)
         self.automation_engine.dry_run = not self._automation_enabled

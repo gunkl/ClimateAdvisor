@@ -82,6 +82,10 @@ class FakeScheduler:
         self._clock: datetime = start
         self._heap: list[_ScheduledCallback] = []
         self._task_queue: list[Any] = []  # coroutines from async_create_task
+        # Exceptions raised during callback/task execution.  Advance never
+        # raises mid-timeline, but G3 assertions can inspect this list and
+        # fail a scenario that had unexpected production errors.
+        self.callback_errors: list[tuple[datetime, BaseException]] = []
 
     # ------------------------------------------------------------------
     # Clock
@@ -126,6 +130,11 @@ class FakeScheduler:
                 # Already inside an event loop — schedule on the running loop
                 loop = asyncio.get_event_loop()
                 loop.run_until_complete(coro)
+            except Exception as exc:  # noqa: BLE001
+                import traceback
+
+                traceback.print_exc()
+                self.callback_errors.append((self._clock, exc))
 
     # ------------------------------------------------------------------
     # Advance API
@@ -151,10 +160,11 @@ class FakeScheduler:
             # Fire it — callbacks take a single ``_now`` positional arg
             try:
                 entry.callback(self._clock)
-            except Exception:  # noqa: BLE001 — don't let one bad callback stop the clock
+            except Exception as exc:  # noqa: BLE001 — don't let one bad callback stop the clock
                 import traceback
 
                 traceback.print_exc()
+                self.callback_errors.append((self._clock, exc))
             # Drain any async_create_task coroutines queued by this callback
             self._drain_tasks()
             # Loop: newly-scheduled callbacks may now be due

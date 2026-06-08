@@ -132,6 +132,9 @@ def test_grace_expiry_fires_and_converges():
     # action_log should have at least one service call (the mode restore on close)
     assert len(fake_hass.action_log) > 0, "Expected service calls, got empty action_log"
 
+    # No production callback should have raised
+    assert scheduler.callback_errors == [], f"Unexpected callback errors: {scheduler.callback_errors}"
+
     print(
         f"  PASS: grace_expiry_fires_and_converges — action_log has {len(fake_hass.action_log)} calls, "
         f"events: {_event_types(event_log)}"
@@ -163,6 +166,7 @@ def test_manual_grace_path():
 
     assert not engine._grace_active
     assert "grace_expired" in _event_types(event_log)
+    assert scheduler.callback_errors == [], f"Unexpected callback errors: {scheduler.callback_errors}"
 
     print(f"  PASS: manual_grace_path — events: {_event_types(event_log)}")
 
@@ -214,6 +218,7 @@ def test_override_confirm_timer_fires():
     assert not engine._override_confirm_pending or confirmed, (
         "Either override confirmed or pending cleared — timer must have fired"
     )
+    assert scheduler.callback_errors == [], f"Unexpected callback errors: {scheduler.callback_errors}"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +247,7 @@ def test_revisit_timer_fires():
         scheduler.advance_by(REVISIT_DELAY_SECONDS + 1)
 
     assert revisit_fired, "Revisit callback should have fired"
+    assert scheduler.callback_errors == [], f"Unexpected callback errors: {scheduler.callback_errors}"
     print(f"  PASS: revisit_timer_fires — REVISIT_DELAY_SECONDS={REVISIT_DELAY_SECONDS}")
 
 
@@ -280,6 +286,7 @@ def test_fan_cycle_timer_fires():
         scheduler.advance_by(45 * 60 + 1)
 
     # After a full cycle the next on-phase should have been attempted
+    assert scheduler.callback_errors == [], f"Unexpected callback errors: {scheduler.callback_errors}"
     print(f"  PASS: fan_cycle_timer_fires — action_log has {len(fake_hass.action_log)} calls")
 
 

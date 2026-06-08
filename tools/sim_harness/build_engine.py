@@ -75,7 +75,7 @@ def build_headless_engine(
     config: dict[str, Any] | None = None,
     *,
     climate_entity: str = "climate.test_thermostat",
-    climate_state: str = "cool",
+    climate_state: str = "off",
     climate_attributes: dict[str, Any] | None = None,
     start_time: datetime | None = None,
     sensor_polarity_inverted: bool = False,
@@ -86,7 +86,8 @@ def build_headless_engine(
         config: Runtime config dict.  Merged over ``_DEFAULT_CONFIG``; pass only
                 the keys you want to differ from the defaults.
         climate_entity: Entity ID for the climate device.
-        climate_state: Initial thermostat state string (e.g. ``"cool"``, ``"heat"``).
+        climate_state: Initial thermostat state string (e.g. ``"off"``, ``"heat"``).
+                       Defaults to ``"off"`` to match the legacy SimState default.
         climate_attributes: Initial thermostat attributes dict.
         start_time: Virtual clock start time.  Defaults to 2024-01-15 08:00 UTC.
         sensor_polarity_inverted: Passed to AutomationEngine constructor.
@@ -114,8 +115,10 @@ def build_headless_engine(
     fake_hass = FakeHass(clock_fn=scheduler.now)
     fake_hass.set_scheduler(scheduler)
 
-    # 5. Inject initial climate entity state so the engine can read it
-    attrs = {"temperature": 72.0, "hvac_action": "cooling", "fan_mode": "auto"}
+    # 5. Inject initial climate entity state so the engine can read it.
+    #    Default matches legacy SimState: mode="off", fan_mode="auto", no target temp,
+    #    no hvac_action (engine should not fire mode-inconsistency checks at startup).
+    attrs = {"fan_mode": "auto"}
     if climate_attributes:
         attrs.update(climate_attributes)
     fake_hass.states.set(climate_entity, FakeState(state=climate_state, attributes=attrs))

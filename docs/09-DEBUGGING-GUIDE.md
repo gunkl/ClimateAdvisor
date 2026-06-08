@@ -419,7 +419,7 @@ This section documents known ways a user-initiated thermostat change can be sile
 |---|------|-------|--------|-------|
 | 1 | Setpoint-only change not treated as override | `coordinator.py` — setpoint change block now calls `handle_manual_override(source="setpoint")` and enters the manual grace period | Fixed — v0.3.55 | [#197](https://github.com/gunkl/ClimateAdvisor/issues/197) |
 | RC-1 | Override confirm state lost on restart | `automation.py restore_state()` never restores `override_confirm_pending` / `override_confirm_time` — 10-min gate is lost | Confirmed bug | [#198](https://github.com/gunkl/ClimateAdvisor/issues/198) |
-| RC-2 | Grace timer not restored on restart | `automation.py:2303–2304` explicitly discards grace timer — `_manual_override_active` stays True indefinitely | Confirmed bug | [#199](https://github.com/gunkl/ClimateAdvisor/issues/199) |
+| RC-2 | Grace timer not restored on restart | `async_restore_state()` re-schedules grace timer with remaining duration; if already expired, override cleared immediately on startup | Fixed — v0.3.56 | [#199](https://github.com/gunkl/ClimateAdvisor/issues/199) / [#227](https://github.com/gunkl/ClimateAdvisor/issues/227) |
 | PATH-B | Self-resolve discards short deliberate overrides | `automation.py:630–644` PATH B treats quick mode revert as transient — no grace granted | Design gap | [#200](https://github.com/gunkl/ClimateAdvisor/issues/200) |
 | 2nd | Second override during active override silently ignored | `coordinator.py:2172` gates override detection on `not _manual_override_active` | Design gap | [#201](https://github.com/gunkl/ClimateAdvisor/issues/201) |
 | 30s | 30-second guard too wide for setpoint changes | `coordinator.py:2387` uses 30s vs 3s for mode changes — user changes within 30s of CA command are dropped | Design gap | [#202](https://github.com/gunkl/ClimateAdvisor/issues/202) |
@@ -449,13 +449,24 @@ handle_manual_override called source=setpoint
 
 **Diagnostic**: Correlate a CA reload event in logs with a sudden `_manual_override_active → False` transition within minutes of an override being set.
 
-### RC-2 — Grace timer not restored on restart (Issue #199)
+### RC-2 — Grace timer not restored on restart (Issue #199) — FIXED in v0.3.56
 
-**Symptom**: After a CA restart, the manual override flag remains active indefinitely — CA never re-applies its schedule.
+**Symptom (pre-fix)**: After a CA restart, the manual override flag remained active indefinitely — CA never re-applied its schedule. Dashboard showed "0 min remaining" on the override status but the override never cleared.
 
-**Root cause**: `automation.py:2303–2304` contains an explicit comment: "Grace timers cannot be restored — clear on restart." `_manual_override_active=True` is restored (line 2286) but the `_grace_expired` timer is not rescheduled. The flag stays set until the `clear_manual_override` service is called.
+**Root cause**: `automation.py:2303–2304` contained an explicit comment: "Grace timers cannot be restored — clear on restart." `_manual_override_active=True` was restored (line 2286) but the `_grace_expired` timer was not rescheduled. The flag stayed set until the `clear_manual_override` service was called.
 
-**Diagnostic**: `_manual_override_active=True` persists in `sensor.climate_advisor_status` attributes for more than 4 hours after a CA restart with no user interaction.
+**Fix (v0.3.56 / Issues #199 + #227)**: `async_restore_state()` now computes the remaining grace duration from the persisted `_grace_end_time` ISO timestamp. Three cases:
+- Remaining > 0: `async_call_later(remaining)` re-schedules the expiry callback
+- Already expired: `clear_manual_override(reason="grace_expired_during_restart")` called immediately
+- Exception: `clear_manual_override(reason="grace_restore_error")` called as safety fallback
+
+**Diagnostic log pattern (post-fix)**:
+```
+# Grace restored with remaining duration:
+[climate_advisor] Restoring grace period timer — remaining=847s
+# Grace already expired during restart:
+[climate_advisor] clear_manual_override called — reason=grace_expired_during_restart
+```
 
 ### BW — Bedtime/wakeup handler unconditionally clears override (Issue #204) — FIXED
 

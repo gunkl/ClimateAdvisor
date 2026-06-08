@@ -215,6 +215,10 @@ class TestOccupancyLogging:
             setback_modifier=2.0,
         )
         engine._current_classification = c
+        # handle_occupancy_away() reads actual thermostat mode
+        thermostat_state = MagicMock()
+        thermostat_state.state = "heat"
+        engine.hass.states.get.return_value = thermostat_state
 
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             asyncio.run(engine.handle_occupancy_away())
@@ -235,6 +239,10 @@ class TestOccupancyLogging:
             setback_modifier=1.0,
         )
         engine._current_classification = c
+        # handle_occupancy_away() reads actual thermostat mode
+        thermostat_state = MagicMock()
+        thermostat_state.state = "cool"
+        engine.hass.states.get.return_value = thermostat_state
 
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             asyncio.run(engine.handle_occupancy_away())

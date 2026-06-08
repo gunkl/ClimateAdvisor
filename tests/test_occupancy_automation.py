@@ -98,6 +98,10 @@ class TestApplyClassificationOccupancy:
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
         engine.set_occupancy_mode("away")
+        # handle_occupancy_away() now reads actual thermostat mode
+        thermostat_state = MagicMock()
+        thermostat_state.state = "cool"
+        engine.hass.states.get.return_value = thermostat_state
 
         asyncio.run(engine.apply_classification(c))
 
@@ -114,6 +118,10 @@ class TestApplyClassificationOccupancy:
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("away")
+        # handle_occupancy_away() now reads actual thermostat mode
+        thermostat_state = MagicMock()
+        thermostat_state.state = "heat"
+        engine.hass.states.get.return_value = thermostat_state
 
         asyncio.run(engine.apply_classification(c))
 
@@ -314,6 +322,10 @@ class TestSetTemperatureForModeOccupancy:
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
         engine.set_occupancy_mode("away")
+        # handle_occupancy_away() reads actual thermostat mode
+        thermostat_state = MagicMock()
+        thermostat_state.state = "cool"
+        engine.hass.states.get.return_value = thermostat_state
 
         asyncio.run(engine._set_temperature_for_mode(c, reason="test"))
 
@@ -329,6 +341,10 @@ class TestSetTemperatureForModeOccupancy:
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("vacation")
+        # handle_occupancy_vacation() reads actual thermostat mode
+        thermostat_state = MagicMock()
+        thermostat_state.state = "heat"
+        engine.hass.states.get.return_value = thermostat_state
 
         asyncio.run(engine._set_temperature_for_mode(c, reason="test"))
 

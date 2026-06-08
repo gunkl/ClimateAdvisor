@@ -15,7 +15,7 @@ This guide documents debugging strategies, sensor entities, and tooling for diag
 | Why does the Predicted Indoor line track Actual Indoor exactly (delta ≈ 0)? | Check log source tag: `(archive)` = working correctly; `(ode-warmup)` = HA restart < 4h ago (auto-resolves); `(none)` = ODE cache empty (check thermal model confidence). Five root causes documented. | [§"Predicted Indoor tracks Actual Indoor"](09-DEBUGGING-GUIDE.md#predicted-indoor-tracks-actual-indoor-delta--0) |
 | How do you diagnose AI feature failures? | Check `sensor.climate_advisor_ai_status` first: active/inactive/error/disabled/circuit_open. Circuit breaker trips after 5 consecutive failures, auto-resets after 5 minutes. `monthly_cost_estimate` attribute tracks spending. | [§Debugging AI Features](09-DEBUGGING-GUIDE.md#debugging-ai-features) |
 | How do you decide if a finding in an AI investigator report is a real bug or noise? | Apply the 5-category taxonomy: ACTIONABLE / TIME-DEPENDENT / CONTEXTUAL / NOISE / RESOLVED. Count discrepancies ≤ 1, high abandonment from operational interruptions, and pending-observation speculation are all NOISE. | [§Interpreting AI Investigator Reports — Noise Taxonomy](09-DEBUGGING-GUIDE.md#interpreting-ai-investigator-reports--noise-taxonomy) |
-| How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 7 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), 30s guard too wide (#202), and bedtime/wakeup unconditional clear (BW #204 — fixed). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
+| How do you diagnose a user-reported "CA keeps overriding my thermostat changes"? | Check the Override Bypass Inventory: 9 known bypasses covering setpoint-only changes (#197), confirm state lost on restart (RC-1 #198), grace timer not restored (RC-2 #199), PATH B short overrides (#200), second override ignored (#201), 30s guard too wide (#202), bedtime/wakeup unconditional clear (BW #204 — fixed), away setback mode mismatch (OA #222 — fixed), and away setback detected as override (OB #221 — fixed). | [§Override Bypass Inventory](09-DEBUGGING-GUIDE.md#override-bypass-inventory) |
 
 ## Primary Debugging Data Sources
 
@@ -424,6 +424,8 @@ This section documents known ways a user-initiated thermostat change can be sile
 | 2nd | Second override during active override silently ignored | `coordinator.py:2172` gates override detection on `not _manual_override_active` | Design gap | [#201](https://github.com/gunkl/ClimateAdvisor/issues/201) |
 | 30s | 30-second guard too wide for setpoint changes | `coordinator.py:2387` uses 30s vs 3s for mode changes — user changes within 30s of CA command are dropped | Design gap | [#202](https://github.com/gunkl/ClimateAdvisor/issues/202) |
 | BW | Bedtime/wakeup handler unconditionally clears active override | `automation.py:1926` (`handle_bedtime_setback`) and `automation.py:2025` (`handle_morning_wakeup`) called `clear_manual_override()` unconditionally — override silently wiped at scheduled sleep/wake time even with active grace | Fixed — Issue #204 | [#204](https://github.com/gunkl/ClimateAdvisor/issues/204) |
+| OA | Away/vacation setback uses classification hvac_mode instead of actual thermostat mode | `automation.py` `handle_occupancy_away()`, `handle_occupancy_vacation()` | On days that start in cool mode but nightly reclassification switches to heat, away setback applies heat setpoint (e.g. 61°F) to a cooling-mode thermostat — AC runs constantly trying to reach 61°F. Observed June 6: 349 min runtime vs 209 min avg. | Fixed this session (issue #222) |
+| OB | Away setback setpoint change not guarded by time-based temp command check | `coordinator.py` ~line 2422, `automation.py` `_set_temperature()` | `_temp_command_pending` clears before `_async_thermostat_changed` fires. Automation's own setback (e.g. 72→79°F) detected as user manual override — spurious 90-min grace period blocks subsequent automation. | Fixed this session (issue #221) |
 
 ### Bypass #1 — Setpoint-only change (Issue #197) — FIXED
 
@@ -473,6 +475,42 @@ A secondary root cause: `clear_manual_override()` had no `reason` parameter, so 
 
 # Override not active at sleep_time — normal setback path:
 [climate_advisor] clear_manual_override called — reason=bedtime_setback
+```
+
+**Cross-reference**: [Grace Periods Spec — What Clears a Manual Override](grace-periods-spec.md#what-clears-a-manual-override)
+
+### OA — Away/vacation setback mode mismatch (Issue #222) — FIXED
+
+**Symptom**: On a day that began as a cooling day, occupancy transitions to away mid-day. CA applies the heat setback setpoint (e.g. 61°F) to a thermostat that is in cool mode. The thermostat interprets this as a cooling target and runs AC continuously, producing anomalously high HVAC runtime (observed June 6: 349 min vs 209 min rolling average).
+
+**Root cause**: `handle_occupancy_away()` and `handle_occupancy_vacation()` selected the setback branch by reading `classification.hvac_mode` (the day's original classification) rather than the actual live thermostat mode. A warm-day classification could have `hvac_mode = "heat"` from the previous night's reclassification while the physical thermostat was still running in cool mode. The automation then called `_set_temperature_for_mode("heat", ...)` — applying the heat setback setpoint to a cooling thermostat.
+
+**Fix (Issue #222)**: Both handlers now read the live thermostat state from `hass.states.get(self.climate_entity).state` to determine which setback branch to apply. If the live mode is `"cool"`, the cool setback setpoint is used; if `"heat"`, the heat setback setpoint is used; if `"off"`, no setpoint change is made.
+
+**Diagnostic log pattern (post-fix)**:
+```
+# Occupancy → away with thermostat in cool mode:
+handle_occupancy_away: live_mode=cool — applying cool setback (setpoint=79°F)
+
+# Pre-fix (wrong branch):
+handle_occupancy_away: classification.hvac_mode=heat — applying heat setback (setpoint=61°F)
+```
+
+### OB — Away setback detected as manual override (Issue #221) — FIXED
+
+**Symptom**: When CA transitions to away mode and applies a setback setpoint (e.g. 72→79°F), the coordinator's `_async_thermostat_changed()` fires on the resulting thermostat state change and detects CA's own setpoint change as a user manual override. A spurious 90-minute grace period starts, blocking the automation engine from responding for the remainder of the away period.
+
+**Root cause**: `_temp_command_pending` (the flag used to suppress override detection immediately after a CA command) was cleared by the time `_async_thermostat_changed()` processed the thermostat echo — the flag's guard window was too narrow (or absent) for setback commands from occupancy handlers. The setpoint change 72→79°F appeared identical to a user manual override from the coordinator's perspective.
+
+**Fix (Issue #221)**: A `_temp_command_time` timestamp field was added to the automation engine. `_set_temperature()` records the current time into `_temp_command_time` on every CA setpoint command. A new `_is_recent_temp_command(window_seconds=30)` guard is checked in the coordinator's setpoint-change detection block: if the setpoint change arrived within 30 s of a CA-issued setpoint command, it is suppressed and no override is registered.
+
+**Diagnostic log pattern (post-fix)**:
+```
+# Setpoint change arrives within 30 s of CA command — suppressed:
+_async_thermostat_changed: setpoint change suppressed — recent CA command (0.8 s ago)
+
+# Pre-fix (wrong detection):
+handle_manual_override called source=setpoint  ← triggered by CA's own setback
 ```
 
 **Cross-reference**: [Grace Periods Spec — What Clears a Manual Override](grace-periods-spec.md#what-clears-a-manual-override)

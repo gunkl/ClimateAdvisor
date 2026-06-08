@@ -171,6 +171,7 @@ def _make_thermostat_coordinator_stub(*, temp_command_pending: bool = False):
     ae._fan_command_pending = False
     ae._fan_override_active = False
     ae._temp_command_pending = temp_command_pending
+    ae._temp_command_time = None  # no recent temp command by default
     ae.handle_manual_override_during_pause = AsyncMock()
     ae.handle_manual_override = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
@@ -182,6 +183,7 @@ def _make_thermostat_coordinator_stub(*, temp_command_pending: bool = False):
 
     # Helpers used inside _async_thermostat_changed
     coord._is_recent_hvac_command = MagicMock(return_value=False)
+    coord._is_recent_temp_command = MagicMock(return_value=False)
     coord._emit_event = MagicMock()
     coord._hvac_on_since = None
     coord._pending_thermal_event = None

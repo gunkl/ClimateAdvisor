@@ -1,0 +1,51 @@
+{
+  "name": "cancel_override_then_resume",
+  "description": "User cancels manual override: classification fires immediately and warm-day setback is applied (Issue #226)",
+  "source": "synthetic",
+  "issue": 226,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-06-10T17:00:00",
+      "type": "classification",
+      "hvac_mode": "off",
+      "day_type": "warm",
+      "note": "Warm day: classification re-applied after override cleared, mode off"
+    },
+    {
+      "time": "2026-06-10T17:01:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 82.0,
+      "note": "Indoor comfortable, outdoor hot"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T17:00:00",
+      "expect": "classification_applied",
+      "track": "logic",
+      "reason": "After override cleared, warm-day classification re-applied immediately; mode set to off"
+    },
+    {
+      "at": "2026-06-10T17:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "integration",
+      "reason": "Warm-day setback (setback_cool=79F) applied after classification. Grace period does NOT suppress this. Integration track: requires coordinator to schedule apply_classification after cancel.",
+      "simulator_support": false
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cancel override + resume: automation immediately restores warm-day setback",
+    "observed_behavior": "Four events at same timestamp (override_cleared, grace_started, classification_applied, setback_applied) from user clicking two dashboard buttons",
+    "expected_behavior": "Grace period does not suppress classification or setback — only blocks door/window sensor re-pause. User sees correct warm-day state restored immediately."
+  }
+}

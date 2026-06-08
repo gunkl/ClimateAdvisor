@@ -1,0 +1,79 @@
+{
+  "name": "overnight_with_adaptive_setback_and_wakeup",
+  "description": "Warm summer day: afternoon cooling (14:00–22:00), bedtime at 22:30 applies cool setback (default depth = comfort_cool + 3F = 77F, clamped to setback_cool=79F), morning wakeup at 07:00 restores comfort. Full overnight cycle.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "DEFAULT_SETBACK_DEPTH_COOL_F = 3.0. comfort_cool=74. setback_cool=79.",
+    "Bedtime target = comfort_cool(74) + 3 = 77F. This is below the ceiling setback_cool(79), so 77F applies.",
+    "Wakeup restores comfort_cool=74F.",
+    "No thermal model configured — uses default setback depth path.",
+    "Covers Priority 5 overnight bedtime/wakeup from plan abundant-mapping-clarke.md."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Afternoon classification — cool mode starts at comfort_cool=74F"
+    },
+    {
+      "time": "2026-07-15T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.5,
+      "outdoor_f": 76.0,
+      "note": "Evening: indoor cooling down, outdoor still warm — AC running normally"
+    },
+    {
+      "time": "2026-07-15T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime: cool setback fires. Default depth = comfort_cool(74) + 3F = 77F. Ceiling=79F so 77F applies."
+    },
+    {
+      "time": "2026-07-16T00:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.5,
+      "outdoor_f": 68.0,
+      "note": "Overnight: indoor 76.5F with setback target 77F — AC barely running"
+    },
+    {
+      "time": "2026-07-16T07:00:00",
+      "type": "wakeup",
+      "note": "Morning wakeup: restore comfort_cool=74F"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Afternoon classification: cool mode at comfort_cool=74F"
+    },
+    {
+      "at": "2026-07-15T22:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 77.0,
+      "reason": "Bedtime cool setback: comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) = 77F (below ceiling 79F)"
+    },
+    {
+      "at": "2026-07-16T07:00:00",
+      "expect": "comfort_restored",
+      "expect_temp": 74.0,
+      "reason": "Morning wakeup restores comfort_cool=74F"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Overnight cycle: cool classification → bedtime setback (77F) → morning comfort restore (74F)",
+    "observed_behavior": "classification_applied (74F) at 14:00; setback_applied (77F) at 22:30; comfort_restored (74F) at 07:00",
+    "expected_behavior": "Standard overnight cycle with default-depth cool setback and morning comfort restore"
+  }
+}

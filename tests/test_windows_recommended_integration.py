@@ -372,7 +372,14 @@ class TestWindowsRecommendedPauseSuppression:
         assert engine._paused_by_door is False, (
             "_re_pause_for_open_sensor must be suppressed during a planned window period"
         )
-        engine.hass.async_create_task.assert_not_called()
+        # _apply_current_scheduled_state is allowed (grace expiry convergence fix #230).
+        # What must NOT be called is _re_pause_for_open_sensor.
+        for call_args in engine.hass.async_create_task.call_args_list:
+            coro = call_args[0][0]
+            coro_name = getattr(coro, "__qualname__", "") or getattr(coro, "__name__", "")
+            assert "_re_pause_for_open_sensor" not in coro_name, (
+                "_re_pause_for_open_sensor must be suppressed during a planned window period"
+            )
 
     # ------------------------------------------------------------------
     # Test 6 — classification changes warm→hot: pause re-enabled

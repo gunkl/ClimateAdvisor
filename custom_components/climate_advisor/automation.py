@@ -1613,6 +1613,26 @@ class AutomationEngine:
                         self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                 return
 
+        # Priority 2b: Away mode ceiling exit — nat-vent exits at home comfort ceiling while away
+        # (away setback is higher than comfort_cool, but nat-vent only free-cools within home band)
+        if self._natural_vent_active and self._occupancy_mode == OCCUPANCY_AWAY:
+            _indoor_away = self._get_indoor_temp_f()
+            if _indoor_away is not None and comfort_cool is not None and _indoor_away >= comfort_cool:
+                _LOGGER.info(
+                    "Nat-vent away-mode ceiling exit: indoor %.1fF >= comfort_cool %.1fF while away",
+                    _indoor_away,
+                    comfort_cool,
+                )
+                self._natural_vent_active = False
+                await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
+                # Do NOT pause — just let away setback handle HVAC
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_away_ceiling_exit",
+                        {"indoor": _indoor_away, "comfort_cool": comfort_cool},
+                    )
+                return
+
         # Phase 2: proactive floor exit — predict floor crossing before it happens
         if self._natural_vent_active:
             thermal = self._thermal_model or {}

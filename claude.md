@@ -652,6 +652,22 @@ For plans touching 4+ files, structure execution as:
 
 Phases that modify different files with no shared dependencies can run in parallel. Phases with dependencies must be sequential.
 
+#### Agent Model Discipline (MANDATORY)
+
+When running an agent-based (mob) execution, assign models by role — never by convenience:
+
+- **Opus** — ONLY the Coordinator (main thread) and the post-phase Verification agent.
+  The Coordinator sequences phases and owns user-facing synthesis; the Verification
+  agent reviews correctness/security/logging and runs the suite. These are the
+  judgment-bearing roles.
+- **Sonnet** — ALL other agents: Explore, Plan, Craftsman/executor, Scribe, Toolsmith.
+  Bulk implementation, search, and documentation are Sonnet work.
+
+Do not run Craftsman/executor or Scribe work on Opus to "save a handoff" — that defeats
+the discipline. Set the `model` parameter explicitly on every spawned agent
+(`model: "sonnet"` for executors/scribe/explore; `model: "opus"` only for the verification
+agent). The Coordinator is already Opus by virtue of being the main thread.
+
 **The plan file MUST include an "Execution Structure" section before `ExitPlanMode` is called.** This section defines: which agents run in parallel (grouped by file independence), which files each agent owns, and what verification steps run between groups. Without this section, the parallel execution pattern cannot be validated — the user will push back. Use the table format: `Agent | Phases | Files` with a `→ Verification agent` row between groups.
 
 After the final test phase passes, always run an Opus 4.6 verification agent to review all modified files for correctness, completeness, security, and logging coverage before handing off to the user. Do not skip this step or wait to be asked.

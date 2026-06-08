@@ -4,7 +4,7 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.55"
+VERSION = "0.3.56"
 
 RELEASE_NOTES: dict[str, list[str]] = {
     "0.3.54": [
@@ -53,6 +53,31 @@ RELEASE_NOTES: dict[str, list[str]] = {
         "Fix #149: Comfort band [FLAG] now suppressed when indoor/outdoor gap is within thermostat swing deadband",
         "Fix #149: Activity report section deduplication rule added to system prompt",
         "Fix #149: HVAC peak indoor temp now captured at exact HVAC-off moment (not only at poll cycles)",
+    ],
+    "0.3.56": [
+        "Fix #220: Manual override now cleared when occupancy transitions to away or vacation"
+        " — automation resumes correctly after user leaves home; override no longer silently persists",
+        "Fix #221: Away-mode setback no longer falsely detected as manual override"
+        " — automation-issued setpoint change on occupancy transition correctly attributed to automation",
+        "Fix #222: Away/vacation setback now uses correct mode-aware setpoint"
+        " — cool-mode thermostat correctly receives setback_cool (79°F), not setback_heat (61°F)"
+        " (critical bug: wrong setpoint caused AC to run to 61°F all day while away)",
+        "Feat #223: Closed-loop simulation feedback system"
+        " — production incidents auto-generate pending BSpec scenarios;"
+        " simulation_loop.py validates them; Tests dashboard tab surfaces results;"
+        " approve_pending_test API promotes to golden",
+        "Fix #227/#199: Grace period timer restored after HA restart"
+        " — timer re-scheduled on startup if grace was active; override auto-clears if timer already expired"
+        " (previously: restart destroyed timer; system stuck with 0 min remaining until user clicked Resume)",
+        "Fix #229: Simulator alignment overhaul"
+        " — six simulator divergences from production fixed; three-way audit protocol added;"
+        " occupant-first framing and simulator mirror rules encoded in process policy",
+        "Fix #230: Grace period expiry now converges to scheduled automation state"
+        " — bedtime setback suppressed during grace is applied when grace expires"
+        " (previously: grace expiry resumed from daytime classification; occupant slept at wrong temperature)",
+        "Fix #231: Nat-vent exits at home comfort ceiling when occupancy is away"
+        " — nat_vent_away_ceiling_exit fires when indoor >= comfort_cool while away;"
+        " free cooling within home band; HVAC setback handles the rest",
     ],
     "0.3.55": [
         "Fix #190: _get_forecast() switches to local date + raw forecast date —"
@@ -537,6 +562,102 @@ KNOWN_FIXES: dict[int, dict] = {
             " — prevents AI from treating denominator as total recording window",
         ],
         "scope_not_covered": [],
+    },
+    220: {
+        "issue": 220,
+        "title": "Manual override not cleared on away/vacation occupancy transition",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "handle_occupancy_away() and handle_occupancy_vacation() now clear"
+            " active manual override before applying setback",
+            "Override flag cleared prevents setback being silently skipped on classification cycles while away",
+        ],
+        "scope_not_covered": [
+            "Override clearing on guest mode transition (guest mode maintains comfort, no setback)",
+        ],
+    },
+    221: {
+        "issue": 221,
+        "title": "Away setback setpoint change falsely detected as manual override",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "_temp_command_time guard added to setpoint-only override detector",
+            "Away setback no longer starts spurious 90-minute grace period",
+        ],
+        "scope_not_covered": [
+            "Coordinator-level listener timing (integration-track) — simulator cannot fully exercise this path",
+        ],
+    },
+    222: {
+        "issue": 222,
+        "title": "Away/vacation setback applies heat setpoint in cool mode",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "handle_occupancy_away() and handle_occupancy_vacation() now read"
+            " actual thermostat hvac_mode before selecting setback",
+            "Cool-mode thermostat receives setback_cool (79°F); heat-mode receives setback_heat (61°F)",
+            "June 5 incident (AC targeted 61°F in cool mode while away) cannot recur",
+        ],
+        "scope_not_covered": [],
+    },
+    223: {
+        "issue": 223,
+        "title": "Closed-loop simulation feedback system",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "incident_detected events emitted for 8 incident classes (comfort_violation, occupancy_transition, etc.)",
+            "simulation_loop.py polls event_log and runs pending BSpecs through simulate.py",
+            "Tools dashboard Tests tab shows pending scenario statistics",
+            "approve_pending_test API promotes BSpec from pending/ to golden/",
+            "build_historical_scenario.py extracts production incidents into pending scenarios",
+            "Incident package auto-appended to existing Submit GitHub Issue button",
+            "--from-issue flag on build_historical_scenario.py for developer workflow",
+        ],
+        "scope_not_covered": [
+            "Multi-user scenario submission (Phase 2 — architecture supports it)",
+            "Scheduled automatic loop (requires schedule skill setup by user)",
+        ],
+    },
+    227: {
+        "issue": 227,
+        "title": "Grace timer lost on HA restart; system stuck in manual override with 0 min remaining",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "async_restore_state() re-schedules grace timer with remaining duration on startup",
+            "If grace already expired during restart: override cleared immediately on startup",
+            "Exception path: clears override as safety fallback",
+        ],
+        "scope_not_covered": [
+            "Restart during active nat-vent (nat-vent flag already handled by separate restore logic)",
+        ],
+    },
+    230: {
+        "issue": 230,
+        "title": "Grace expiry resumes from daytime classification instead of scheduled state",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "_apply_current_scheduled_state() called after override clears on grace expiry",
+            "If in bedtime window (after sleep_time, before wake_time): applies bedtime setback",
+            "Otherwise: applies current classification",
+            "Occupant wakes to scheduled temperature even when manual adjustment happened within grace window",
+        ],
+        "scope_not_covered": [
+            "Morning wakeup convergence (wakeup time is close to grace expiry — edge case deferred)",
+            "Multiple suppressed events during grace window (only most recent scheduled state applied)",
+        ],
+    },
+    231: {
+        "issue": 231,
+        "title": "Nat-vent continues above home comfort ceiling while user is away",
+        "version_fixed": "0.3.56",
+        "scope_covered": [
+            "check_natural_vent_conditions() adds ceiling exit when occupancy=away and indoor >= comfort_cool",
+            "nat_vent_away_ceiling_exit event emitted; fan deactivated; HVAC setback takes over",
+            "Free cooling within home comfort band (70-74°F) while away; setback (79°F) handles drift above that",
+        ],
+        "scope_not_covered": [
+            "Vacation mode ceiling exit (vacation setback is higher; same principle applies but not yet implemented)",
+        ],
     },
 }
 

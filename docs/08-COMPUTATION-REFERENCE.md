@@ -583,6 +583,8 @@ When `apply_classification()` runs and the day type is `warm` or `hot` with HVAC
 
 **Event frequency — `warm_day_state_confirmed` / `warm_day_setback_applied`:** `warm_day_state_confirmed` fires on every 30-minute coordinator update cycle while the thermostat is already in the correct warm-day state (mode=off, no setpoint change needed) — not once per day. Sixty or more firings in 48 hours is expected on a sustained warm day; this is a heartbeat, not a loop or a bug. `warm_day_setback_applied` fires only when an actual setpoint or mode change is made (e.g., resetting the setpoint from a ceiling guard's 74°F back to the 79°F setback value), which is infrequent.
 
+**Event frequency — `incident_detected`:** Emitted at most once per 30-min cycle per incident class (deduplicated within each call to `_detect_and_emit_incidents()`). The proactive variant (`setpoint_mode_inconsistency`) may fire at command time inside `_set_temperature()` rather than post-cycle, once per inconsistent command issued. See [Incident Classes](incident-classes.md) for the full list of classes and their detection timing.
+
 **Test coverage:** `tests/test_warm_day_comfort_gap.py`
 
 ### 6c. Warm-Day ODE Ceiling Guard (Issue #136)

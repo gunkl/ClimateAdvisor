@@ -1,0 +1,69 @@
+{
+  "name": "ceiling_guard_dormancy_nat_vent_active_in_band",
+  "description": "ODE ceiling guard stays dormant when nat-vent is active AND indoor is within comfort band. Outdoor cooler than indoor provides free cooling — no HVAC escalation needed.",
+  "source": "synthetic",
+  "issue": 218,
+  "verdict": {
+    "type": "positive",
+    "summary": "Ceiling guard correctly defers to nat-vent when outdoor is cooler than indoor and indoor is within the comfort band",
+    "observed_behavior": "nat_vent_active=True with indoor 73F within band [70F, 74F], outdoor 65F — ceiling guard bypassed",
+    "expected_behavior": "ceiling guard dormant (bypassed), nat-vent continues, no HVAC intervention"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "k_passive": -0.04,
+    "k_active_cool": -11.8,
+    "k_active_heat": 6.78,
+    "ode_enabled": true
+  },
+  "events": [
+    {
+      "time": "2026-07-10T09:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC off"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 73F within comfort band [70F, 74F], outdoor 65F (8F cooler than indoor — nat-vent favorable)"
+    },
+    {
+      "time": "2026-07-10T09:01:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 65F < indoor 73F, indoor > comfort_heat 70F, outdoor < threshold 77F — nat-vent activates"
+    },
+    {
+      "time": "2026-07-10T09:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "30 min later: indoor still 73F (within band), outdoor still 65F. Nat-vent providing free cooling. Ceiling guard should remain dormant — ODE branch is bypassed entirely when nat-vent is active."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T09:01:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "sensor_open: outdoor 65F < indoor 73F, indoor > comfort_heat 70F, outdoor 65F <= threshold 77F — nat-vent activates"
+    },
+    {
+      "at": "2026-07-10T09:30:00",
+      "expect": "nat_vent_still_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "temp_update with nat-vent active and indoor 73F within band [70F, 74F], outdoor 65F < indoor: no exit condition fires (indoor > comfort_heat, outdoor < indoor, outdoor < threshold). Ceiling guard is bypassed by simulator routing when nat_vent_active=True. Nat-vent continues as expected."
+    }
+  ]
+}

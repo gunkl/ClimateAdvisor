@@ -1,0 +1,64 @@
+{
+  "name": "warm_day_planned_window_no_pause",
+  "description": "Warm day with windows_recommended=True and planned window 06:00–10:00. Sensor opens at 08:00 (inside the window). The planned-window gate suppresses the normal pause path — sensor_open produces no_action instead of paused or natural_ventilation.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "The _is_within_planned_window_period() check: requires windows_recommended=True AND hvac_mode='off'",
+    "AND current time is between window_open_time and window_close_time.",
+    "Warm day typically has hvac_mode='off' (HVAC shut off for the warm period).",
+    "When the gate fires, sensor_open returns no_action with reason 'within planned window period'.",
+    "This is distinct from nat-vent: planned window gate activates before the nat-vent eligibility check.",
+    "Covers Priority 6 warm_day_planned_window from plan abundant-mapping-clarke.md (C2×E1 cell)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 66.0,
+      "note": "Early morning: indoor 72F, outdoor 66F — conditions favorable for natural ventilation"
+    },
+    {
+      "time": "2026-07-15T06:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "note": "Warm-day classification: windows recommended 06:00–10:00, hvac_mode=off for the window period"
+    },
+    {
+      "time": "2026-07-15T08:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens at 08:00 — inside the planned 06:00–10:00 window. Gate should suppress pause."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=off, windows_recommended=True with 06:00–10:00 window"
+    },
+    {
+      "at": "2026-07-15T08:00:00",
+      "expect": "no_action",
+      "reason": "sensor_open during planned window period — _is_within_planned_window_period() returns True, pause suppressed"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Planned window period gate suppresses pause on sensor_open during window",
+    "observed_behavior": "classification_applied (off) → sensor_open at 08:00 → no_action (within planned window period)",
+    "expected_behavior": "Sensor open inside planned window does not trigger pause — user expected to have windows open"
+  }
+}

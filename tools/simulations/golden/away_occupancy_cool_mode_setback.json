@@ -1,0 +1,61 @@
+{
+  "name": "away_occupancy_cool_mode_setback",
+  "description": "Hot day in cool mode: away setback must use setback_cool (79F), not setback_heat (61F)",
+  "source": "issue-report",
+  "issue": 222,
+  "notes": [
+    "Before Issue #222 fix, _handle_occupancy_away() applied setback_heat when hvac_mode was 'cool',",
+    "sending the thermostat to 61F — far below the comfort floor — instead of the correct setback_cool (79F).",
+    "This scenario FAILS before the fix and passes after.",
+    "Also verifies the setpoint_consistent_with_mode guard: a cool-mode setpoint must not fall below comfort_heat."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 61,
+    "setback_cool": 79
+  },
+  "events": [
+    {
+      "time": "2026-06-10T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "note": "Morning classification — hot day, HVAC in cool mode targeting comfort_cool (74F)"
+    },
+    {
+      "time": "2026-06-10T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 82.0,
+      "note": "Baseline reading: indoor 76F, outdoor 82F — confirms hot-day conditions"
+    },
+    {
+      "time": "2026-06-10T09:00:00",
+      "type": "occupancy_change",
+      "mode": "away",
+      "note": "User leaves home — should apply setback_cool (79F) because HVAC is in cool mode"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T09:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "logic",
+      "reason": "Away setback should use setback_cool (79F) when HVAC is in cool mode, not setback_heat (61F)"
+    },
+    {
+      "at": "2026-06-10T09:00:00",
+      "expect": "setpoint_consistent_with_mode",
+      "track": "logic",
+      "reason": "Setpoint must not be below comfort_heat (70F) when HVAC is in cool mode — a 61F setpoint would be nonsensical and damage comfort on return"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Away setback in cool mode applies setback_cool (79F), not setback_heat (61F)",
+    "observed_behavior": "FAILS before fix: setback_applied emits setback_heat (61F) instead of setback_cool (79F); setpoint_consistent_with_mode also fails",
+    "expected_behavior": "setback_applied with target_temp=79.0; setpoint_consistent_with_mode passes"
+  }
+}

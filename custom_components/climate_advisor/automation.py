@@ -1088,6 +1088,43 @@ class AutomationEngine:
                 reason,
             )
             return
+        # Check setpoint is appropriate for current HVAC mode
+        _current_mode_state = self.hass.states.get(self.climate_entity)
+        _current_mode = _current_mode_state.state if _current_mode_state else None
+        if _current_mode == "cool" and temperature < (self.config.get("comfort_heat", 70) - 1.0):
+            _LOGGER.error(
+                "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
+                temperature,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "setpoint_mode_inconsistency",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": _current_mode,
+                        "setpoint_f": temperature,
+                        "comfort_heat": self.config.get("comfort_heat", 70),
+                        "comfort_cool": self.config.get("comfort_cool", 76),
+                    },
+                )
+        elif _current_mode == "heat" and temperature > (self.config.get("comfort_cool", 76) + 1.0):
+            _LOGGER.error(
+                "SETPOINT INCONSISTENCY: heat mode but target %.1fF is above comfort_cool threshold",
+                temperature,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "incident_detected",
+                    {
+                        "incident_class": "setpoint_mode_inconsistency",
+                        "incident_id": dt_util.now().isoformat(),
+                        "hvac_mode": _current_mode,
+                        "setpoint_f": temperature,
+                        "comfort_heat": self.config.get("comfort_heat", 70),
+                        "comfort_cool": self.config.get("comfort_cool", 76),
+                    },
+                )
         self._temp_command_pending = True
         try:
             await self.hass.services.async_call(
@@ -1915,6 +1952,13 @@ class AutomationEngine:
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Occupancy transition to away -- clearing manual override (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason="occupancy_away")
         c = self._current_classification
         if not c:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
@@ -1996,6 +2040,13 @@ class AutomationEngine:
     async def handle_occupancy_vacation(self) -> None:
         """Handle vacation mode — apply deeper setback for extended away."""
         self._occupancy_mode = OCCUPANCY_VACATION
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Occupancy transition to away -- clearing manual override (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason="occupancy_vacation")
         c = self._current_classification
         if not c:
             return

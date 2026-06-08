@@ -1,0 +1,85 @@
+{
+  "name": "ceiling_guard_fires_clears_natvent_when_above_ceiling",
+  "description": "When indoor is above comfort_cool and nat-vent is active, the ODE ceiling guard should fire and clear nat-vent state. The simulator structural fix (Bug 3) routes through the ceiling guard when indoor > comfort_cool even during active nat-vent, instead of short-circuiting to _check_natural_vent_exit.",
+  "source": "synthetic",
+  "issue": 218,
+  "notes": [
+    "Production automation.py check_natural_vent_conditions() should exit nat-vent when indoor >= comfort_cool",
+    "AND trigger the ceiling guard to activate AC cooling.",
+    "The simulator structural fix (Bug 3, tools/simulate.py) adds a guard before the nat-vent short-circuit:",
+    "if ODE is enabled AND indoor > comfort_cool, skip the nat-vent short-circuit and fall through to the",
+    "ODE ceiling guard section, which then clears nat-vent and switches to cool mode.",
+    "Both 14:30 assertions (ceiling_guard_fired + nat_vent_not_active) are now logic-track."
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "When indoor exceeds comfort_cool with nat-vent active, ceiling guard fires and nat-vent is cleared",
+    "observed_behavior": "ceiling_guard_fired at 14:30 with indoor 76F > comfort_cool 74F, nat-vent cleared",
+    "expected_behavior": "In production: indoor > comfort_cool overrides nat-vent dormancy check; ceiling guard fires AC at comfort_cool=74F and clears nat-vent state"
+  },
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "k_passive": -0.04,
+    "k_active_cool": -11.8,
+    "k_active_heat": 6.78,
+    "ode_enabled": true
+  },
+  "events": [
+    {
+      "time": "2026-07-10T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC off"
+    },
+    {
+      "time": "2026-07-10T14:01:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "Afternoon: indoor 76F (2F above comfort_cool=74F), outdoor 68F (still cooler than indoor)"
+    },
+    {
+      "time": "2026-07-10T14:01:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F — nat-vent activates despite indoor being above comfort_cool"
+    },
+    {
+      "time": "2026-07-10T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 68.0,
+      "note": "30 min later: indoor still 76F (above comfort_cool=74F). Simulator structural fix: ceiling guard fires and clears nat-vent because indoor > comfort_cool bypasses nat-vent short-circuit."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T14:01:00",
+      "expect": "natural_ventilation",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "sensor_open: outdoor 68F < indoor 76F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F — nat-vent activates. Note: indoor is above comfort_cool=74F but nat-vent activation guard checks comfort_heat floor, not comfort_cool ceiling."
+    },
+    {
+      "at": "2026-07-10T14:30:00",
+      "expect": "ceiling_guard_fired",
+      "expect_temp": 74.0,
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "indoor 76F > comfort_cool 74F with nat-vent active — simulator structural fix (Bug 3) bypasses nat-vent short-circuit when indoor > comfort_cool and ODE is enabled, ceiling guard fires AC at comfort_cool=74F."
+    },
+    {
+      "at": "2026-07-10T14:30:00",
+      "expect": "nat_vent_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "After ceiling guard fires: nat-vent state cleared (ceiling guard clears natural_vent_active, fan_active=False, fan_mode=auto when escalating to AC cooling)."
+    }
+  ]
+}

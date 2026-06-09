@@ -1772,6 +1772,24 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
     assertion_results: list[dict] = []
     any_real_assertion = False
     for a in scenario.get("assertions", []):
+        # Tier separation (issue #236): track:"integration" assertions need the
+        # coordinator's state-listener layer (e.g. _async_thermostat_changed), which
+        # neither Tier-A engine models — defer them to the Tier B (HeadlessTarry)
+        # harness. (simulator_support:false is NOT skipped — the real production
+        # engine CAN evaluate those, de-phantoming what the legacy sim could not.)
+        if a.get("track") == "integration":
+            assertion_results.append(
+                {
+                    "at": a["at"],
+                    "expected": a.get("expect", ""),
+                    "actual": None,
+                    "pass": None,
+                    "skipped": True,
+                    "reason": "integration-track assertion — deferred to Tier B",
+                    "track": "integration",
+                }
+            )
+            continue
         any_real_assertion = True
         expect = a.get("expect", "")
         custom_result = _out.check_assertion(result, a, decisions)
@@ -1844,6 +1862,10 @@ def run_scenario_diff(scenario_file: Path, state: str | None = None) -> dict:
         at, expected = key
         la = legacy_by_key.get(key)
         pa = prod_by_key.get(key)
+        # Integration-track assertions are deferred to Tier B by BOTH engines —
+        # there is nothing to compare in Tier A, so they are not a divergence.
+        if pa and pa.get("track") == "integration" and pa.get("skipped"):
+            continue
         legacy_actual = "<skipped>" if (la and la.get("skipped")) else (la["actual"] if la else "<absent>")
         prod_actual = pa["actual"] if pa else "<absent>"
         if legacy_actual != prod_actual:

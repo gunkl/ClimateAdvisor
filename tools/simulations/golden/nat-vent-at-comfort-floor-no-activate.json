@@ -1,6 +1,6 @@
 {
   "name": "nat-vent-at-comfort-floor-no-activate",
-  "description": "Indoor at comfort_heat floor (70F); sensor opens — floor guard prevents activation even though outdoor is cooler",
+  "description": "Indoor at comfort_heat floor (70F); sensor opens \u00e2\u20ac\u201d floor guard prevents activation even though outdoor is cooler",
   "source": "synthetic",
   "issue": 115,
   "verdict": {
@@ -32,8 +32,8 @@
   "assertions": [
     {
       "at": "2026-04-20T23:00:00",
-      "expect": "paused",
-      "reason": "indoor 70F == comfort_heat 70F — floor guard blocks nat vent activation; pulling in 65F air would immediately violate comfort floor"
+      "expect": "nat_vent_not_active",
+      "reason": "indoor 70F == comfort_heat 70F \u2014 floor guard correctly blocks nat-vent (nat_vent_not_active) so the house is not cooled below the comfort floor overnight."
     }
   ]
 }

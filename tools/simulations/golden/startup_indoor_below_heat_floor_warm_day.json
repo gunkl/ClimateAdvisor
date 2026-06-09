@@ -12,7 +12,8 @@
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 74,
-    "natural_vent_delta": 3.0
+    "natural_vent_delta": 3.0,
+    "warm_day_comfort_gap_guard": true
   },
   "events": [
     {
@@ -28,14 +29,14 @@
       "day_type": "warm",
       "hvac_mode": "off",
       "windows_recommended": false,
-      "note": "Warm-day classification would normally say hvac_mode=off, but indoor 65F < comfort_heat 70F — warm-day comfort-floor guard should fire heat"
+      "note": "Warm-day classification would normally say hvac_mode=off, but indoor 65F < comfort_heat 70F \u00e2\u20ac\u201d warm-day comfort-floor guard should fire heat"
     }
   ],
   "assertions": [
     {
       "at": "2026-05-24T08:01:00",
-      "expect": "classification_applied",
-      "reason": "Warm-day classification but indoor 65F < comfort_heat 70F — warm-day comfort-floor guard in production fires heat to restore comfort floor. Simulator records classification_applied as baseline; production would override to heat mode."
+      "expect": "warm_day_comfort_gap",
+      "reason": "Warm-day classification but indoor 65F < comfort_heat 70F \u2014 system heats to the comfort floor first (warm_day_comfort_gap) so the occupant is not left cold; HVAC coasts off once at the floor."
     }
   ]
 }

@@ -24,8 +24,8 @@
     "issue": 85
   },
   "nat-vent-at-comfort-floor-no-activate": {
-    "sha256": "06043564718ac2b6fc63a42697a97f4da764e40bd50f2ca84442f0d535948ca8",
-    "signed": "2026-04-20",
+    "sha256": "1d10b5062c7113cbc8380a2bcefca693645d2976a5b2cde8e11b92f5eaa4d905",
+    "signed": "2026-06-08",
     "issue": 115
   },
   "nat-vent-evening-activation": {
@@ -44,8 +44,8 @@
     "issue": 115
   },
   "nat-vent-outdoor-warmer-no-activate": {
-    "sha256": "6b99dace9d50281708e558b7947ec91ecb2220858dc17fcfd818c82a9cf82382",
-    "signed": "2026-04-20",
+    "sha256": "b33f8bc0daebb2835ebe974f508806336577548db3a9220ff62e549527a73205",
+    "signed": "2026-06-08",
     "issue": 115
   },
   "warm-day-setback-cool-mode": {
@@ -74,8 +74,8 @@
     "issue": 136
   },
   "hot_all_day_no_nat_vent_window": {
-    "sha256": "6df8ff824fa7260fe273388c07368ebd66931a94b50370bd22597a7e914fc857",
-    "signed": "2026-06-07",
+    "sha256": "8226b30e5b7272873c8291e1d2080e4b59479dc7b60df91d268bb810e96a1007",
+    "signed": "2026-06-08",
     "issue": 136
   },
   "mild_all_day_nat_vent_only": {
@@ -94,18 +94,18 @@
     "issue": 136
   },
   "away_occupancy_cool_mode_setback": {
-    "sha256": "b01c856418ef64215f382df9bed084f7ce460eef79de22f62b0ad2e63bf671d6",
-    "signed": "2026-06-07",
+    "sha256": "d9f19d28b05bccebffa994d39c96809784d239b87dc8609ed782d2caa79bcaf9",
+    "signed": "2026-06-08",
     "issue": 222
   },
   "away_occupancy_override_cleared": {
-    "sha256": "3c03f6328ac044e796e63ab186391fa832dafd91246fb0daeedbaee6b959d863",
-    "signed": "2026-06-07",
+    "sha256": "2a67ca3502d70c6bc75de3a7022a3e6cafa1ce0d16c60b8b25edb58e953f61e7",
+    "signed": "2026-06-08",
     "issue": 220
   },
   "away_setpoint_change_not_override": {
-    "sha256": "f8215c0b9ec4081d253a9479eb7030a01b0ae5a387ccbeba1f403d4899df2e07",
-    "signed": "2026-06-07",
+    "sha256": "905fca66d2ae64fd7cafaf9a5e1f9793aebf2a7e36d48392980c40a79d4cad38",
+    "signed": "2026-06-08",
     "issue": 221
   },
   "nat_vent_active_indoor_in_band_guard_dormant": {
@@ -129,8 +129,8 @@
     "issue": 218
   },
   "startup_indoor_below_heat_floor_warm_day": {
-    "sha256": "c74d551ca9c7ac75551057892041ff94cf625e1015416f2e807be0340ed831cd",
-    "signed": "2026-06-07",
+    "sha256": "f3da978dc2b1252708a1ab8fb9e1ac1666aa30e6210f05bf4d76c17b812c0f06",
+    "signed": "2026-06-08",
     "issue": 218
   }
 }

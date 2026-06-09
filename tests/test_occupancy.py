@@ -644,16 +644,18 @@ class TestLearningVacationExclusion:
 
     def test_vacation_days_excluded_from_override_pattern(self):
         """Vacation records should not count toward frequent_overrides."""
+        from datetime import datetime, timedelta
         from pathlib import Path
 
         from custom_components.climate_advisor.learning import LearningEngine
 
         engine = LearningEngine(Path("/tmp/fake"))
 
-        # Add 14 vacation days with many overrides — should not trigger suggestion
+        # Add 14 vacation days with many overrides — should not trigger suggestion.
+        # Relative dates so records stay inside the 90-day retention window (issue #242).
         for i in range(14):
             record = DailyRecord(
-                date=f"2026-03-{i + 1:02d}",
+                date=(datetime.now() - timedelta(days=14 - i)).strftime("%Y-%m-%d"),
                 day_type="warm",
                 trend_direction="stable",
                 manual_overrides=5,

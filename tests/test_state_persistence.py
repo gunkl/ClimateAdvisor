@@ -631,12 +631,15 @@ class TestSuggestionTracking:
         engine = LearningEngine(tmp_path)
 
         # Add enough records to trigger suggestions (need MIN_DATA_POINTS_FOR_SUGGESTION)
+        from datetime import datetime, timedelta
+
         from custom_components.climate_advisor.const import MIN_DATA_POINTS_FOR_SUGGESTION
 
+        # Relative dates so records stay inside the 90-day retention window (issue #242).
         for i in range(MIN_DATA_POINTS_FOR_SUGGESTION):
             engine.record_day(
                 DailyRecord(
-                    date=f"2026-03-{i + 1:02d}",
+                    date=(datetime.now() - timedelta(days=MIN_DATA_POINTS_FOR_SUGGESTION - i)).strftime("%Y-%m-%d"),
                     day_type="mild",
                     trend_direction="stable",
                     manual_overrides=5,  # Trigger frequent_overrides pattern

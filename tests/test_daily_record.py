@@ -83,41 +83,44 @@ class TestGetRecordByDate:
 
     def test_returns_correct_record(self, tmp_path: Path):
         engine = LearningEngine(tmp_path)
-        rec1 = _make_record("2026-03-18", day_type="cool")
-        rec2 = _make_record("2026-03-19", day_type="mild")
-        rec3 = _make_record("2026-03-20", day_type="warm")
-        engine.record_day(rec1)
-        engine.record_day(rec2)
-        engine.record_day(rec3)
+        # Relative dates so they stay inside the 90-day retention window (issue #242)
+        d1 = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        d2 = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        d3 = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        engine.record_day(_make_record(d1, day_type="cool"))
+        engine.record_day(_make_record(d2, day_type="mild"))
+        engine.record_day(_make_record(d3, day_type="warm"))
 
-        result = engine.get_record_by_date("2026-03-19")
+        result = engine.get_record_by_date(d2)
         assert result is not None
-        assert result["date"] == "2026-03-19"
+        assert result["date"] == d2
         assert result["day_type"] == "mild"
 
     def test_returns_none_wrong_date(self, tmp_path: Path):
         engine = LearningEngine(tmp_path)
-        engine.record_day(_make_record("2026-03-15"))
-        assert engine.get_record_by_date("2026-03-20") is None
+        engine.record_day(_make_record((datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")))
+        assert engine.get_record_by_date((datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")) is None
 
     def test_returns_most_recent_if_duplicates(self, tmp_path: Path):
         """If somehow two records share a date, return the most recent one."""
         engine = LearningEngine(tmp_path)
-        engine.record_day(_make_record("2026-03-20", day_type="cool"))
-        engine.record_day(_make_record("2026-03-20", day_type="warm"))
-        result = engine.get_record_by_date("2026-03-20")
+        dup = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        engine.record_day(_make_record(dup, day_type="cool"))
+        engine.record_day(_make_record(dup, day_type="warm"))
+        result = engine.get_record_by_date(dup)
         assert result is not None
         # reversed() iteration returns the last-appended record first
         assert result["day_type"] == "warm"
 
     def test_persists_through_save_load(self, tmp_path: Path):
         engine = LearningEngine(tmp_path)
-        engine.record_day(_make_record("2026-03-19", day_type="cool"))
+        d = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        engine.record_day(_make_record(d, day_type="cool"))
         engine.save_state()
 
         engine2 = LearningEngine(tmp_path)
         engine2.load_state()
-        result = engine2.get_record_by_date("2026-03-19")
+        result = engine2.get_record_by_date(d)
         assert result is not None
         assert result["day_type"] == "cool"
 

@@ -65,7 +65,12 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "fan_min_runtime_per_hour": 0,
     # Misc (CONF_SENSOR_DEBOUNCE = "sensor_debounce_seconds", etc.)
     "sensor_debounce_seconds": 0,
-    "nat_vent_hysteresis_f": 2.0,
+    # NAT_VENT_HYSTERESIS_F / NAT_VENT_REACTIVATION_LOCKOUT_S are INTERNAL constants
+    # (not CONFIG_METADATA user settings), so a real install never sets them and the
+    # engine uses its const fallbacks (1.0°F, 300s). The harness must mirror those exact
+    # values — pinning a different hysteresis (was 2.0) made production behave unlike any
+    # real home and silently suppressed nat-vent for marginal gaps (issue #236 fidelity).
+    "nat_vent_hysteresis_f": 1.0,
     "nat_vent_reactivation_lockout_s": 300,
     "natural_vent_delta": 3.0,
 }

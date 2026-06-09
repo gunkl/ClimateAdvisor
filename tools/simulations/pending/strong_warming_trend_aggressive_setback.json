@@ -9,7 +9,7 @@
     "  raw = comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) + setback_modifier(-3) = 74F",
     "  ceiling = setback_cool(79)",
     "  target = min(74, 79) = 74F",
-    "So setback is 74F — same as comfort_cool. This makes sense: a -3 modifier exactly cancels the",
+    "So setback is 74F \u00e2\u20ac\u201d same as comfort_cool. This makes sense: a -3 modifier exactly cancels the",
     "default 3F depth, resulting in no net setback depth (cooling all the way to comfort target overnight).",
     "The key assertion is that setback_applied fires with the modifier-adjusted target (74F, NOT 77F).",
     "The modifier is passed in the classification event's setback_modifier field.",
@@ -36,7 +36,7 @@
       "type": "temp_update",
       "indoor_f": 73.0,
       "outdoor_f": 78.0,
-      "note": "Evening: indoor 73F, outdoor 78F — AC running"
+      "note": "Evening: indoor 73F, outdoor 78F \u00e2\u20ac\u201d AC running"
     },
     {
       "time": "2026-07-15T22:30:00",
@@ -55,13 +55,14 @@
       "at": "2026-07-15T22:30:00",
       "expect": "setback_applied",
       "expect_temp": 74.0,
-      "reason": "Bedtime cool setback with modifier: comfort_cool(74) + depth(3) + modifier(-3) = 74F. Modifier deepens setback toward comfort target — maximally pre-cools for the hot tomorrow."
+      "reason": "Bedtime cool setback with modifier: comfort_cool(74) + depth(3) + modifier(-3) = 74F. Modifier deepens setback toward comfort target \u00e2\u20ac\u201d maximally pre-cools for the hot tomorrow."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "Strong warming trend modifier (-3.0) reduces cool setback target to comfort floor (74F) for aggressive pre-cooling",
-    "observed_behavior": "classification_applied (74F, modifier=-3.0) → setback_applied (74F) at bedtime",
+    "observed_behavior": "classification_applied (74F, modifier=-3.0) \u00e2\u2020\u2019 setback_applied (74F) at bedtime",
     "expected_behavior": "setback_modifier=-3.0 on cool day: bedtime target = comfort_cool+3-3 = comfort_cool (74F); deepest valid pre-cooling setback"
-  }
+  },
+  "pending_issue": 245
 }

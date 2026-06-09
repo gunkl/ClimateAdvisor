@@ -4,8 +4,8 @@
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "Tests the full override detection \u2192 confirmation \u2192 classification suppression lifecycle.",
-    "Gap 3 (override confirmation delay) is NOT yet in simulate.py \u2014 override_detected and override_confirmed assertions are marked track:integration.",
+    "Tests the full override detection \u00e2\u2020\u2019 confirmation \u00e2\u2020\u2019 classification suppression lifecycle.",
+    "Gap 3 (override confirmation delay) is NOT yet in simulate.py \u00e2\u20ac\u201d override_detected and override_confirmed assertions are marked track:integration.",
     "What the simulator CAN test today: classification with manual_override_active=True produces no_action (not classification_applied).",
     "The manual_override_active flag must be set via config initial state for the logic-track assertion to work.",
     "Once Gap 3 is closed in simulate.py, the integration assertions can be promoted to logic-track."
@@ -46,7 +46,7 @@
       "type": "temp_update",
       "indoor_f": 74.5,
       "outdoor_f": 87.0,
-      "note": "10 minutes have elapsed. Thermostat still in heat mode \u2192 override confirmed."
+      "note": "10 minutes have elapsed. Thermostat still in heat mode \u00e2\u2020\u2019 override confirmed."
     },
     {
       "time": "2026-07-15T14:30:00",
@@ -54,7 +54,7 @@
       "day_type": "warm",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "Scheduled 30-min classification cycle. Override is active \u2014 should be suppressed."
+      "note": "Scheduled 30-min classification cycle. Override is active \u00e2\u20ac\u201d should be suppressed."
     }
   ],
   "assertions": [
@@ -68,7 +68,7 @@
     {
       "at": "2026-07-15T14:00:00",
       "expect": "override_detected",
-      "reason": "Thermostat state changed to heat mode while classification says cool \u2014 override detection fires.",
+      "reason": "Thermostat state changed to heat mode while classification says cool \u00e2\u20ac\u201d override detection fires.",
       "track": "logic",
       "simulator_support": true,
       "note": "Requires Gap 3 (override confirmation delay) in simulate.py. Simulator thermostat_state_changed handler only manages stale-fan-clear, not override detection."
@@ -76,7 +76,7 @@
     {
       "at": "2026-07-15T14:10:00",
       "expect": "override_confirmed",
-      "reason": "10 minutes elapsed with thermostat still in heat mode \u2192 override_confirm_seconds=600 expired \u2192 override confirmed.",
+      "reason": "10 minutes elapsed with thermostat still in heat mode \u00e2\u2020\u2019 override_confirm_seconds=600 expired \u00e2\u2020\u2019 override confirmed.",
       "track": "logic",
       "simulator_support": true,
       "note": "Requires Gap 3 in simulate.py. Once gap is closed this becomes a logic-track assertion."
@@ -91,7 +91,8 @@
   "verdict": {
     "type": "positive",
     "summary": "Override detected on thermostat mode change, confirmed after 10-min delay, suppresses subsequent classification",
-    "observed_behavior": "classification_applied (cool, 74F) \u2192 override_detected (14:00) \u2192 override_confirmed (14:10) \u2192 no_action on classification (14:30)",
+    "observed_behavior": "classification_applied (cool, 74F) \u00e2\u2020\u2019 override_detected (14:00) \u00e2\u2020\u2019 override_confirmed (14:10) \u00e2\u2020\u2019 no_action on classification (14:30)",
     "expected_behavior": "CA respects user's manual override and stops re-applying classification until override clears"
-  }
+  },
+  "pending_issue": 245
 }

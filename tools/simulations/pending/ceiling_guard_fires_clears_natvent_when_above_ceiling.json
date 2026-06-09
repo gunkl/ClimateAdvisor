@@ -48,7 +48,7 @@
       "time": "2026-07-10T14:01:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F — nat-vent activates despite indoor being above comfort_cool"
+      "note": "Window opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F \u00e2\u20ac\u201d nat-vent activates despite indoor being above comfort_cool"
     },
     {
       "time": "2026-07-10T14:30:00",
@@ -64,7 +64,7 @@
       "expect": "natural_ventilation",
       "track": "logic",
       "simulator_support": true,
-      "reason": "sensor_open: outdoor 68F < indoor 76F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F — nat-vent activates. Note: indoor is above comfort_cool=74F but nat-vent activation guard checks comfort_heat floor, not comfort_cool ceiling."
+      "reason": "sensor_open: outdoor 68F < indoor 76F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F \u00e2\u20ac\u201d nat-vent activates. Note: indoor is above comfort_cool=74F but nat-vent activation guard checks comfort_heat floor, not comfort_cool ceiling."
     },
     {
       "at": "2026-07-10T14:30:00",
@@ -72,7 +72,7 @@
       "expect_temp": 74.0,
       "track": "logic",
       "simulator_support": true,
-      "reason": "indoor 76F > comfort_cool 74F with nat-vent active — simulator structural fix (Bug 3) bypasses nat-vent short-circuit when indoor > comfort_cool and ODE is enabled, ceiling guard fires AC at comfort_cool=74F."
+      "reason": "indoor 76F > comfort_cool 74F with nat-vent active \u00e2\u20ac\u201d simulator structural fix (Bug 3) bypasses nat-vent short-circuit when indoor > comfort_cool and ODE is enabled, ceiling guard fires AC at comfort_cool=74F."
     },
     {
       "at": "2026-07-10T14:30:00",
@@ -81,5 +81,6 @@
       "simulator_support": true,
       "reason": "After ceiling guard fires: nat-vent state cleared (ceiling guard clears natural_vent_active, fan_active=False, fan_mode=auto when escalating to AC cooling)."
     }
-  ]
+  ],
+  "pending_issue": 245
 }

@@ -1,14 +1,14 @@
 {
   "name": "grace_full_lifecycle_clean_expiry",
-  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). Sensor stays closed. Grace expires at 13:15 with all sensors closed → automation resumes cleanly. Classification cycle at 13:30 applies normally.",
+  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). Sensor stays closed. Grace expires at 13:15 with all sensors closed \u00e2\u2020\u2019 automation resumes cleanly. Classification cycle at 13:30 applies normally.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "Tests the normal (clean) grace expiry path: pause → sensor closes → grace expires cleanly → classification resumes.",
+    "Tests the normal (clean) grace expiry path: pause \u00e2\u2020\u2019 sensor closes \u00e2\u2020\u2019 grace expires cleanly \u00e2\u2020\u2019 classification resumes.",
     "Gap 2 (grace expiry re-check) is pending in simulate.py, but the CLEAN expiry path already works:",
     "  - grace_end event clears grace_active; no sensors open; no re-pause.",
     "  - The next classification event applies normally since paused_by_door=False after resumed.",
-    "All assertions in this scenario are logic-track — no Gap 2 required for the clean path.",
+    "All assertions in this scenario are logic-track \u00e2\u20ac\u201d no Gap 2 required for the clean path.",
     "Contrast with grace_full_lifecycle_sensor_still_open.json which tests the re-pause path."
   ],
   "config": {
@@ -45,7 +45,7 @@
       "time": "2026-07-15T13:10:00",
       "type": "sensor_close",
       "entity": "binary_sensor.back_door",
-      "note": "Door closes. All sensors closed → automation resumes, grace period begins (5 min)."
+      "note": "Door closes. All sensors closed \u00e2\u2020\u2019 automation resumes, grace period begins (5 min)."
     },
     {
       "time": "2026-07-15T13:10:01",
@@ -55,7 +55,7 @@
     {
       "time": "2026-07-15T13:15:00",
       "type": "grace_end",
-      "note": "Grace expires at 13:15. All sensors are still closed → clean expiry, no re-pause."
+      "note": "Grace expires at 13:15. All sensors are still closed \u00e2\u2020\u2019 clean expiry, no re-pause."
     },
     {
       "time": "2026-07-15T13:30:00",
@@ -63,20 +63,20 @@
       "day_type": "warm",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "30-min classification cycle. Grace is gone, no sensors open — classification applies normally."
+      "note": "30-min classification cycle. Grace is gone, no sensors open \u00e2\u20ac\u201d classification applies normally."
     }
   ],
   "assertions": [
     {
       "at": "2026-07-15T13:00:00",
       "expect": "paused",
-      "reason": "Sensor opens with outdoor (88F) > indoor (76F) — nat vent ineligible. Automation pauses.",
+      "reason": "Sensor opens with outdoor (88F) > indoor (76F) \u00e2\u20ac\u201d nat vent ineligible. Automation pauses.",
       "track": "logic"
     },
     {
       "at": "2026-07-15T13:10:00",
       "expect": "resumed",
-      "reason": "All sensors closed — automation resumes. Grace period begins.",
+      "reason": "All sensors closed \u00e2\u20ac\u201d automation resumes. Grace period begins.",
       "track": "logic"
     },
     {
@@ -90,7 +90,8 @@
   "verdict": {
     "type": "positive",
     "summary": "Grace period expires cleanly when sensors stay closed; classification resumes normally",
-    "observed_behavior": "paused (13:00) → resumed (13:10) → grace expires cleanly (13:15) → classification_applied (13:30, 74F)",
+    "observed_behavior": "paused (13:00) \u00e2\u2020\u2019 resumed (13:10) \u00e2\u2020\u2019 grace expires cleanly (13:15) \u00e2\u2020\u2019 classification_applied (13:30, 74F)",
     "expected_behavior": "When no sensor opens during the grace window, automation resumes without re-pause after grace expires"
-  }
+  },
+  "pending_issue": 245
 }

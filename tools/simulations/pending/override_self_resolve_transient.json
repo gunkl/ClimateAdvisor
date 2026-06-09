@@ -5,7 +5,7 @@
   "issue": 229,
   "notes": [
     "Tests the 'transient glitch' vs 'real user change' distinction in the override confirmation window.",
-    "Gap 3 (override confirmation delay) is NOT yet in simulate.py \u2014 override_detected and override_self_resolved assertions are marked track:integration.",
+    "Gap 3 (override confirmation delay) is NOT yet in simulate.py \u00e2\u20ac\u201d override_detected and override_self_resolved assertions are marked track:integration.",
     "What the simulator CAN test today: after transient thermostat_state_changed (heat) + return to cool, the next classification cycle fires normally (not suppressed), because the simulator does not set manual_override_active from thermostat_state_changed events.",
     "Logic-track assertion at 10:30 verifies classification continues normally (no override suppression).",
     "Once Gap 3 is closed, the integration assertions can be promoted."
@@ -50,7 +50,7 @@
     {
       "time": "2026-07-15T10:05:00",
       "type": "temp_update",
-      "note": "Thermostat returns to cool mode at 10:05 \u2014 only 5 minutes elapsed, before confirm window expires. Override self-resolves.",
+      "note": "Thermostat returns to cool mode at 10:05 \u00e2\u20ac\u201d only 5 minutes elapsed, before confirm window expires. Override self-resolves.",
       "indoor_f": 74.0,
       "outdoor_f": 72.0
     },
@@ -60,7 +60,7 @@
       "day_type": "cool",
       "hvac_mode": "cool",
       "windows_recommended": false,
-      "note": "30-min classification cycle. Override should NOT be active \u2014 classification should apply normally."
+      "note": "30-min classification cycle. Override should NOT be active \u00e2\u20ac\u201d classification should apply normally."
     }
   ],
   "assertions": [
@@ -74,7 +74,7 @@
     {
       "at": "2026-07-15T10:00:00",
       "expect": "override_detected",
-      "reason": "Thermostat changed to heat while classification says cool \u2014 pending override detection.",
+      "reason": "Thermostat changed to heat while classification says cool \u00e2\u20ac\u201d pending override detection.",
       "track": "logic",
       "simulator_support": true,
       "note": "Requires Gap 3 in simulate.py."
@@ -82,7 +82,7 @@
     {
       "at": "2026-07-15T10:05:00",
       "expect": "override_self_resolved",
-      "reason": "Thermostat returned to cool within 5 min (before override_confirm_seconds=600). Override pending window cancelled \u2014 no override accepted.",
+      "reason": "Thermostat returned to cool within 5 min (before override_confirm_seconds=600). Override pending window cancelled \u00e2\u20ac\u201d no override accepted.",
       "track": "logic",
       "simulator_support": true,
       "note": "Requires Gap 3 in simulate.py. This is the key transient-glitch distinction test."
@@ -91,14 +91,15 @@
       "at": "2026-07-15T10:30:00",
       "expect": "classification_applied",
       "expect_temp": 74.0,
-      "reason": "Override was not confirmed (self-resolved), so classification cycle at 10:30 applies normally \u2014 not suppressed.",
+      "reason": "Override was not confirmed (self-resolved), so classification cycle at 10:30 applies normally \u00e2\u20ac\u201d not suppressed.",
       "track": "logic"
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "Transient thermostat state change self-resolves before confirm window; classification continues normally",
-    "observed_behavior": "classification_applied \u2192 override_detected (10:00) \u2192 override_self_resolved (10:05) \u2192 classification_applied (10:30)",
+    "observed_behavior": "classification_applied \u00e2\u2020\u2019 override_detected (10:00) \u00e2\u2020\u2019 override_self_resolved (10:05) \u00e2\u2020\u2019 classification_applied (10:30)",
     "expected_behavior": "CA distinguishes transient thermostat glitches from real user overrides using a 10-min confirmation window"
-  }
+  },
+  "pending_issue": 245
 }

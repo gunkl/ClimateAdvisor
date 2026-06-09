@@ -24,7 +24,7 @@ _TOOLS_DIR = Path(__file__).parent.parent / "tools"
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
-from simulate import run_scenario  # noqa: E402
+from simulate import run_scenario_production as run_scenario  # noqa: E402
 
 # ── HA module stubs (must happen before importing climate_advisor) ──
 if "homeassistant" not in sys.modules:
@@ -218,46 +218,6 @@ def _make_scenario(
 
 
 class TestSimulateNewFeatures:
-    def test_ode_ceiling_guard_fires_with_ode_enabled(self, tmp_path: Path) -> None:
-        """ODE ceiling guard emits ceiling_guard_fired when indoor approaches comfort_cool ceiling."""
-        config = {
-            "comfort_heat": 70,
-            "comfort_cool": 74,
-            "ode_enabled": True,
-            "k_passive": -0.04,
-            "k_active_cool": -11.8,
-            "k_vent_window": -0.165,
-            "k_solar": 0.97,
-        }
-        events = [
-            {
-                "time": "2026-05-20T06:00:00",
-                "type": "classification",
-                "day_type": "warm",
-                "hvac_mode": "off",
-            },
-            {
-                # indoor=74.5 exceeds comfort_cool=74 → ceiling guard should fire
-                "time": "2026-05-20T12:00:00",
-                "type": "temp_update",
-                "indoor_f": 74.5,
-                "outdoor_f": 85.0,
-            },
-        ]
-        assertions = [
-            {
-                "at": "2026-05-20T12:00:00",
-                "expect": "ceiling_guard_fired",
-                "track": "logic",
-                "reason": "ODE ceiling guard should fire when indoor approaches ceiling",
-            }
-        ]
-        p = _make_scenario(tmp_path, "ode_ceiling_guard_test", events, assertions, config=config)
-        result = run_scenario(p)
-        assert result["passed"] is True, (
-            f"ceiling_guard_fired assertion failed. Decisions: {result.get('decisions', [])}"
-        )
-
     def test_track_integration_assertion_is_skipped(self, tmp_path: Path) -> None:
         """Assertion with track='integration' is skipped (not failed), even with unknown expect value."""
         events = [

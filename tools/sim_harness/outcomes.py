@@ -173,10 +173,44 @@ def production_decisions(result: Any) -> list[ProductionDecision]:
     occupancy_decisions = _derive_occupancy_outcomes(result.action_log, event_log_ts_set)
     decisions.extend(occupancy_decisions)
 
+    # Pass 3: enrich target_temp from the action_log.
+    # Production emits the decision EVENT (e.g. classification_applied) and the
+    # setpoint via a SEPARATE channel: _set_temperature() → climate.set_temperature
+    # in the action_log, at the same virtual-clock instant. Events like
+    # classification_applied therefore carry no target_temp in their payload —
+    # the legacy Decision records it, so we recover it from the same-timestamp
+    # set_temperature action to keep expect_temp assertions comparable.
+    temp_by_ts = _temps_by_timestamp(result.action_log)
+    for dec in decisions:
+        if dec.target_temp is None and dec.time in temp_by_ts:
+            dec.target_temp = temp_by_ts[dec.time]
+
     # Sort by time string (ISO 8601 lexicographic = chronological)
     decisions.sort(key=lambda d: d.time)
 
     return decisions
+
+
+def _temps_by_timestamp(action_log: list[dict]) -> dict[str, float]:
+    """Map naive-ISO timestamp → setpoint from climate.set_temperature actions.
+
+    For single-setpoint calls uses ``temperature``; for dual (heat_cool) calls
+    falls back to ``target_temp_low`` (the heat setpoint), matching how the
+    legacy simulator records ``Decision.target_temp`` for dual setback. The last
+    set_temperature at a given timestamp wins.
+    """
+    temps: dict[str, float] = {}
+    for entry in action_log:
+        if entry.get("domain") != "climate" or entry.get("service") != "set_temperature":
+            continue
+        ts = entry.get("ts")
+        if ts is None:
+            continue
+        data = entry.get("data", {})
+        val = data.get("temperature", data.get("target_temp_low"))
+        if val is not None:
+            temps[_naive_iso(ts)] = float(val)
+    return temps
 
 
 def _map_event_to_outcome(

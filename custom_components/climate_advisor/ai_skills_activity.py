@@ -243,6 +243,9 @@ _AUTO_EVENT_TYPES = frozenset(
         "warm_day_comfort_gap",
         "nat_vent_ceiling_escalation",
         "nat_vent_away_ceiling_exit",
+        "occupancy_setback",
+        "occupancy_comfort_restored",
+        "morning_wakeup",
     }
 )
 

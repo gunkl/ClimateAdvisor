@@ -523,6 +523,17 @@ The `_set_temperature_for_mode()` safety net catches all indirect callers (door/
 
 Fire paths emit `bedtime_setback` with `{mode, target_f, depth_f, adaptive, modifier}`. Both event types are visible in the AI investigator's structured event log.
 
+**Occupancy and wakeup events (Issue #240):** The following events are emitted by occupancy handlers when a setpoint change is actually applied, making these actions visible in the dashboard timeline and AI activity report:
+
+| Event type | Handler | Condition | Payload |
+|---|---|---|---|
+| `occupancy_setback` | `handle_occupancy_away()` | Cool or heat thermostat mode — setpoint applied | `{mode: "cool"\|"heat", target_f: float, occupancy: "away"}` |
+| `occupancy_setback` | `handle_occupancy_vacation()` | Cool or heat thermostat mode — setpoint applied | `{mode: "cool"\|"heat", target_f: float, occupancy: "vacation"}` |
+| `occupancy_comfort_restored` | `handle_occupancy_home()` | Classification `hvac_mode` is `heat` or `cool` | `{mode: "cool"\|"heat", target_f: float}` (comfort setpoint) |
+| `morning_wakeup` | `handle_morning_wakeup()` | Classification `hvac_mode` is `heat` or `cool` | `{mode: "cool"\|"heat", target_f: float}` (comfort setpoint) |
+
+No event is emitted when HVAC is `off` (mild/warm day) — no setpoint change occurs in those cases. All four event types are categorised as `source_label=automation` by `_event_source_label()` in `ai_skills_activity.py`. The skip path (HVAC off, occupancy away at wakeup) continues to emit `morning_wakeup_skipped` as before.
+
 **DailyRecord setback fields (Issue #151):** `handle_bedtime()` writes the following fields to `DailyRecord` on every bedtime pass — fire or skip:
 
 | Field | Type | Set when | Value |
@@ -1560,4 +1571,4 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 
 ---
 
-_Last Updated: 2026-06-03_
+_Last Updated: 2026-06-08_

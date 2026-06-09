@@ -84,13 +84,13 @@
     "issue": 136
   },
   "warm_day_ceiling_breach_ac_defense": {
-    "sha256": "3a175e910ba9d14947c675196da044fef421a874f112543e3c929b706c7ddc2a",
-    "signed": "2026-06-07",
+    "sha256": "1faa8c9aef02ce5b340710d57c1885cab8ca78617d9b17b2b2bebd2c736da7ab",
+    "signed": "2026-06-09",
     "issue": 136
   },
   "warm_day_forecast_improves_guard_dormant": {
-    "sha256": "92c7ff300dfe6fc1c3a6596e374ab4f96f18a1ce4aa351f00e298e8aa7072224",
-    "signed": "2026-06-07",
+    "sha256": "65789d8514725d86eed8da4dd0399df675df1e2b56be65245538992eb8bcbdc4",
+    "signed": "2026-06-09",
     "issue": 136
   },
   "away_occupancy_cool_mode_setback": {

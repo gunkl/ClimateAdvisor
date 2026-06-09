@@ -413,6 +413,20 @@ def check_assertion(
             return "nat_vent_not_active"
         return False
 
+    # --- ODE ceiling guard (Issue #236 D) ---
+    # Production emits "ceiling_guard_fired" when it pre-cools. The legacy scenarios use
+    # bespoke labels; map them to the production decision at the asserted time. "fires"/
+    # "would_fire" => a ceiling_guard_fired decision at/just-before that time; "dormant*"
+    # => the guard did NOT fire (the active decision is something else).
+    if expect in ("ceiling_guard_fires_cool", "ceiling_guard_would_fire"):
+        if production_outcome_at(decisions, assertion["at"]) == "ceiling_guard_fired":
+            return expect
+        return False
+    if expect.startswith("ceiling_guard_dormant"):
+        if production_outcome_at(decisions, assertion["at"]) != "ceiling_guard_fired":
+            return expect
+        return False
+
     # --- nat_vent_fan_preserved (Issue #236 C) ---
     # Legacy emits a distinct "nat_vent_fan_preserved" outcome; production keeps
     # nat-vent + fan running without a dedicated event. Verify the GUARANTEE

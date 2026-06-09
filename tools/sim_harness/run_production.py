@@ -458,6 +458,15 @@ def _handle_temp_update(
     # This is the correct re-evaluation entry point for temperature changes.
     asyncio.run(engine.check_natural_vent_conditions())
 
+    # Issue #236 (ceiling-D): the ODE ceiling guard lives inside apply_classification,
+    # which production re-runs every coordinator cycle. The harness models classification
+    # as a one-shot, so a temp_update may carry a `predicted_indoor` curve to re-invoke
+    # apply_classification (with the current classification) — faithfully reproducing the
+    # periodic ceiling-guard re-evaluation. Legacy ignores this field.
+    predicted = event.get("predicted_indoor")
+    if predicted and getattr(engine, "_current_classification", None) is not None:
+        asyncio.run(engine.apply_classification(engine._current_classification, predicted_indoor=predicted))
+
 
 # ---------------------------------------------------------------------------
 # Engine state snapshot

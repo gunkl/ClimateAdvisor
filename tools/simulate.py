@@ -1741,6 +1741,135 @@ def run_scenario(scenario_file: Path, state: str | None = None) -> dict:
 
 
 # ------------------------------------------------------------------
+# Production engine (issue #236) — run the REAL AutomationEngine headless
+# ------------------------------------------------------------------
+
+
+def run_scenario_production(scenario_file: Path, state: str | None = None) -> dict:
+    """Run a scenario through the real production AutomationEngine (issue #236).
+
+    Returns the same result-dict shape as ``run_scenario`` so the existing
+    report/print helpers work unchanged. Unlike the legacy simulator, the
+    production engine can evaluate assertions the legacy sim marks
+    ``simulator_support: false`` or ``track: integration`` — those flags are
+    recorded (``legacy_skipped``) for the diff comparison but still evaluated.
+    """
+    # Lazy imports: keep the legacy path free of HA-stub installation overhead.
+    # Ensure the repo root is importable when run standalone (python tools/simulate.py
+    # puts tools/ on sys.path, not the repo root).
+    _repo_root = str(Path(__file__).resolve().parent.parent)
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    from tools.sim_harness import outcomes as _out
+    from tools.sim_harness.run_production import run_production_scenario
+
+    with open(scenario_file) as f:
+        scenario = json.load(f)
+
+    result = run_production_scenario(scenario)
+    decisions = _out.production_decisions(result)
+
+    assertion_results: list[dict] = []
+    any_real_assertion = False
+    for a in scenario.get("assertions", []):
+        any_real_assertion = True
+        expect = a.get("expect", "")
+        custom_result = _out.check_assertion(result, a, decisions)
+        actual_outcome = custom_result if custom_result is not False else _out.production_outcome_at(decisions, a["at"])
+        outcome_ok = actual_outcome == expect
+
+        temp_pass = True
+        temp_detail = None
+        if "expect_temp" in a:
+            actual_temp = _out.production_temp_at(decisions, a["at"])
+            expected_temp = float(a["expect_temp"])
+            if actual_temp is None:
+                temp_pass = False
+                temp_detail = f"expect_temp={expected_temp} but no target_temp recorded"
+            else:
+                temp_pass = abs(actual_temp - expected_temp) < 0.01
+                temp_detail = f"expect_temp={expected_temp}, actual_temp={actual_temp}"
+
+        assertion_results.append(
+            {
+                "at": a["at"],
+                "expected": expect,
+                "actual": actual_outcome,
+                "pass": outcome_ok and temp_pass,
+                "skipped": False,
+                "reason": a.get("reason", ""),
+                "temp_detail": temp_detail,
+                "track": a.get("track", "logic"),
+                "legacy_skipped": a.get("simulator_support") is False or a.get("track") == "integration",
+            }
+        )
+
+    passed = all(r["pass"] for r in assertion_results) if any_real_assertion else None
+    callback_errors = [f"{ts}: {exc!r}" for ts, exc in result.callback_errors]
+    if callback_errors:
+        # Unexpected callback errors make the run untrustworthy — never report pass.
+        passed = False
+
+    return {
+        "name": scenario.get("name", scenario_file.stem),
+        "description": scenario.get("description", ""),
+        "issue": scenario.get("issue"),
+        "verdict": scenario.get("verdict"),
+        "state": state,
+        "decisions": [
+            {"time": d.time, "outcome": d.outcome, "reason": d.event_type, "target_temp": d.target_temp}
+            for d in decisions
+        ],
+        "assertions": assertion_results,
+        "passed": passed,
+        "callback_errors": callback_errors,
+    }
+
+
+def run_scenario_diff(scenario_file: Path, state: str | None = None) -> dict:
+    """Run a scenario through BOTH engines and compare outcomes (issue #236).
+
+    The differential is the migration oracle: every divergence is either a real
+    production behaviour the legacy sim was masking, or a harness-fidelity gap.
+    Compares the actual outcome at each asserted timestamp.
+    """
+    legacy = run_scenario(scenario_file, state=state)
+    prod = run_scenario_production(scenario_file, state=state)
+
+    legacy_by_key = {(a["at"], a["expected"]): a for a in legacy["assertions"]}
+    prod_by_key = {(a["at"], a["expected"]): a for a in prod["assertions"]}
+
+    divergences: list[dict] = []
+    for key in dict.fromkeys([*legacy_by_key, *prod_by_key]):
+        at, expected = key
+        la = legacy_by_key.get(key)
+        pa = prod_by_key.get(key)
+        legacy_actual = "<skipped>" if (la and la.get("skipped")) else (la["actual"] if la else "<absent>")
+        prod_actual = pa["actual"] if pa else "<absent>"
+        if legacy_actual != prod_actual:
+            divergences.append(
+                {
+                    "at": at,
+                    "expected": expected,
+                    "legacy": legacy_actual,
+                    "production": prod_actual,
+                    "legacy_skipped": bool(la and la.get("skipped")),
+                }
+            )
+
+    return {
+        "name": legacy["name"],
+        "description": legacy["description"],
+        "issue": legacy.get("issue"),
+        "state": state,
+        "legacy_passed": legacy["passed"],
+        "production_passed": prod["passed"],
+        "divergences": divergences,
+        "callback_errors": prod.get("callback_errors", []),
+    }
+
+
+# ------------------------------------------------------------------
 # Output formatting
 # ------------------------------------------------------------------
 
@@ -1808,6 +1937,47 @@ def print_result(result: dict, verbose: bool = False) -> None:
                     print(f"         temp: {a['temp_detail']}")
                 if a["reason"]:
                     print(f"         {a['reason']}")
+
+
+# ------------------------------------------------------------------
+# Differential report (issue #236)
+# ------------------------------------------------------------------
+
+
+def print_diff_result(diff: dict) -> None:
+    """Print one scenario's legacy-vs-production differential."""
+    issue_tag = f" [#{diff['issue']}]" if diff.get("issue") else ""
+    n = len(diff["divergences"])
+    status = "MATCH" if n == 0 and not diff.get("callback_errors") else f"DIVERGE x{n}"
+    print(f"\n[{status}] {diff['name']}{issue_tag}")
+    print(f"  legacy_passed={diff['legacy_passed']}  production_passed={diff['production_passed']}")
+    if diff.get("callback_errors"):
+        print(f"  PRODUCTION CALLBACK ERRORS: {diff['callback_errors']}")
+    for d in diff["divergences"]:
+        flag = "  (legacy skipped — production now evaluates it)" if d["legacy_skipped"] else ""
+        print(f"  @ {d['at']}  expect={d['expected']!r}{flag}")
+        print(f"      legacy     = {d['legacy']!r}")
+        print(f"      production = {d['production']!r}")
+
+
+def run_diff_batch(files: list[Path], state_key: str) -> int:
+    """Run the legacy-vs-production differential over a batch; return exit code."""
+    diffs = [run_scenario_diff(f, state=state_key) for f in files]
+    for d in diffs:
+        print_diff_result(d)
+
+    total = len(diffs)
+    clean = sum(1 for d in diffs if not d["divergences"] and not d["callback_errors"])
+    diverged = total - clean
+    err_runs = sum(1 for d in diffs if d["callback_errors"])
+
+    print(f"\n{'=' * 60}")
+    print(f"DIFF: {clean}/{total} {state_key} scenarios MATCH legacy↔production")
+    if diverged:
+        print(f"      {diverged} scenario(s) DIVERGED — triage each as harness gap vs production behaviour")
+    if err_runs:
+        print(f"      {err_runs} scenario(s) had production callback errors")
+    return 0 if diverged == 0 else 1
 
 
 # ------------------------------------------------------------------
@@ -2138,6 +2308,16 @@ def main() -> int:
         metavar="NAME",
         help="Sign a golden scenario into MANIFEST.json after human review",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["legacy", "production", "diff"],
+        default="legacy",
+        help=(
+            "Which decision engine to run (issue #236). 'legacy' = the standalone "
+            "ClimateSimulator (default). 'production' = the real AutomationEngine driven "
+            "headless. 'diff' = run both and report divergences (migration oracle)."
+        ),
+    )
     args = parser.parse_args()
 
     for d in STATE_DIRS.values():
@@ -2192,7 +2372,11 @@ def main() -> int:
                     print(f"  [{state}] {f.stem}")
             return 1
         scenario_path, scenario_state = found
-        result = run_scenario(scenario_path, state=scenario_state)
+        if args.engine == "diff":
+            print_diff_result(run_scenario_diff(scenario_path, state=scenario_state))
+            return 0
+        runner = run_scenario_production if args.engine == "production" else run_scenario
+        result = runner(scenario_path, state=scenario_state)
         print_result(result, verbose=args.verbose)
         status = _status_label(result)
         return 0 if status != "FAIL" else 1
@@ -2208,7 +2392,12 @@ def main() -> int:
             print("  Promote a scenario from pending/ to golden/ after review.")
         return 0
 
-    results = [run_scenario(f, state=source_key) for f in files]
+    # Differential mode (issue #236): run both engines and report divergences.
+    if args.engine == "diff":
+        return run_diff_batch(files, source_key)
+
+    runner = run_scenario_production if args.engine == "production" else run_scenario
+    results = [runner(f, state=source_key) for f in files]
     for r in results:
         print_result(r, verbose=args.verbose)
 

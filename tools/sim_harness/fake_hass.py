@@ -27,11 +27,22 @@ class FakeState:
 
 
 class _FakeServices:
-    """Intercept point for all hass.services.async_call() invocations."""
+    """Intercept point for all hass.services.async_call() invocations.
 
-    def __init__(self, action_log: list[dict], clock_fn: Any) -> None:
+    Besides recording every call in ``action_log``, this applies a
+    **state-feedback loop**: climate/fan commands update the target entity's
+    ``FakeState`` so that production code which reads the thermostat back via
+    ``hass.states.get(...)`` (e.g. ``handle_occupancy_away`` checks the actual
+    HVAC mode before choosing setback_heat vs setback_cool) sees the commanded
+    state — exactly as real HA would, and as the legacy ``SimState`` mirrors by
+    mutating its own state after each decision. Without this, read-backs return
+    the stale initial state and production diverges for the wrong reason.
+    """
+
+    def __init__(self, action_log: list[dict], clock_fn: Any, states: _FakeStates) -> None:
         self._action_log = action_log
         self._clock_fn = clock_fn  # callable → current sim datetime
+        self._states = states
 
     async def async_call(
         self,
@@ -41,7 +52,8 @@ class _FakeServices:
         blocking: bool = False,
         **kw: Any,
     ) -> None:
-        """Record the service call; do nothing else."""
+        """Record the service call, then apply the state-feedback loop."""
+        data = dict(data or {})
         ts: datetime | None = None
         with contextlib.suppress(Exception):
             ts = self._clock_fn()
@@ -49,10 +61,42 @@ class _FakeServices:
             {
                 "domain": domain,
                 "service": service,
-                "data": dict(data or {}),
+                "data": data,
                 "ts": ts,
             }
         )
+        self._apply_state_feedback(domain, service, data)
+
+    def _apply_state_feedback(self, domain: str, service: str, data: dict) -> None:
+        """Reflect a command into the target entity's FakeState (real-HA behaviour)."""
+        entity_id = data.get("entity_id")
+        if isinstance(entity_id, list):
+            entity_id = entity_id[0] if entity_id else None
+        if not entity_id:
+            return
+
+        st = self._states.get(entity_id)
+        if st is None:
+            st = FakeState(state="off", attributes={})
+            self._states.set(entity_id, st)
+
+        if domain == "climate":
+            if service == "set_hvac_mode" and "hvac_mode" in data:
+                st.state = data["hvac_mode"]
+            elif service == "set_temperature":
+                if "temperature" in data:
+                    st.attributes["temperature"] = data["temperature"]
+                if "target_temp_low" in data:
+                    st.attributes["target_temp_low"] = data["target_temp_low"]
+                if "target_temp_high" in data:
+                    st.attributes["target_temp_high"] = data["target_temp_high"]
+            elif service == "set_fan_mode" and "fan_mode" in data:
+                st.attributes["fan_mode"] = data["fan_mode"]
+        elif domain in ("fan", "switch"):
+            if service == "turn_on":
+                st.state = "on"
+            elif service == "turn_off":
+                st.state = "off"
 
 
 class _FakeStates:
@@ -94,7 +138,7 @@ class FakeHass:
         self._clock_fn = clock_fn or datetime.now
         self.action_log: list[dict] = []
         self.states = _FakeStates()
-        self.services = _FakeServices(self.action_log, self._clock_fn)
+        self.services = _FakeServices(self.action_log, self._clock_fn, self.states)
         self._scheduler: Any | None = None  # set via set_scheduler()
 
         # Minimal config stub the engine reads via hass.config.config_dir

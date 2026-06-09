@@ -124,6 +124,22 @@ class ProductionDecision:
 # ---------------------------------------------------------------------------
 
 
+def _naive_iso(ts: Any) -> str:
+    """Format a timestamp as a NAIVE ISO string (no tz offset).
+
+    The FakeScheduler clock is tz-aware (UTC), so ``ts.isoformat()`` yields a
+    ``...+00:00`` suffix. Scenario assertion ``at`` strings and legacy
+    ``Decision.time`` values are naive (e.g. ``2026-05-20T06:01:00``). Comparing
+    them lexicographically, a tz-aware production string sorts AFTER the bare
+    assertion time, so an "at or before" lookup would wrongly exclude a decision
+    landing exactly on the assertion timestamp (off-by-one lag). Stripping the
+    offset keeps production timestamps in the same comparable space as legacy.
+    """
+    if hasattr(ts, "replace") and hasattr(ts, "isoformat"):
+        return ts.replace(tzinfo=None).isoformat()
+    return str(ts)
+
+
 def production_decisions(result: Any) -> list[ProductionDecision]:
     """Convert a ``ProductionRunResult`` into a list of ``ProductionDecision`` entries.
 
@@ -143,7 +159,7 @@ def production_decisions(result: Any) -> list[ProductionDecision]:
     for event_type, payload, ts in result.event_log:
         if ts is None:
             continue
-        ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        ts_str = _naive_iso(ts)
         mapped = _map_event_to_outcome(event_type, payload, ts_str)
         if mapped is not None:
             decisions.append(mapped)
@@ -153,9 +169,7 @@ def production_decisions(result: Any) -> list[ProductionDecision]:
     # silently — no event is emitted.  We reconstruct these outcomes by
     # looking for set_temperature actions that are NOT already accounted for
     # by an event_log entry at the same timestamp.
-    event_log_ts_set: set[str] = {
-        (ts.isoformat() if hasattr(ts, "isoformat") else str(ts)) for _et, _pl, ts in result.event_log if ts is not None
-    }
+    event_log_ts_set: set[str] = {(_naive_iso(ts)) for _et, _pl, ts in result.event_log if ts is not None}
     occupancy_decisions = _derive_occupancy_outcomes(result.action_log, event_log_ts_set)
     decisions.extend(occupancy_decisions)
 
@@ -289,7 +303,7 @@ def _derive_occupancy_outcomes(
         ts = action.get("ts")
         if ts is None:
             continue
-        ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        ts_str = _naive_iso(ts)
 
         # Skip if already covered by an event_log entry at this timestamp
         if ts_str in event_log_ts_set:

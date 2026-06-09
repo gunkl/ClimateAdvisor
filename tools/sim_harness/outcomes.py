@@ -413,6 +413,30 @@ def check_assertion(
             return "nat_vent_not_active"
         return False
 
+    # --- nat_vent_fan_preserved (Issue #236 C) ---
+    # Legacy emits a distinct "nat_vent_fan_preserved" outcome; production keeps
+    # nat-vent + fan running without a dedicated event. Verify the GUARANTEE
+    # directly (fan still circulating during nat-vent) rather than the label, so
+    # a regression that stops the fan (occupant loses their breeze) still fails.
+    if expect == "nat_vent_fan_preserved":
+        if engine_state.get("_natural_vent_active") is True and engine_state.get("_fan_active") is True:
+            return "nat_vent_fan_preserved"
+        return False
+
+    # --- dual_setback_applied (Issue #236 C) ---
+    # Legacy distinguishes dual-mode (heat_cool) setback; production applies both
+    # setpoints but emits a generic setback event. Verify the GUARANTEE: a
+    # climate.set_temperature with BOTH target_temp_low and target_temp_high was
+    # issued (so a regression dropping one setpoint — running AC while away —
+    # still fails).
+    if expect == "dual_setback_applied":
+        for entry in result.action_log:
+            if entry.get("domain") == "climate" and entry.get("service") == "set_temperature":
+                d = entry.get("data", {})
+                if "target_temp_low" in d and "target_temp_high" in d:
+                    return "dual_setback_applied"
+        return False
+
     return False
 
 

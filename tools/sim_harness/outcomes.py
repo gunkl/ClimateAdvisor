@@ -41,12 +41,12 @@ Mapped (production → legacy):
   override_self_resolved        → override_self_resolved
   override_cleared              → override_cleared
 
-Derived from action_log (no event_log entry in production):
-  occupancy_away / occupancy_home / occupancy_vacation events drive
-  ``set_temperature`` calls but emit NO event in production.  These
-  setback/restore outcomes are derived by ``_derive_occupancy_outcomes``
-  from ``action_log`` temperature changes tied to the event timestamp.
-  Legacy outcomes: setback_applied (away/vacation), comfort_restored (home).
+Occupancy / wakeup (Issue #240 — production emits these directly now):
+  occupancy_setback            → setback_applied  (away/vacation)
+  occupancy_comfort_restored   → comfort_restored (home return)
+  morning_wakeup               → comfort_restored (wakeup success path)
+  (Previously production emitted no event and these were guessed from the
+   action_log; that derivation was removed once #240 landed.)
 
 FINDINGS — no legacy outcome equivalent:
   warm_day_state_confirmed   — informational; thermostat already in correct
@@ -164,16 +164,13 @@ def production_decisions(result: Any) -> list[ProductionDecision]:
         if mapped is not None:
             decisions.append(mapped)
 
-    # Pass 2: derive occupancy outcomes from action_log.
-    # Production handle_occupancy_away/home/vacation calls set_temperature
-    # silently — no event is emitted.  We reconstruct these outcomes by
-    # looking for set_temperature actions that are NOT already accounted for
-    # by an event_log entry at the same timestamp.
-    event_log_ts_set: set[str] = {(_naive_iso(ts)) for _et, _pl, ts in result.event_log if ts is not None}
-    occupancy_decisions = _derive_occupancy_outcomes(result.action_log, event_log_ts_set)
-    decisions.extend(occupancy_decisions)
+    # Occupancy/wakeup outcomes now come straight from Pass 1 events
+    # (occupancy_setback / occupancy_comfort_restored / morning_wakeup) since
+    # production emits them directly (Issue #240). The earlier action_log
+    # derivation that guessed setback-vs-restore from set_temperature calls is
+    # no longer needed and was removed (it mislabeled home-returns as setbacks).
 
-    # Pass 3: enrich target_temp from the action_log.
+    # Pass 2: enrich target_temp from the action_log.
     # Production emits the decision EVENT (e.g. classification_applied) and the
     # setpoint via a SEPARATE channel: _set_temperature() → climate.set_temperature
     # in the action_log, at the same virtual-clock instant. Events like
@@ -271,7 +268,22 @@ def _map_event_to_outcome(
     if event_type == "bedtime_setback_skipped":
         return ProductionDecision(ts_str, event_type, "bedtime_setback_skipped")
 
+    # --- Occupancy (Issue #240 — production now emits these directly) ---
+    if event_type == "occupancy_setback":
+        # away/vacation setback; legacy outcome is "setback_applied"
+        target = payload.get("target_f")
+        return ProductionDecision(ts_str, event_type, "setback_applied", target)
+
+    if event_type == "occupancy_comfort_restored":
+        target = payload.get("target_f")
+        return ProductionDecision(ts_str, event_type, "comfort_restored", target)
+
     # --- Morning wakeup ---
+    if event_type == "morning_wakeup":
+        # success path (Issue #240); legacy outcome is "comfort_restored"
+        target = payload.get("target_f")
+        return ProductionDecision(ts_str, event_type, "comfort_restored", target)
+
     if event_type == "morning_wakeup_skipped":
         return ProductionDecision(ts_str, event_type, "morning_wakeup_skipped")
 
@@ -300,60 +312,6 @@ def _map_event_to_outcome(
 
     # Unknown event type — surface it visibly so nothing is silently lost
     return ProductionDecision(ts_str, event_type, f"unknown:{event_type}")
-
-
-def _derive_occupancy_outcomes(
-    action_log: list[dict],
-    event_log_ts_set: set[str],
-) -> list[ProductionDecision]:
-    """Derive setback_applied / comfort_restored outcomes from action_log.
-
-    Production handle_occupancy_away/home/vacation calls set_temperature but
-    emits NO event.  We reconstruct these by finding set_temperature calls
-    at timestamps that do NOT already have an event_log entry — those are the
-    occupancy-driven temperature changes.
-
-    Heuristic: a set_temperature action whose timestamp has no event_log event
-    AND whose domain+service == "climate.set_temperature" is treated as an
-    occupancy-driven outcome.  The outcome type (setback_applied vs
-    comfort_restored) is not determinable from the action alone without
-    config context — this function returns `setback_applied` as the default
-    and lets the caller check the actual temperature to disambiguate.
-
-    NOTE: This heuristic can produce false positives when a classification
-    event fires a set_temperature at the same timestamp as an occupancy change.
-    The event_log_ts_set exclusion mitigates this — real event-driven temp
-    changes are excluded.
-    """
-    results: list[ProductionDecision] = []
-    seen_ts: set[str] = set()
-
-    for action in action_log:
-        domain = action.get("domain", "")
-        service = action.get("service", "")
-        if domain != "climate" or service != "set_temperature":
-            continue
-
-        ts = action.get("ts")
-        if ts is None:
-            continue
-        ts_str = _naive_iso(ts)
-
-        # Skip if already covered by an event_log entry at this timestamp
-        if ts_str in event_log_ts_set:
-            continue
-
-        # Skip duplicates (same timestamp already added in this pass)
-        if ts_str in seen_ts:
-            continue
-        seen_ts.add(ts_str)
-
-        temp = action.get("data", {}).get("temperature")
-        # Record as setback_applied (caller can inspect target_temp to distinguish
-        # setback vs comfort_restored relative to config)
-        results.append(ProductionDecision(ts_str, "occupancy_action", "setback_applied", temp))
-
-    return results
 
 
 # ---------------------------------------------------------------------------

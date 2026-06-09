@@ -278,6 +278,21 @@ def run_production_scenario(scenario: dict) -> ProductionRunResult:
     tracker = _SensorTracker()
     engine._sensor_check_callback = tracker.any_open
 
+    # --- Optional ODE inputs (Issue #236 D — scenario schema extension) ---
+    # A scenario may supply a learned thermal model and/or an hourly forecast so
+    # the production ODE ceiling guard (and the forecast/floor-imminence nat-vent
+    # guards) can be exercised. The LEGACY simulator has no ODE and ignores these
+    # keys entirely, so adding them to a scenario only affects the production run.
+    #   "thermal_model":   dict with keys the engine reads, e.g.
+    #                      {"confidence": "high", "k_passive": -0.18,
+    #                       "k_active_heat": ..., "k_active_cool": ..., "k_vent": ...,
+    #                       "k_solar": ...}
+    #   "hourly_forecast": list of {"datetime": ISO8601, "temperature": float}
+    if "thermal_model" in scenario and isinstance(scenario["thermal_model"], dict):
+        engine._thermal_model = scenario["thermal_model"]
+    if "hourly_forecast" in scenario and isinstance(scenario["hourly_forecast"], list):
+        engine._hourly_forecast_temps = scenario["hourly_forecast"]
+
     # --- Process events under scheduler.installed() ---
     with scheduler.installed():
         for event in events:

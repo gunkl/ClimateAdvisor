@@ -7,7 +7,7 @@ callers must explicitly invoke load_state() / save_state().
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,7 +24,13 @@ from custom_components.climate_advisor.learning import (
 # ---------------------------------------------------------------------------
 
 
-def _make_record(date: str = "2026-03-18", **overrides) -> DailyRecord:
+# Anchor dates to "today" so they always sit inside the 90-day record-retention
+# window (record_day trims older records). Fixed calendar dates age out and turn
+# these into time-bombs — see issue #242.
+_DEFAULT_DATE = (date.today() - timedelta(days=1)).isoformat()
+
+
+def _make_record(date: str = _DEFAULT_DATE, **overrides) -> DailyRecord:
     defaults = dict(day_type="mild", trend_direction="stable")
     defaults.update(overrides)
     return DailyRecord(date=date, **defaults)
@@ -116,7 +122,7 @@ class TestSaveState:
 
         data = json.loads(db_path.read_text())
         assert len(data["records"]) == 1
-        assert data["records"][0]["date"] == "2026-03-18"
+        assert data["records"][0]["date"] == _DEFAULT_DATE
 
     def test_record_day_does_not_write(self, tmp_path: Path):
         """record_day only mutates in-memory state — no disk I/O."""
@@ -143,8 +149,8 @@ class TestRoundTrip:
 
     def test_record_round_trip(self, tmp_path: Path):
         engine1 = LearningEngine(tmp_path)
-        engine1.record_day(_make_record("2026-03-10", day_type="hot"))
-        engine1.record_day(_make_record("2026-03-11", day_type="cold"))
+        engine1.record_day(_make_record((date.today() - timedelta(days=2)).isoformat(), day_type="hot"))
+        engine1.record_day(_make_record((date.today() - timedelta(days=1)).isoformat(), day_type="cold"))
         engine1.save_state()
 
         engine2 = LearningEngine(tmp_path)

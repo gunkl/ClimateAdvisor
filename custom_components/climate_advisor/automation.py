@@ -2089,6 +2089,11 @@ class AutomationEngine:
                     f" - modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_setback",
+                    {"mode": "cool", "target_f": setback, "occupancy": "away"},
+                )
         elif actual_mode == "heat":
             setback = self.config["setback_heat"] + c.setback_modifier
             await self._set_temperature(
@@ -2099,6 +2104,11 @@ class AutomationEngine:
                     f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
                 ),
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_setback",
+                    {"mode": "heat", "target_f": setback, "occupancy": "away"},
+                )
         else:
             _LOGGER.info(
                 "Occupancy away — HVAC mode is %r, no setback needed",
@@ -2114,6 +2124,12 @@ class AutomationEngine:
 
         if c.hvac_mode in ("heat", "cool"):
             await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {c.hvac_mode} comfort")
+            comfort = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_comfort_restored",
+                    {"mode": c.hvac_mode, "target_f": comfort},
+                )
 
         # Check 1: Temperature proximity — skip notification if house already near comfort.
         indoor_temp = self._get_indoor_temp_f()
@@ -2181,6 +2197,11 @@ class AutomationEngine:
                     f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
                 ),
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_setback",
+                    {"mode": "cool", "target_f": setback, "occupancy": "vacation"},
+                )
         elif actual_mode == "heat":
             setback = self.config["setback_heat"] + c.setback_modifier - VACATION_SETBACK_EXTRA
             await self._set_temperature(
@@ -2192,6 +2213,11 @@ class AutomationEngine:
                     f" - vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
                 ),
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_setback",
+                    {"mode": "heat", "target_f": setback, "occupancy": "vacation"},
+                )
         else:
             _LOGGER.info(
                 "Occupancy vacation — HVAC mode is %r, no setback needed",
@@ -2344,15 +2370,27 @@ class AutomationEngine:
             return
 
         if c.hvac_mode == "heat":
+            comfort_heat = self.config["comfort_heat"]
             await self._set_temperature(
-                self.config["comfort_heat"],
+                comfort_heat,
                 reason="morning wake-up — restoring heat comfort",
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "morning_wakeup",
+                    {"mode": "heat", "target_f": comfort_heat},
+                )
         elif c.hvac_mode == "cool":
+            comfort_cool = self.config["comfort_cool"]
             await self._set_temperature(
-                self.config["comfort_cool"],
+                comfort_cool,
                 reason="morning wake-up — restoring cool comfort",
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "morning_wakeup",
+                    {"mode": "cool", "target_f": comfort_cool},
+                )
 
     async def _activate_fan(self, *, reason: str) -> None:
         """Activate fan based on configured fan_mode."""

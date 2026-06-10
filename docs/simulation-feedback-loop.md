@@ -7,7 +7,7 @@
 | Question | Short answer (<= 2 sentences) | -> Full answer |
 |---|---|---|
 | What is the closed loop and what problem does it solve? | Production incidents are automatically converted to pending BSpec scenarios, validated against simulate.py (logic) and production event logs (integration), and surfaced to a human for approval into the golden suite. It was built because bugs #220-222 all involved occupancy-mode transitions with near-zero simulation coverage. | [What the loop is](#what-the-loop-is) |
-| What is the difference between a Logic Trace and an Integration Trace? | A Logic Trace is what simulate.py predicts from automation engine behavior alone, run offline. An Integration Trace is what the coordinator + HA together actually did in production, observed from the event log. | [Two Validation Tracks](#two-validation-tracks) |
+| What is the difference between a Logic Trace and an Integration Trace? | A Logic Trace is what simulate.py produces by running the real production `AutomationEngine` headless (Tier A harness). An Integration Trace is what the coordinator + HA together actually did in production, observed from the event log. | [Two Validation Tracks](#two-validation-tracks) |
 | What is a BSpec and how does it differ from a golden scenario? | A BSpec is a scenario JSON expressing what the system SHOULD do (assertions). It lives in pending/ until a human approves it. A golden scenario is a BSpec that has been reviewed, signed, and promoted to golden/. | [Key Concepts](#key-concepts) |
 | What are the 8 incident classes and which are proactive vs reactive? | comfort_violation, nat_vent_escalation, override_detected, system_restart are reactive. setpoint_mode_inconsistency, rapid_override_after_automation, occupancy_transition, override_active_on_occupancy are new classes added for bugs #220-222. setpoint_mode_inconsistency is the only proactive class (fires at command time). | [Incident Classes](#incident-classes) |
 | What is the full lifecycle from production event to golden test? | production event -> incident_detected emitted -> build_historical_scenario.py -> pending/ BSpec -> simulation_loop.py validates -> Validation Record written -> Dashboard Tests tab -> human approves -> golden/ | [Lifecycle](#lifecycle) |
@@ -36,7 +36,7 @@ None of these were catchable by the existing golden suite. The loop closes this 
 |---|---|
 | Incident | A real production event window that the system flagged as needing review. Has an incident_class and incident_id. |
 | BSpec | What the automation/coordinator SHOULD do given a set of inputs. A scenario JSON file in pending/. |
-| Logic Trace | What simulate.py predicts (automation engine behavior only, offline). |
+| Logic Trace | What simulate.py produces by running the real production `AutomationEngine` headless (Tier A harness, offline). |
 | Integration Trace | What actually happened in production (coordinator + automation + HA together, observed from event_log). |
 | Validation Record | One comparison: BSpec assertions vs. Logic Trace or Integration Trace. Written to results/. |
 | Track | Logic (simulator can validate) vs. Integration (requires production). Every BSpec assertion is tagged with one. |
@@ -49,13 +49,13 @@ None of these were catchable by the existing golden suite. The loop closes this 
 
 Every BSpec assertion is tagged `"track": "logic"` or `"track": "integration"`.
 
-**Logic track:** Verifiable by simulate.py in isolation. Covers automation engine decisions: setpoint selection, day classification application, natural vent escalation, ceiling guard ODE projection. Runs offline; no HA connection required.
+**Logic track (Tier A):** Verifiable by running the real production `AutomationEngine` headless via `tools/sim_harness/` (Issue #236). Covers all `automation.py` decision paths: setpoint selection, day classification application, natural vent escalation, ceiling guard ODE projection. Runs offline; no HA connection required. `tests/test_production_harness.py` enforces all goldens on every commit.
 
-**Integration track:** Requires coordinator behavior, HA state events, and async flag timing. Covers: `_temp_command_pending` flag timing, `_last_commanded_hvac_mode` state, whether an automation-driven setpoint change is falsely detected as manual, occupancy handler setpoint selection from coordinator.py (not automation.py).
+**Integration track (Tier B):** Requires coordinator behavior, HA state events, and async flag timing. Covers: `_async_thermostat_changed` timing, `_temp_command_pending` flag, `_last_commanded_hvac_mode` state, whether an automation-driven setpoint change is falsely detected as manual, occupancy handler setpoint selection from coordinator.py (not automation.py). Deferred to the HeadlessTarry Docker harness (future, CI-gated).
 
-A BSpec can contain both track types. The Dashboard shows logic pass rate and integration pass rate separately. A BSpec with 3 logic passes and 0 integration passes surfaces as partially validated -- human judgment determines whether to promote.
+A BSpec can contain both track types. The Dashboard shows logic pass rate and integration pass rate separately. A BSpec with 3 logic passes and 0 integration passes surfaces as partially validated — human judgment determines whether to promote.
 
-**Why two tracks matter:** simulate.py mirrors `automation.py` only. Bugs #221 and #222 live in `coordinator.py`. The simulator can never catch them. Tagging assertions by track makes this boundary explicit and prevents false confidence from logic-track passes.
+**Why two tracks matter:** simulate.py runs `automation.py` production code directly (Issue #236). Bugs #221 and #222 live in `coordinator.py`. The Tier A harness cannot catch coordinator-layer issues. Tagging assertions by track makes this boundary explicit and prevents false confidence from logic-track passes.
 
 ---
 
@@ -121,7 +121,7 @@ Simulation Loop (tools/simulation_loop.py, runs every 30 min via schedule)
     +-- For each new incident:
             build_historical_scenario.py --type <class> --incident-id <id>
                 -> BSpec JSON written to tools/simulations/pending/
-            simulate.py --pending --filter <name>
+            simulate.py --pending --filter <name>  (runs real production engine headless)
                 -> Logic Validation Record written to results/<name>/<ts>-logic.json
             Compare production event_log to BSpec expected events
                 -> Integration Validation Record written to results/<name>/<ts>-integration.json
@@ -189,7 +189,8 @@ All simulation loop work operates from a dedicated worktree:
 c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-simulation-loop/
     tools/simulation_loop.py          -- the loop agent
     tools/build_historical_scenario.py  -- incident -> BSpec builder
-    tools/simulate.py                 -- enhanced with new assertion types + ODE
+    tools/simulate.py                 -- CLI/MANIFEST shell; engine work in tools/sim_harness/
+    tools/sim_harness/                -- production harness (FakeHass, FakeScheduler, outcomes)
     tools/simulations/
         pending/                      -- auto-generated BSpecs land here
         golden/                       -- approved BSpecs

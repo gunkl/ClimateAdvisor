@@ -27,7 +27,7 @@ The automation logic table and all threshold constants in this document are expr
 | How does the physics ODE predict future indoor temperature? | `T(t+dt) = T_outdoor + (T − T_outdoor) × exp(k_p × dt) + (Q/k_p) × (exp(k_p × dt) − 1)`, where Q switches between k_active_heat, k_active_cool, and 0 per schedule period. | [§5c. Predicted Temperature Graph — Physics Path](08-COMPUTATION-REFERENCE.md#5c-predicted-temperature-graph--physics-path) |
 | What is the dynamic target band and how does occupancy mode change it? | `_compute_target_band_schedule()` returns `[{ts, lower, upper}]` per forecast hour; away = setback today only, vacation = deep setback all days, home/guest = comfort with sleep/wake ramps. | [§5d. Dynamic Target Band](08-COMPUTATION-REFERENCE.md#5d-dynamic-target-band--_compute_target_band_schedule) |
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
-| When does the ODE ceiling guard fire on a warm day and what activates AC? | The guard scans the predicted indoor curve on every 30-min cycle. When outdoor > indoor AND a breach above `comfort_cool` is predicted within the computed lead time (or 120-min fallback), the guard sets HVAC to cool at `comfort_cool`. Guard skips when no calibrated model, occupancy is away/vacation, or nat-vent can keep indoor below the ceiling. | [§6c. Warm-Day ODE Ceiling Guard](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136) |
+| When does the ODE ceiling guard fire on a warm day and what activates AC? | The guard scans the predicted indoor curve on every 30-min cycle and sets HVAC to cool at `comfort_cool` when a breach is predicted within the lead time (or 120-min fallback). It is **dormant only when all 3 hold**: outdoor <= indoor AND nat-vent is actually running AND indoor still <= ceiling. So it also fires when indoor already exceeds the ceiling (even if outdoor < indoor) or when nat-vent is not running — clearing nat-vent on escalation. Guard skips when no calibrated model or occupancy is away/vacation. | [§6c. Warm-Day ODE Ceiling Guard](08-COMPUTATION-REFERENCE.md#6c-warm-day-ode-ceiling-guard-issue-136) |
 | How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
 | What invariant must `_async_send_briefing()` maintain when replacing `_today_record`? | It must copy all accumulated counters (`hvac_runtime_minutes`, `comfort_violations_minutes`, etc.) from the existing same-day record before constructing the new one. Creating a fresh `DailyRecord` unconditionally resets all counters to zero (Issue #176 bug). | [DailyRecord Persistence Invariant](08-COMPUTATION-REFERENCE.md#dailyrecord-persistence-invariant-issue-176) |
 | Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
@@ -604,7 +604,27 @@ When the day classification is `warm` or `mild` (HVAC mode = `off`) and the ther
 
 #### Purpose
 
-The guard closes the "read-render split" gap: `_build_predicted_indoor_future()` feeds the chart every 30 min with an accurate indoor forecast, but prior to Issue #136 that forecast was never routed into `apply_classification()`. The ceiling guard routes it: if the ODE curve predicts a `comfort_cool` breach and outdoor air is already warmer than indoor (nat-vent unavailable), the guard sets HVAC to `cool` at `comfort_cool` before the breach occurs.
+The guard closes the "read-render split" gap: `_build_predicted_indoor_future()` feeds the chart every 30 min with an accurate indoor forecast, but prior to Issue #136 that forecast was never routed into `apply_classification()`. The ceiling guard routes it: if the ODE curve predicts a `comfort_cool` breach and free cooling cannot keep up, the guard sets HVAC to `cool` at `comfort_cool` before (or as soon as) the breach occurs.
+
+#### Dormancy: when the guard defers to free cooling (3-condition — Issue #247)
+
+The guard goes **dormant** (defers to natural ventilation) only when **all three** of these hold:
+
+1. `outdoor <= indoor` — outdoor air can in principle cool the home, **and**
+2. `self._natural_vent_active` — windows are actually open and nat-vent is running (not merely *eligible*), **and**
+3. `indoor <= ceiling threshold` — indoor is still at/under the ceiling, so free cooling is keeping up.
+
+If any condition fails, the guard **evaluates** (and fires if the breach scan confirms a breach):
+
+- **indoor already exceeds the ceiling** — the #247 reactive case: solar/internal gains are out-pacing the breeze, so the guard escalates to AC **even though `outdoor < indoor`**. Free cooling stays the first remediation; AC fires only when ventilation is demonstrably losing.
+- **nat-vent is NOT running** (windows closed, fan override) — the #215 case: do not defer to a ventilation that is not happening.
+- **outdoor has risen above indoor** — the original #136/#218 path (airflow would add heat).
+
+> **Regression note:** Issue #218 specified this 3-condition dormancy *plus* the escalation-on-fire that clears nat-vent, but the committed fix (`676daa4`) landed only the escalation half. The dormancy stayed one-condition (`outdoor <= indoor`), so on a day where outdoor stayed below indoor the guard never woke and the escalation code was unreachable — the home sat above the ceiling for hours (re-filed as #247). The escalation-on-fire is now reachable because the dormancy correctly lifts.
+
+**`aggressive_savings` widens the ceiling threshold.** In normal mode the ceiling threshold is `comfort_cool`. In `aggressive_savings` mode it is `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` (2.0°F) — savings homes tolerate a small overshoot before paying for the compressor, but are still rescued from a real comfort failure once indoor exceeds that wider threshold.
+
+**On escalation the guard clears nat-vent** (Issue #218 part 2): if `_natural_vent_active` is true when the guard fires, it deactivates the fan, sets `_natural_vent_active = False`, and emits `nat_vent_ceiling_escalation` before switching to `cool` — so free cooling does not fight the compressor.
 
 #### Guard conditions
 
@@ -615,7 +635,7 @@ The guard closes the "read-render split" gap: `_build_predicted_indoor_future()`
 | Occupancy away or vacation | Skip — handled by upstream occupancy guards (§6a) |
 | `predicted_indoor` is empty or None | Skip — no ODE curve available (fresh install, no physics gate) |
 | Outdoor temp unavailable or missing | Skip |
-| `outdoor <= indoor` | Dormant — nat-vent is eligible; guard does not fire |
+| `outdoor <= indoor` **AND** `_natural_vent_active` **AND** `indoor <= ceiling threshold` | Dormant — free cooling is actually viable; guard defers to nat-vent (see 3-condition dormancy below) |
 | `_find_ceiling_breach_time()` returns None | Dormant — no breach predicted above threshold |
 | Bridge home (`k_passive_via_bridge=True`) | Apply `+CEILING_BRIDGE_TOLERANCE_F (1.0°F)` tolerance; guard fires at `comfort_cool + 1.0°F` |
 | `k_active_cool` not learned (None) | Guard fires with `CEILING_PRECOOL_FALLBACK_MIN = 120` min lead time |
@@ -676,14 +696,15 @@ Bridge homes use `k_vent_window` as a proxy for `k_passive`. The `k_passive_via_
 |---|---|---|
 | `CEILING_PRECOOL_FALLBACK_MIN` | `120` | Lead time (minutes) when `k_active_cool` is not learned |
 | `CEILING_BRIDGE_TOLERANCE_F` | `1.0` | Extra °F threshold for bridge homes |
+| `CEILING_ESCALATION_SAVINGS_MARGIN_F` | `2.0` | Overshoot tolerated above `comfort_cool` before escalating in `aggressive_savings` mode (Issue #247) |
 
-Both are defined in `const.py`.
+All three are defined in `const.py`.
 
 #### Interaction with §6b comfort-floor guard
 
 The ceiling guard runs **after** the comfort-floor guard in `apply_classification()`. The comfort-floor guard runs inside the `hvac_mode == "off"` branch; the ceiling guard is a separate block also gated by `classification.hvac_mode == "off"`, so it evaluates regardless of whether the floor guard fired.
 
-In practice the two guards do not conflict: if indoor is below `comfort_heat` (floor guard fires), outdoor is typically also cool (early morning), making `outdoor <= indoor` true and the ceiling guard dormant on that cycle. A home simultaneously below the comfort floor and predicted to breach the ceiling is a degenerate condition that resolves naturally — the floor guard heats, the next cycle re-evaluates both guards with updated temperatures.
+In practice the two guards do not conflict: if indoor is below `comfort_heat` (floor guard fires), indoor is well under `comfort_cool`, so `_find_ceiling_breach_time()` finds no breach above the ceiling and the ceiling guard is dormant via that row (regardless of the 3-condition dormancy). A home simultaneously below the comfort floor and predicted to breach the ceiling is a degenerate condition that resolves naturally — the floor guard heats, the next cycle re-evaluates both guards with updated temperatures.
 
 #### Emitted event
 

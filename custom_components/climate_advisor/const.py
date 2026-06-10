@@ -659,6 +659,30 @@ KNOWN_FIXES: dict[int, dict] = {
             "Vacation mode ceiling exit (vacation setback is higher; same principle applies but not yet implemented)",
         ],
     },
+    247: {
+        "issue": 247,
+        "title": "Ceiling guard never escalated to AC when outdoor stayed below indoor"
+        " (re-occurrence of #218's incomplete fix)",
+        "version_fixed": "0.3.57",
+        "scope_covered": [
+            "apply_classification() ceiling-guard dormancy changed from 1 condition (outdoor<=indoor) to 3",
+            " (outdoor<=indoor AND _natural_vent_active AND indoor<=ceiling threshold)",
+            "Guard now evaluates+fires when indoor exceeds the ceiling even though outdoor<indoor"
+            " (solar/internal gains out-pace ventilation) — the #247 reactive case",
+            "Guard evaluates+fires when nat-vent is NOT running (windows closed / fan override) — the #215 case",
+            "Escalation-on-fire (deactivate fan, clear _natural_vent_active, emit nat_vent_ceiling_escalation)"
+            " from #218 part 2 is now reachable because the dormancy correctly lifts",
+            "aggressive_savings widens the escalation threshold to"
+            " comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F (2.0F)",
+            "Warning-only no-op in check_natural_vent_conditions() replaced with an INFO log"
+            " noting the guard will escalate",
+        ],
+        "scope_not_covered": [
+            "Predictive pre-emption (firing before indoor crosses the ceiling based on the ODE curve under nat-vent)"
+            " — deferred; the fix is reactive once indoor breaches the ceiling threshold",
+            "Coordinator cadence (re-evaluation still every 30 min + 5-min revisit) — unchanged",
+        ],
+    },
 }
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"
@@ -1549,6 +1573,10 @@ THERMAL_OBS_CAP = 200  # max observations in LearningState
 # ---------------------------------------------------------------------------
 CEILING_PRECOOL_FALLBACK_MIN: int = 120  # fallback lead time when k_active_cool not learned
 CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfort_cool + this
+# Issue #247: in aggressive_savings mode, tolerate this much overshoot above comfort_cool before
+# the ceiling guard escalates nat-vent -> AC (savings homes accept a small overshoot before paying
+# for cooling; normal mode escalates at comfort_cool).
+CEILING_ESCALATION_SAVINGS_MARGIN_F: float = 2.0
 
 ATTR_THERMAL_HEATING_RATE = "thermal_heating_rate"
 ATTR_THERMAL_COOLING_RATE = "thermal_cooling_rate"

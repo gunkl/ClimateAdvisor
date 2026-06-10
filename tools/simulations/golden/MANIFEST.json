@@ -132,5 +132,10 @@
     "sha256": "f3da978dc2b1252708a1ab8fb9e1ac1666aa30e6210f05bf4d76c17b812c0f06",
     "signed": "2026-06-08",
     "issue": 218
+  },
+  "ceiling_guard_fires_when_outdoor_stays_below_indoor": {
+    "sha256": "5f9e753a9a8300a52653b271ae179713603dfb0b366b6516d67d73aaac5791d4",
+    "signed": "2026-06-10",
+    "issue": 247
   }
 }

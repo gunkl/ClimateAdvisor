@@ -1,0 +1,4 @@
+# Live HA runtime config — reset from config-seed/ on each test run. Never commit.
+config/
+__pycache__/
+*.pyc

@@ -47,28 +47,56 @@
       "time": "2026-05-20T08:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "User opens window per recommendation. outdoor=65F < indoor=72.5F, indoor > comfort_heat=70F, outdoor <= threshold 77F — nat vent activates."
+      "note": "User opens window per recommendation. outdoor=65F < indoor=72.5F, indoor > comfort_heat=70F, outdoor <= threshold 77F \u00e2\u20ac\u201d nat vent activates."
     },
     {
       "time": "2026-05-20T10:00:00",
       "type": "temp_update",
       "indoor_f": 73.0,
       "outdoor_f": 73.5,
-      "note": "10 AM: outdoor has risen above indoor (73.5F > 73.0F). Nat vent exit fires — airflow would now add heat."
+      "note": "10 AM: outdoor has risen above indoor (73.5F > 73.0F). Nat vent exit fires \u00e2\u20ac\u201d airflow would now add heat."
     },
     {
       "time": "2026-05-20T12:30:00",
       "type": "temp_update",
       "indoor_f": 73.5,
       "outdoor_f": 76.0,
-      "note": "12:30 PM: ODE predicts indoor will reach 74F by 2 PM. Ceiling guard evaluates on this 30-min cycle. k_active_cool not learned — 120-min fallback applies. Breach is 1.5h away, within 120-min lead time."
+      "note": "12:30 PM: ODE predicts indoor will reach 74F by 2 PM. Ceiling guard evaluates on this 30-min cycle. k_active_cool not learned \u00e2\u20ac\u201d 120-min fallback applies. Breach is 1.5h away, within 120-min lead time.",
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T12:30:00",
+          "temp": 73.5
+        },
+        {
+          "ts": "2026-05-20T12:55:00",
+          "temp": 74.6
+        },
+        {
+          "ts": "2026-05-20T13:30:00",
+          "temp": 75.4
+        }
+      ]
     },
     {
       "time": "2026-05-20T14:30:00",
       "type": "temp_update",
       "indoor_f": 73.0,
       "outdoor_f": 74.0,
-      "note": "2:30 PM: AC has run and indoor dropped back to 73F. ODE no longer predicts a breach. Guard goes dormant."
+      "note": "2:30 PM: AC has run and indoor dropped back to 73F. ODE no longer predicts a breach. Guard goes dormant.",
+      "predicted_indoor": [
+        {
+          "ts": "2026-05-20T14:30:00",
+          "temp": 73.0
+        },
+        {
+          "ts": "2026-05-20T15:30:00",
+          "temp": 73.4
+        },
+        {
+          "ts": "2026-05-20T16:30:00",
+          "temp": 73.6
+        }
+      ]
     }
   ],
   "assertions": [
@@ -80,25 +108,25 @@
     {
       "at": "2026-05-20T08:05:00",
       "expect": "natural_ventilation",
-      "reason": "sensor_open: outdoor=65F < indoor=72.5F, indoor=72.5F > comfort_heat=70F, outdoor=65F <= threshold 77F — nat vent activates at the planned window open time."
+      "reason": "sensor_open: outdoor=65F < indoor=72.5F, indoor=72.5F > comfort_heat=70F, outdoor=65F <= threshold 77F \u00e2\u20ac\u201d nat vent activates at the planned window open time."
     },
     {
       "at": "2026-05-20T10:00:00",
       "expect": "nat_vent_outdoor_rise_exit",
-      "reason": "temp_update: outdoor=73.5F >= indoor=73.0F — directional exit fires; airflow would now add heat rather than cool."
+      "reason": "temp_update: outdoor=73.5F >= indoor=73.0F \u00e2\u20ac\u201d directional exit fires; airflow would now add heat rather than cool."
     },
     {
       "at": "2026-05-20T12:30:00",
       "expect": "ceiling_guard_fires_cool",
       "simulator_support": false,
       "note": "ODE ceiling guard: requires _last_predicted_indoor curve from _build_predicted_indoor_future() and k_passive/k_active_cool from thermal model. The simulator does not model ODE prediction curves. In production: guard evaluates predicted indoor vs comfort_cool=74F; breach predicted within 120-min fallback lead time (k_active_cool=None); HVAC set to cool at comfort_cool=74F.",
-      "reason": "Ceiling guard fires when breach is predicted within lead_time AND outdoor > indoor. k_active_cool=None → 120-min fallback. Expected: HVAC set to cool, target=74F."
+      "reason": "Ceiling guard fires when breach is predicted within lead_time AND outdoor > indoor. k_active_cool=None \u00e2\u2020\u2019 120-min fallback. Expected: HVAC set to cool, target=74F."
     },
     {
       "at": "2026-05-20T14:30:00",
       "expect": "ceiling_guard_dormant_after_ac_run",
       "simulator_support": false,
-      "note": "After the ceiling guard fires AC and indoor drops to 73F, ODE no longer predicts a breach. On the next 30-min cycle, _find_ceiling_breach_time() returns None. Guard evaluates and does nothing — HVAC stays at current state. In the simulator, the state remains paused (sensors still open, outdoor >= indoor) which is a correct partial model but does not reflect that in production the ceiling guard firing would have changed system state. The post-guard dormancy assertion requires ODE curve state not available in the simulator.",
+      "note": "After the ceiling guard fires AC and indoor drops to 73F, ODE no longer predicts a breach. On the next 30-min cycle, _find_ceiling_breach_time() returns None. Guard evaluates and does nothing \u00e2\u20ac\u201d HVAC stays at current state. In the simulator, the state remains paused (sensors still open, outdoor >= indoor) which is a correct partial model but does not reflect that in production the ceiling guard firing would have changed system state. The post-guard dormancy assertion requires ODE curve state not available in the simulator.",
       "reason": "Post-AC-run: ODE breach no longer predicted; ceiling guard goes dormant on next cycle. In production: HVAC reverts to warm-day classification (off) once indoor is below comfort_cool."
     }
   ],
@@ -107,5 +135,12 @@
     "summary": "Warm day with outdoor crossing above indoor: nat vent exits, ODE ceiling guard fires AC defense before indoor reaches comfort_cool",
     "observed_behavior": "Confirmed failure 2026-05-11: HVAC stayed off, 3-hour comfort gap when indoor reached 75F",
     "expected_behavior": "Ceiling guard fires at noon cycle when breach predicted within 120-min fallback lead time; AC defends comfort ceiling"
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "k_passive": -0.15,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
   }
 }

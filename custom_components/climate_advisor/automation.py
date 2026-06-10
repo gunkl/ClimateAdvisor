@@ -1526,7 +1526,14 @@ class AutomationEngine:
             # Grace still blocks rapid door-open/close cycling below the comfort ceiling.
             _indoor = self._get_indoor_temp_f()
             _cool = float(self.config.get("comfort_cool", 75))
-            if not (self._grace_active and _indoor is not None and _indoor > _cool):
+            # Issue #244: a contact sensor open while HVAC is idle (door opened with
+            # nothing to pause) must still be re-evaluated so nat-vent can engage when
+            # outdoor later cools below indoor — otherwise the occupant misses free
+            # evening cooling. Restricted to HVAC-off so we never fight active heating/cooling.
+            _hvac_state_244 = self.hass.states.get(self.climate_entity)
+            _hvac_off_244 = (_hvac_state_244 is None) or (getattr(_hvac_state_244, "state", "off") == "off")
+            _idle_open = bool(self._sensor_check_callback and self._sensor_check_callback()) and _hvac_off_244
+            if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
                 return
 
         outdoor = self._last_outdoor_temp
@@ -1562,6 +1569,17 @@ class AutomationEngine:
                     )
                 )
                 self._natural_vent_active = True
+                # Issue #244: emit so the re-evaluation activation is visible in the
+                # event log / timeline / AI report (previously this path was silent).
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "sensor_opened",
+                        {
+                            "entity": "natural_vent_reeval",
+                            "result": "natural_ventilation",
+                            "trigger": "open_door_reeval",
+                        },
+                    )
             return
 
         # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting

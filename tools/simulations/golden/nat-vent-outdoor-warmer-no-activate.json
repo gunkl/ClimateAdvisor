@@ -1,6 +1,6 @@
 {
   "name": "nat-vent-outdoor-warmer-no-activate",
-  "description": "Sensor opens; outdoor 75F >= indoor 74F — directional guard prevents nat vent activation",
+  "description": "Sensor opens; outdoor 75F >= indoor 74F \u00e2\u20ac\u201d directional guard prevents nat vent activation",
   "source": "synthetic",
   "issue": 115,
   "verdict": {
@@ -20,7 +20,7 @@
       "type": "temp_update",
       "indoor_f": 74.0,
       "outdoor_f": 75.0,
-      "note": "outdoor 75F > indoor 74F — directional guard should block nat vent"
+      "note": "outdoor 75F > indoor 74F \u00e2\u20ac\u201d directional guard should block nat vent"
     },
     {
       "time": "2026-04-20T06:00:00",
@@ -32,8 +32,8 @@
   "assertions": [
     {
       "at": "2026-04-20T06:00:00",
-      "expect": "paused",
-      "reason": "outdoor 75F >= indoor 74F — pulling in warmer air; directional guard blocks nat vent"
+      "expect": "nat_vent_not_active",
+      "reason": "outdoor 75F >= indoor 74F \u2014 directional guard correctly prevents nat-vent activation (nat_vent_not_active). HVAC was idle, so there is nothing to pause."
     }
   ]
 }

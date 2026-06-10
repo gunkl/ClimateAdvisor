@@ -1,0 +1,46 @@
+# Minimal HA configuration for Climate Advisor integration harness.
+# Used by the Docker-based integration test environment ONLY.
+# DO NOT use in production.
+
+homeassistant:
+  name: "Test Home"
+  latitude: 37.3861
+  longitude: -122.0839
+  elevation: 32
+  unit_system: imperial
+  time_zone: America/Los_Angeles
+  country: US
+  # Use only the homeassistant auth provider (username+password).
+  # The pre-seeded credentials are testadmin / testpassword123.
+  # Tests call POST /auth/token to exchange credentials for a Bearer token.
+  auth_providers:
+    - type: homeassistant
+
+# Enable the HA HTTP API — required for REST polling + WebSocket control.
+# No IP ban so the test container can make unlimited calls without being blocked.
+http:
+  server_port: 8123
+  ip_ban_enabled: false
+  login_attempts_threshold: -1
+
+# Demo platform provides ready-made entities:
+#   climate.demo_climate_1  — thermostat entity (matches pre-seeded config entry)
+#   weather.demo            — weather entity (matches pre-seeded config entry)
+# These are the only entities climate_advisor needs to start up.
+demo:
+
+# Logging: info globally; debug for our integration so startup errors are visible.
+logger:
+  default: info
+  logs:
+    custom_components.climate_advisor: debug
+    homeassistant.components.demo: warning
+
+# Frontend is required for the iframe panel registration in __init__.py.
+frontend:
+
+# Lightweight recorder to avoid startup errors from missing DB.
+# Uses an in-memory path so it does not persist between test runs.
+recorder:
+  purge_keep_days: 1
+  db_url: "sqlite:////tmp/home-assistant_v2.db"

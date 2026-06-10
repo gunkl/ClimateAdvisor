@@ -1,0 +1,56 @@
+---
+# Climate Advisor Integration Harness — Docker Compose
+#
+# Boots real Home Assistant with:
+#   - climate_advisor custom component bind-mounted
+#   - pre-seeded config entry (no UI config-flow needed)
+#   - pre-seeded testadmin user (testadmin / testpassword123)
+#   - libfaketime available for time control
+#
+# Quick start:
+#   docker compose up --build -d
+#   docker compose logs -f homeassistant
+#   docker compose down -v
+#
+# Run the integration test:
+#   pytest tools/integration_harness/ -m integration -v
+#
+# Time control (freeze time for scenario replay):
+#   FAKETIME="@2026-01-15 08:00:00" docker compose up --build -d
+#   HA sees faked time via LD_PRELOAD=libfaketime.so.
+#   Omitting FAKETIME causes HA to run at real wall-clock time.
+
+services:
+  homeassistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ca_integration_ha
+    volumes:
+      # HA config directory with pre-seeded entries + configuration.yaml
+      - ./config:/config
+      # Mount the integration source read-only — picked up as a custom component
+      - ../../custom_components/climate_advisor:/config/custom_components/climate_advisor:ro
+    ports:
+      # Expose on 18123 to avoid collision with any real HA on 8123
+      - "18123:8123"
+    environment:
+      # Time control: set FAKETIME to freeze or offset time.
+      # Format: "@2026-01-15 08:00:00" (freeze), "+3600" (offset by 1h), etc.
+      # If unset, HA runs at real wall-clock time.
+      - FAKETIME=${FAKETIME:-}
+      # LD_PRELOAD: activated by the entrypoint wrapper only when FAKETIME is set.
+      # Leave empty here — the Dockerfile CMD handles this conditionally.
+      - LD_PRELOAD=${LD_PRELOAD:-}
+      # Suppress first-run wizard (belt-and-suspenders alongside .storage/onboarding)
+      - DISABLE_HASSIO=true
+    restart: "no"
+    # HA is considered healthy when the /api/ endpoint responds (even 401 is fine —
+    # it proves HA is up; the test gets its token via the login flow).
+    healthcheck:
+      test: ["CMD-SHELL",
+             "curl -sf http://localhost:8123/api/ -o /dev/null -w '%{http_code}' | grep -qE '200|401'"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 90s

@@ -27,7 +27,8 @@ if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
 
 import simulate as _sim  # noqa: E402  (after sys.path insert)
-from simulate import ClimateSimulator, print_result, run_scenario  # noqa: E402
+from simulate import print_result  # noqa: E402
+from simulate import run_scenario_production as run_scenario  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -190,24 +191,27 @@ class TestExpectedFail:
 
 
 class TestAssertionSkip:
-    def test_assertion_with_simulator_support_false_skipped(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture
-    ) -> None:
-        """Assertion with simulator_support=false is shown as [SKIP] and not counted."""
+    def test_assertion_with_track_integration_skipped(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        """Assertion with track='integration' is shown as [SKIP] and not counted.
+
+        In the production engine, track:'integration' is deferred to Tier B (HeadlessTarry)
+        and skipped in Tier A. Note: simulator_support:false is now EVALUATED (not skipped)
+        by the production engine — use track:'integration' to test skip behavior.
+        """
         skip_assertion = {
             "at": "2099-01-01T00:00:00",
-            "expect": "natural_ventilation",
-            "reason": "requires HA state machine",
-            "simulator_support": False,
+            "expect": "some_integration_only_outcome",
+            "reason": "requires HA coordinator listener — deferred to Tier B",
+            "track": "integration",
         }
         p = _make_scenario(tmp_path, name="skip-assert", assertions=[skip_assertion])
         result = run_scenario(p)
         # Skipped assertions mean no pass/fail determination — passed should be None or True
-        # (not False), since the unsupported assertion was not evaluated
-        assert result["passed"] is not False, "skipped assertions must not cause FAIL"
+        # (not False), since the integration assertion was not evaluated
+        assert result["passed"] is not False, "integration-track skipped assertions must not cause FAIL"
         # The assertion result should be marked as skipped
         assert len(result["assertions"]) == 1
-        assert result["assertions"][0].get("skipped") is True, "result should mark assertion as skipped"
+        assert result["assertions"][0].get("skipped") is True, "integration-track assertion should be marked skipped"
         print_result(result)
         captured = capsys.readouterr()
         assert "[SKIP]" in captured.out, "skipped assertion should display [SKIP] marker"
@@ -228,11 +232,11 @@ class TestAssertionSkip:
         assert "[SKIP]" not in captured.out
 
     def test_mixed_skip_and_normal_assertions(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-        """Mix of skipped and normal passing assertions → overall PASS."""
+        """Mix of skipped (track:integration) and normal passing assertions → overall PASS."""
         skip_assertion = {
             "at": "2099-01-01T00:00:00",
-            "expect": "natural_ventilation",
-            "simulator_support": False,
+            "expect": "some_integration_only_outcome",
+            "track": "integration",
         }
         normal_passing = _passing_assertion()
         p = _make_scenario(tmp_path, name="mixed-assert", assertions=[skip_assertion, normal_passing])
@@ -244,11 +248,11 @@ class TestAssertionSkip:
         assert "[OK]" in captured.out
 
     def test_mixed_skip_and_failing_assertion_still_fails(self, tmp_path: Path) -> None:
-        """Skipped assertion + failing normal assertion → overall FAIL."""
+        """Skipped (track:integration) assertion + failing normal assertion → overall FAIL."""
         skip_assertion = {
             "at": "2099-01-01T00:00:00",
-            "expect": "natural_ventilation",
-            "simulator_support": False,
+            "expect": "some_integration_only_outcome",
+            "track": "integration",
         }
         failing = _failing_assertion()
         p = _make_scenario(tmp_path, name="mixed-fail", assertions=[skip_assertion, failing])
@@ -375,22 +379,3 @@ class TestBackwardCompatibility:
         print_result(result)  # no state kwarg — must not raise
         captured = capsys.readouterr()
         assert "PASS" in captured.out
-
-    def test_simulator_core_nat_vent_logic(self) -> None:
-        """ClimateSimulator core logic: nat vent activates when outdoor < indoor AND outdoor < threshold."""
-        config = {"comfort_cool": 72, "natural_vent_delta": 3.0}
-        sim = ClimateSimulator(config)
-        # indoor=76 > outdoor=70 (directional guard passes); outdoor=70 < threshold=75 (ceiling passes)
-        sim.process_event({"type": "temp_update", "time": "T1", "indoor_f": 76.0, "outdoor_f": 70.0})
-        sim.process_event({"type": "sensor_open", "time": "T2", "entity": "binary_sensor.door"})
-        assert sim.state.natural_vent_active, "nat vent should activate when outdoor < indoor and outdoor < threshold"
-
-    def test_simulator_core_pause_logic(self) -> None:
-        """ClimateSimulator core logic: pause when outdoor > threshold."""
-        config = {"comfort_cool": 72, "natural_vent_delta": 3.0}
-        sim = ClimateSimulator(config)
-        # threshold = 75; outdoor 80 > 75 → pause
-        sim.process_event({"type": "temp_update", "time": "T1", "indoor_f": 78.0, "outdoor_f": 80.0})
-        sim.process_event({"type": "sensor_open", "time": "T2", "entity": "binary_sensor.door"})
-        assert sim.state.paused_by_door, "should pause when outdoor exceeds threshold"
-        assert not sim.state.natural_vent_active

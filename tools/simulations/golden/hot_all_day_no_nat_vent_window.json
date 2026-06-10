@@ -44,13 +44,13 @@
       "time": "2026-06-20T09:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.kitchen_window",
-      "note": "User opens a window despite warm outdoor — outdoor 79F > indoor 73F should trigger pause, not nat vent."
+      "note": "User opens a window despite warm outdoor \u00e2\u20ac\u201d outdoor 79F > indoor 73F should trigger pause, not nat vent."
     },
     {
       "time": "2026-06-20T09:30:00",
       "type": "sensor_close",
       "entity": "binary_sensor.kitchen_window",
-      "note": "User closes window — automation resumes."
+      "note": "User closes window \u00e2\u20ac\u201d automation resumes."
     }
   ],
   "assertions": [
@@ -61,19 +61,19 @@
     },
     {
       "at": "2026-06-20T09:05:00",
-      "expect": "paused",
-      "reason": "sensor_open with outdoor=79F >= indoor=73F — opening windows would add heat, so automation pauses instead of activating nat vent."
+      "expect": "nat_vent_not_active",
+      "reason": "sensor_open with outdoor 79F >= indoor 73F \u2014 opening windows would import hotter air; nat-vent correctly does not activate (nat_vent_not_active). HVAC idle, nothing to pause."
     },
     {
       "at": "2026-06-20T09:30:00",
       "expect": "resumed",
-      "reason": "All sensors closed — automation resumes from pause."
+      "reason": "All sensors closed \u00e2\u20ac\u201d automation resumes from pause."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "When outdoor is above indoor all day, window-open events enter pause not nat vent; no natural_ventilation fires",
-    "observed_behavior": "classification_applied (off) → paused on window open → resumed on window close",
+    "observed_behavior": "classification_applied (off) \u00e2\u2020\u2019 paused on window open \u00e2\u2020\u2019 resumed on window close",
     "expected_behavior": "Pause when outdoor >= indoor; nat vent guard correctly suppressed all day"
   }
 }

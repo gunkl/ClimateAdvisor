@@ -1,0 +1,168 @@
+"""ha_stubs — idempotent HA sys.modules stub installer.
+
+This module is the single source of truth for the homeassistant.* mock layer.
+Both ``tests/conftest.py`` and the sim_harness runtime call ``install_ha_stubs()``
+so the two environments stay in sync automatically.
+
+The function is idempotent: calling it multiple times is safe (each module is
+only injected if it is not already present in sys.modules).
+"""
+
+from __future__ import annotations
+
+import enum as _enum
+import os
+import sys
+from unittest.mock import MagicMock
+
+
+def _make_mock_module(name: str) -> MagicMock:
+    """Create a MagicMock that works as a module for 'from X import Y' statements."""
+    mod = MagicMock()
+    mod.__name__ = name
+    mod.__path__ = []
+    mod.__file__ = None
+    mod.__spec__ = None
+    mod.__loader__ = None
+    mod.__package__ = name
+    return mod
+
+
+_HA_MODULES = [
+    "homeassistant",
+    "homeassistant.config_entries",
+    "homeassistant.const",
+    "homeassistant.core",
+    "homeassistant.helpers",
+    "homeassistant.helpers.update_coordinator",
+    "homeassistant.helpers.entity_platform",
+    "homeassistant.helpers.event",
+    "homeassistant.helpers.selector",
+    "homeassistant.components",
+    "homeassistant.components.sensor",
+    "homeassistant.components.weather",
+    "homeassistant.components.climate",
+    "homeassistant.data_entry_flow",
+    "homeassistant.exceptions",
+    "homeassistant.util",
+    "homeassistant.util.dt",
+    "homeassistant.components.http",
+    "homeassistant.components.repairs",
+    "homeassistant.helpers.issue_registry",
+    "homeassistant.helpers.config_validation",
+    "aiohttp",
+    "aiohttp.web",
+]
+
+
+# ---------------------------------------------------------------------------
+# Real minimal base classes needed so HA-subclassing modules don't hit
+# the metaclass conflict (MagicMock instances cannot be base classes).
+# ---------------------------------------------------------------------------
+
+
+class _MockRepairsFlow:
+    """Minimal stand-in for homeassistant.components.repairs.RepairsFlow."""
+
+    hass = None
+
+    def async_show_form(self, *, step_id, data_schema, errors=None):
+        result = {"type": "form", "step_id": step_id, "data_schema": data_schema}
+        if errors:
+            result["errors"] = errors
+        return result
+
+    def async_create_entry(self, *, title="", data):
+        return {"type": "create_entry", "title": title, "data": data}
+
+
+class _MockConfirmRepairFlow(_MockRepairsFlow):
+    """Minimal stand-in for homeassistant.components.repairs.ConfirmRepairFlow."""
+
+
+class _MockDataUpdateCoordinator:
+    """Minimal stand-in for homeassistant.helpers.update_coordinator.DataUpdateCoordinator."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def async_request_refresh(self):
+        """Stub for triggering a data refresh."""
+
+
+class _MockCoordinatorEntity:
+    """Minimal stand-in for homeassistant.helpers.update_coordinator.CoordinatorEntity."""
+
+    def __init__(self, coordinator, *args, **kwargs):
+        self.coordinator = coordinator
+
+
+class _MockSensorEntity:
+    """Minimal stand-in for homeassistant.components.sensor.SensorEntity."""
+
+
+class _SensorStateClass(_enum.StrEnum):
+    MEASUREMENT = "measurement"
+    TOTAL = "total"
+    TOTAL_INCREASING = "total_increasing"
+
+
+class _SensorDeviceClass(_enum.StrEnum):
+    TEMPERATURE = "temperature"
+    HUMIDITY = "humidity"
+    PRESSURE = "pressure"
+    POWER = "power"
+    ENERGY = "energy"
+
+
+class _UnitOfTemperature(_enum.StrEnum):
+    FAHRENHEIT = "°F"
+    CELSIUS = "°C"
+    KELVIN = "K"
+
+
+def install_ha_stubs() -> None:
+    """Install homeassistant.* mock modules into sys.modules (idempotent).
+
+    Safe to call multiple times — each module is only injected once.
+    Also ensures the project root is on sys.path so
+    ``custom_components.climate_advisor`` resolves.
+    """
+    # Ensure project root on path so custom_components imports work.
+    # The project root is two directories above this file:
+    #   tools/sim_harness/ha_stubs.py → tools/ → <project root>
+    _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
+
+    # Inject all HA mock modules (idempotent guard)
+    for mod_name in _HA_MODULES:
+        if mod_name not in sys.modules:
+            sys.modules[mod_name] = _make_mock_module(mod_name)
+
+    # Attach real base classes to the already-installed mock modules.
+    # These assignments are idempotent — re-assigning the same class is harmless.
+    repairs = sys.modules["homeassistant.components.repairs"]
+    repairs.RepairsFlow = _MockRepairsFlow
+    repairs.ConfirmRepairFlow = _MockConfirmRepairFlow
+
+    duc = sys.modules["homeassistant.helpers.update_coordinator"]
+    duc.DataUpdateCoordinator = _MockDataUpdateCoordinator
+    duc.CoordinatorEntity = _MockCoordinatorEntity
+
+    sensor = sys.modules["homeassistant.components.sensor"]
+    sensor.SensorEntity = _MockSensorEntity
+    sensor.SensorStateClass = _SensorStateClass
+    sensor.SensorDeviceClass = _SensorDeviceClass
+
+    const = sys.modules["homeassistant.const"]
+    const.UnitOfTemperature = _UnitOfTemperature
+
+    # voluptuous — use real package if available, mock otherwise
+    if "voluptuous" not in sys.modules:
+        try:
+            import voluptuous as _vol_check  # noqa: F401
+            import voluptuous.error  # noqa: F401
+        except ImportError:
+            sys.modules["voluptuous"] = _make_mock_module("voluptuous")
+            sys.modules["voluptuous.error"] = _make_mock_module("voluptuous.error")

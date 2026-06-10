@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "minor_version": 1,
+  "key": "auth",
+  "data": {
+    "users": [
+      {
+        "id": "ca_test_admin_user_001",
+        "group_ids": ["system-admin"],
+        "is_owner": true,
+        "is_active": true,
+        "name": "Test Admin",
+        "system_generated": false,
+        "local_only": false
+      }
+    ],
+    "groups": [
+      {
+        "id": "system-admin",
+        "name": "Administrators"
+      },
+      {
+        "id": "system-users",
+        "name": "Users"
+      },
+      {
+        "id": "system-read-only",
+        "name": "Read Only"
+      }
+    ],
+    "credentials": [
+      {
+        "id": "ca_test_credential_001",
+        "user_id": "ca_test_admin_user_001",
+        "auth_provider_type": "homeassistant",
+        "auth_provider_id": null,
+        "data": {"username": "testadmin"}
+      }
+    ],
+    "refresh_tokens": []
+  }
+}

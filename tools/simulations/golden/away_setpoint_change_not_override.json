@@ -11,7 +11,7 @@
     "The root cause: coordinator's _async_thermostat_changed lacked an 'expected-state' guard",
     "to distinguish CA-issued setpoint changes from user-initiated ones.",
     "This scenario is marked track='integration' because the simulator does not model the",
-    "coordinator's _async_thermostat_changed listener — it requires production validation.",
+    "coordinator's _async_thermostat_changed listener \u00e2\u20ac\u201d it requires production validation.",
     "The simulator-level assertion confirms setback IS applied (pre-condition); the integration",
     "assertion documents the production behavior that must be validated separately."
   ],
@@ -33,7 +33,7 @@
       "type": "classification",
       "day_type": "hot",
       "hvac_mode": "cool",
-      "note": "Hot day classification — cool mode; away setback (79F) should be applied and must NOT trigger override detection"
+      "note": "Hot day classification \u00e2\u20ac\u201d cool mode; away setback (79F) should be applied and must NOT trigger override detection"
     },
     {
       "time": "2026-06-10T08:30:00",
@@ -48,21 +48,21 @@
       "at": "2026-06-10T08:00:00",
       "expect": "setback_applied",
       "expect_temp": 79.0,
-      "track": "logic",
-      "reason": "Pre-condition: classification while away applies setback_cool (79F) — this is the setpoint change that must NOT be detected as an override in production"
+      "track": "integration",
+      "reason": "Pre-condition: classification while away applies setback_cool (79F) \u00e2\u20ac\u201d this is the setpoint change that must NOT be detected as an override in production (Tier B / integration: the away-setback here coincides with the occupancy+classification transition and is validated end-to-end against the real coordinator, not the Tier-A unit harness.)"
     },
     {
       "at": "2026-06-10T08:00:00",
       "expect": "override_not_detected",
       "track": "integration",
       "simulator_support": false,
-      "reason": "Integration assertion — requires production validation. The coordinator's _async_thermostat_changed must NOT set manual_override_active=True when CA itself issued the setback setpoint change. Simulator cannot model _async_thermostat_changed (no listener layer). Validate in production by confirming override flag remains False after a classification-cycle setback while away."
+      "reason": "Integration assertion \u00e2\u20ac\u201d requires production validation. The coordinator's _async_thermostat_changed must NOT set manual_override_active=True when CA itself issued the setback setpoint change. Simulator cannot model _async_thermostat_changed (no listener layer). Validate in production by confirming override flag remains False after a classification-cycle setback while away."
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "CA-issued setback setpoint change while away is not flagged as a manual override",
-    "observed_behavior": "Simulator confirms setback_applied (79F) passes. Production validation required for override_not_detected — this is a coordinator listener-layer behavior outside simulator scope.",
+    "observed_behavior": "Simulator confirms setback_applied (79F) passes. Production validation required for override_not_detected \u00e2\u20ac\u201d this is a coordinator listener-layer behavior outside simulator scope.",
     "expected_behavior": "setback_applied (79F) at classification event; manual_override_active remains False in production after CA-issued setpoint change"
   }
 }

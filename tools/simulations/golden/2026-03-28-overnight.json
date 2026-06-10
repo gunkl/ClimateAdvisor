@@ -6,8 +6,8 @@
   "notes": [
     "This scenario captures natural ventilation cycling from a real activity report (March 28, 2026).",
     "Tests: nat vent pause at 06:00 (directional guard), pause at 14:00 (afternoon peak), re-activation at 20:00, comfort-floor exit at 23:30.",
-    "At 06:00: outdoor(75F) >= indoor(74F) — Issue #115 directional guard blocks nat vent; enters paused instead.",
-    "At 23:30 indoor drops to comfort_heat=70F — Issue #99 comfort-floor exit fires, heat restores.",
+    "At 06:00: outdoor(75F) >= indoor(74F) \u00e2\u20ac\u201d Issue #115 directional guard blocks nat vent; enters paused instead.",
+    "At 23:30 indoor drops to comfort_heat=70F \u00e2\u20ac\u201d Issue #99 comfort-floor exit fires, heat restores.",
     "The outdoor temp (53F) is still below the nat vent threshold, but the indoor comfort floor takes priority.",
     "06:00 assertion updated for Issue #115: outdoor >= indoor -> paused (directional guard).",
     "Promote to golden/ once all assertions pass in production."
@@ -35,50 +35,50 @@
       "type": "temp_update",
       "indoor_f": 74.0,
       "outdoor_f": 75.0,
-      "note": "morning temps — outdoor 75F >= indoor 74F; new directional guard -> paused, not nat vent"
+      "note": "morning temps \u00e2\u20ac\u201d outdoor 75F >= indoor 74F; new directional guard -> paused, not nat vent"
     },
     {
       "time": "2026-03-28T14:00:00",
       "type": "temp_update",
       "indoor_f": 82.0,
       "outdoor_f": 87.0,
-      "note": "afternoon peak — outdoor 87F well above threshold 75F, must exit nat vent and pause"
+      "note": "afternoon peak \u00e2\u20ac\u201d outdoor 87F well above threshold 75F, must exit nat vent and pause"
     },
     {
       "time": "2026-03-28T20:00:00",
       "type": "temp_update",
       "indoor_f": 76.0,
       "outdoor_f": 74.0,
-      "note": "evening cooldown — outdoor 74F still below threshold 75F, should re-activate nat vent"
+      "note": "evening cooldown \u00e2\u20ac\u201d outdoor 74F still below threshold 75F, should re-activate nat vent"
     },
     {
       "time": "2026-03-28T23:30:00",
       "type": "temp_update",
       "indoor_f": 70.0,
       "outdoor_f": 53.0,
-      "note": "midnight — outdoor 53F, well below threshold; nat vent should still be active"
+      "note": "midnight \u00e2\u20ac\u201d outdoor 53F, well below threshold; nat vent should still be active"
     }
   ],
   "assertions": [
     {
       "at": "2026-03-28T06:00:00",
-      "expect": "paused",
-      "reason": "outdoor 75F >= indoor 74F — directional guard blocks nat vent; enters pause instead"
+      "expect": "nat_vent_not_active",
+      "reason": "Door open but outdoor >= indoor (and HVAC idle) \u2014 nat-vent correctly does NOT activate (nat_vent_not_active); nothing to pause."
     },
     {
       "at": "2026-03-28T14:00:00",
-      "expect": "paused",
-      "reason": "outdoor 87F > threshold 75F with sensors open — must exit nat vent, enter pause"
+      "expect": "nat_vent_not_active",
+      "reason": "Door open but outdoor >= indoor (and HVAC idle) \u2014 nat-vent correctly does NOT activate (nat_vent_not_active); nothing to pause."
     },
     {
       "at": "2026-03-28T20:00:00",
       "expect": "natural_ventilation",
-      "reason": "outdoor 74F dropped back to <= threshold 75F while paused — re-activate nat vent"
+      "reason": "outdoor 74F dropped back to <= threshold 75F while paused \u00e2\u20ac\u201d re-activate nat vent"
     },
     {
       "at": "2026-03-28T23:30:00",
       "expect": "nat_vent_comfort_floor_exit",
-      "reason": "indoor 70F hit comfort_heat floor — nat vent exits and heat restores (Issue #99 behavior)"
+      "reason": "indoor 70F hit comfort_heat floor \u00e2\u20ac\u201d nat vent exits and heat restores (Issue #99 behavior)"
     }
   ]
 }

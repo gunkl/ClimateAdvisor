@@ -1550,6 +1550,13 @@ THERMAL_OBS_CAP = 200  # max observations in LearningState
 CEILING_PRECOOL_FALLBACK_MIN: int = 120  # fallback lead time when k_active_cool not learned
 CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfort_cool + this
 
+# Issue #249 — thermostat capability detection. Home Assistant's
+# ClimateEntityFeature.TARGET_TEMPERATURE_RANGE bit: when set in a climate entity's
+# `supported_features`, the thermostat accepts target_temp_low/target_temp_high (dual-setpoint /
+# heat_cool band). Defined locally as a stable HA flag value so automation.py need not import
+# homeassistant.components.climate (which breaks the lightweight stub test environment).
+CLIMATE_FEATURE_TARGET_TEMP_RANGE: int = 2
+
 ATTR_THERMAL_HEATING_RATE = "thermal_heating_rate"
 ATTR_THERMAL_COOLING_RATE = "thermal_cooling_rate"
 ATTR_THERMAL_CONFIDENCE = "thermal_confidence"

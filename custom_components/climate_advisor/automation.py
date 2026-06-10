@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,6 +20,7 @@ from .classifier import DayClassification
 from .const import (
     CEILING_BRIDGE_TOLERANCE_F,
     CEILING_PRECOOL_FALLBACK_MIN,
+    CLIMATE_FEATURE_TARGET_TEMP_RANGE,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
@@ -67,6 +69,55 @@ from .const import (
 from .temperature import format_temp, format_temp_delta, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ThermostatCapabilities:
+    """What modes and setpoint shapes a thermostat advertises (Issue #249).
+
+    Derived from the climate entity's ``hvac_modes`` list and ``supported_features`` bitmask so the
+    program-selection logic can choose how to arm the comfort band — single-mode (``cool``/``heat``)
+    vs a ``heat_cool`` dual-setpoint band — based on what the hardware actually supports. An unknown
+    or unavailable thermostat yields all-False capabilities and callers fall back to current behavior.
+    """
+
+    modes: tuple[str, ...]
+    supports_heat: bool
+    supports_cool: bool
+    supports_heat_cool: bool  # a band mode (heat_cool or auto) is offered
+    supports_dual_setpoint: bool  # band mode AND target_temp_low/high accepted
+    raw_supported_features: int
+
+
+def parse_thermostat_capabilities(hvac_modes: Any, supported_features: Any) -> ThermostatCapabilities:
+    """Compute :class:`ThermostatCapabilities` from advertised modes + feature bitmask.
+
+    Pure function (no HA state access) so it is trivially unit-testable. Defensive against
+    missing/None/malformed inputs: a non-list ``hvac_modes`` or non-int ``supported_features``
+    degrades to empty/zero, yielding all-False capabilities rather than raising.
+
+    ``supports_dual_setpoint`` requires BOTH a band mode (``heat_cool``/``auto``) in ``hvac_modes``
+    AND the ``TARGET_TEMPERATURE_RANGE`` feature bit, because Home Assistant only accepts
+    ``target_temp_low``/``target_temp_high`` when that feature is present.
+    """
+    modes: tuple[str, ...] = tuple(str(m) for m in hvac_modes) if isinstance(hvac_modes, (list, tuple)) else ()
+
+    try:
+        features = int(supported_features)
+    except (TypeError, ValueError):
+        features = 0
+
+    supports_heat_cool = "heat_cool" in modes or "auto" in modes
+    supports_dual_setpoint = supports_heat_cool and bool(features & CLIMATE_FEATURE_TARGET_TEMP_RANGE)
+
+    return ThermostatCapabilities(
+        modes=modes,
+        supports_heat="heat" in modes,
+        supports_cool="cool" in modes,
+        supports_heat_cool=supports_heat_cool,
+        supports_dual_setpoint=supports_dual_setpoint,
+        raw_supported_features=features,
+    )
 
 
 def _parse_forecast_dt(dt_str: str | None) -> datetime | None:
@@ -2648,6 +2699,20 @@ class AutomationEngine:
             temp = climate_state.attributes.get("current_temperature")
             return to_fahrenheit(float(temp), unit) if temp is not None else None
         return None
+
+    def _get_thermostat_capabilities(self) -> ThermostatCapabilities:
+        """Read the configured thermostat's advertised capabilities (Issue #249).
+
+        Reads ``hvac_modes`` and ``supported_features`` from the climate entity's state and
+        delegates to :func:`parse_thermostat_capabilities`. If the entity is missing or
+        unavailable, returns all-False capabilities so callers degrade gracefully to their
+        current behavior rather than assuming a band-capable thermostat.
+        """
+        state = self.hass.states.get(self.climate_entity)
+        if state is None:
+            return parse_thermostat_capabilities(None, None)
+        attrs = getattr(state, "attributes", None) or {}
+        return parse_thermostat_capabilities(attrs.get("hvac_modes"), attrs.get("supported_features"))
 
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.

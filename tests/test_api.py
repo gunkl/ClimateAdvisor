@@ -278,6 +278,8 @@ def _simulate_status_get(coordinator):
         "hvac_mode": "off",
         "indoor_temp": indoor_temp_display,
         "current_setpoint": None,
+        "target_temp_low": None,
+        "target_temp_high": None,
         "automation_status": data.get("automation_status", "unknown"),
         "compliance_score": data.get("compliance_score", 1.0),
         "next_action": data.get(ATTR_NEXT_ACTION, ""),
@@ -310,6 +312,45 @@ def _simulate_learning_get(coordinator):
         "comfort_range_high": round(from_fahrenheit(coordinator.config.get("comfort_cool", 75), unit), 1),
         "unit": unit,
     }
+
+
+def _extract_setpoints(climate_state, hvac_mode):
+    """Replicate the api.py status setpoint extraction (Issue #266).
+
+    Single-setpoint modes (cool/heat) expose `temperature`; the heat_cool band exposes
+    `target_temp_low`/`target_temp_high`. Nothing is exposed when HVAC is off.
+    """
+    setpoint = target_temp_low = target_temp_high = None
+    if climate_state and hvac_mode != "off":
+        setpoint = climate_state.attributes.get("temperature")
+        target_temp_low = climate_state.attributes.get("target_temp_low")
+        target_temp_high = climate_state.attributes.get("target_temp_high")
+    return setpoint, target_temp_low, target_temp_high
+
+
+class TestStatusSetpointExtraction:
+    """Issue #266: the status endpoint must expose the dual band setpoints in heat_cool mode."""
+
+    def test_heat_cool_band_exposes_dual_setpoints(self):
+        state = MagicMock()
+        state.attributes = {"temperature": None, "target_temp_low": 64, "target_temp_high": 72}
+        setpoint, low, high = _extract_setpoints(state, "heat_cool")
+        assert setpoint is None  # single setpoint is absent in the heat_cool band
+        assert low == 64
+        assert high == 72
+
+    def test_cool_mode_exposes_single_setpoint(self):
+        state = MagicMock()
+        state.attributes = {"temperature": 74, "target_temp_low": None, "target_temp_high": None}
+        setpoint, low, high = _extract_setpoints(state, "cool")
+        assert setpoint == 74
+        assert low is None and high is None
+
+    def test_off_mode_exposes_no_setpoints(self):
+        state = MagicMock()
+        state.attributes = {"temperature": 74, "target_temp_low": 64, "target_temp_high": 72}
+        setpoint, low, high = _extract_setpoints(state, "off")
+        assert setpoint is None and low is None and high is None
 
 
 class TestStatusViewCelsiusUnit:

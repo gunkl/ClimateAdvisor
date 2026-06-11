@@ -867,6 +867,17 @@
         : data.trend_direction === 'cooling' ? '\u2193' : '\u2192';
       const score = Math.round((data.compliance_score || 0) * 100);
 
+      // Issue #266: show the thermostat's setpoint(s) under the mode. The heat_cool band exposes
+      // target_temp_low/high (dual); cool/heat expose the single current_setpoint.
+      let hvacTemps = '';
+      if (data.hvac_mode === 'heat_cool' && (data.target_temp_low != null || data.target_temp_high != null)) {
+        const lo = data.target_temp_low != null ? data.target_temp_low + unitSym : '—';
+        const hi = data.target_temp_high != null ? data.target_temp_high + unitSym : '—';
+        hvacTemps = `Heat ${lo} · Cool ${hi}`;
+      } else if (data.current_setpoint != null) {
+        hvacTemps = data.current_setpoint + unitSym;
+      }
+
       grid.innerHTML = `
         <div class="status-item">
           <div class="label">Day Type</div>
@@ -878,11 +889,15 @@
         </div>
         <div class="status-item">
           <div class="label">HVAC Mode</div>
-          <div class="value">${data.hvac_mode || 'unknown'}${data.current_setpoint != null ? ' @ ' + data.current_setpoint + unitSym : ''}</div>
+          <div class="value">${data.hvac_mode || 'unknown'}${hvacTemps ? `<br><span style="font-size:0.8rem;opacity:0.85">${hvacTemps}</span>` : ''}</div>
         </div>
         <div class="status-item">
           <div class="label">Status</div>
-          <div class="value">${data.automation_status || 'unknown'}${data.indoor_temp != null ? ' | ' + data.indoor_temp.toFixed(1) + unitSym : ''}</div>
+          <div class="value">${data.automation_status || 'unknown'}</div>
+        </div>
+        <div class="status-item">
+          <div class="label">Indoor</div>
+          <div class="value">${data.indoor_temp != null ? data.indoor_temp.toFixed(1) + unitSym : '—'}</div>
         </div>
         <div class="status-item">
           <div class="label">Occupancy</div>

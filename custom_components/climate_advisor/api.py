@@ -88,10 +88,17 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         climate_state = hass.states.get(coordinator.config.get("climate_entity", ""))
         hvac_mode = climate_state.state if climate_state else "unknown"
 
-        # Set point: only include when HVAC is actively running
+        # Set point(s): only include when HVAC is actively running. Single-setpoint modes
+        # (cool/heat) expose `temperature`; the heat_cool band (Issue #249/#266) exposes
+        # `target_temp_low`/`target_temp_high` instead. Attributes are already in the thermostat's
+        # display unit, so they are sent as-is (matching `current_setpoint`).
         setpoint = None
+        target_temp_low = None
+        target_temp_high = None
         if climate_state and hvac_mode != "off":
             setpoint = climate_state.attributes.get("temperature")
+            target_temp_low = climate_state.attributes.get("target_temp_low")
+            target_temp_high = climate_state.attributes.get("target_temp_high")
 
         indoor_temp = coordinator._get_indoor_temp()
         unit = coordinator.config.get("temp_unit", "fahrenheit")
@@ -108,6 +115,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
                 ATTR_HVAC_RUNTIME_TODAY: data.get(ATTR_HVAC_RUNTIME_TODAY, 0),
                 ATTR_CURRENT_SETPOINT: setpoint,
+                "target_temp_low": target_temp_low,
+                "target_temp_high": target_temp_high,
                 ATTR_INDOOR_TEMP: indoor_temp_display,
                 "unit": unit,
                 "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),

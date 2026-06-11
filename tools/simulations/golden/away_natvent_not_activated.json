@@ -1,0 +1,66 @@
+{
+  "name": "away_natvent_not_activated",
+  "description": "Away mode, warm day: outdoor 68F is cooler than indoor 74F, so nat-vent would be favorable IF someone were home. A window opens at 14:00 while the home is empty. Issue #254: nat-vent must NOT activate in an unoccupied home — the open contact pauses HVAC instead of running the fan in an empty house.",
+  "source": "synthetic",
+  "issue": 254,
+  "notes": [
+    "Occupant outcome: a person who leaves on a warm day with a window inadvertently left open does NOT come home to a fan that ran all afternoon in an empty house. The open contact pauses HVAC instead.",
+    "Issue #254 added an occupancy guard to nat-vent activation (handle_door_window_open + the two check_natural_vent_conditions re-entry paths). #231 fixed the away nat-vent EXIT; this guards the activation.",
+    "Regression proof: remove the occupancy guard and the 14:00 assertion flips from 'paused' to 'natural_ventilation' (the fan activates in the empty home)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Morning classification — comfort band armed (occupied)"
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves — away setback applied (setback_cool=79F)"
+    },
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 68.0,
+      "note": "Afternoon: indoor 74F, outdoor 68F — nat-vent eligible by temperature alone (outdoor < indoor, indoor > comfort_heat)"
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens while away — occupancy guard suppresses nat-vent; the normal HVAC pause fires instead"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "reason": "Away setback applied: setback_cool=79F",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "paused",
+      "reason": "Issue #254: sensor_open while away — the occupancy guard suppresses nat-vent activation; the normal door/window HVAC pause fires instead of running the fan in an empty home.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Away mode suppresses nat-vent activation — an open contact in an empty home pauses HVAC, it does not run the fan",
+    "observed_behavior": "classification_applied -> away setback (79F) -> paused on sensor_open at 14:00 (no nat-vent)",
+    "expected_behavior": "Nat-vent activates only when occupancy is home or guest; away/vacation forces the pause path (Issue #254)"
+  }
+}

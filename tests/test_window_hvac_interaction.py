@@ -86,6 +86,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
         "automation_grace_notify": False,
     }
     ae._current_classification = _make_hot_classification()
+    ae._occupancy_mode = "home"  # Issue #254: nat-vent activation now requires an occupied home
     ae._natural_vent_active = False
     ae._hourly_forecast_temps = []
     ae._thermal_model = {}
@@ -129,6 +130,31 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae.clear_manual_override = MagicMock()
 
     return ae
+
+
+class TestNatVentRequiresOccupancy:
+    """Issue #254: nat-vent must not activate in an unoccupied home. An open monitored contact
+    while away/vacation pauses HVAC instead of running the fan in an empty house (the occupant
+    isn't there to benefit, and #231 only fixed the away *exit*, not the *activation*)."""
+
+    def test_away_open_contact_pauses_not_ventilates(self):
+        ae = _make_ae_stub(_occupancy_mode="away", _last_outdoor_temp=65.0)  # cool outdoor would otherwise vent
+        asyncio.run(ae.handle_door_window_open("binary_sensor.front_window"))
+        assert ae._natural_vent_active is False  # no ventilation in an empty home
+        ae._activate_fan.assert_not_called()
+        assert ae._paused_by_door is True  # fell through to the pause path
+
+    def test_vacation_open_contact_does_not_ventilate(self):
+        ae = _make_ae_stub(_occupancy_mode="vacation", _last_outdoor_temp=65.0)
+        asyncio.run(ae.handle_door_window_open("binary_sensor.front_window"))
+        assert ae._natural_vent_active is False
+        ae._activate_fan.assert_not_called()
+
+    def test_home_open_contact_still_ventilates(self):
+        ae = _make_ae_stub(_occupancy_mode="home", _last_outdoor_temp=65.0)
+        asyncio.run(ae.handle_door_window_open("binary_sensor.front_window"))
+        assert ae._natural_vent_active is True  # occupied home — free cooling as before
+        ae._activate_fan.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

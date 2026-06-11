@@ -167,5 +167,10 @@
     "sha256": "f577212489dfad85c6c23232b3177bbd7ef0a8431b0069b41d044957f78cb9cc",
     "signed": "2026-06-10",
     "issue": 229
+  },
+  "away_natvent_not_activated": {
+    "sha256": "e22634818dae464eaada481e6dbf7512910ff79176922dc0f14273320526c00b",
+    "signed": "2026-06-10",
+    "issue": 254
   }
 }

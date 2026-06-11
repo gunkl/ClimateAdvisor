@@ -1261,16 +1261,17 @@ Natural ventilation is the cheap path. When outdoor air is cooler than indoor ai
 
 ### Activation Conditions
 
-All four must be true simultaneously for natural ventilation to activate.
+All five must be true simultaneously for natural ventilation to activate.
 
 | Condition | Guard | Rationale |
 |---|---|---|
+| Occupancy is `home` or `guest` | Occupancy guard (Issue #254) | Never ventilate an unoccupied home — while `away`/`vacation` an open monitored contact **pauses** HVAC instead of running the fan in an empty house (the occupant isn't there to benefit). #231 fixed the away *exit*; this guards the *activation*. Enforced at all three activation sites (`handle_door_window_open` + the two `check_natural_vent_conditions` re-entry paths) |
 | `outdoor_temp < indoor_temp` | Directional — outdoor must be cooler than indoor | Pulling in warmer air heats the house instead of cooling it; nat vent would work against the goal |
 | `indoor_temp > comfort_heat` | Floor guard | If indoor is already at or below the comfort floor, nat vent would immediately trigger a comfort-floor exit — no benefit from activating first |
 | `outdoor_temp < comfort_cool + nat_vent_delta` | Ceiling | Outdoor air too warm (even for transitional cooling) should not enter; `nat_vent_delta` provides a configurable tolerance band above `comfort_cool` |
 | At least one door/window sensor open | Physical prerequisite | Natural ventilation requires an open path for airflow |
 
-When all conditions are met: HVAC is set to `off`, the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`.
+When all conditions are met: the comfort band **stays armed** (HVAC is **not** set to `off` — Issue #249; the thermostat self-arbitrates with the open window), the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`.
 
 ### Exit Hierarchy
 

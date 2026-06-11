@@ -1478,8 +1478,13 @@ class AutomationEngine:
         nat_vent_threshold = comfort_cool + nat_vent_delta
         indoor = self._get_indoor_temp_f()
         comfort_heat = float(self.config.get("comfort_heat", 70))
+        # Issue #254: never ventilate an unoccupied home. While away/vacation, an open monitored
+        # contact must pause HVAC (fall through to the pause path below), not run the fan in an
+        # empty house. (#231 fixed the away nat-vent *exit*; this guards the *activation*.)
+        _occupied = self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
         if (
-            outdoor is not None
+            _occupied
+            and outdoor is not None
             and indoor is not None
             and outdoor < indoor  # outdoor must be cooler than indoor
             and indoor > comfort_heat  # indoor must be above comfort floor
@@ -1680,7 +1685,8 @@ class AutomationEngine:
             _comfort_heat = float(self.config.get("comfort_heat", 70))
             _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
             if (
-                outdoor is not None
+                self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)  # Issue #254
+                and outdoor is not None
                 and _indoor is not None
                 and outdoor < _indoor - _hysteresis
                 and _indoor > _comfort_heat
@@ -1886,7 +1892,8 @@ class AutomationEngine:
                     return  # still within lockout window
 
             if (
-                outdoor < indoor - hysteresis  # outdoor must be at least 1°F below indoor
+                self._occupancy_mode not in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)  # Issue #254: don't vent an empty home
+                and outdoor < indoor - hysteresis  # outdoor must be at least 1°F below indoor
                 and indoor > comfort_heat  # indoor above comfort floor
                 and outdoor < threshold  # within acceptable ceiling
             ):

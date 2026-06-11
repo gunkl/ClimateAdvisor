@@ -721,6 +721,25 @@ KNOWN_FIXES: dict[int, dict] = {
             "Single-setpoint mid-day edge re-selection — the band holds both edges via the device's shape",
         ],
     },
+    254: {
+        "issue": 254,
+        "title": "Nat-vent no longer activates while away/vacation (occupancy guard)",
+        "version_fixed": "0.4.0",
+        "scope_covered": [
+            "handle_door_window_open(): nat-vent activation gated on occupancy home/guest — an open"
+            " monitored contact while away/vacation falls through to the HVAC pause path instead of"
+            " running the fan in an empty home",
+            "check_natural_vent_conditions(): the two re-entry activation paths (grace re-entry,"
+            " paused->reactivate) carry the same occupancy guard",
+            "Exit paths (incl. the #231 away-ceiling exit) are unchanged — a nat-vent that was active"
+            " before going away still exits correctly",
+            "docs §17 activation table: occupancy=home/guest is now a listed prerequisite (5 conditions)",
+        ],
+        "scope_not_covered": [
+            "Vacation-specific ventilation policy (treated identically to away — no ventilation)",
+            "Re-enabling nat-vent immediately on return — the next open/recheck cycle re-evaluates normally",
+        ],
+    },
 }
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"

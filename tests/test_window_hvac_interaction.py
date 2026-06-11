@@ -158,21 +158,23 @@ class TestEconomizerNatVentGuard:
             assert call.args[0] != "cool", "Should not activate AC when nat-vent is active"
 
     def test_economizer_activates_normally_without_nat_vent(self):
-        """Returns True and calls _set_hvac_mode('cool') when nat-vent is NOT active."""
+        """Issue #264: cool-down activates (fan assist) without overriding the band. The #249 band
+        already holds comfort_cool, so the economizer no longer calls _set_hvac_mode('cool')."""
         ae = _make_ae_stub(_natural_vent_active=False, _economizer_active=False)
 
         result = asyncio.run(
             ae.check_window_cooling_opportunity(
                 outdoor_temp=70.0,
-                indoor_temp=78.0,  # indoor > comfort_cool (75) → Phase 1
+                indoor_temp=78.0,  # indoor > comfort_cool (75) → Phase 1 cool-down
                 windows_physically_open=True,
                 current_hour=19,
             )
         )
 
         assert result is True
-        ae._set_hvac_mode.assert_called_once()
-        assert ae._set_hvac_mode.call_args.args[0] == "cool"
+        assert ae._economizer_phase == "cool-down"
+        ae._set_hvac_mode.assert_not_called()  # #264: must not override the band's mode
+        ae._activate_fan.assert_called_once()  # assists with the fan instead
 
     def test_economizer_nat_vent_guard_does_not_deactivate_economizer(self):
         """When nat-vent is active and economizer was also running, deactivation is NOT triggered.

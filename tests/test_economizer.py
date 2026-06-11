@@ -1,8 +1,9 @@
 """Tests for the two-phase economizer (window cooling) feature (Issue #27).
 
 Tests cover:
-- Phase 1 (cool-down): AC runs to cool to set temp when indoor > comfort
-- Phase 2 (maintain): AC off when indoor <= comfort, ventilation holds
+- Phase 1 (cool-down): the #249 band holds comfort_cool; the economizer assists with the fan and
+  does not override the HVAC mode/setpoint (Issue #264)
+- Phase 2 (maintain): band stays armed when indoor <= comfort, ventilation holds (Issue #249)
 - Time-bounding: only morning (6-9) and evening (17-24)
 - aggressive_savings: skip AC, ventilation only
 - Guards: non-HOT days, windows closed, too warm outdoor, no classification
@@ -125,7 +126,8 @@ class TestEconomizerCoolDown:
     """Phase 1: AC runs when indoor > comfort and outdoor is favorable."""
 
     def test_cooldown_activates_ac_when_indoor_above_comfort(self):
-        """Indoor 80°F > comfort 75°F, outdoor 73°F → AC runs in cool mode."""
+        """Indoor 80°F > comfort 75°F, outdoor 73°F → cool-down phase; the #249 band holds
+        comfort_cool, so the economizer assists with the fan and does NOT override the HVAC mode (#264)."""
         engine = _make_automation_engine()
         engine._current_classification = _make_hot_classification()
 
@@ -141,11 +143,12 @@ class TestEconomizerCoolDown:
         assert result is True
         assert engine._economizer_active is True
         assert engine._economizer_phase == "cool-down"
-        # Should set HVAC to cool mode and set temperature to comfort
+        # Issue #264: the #249 comfort band already holds comfort_cool — the economizer no longer
+        # flips the HVAC mode/setpoint (that would fight the band). Cool-down now only assists with the fan.
         mode_calls = _get_hvac_mode_calls(engine)
-        assert any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls)
+        assert not any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls), "economizer must not override the band mode"
         temp_calls = _get_set_temp_calls(engine)
-        assert any(c[0][2]["temperature"] == 75 for c in temp_calls)
+        assert not any(c[0][2]["temperature"] == 75 for c in temp_calls), "economizer must not set the band's setpoint"
 
     def test_cooldown_no_repeat_calls_same_phase(self):
         """Calling again while still in cool-down doesn't re-issue commands."""
@@ -368,8 +371,9 @@ class TestEconomizerAggressiveSavings:
         # Should NOT have set cool mode (savings skips AC assist)
         assert not any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls)
 
-    def test_comfort_mode_uses_ac_for_cooldown(self):
-        """With aggressive_savings=False (default), AC runs for cool-down."""
+    def test_comfort_mode_cooldown_assists_with_fan_not_ac_override(self):
+        """Issue #264: with aggressive_savings=False, cool-down assists with the fan; the #249 band
+        (not the economizer) holds comfort_cool, so the economizer no longer flips the HVAC mode."""
         engine = _make_automation_engine({"aggressive_savings": False})
         engine._current_classification = _make_hot_classification()
 
@@ -385,7 +389,7 @@ class TestEconomizerAggressiveSavings:
         assert result is True
         assert engine._economizer_phase == "cool-down"
         mode_calls = _get_hvac_mode_calls(engine)
-        assert any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls)
+        assert not any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls), "economizer must not override the band mode"
 
 
 # ---------------------------------------------------------------------------

@@ -721,6 +721,25 @@ KNOWN_FIXES: dict[int, dict] = {
             "Single-setpoint mid-day edge re-selection — the band holds both edges via the device's shape",
         ],
     },
+    264: {
+        "issue": 264,
+        "title": "Economizer no longer overrides the #249 comfort band (fan-assist only)",
+        "version_fixed": "0.4.1",
+        "scope_covered": [
+            "check_window_cooling_opportunity() cool-down phase: removed _set_hvac_mode('cool') +"
+            " _set_temperature(comfort_cool) — the #249 band already holds comfort_cool, so the"
+            " economizer no longer flips the heat_cool band to single cool",
+            "Cool-down now only activates the fan to assist the band's cooling (pull cool outdoor air"
+            " through the open window); maintain phase unchanged (band stays armed, #249)",
+            "Thermostat stays in the stable heat_cool band on hot days — one controller, no mode flip",
+        ],
+        "scope_not_covered": [
+            "Full economizer retirement (its fan role overlaps natural ventilation) — deferred",
+            "No economizer on/off toggle added — it remains gated only by hot-day + window-open +"
+            " outdoor<=comfort_cool+delta + time-window eligibility",
+            "Restart re-evaluation (home sits paused after restart with an open contact) — tracked in #263",
+        ],
+    },
 }
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"

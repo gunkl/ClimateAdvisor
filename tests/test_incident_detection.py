@@ -251,12 +251,14 @@ class TestSimulateNewFeatures:
         _handle_occupancy_away() in simulate.py clears manual_override_active.
         The scenario documents that occupancy-away transitions must clear overrides.
         """
+        # Issue #243: this scenario was de-duplicated — the canonical copy lives in golden/ (the
+        # pending/ duplicate was removed). Point at the golden copy.
         bspec_path = (
-            Path(__file__).parent.parent / "tools" / "simulations" / "pending" / "away_occupancy_override_cleared.json"
+            Path(__file__).parent.parent / "tools" / "simulations" / "golden" / "away_occupancy_override_cleared.json"
         )
         assert bspec_path.exists(), f"Expected BSpec not found: {bspec_path}"
 
-        result = run_scenario(bspec_path, state="pending")
+        result = run_scenario(bspec_path, state="golden")
 
         assert result["passed"] is True, (
             f"away_occupancy_override_cleared should PASS after bug #220 is fixed. Assertions: {result['assertions']}"

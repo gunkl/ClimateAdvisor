@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.56"
+VERSION = "0.4.0"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.0": [
+        "Feat #249: Thermostat-is-the-controller — Climate Advisor now programs a comfort band"
+        " [comfort_heat, comfort_cool] and lets the thermostat's own deadband hold it, instead of"
+        " switching HVAC off and running a 30-minute supervisory loop. The home pre-heats cold"
+        " mornings up to comfort and cools warm afternoons by itself; natural ventilation keeps the"
+        " band armed (free cooling stays free while the heat floor stays defended); aggressive_savings"
+        " widens the band. away/vacation/sleep use setback bands. Single-mode thermostats arm the"
+        " threatened edge; dual heat_cool thermostats hold both edges with one command.",
+        "Fix #247: The ODE ceiling guard now escalates to AC when outdoor stays below indoor but"
+        " ventilation can't hold the comfort ceiling (re-occurrence of #218's incomplete fix). Under"
+        " the #249 band model this is the misprogramming backstop; the comfort band is the primary"
+        " defense.",
+    ],
     "0.3.54": [
         "Fix #172: Predicted indoor temperature no longer drops suddenly at sleep time"
         " — ODE uses classification.hvac_mode for today's mode (prevents evening forecast-high flip);"
@@ -663,7 +676,7 @@ KNOWN_FIXES: dict[int, dict] = {
         "issue": 247,
         "title": "Ceiling guard never escalated to AC when outdoor stayed below indoor"
         " (re-occurrence of #218's incomplete fix)",
-        "version_fixed": "0.3.57",
+        "version_fixed": "0.4.0",
         "scope_covered": [
             "apply_classification() ceiling-guard dormancy changed from 1 condition (outdoor<=indoor) to 3",
             " (outdoor<=indoor AND _natural_vent_active AND indoor<=ceiling threshold)",
@@ -686,7 +699,7 @@ KNOWN_FIXES: dict[int, dict] = {
     249: {
         "issue": 249,
         "title": "Thermostat-is-the-controller: program a comfort band instead of HVAC off + supervisory guards",
-        "version_fixed": "0.3.57",
+        "version_fixed": "0.4.0",
         "scope_covered": [
             "select_comfort_band() computes [floor, ceiling] from classification/occupancy/sleep/savings;"
             " occupied+awake = full comfort band [comfort_heat, comfort_cool] on ANY day type",

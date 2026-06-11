@@ -167,5 +167,10 @@
     "sha256": "f577212489dfad85c6c23232b3177bbd7ef0a8431b0069b41d044957f78cb9cc",
     "signed": "2026-06-10",
     "issue": 229
+  },
+  "away_natvent_activates_free_cooling": {
+    "sha256": "9f4c6745e1b2ecc30c8612d5f64d01e9a2745fa385e539f95ee7e41aed8c4857",
+    "signed": "2026-06-10",
+    "issue": 231
   }
 }

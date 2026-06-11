@@ -1270,7 +1270,7 @@ All four must be true simultaneously for natural ventilation to activate.
 | `outdoor_temp < comfort_cool + nat_vent_delta` | Ceiling | Outdoor air too warm (even for transitional cooling) should not enter; `nat_vent_delta` provides a configurable tolerance band above `comfort_cool` |
 | At least one door/window sensor open | Physical prerequisite | Natural ventilation requires an open path for airflow |
 
-When all conditions are met: HVAC is set to `off`, the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`.
+When all conditions are met: the comfort band **stays armed** (HVAC is **not** set to `off` — Issue #249; the thermostat self-arbitrates with the open window), the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`. Activation is gated on **fan configuration + temperature, not occupancy** — a configured fan is the user's opt-in to fan-assisted ventilation, so nat-vent runs for free cooling home or away (#231 handles the comfort-ceiling exit so an empty home is not over-cooled); a user opts out of nat-vent by not configuring a fan.
 
 ### Exit Hierarchy
 

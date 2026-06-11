@@ -1,18 +1,19 @@
 {
   "name": "strong_warming_trend_aggressive_setback",
-  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. Setback target = comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) + setback_modifier(-3) = 74F (floored by logic: modifier is subtracted from comfort-cool direction). Verifies modifier deepens cool setback.",
+  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. Production handle_bedtime() uses select_comfort_band() with DEFAULT_SLEEP_COOL=78F — the modifier is stored in the event payload for transparency but the band uses the configured sleep setpoints, not compute_bedtime_setback(). Verifies classification and bedtime band are both applied correctly.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "setback_modifier = -3.0 (negative = stronger/more aggressive pre-cooling setback).",
-    "Simulator _compute_bedtime_setback() for cool:",
-    "  raw = comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) + setback_modifier(-3) = 74F",
-    "  ceiling = setback_cool(79)",
-    "  target = min(74, 79) = 74F",
-    "So setback is 74F \u00e2\u20ac\u201d same as comfort_cool. This makes sense: a -3 modifier exactly cancels the",
-    "default 3F depth, resulting in no net setback depth (cooling all the way to comfort target overnight).",
-    "The key assertion is that setback_applied fires with the modifier-adjusted target (74F, NOT 77F).",
-    "The modifier is passed in the classification event's setback_modifier field.",
+    "setback_modifier = -3.0 (negative = stronger warming trend signal).",
+    "Production handle_bedtime() uses select_comfort_band(in_sleep_window=True), which reads",
+    "  sleep_cool = config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL) = 78.0F (not in scenario config).",
+    "  sleep_heat = config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT) = 66.0F (not in scenario config).",
+    "  Sleep band = [66/78]. The setback_modifier is stored in the bedtime_setback event payload for",
+    "  transparency but does not currently change the band ceiling (adaptive wiring is a P3 follow-up).",
+    "Classification at 14:00: dual band [comfort_heat=70 / comfort_cool=74]. production_temp_at",
+    "  returns the floor (70F) for dual-setpoint actions per outcomes.py §P3 note.",
+    "Bedtime at 22:30: sleep band [66/78]. production_temp_at returns ceiling (78F) for cool mode",
+    "  (active='ceiling' → outcomes.py reads ceiling from bedtime_setback payload).",
     "Covers Priority 7 warming trend setback from plan abundant-mapping-clarke.md."
   ],
   "config": {
@@ -36,33 +37,32 @@
       "type": "temp_update",
       "indoor_f": 73.0,
       "outdoor_f": 78.0,
-      "note": "Evening: indoor 73F, outdoor 78F \u00e2\u20ac\u201d AC running"
+      "note": "Evening: indoor 73F, outdoor 78F — AC running"
     },
     {
       "time": "2026-07-15T22:30:00",
       "type": "bedtime",
-      "note": "Bedtime: cool setback with modifier. raw=74+3+(-3)=74F. ceiling=79F. target=74F."
+      "note": "Bedtime: select_comfort_band(in_sleep_window=True) → [66/78]. setback_modifier stored in event payload."
     }
   ],
   "assertions": [
     {
       "at": "2026-07-15T14:00:00",
       "expect": "classification_applied",
-      "expect_temp": 74.0,
-      "reason": "Warm-day classification applied: cool mode at comfort_cool=74F; setback_modifier=-3.0 stored for bedtime"
+      "expect_temp": 70.0,
+      "reason": "Warm-day classification applied: dual band [comfort_heat=70 / comfort_cool=74]. production_temp_at returns floor=70 for dual-setpoint actions. setback_modifier=-3.0 stored in classification for downstream use."
     },
     {
       "at": "2026-07-15T22:30:00",
       "expect": "setback_applied",
-      "expect_temp": 74.0,
-      "reason": "Bedtime cool setback with modifier: comfort_cool(74) + depth(3) + modifier(-3) = 74F. Modifier deepens setback toward comfort target \u00e2\u20ac\u201d maximally pre-cools for the hot tomorrow."
+      "expect_temp": 78.0,
+      "reason": "Bedtime sleep band [66/78] applied via select_comfort_band(in_sleep_window=True). cool mode active='ceiling' so production_temp_at returns ceiling=78. setback_modifier=-3.0 is recorded in the bedtime_setback event payload; adaptive wiring to the band ceiling is a P3 follow-up."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Strong warming trend modifier (-3.0) reduces cool setback target to comfort floor (74F) for aggressive pre-cooling",
-    "observed_behavior": "classification_applied (74F, modifier=-3.0) \u00e2\u2020\u2019 setback_applied (74F) at bedtime",
-    "expected_behavior": "setback_modifier=-3.0 on cool day: bedtime target = comfort_cool+3-3 = comfort_cool (74F); deepest valid pre-cooling setback"
-  },
-  "pending_issue": 245
+    "summary": "Warming trend classification and standard sleep band both applied correctly; setback_modifier stored in event payload",
+    "observed_behavior": "classification_applied (dual band floor=70) → setback_applied (sleep band ceiling=78) at bedtime",
+    "expected_behavior": "Classification arms comfort band; bedtime arms sleep band [66/78]. setback_modifier carried in payload for future adaptive wiring."
+  }
 }

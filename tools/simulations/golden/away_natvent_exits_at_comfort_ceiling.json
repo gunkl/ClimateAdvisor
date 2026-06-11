@@ -4,22 +4,11 @@
   "source": "synthetic",
   "issue": 231,
   "notes": [
-    "Correct production behavior: nat-vent activates while home, continues after away transition (setpoint-only change).",
+    "Production behavior (single-engine harness): nat-vent activates while home, continues after the away transition (setpoint-only change).",
     "While away with nat-vent active, free cooling keeps indoor below setback_cool=79F.",
-    "At 14:00 when indoor reaches comfort_cool=74F ceiling, nat-vent should exit \u00e2\u20ac\u201d further cooling via open windows",
-    "risks dropping below comfort_heat and accumulating violations.",
-    "The 14:00 nat_vent_not_active assertion documents the Issue #231 fix behavior.",
-    "In simulator: _check_natural_vent_exit() checks comfort_heat floor (74 > 70, no exit), outdoor >= indoor",
-    "(68 < 74, no exit), and outdoor > threshold (68 < 77, no exit) \u00e2\u20ac\u201d nat-vent stays active (documents gap).",
-    "Mark the 14:00 exit assertion simulator_support=false until Issue #231 fix is ported to simulate.py.",
-    "The 09:01 activation, 10:00 setback, and 10:00 nat_vent_still_active assertions are all simulator_support=true."
+    "When indoor reaches the comfort_cool=74F ceiling, the away-ceiling-exit (Issue #231, check_natural_vent_conditions Priority-2b) exits nat-vent \u2014 further open-window cooling risks dropping below comfort_heat and accumulating violations.",
+    "The nat_vent_not_active assertion captures the Issue #231 away-ceiling-exit (live in production)."
   ],
-  "verdict": {
-    "type": "positive",
-    "summary": "Nat-vent uses free cooling while away, exits at comfort_cool ceiling (74F) rather than cooling below comfort band",
-    "observed_behavior": "nat-vent activates while home, persists through away transition (setback applied), exits when indoor reaches comfort_cool",
-    "expected_behavior": "Free cooling opportunity exploited while away; ceiling exit at comfort_cool prevents over-cooling and accumulating comfort violations in the band"
-  },
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 74,
@@ -79,21 +68,17 @@
       "reason": "Away transition: setback_cool=79F applied. This is the only change production makes on occupancy_away \u00e2\u20ac\u201d nat-vent is not exited."
     },
     {
-      "at": "2026-07-10T10:00:00",
-      "expect": "nat_vent_still_active",
-      "track": "logic",
-      "simulator_support": true,
-      "reason": "After away transition, nat-vent state flag must still be True. Production handle_occupancy_away() only changes the setpoint \u00e2\u20ac\u201d it does not exit nat-vent. Checks SimState.natural_vent_active directly."
-    },
-    {
       "at": "2026-07-10T14:00:00",
       "expect": "nat_vent_not_active",
       "track": "logic",
-      "simulator_support": false,
-      "issue": 231,
-      "reason": "Issue #231 fix: when indoor reaches comfort_cool=74F ceiling while away and nat-vent is active, nat-vent should exit. Free cooling has done its job; further outdoor air could stall at the ceiling or risk over-cooling. Production check_natural_vent_conditions() needs a comfort_cool exit gate for away occupancy. Simulator gap: _check_natural_vent_exit() only checks comfort_heat floor (74 > 70, no exit), outdoor >= indoor (68 < 74, no exit), and outdoor > threshold (68 < 77, no exit) \u00e2\u20ac\u201d nat-vent stays active until Issue #231 fix is ported to simulate.py.",
-      "note": "Requires Issue #231 production fix AND a corresponding simulate.py update before this assertion can be promoted to simulator_support=true."
+      "simulator_support": true,
+      "reason": "Issue #231 fix is live in production: when indoor reaches comfort_cool=74F ceiling while away and nat-vent is active, check_natural_vent_conditions() Priority-2b path exits nat-vent. Free cooling has done its job; further outdoor air risks over-cooling below the comfort band. The nat_vent_still_active assertion at 10:00 was removed \u2014 it used the final engine snapshot (which captures the 14:00 exit), making it impossible to assert mid-run state. The continue-through-away behavior is covered by away_with_active_natvent_transition."
     }
   ],
-  "pending_issue": 245
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent uses free cooling while away, exits at comfort_cool ceiling (74F) via Issue #231 away-ceiling-exit path",
+    "observed_behavior": "nat-vent activates while home, persists through away transition (setback applied), exits when indoor reaches comfort_cool=74F",
+    "expected_behavior": "Free cooling opportunity exploited while away; ceiling exit at comfort_cool prevents over-cooling and accumulating comfort violations in the band"
+  }
 }

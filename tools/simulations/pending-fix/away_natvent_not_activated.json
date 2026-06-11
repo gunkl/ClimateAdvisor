@@ -9,7 +9,8 @@
     "whenever outdoor < indoor and conditions are met, regardless of occupancy.",
     "So the simulator incorrectly produces 'natural_ventilation' here.",
     "simulator_support:false on the paused assertion; logic-track verification needs occupancy guard port.",
-    "Covers Priority 6b away_natvent from plan abundant-mapping-clarke.md."
+    "Covers Priority 6b away_natvent from plan abundant-mapping-clarke.md.",
+    "Issue #254: documents a REAL production bug \u2014 handle_door_window_open() activates nat-vent even when occupancy is away (fan runs in an unoccupied home). This scenario is the regression guard; it will pass once the occupancy guard is added. #231 fixed the away nat-vent EXIT; this is the activation gap."
   ],
   "config": {
     "comfort_heat": 70,
@@ -67,5 +68,5 @@
     "observed_behavior": "production: paused on sensor_open while away; simulator incorrectly produces natural_ventilation",
     "expected_behavior": "Nat-vent only activates when occupancy is home or guest; away/vacation occupancy forces pause"
   },
-  "pending_issue": 245
+  "pending_issue": 254
 }

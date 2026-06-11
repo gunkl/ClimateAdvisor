@@ -71,6 +71,5 @@
     "summary": "Away transition changes setpoint only; nat-vent continues running (production behavior)",
     "observed_behavior": "occupancy_away fires -> setback_applied (79F); nat-vent flag remains active",
     "expected_behavior": "Leaving home while nat-vent is active: only setpoint changes. No explicit nat-vent exit event. Nat-vent exits naturally when outdoor conditions change."
-  },
-  "pending_issue": 245
+  }
 }

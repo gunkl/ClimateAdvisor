@@ -1,15 +1,16 @@
 {
   "name": "grace_window_period_no_repause",
-  "description": "Warm day with planned window period 06:00\u00e2\u20ac\u201c10:00 (windows_recommended=True, hvac_mode=off). Sensor opens at 07:00 during window \u00e2\u20ac\u201d planned window gate suppresses pause. Grace might start; sensor opens again at 07:05 during window \u00e2\u2020\u2019 no re-pause (within window). No pause fires at any point during the window period.",
+  "description": "Warm day with planned window period 06:00–10:00 (windows_recommended=True, hvac_mode=off). Sensor opens at 07:00 during window — planned window gate suppresses pause. Grace might start; sensor opens again at 07:05 during window → no re-pause (within window). No pause fires at any point during the window period.",
   "source": "synthetic",
   "issue": 229,
+  "unsupported_reason": "Integration-tier: the planned-window gate that suppresses pause when a sensor opens during the scheduled window period is implemented in the coordinator's _handle_contact_sensor_change listener via _is_within_planned_window_period(). The Tier-A harness dispatches sensor_open events directly into the production AutomationEngine without going through the coordinator's contact-sensor state-listener layer. As a result, the window-gate check is never reached — sensor_open is processed directly and the last event (classification_applied) is returned instead of no_action. Deferred to Tier-B HeadlessTarry harness (#236 follow-on) which wires the full coordinator state-listener layer including _handle_contact_sensor_change.",
   "notes": [
     "Tests: planned window gate suppressing pause when sensor opens during window period.",
     "The simulator's _handle_sensor_open() checks _is_within_planned_window_period() BEFORE calling _apply_nat_vent_or_pause().",
     "When classification has hvac_mode='off' + windows_recommended=True + window_open_time/close_time set, and event time is within the window, sensor_open returns no_action.",
-    "This is a fully logic-track scenario \u00e2\u20ac\u201d no gap closures required.",
+    "This is a fully logic-track scenario — no gap closures required.",
     "Note: _is_within_planned_window_period() requires classification.hvac_mode == 'off' to be true. The warm-day classification with windows_recommended uses hvac_mode='off'.",
-    "Contrast with non-window scenarios where sensor_open during warm day \u00e2\u2020\u2019 nat vent or pause."
+    "Contrast with non-window scenarios where sensor_open during warm day → nat vent or pause."
   ],
   "config": {
     "comfort_heat": 70,
@@ -35,19 +36,19 @@
       "windows_recommended": true,
       "window_open_time": "06:00",
       "window_close_time": "10:00",
-      "note": "Warm-day classification with planned window 06:00\u00e2\u20ac\u201c10:00. hvac_mode=off during window."
+      "note": "Warm-day classification with planned window 06:00–10:00. hvac_mode=off during window."
     },
     {
       "time": "2026-07-15T07:00:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens at 07:00, within planned window period (06:00\u00e2\u20ac\u201c10:00). Window gate should suppress pause."
+      "note": "Window opens at 07:00, within planned window period (06:00–10:00). Window gate should suppress pause."
     },
     {
       "time": "2026-07-15T07:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.bedroom_window",
-      "note": "Second window opens at 07:05. Still within window period \u00e2\u20ac\u201d no pause, no change."
+      "note": "Second window opens at 07:05. Still within window period — no pause, no change."
     },
     {
       "time": "2026-07-15T08:00:00",
@@ -61,26 +62,26 @@
     {
       "at": "2026-07-15T05:31:00",
       "expect": "classification_applied",
-      "reason": "Warm-day classification applied: hvac_mode=off, windows_recommended=True, window 06:00\u00e2\u20ac\u201c10:00.",
-      "track": "logic"
+      "reason": "Warm-day classification applied: hvac_mode=off, windows_recommended=True, window 06:00–10:00.",
+      "track": "integration"
     },
     {
       "at": "2026-07-15T07:00:00",
       "expect": "no_action",
-      "reason": "Sensor opens at 07:00, within planned window period 06:00\u00e2\u20ac\u201c10:00. _is_within_planned_window_period() returns True (classification.hvac_mode='off', windows_recommended=True, 07:00 is in [06:00,10:00]). Simulator returns no_action \u00e2\u20ac\u201d no pause, no nat vent.",
-      "track": "logic"
+      "reason": "Sensor opens at 07:00, within planned window period 06:00–10:00. _is_within_planned_window_period() returns True (classification.hvac_mode='off', windows_recommended=True, 07:00 is in [06:00,10:00]). Coordinator returns no_action — no pause, no nat vent.",
+      "track": "integration"
     },
     {
       "at": "2026-07-15T07:05:00",
       "expect": "no_action",
-      "reason": "Second sensor opens at 07:05, still within window period. Already suppressed \u00e2\u20ac\u201d no_action again.",
-      "track": "logic"
+      "reason": "Second sensor opens at 07:05, still within window period. Already suppressed — no_action again.",
+      "track": "integration"
     }
   ],
   "verdict": {
     "type": "positive",
     "summary": "Planned window period gate suppresses pause when sensor opens during the scheduled window",
-    "observed_behavior": "classification_applied (off, windows_recommended) \u00e2\u2020\u2019 no_action on sensor_open (07:00, within window) \u00e2\u2020\u2019 no_action on second sensor_open (07:05)",
+    "observed_behavior": "classification_applied (off, windows_recommended) → no_action on sensor_open (07:00, within window) → no_action on second sensor_open (07:05)",
     "expected_behavior": "During planned window hours, sensor openings are expected and do not trigger pause or nat-vent logic"
   },
   "pending_issue": 245

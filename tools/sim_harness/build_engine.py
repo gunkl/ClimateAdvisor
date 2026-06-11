@@ -123,7 +123,31 @@ def build_headless_engine(
     # 5. Inject initial climate entity state so the engine can read it.
     #    Default matches legacy SimState: mode="off", fan_mode="auto", no target temp,
     #    no hvac_action (engine should not fire mode-inconsistency checks at startup).
-    attrs = {"fan_mode": "auto"}
+    #
+    #    P3 (Issue #249) capability defaults: _apply_comfort_band reads hvac_modes and
+    #    supported_features to decide the command shape.  Without these the engine hits
+    #    the "no capable mode" fallback and silently skips the band arm — no
+    #    comfort_band_applied event, no set_temperature action — making every band-based
+    #    scenario mute.  The harness default is now a dual-setpoint thermostat
+    #    (heat_cool + TARGET_TEMP_RANGE=2), matching the most capable real-world unit and
+    #    giving scenarios the widest assertion surface.  Scenarios that need single-mode
+    #    behaviour can override via config["thermostat_hvac_modes"] /
+    #    config["thermostat_supported_features"] or by passing climate_attributes directly.
+    _default_hvac_modes = merged_config.get(
+        "thermostat_hvac_modes",
+        ["off", "heat", "cool", "heat_cool"],
+    )
+    _default_features = int(
+        merged_config.get(
+            "thermostat_supported_features",
+            2,  # CLIMATE_FEATURE_TARGET_TEMP_RANGE = 2 (const.py)
+        )
+    )
+    attrs = {
+        "fan_mode": "auto",
+        "hvac_modes": _default_hvac_modes,
+        "supported_features": _default_features,
+    }
     if climate_attributes:
         attrs.update(climate_attributes)
     fake_hass.states.set(climate_entity, FakeState(state=climate_state, attributes=attrs))

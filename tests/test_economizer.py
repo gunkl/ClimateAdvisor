@@ -177,7 +177,11 @@ class TestEconomizerMaintain:
     """Phase 2: AC off when indoor <= comfort, ventilation holds."""
 
     def test_maintain_turns_ac_off_when_indoor_at_comfort(self):
-        """Indoor 75°F == comfort 75°F → AC off, maintain phase."""
+        """Indoor 75°F == comfort 75°F → maintain phase; band stays armed (no HVAC off call).
+
+        #249: economizer maintain no longer calls set_hvac_mode("off") — the comfort
+        band stays armed and the open window handles cooling via natural ventilation.
+        """
         engine = _make_automation_engine()
         engine._current_classification = _make_hot_classification()
 
@@ -193,8 +197,9 @@ class TestEconomizerMaintain:
         assert result is True
         assert engine._economizer_active is True
         assert engine._economizer_phase == "maintain"
+        # #249: maintain phase leaves the comfort band armed; no set_hvac_mode("off") call
         mode_calls = _get_hvac_mode_calls(engine)
-        assert any(c[0][2]["hvac_mode"] == "off" for c in mode_calls)
+        assert not any(c[0][2]["hvac_mode"] == "off" for c in mode_calls)
 
     def test_maintain_when_indoor_below_comfort(self):
         """Indoor 72°F < comfort 75°F → AC off, maintain phase."""
@@ -214,7 +219,11 @@ class TestEconomizerMaintain:
         assert engine._economizer_phase == "maintain"
 
     def test_transition_cooldown_to_maintain(self):
-        """Indoor drops from above to at comfort → transitions cool-down → maintain."""
+        """Indoor drops from above to at comfort → transitions cool-down → maintain.
+
+        #249: the cool-down→maintain transition no longer calls set_hvac_mode("off");
+        the comfort band stays armed once indoor is at/below the comfort ceiling.
+        """
         engine = _make_automation_engine()
         engine._current_classification = _make_hot_classification()
         engine._economizer_active = True
@@ -231,8 +240,9 @@ class TestEconomizerMaintain:
 
         assert result is True
         assert engine._economizer_phase == "maintain"
+        # #249: maintain phase leaves band armed; no set_hvac_mode("off") on transition
         mode_calls = _get_hvac_mode_calls(engine)
-        assert any(c[0][2]["hvac_mode"] == "off" for c in mode_calls)
+        assert not any(c[0][2]["hvac_mode"] == "off" for c in mode_calls)
 
     def test_maintain_when_indoor_temp_is_none(self):
         """No indoor temp data → defaults to maintain (AC off)."""
@@ -333,7 +343,11 @@ class TestEconomizerAggressiveSavings:
     """When aggressive_savings=True, skip AC assist, ventilation only."""
 
     def test_savings_mode_goes_directly_to_maintain(self):
-        """With aggressive_savings, indoor above comfort still uses ventilation only."""
+        """With aggressive_savings, indoor above comfort still uses ventilation only.
+
+        #249: aggressive_savings maintain no longer calls set_hvac_mode("off") — the
+        comfort band stays armed; AC compressor self-arbitrates with the open window.
+        """
         engine = _make_automation_engine({"aggressive_savings": True})
         engine._current_classification = _make_hot_classification()
 
@@ -348,9 +362,10 @@ class TestEconomizerAggressiveSavings:
 
         assert result is True
         assert engine._economizer_phase == "maintain"
+        # #249: maintain/savings mode leaves band armed; no set_hvac_mode("off") call
         mode_calls = _get_hvac_mode_calls(engine)
-        assert any(c[0][2]["hvac_mode"] == "off" for c in mode_calls)
-        # Should NOT have set cool mode
+        assert not any(c[0][2]["hvac_mode"] == "off" for c in mode_calls)
+        # Should NOT have set cool mode (savings skips AC assist)
         assert not any(c[0][2]["hvac_mode"] == "cool" for c in mode_calls)
 
     def test_comfort_mode_uses_ac_for_cooldown(self):

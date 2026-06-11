@@ -1,0 +1,71 @@
+{
+  "name": "p3_warm_day_dual_thermostat_comfort_band",
+  "description": "Issue #249 P3: On a warm day with a dual-setpoint thermostat, classification arms the comfort band [comfort_heat / comfort_cool] in heat_cool mode instead of issuing HVAC off.",
+  "source": "synthetic",
+  "issue": 249,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md):",
+    "(a) Scenario effectiveness: if _apply_comfort_band is removed from apply_classification, the",
+    "    comfort_band_armed assertion fails — the band is never armed and the thermostat is left",
+    "    in its prior state without a refreshed setpoint, risking comfort failure on a warm afternoon.",
+    "(b) Docs↔production alignment: docs/08-COMPUTATION-REFERENCE.md must reflect that warm-day",
+    "    classification now arms a comfort band (not HVAC off + supervisory guards). This scenario",
+    "    is the regression anchor that forces any doc update if the band arm is removed.",
+    "(c) Occupant experience: if this scenario fails to catch a regression, the occupant may return",
+    "    home to a house that was never actively cooled (band not armed), breaching comfort_cool.",
+    "Regression proof: delete or skip _apply_comfort_band call in apply_classification → comfort_band_armed",
+    "fails; change band ceiling from comfort_cool to setback_cool → expect_band ceiling check fails.",
+    "The thermostat must enter heat_cool mode (dual setpoint) — set_hvac_mode(heat_cool) fires."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-06-15T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 72.0,
+      "note": "Morning: indoor 74F (within band), outdoor 72F."
+    },
+    {
+      "time": "2026-06-15T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification. P3: _apply_comfort_band arms [comfort_heat=70 / comfort_cool=76] in heat_cool."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-15T08:01:00",
+      "expect": "classification_applied",
+      "reason": "P3: warm-day classification applied. Comfort band armed immediately after — no pure HVAC-off.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T08:01:00",
+      "expect": "comfort_band_armed",
+      "reason": "P3 guard: _apply_comfort_band must fire. If missing, thermostat is left without a refreshed setpoint — comfort_cool ceiling undefended on a warm afternoon.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T08:01:00",
+      "expect": "expect_band",
+      "expect_band": {"floor": 70.0, "ceiling": 76.0},
+      "reason": "Band must be [comfort_heat=70 / comfort_cool=76]. Occupied+awake on any day type uses the full comfort band — no floor suppression. Wrong ceiling (e.g. setback_cool=82) would leave thermostat 6F too permissive and occupant overheated.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "P3 warm-day classification arms dual comfort band [70/76] — thermostat defends comfort_cool ceiling autonomously",
+    "observed_behavior": "classification_applied; comfort_band_applied [floor=70, ceiling=76, active=ceiling, mode=dual]; set_hvac_mode(heat_cool) + set_temperature(low=70, high=76)",
+    "expected_behavior": "Occupant returns home to a thermostat that has been defending 76F all day — no surprise heat buildup. Floor=70F (comfort_heat) is the full occupied+awake band — no floor suppression on warm days."
+  }
+}

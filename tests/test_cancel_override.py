@@ -35,6 +35,22 @@ def _consume_coroutine(coro):
     coro.close()
 
 
+def _make_thermostat_state(mode: str = "heat") -> MagicMock:
+    """Return a mock thermostat state with heat+cool capabilities.
+
+    #249 P3: apply_classification now calls _apply_comfort_band which reads
+    attributes.hvac_modes + supported_features.  Without these the band no-ops
+    and no service calls are emitted, breaking the 'classification resumes' tests.
+    """
+    s = MagicMock()
+    s.state = mode
+    s.attributes = {
+        "hvac_modes": ["off", "heat", "cool"],
+        "supported_features": 1,
+    }
+    return s
+
+
 def _make_automation_engine(config_overrides=None):
     """Create an AutomationEngine with mocked HA dependencies."""
     hass = MagicMock()
@@ -42,6 +58,8 @@ def _make_automation_engine(config_overrides=None):
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+    # Provide thermostat capabilities so _apply_comfort_band can arm when classification resumes.
+    hass.states.get.return_value = _make_thermostat_state("heat")
 
     config = {
         "comfort_heat": 70,
@@ -126,18 +144,24 @@ class TestCancelOverride:
         assert engine._grace_active is False
 
     def test_cancel_allows_classification_to_apply(self):
-        """After clearing override, apply_classification should call HVAC services."""
+        """After clearing override, apply_classification arms the band and calls HVAC services.
+
+        #249 P3: apply_classification now calls _apply_comfort_band; the thermostat state mock
+        must expose hvac_modes + supported_features so the band can select a command path.
+        """
         engine = _make_automation_engine()
 
         # Activate then cancel override
         state = MagicMock()
         state.state = "heat"
+        # Provide capabilities so _apply_comfort_band can arm after override is cleared.
+        state.attributes = {"hvac_modes": ["off", "heat", "cool"], "supported_features": 1}
         engine.hass.states.get.return_value = state
         engine.handle_manual_override()
         engine.clear_manual_override()
         engine._cancel_grace_timers()
 
-        # Now classification should apply normally
+        # Now classification should apply normally — band fires the floor (heat day).
         c = _make_classification(day_type="cold", hvac_mode="heat")
         asyncio.run(engine.apply_classification(c))
 

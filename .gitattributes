@@ -1,0 +1,5 @@
+# Simulation/golden scenario JSON are byte-hashed for integrity (tools/simulate.py _file_sha256).
+# Force LF so the hash is identical on every platform: a Windows checkout would otherwise be CRLF
+# and break `--check-integrity`, and a CRLF re-sign would silently break Linux CI. (Issue #249 follow-on.)
+tools/simulations/**/*.json text eol=lf
+tools/simulations/golden/MANIFEST.json text eol=lf

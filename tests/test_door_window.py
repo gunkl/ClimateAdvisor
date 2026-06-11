@@ -529,8 +529,9 @@ class TestSensorOpenedEventPayloadNatVent:
         assert payload.get("result") == "natural_ventilation"
         assert "hvac_mode_change" in payload, "hvac_mode_change must be present for nat_vent result"
         assert "fan_mode_change" in payload, "fan_mode_change must be present for nat_vent result"
-        # hvac transitions to off; fan transitions to on
-        assert payload["hvac_mode_change"].endswith("→off")
+        # Issue #249 P3: nat-vent no longer turns HVAC off — the comfort band stays armed and only
+        # the fan turns on (the compressor self-arbitrates with the open window). Was "→off".
+        assert payload["hvac_mode_change"].endswith("→band-armed")
         assert payload["fan_mode_change"] == "auto→on"
 
     def test_sensor_opened_paused_result_has_hvac_mode_change(self):

@@ -59,8 +59,14 @@
     {
       "at": "2026-07-15T13:01:00",
       "expect": "classification_applied",
-      "expect_temp": 74.0,
-      "reason": "Initial warm-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "reason": "Initial warm-day classification applied. P3: band [comfort_heat=70 / comfort_cool=74] armed.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-15T13:01:00",
+      "expect": "expect_band",
+      "expect_band": {"floor": 70.0, "ceiling": 74.0},
+      "reason": "P3: comfort band ceiling=comfort_cool=74F, floor=comfort_heat=70F armed at classification. Occupied+awake uses the full comfort band — no floor suppression.",
       "track": "logic"
     },
     {

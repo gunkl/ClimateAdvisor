@@ -79,9 +79,19 @@ def _make_classification(hvac_mode: str = "cool", setback_modifier: float = 0.0)
 
 
 def _thermostat_state(mode: str) -> MagicMock:
-    """Return a mock HA state object whose .state is ``mode``."""
+    """Return a mock HA state object whose .state is ``mode`` with capabilities.
+
+    #249 P3: _apply_comfort_band reads attributes.hvac_modes + attributes.supported_features
+    to decide which command shape to use.  Without these the band no-ops silently, so all
+    thermostat stubs must carry real capability attrs to exercise the set_temperature path.
+    """
     s = MagicMock()
     s.state = mode
+    # Expose both heat and cool so the band can arm whichever active edge is needed.
+    s.attributes = {
+        "hvac_modes": ["off", "heat", "cool"],
+        "supported_features": 1,  # single-setpoint, no heat_cool
+    }
     return s
 
 
@@ -98,34 +108,44 @@ def _last_set_temperature(engine: AutomationEngine) -> float | None:
 
 
 class TestHandleOccupancyAwayActualMode:
-    """handle_occupancy_away() selects setback branch from thermostat state, not classification."""
+    """handle_occupancy_away() arms the away comfort band, defending the ceiling edge."""
 
     def test_thermostat_cool_classification_heat_applies_cool_setback(self):
-        """Bug scenario: thermostat=cool, classification=heat → must use setback_cool (82), NOT setback_heat (61)."""
+        """Away band active='ceiling': cool-capable thermostat receives setback_cool (82).
+
+        #249 P3 replaces the old actual-thermostat-mode dispatch — the band model always
+        defends the ceiling when away (setback_cool) on a cool-capable device, regardless
+        of the day classification's hvac_mode.
+        """
         engine = _make_engine()
-        # Classification says heat (e.g., rolled over at night)…
+        # Classification says heat (e.g., rolled over at night) — irrelevant to away band selection.
         engine._current_classification = _make_classification(hvac_mode="heat")
-        # …but the actual thermostat is still in cool mode
+        # Thermostat supports both heat and cool — band picks ceiling (cool) path.
         engine.hass.states.get.return_value = _thermostat_state("cool")
 
         asyncio.run(engine.handle_occupancy_away())
 
         temp = _last_set_temperature(engine)
-        assert temp == 82, f"Expected setback_cool=82, got {temp}"
+        assert temp == 82, f"Expected setback_cool=82 (away ceiling), got {temp}"
 
-    def test_thermostat_heat_classification_cool_applies_heat_setback(self):
-        """Reverse: thermostat=heat, classification=cool → must use setback_heat (61), NOT setback_cool (82)."""
+    def test_thermostat_heat_classification_cool_applies_cool_setback(self):
+        """Away band active='ceiling': cool-capable thermostat receives setback_cool (82).
+
+        #249 P3: thermostat state is no longer the dispatch axis — the away band always
+        fires the ceiling edge on any cool-capable device.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
+        # Thermostat in heat mode but still advertises cool capability.
         engine.hass.states.get.return_value = _thermostat_state("heat")
 
         asyncio.run(engine.handle_occupancy_away())
 
         temp = _last_set_temperature(engine)
-        assert temp == 61, f"Expected setback_heat=61, got {temp}"
+        assert temp == 82, f"Expected setback_cool=82 (away ceiling), got {temp}"
 
     def test_thermostat_cool_classification_cool_applies_cool_setback(self):
-        """Normal path (no mismatch): thermostat=cool, classification=cool → setback_cool (82)."""
+        """Normal path: cool thermostat, cool classification → away ceiling = setback_cool (82)."""
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
         engine.hass.states.get.return_value = _thermostat_state("cool")
@@ -135,26 +155,39 @@ class TestHandleOccupancyAwayActualMode:
         temp = _last_set_temperature(engine)
         assert temp == 82, f"Expected setback_cool=82, got {temp}"
 
-    def test_thermostat_off_logs_and_skips_setpoint(self):
-        """When thermostat is off no setpoint should be sent."""
+    def test_thermostat_off_only_logs_and_skips_setpoint(self):
+        """Off-only thermostat (no heat/cool capability) → band cannot arm → no setpoint.
+
+        #249 P3: the band checks capabilities, not current state.  A thermostat that only
+        advertises 'off' (hvac_modes=['off']) has no capable mode to defend the active edge,
+        so _apply_comfort_band logs INFO and returns without calling set_temperature.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
-        engine.hass.states.get.return_value = _thermostat_state("off")
+        # Only "off" in hvac_modes → no cool/heat capability → band no-ops.
+        off_only_state = MagicMock()
+        off_only_state.state = "off"
+        off_only_state.attributes = {"hvac_modes": ["off"], "supported_features": 0}
+        engine.hass.states.get.return_value = off_only_state
 
         asyncio.run(engine.handle_occupancy_away())
 
         temp = _last_set_temperature(engine)
-        assert temp is None, f"Expected no setpoint when HVAC is off, got {temp}"
+        assert temp is None, f"Expected no setpoint when thermostat has no capable mode, got {temp}"
 
 
 # ── handle_occupancy_vacation — 4 cases ─────────────────────────
 
 
 class TestHandleOccupancyVacationActualMode:
-    """handle_occupancy_vacation() selects setback branch from thermostat state, not classification."""
+    """handle_occupancy_vacation() arms the vacation deep-setback band, defending the ceiling edge."""
 
     def test_thermostat_cool_classification_heat_applies_cool_setback(self):
-        """Bug scenario: thermostat=cool, classification=heat → must use setback_cool branch."""
+        """Vacation band active='ceiling': cool-capable thermostat receives setback_cool + EXTRA.
+
+        #249 P3: the vacation band always arms the ceiling on cool-capable devices regardless
+        of classification hvac_mode — the old mode-dispatch is replaced by band selection.
+        """
         from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
@@ -163,26 +196,31 @@ class TestHandleOccupancyVacationActualMode:
 
         asyncio.run(engine.handle_occupancy_vacation())
 
-        expected = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA  # 82 + extra
+        expected = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA  # 82 + 3 = 85
         temp = _last_set_temperature(engine)
-        assert temp == expected, f"Expected vacation cool setback={expected}, got {temp}"
+        assert temp == expected, f"Expected vacation cool ceiling={expected}, got {temp}"
 
-    def test_thermostat_heat_classification_cool_applies_heat_setback(self):
-        """Reverse: thermostat=heat, classification=cool → must use setback_heat branch."""
+    def test_thermostat_heat_classification_cool_applies_cool_setback(self):
+        """Vacation band active='ceiling': cool-capable thermostat gets ceiling even when in heat state.
+
+        #249 P3: thermostat current state is no longer the dispatch axis — cool capability
+        is what matters, and the vacation band always defends the ceiling.
+        """
         from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
+        # Thermostat in heat mode but advertises cool — band picks ceiling.
         engine.hass.states.get.return_value = _thermostat_state("heat")
 
         asyncio.run(engine.handle_occupancy_vacation())
 
-        expected = engine.config["setback_heat"] - VACATION_SETBACK_EXTRA  # 61 - extra
+        expected = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA  # 82 + 3 = 85
         temp = _last_set_temperature(engine)
-        assert temp == expected, f"Expected vacation heat setback={expected}, got {temp}"
+        assert temp == expected, f"Expected vacation cool ceiling={expected}, got {temp}"
 
     def test_thermostat_cool_classification_cool_applies_cool_setback(self):
-        """Normal path: thermostat=cool, classification=cool → cool vacation setback."""
+        """Normal path: cool thermostat, cool classification → vacation ceiling = setback_cool + EXTRA."""
         from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
@@ -193,28 +231,39 @@ class TestHandleOccupancyVacationActualMode:
 
         expected = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA
         temp = _last_set_temperature(engine)
-        assert temp == expected, f"Expected vacation cool setback={expected}, got {temp}"
+        assert temp == expected, f"Expected vacation cool ceiling={expected}, got {temp}"
 
-    def test_thermostat_off_logs_and_skips_setpoint(self):
-        """When thermostat is off no setpoint should be sent."""
+    def test_thermostat_off_only_logs_and_skips_setpoint(self):
+        """Off-only thermostat (no heat/cool capability) → band cannot arm → no setpoint.
+
+        #249 P3: the band checks advertised capabilities, not current thermostat state.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
-        engine.hass.states.get.return_value = _thermostat_state("off")
+        # Only "off" in hvac_modes → no cool/heat capability → band no-ops.
+        off_only_state = MagicMock()
+        off_only_state.state = "off"
+        off_only_state.attributes = {"hvac_modes": ["off"], "supported_features": 0}
+        engine.hass.states.get.return_value = off_only_state
 
         asyncio.run(engine.handle_occupancy_vacation())
 
         temp = _last_set_temperature(engine)
-        assert temp is None, f"Expected no setpoint when HVAC is off, got {temp}"
+        assert temp is None, f"Expected no setpoint when thermostat has no capable mode, got {temp}"
 
 
 # ── Event emission — Issue #240 ──────────────────────────────────
 
 
 class TestOccupancyAwayEmitsEvent:
-    """handle_occupancy_away() must emit occupancy_setback when a setpoint is applied."""
+    """handle_occupancy_away() must emit occupancy_setback with the band shape."""
 
     def test_cool_mode_emits_occupancy_setback_away(self):
-        """Cool thermostat → occupancy_setback with mode=cool, occupancy=away."""
+        """Away band → occupancy_setback with mode='away', floor/ceiling, occupancy='away'.
+
+        #249 P3: event payload changed from {mode: 'cool', target_f} to {mode: 'away',
+        floor, ceiling} — the band covers both edges rather than a single setpoint.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
         engine.hass.states.get.return_value = _thermostat_state("cool")
@@ -224,15 +273,21 @@ class TestOccupancyAwayEmitsEvent:
 
         asyncio.run(engine.handle_occupancy_away())
 
-        assert len(events) == 1, f"Expected 1 event, got {events}"
-        evt_name, evt_data = events[0]
+        # Filter to occupancy_setback events only (comfort_band_applied may also fire).
+        setback_events = [(n, d) for n, d in events if n == "occupancy_setback"]
+        assert len(setback_events) == 1, f"Expected 1 occupancy_setback event, got {events}"
+        evt_name, evt_data = setback_events[0]
         assert evt_name == "occupancy_setback"
-        assert evt_data["mode"] == "cool"
+        assert evt_data["mode"] == "away"  # band always emits mode='away', not the HVAC mode
         assert evt_data["occupancy"] == "away"
-        assert evt_data["target_f"] == engine.config["setback_cool"]
+        assert evt_data["floor"] == engine.config["setback_heat"]
+        assert evt_data["ceiling"] == engine.config["setback_cool"]
 
     def test_heat_mode_emits_occupancy_setback_away(self):
-        """Heat thermostat → occupancy_setback with mode=heat, occupancy=away."""
+        """Heat thermostat → occupancy_setback still reports mode='away' and the full band.
+
+        #249 P3: mode key in the event now indicates occupancy context ('away'), not HVAC mode.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="heat")
         engine.hass.states.get.return_value = _thermostat_state("heat")
@@ -242,17 +297,25 @@ class TestOccupancyAwayEmitsEvent:
 
         asyncio.run(engine.handle_occupancy_away())
 
-        assert len(events) == 1
-        evt_name, evt_data = events[0]
+        setback_events = [(n, d) for n, d in events if n == "occupancy_setback"]
+        assert len(setback_events) == 1
+        evt_name, evt_data = setback_events[0]
         assert evt_name == "occupancy_setback"
-        assert evt_data["mode"] == "heat"
+        assert evt_data["mode"] == "away"
         assert evt_data["occupancy"] == "away"
-        assert evt_data["target_f"] == engine.config["setback_heat"]
+        assert evt_data["floor"] == engine.config["setback_heat"]
+        assert evt_data["ceiling"] == engine.config["setback_cool"]
 
-    def test_off_mode_emits_no_event(self):
-        """HVAC off → no event (no setpoint applied)."""
+    def test_off_mode_emits_occupancy_setback_event(self):
+        """HVAC off classification → occupancy_setback is still emitted (band is always armed).
+
+        #249 P3: the old model skipped the event when hvac_mode='off'; the band model emits
+        the setback event regardless of classification hvac_mode because the band covers both
+        edges and the thermostat self-arbitrates.  The band no-ops at the service-call layer
+        if the entity has no capable mode, but the event is always emitted.
+        """
         engine = _make_engine()
-        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._current_classification = _make_classification(hvac_mode="off")
         engine.hass.states.get.return_value = _thermostat_state("off")
 
         events: list[tuple[str, dict]] = []
@@ -260,14 +323,19 @@ class TestOccupancyAwayEmitsEvent:
 
         asyncio.run(engine.handle_occupancy_away())
 
-        assert events == [], f"Expected no events when HVAC is off, got {events}"
+        setback_events = [(n, d) for n, d in events if n == "occupancy_setback"]
+        assert len(setback_events) == 1, f"Expected 1 occupancy_setback event even for off-mode, got {events}"
 
 
 class TestOccupancyVacationEmitsEvent:
-    """handle_occupancy_vacation() must emit occupancy_setback when a setpoint is applied."""
+    """handle_occupancy_vacation() must emit occupancy_setback with the band shape."""
 
     def test_cool_mode_emits_occupancy_setback_vacation(self):
-        """Cool thermostat → occupancy_setback with mode=cool, occupancy=vacation."""
+        """Vacation band → occupancy_setback with mode='vacation', floor/ceiling, occupancy='vacation'.
+
+        #249 P3: event payload changed from {mode: 'cool', target_f} to {mode: 'vacation',
+        floor, ceiling} — the band covers both edges using the deeper vacation offsets.
+        """
         from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
@@ -279,16 +347,22 @@ class TestOccupancyVacationEmitsEvent:
 
         asyncio.run(engine.handle_occupancy_vacation())
 
-        assert len(events) == 1
-        evt_name, evt_data = events[0]
+        setback_events = [(n, d) for n, d in events if n == "occupancy_setback"]
+        assert len(setback_events) == 1
+        evt_name, evt_data = setback_events[0]
         assert evt_name == "occupancy_setback"
-        assert evt_data["mode"] == "cool"
+        assert evt_data["mode"] == "vacation"  # band mode key now reports occupancy context
         assert evt_data["occupancy"] == "vacation"
-        expected_target = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA
-        assert evt_data["target_f"] == expected_target
+        expected_ceiling = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA
+        expected_floor = engine.config["setback_heat"] - VACATION_SETBACK_EXTRA
+        assert evt_data["ceiling"] == expected_ceiling
+        assert evt_data["floor"] == expected_floor
 
     def test_heat_mode_emits_occupancy_setback_vacation(self):
-        """Heat thermostat → occupancy_setback with mode=heat, occupancy=vacation."""
+        """Heat thermostat → occupancy_setback still reports mode='vacation' with full band.
+
+        #249 P3: mode key in the event indicates occupancy context not HVAC mode.
+        """
         from custom_components.climate_advisor.automation import VACATION_SETBACK_EXTRA
 
         engine = _make_engine()
@@ -300,18 +374,25 @@ class TestOccupancyVacationEmitsEvent:
 
         asyncio.run(engine.handle_occupancy_vacation())
 
-        assert len(events) == 1
-        evt_name, evt_data = events[0]
+        setback_events = [(n, d) for n, d in events if n == "occupancy_setback"]
+        assert len(setback_events) == 1
+        evt_name, evt_data = setback_events[0]
         assert evt_name == "occupancy_setback"
-        assert evt_data["mode"] == "heat"
+        assert evt_data["mode"] == "vacation"
         assert evt_data["occupancy"] == "vacation"
-        expected_target = engine.config["setback_heat"] - VACATION_SETBACK_EXTRA
-        assert evt_data["target_f"] == expected_target
+        expected_ceiling = engine.config["setback_cool"] + VACATION_SETBACK_EXTRA
+        expected_floor = engine.config["setback_heat"] - VACATION_SETBACK_EXTRA
+        assert evt_data["ceiling"] == expected_ceiling
+        assert evt_data["floor"] == expected_floor
 
-    def test_off_mode_emits_no_event(self):
-        """HVAC off → no event."""
+    def test_off_mode_emits_occupancy_setback_event(self):
+        """HVAC off classification → occupancy_setback is still emitted (band always fires).
+
+        #249 P3: the old model skipped the event for hvac_mode='off'; the band always emits
+        the setback event regardless of classification mode.
+        """
         engine = _make_engine()
-        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._current_classification = _make_classification(hvac_mode="off")
         engine.hass.states.get.return_value = _thermostat_state("off")
 
         events: list[tuple[str, dict]] = []
@@ -319,7 +400,8 @@ class TestOccupancyVacationEmitsEvent:
 
         asyncio.run(engine.handle_occupancy_vacation())
 
-        assert events == [], f"Expected no events when HVAC is off, got {events}"
+        setback_events = [(n, d) for n, d in events if n == "occupancy_setback"]
+        assert len(setback_events) == 1, f"Expected 1 occupancy_setback event even for off-mode, got {events}"
 
 
 class TestOccupancyHomeEmitsEvent:
@@ -381,14 +463,20 @@ class TestOccupancyHomeEmitsEvent:
 
 
 class TestMorningWakeupEmitsEvent:
-    """handle_morning_wakeup() must emit morning_wakeup on the success path."""
+    """handle_morning_wakeup() must emit morning_wakeup with the band shape on the success path."""
 
     def test_heat_mode_emits_morning_wakeup(self):
-        """Heat classification → morning_wakeup with mode=heat."""
+        """Heat classification → morning_wakeup with mode='heat', floor, ceiling, active.
+
+        #249 P3: event payload changed from {mode, target_f} to {mode, floor, ceiling, active}
+        — the band arms both edges; mode still reflects the classification's HVAC intent.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="heat")
         engine._fan_active = False
         engine._fan_override_active = False
+        # Provide capabilities so the band can arm on the floor (heat) edge.
+        engine.hass.states.get.return_value = _thermostat_state("heat")
 
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
@@ -399,14 +487,20 @@ class TestMorningWakeupEmitsEvent:
         assert len(wakeup_events) == 1, f"Expected 1 morning_wakeup event, got {events}"
         evt_data = wakeup_events[0][1]
         assert evt_data["mode"] == "heat"
-        assert evt_data["target_f"] == engine.config["comfort_heat"]
+        assert "floor" in evt_data  # band carries floor (comfort_heat for heat day)
+        assert "ceiling" in evt_data
+        assert "active" in evt_data
 
     def test_cool_mode_emits_morning_wakeup(self):
-        """Cool classification → morning_wakeup with mode=cool."""
+        """Cool classification → morning_wakeup with mode='cool', floor, ceiling, active.
+
+        #249 P3: event payload no longer has target_f; it carries floor/ceiling/active.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="cool")
         engine._fan_active = False
         engine._fan_override_active = False
+        engine.hass.states.get.return_value = _thermostat_state("cool")
 
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
@@ -417,7 +511,9 @@ class TestMorningWakeupEmitsEvent:
         assert len(wakeup_events) == 1, f"Expected 1 morning_wakeup event, got {events}"
         evt_data = wakeup_events[0][1]
         assert evt_data["mode"] == "cool"
-        assert evt_data["target_f"] == engine.config["comfort_cool"]
+        assert "floor" in evt_data
+        assert "ceiling" in evt_data
+        assert "active" in evt_data
 
     def test_skipped_when_occupancy_away_emits_no_event(self):
         """Wakeup skipped (away) → no morning_wakeup event."""
@@ -436,12 +532,19 @@ class TestMorningWakeupEmitsEvent:
         wakeup_events = [(n, d) for n, d in events if n == "morning_wakeup"]
         assert wakeup_events == [], f"Expected no morning_wakeup when away, got {events}"
 
-    def test_hvac_off_classification_emits_no_event(self):
-        """HVAC off (mild/warm day) → no morning_wakeup event."""
+    def test_hvac_off_classification_emits_morning_wakeup_event(self):
+        """HVAC off (mild/warm day) → morning_wakeup event is still emitted with the band.
+
+        #249 P3: the old model skipped the event for hvac_mode='off'; the band model emits
+        the event regardless because select_comfort_band handles off-mode days (active='ceiling',
+        warm-day ceiling path).  The service call may no-op if the thermostat has no cool mode,
+        but the event fires.
+        """
         engine = _make_engine()
         engine._current_classification = _make_classification(hvac_mode="off")
         engine._fan_active = False
         engine._fan_override_active = False
+        engine.hass.states.get.return_value = _thermostat_state("off")
 
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
@@ -449,4 +552,4 @@ class TestMorningWakeupEmitsEvent:
         asyncio.run(engine.handle_morning_wakeup())
 
         wakeup_events = [(n, d) for n, d in events if n == "morning_wakeup"]
-        assert wakeup_events == [], f"Expected no morning_wakeup for off-mode day, got {events}"
+        assert len(wakeup_events) == 1, f"Expected 1 morning_wakeup event for off-mode day, got {events}"

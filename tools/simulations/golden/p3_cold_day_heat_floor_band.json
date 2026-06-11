@@ -1,0 +1,70 @@
+{
+  "name": "p3_cold_day_heat_floor_band",
+  "description": "Issue #249 P3: On a cold day with a dual-setpoint thermostat, classification arms the occupied comfort band [comfort_heat / comfort_cool] in heat_cool mode with active=floor, defending the heat floor.",
+  "source": "synthetic",
+  "issue": 249,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md):",
+    "(a) Scenario effectiveness: if _apply_comfort_band is removed from apply_classification on cold day,",
+    "    comfort_band_armed fails; if band floor is set to setback_heat (62) instead of comfort_heat (70),",
+    "    expect_band floor check fails — the thermostat would let indoor drop 8F below comfort before heating.",
+    "(b) Docs↔production alignment: cold day arms the full comfort band [comfort_heat, comfort_cool] with",
+    "    active=floor (occupied+awake uses the full comfort band on any day type). See docs/08 §6e.",
+    "(c) Occupant experience: if the floor were set to setback_heat (62F) instead of comfort_heat (70F),",
+    "    the occupant could wake to a house 8F below their comfort setting — the regression guard here",
+    "    catches exactly this drift.",
+    "Regression proof: change select_comfort_band(cold day) to use setback_heat as floor →",
+    "expect_band {floor: 70} fails. Remove _apply_comfort_band → comfort_band_armed fails."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-01-20T07:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 32.0,
+      "note": "Cold morning: indoor 68F below comfort_heat=70F. Heating needed."
+    },
+    {
+      "time": "2026-01-20T07:01:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "Cold-day classification: hvac_mode=heat. P3: band [comfort_heat=70 / comfort_cool=76] armed with active=floor."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-20T07:01:00",
+      "expect": "classification_applied",
+      "reason": "Cold-day classification fires; comfort band armed to defend the heat floor.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-01-20T07:01:00",
+      "expect": "comfort_band_armed",
+      "reason": "P3 guard: _apply_comfort_band must fire on cold day. If missing, the thermostat is left without a refreshed setpoint — heat floor undefended, occupant wakes to cold house.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-01-20T07:01:00",
+      "expect": "expect_band",
+      "expect_band": {"floor": 70.0, "ceiling": 76.0},
+      "reason": "Occupied+awake uses the full comfort band [comfort_heat=70, comfort_cool=76] on any day type. Floor must be comfort_heat=70 (not setback_heat=62) so the occupant does not wake 8F below comfort; ceiling stays at comfort_cool=76 (not setback_cool=82).",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "P3 cold-day classification arms the dual comfort band [70/76] with active=floor — the thermostat defends the comfort_heat floor autonomously",
+    "observed_behavior": "classification_applied; comfort_band_applied [floor=70, ceiling=76, active=floor, mode=dual]; set_hvac_mode(heat_cool) + set_temperature(low=70, high=76)",
+    "expected_behavior": "Occupant wakes to a home held at/above 70F (comfort_heat); the thermostat self-manages the band without periodic CA override."
+  }
+}

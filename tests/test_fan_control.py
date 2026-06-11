@@ -1488,7 +1488,11 @@ class TestCheckNatVentGraceComfortCeiling:
     """
 
     def test_grace_active_indoor_above_comfort_cool_allows_nat_vent(self):
-        """grace=True, indoor=76 > comfort_cool=75, outdoor cool → nat-vent activates, HVAC set off first."""
+        """grace=True, indoor=76 > comfort_cool=75, outdoor cool → nat-vent activates.
+
+        #249: nat-vent activation no longer calls set_hvac_mode("off") — the comfort
+        band stays armed; only the fan turns on. The "HVAC off first" step is removed.
+        """
         engine = _make_grace_nat_vent_engine(indoor_temp=76.0, grace_active=True)
         with patch(_PATCH_CALL_LATER):
             asyncio.run(engine.check_natural_vent_conditions())
@@ -1496,11 +1500,10 @@ class TestCheckNatVentGraceComfortCeiling:
         assert engine._natural_vent_active is True, (
             "check_natural_vent_conditions() should fall through grace when indoor > comfort_cool"
         )
-        # HVAC must be set off before fan activates (thermostat may be in heat mode from prior exit)
+        # #249: no set_hvac_mode("off") call — band stays armed, compressor self-arbitrates
         hvac_calls = _get_service_calls(engine, "climate", "set_hvac_mode")
-        assert len(hvac_calls) == 1
-        assert hvac_calls[0][0][2]["hvac_mode"] == "off"
-        # Fan must end up on (set_fan_mode=auto from _set_hvac_mode, then =on from _activate_fan)
+        assert not any(c[0][2]["hvac_mode"] == "off" for c in hvac_calls)
+        # Fan must end up on (set_fan_mode=on from _activate_fan)
         fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
         assert fan_calls[-1][0][2]["fan_mode"] == "on"
 

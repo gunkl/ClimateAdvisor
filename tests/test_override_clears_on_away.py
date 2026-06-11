@@ -21,6 +21,21 @@ def _consume_coroutine(coro):
     coro.close()
 
 
+def _make_thermostat_state(mode: str = "cool") -> MagicMock:
+    """Return a mock thermostat state with heat+cool capabilities.
+
+    #249 P3: _apply_comfort_band reads attributes.hvac_modes + supported_features.
+    Without these attrs the band no-ops and _set_temperature is never reached.
+    """
+    s = MagicMock()
+    s.state = mode
+    s.attributes = {
+        "hvac_modes": ["off", "heat", "cool"],
+        "supported_features": 1,
+    }
+    return s
+
+
 def _make_engine(config_overrides: dict | None = None) -> AutomationEngine:
     """Create an AutomationEngine with standard test config."""
     hass = MagicMock()
@@ -28,7 +43,8 @@ def _make_engine(config_overrides: dict | None = None) -> AutomationEngine:
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
-    hass.states.get.return_value = MagicMock(state="cool")  # default thermostat state for #222 actual_mode lookup
+    # Default thermostat with heat+cool capability so the band can arm.
+    hass.states.get.return_value = _make_thermostat_state("cool")
 
     config = {
         "comfort_heat": 70,

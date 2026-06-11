@@ -205,7 +205,11 @@ class TestGraceNatVentBypass:
     when outdoor temperature is cool enough."""
 
     def test_grace_active_outdoor_cool_nat_vent_activates(self):
-        """Grace active + outdoor ≤ threshold → HVAC off + nat-vent, NOT blocked."""
+        """Grace active + outdoor ≤ threshold → nat-vent activates, NOT blocked.
+
+        #249: nat-vent activation no longer calls set_hvac_mode("off") — the comfort
+        band stays armed and the compressor self-arbitrates with the open window.
+        """
         ae = _make_ae_stub(
             _grace_active=True,
             _last_resume_source="automation",
@@ -214,9 +218,10 @@ class TestGraceNatVentBypass:
 
         asyncio.run(ae.handle_door_window_open("binary_sensor.front_window"))
 
-        ae._set_hvac_mode.assert_called_once()
-        assert ae._set_hvac_mode.call_args.args[0] == "off"
+        # #249: nat-vent no longer sets HVAC off; band stays armed, fan turns on
         assert ae._natural_vent_active is True
+        for call in ae._set_hvac_mode.call_args_list:
+            assert call.args[0] != "off", "nat-vent must not call set_hvac_mode('off') under #249 band model"
         # Must NOT have set the pause flag
         assert ae._paused_by_door is False
 
@@ -257,15 +262,20 @@ class TestRePauseNatVent:
     outdoor conditions are favourable."""
 
     def test_re_pause_activates_nat_vent_when_outdoor_cool(self):
-        """Outdoor ≤ threshold → nat-vent activated; paused_by_door stays False."""
+        """Outdoor ≤ threshold → nat-vent activated; paused_by_door stays False.
+
+        #249: nat-vent activation no longer calls set_hvac_mode("off") — the comfort
+        band stays armed; only the fan turns on and _natural_vent_active is set.
+        """
         ae = _make_ae_stub(_last_outdoor_temp=70.0)
 
         asyncio.run(ae._re_pause_for_open_sensor())
 
         assert ae._natural_vent_active is True
         assert ae._paused_by_door is False
-        ae._set_hvac_mode.assert_called_once()
-        assert ae._set_hvac_mode.call_args.args[0] == "off"
+        # #249: no HVAC off call — band stays armed, fan activates instead
+        for call in ae._set_hvac_mode.call_args_list:
+            assert call.args[0] != "off", "nat-vent must not call set_hvac_mode('off') under #249 band model"
         ae._activate_fan.assert_called_once()
 
     def test_re_pause_pauses_when_outdoor_warm(self):

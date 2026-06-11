@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,6 +21,7 @@ from .const import (
     CEILING_BRIDGE_TOLERANCE_F,
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CEILING_PRECOOL_FALLBACK_MIN,
+    CLIMATE_FEATURE_TARGET_TEMP_RANGE,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
@@ -34,6 +36,8 @@ from .const import (
     CONF_NATURAL_VENT_DELTA,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
+    CONF_SLEEP_COOL,
+    CONF_SLEEP_HEAT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -42,6 +46,8 @@ from .const import (
     DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_SLEEP_COOL,
+    DEFAULT_SLEEP_HEAT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
     ECONOMIZER_EVENING_START_HOUR,
@@ -68,6 +74,169 @@ from .const import (
 from .temperature import format_temp, format_temp_delta, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ThermostatCapabilities:
+    """What modes and setpoint shapes a thermostat advertises (Issue #249).
+
+    Derived from the climate entity's ``hvac_modes`` list and ``supported_features`` bitmask so the
+    program-selection logic can choose how to arm the comfort band — single-mode (``cool``/``heat``)
+    vs a ``heat_cool`` dual-setpoint band — based on what the hardware actually supports. An unknown
+    or unavailable thermostat yields all-False capabilities and callers fall back to current behavior.
+    """
+
+    modes: tuple[str, ...]
+    supports_heat: bool
+    supports_cool: bool
+    supports_heat_cool: bool  # a band mode (heat_cool or auto) is offered
+    supports_dual_setpoint: bool  # band mode AND target_temp_low/high accepted
+    raw_supported_features: int
+
+
+def parse_thermostat_capabilities(hvac_modes: Any, supported_features: Any) -> ThermostatCapabilities:
+    """Compute :class:`ThermostatCapabilities` from advertised modes + feature bitmask.
+
+    Pure function (no HA state access) so it is trivially unit-testable. Defensive against
+    missing/None/malformed inputs: a non-list ``hvac_modes`` or non-int ``supported_features``
+    degrades to empty/zero, yielding all-False capabilities rather than raising.
+
+    ``supports_dual_setpoint`` requires BOTH a band mode (``heat_cool``/``auto``) in ``hvac_modes``
+    AND the ``TARGET_TEMPERATURE_RANGE`` feature bit, because Home Assistant only accepts
+    ``target_temp_low``/``target_temp_high`` when that feature is present.
+    """
+    modes: tuple[str, ...] = tuple(str(m) for m in hvac_modes) if isinstance(hvac_modes, (list, tuple)) else ()
+
+    try:
+        features = int(supported_features)
+    except (TypeError, ValueError):
+        features = 0
+
+    supports_heat_cool = "heat_cool" in modes or "auto" in modes
+    supports_dual_setpoint = supports_heat_cool and bool(features & CLIMATE_FEATURE_TARGET_TEMP_RANGE)
+
+    return ThermostatCapabilities(
+        modes=modes,
+        supports_heat="heat" in modes,
+        supports_cool="cool" in modes,
+        supports_heat_cool=supports_heat_cool,
+        supports_dual_setpoint=supports_dual_setpoint,
+        raw_supported_features=features,
+    )
+
+
+@dataclass(frozen=True)
+class ComfortBand:
+    """The comfort band the thermostat should hold (Issue #249 P3).
+
+    Capability-free: the band expresses *what* we want (floor, ceiling, active edge) with no
+    reference to thermostat modes. The actuation primitive :meth:`AutomationEngine._apply_comfort_band`
+    reads capabilities and emits the appropriate command shape.
+
+    ``active`` identifies the edge that the day primarily threatens:
+    - ``"ceiling"`` — warm/hot day, afternoon; compressor defends the upper bound.
+    - ``"floor"`` — cold/cool day, morning; heater defends the lower bound.
+    ``active`` is used by single-mode actuation to pick which edge to arm; dual-setpoint devices
+    always arm both.
+    """
+
+    floor: float
+    ceiling: float
+    active: str  # "ceiling" | "floor"
+    reason: str
+
+
+def select_comfort_band(
+    classification: DayClassification,
+    config: dict,
+    *,
+    occupancy_mode: str,
+    in_sleep_window: bool,
+    aggressive_savings: bool,
+) -> ComfortBand:
+    """Compute the comfort band for the current plan — pure, no HA state access.
+
+    Derives ``[floor, ceiling]`` and the active edge from the classification, occupancy,
+    sleep-window state, and savings posture. **No capability mapping** — that is the
+    actuation primitive's job.
+
+    Band logic:
+    - vacation: deep setback on both edges; ``active="ceiling"`` (a cool-capable unit defends
+      the wide ceiling, the dominant concern in an empty home).
+    - away: standard setback on both edges; ``active="ceiling"`` for the same reason.
+    - sleep: ``sleep_heat``/``sleep_cool`` band; active follows day type.
+    - occupied + awake (home/guest), ANY day type: the "lazy" comfort band
+      ``[comfort_heat, comfort_cool]`` — the thermostat pre-heats the morning to comfort_heat and
+      cools the afternoon to comfort_cool. Suppression to a setback edge applies ONLY when
+      away/asleep. ``active`` marks the day's dominant edge for single-mode devices (floor on a heat
+      day, ceiling otherwise); pre-cool lowers the ceiling on a hot day.
+    ``aggressive_savings`` widens BOTH comfort edges by ``CEILING_ESCALATION_SAVINGS_MARGIN_F``
+    (floor down, ceiling up) so the system runs less; setback/sleep bands are unaffected.
+    """
+    comfort_heat = float(config.get("comfort_heat", 70))
+    comfort_cool = float(config.get("comfort_cool", 75))
+    setback_heat = float(config.get("setback_heat", 60))
+    setback_cool = float(config.get("setback_cool", 80))
+    sleep_heat = float(config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
+    sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+    margin = CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive_savings else 0.0
+
+    if occupancy_mode == OCCUPANCY_VACATION:
+        floor = setback_heat - VACATION_SETBACK_EXTRA
+        ceiling = setback_cool + VACATION_SETBACK_EXTRA
+        active = "ceiling"
+        ctx = "vacation"
+    elif occupancy_mode == OCCUPANCY_AWAY:
+        floor, ceiling, active, ctx = setback_heat, setback_cool, "ceiling", "away"
+    elif in_sleep_window:
+        active = "floor" if classification.hvac_mode == "heat" else "ceiling"
+        floor, ceiling, ctx = sleep_heat, sleep_cool, "sleep"
+    else:
+        # Occupied + awake (home/guest): the "lazy" comfort band — hold BOTH edges at comfort so the
+        # thermostat pre-heats the morning to comfort_heat and cools the afternoon to comfort_cool.
+        # (Suppression to a setback edge happens only away/asleep.) `active` is the day's dominant
+        # edge for single-mode devices: floor on a heat day, ceiling otherwise.
+        active = "floor" if classification.hvac_mode == "heat" else "ceiling"
+        floor = comfort_heat - margin
+        ceiling = comfort_cool + margin
+        if (
+            classification.hvac_mode == "cool"
+            and classification.pre_condition_target is not None
+            and classification.pre_condition_target < 0
+        ):
+            ceiling += float(classification.pre_condition_target)  # pre-cool lowers the ceiling
+        ctx = "comfort"
+
+    reason = (
+        f"{ctx} band [{floor:.0f}/{ceiling:.0f}] (day={classification.day_type}, active={active}"
+        f"{', aggressive' if aggressive_savings else ''})"
+    )
+    return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason)
+
+
+def _in_sleep_window(now: datetime, config: dict) -> bool:
+    """Return True if ``now`` falls in the configured sleep window (Issue #249).
+
+    The window runs ``sleep_time`` → ``wake_time`` with midnight wraparound (the common night-owl
+    case where ``sleep_time > wake_time``, e.g. 22:30 → 07:00): in-window iff
+    ``now >= sleep_time OR now < wake_time``. Returns False when either time is unset or malformed —
+    callers treat "unknown" as awake (apply the daytime program), matching the prior inline behavior.
+    """
+    from datetime import time as dt_time  # noqa: PLC0415
+
+    sleep_time = config.get("sleep_time")
+    wake_time = config.get("wake_time")
+    if not sleep_time or not wake_time:
+        return False
+    try:
+        sleep_h, sleep_m = map(int, str(sleep_time).split(":"))
+        wake_h, wake_m = map(int, str(wake_time).split(":"))
+        now_time = now.time().replace(second=0, microsecond=0)
+        sleep_t = dt_time(sleep_h, sleep_m)
+        wake_t = dt_time(wake_h, wake_m)
+    except (ValueError, AttributeError):
+        return False
+    return now_time >= sleep_t or now_time < wake_t
 
 
 def _parse_forecast_dt(dt_str: str | None) -> datetime | None:
@@ -755,133 +924,19 @@ class AutomationEngine:
                 classification.hvac_mode,
             )
 
-        # Set the base HVAC mode
+        # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
         cls_reason = (
             f"daily classification — {classification.day_type} day,"
             f" trend {classification.trend_direction} {format_temp_delta(classification.trend_magnitude, unit)}"
         )
-        if classification.hvac_mode in ("heat", "cool"):
-            await self._set_hvac_mode(classification.hvac_mode, reason=cls_reason)
-            await self._set_temperature_for_mode(classification, reason=cls_reason)
-        elif classification.hvac_mode == "off":
-            indoor_temp = self._get_indoor_temp_f()
-            comfort_heat = self.config.get("comfort_heat")
-            if indoor_temp is not None and comfort_heat is not None and indoor_temp < comfort_heat:
-                # Indoor below comfort floor despite warm forecast — heat to comfort first.
-                # apply_classification() is called every 30 min; once indoor reaches comfort_heat
-                # the guard stops firing and HVAC goes off naturally.
-                _LOGGER.warning(
-                    "Warm-day off deferred: indoor %.1f°F below comfort floor %.1f°F — heating to comfort first",
-                    indoor_temp,
-                    comfort_heat,
-                )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "warm_day_comfort_gap",
-                        {
-                            "day_type": classification.day_type,
-                            "indoor_temp": indoor_temp,
-                            "comfort_heat": comfort_heat,
-                        },
-                    )
-                await self._set_hvac_mode(
-                    "heat",
-                    reason=(
-                        f"indoor {format_temp(indoor_temp, unit)} below comfort floor"
-                        f" {format_temp(comfort_heat, unit)}"
-                        f" — heating before {classification.day_type} day shutoff"
-                    ),
-                )
-                await self._set_temperature(
-                    comfort_heat,
-                    reason=f"comfort floor recovery before {classification.day_type} day HVAC off",
-                )
-            else:
-                # Issue #96 Root Cause C: Replace hard off with mode-aware setback to avoid Ecobee side-effects.
-                # No mode change = no fan_mode/temperature side-effects on Ecobee.
-                # heat:      setback_heat — heating won't fire (house is above floor)
-                # cool:      setback_cool — cooling won't fire unless truly extreme (safety ceiling preserved)
-                # heat_cool/auto: both setbacks via target_temp_low/high — both sides suppressed with safety bounds
-                # unknown:   fall back to hard off (last resort)
-                _cs_state = self.hass.states.get(self.climate_entity)
-                _current_mode = _cs_state.state if _cs_state else "unknown"
-                _setback_heat = self.config.get("setback_heat")
-                _setback_cool = self.config.get("setback_cool")
-                _setpoint_changed = False
-                _old_setpoint_f: float | None = None
-
-                if _current_mode == "off":
-                    # Thermostat already off — heartbeat, no service call needed.
-                    pass
-                elif _current_mode == "heat":
-                    await self._set_temperature(
-                        _setback_heat,
-                        reason=f"warm-day setback: {classification.day_type} day, heating suppressed at setback_heat",
-                    )
-                    _setpoint_changed = True
-                elif _current_mode == "cool":
-                    # Capture old setpoint before adjustment
-                    _cs = self.hass.states.get(self.climate_entity)
-                    _old_setpoint_raw = _cs.attributes.get("temperature") if _cs else None
-                    unit = self.config.get("temp_unit", "fahrenheit")
-                    _old_setpoint_f = to_fahrenheit(_old_setpoint_raw, unit) if _old_setpoint_raw is not None else None
-                    # Guard: skip service call if setpoint is already at setback_cool
-                    if _old_setpoint_f is not None and abs(_old_setpoint_f - _setback_cool) <= 0.5:
-                        pass  # Already at setback — heartbeat only
-                    else:
-                        await self._set_temperature(
-                            _setback_cool,
-                            reason=(
-                                f"warm-day setback: {classification.day_type} day, cooling suppressed at setback_cool"
-                            ),
-                        )
-                        _setpoint_changed = True
-                elif _current_mode in ("heat_cool", "auto"):
-                    await self._set_temperature_dual(
-                        _setback_heat,
-                        _setback_cool,
-                        reason=f"warm-day setback: {classification.day_type} day, dual setpoints prevent HVAC running",
-                    )
-                    _setpoint_changed = True
-                else:
-                    _LOGGER.warning(
-                        "warm-day setback: thermostat in unknown mode %r -- falling back to hard off",
-                        _current_mode,
-                    )
-                    await self._set_hvac_mode(
-                        "off",
-                        reason=(
-                            f"daily classification -- {classification.day_type} day,"
-                            f" HVAC not needed (unknown mode={_current_mode})"
-                        ),
-                    )
-                    _setpoint_changed = True
-
-                if self._emit_event_callback:
-                    if _setpoint_changed:
-                        self._emit_event_callback(
-                            "warm_day_setback_applied",
-                            {
-                                "day_type": classification.day_type,
-                                "thermostat_mode": _current_mode,
-                                **(
-                                    {
-                                        "old_setpoint_f": _old_setpoint_f,
-                                        "new_setpoint_f": _setback_cool,
-                                    }
-                                    if _current_mode == "cool"
-                                    else {}
-                                ),
-                            },
-                        )
-                    else:
-                        self._emit_event_callback(
-                            "warm_day_state_confirmed",
-                            {
-                                "day_type": classification.day_type,
-                                "thermostat_mode": _current_mode,
-                            },
-                        )
+        _band = select_comfort_band(
+            classification,
+            self.config,
+            occupancy_mode=self._occupancy_mode,
+            in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        await self._apply_comfort_band(_band, reason=cls_reason)
 
         # ODE ceiling guard (Issue #136): if thermal model predicts indoor will breach
         # comfort_cool within lead_time AND outdoor is already warmer than indoor
@@ -1057,6 +1112,64 @@ class AutomationEngine:
             self._revisit_cancel()
             self._revisit_cancel = None
         _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
+
+    async def _apply_comfort_band(self, band: ComfortBand, *, reason: str) -> None:
+        """Arm the thermostat with the comfort band using the right command shape (Issue #249 P3).
+
+        Reads live thermostat capabilities and emits ONE command:
+        - dual-setpoint capable → ensure ``heat_cool`` mode, then ``set_temperature`` with both
+          ``target_temp_low=band.floor`` and ``target_temp_high=band.ceiling``.
+        - single, ``active="ceiling"``, cool-capable → set mode ``cool`` (if changed) + ``set_temperature``
+          at ``band.ceiling``.
+        - single, ``active="floor"``, heat-capable → set mode ``heat`` (if changed) + ``set_temperature``
+          at ``band.floor``.
+        - device cannot serve the active edge or state unavailable → log debug and return (defensive
+          no-op, not a legacy fallback).
+
+        Emits ``comfort_band_applied`` event so the harness/scenarios can assert on band decisions.
+        """
+        caps = self._get_thermostat_capabilities()
+        _cs = self.hass.states.get(self.climate_entity)
+        _current_mode = _cs.state if _cs else None
+
+        if caps.supports_dual_setpoint:
+            if _current_mode != "heat_cool":
+                await self._set_hvac_mode("heat_cool", reason=f"{reason} [band: entering heat_cool]")
+            await self._set_temperature_dual(band.floor, band.ceiling, reason=reason)
+            _cmd_shape = "dual"
+        elif band.active == "ceiling" and caps.supports_cool:
+            if _current_mode != "cool":
+                await self._set_hvac_mode("cool", reason=f"{reason} [band: entering cool]")
+            await self._set_temperature(band.ceiling, reason=reason)
+            _cmd_shape = "cool"
+        elif band.active == "floor" and caps.supports_heat:
+            if _current_mode != "heat":
+                await self._set_hvac_mode("heat", reason=f"{reason} [band: entering heat]")
+            await self._set_temperature(band.floor, reason=reason)
+            _cmd_shape = "heat"
+        else:
+            # The thermostat advertises no mode that can defend the active edge (e.g. a heat-only
+            # unit on a warm day, or an unavailable entity). Surface this at INFO in real operation
+            # so a silently-unarmed home is observable; stay quiet in dry-run.
+            _log = _LOGGER.debug if self.dry_run else _LOGGER.info
+            _log(
+                "_apply_comfort_band: no capable mode for active=%r (modes=%s) — band not armed this cycle",
+                band.active,
+                list(caps.modes),
+            )
+            return
+
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "comfort_band_applied",
+                {
+                    "floor": band.floor,
+                    "ceiling": band.ceiling,
+                    "active": band.active,
+                    "mode": _cmd_shape,
+                    "reason": band.reason,
+                },
+            )
 
     async def _set_hvac_mode(self, mode: str, *, reason: str) -> None:
         """Set the thermostat HVAC mode."""
@@ -1434,12 +1547,11 @@ class AutomationEngine:
                     f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
                     f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
                 )
-                await self._set_hvac_mode("off", reason=nat_vent_reason + ", HVAC off, fan on")
                 await self._activate_fan(reason=nat_vent_reason)
                 self._natural_vent_active = True
                 _LOGGER.info(
                     "Natural ventilation mode: outdoor %.1f°F < indoor %.1f°F,"
-                    " outdoor ≤ target %.1f°F — fan on, HVAC off",
+                    " outdoor ≤ target %.1f°F — fan on, band stays armed",
                     outdoor,
                     indoor,
                     nat_vent_threshold,
@@ -1450,7 +1562,7 @@ class AutomationEngine:
                         {
                             "entity": entity_id,
                             "result": "natural_ventilation",
-                            "hvac_mode_change": f"{_old_mode_nv}→off",
+                            "hvac_mode_change": f"{_old_mode_nv}→band-armed",
                             "fan_mode_change": "auto→on",
                         },
                     )
@@ -1574,13 +1686,7 @@ class AutomationEngine:
                 and _indoor > _comfort_heat
                 and outdoor < threshold
             ):
-                # Turn HVAC off first (may be in heat mode from comfort-floor exit) before
-                # running the fan. _natural_vent_active is still False here, so Fix 1's guard
-                # allows fan_mode=auto — _activate_fan immediately overrides to fan_mode=on.
-                await self._set_hvac_mode(
-                    "off",
-                    reason=f"nat vent grace re-entry: indoor {_indoor:.1f}°F > comfort_cool",
-                )
+                # Band stays armed — just activate the fan; the compressor self-arbitrates.
                 await self._activate_fan(
                     reason=(
                         f"nat vent grace re-entry: indoor {_indoor:.1f}°F"
@@ -2025,11 +2131,11 @@ class AutomationEngine:
                 f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
                 f" outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
             )
-            await self._set_hvac_mode("off", reason=nat_vent_reason)
             await self._activate_fan(reason=nat_vent_reason)
             self._natural_vent_active = True
             _LOGGER.info(
-                "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F, outdoor ≤ %.1f°F",
+                "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
+                " outdoor ≤ %.1f°F, band stays armed",
                 outdoor,
                 indoor,
                 nat_vent_threshold,
@@ -2065,32 +2171,16 @@ class AutomationEngine:
 
         now = dt_util.now()
 
-        # Determine if we're in a bedtime window (after sleep_time OR before wake_time)
-        sleep_time = self.config.get("sleep_time")  # e.g. "22:30"
-        wake_time = self.config.get("wake_time")  # e.g. "07:00"
-
-        if sleep_time and wake_time:
-            try:
-                from datetime import time as dt_time  # noqa: PLC0415
-
-                sleep_h, sleep_m = map(int, sleep_time.split(":"))
-                wake_h, wake_m = map(int, wake_time.split(":"))
-                now_time = now.time().replace(second=0, microsecond=0)
-                sleep_t = dt_time(sleep_h, sleep_m)
-                wake_t = dt_time(wake_h, wake_m)
-
-                # Bedtime window: after sleep_time OR before wake_time
-                in_bedtime_window = now_time >= sleep_t or now_time < wake_t
-                if in_bedtime_window:
-                    _LOGGER.info(
-                        "Grace expired: in bedtime window (%s–%s) — applying bedtime setback",
-                        sleep_time,
-                        wake_time,
-                    )
-                    await self.handle_bedtime()
-                    return
-            except (ValueError, AttributeError):
-                pass  # malformed config — fall through to classification
+        # Determine if we're in a bedtime window (after sleep_time OR before wake_time).
+        # Issue #249: extracted to the shared module-level _in_sleep_window() helper.
+        if _in_sleep_window(now, self.config):
+            _LOGGER.info(
+                "Grace expired: in bedtime window (%s–%s) — applying bedtime setback",
+                self.config.get("sleep_time"),
+                self.config.get("wake_time"),
+            )
+            await self.handle_bedtime()
+            return
 
         # Otherwise apply current classification
         if self._current_classification:
@@ -2112,49 +2202,25 @@ class AutomationEngine:
             _LOGGER.warning("Occupancy away handler skipped — no day classification available")
             return
 
-        # Use actual thermostat mode as ground truth — classification mode may differ
-        # if the day started in one mode but the nightly reclassification switched it
-        # (e.g., started hot → cool mode, reclassified to heat at night; without this
-        # guard, we would apply setback_heat while the AC is still in cool mode)
-        actual_state = self.hass.states.get(self.climate_entity)
-        actual_mode = actual_state.state if actual_state else c.hvac_mode
-
-        unit = self.config.get("temp_unit", "fahrenheit")
-        if actual_mode == "cool":
-            setback = self.config["setback_cool"] - c.setback_modifier
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"occupancy away — cool setback"
-                    f" (base {format_temp(self.config['setback_cool'], unit)}"
-                    f" - modifier {format_temp_delta(c.setback_modifier, unit)})"
-                ),
+        # Arm the away setback band — covers both edges; thermostat self-arbitrates.
+        _away_band = select_comfort_band(
+            c,
+            self.config,
+            occupancy_mode=OCCUPANCY_AWAY,
+            in_sleep_window=False,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "occupancy_setback",
+                {
+                    "mode": "away",
+                    "floor": _away_band.floor,
+                    "ceiling": _away_band.ceiling,
+                    "occupancy": "away",
+                },
             )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "occupancy_setback",
-                    {"mode": "cool", "target_f": setback, "occupancy": "away"},
-                )
-        elif actual_mode == "heat":
-            setback = self.config["setback_heat"] + c.setback_modifier
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"occupancy away — heat setback"
-                    f" (base {format_temp(self.config['setback_heat'], unit)}"
-                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
-                ),
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "occupancy_setback",
-                    {"mode": "heat", "target_f": setback, "occupancy": "away"},
-                )
-        else:
-            _LOGGER.info(
-                "Occupancy away — HVAC mode is %r, no setback needed",
-                actual_mode,
-            )
+        await self._apply_comfort_band(_away_band, reason="occupancy away — setback band")
 
     async def handle_occupancy_home(self) -> None:
         """Handle someone returning — restore comfort."""
@@ -2222,48 +2288,25 @@ class AutomationEngine:
         if not c:
             return
 
-        # Use actual thermostat mode as ground truth — same guard as handle_occupancy_away()
-        actual_state = self.hass.states.get(self.climate_entity)
-        actual_mode = actual_state.state if actual_state else c.hvac_mode
-
-        unit = self.config.get("temp_unit", "fahrenheit")
-        if actual_mode == "cool":
-            setback = self.config["setback_cool"] - c.setback_modifier + VACATION_SETBACK_EXTRA
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"vacation mode — deep cool setback"
-                    f" (base {format_temp(self.config['setback_cool'], unit)}"
-                    f" - modifier {format_temp_delta(c.setback_modifier, unit)}"
-                    f" + vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
-                ),
+        # Arm the vacation deep-setback band — both edges widened; thermostat self-arbitrates.
+        _vac_band = select_comfort_band(
+            c,
+            self.config,
+            occupancy_mode=OCCUPANCY_VACATION,
+            in_sleep_window=False,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "occupancy_setback",
+                {
+                    "mode": "vacation",
+                    "floor": _vac_band.floor,
+                    "ceiling": _vac_band.ceiling,
+                    "occupancy": "vacation",
+                },
             )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "occupancy_setback",
-                    {"mode": "cool", "target_f": setback, "occupancy": "vacation"},
-                )
-        elif actual_mode == "heat":
-            setback = self.config["setback_heat"] + c.setback_modifier - VACATION_SETBACK_EXTRA
-            await self._set_temperature(
-                setback,
-                reason=(
-                    f"vacation mode — deep heat setback"
-                    f" (base {format_temp(self.config['setback_heat'], unit)}"
-                    f" + modifier {format_temp_delta(c.setback_modifier, unit)}"
-                    f" - vacation {format_temp_delta(VACATION_SETBACK_EXTRA, unit)})"
-                ),
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "occupancy_setback",
-                    {"mode": "heat", "target_f": setback, "occupancy": "vacation"},
-                )
-        else:
-            _LOGGER.info(
-                "Occupancy vacation — HVAC mode is %r, no setback needed",
-                actual_mode,
-            )
+        await self._apply_comfort_band(_vac_band, reason="vacation mode — deep setback band")
 
     async def handle_bedtime(self) -> None:
         """Apply bedtime setback."""
@@ -2304,80 +2347,40 @@ class AutomationEngine:
                 self._today_record.setback_skipped_reason = "no_classification"
             return
 
-        if c.hvac_mode not in ("heat", "cool"):
-            _LOGGER.info("Bedtime — HVAC mode is %s, no setback needed", c.hvac_mode)
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "bedtime_setback_skipped",
-                    {"reason": "hvac_off", "occupancy": self._occupancy_mode},
-                )
-            if self._today_record is not None:
-                self._today_record.setback_skipped_reason = "hvac_off"
-            return
-
-        unit = self.config.get("temp_unit", "fahrenheit")
-        if c.hvac_mode == "heat":
-            bedtime_target = compute_bedtime_setback(self.config, self._thermal_model, c)
-            depth_f = abs(self.config["comfort_heat"] - bedtime_target)
-            was_adaptive = (
-                self._thermal_model is not None
-                and self._thermal_model.get("confidence", "none") != "none"
-                and (self._thermal_model.get("k_active_heat") or 0) > 0
+        # Arm the sleep band — the thermostat holds both edges through the night.
+        # Note: adaptive compute_bedtime_setback depth is a follow-up (P3 follow-up documented);
+        # for now the band uses configured sleep_heat/sleep_cool which are the standard sleep setpoints.
+        _sleep_band = select_comfort_band(
+            c,
+            self.config,
+            occupancy_mode=self._occupancy_mode,
+            in_sleep_window=True,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "bedtime_setback",
+                {
+                    "mode": c.hvac_mode,
+                    "floor": _sleep_band.floor,
+                    "ceiling": _sleep_band.ceiling,
+                    "active": _sleep_band.active,
+                    "modifier": c.setback_modifier,
+                },
             )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "bedtime_setback",
-                    {
-                        "mode": "heat",
-                        "target_f": bedtime_target,
-                        "depth_f": depth_f,
-                        "adaptive": was_adaptive,
-                        "modifier": c.setback_modifier,
-                    },
-                )
-            if self._today_record is not None:
-                self._today_record.setback_heat_applied_f = bedtime_target
-                self._today_record.setback_depth_f = depth_f
-                self._today_record.setback_was_adaptive = was_adaptive
-            await self._set_temperature(
-                bedtime_target,
-                reason=(
-                    f"bedtime — heat setback"
-                    f" (comfort {format_temp(self.config['comfort_heat'], unit)}"
-                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
-                ),
-            )
-        elif c.hvac_mode == "cool":
-            bedtime_target = compute_bedtime_setback(self.config, self._thermal_model, c)
-            depth_f = abs(self.config["comfort_cool"] - bedtime_target)
-            was_adaptive = (
-                self._thermal_model is not None
-                and self._thermal_model.get("confidence", "none") != "none"
-                and (self._thermal_model.get("k_active_cool") or 0) > 0
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "bedtime_setback",
-                    {
-                        "mode": "cool",
-                        "target_f": bedtime_target,
-                        "depth_f": depth_f,
-                        "adaptive": was_adaptive,
-                        "modifier": c.setback_modifier,
-                    },
-                )
-            if self._today_record is not None:
-                self._today_record.setback_cool_applied_f = bedtime_target
-                self._today_record.setback_depth_f = depth_f
-                self._today_record.setback_was_adaptive = was_adaptive
-            await self._set_temperature(
-                bedtime_target,
-                reason=(
-                    f"bedtime — cool setback"
-                    f" (comfort {format_temp(self.config['comfort_cool'], unit)}"
-                    f" + modifier {format_temp_delta(c.setback_modifier, unit)})"
-                ),
-            )
+        if self._today_record is not None:
+            if c.hvac_mode == "heat":
+                self._today_record.setback_heat_applied_f = _sleep_band.floor
+                self._today_record.setback_depth_f = abs(self.config.get("comfort_heat", 70) - _sleep_band.floor)
+                self._today_record.setback_was_adaptive = False
+            elif c.hvac_mode == "cool":
+                self._today_record.setback_cool_applied_f = _sleep_band.ceiling
+                self._today_record.setback_depth_f = abs(self.config.get("comfort_cool", 75) - _sleep_band.ceiling)
+                self._today_record.setback_was_adaptive = False
+        await self._apply_comfort_band(
+            _sleep_band,
+            reason=f"bedtime — sleep band [{_sleep_band.floor:.0f}/{_sleep_band.ceiling:.0f}]",
+        )
 
     async def handle_morning_wakeup(self) -> None:
         """Restore comfort for morning wake-up."""
@@ -2410,28 +2413,28 @@ class AutomationEngine:
         if not c:
             return
 
-        if c.hvac_mode == "heat":
-            comfort_heat = self.config["comfort_heat"]
-            await self._set_temperature(
-                comfort_heat,
-                reason="morning wake-up — restoring heat comfort",
+        # Arm the daytime comfort band — waking up exits the sleep window.
+        _wakeup_band = select_comfort_band(
+            c,
+            self.config,
+            occupancy_mode=self._occupancy_mode,
+            in_sleep_window=False,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "morning_wakeup",
+                {
+                    "mode": c.hvac_mode,
+                    "floor": _wakeup_band.floor,
+                    "ceiling": _wakeup_band.ceiling,
+                    "active": _wakeup_band.active,
+                },
             )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "morning_wakeup",
-                    {"mode": "heat", "target_f": comfort_heat},
-                )
-        elif c.hvac_mode == "cool":
-            comfort_cool = self.config["comfort_cool"]
-            await self._set_temperature(
-                comfort_cool,
-                reason="morning wake-up — restoring cool comfort",
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "morning_wakeup",
-                    {"mode": "cool", "target_f": comfort_cool},
-                )
+        await self._apply_comfort_band(
+            _wakeup_band,
+            reason=f"morning wake-up — comfort band [{_wakeup_band.floor:.0f}/{_wakeup_band.ceiling:.0f}]",
+        )
 
     async def _activate_fan(self, *, reason: str) -> None:
         """Activate fan based on configured fan_mode."""
@@ -2573,16 +2576,12 @@ class AutomationEngine:
         self._economizer_active = True
 
         if aggressive_savings:
-            # Savings mode: skip AC, rely purely on ventilation
+            # Savings mode: rely purely on ventilation; band stays armed (compressor self-arbitrates)
             if self._economizer_phase != "maintain":
                 self._economizer_phase = "maintain"
-                await self._set_hvac_mode(
-                    "off",
-                    reason=f"economizer (savings) — outdoor {format_temp(outdoor_temp, unit)}, ventilation only",
-                )
                 await self._activate_fan(reason="economizer maintain — fan assists ventilation")
                 _LOGGER.info(
-                    "Economizer (savings): ventilation only, outdoor=%s",
+                    "Economizer (savings): ventilation only, outdoor=%s, band stays armed",
                     format_temp(outdoor_temp, unit),
                 )
             return True
@@ -2612,20 +2611,13 @@ class AutomationEngine:
                 )
             return True
         else:
-            # Phase 2: maintain — indoor at or below comfort, AC off
+            # Phase 2: maintain — indoor at or below comfort; band stays armed (compressor
+            # self-arbitrates — if ventilation is enough the compressor stays idle for free).
             if self._economizer_phase != "maintain":
                 self._economizer_phase = "maintain"
-                await self._set_hvac_mode(
-                    "off",
-                    reason=(
-                        f"economizer maintain — indoor"
-                        f" {format_temp(indoor_temp if indoor_temp is not None else 0, unit)}"
-                        " at comfort, ventilation holding"
-                    ),
-                )
                 await self._activate_fan(reason="economizer maintain — fan assists ventilation")
                 _LOGGER.info(
-                    "Economizer phase=maintain: indoor=%s, AC off",
+                    "Economizer phase=maintain: indoor=%s, band armed, ventilation holding",
                     format_temp(indoor_temp if indoor_temp is not None else 0, unit),
                 )
             return True
@@ -2671,6 +2663,20 @@ class AutomationEngine:
             temp = climate_state.attributes.get("current_temperature")
             return to_fahrenheit(float(temp), unit) if temp is not None else None
         return None
+
+    def _get_thermostat_capabilities(self) -> ThermostatCapabilities:
+        """Read the configured thermostat's advertised capabilities (Issue #249).
+
+        Reads ``hvac_modes`` and ``supported_features`` from the climate entity's state and
+        delegates to :func:`parse_thermostat_capabilities`. If the entity is missing or
+        unavailable, returns all-False capabilities so callers degrade gracefully to their
+        current behavior rather than assuming a band-capable thermostat.
+        """
+        state = self.hass.states.get(self.climate_entity)
+        if state is None:
+            return parse_thermostat_capabilities(None, None)
+        attrs = getattr(state, "attributes", None) or {}
+        return parse_thermostat_capabilities(attrs.get("hvac_modes"), attrs.get("supported_features"))
 
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.

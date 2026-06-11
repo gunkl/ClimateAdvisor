@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.3.56"
+VERSION = "0.4.0"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.0": [
+        "Feat #249: Thermostat-is-the-controller — Climate Advisor now programs a comfort band"
+        " [comfort_heat, comfort_cool] and lets the thermostat's own deadband hold it, instead of"
+        " switching HVAC off and running a 30-minute supervisory loop. The home pre-heats cold"
+        " mornings up to comfort and cools warm afternoons by itself; natural ventilation keeps the"
+        " band armed (free cooling stays free while the heat floor stays defended); aggressive_savings"
+        " widens the band. away/vacation/sleep use setback bands. Single-mode thermostats arm the"
+        " threatened edge; dual heat_cool thermostats hold both edges with one command.",
+        "Fix #247: The ODE ceiling guard now escalates to AC when outdoor stays below indoor but"
+        " ventilation can't hold the comfort ceiling (re-occurrence of #218's incomplete fix). Under"
+        " the #249 band model this is the misprogramming backstop; the comfort band is the primary"
+        " defense.",
+    ],
     "0.3.54": [
         "Fix #172: Predicted indoor temperature no longer drops suddenly at sleep time"
         " — ODE uses classification.hvac_mode for today's mode (prevents evening forecast-high flip);"
@@ -663,7 +676,7 @@ KNOWN_FIXES: dict[int, dict] = {
         "issue": 247,
         "title": "Ceiling guard never escalated to AC when outdoor stayed below indoor"
         " (re-occurrence of #218's incomplete fix)",
-        "version_fixed": "0.3.57",
+        "version_fixed": "0.4.0",
         "scope_covered": [
             "apply_classification() ceiling-guard dormancy changed from 1 condition (outdoor<=indoor) to 3",
             " (outdoor<=indoor AND _natural_vent_active AND indoor<=ceiling threshold)",
@@ -681,6 +694,31 @@ KNOWN_FIXES: dict[int, dict] = {
             "Predictive pre-emption (firing before indoor crosses the ceiling based on the ODE curve under nat-vent)"
             " — deferred; the fix is reactive once indoor breaches the ceiling threshold",
             "Coordinator cadence (re-evaluation still every 30 min + 5-min revisit) — unchanged",
+        ],
+    },
+    249: {
+        "issue": 249,
+        "title": "Thermostat-is-the-controller: program a comfort band instead of HVAC off + supervisory guards",
+        "version_fixed": "0.4.0",
+        "scope_covered": [
+            "select_comfort_band() computes [floor, ceiling] from classification/occupancy/sleep/savings;"
+            " occupied+awake = full comfort band [comfort_heat, comfort_cool] on ANY day type",
+            "_apply_comfort_band() arms the band via the thermostat's command shape:"
+            " dual -> heat_cool + target_temp_low/high; single -> cool@ceiling or heat@floor;"
+            " emits comfort_band_applied",
+            "All scheduled handlers (apply_classification, handle_bedtime, handle_occupancy_away/vacation,"
+            " handle_morning_wakeup) route through the band primitive — no more off+setback divergence",
+            "Nat-vent and economizer no longer set HVAC off — the band stays armed and only the fan is managed;"
+            " the compressor self-arbitrates with the open window (free cooling stays free)",
+            "aggressive_savings widens BOTH comfort edges by CEILING_ESCALATION_SAVINGS_MARGIN_F",
+            "away/vacation/sleep keep setback/sleep bands; §6b/§6c demoted to passive backstops",
+            "Thermostat capability detection (P1: ThermostatCapabilities) + sim harness arms the band",
+        ],
+        "scope_not_covered": [
+            "Adaptive bedtime setback depth (compute_bedtime_setback) — the sleep band uses configured"
+            " sleep_heat/sleep_cool; adaptive depth is a follow-up",
+            "Heat-only thermostat on a warm day (cannot defend the ceiling) — band no-ops with an INFO log",
+            "Single-setpoint mid-day edge re-selection — the band holds both edges via the device's shape",
         ],
     },
 }
@@ -1577,6 +1615,13 @@ CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfor
 # the ceiling guard escalates nat-vent -> AC (savings homes accept a small overshoot before paying
 # for cooling; normal mode escalates at comfort_cool).
 CEILING_ESCALATION_SAVINGS_MARGIN_F: float = 2.0
+
+# Issue #249 — thermostat capability detection. Home Assistant's
+# ClimateEntityFeature.TARGET_TEMPERATURE_RANGE bit: when set in a climate entity's
+# `supported_features`, the thermostat accepts target_temp_low/target_temp_high (dual-setpoint /
+# heat_cool band). Defined locally as a stable HA flag value so automation.py need not import
+# homeassistant.components.climate (which breaks the lightweight stub test environment).
+CLIMATE_FEATURE_TARGET_TEMP_RANGE: int = 2
 
 ATTR_THERMAL_HEATING_RATE = "thermal_heating_rate"
 ATTR_THERMAL_COOLING_RATE = "thermal_cooling_rate"

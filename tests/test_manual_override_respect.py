@@ -32,6 +32,22 @@ def _consume_coroutine(coro):
     coro.close()
 
 
+def _make_thermostat_state(mode: str = "heat") -> MagicMock:
+    """Return a mock thermostat state with heat+cool capabilities.
+
+    #249 P3: apply_classification now calls _apply_comfort_band which reads
+    attributes.hvac_modes + supported_features.  Without these the band no-ops
+    and no service calls are emitted, breaking the 'works when no override' test.
+    """
+    s = MagicMock()
+    s.state = mode
+    s.attributes = {
+        "hvac_modes": ["off", "heat", "cool"],
+        "supported_features": 1,
+    }
+    return s
+
+
 def _make_automation_engine(config_overrides=None):
     """Create an AutomationEngine with mocked HA dependencies."""
     hass = MagicMock()
@@ -39,6 +55,8 @@ def _make_automation_engine(config_overrides=None):
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+    # Provide thermostat capabilities so _apply_comfort_band can arm when classification runs.
+    hass.states.get.return_value = _make_thermostat_state("heat")
 
     config = {
         "comfort_heat": 70,

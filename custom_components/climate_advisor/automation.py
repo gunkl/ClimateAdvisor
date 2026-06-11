@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 from .classifier import DayClassification
 from .const import (
     CEILING_BRIDGE_TOLERANCE_F,
+    CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CEILING_PRECOOL_FALLBACK_MIN,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
     CONF_ADAPTIVE_PREHEAT,
@@ -968,18 +969,35 @@ class AutomationEngine:
                 _k_via_bridge,
             )
 
+            # Issue #247: dormancy is THREE conditions (the change #218 specified but its commit
+            # omitted — only the escalation-on-fire half landed). Defer to free cooling ONLY when
+            # outdoor is cooler AND nat-vent is actually running AND indoor is still within band.
+            # If indoor has breached the ceiling (free cooling losing to solar/internal gains), or
+            # nat-vent is not actually running (sensors closed / fan override — #215), the guard must
+            # evaluate and escalate to AC even though outdoor <= indoor. aggressive_savings widens the
+            # in-band threshold so savings homes tolerate a small overshoot before paying for cooling.
+            _aggressive = bool(self.config.get("aggressive_savings", False))
+            _ceiling_threshold = (
+                _comfort_cool_cg + CEILING_ESCALATION_SAVINGS_MARGIN_F
+                if (_aggressive and _comfort_cool_cg is not None)
+                else _comfort_cool_cg
+            )
             if not _model_eligible:
                 _LOGGER.debug("ODE ceiling guard: skipped — k_passive=%s, conf=%s", _k_passive, _conf)
             elif _outdoor is None or _indoor_cg is None:
                 _LOGGER.debug("ODE ceiling guard: skipped — missing outdoor/indoor temps")
-            elif _outdoor <= _indoor_cg:
+            elif _outdoor <= _indoor_cg and self._natural_vent_active and _indoor_cg <= _ceiling_threshold:
                 _LOGGER.debug(
-                    "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f (nat-vent eligible)",
+                    "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
+                    " indoor <= ceiling threshold %.1f (free cooling viable)",
                     _outdoor,
                     _indoor_cg,
+                    _ceiling_threshold,
                 )
             else:
-                # Nat-vent unavailable; scan predicted curve for ceiling breach.
+                # Dormancy lifted (outdoor rose above indoor, OR nat-vent is not running, OR indoor
+                # breached the ceiling under active nat-vent — Issue #247). Scan the predicted curve
+                # for a ceiling breach.
                 # Inline equivalent of _find_ceiling_breach_time() — avoids circular import.
                 _breach_ts: datetime | None = None
                 _threshold = _comfort_cool_cg + _tolerance
@@ -1015,11 +1033,13 @@ class AutomationEngine:
                     _lead_min = max(30.0, min(240.0, _lead_min))
 
                     _LOGGER.info(
-                        "ODE ceiling guard: breach predicted at %s (%.1fh away), outdoor=%.1f > indoor=%.1f",
+                        "ODE ceiling guard: breach predicted at %s (%.1fh away), outdoor=%.1f, indoor=%.1f,"
+                        " nat_vent=%s",
                         _breach_ts.strftime("%H:%M"),
                         _hours_to_breach,
                         _outdoor,
                         _indoor_cg,
+                        self._natural_vent_active,
                     )
 
                     if _hours_to_breach <= _lead_min / 60:
@@ -1640,9 +1660,12 @@ class AutomationEngine:
             comfort_heat = float(self.config.get("comfort_heat", 70))
             indoor = self._get_indoor_temp_f()
             if self._natural_vent_active and indoor is not None and comfort_cool is not None and indoor > comfort_cool:
-                _LOGGER.warning(
+                # Issue #247: the ODE ceiling guard now ESCALATES to AC on the classification cycle
+                # when indoor breaches the ceiling under active nat-vent (its three-condition dormancy
+                # lifts), so this is an informational heads-up, not a stuck state.
+                _LOGGER.info(
                     "Nat-vent active but indoor %.1fF > comfort_cool %.1fF --"
-                    " ceiling guard will evaluate on next classification cycle",
+                    " ceiling guard will escalate to AC this classification cycle",
                     indoor,
                     comfort_cool,
                 )

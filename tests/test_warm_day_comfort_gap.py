@@ -405,11 +405,46 @@ class TestCeilingGuardSkips:
         hvac_calls = [c for c in calls if c.args[1] == "set_hvac_mode"]
         assert not any(c.args[2].get("hvac_mode") == "cool" for c in hvac_calls)
 
-    def test_skips_when_outdoor_below_indoor(self):
-        """Outdoor <= indoor → nat-vent available → guard dormant."""
+    def test_dormant_when_outdoor_below_natvent_running_in_band(self):
+        """Issue #247: dormant ONLY when outdoor<=indoor AND nat-vent running AND indoor in band.
+
+        This replaces the old `test_skips_when_outdoor_below_indoor`, which asserted "no AC whenever
+        outdoor <= indoor" UNCONDITIONALLY — even with indoor 76°F above comfort_cool 74°F. That
+        encoded the bug: it validated the one-condition dormancy that #218 was supposed to replace
+        (its 3-condition fix was specified but never committed). The correct behavior is: defer to
+        free cooling only while it is actually viable — outdoor cool, windows actually ventilating,
+        and indoor still within band.
+        """
         engine = _make_engine(config_overrides={"comfort_cool": 74.0})
-        _set_indoor_temp_via_climate(engine, 76.0)
-        engine._last_outdoor_temp = 72.0  # outdoor < indoor → nat-vent available
+        _set_indoor_temp_via_climate(engine, 73.0)  # IN band
+        engine._last_outdoor_temp = 70.0  # outdoor < indoor
+        engine._natural_vent_active = True  # windows actually ventilating
+        _set_thermal_model(engine, k_passive=-0.05, conf="medium")
+
+        now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        # Curve DOES breach later — proves dormancy holds on the indoor-in-band + nat-vent condition,
+        # not merely because nothing breaches (the breach scan is never reached while dormant).
+        curve = _make_predicted_indoor(start_hour_utc=10, temps=[73.0, 74.5, 75.0])
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(engine.apply_classification(_make_warm_off_classification(), predicted_indoor=curve))
+
+        calls = engine.hass.services.async_call.call_args_list
+        cool_calls = [c for c in calls if c.args[1] == "set_hvac_mode" and c.args[2].get("hvac_mode") == "cool"]
+        assert len(cool_calls) == 0  # free cooling still viable → dormant
+
+    def test_fires_when_indoor_breaches_ceiling_despite_outdoor_below(self):
+        """Issue #247: nat-vent active, outdoor < indoor, indoor ABOVE comfort_cool → escalate to AC.
+
+        Solar/internal gains exceed ventilated cooling; free cooling is demonstrably losing. The
+        guard must fire even though outdoor < indoor (this is the exact #247 case the old test
+        wrongly asserted should be dormant).
+        """
+        engine = _make_engine(config_overrides={"comfort_cool": 74.0})
+        _set_indoor_temp_via_climate(engine, 76.0)  # OUT of band
+        engine._last_outdoor_temp = 70.0  # outdoor < indoor
+        engine._natural_vent_active = True
         _set_thermal_model(engine, k_passive=-0.05, conf="medium")
 
         now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
@@ -421,7 +456,48 @@ class TestCeilingGuardSkips:
 
         calls = engine.hass.services.async_call.call_args_list
         cool_calls = [c for c in calls if c.args[1] == "set_hvac_mode" and c.args[2].get("hvac_mode") == "cool"]
-        assert len(cool_calls) == 0
+        assert len(cool_calls) >= 1  # escalated to AC
+
+    def test_fires_when_natvent_not_running_and_indoor_above_ceiling(self):
+        """Issue #215/#247: nat-vent NOT running (sensors closed / fan override), indoor above ceiling,
+        outdoor below indoor → guard must fire (do not defer to a ventilation that is not happening)."""
+        engine = _make_engine(config_overrides={"comfort_cool": 74.0})
+        _set_indoor_temp_via_climate(engine, 76.0)
+        engine._last_outdoor_temp = 70.0  # outdoor < indoor
+        engine._natural_vent_active = False  # windows closed / fan off
+        _set_thermal_model(engine, k_passive=-0.05, conf="medium")
+
+        now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        curve = _make_predicted_indoor(start_hour_utc=10, temps=[76.0, 77.0, 78.0])
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(engine.apply_classification(_make_warm_off_classification(), predicted_indoor=curve))
+
+        calls = engine.hass.services.async_call.call_args_list
+        cool_calls = [c for c in calls if c.args[1] == "set_hvac_mode" and c.args[2].get("hvac_mode") == "cool"]
+        assert len(cool_calls) >= 1
+
+    def test_aggressive_savings_widens_escalation_threshold(self):
+        """Issue #247: in aggressive_savings, tolerate a small overshoot (comfort_cool + margin) before
+        escalating — so a 75°F reading (within comfort_cool 74 + 2°F margin) stays dormant under
+        active nat-vent."""
+        engine = _make_engine(config_overrides={"comfort_cool": 74.0, "aggressive_savings": True})
+        _set_indoor_temp_via_climate(engine, 75.0)  # within 74 + 2°F savings margin
+        engine._last_outdoor_temp = 70.0
+        engine._natural_vent_active = True
+        _set_thermal_model(engine, k_passive=-0.05, conf="medium")
+
+        now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        curve = _make_predicted_indoor(start_hour_utc=10, temps=[75.0, 75.5, 75.8])
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(engine.apply_classification(_make_warm_off_classification(), predicted_indoor=curve))
+
+        calls = engine.hass.services.async_call.call_args_list
+        cool_calls = [c for c in calls if c.args[1] == "set_hvac_mode" and c.args[2].get("hvac_mode") == "cool"]
+        assert len(cool_calls) == 0  # savings margin tolerates the small overshoot
 
     def test_skips_when_no_breach_in_curve(self):
         """All predicted temps below comfort_cool → guard dormant."""

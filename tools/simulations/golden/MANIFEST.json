@@ -122,5 +122,25 @@
     "sha256": "5f9e753a9a8300a52653b271ae179713603dfb0b366b6516d67d73aaac5791d4",
     "signed": "2026-06-10",
     "issue": 247
+  },
+  "p3_warm_day_dual_thermostat_comfort_band": {
+    "sha256": "5dad4f8b74a3b7fea2a7835cfbda9d7496cf33c439a281d55442aaaf591f10c1",
+    "signed": "2026-06-10",
+    "issue": 249
+  },
+  "p3_warm_day_natvent_band_stays_armed": {
+    "sha256": "46c068ae62d49ceee089975afa8842e1169e31365d4f26fe91798e5509bd4211",
+    "signed": "2026-06-10",
+    "issue": 249
+  },
+  "p3_cold_day_heat_floor_band": {
+    "sha256": "10d991dd67458b796894b4c5275d7beb5c0a313b681e91e8521cc15ad76b967f",
+    "signed": "2026-06-10",
+    "issue": 249
+  },
+  "p3_single_cool_thermostat_warm_day": {
+    "sha256": "8c2d425245479d61bed288f2e92f4b0e3c9d640cb68fc9842ef01935483dda02",
+    "signed": "2026-06-10",
+    "issue": 249
   }
 }

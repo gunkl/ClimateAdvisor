@@ -116,5 +116,5 @@
     "observed_behavior": "classification_applied (heat, 70F) \u00e2\u2020\u2019 override_detected (10:00) \u00e2\u2020\u2019 override_confirmed (10:10) \u00e2\u2020\u2019 no_action on classification (14:30) \u00e2\u2020\u2019 setback_applied (22:30, 66F)",
     "expected_behavior": "CA respects manual override during the day; bedtime event always clears override and applies setback regardless of override state"
   },
-  "pending_issue": 245
+  "unsupported_reason": "Integration-tier (Issue #204 / override persistence): a CONFIRMED manual override must persist to the bedtime/classification cycles to suppress setback. That state is established by the coordinator's _async_thermostat_changed listener + async_call_later confirm timer, which the Tier-A production harness does not run headlessly, so _manual_override_active is not True when handle_bedtime() fires. Production is occupant-correct (it skips bedtime setback when the override is active \u2014 bedtime_setback_skipped); the Tier-A harness cannot model the override lifecycle. Deferred to the Tier B HeadlessTarry harness (#236)."
 }

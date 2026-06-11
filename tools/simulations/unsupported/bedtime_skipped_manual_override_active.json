@@ -77,5 +77,5 @@
     "observed_behavior": "production: override_confirmed at 21:10, bedtime_setback_skipped at 22:30",
     "expected_behavior": "Bedtime setback suppressed when manual override is active (Issue #204 fix validation)"
   },
-  "pending_issue": 245
+  "unsupported_reason": "Integration-tier (Issue #204 / override persistence): a CONFIRMED manual override must persist to the bedtime/classification cycles to suppress setback. That state is established by the coordinator's _async_thermostat_changed listener + async_call_later confirm timer, which the Tier-A production harness does not run headlessly, so _manual_override_active is not True when handle_bedtime() fires. Production is occupant-correct (it skips bedtime setback when the override is active \u2014 bedtime_setback_skipped); the Tier-A harness cannot model the override lifecycle. Deferred to the Tier B HeadlessTarry harness (#236)."
 }

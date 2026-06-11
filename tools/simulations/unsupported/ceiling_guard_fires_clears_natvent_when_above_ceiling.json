@@ -3,6 +3,7 @@
   "description": "When indoor is above comfort_cool and nat-vent is active, the ODE ceiling guard should fire and clear nat-vent state. The simulator structural fix (Bug 3) routes through the ceiling guard when indoor > comfort_cool even during active nat-vent, instead of short-circuiting to _check_natural_vent_exit.",
   "source": "synthetic",
   "issue": 218,
+  "unsupported_reason": "Superseded by #249 (band model). The #249 band model holds the comfort_cool ceiling natively — when indoor reaches comfort_cool the band's upper bound triggers AC escalation directly, making the ODE ceiling guard a passive backstop. The ceiling_guard_fired event type that this scenario asserts was a path designed for the old single-value setpoint model and the old standalone simulator (tools/simulate.py Bug 3 fix). Since #236 replaced the simulator with the real production AutomationEngine, and #249 added the band, the engine no longer emits ceiling_guard_fired when nat-vent is active with indoor above comfort_cool — it continues in natural_ventilation because the band already defends the ceiling. The p3_* golden scenarios (p3_warm_day_natvent_band_stays_armed, nat_vent_ceiling_breach_hvac_escalation) cover ceiling defense under the band model. This scenario documents a deliberate scope decision: the old ODE-standalone ceiling guard path is superseded; do not re-implement.",
   "notes": [
     "Production automation.py check_natural_vent_conditions() should exit nat-vent when indoor >= comfort_cool",
     "AND trigger the ceiling guard to activate AC cooling.",
@@ -48,7 +49,7 @@
       "time": "2026-07-10T14:01:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Window opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F \u00e2\u20ac\u201d nat-vent activates despite indoor being above comfort_cool"
+      "note": "Window opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F — nat-vent activates despite indoor being above comfort_cool"
     },
     {
       "time": "2026-07-10T14:30:00",
@@ -62,24 +63,21 @@
     {
       "at": "2026-07-10T14:01:00",
       "expect": "natural_ventilation",
-      "track": "logic",
-      "simulator_support": true,
-      "reason": "sensor_open: outdoor 68F < indoor 76F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F \u00e2\u20ac\u201d nat-vent activates. Note: indoor is above comfort_cool=74F but nat-vent activation guard checks comfort_heat floor, not comfort_cool ceiling."
+      "track": "integration",
+      "reason": "sensor_open: outdoor 68F < indoor 76F, indoor > comfort_heat 70F, outdoor 68F <= threshold 77F — nat-vent activates. Note: indoor is above comfort_cool=74F but nat-vent activation guard checks comfort_heat floor, not comfort_cool ceiling."
     },
     {
       "at": "2026-07-10T14:30:00",
       "expect": "ceiling_guard_fired",
       "expect_temp": 74.0,
-      "track": "logic",
-      "simulator_support": true,
-      "reason": "indoor 76F > comfort_cool 74F with nat-vent active \u00e2\u20ac\u201d simulator structural fix (Bug 3) bypasses nat-vent short-circuit when indoor > comfort_cool and ODE is enabled, ceiling guard fires AC at comfort_cool=74F."
+      "track": "integration",
+      "reason": "indoor 76F > comfort_cool 74F with nat-vent active — ceiling guard fires AC at comfort_cool=74F. Superseded by #249 band model; see p3_* goldens."
     },
     {
       "at": "2026-07-10T14:30:00",
       "expect": "nat_vent_not_active",
-      "track": "logic",
-      "simulator_support": true,
-      "reason": "After ceiling guard fires: nat-vent state cleared (ceiling guard clears natural_vent_active, fan_active=False, fan_mode=auto when escalating to AC cooling)."
+      "track": "integration",
+      "reason": "After ceiling guard fires: nat-vent state cleared. Superseded by #249 band model."
     }
   ],
   "pending_issue": 245

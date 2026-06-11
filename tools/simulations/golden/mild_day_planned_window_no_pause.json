@@ -1,0 +1,65 @@
+{
+  "name": "mild_day_planned_window_no_pause",
+  "description": "Mild day with windows_recommended=True and planned window 10:00–17:00. Outdoor is cooler than indoor. Sensor opens at 12:00 (inside the window). The planned-window gate fires — production returns silently with no new event. The last observable decision at 12:00 remains classification_applied.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "_handle_sensor_open() checks: paused? → grace? → _is_within_planned_window_period() → _apply_nat_vent_or_pause().",
+    "The planned-window gate at position 3 fires BEFORE nat-vent evaluation when within window.",
+    "When the gate fires, production simply returns — no event is emitted. The last visible decision",
+    "stays at classification_applied. This is correct: planned window tells CA to stay out of the way.",
+    "outdoor=65F < indoor=73F, indoor=73F > comfort_heat=70F, outdoor < threshold — nat-vent conditions met,",
+    "but gate takes priority and the return happens before any event emission.",
+    "Covers Priority 6 mild_day_planned_window from plan abundant-mapping-clarke.md (C5×E1 cell)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-04-22T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Late morning: indoor 73F, outdoor 65F — nat-vent conditions would be favorable"
+    },
+    {
+      "time": "2026-04-22T10:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "10:00",
+      "window_close_time": "17:00",
+      "note": "Mild-day classification: windows recommended 10:00–17:00, hvac_mode=off"
+    },
+    {
+      "time": "2026-04-22T12:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens at 12:00 inside the 10:00–17:00 planned window — gate fires, production returns silently"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-04-22T10:01:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied: hvac_mode=off, windows_recommended=True, 10:00–17:00 window"
+    },
+    {
+      "at": "2026-04-22T12:00:00",
+      "expect": "classification_applied",
+      "reason": "sensor_open during planned window period — production _is_within_planned_window_period() returns True and handle_door_window_open() returns silently with no event emitted. No pause, no nat-vent event. Last observable decision remains classification_applied. CA stays hands-off during the occupant's planned window period."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Planned window gate suppresses sensor_open response on mild day — production returns silently, no event emitted",
+    "observed_behavior": "classification_applied (off, windows recommended) → sensor_open at 12:00 → no new event; last decision stays classification_applied",
+    "expected_behavior": "Sensor open inside planned window suppressed entirely; CA stays hands-off during window period"
+  }
+}

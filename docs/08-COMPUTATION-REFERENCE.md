@@ -857,7 +857,7 @@ Mode changes are issued only when the thermostat is not already in the target mo
 Natural ventilation and the economizer **no longer set `hvac_mode=off`** when they activate (Issue #249 Design §4). They manage only the fan; the comfort band remains armed throughout:
 
 - **Nat-vent active (windows open, outdoor cooler than indoor):** fan on, `_natural_vent_active = True`, band unchanged. The thermostat self-arbitrates: if the breeze keeps the home below the ceiling, the compressor idles for free. If the breeze fails and indoor rises above `comfort_cool`, the thermostat cools without waiting for the next CA 30-minute cycle.
-- **Economizer maintain phase:** fan on (or HVAC fan mode), band unchanged. The compressor is not needed as long as the open windows can hold the ceiling.
+- **Economizer (both phases):** fan on (or HVAC fan mode), band unchanged. The band holds `comfort_cool`, so the economizer never sets the HVAC mode/setpoint (Issue #264) — cool-down assists with the fan while the band cools; maintain holds it via ventilation.
 - **Escalation:** when the ODE ceiling guard (§6c) fires, nat-vent is cleared (`_natural_vent_active = False`) and a `nat_vent_ceiling_escalation` event is emitted — the band was already armed at the cool ceiling, so "escalation" means allowing the compressor to run rather than re-programming the setpoint.
 
 **Why no more HVAC off on nat-vent:** Turning HVAC off on nat-vent activation disarmed the floor. If outdoor conditions changed mid-night (cold snap), CA would not re-heat until the next 30-minute cycle noticed the floor breach — up to 30 minutes of the home sitting below the comfort floor. With the band always armed, the thermostat heats immediately.
@@ -911,7 +911,11 @@ Window advice is set by the classifier at classification time, based on `day_typ
 
 ## 8. Economizer (Window Cooling on Hot Days)
 
-The economizer is a two-phase strategy that uses open windows to reduce AC load on hot days.
+The economizer uses open windows on hot days to make the band's cooling cheaper. Under the #249 band
+model it is **fan-assist only**: the comfort band (§6e) holds `comfort_cool`, so the economizer no
+longer sets the HVAC mode or setpoint (Issue #264) — it runs the fan to pull cool outdoor air through
+the open window. It never overrides the band; there is no separate economizer on/off toggle (it is
+gated purely by the eligibility conditions below).
 
 ### Eligibility
 
@@ -928,17 +932,17 @@ All of the following must be true simultaneously:
 
 | Mode | aggressive_savings | Phase | Condition | Action |
 |---|---|---|---|---|
-| Normal | `False` | Phase 1: cool-down | `indoor_temp > comfort_cool` | Set HVAC to `cool`, target = `comfort_cool`; outdoor air assists efficiency |
-| Normal | `False` | Phase 2: maintain | `indoor_temp <= comfort_cool` | Set HVAC to `off`; activate fan for ventilation |
-| Savings | `True` | Maintain only (skip Phase 1) | Any eligible condition | Set HVAC to `off` immediately; activate fan; no AC assist |
+| Normal | `False` | Phase 1: cool-down | `indoor_temp > comfort_cool` | **Activate the fan only** — the #249 band already holds `comfort_cool`; the economizer pulls cool outdoor air through the open window to assist the band's cooling. It does **not** set the HVAC mode/setpoint (Issue #264 — that would flip the `heat_cool` band to single `cool`). |
+| Normal | `False` | Phase 2: maintain | `indoor_temp <= comfort_cool` | Activate the fan; the band stays armed (no `hvac_mode=off` — Issue #249) |
+| Savings | `True` | Maintain only (skip Phase 1) | Any eligible condition | Activate the fan; band stays armed; no AC assist (savings relies on ventilation) |
 
-When the economizer deactivates (conditions no longer met), the fan is turned off and HVAC resumes normal `cool` mode at `comfort_cool`.
+When the economizer deactivates (conditions no longer met), the fan is turned off; the comfort band continues to hold the thermostat — no HVAC mode change is issued (Issues #249/#264).
 
 ---
 
 ## 9. Fan Control
 
-Fans only activate during the economizer **maintain** phase (Phase 2 or savings-mode ventilation). Fan behavior is controlled by the `fan_mode` config setting.
+Fans activate during natural ventilation and during the economizer (both phases — cool-down assists the band's cooling, maintain holds it; Issue #264). Fan behavior is controlled by the `fan_mode` config setting.
 
 | fan_mode value | Activate action | Deactivate action |
 |---|---|---|

@@ -2588,26 +2588,24 @@ class AutomationEngine:
 
         # Comfort mode: two-phase strategy
         if indoor_temp is not None and indoor_temp > comfort_cool:
-            # Phase 1: cool-down — run AC, outdoor air assists efficiency
+            # Phase 1: cool-down. Issue #264: the #249 comfort band already holds comfort_cool, so the
+            # economizer no longer sets the HVAC mode/setpoint — doing so would flip the heat_cool band
+            # to single `cool` and fight the band (two controllers). It now only assists with the fan,
+            # pulling cool outdoor air through the open window to make the band's cooling more efficient.
             if self._economizer_phase != "cool-down":
                 self._economizer_phase = "cool-down"
-                await self._set_hvac_mode(
-                    "cool",
+                await self._activate_fan(
                     reason=(
-                        f"economizer cool-down — indoor {format_temp(indoor_temp, unit)}"
-                        f" > comfort {format_temp(comfort_cool, unit)},"
+                        f"economizer cool-down — fan assists the band's cooling: indoor"
+                        f" {format_temp(indoor_temp, unit)} > comfort {format_temp(comfort_cool, unit)},"
                         f" outdoor {format_temp(outdoor_temp, unit)} assisting"
-                    ),
-                )
-                await self._set_temperature(
-                    comfort_cool,
-                    reason=f"economizer cool-down — target comfort {format_temp(comfort_cool, unit)}",
+                    )
                 )
                 _LOGGER.info(
-                    "Economizer phase=cool-down: indoor=%s, target=%s, outdoor=%s",
+                    "Economizer phase=cool-down: indoor=%s, outdoor=%s — band holds comfort_cool=%s, fan assists",
                     format_temp(indoor_temp, unit),
-                    format_temp(comfort_cool, unit),
                     format_temp(outdoor_temp, unit),
+                    format_temp(comfort_cool, unit),
                 )
             return True
         else:

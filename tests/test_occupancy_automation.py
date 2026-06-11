@@ -26,6 +26,21 @@ def _consume_coroutine(coro):
     coro.close()
 
 
+def _make_thermostat_state(mode: str = "cool") -> MagicMock:
+    """Return a mock thermostat state with both heat and cool capabilities.
+
+    #249 P3: _apply_comfort_band reads attributes.hvac_modes + supported_features to
+    decide which command shape to emit.  Without these attrs the band no-ops silently.
+    """
+    s = MagicMock()
+    s.state = mode
+    s.attributes = {
+        "hvac_modes": ["off", "heat", "cool"],
+        "supported_features": 1,  # single-setpoint, no heat_cool
+    }
+    return s
+
+
 def _make_engine(config_overrides: dict | None = None) -> AutomationEngine:
     """Create an AutomationEngine with standard test config."""
     hass = MagicMock()
@@ -33,6 +48,8 @@ def _make_engine(config_overrides: dict | None = None) -> AutomationEngine:
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+    # Default thermostat state with both heat/cool capability so bands can arm.
+    hass.states.get.return_value = _make_thermostat_state("cool")
 
     config = {
         "comfort_heat": 70,
@@ -93,35 +110,36 @@ class TestApplyClassificationOccupancy:
     """apply_classification should respect occupancy mode."""
 
     def test_away_reapplies_setback_instead_of_comfort(self):
-        """When away, classification cycle should apply setback, not comfort."""
+        """When away, classification cycle arms the away band (ceiling=setback_cool), not comfort.
+
+        #249 P3: band active='ceiling' on a cool-capable thermostat → set_temperature(setback_cool=80).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
         engine.set_occupancy_mode("away")
-        # handle_occupancy_away() now reads actual thermostat mode
-        thermostat_state = MagicMock()
-        thermostat_state.state = "cool"
-        engine.hass.states.get.return_value = thermostat_state
+        engine.hass.states.get.return_value = _make_thermostat_state("cool")
 
         asyncio.run(engine.apply_classification(c))
 
-        # Should have called set_temperature with setback_cool (80), not comfort_cool (75)
+        # Away band active='ceiling' → set_temperature(setback_cool=80), not comfort_cool (75).
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) == 1
         set_temp = temp_calls[0][0][2]["temperature"]
-        assert set_temp == 80  # setback_cool, not comfort_cool (75)
+        assert set_temp == 80  # setback_cool (away ceiling), not comfort_cool (75)
 
     def test_away_heat_reapplies_heat_setback(self):
-        """When away in heat mode, classification should apply heat setback."""
+        """When away in heat mode, band still arms ceiling (cool side) on cool-capable thermostat.
+
+        #249 P3: away band is always active='ceiling'; a cool-capable device gets
+        set_temperature(setback_cool=80) regardless of the classification's hvac_mode.
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("away")
-        # handle_occupancy_away() now reads actual thermostat mode
-        thermostat_state = MagicMock()
-        thermostat_state.state = "heat"
-        engine.hass.states.get.return_value = thermostat_state
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine.apply_classification(c))
 
@@ -129,7 +147,8 @@ class TestApplyClassificationOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) == 1
         set_temp = temp_calls[0][0][2]["temperature"]
-        assert set_temp == 60  # setback_heat, not comfort_heat (70)
+        # Away band active='ceiling'; thermostat has cool → set_temperature(setback_cool=80).
+        assert set_temp == 80  # setback_cool (away ceiling), not setback_heat (60)
 
     def test_vacation_skips_classification_entirely(self):
         """When on vacation, classification should not change temperature at all."""
@@ -144,11 +163,15 @@ class TestApplyClassificationOccupancy:
         engine.hass.services.async_call.assert_not_called()
 
     def test_home_applies_comfort_normally(self):
-        """When home, classification should apply comfort temps as usual."""
+        """When home, classification arms the daytime comfort band (ceiling=comfort_cool for cool day).
+
+        #249 P3: cool day band active='ceiling' → set_temperature(comfort_cool=75).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
         engine.set_occupancy_mode("home")
+        engine.hass.states.get.return_value = _make_thermostat_state("cool")
 
         asyncio.run(engine.apply_classification(c))
 
@@ -156,14 +179,19 @@ class TestApplyClassificationOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) >= 1
         set_temp = temp_calls[-1][0][2]["temperature"]
+        # Cool day band: active='ceiling' → set_temperature(comfort_cool=75).
         assert set_temp == 75  # comfort_cool
 
     def test_guest_applies_comfort_normally(self):
-        """Guest mode should behave like home — full comfort."""
+        """Guest mode should behave like home — full comfort band armed (floor=comfort_heat for heat day).
+
+        #249 P3: heat day band active='floor' → set_temperature(comfort_heat=70).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("guest")
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine.apply_classification(c))
 
@@ -171,6 +199,7 @@ class TestApplyClassificationOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) >= 1
         set_temp = temp_calls[-1][0][2]["temperature"]
+        # Heat day band: active='floor' → set_temperature(comfort_heat=70).
         assert set_temp == 70  # comfort_heat
 
 
@@ -203,11 +232,16 @@ class TestMorningWakeupOccupancy:
         engine.hass.services.async_call.assert_not_called()
 
     def test_wakeup_runs_when_home(self):
-        """Morning wakeup should work normally when home."""
+        """Morning wakeup arms the daytime comfort band — heat day floor=comfort_heat.
+
+        #249 P3: wakeup now calls _apply_comfort_band which needs thermostat capabilities.
+        Heat day active='floor' → set_temperature(comfort_heat=70).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("home")
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine.handle_morning_wakeup())
 
@@ -215,14 +249,19 @@ class TestMorningWakeupOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) >= 1
         set_temp = temp_calls[-1][0][2]["temperature"]
-        assert set_temp == 70  # comfort_heat
+        assert set_temp == 70  # comfort_heat (heat day band floor)
 
     def test_wakeup_runs_when_guest(self):
-        """Morning wakeup should work when guests are present."""
+        """Morning wakeup works when guests are present — cool day ceiling=comfort_cool.
+
+        #249 P3: wakeup now calls _apply_comfort_band which needs thermostat capabilities.
+        Cool day active='ceiling' → set_temperature(comfort_cool=75).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
         engine.set_occupancy_mode("guest")
+        engine.hass.states.get.return_value = _make_thermostat_state("cool")
 
         asyncio.run(engine.handle_morning_wakeup())
 
@@ -230,7 +269,7 @@ class TestMorningWakeupOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) >= 1
         set_temp = temp_calls[-1][0][2]["temperature"]
-        assert set_temp == 75  # comfort_cool
+        assert set_temp == 75  # comfort_cool (cool day band ceiling)
 
 
 # ── handle_bedtime occupancy tests ──────────────────────────────
@@ -263,11 +302,15 @@ class TestBedtimeOccupancy:
         engine.hass.services.async_call.assert_not_called()
 
     def test_bedtime_runs_when_home(self):
-        """Bedtime should run normally when home."""
+        """Bedtime arms the sleep band — needs thermostat capabilities to produce a service call.
+
+        #249 P3: bedtime now calls _apply_comfort_band; stubs must carry hvac_modes attributes.
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("home")
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine.handle_bedtime())
 
@@ -276,11 +319,15 @@ class TestBedtimeOccupancy:
         assert len(temp_calls) >= 1
 
     def test_bedtime_runs_when_guest(self):
-        """Guest mode should apply bedtime setback like home."""
+        """Guest mode applies the sleep band like home — needs thermostat capabilities.
+
+        #249 P3: bedtime now calls _apply_comfort_band; stubs must carry hvac_modes attributes.
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("guest")
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine.handle_bedtime())
 
@@ -289,7 +336,11 @@ class TestBedtimeOccupancy:
         assert len(temp_calls) >= 1
 
     def test_bedtime_uses_sleep_heat_when_home(self):
-        """Issue #101: sleep_heat=67 in config → bedtime sets to 67°F, not comfort_heat-4."""
+        """sleep_heat=67 in config → bedtime sleep band floor=67°F.
+
+        #249 P3: the sleep band floor comes from config sleep_heat; the band arms with
+        set_temperature(floor=67) on a heat-capable thermostat.
+        """
         engine = _make_engine(
             config_overrides={
                 "comfort_heat": 70,
@@ -300,6 +351,7 @@ class TestBedtimeOccupancy:
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("home")
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine.handle_bedtime())
 
@@ -307,7 +359,7 @@ class TestBedtimeOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) >= 1
         set_temp = temp_calls[0][0][2]["temperature"]
-        assert set_temp == pytest.approx(67.0, abs=0.1)
+        assert set_temp == pytest.approx(67.0, abs=0.1)  # sleep band floor = sleep_heat
 
 
 # ── _set_temperature_for_mode safety net tests ──────────────────
@@ -317,15 +369,16 @@ class TestSetTemperatureForModeOccupancy:
     """_set_temperature_for_mode should redirect to setback when away/vacation."""
 
     def test_redirects_to_away_setback(self):
-        """When away, _set_temperature_for_mode should apply away setback."""
+        """When away, _set_temperature_for_mode routes to handle_occupancy_away (band ceiling).
+
+        #249 P3: away band active='ceiling' → cool-capable thermostat gets
+        set_temperature(setback_cool=80).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
         engine.set_occupancy_mode("away")
-        # handle_occupancy_away() reads actual thermostat mode
-        thermostat_state = MagicMock()
-        thermostat_state.state = "cool"
-        engine.hass.states.get.return_value = thermostat_state
+        engine.hass.states.get.return_value = _make_thermostat_state("cool")
 
         asyncio.run(engine._set_temperature_for_mode(c, reason="test"))
 
@@ -333,18 +386,20 @@ class TestSetTemperatureForModeOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) == 1
         set_temp = temp_calls[0][0][2]["temperature"]
+        # Away band active='ceiling' on cool-capable thermostat → setback_cool.
         assert set_temp == 80  # setback_cool
 
     def test_redirects_to_vacation_setback(self):
-        """When on vacation, _set_temperature_for_mode should apply deep setback."""
+        """When on vacation, _set_temperature_for_mode routes to handle_occupancy_vacation (band ceiling+extra).
+
+        #249 P3: vacation band active='ceiling' → cool-capable thermostat gets
+        set_temperature(setback_cool + VACATION_SETBACK_EXTRA = 80 + 3 = 83).
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
         engine.set_occupancy_mode("vacation")
-        # handle_occupancy_vacation() reads actual thermostat mode
-        thermostat_state = MagicMock()
-        thermostat_state.state = "heat"
-        engine.hass.states.get.return_value = thermostat_state
+        engine.hass.states.get.return_value = _make_thermostat_state("heat")
 
         asyncio.run(engine._set_temperature_for_mode(c, reason="test"))
 
@@ -352,9 +407,9 @@ class TestSetTemperatureForModeOccupancy:
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
         assert len(temp_calls) == 1
         set_temp = temp_calls[0][0][2]["temperature"]
-        # vacation heat = setback_heat + setback_modifier - VACATION_SETBACK_EXTRA
-        # = 60 + 0 - 3 = 57
-        assert set_temp == 57
+        # Vacation band active='ceiling' on cool-capable thermostat: setback_cool + VACATION_SETBACK_EXTRA.
+        # = 80 + 3 = 83
+        assert set_temp == 83
 
     def test_applies_comfort_when_home(self):
         """When home, _set_temperature_for_mode should apply comfort as usual."""

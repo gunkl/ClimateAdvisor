@@ -1,0 +1,73 @@
+{
+  "name": "p3_single_cool_thermostat_warm_day",
+  "description": "Issue #249 P3: On a warm day with a cool-only thermostat (no heat_cool mode), _apply_comfort_band selects the 'cool' command shape — set HVAC mode=cool at the ceiling (comfort_cool).",
+  "source": "synthetic",
+  "issue": 249,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md):",
+    "(a) Scenario effectiveness: if the cool-only thermostat branch in _apply_comfort_band is removed",
+    "    (e.g. falls through to no-op), comfort_band_armed fails; if the wrong temperature is",
+    "    commanded (e.g. floor instead of ceiling), expect_temp on classification_applied fails.",
+    "(b) Docs↔production alignment: docs must document that cool-only thermostats receive a single",
+    "    set_temperature(ceiling) call, not a dual set_temperature.",
+    "(c) Occupant experience: if the cool-only thermostat gets no command, the house heats unchecked",
+    "    on a warm day — no AC defense. This scenario is the regression anchor for that path.",
+    "Config: thermostat_hvac_modes=['off','cool'] disables heat and heat_cool in the FakeHass harness.",
+    "supported_features=0 disables dual-setpoint (TARGET_TEMP_RANGE bit not set).",
+    "Regression proof: remove cool-only branch from _apply_comfort_band → comfort_band_armed fails.",
+    "Change ceiling from comfort_cool to setback_cool → expect_temp fails."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0,
+    "thermostat_hvac_modes": ["off", "cool"],
+    "thermostat_supported_features": 0
+  },
+  "events": [
+    {
+      "time": "2026-06-15T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 72.0,
+      "note": "Warm morning: indoor 74F. Cool-only thermostat — no heat or heat_cool mode."
+    },
+    {
+      "time": "2026-06-15T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification. P3: cool-only thermostat → set HVAC=cool, temp=comfort_cool=76F."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-15T08:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification fires; cool-only thermostat band path executes.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T08:01:00",
+      "expect": "comfort_band_armed",
+      "reason": "P3 guard: _apply_comfort_band cool-only path must fire. If the band is not armed, the thermostat gets no command — indoor can overheat unchecked.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T08:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 76.0,
+      "reason": "Single-setpoint cool action: temperature=comfort_cool=76F. Regression check: if ceiling is wrong (e.g. setback_cool=82) the AC target is 6F too permissive.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "P3 warm-day classification with cool-only thermostat: set_hvac_mode(cool) + set_temperature(76) — ceiling defended without dual setpoint",
+    "observed_behavior": "classification_applied; comfort_band_applied [floor=62, ceiling=76, active=ceiling, mode=cool]; set_hvac_mode(cool) + set_temperature(76)",
+    "expected_behavior": "Occupant home cooled to 76F (comfort_cool) — thermostat runs AC to ceiling. No dual setpoint needed: cool-only units self-manage the floor since they can only cool."
+  }
+}

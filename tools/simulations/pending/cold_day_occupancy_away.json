@@ -1,15 +1,15 @@
 {
   "name": "cold_day_occupancy_away",
-  "description": "Cold day. User starts home with heat running at comfort_heat=70F. At 09:00 user leaves (occupancy_away) — setback applies to setback_heat=60F (NOT setback_cool). Classification cycles at 11:00 and 13:00 while away (reapply heat setback). User returns at 17:00 (occupancy_home) → comfort restored to 70F.",
+  "description": "Cold day. User starts home with heat running at comfort_heat=70F. At 09:00 user leaves (occupancy_away) — P3 comfort band arms [setback_heat=60 / setback_cool=82] with active=ceiling. Classification cycles at 11:00 and 13:00 while away reapply band. User returns at 17:00 → comfort restored to 70F.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "Tests cold day + full occupancy cycle: home → away (heat setback) → classification cycles during away → home (comfort restored).",
-    "Key assertion: away setback selects setback_HEAT (not setback_cool) when day type is cold/heat.",
-    "Simulator _handle_occupancy_away() checks classification.hvac_mode: heat → setback_heat; cool → setback_cool.",
-    "Classification cycles while occupancy=away produce setback_applied (not classification_applied) — simulator re-applies setback via _handle_occupancy_away() called from _handle_classification().",
-    "All assertions are fully logic-track — no gap closures required.",
-    "This is a gap-filling scenario: covers cold-day away occupancy path that has zero existing golden coverage."
+    "Tests cold day + full occupancy cycle: home → away (P3 dual band) → classification cycles → home (comfort restored).",
+    "P3 migration (Issue #249): select_comfort_band(away) always uses active='ceiling' regardless of day type.",
+    "Away band: [floor=setback_heat=60, ceiling=setback_cool=82, active=ceiling].",
+    "Primary temperature = ceiling=82F (setback_cool). Floor=60F guards against excessive cooling.",
+    "NOTE: expect_temp updated from 60F (old setback_heat) to 82F (P3 band ceiling=setback_cool).",
+    "This is a gap-filling scenario covering cold-day away occupancy path."
   ],
   "config": {
     "comfort_heat": 70,
@@ -72,22 +72,22 @@
     {
       "at": "2026-01-20T09:00:00",
       "expect": "setback_applied",
-      "expect_temp": 60.0,
-      "reason": "User leaves → occupancy_away. Classification is cold/heat → setback_heat=60F applied (NOT setback_cool). This is the key assertion distinguishing cold-day away from warm-day away.",
+      "expect_temp": 82.0,
+      "reason": "P3: user leaves → occupancy_away. Away band armed [floor=60/ceiling=82, active=ceiling]. Primary temperature=ceiling=82F (setback_cool). Floor=60F guards against over-cooling.",
       "track": "logic"
     },
     {
       "at": "2026-01-20T11:00:00",
       "expect": "setback_applied",
-      "expect_temp": 60.0,
-      "reason": "Classification cycle while away. Simulator _handle_classification() detects occupancy=away and calls _handle_occupancy_away() which reapplies setback_heat=60F.",
+      "expect_temp": 82.0,
+      "reason": "P3: classification cycle while away reapplies away band ceiling=82F. Comfort NOT restored.",
       "track": "logic"
     },
     {
       "at": "2026-01-20T13:00:00",
       "expect": "setback_applied",
-      "expect_temp": 60.0,
-      "reason": "Second classification cycle while away. Setback_heat=60F maintained — not reverted to comfort.",
+      "expect_temp": 82.0,
+      "reason": "P3: second classification cycle while away. Band ceiling=82F maintained.",
       "track": "logic"
     },
     {
@@ -100,8 +100,8 @@
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Cold day away setback selects setback_heat; classification cycles maintain setback; comfort restored on return",
-    "observed_behavior": "classification_applied (heat, 70F) → setback_applied (60F, away) → setback_applied (60F, classification cycles x2) → comfort_restored (70F, home)",
-    "expected_behavior": "Away setback on cold day uses setback_heat=60F (not setback_cool); classification cycles during away maintain setback; home return restores comfort_heat"
+    "summary": "P3: cold-day away setback arms dual band [60/82] ceiling=setback_cool; classification cycles maintain band; comfort restored on return",
+    "observed_behavior": "classification_applied (heat, 70F) → setback_applied (ceiling=82F, away band) × 3 → comfort_restored (70F, home)",
+    "expected_behavior": "P3 away band [floor=60/ceiling=82] active=ceiling. Occupant returns to home that was never too hot (>82F) nor over-cooled (<60F)."
   }
 }

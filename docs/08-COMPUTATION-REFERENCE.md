@@ -31,18 +31,23 @@ The automation logic table and all threshold constants in this document are expr
 | How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
 | What invariant must `_async_send_briefing()` maintain when replacing `_today_record`? | It must copy all accumulated counters (`hvac_runtime_minutes`, `comfort_violations_minutes`, etc.) from the existing same-day record before constructing the new one. Creating a fresh `DailyRecord` unconditionally resets all counters to zero (Issue #176 bug). | [DailyRecord Persistence Invariant](08-COMPUTATION-REFERENCE.md#dailyrecord-persistence-invariant-issue-176) |
 | Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
+| What is the comfort-band programming model introduced in Issue #249? | CA programs a floor+ceiling band every 30 min via one `select_comfort_band` decision and one `_apply_comfort_band` actuation; the thermostat's own deadband holds the house inside the band continuously — no more off+supervisor pattern. | [§6e Comfort-Band Programming](08-COMPUTATION-REFERENCE.md#6e-comfort-band-programming-issue-249) |
+| What command shape does `_apply_comfort_band` emit per thermostat capability? | Dual-capable: `heat_cool` mode + `set_temperature(target_temp_low=floor, target_temp_high=ceiling)`. Cool-only (active=ceiling): `cool` + `set_temperature(ceiling)`. Heat-only (active=floor): `heat` + `set_temperature(floor)`. | [§6e — `_apply_comfort_band` command shapes](08-COMPUTATION-REFERENCE.md#_apply_comfort_band-command-shapes) |
+| Why does nat-vent no longer set HVAC off when windows open (Issue #249)? | The band stays armed when nat-vent activates; the thermostat self-arbitrates — free cooling is free, AC kicks in only if the breeze can't hold the ceiling. Turning HVAC off also disarmed the floor, making cold-snap escalation impossible. | [§6e — Nat-vent and economizer with the band armed](08-COMPUTATION-REFERENCE.md#nat-vent-and-economizer-with-the-band-armed) |
 
 ## 1. Day Classification
 
 Today's high temperature is compared against fixed thresholds to assign a `day_type`. All downstream decisions (HVAC mode, setpoints, window advice, pre-conditioning) flow from this classification.
 
-| today_high condition | day_type | HVAC mode | Constant name |
+| today_high condition | day_type | HVAC mode (classifier) | Constant name |
 |---|---|---|---|
 | `today_high >= 85` | `hot` | `cool` | `THRESHOLD_HOT = 85` |
-| `75 <= today_high < 85` | `warm` | `off` | `THRESHOLD_WARM = 75` |
-| `60 <= today_high < 75` | `mild` | `off` | `THRESHOLD_MILD = 60` |
+| `75 <= today_high < 85` | `warm` | `off` ¹ | `THRESHOLD_WARM = 75` |
+| `60 <= today_high < 75` | `mild` | `off` ¹ | `THRESHOLD_MILD = 60` |
 | `45 <= today_high < 60` | `cool` | `heat` | `THRESHOLD_COOL = 45` |
 | `today_high < 45` | `cold` | `heat` | _(below all thresholds)_ |
+
+¹ The `off` field in `DayClassification` is a historical label from the classifier's perspective (no active HVAC needed at peak). In practice, the automation engine programs a comfort band (floor = `comfort_heat`, ceiling = `comfort_cool` while occupied + awake) rather than issuing an actual `hvac_mode=off` command — the thermostat holds the band autonomously and runs the compressor only if natural ventilation can't keep up. See [§6e Comfort-Band Programming](#6e-comfort-band-programming-issue-249).
 
 ---
 
@@ -88,7 +93,9 @@ Pre-conditioning sets the HVAC system up ahead of an expected temperature change
 | Hot day (`day_type == hot`) | `comfort_cool + (-2)` = `comfort_cool - 2` | At classification time (morning) |
 | Moderate cold front (`cooling`, magnitude 5–9°F) | `comfort_heat + 2.0` | Scheduled at 7:00 PM |
 | Significant cold front (`cooling`, magnitude ≥ 10°F) | `comfort_heat + 3.0` | Scheduled at 7:00 PM |
-| ODE ceiling defense (`warm` or `mild` day, model calibrated, breach predicted) | `comfort_cool` | Reactive: evaluated on every 30-min cycle; fires when predicted breach is within computed lead time |
+| ODE ceiling defense (`warm` or `mild` day, model calibrated, breach predicted) | `comfort_cool` | Reactive: passive safety backstop (§6c); naturally dormant when the comfort band is armed because the band's ceiling already holds the house below `comfort_cool` |
+
+> **Issue #249 — band model change:** Warm and mild days previously issued an `hvac_mode=off` command at classification time and relied on §6b/§6c guards to rescue the home if temperatures drifted. The automation engine now programs the occupied comfort band `[comfort_heat, comfort_cool]` (suppression to setback applies only away/asleep) instead. The thermostat holds both edges autonomously; the pre-conditioning column above reflects the new steady-state where the ODE ceiling guard is a passive backstop rather than the primary defense. See [§6e](#6e-comfort-band-programming-issue-249).
 
 **Hot-day pre-cool detail:** The `pre_condition_target` is stored as `-2.0` (a negative offset). `_set_temperature_for_mode()` applies it as `comfort_cool + pre_condition_target`, so a `comfort_cool` of 75°F yields a pre-cool target of **73°F**.
 
@@ -576,35 +583,41 @@ All five fields default to `None` at record creation. On a fire night, `setback_
 
 ---
 
-### 6b. Warm-Day Comfort-Floor Guard
+### 6b. Warm-Day Comfort-Floor Guard _(passive safety backstop — Issue #249)_
 
-When `apply_classification()` runs and the day type is `warm` or `hot` with HVAC mode `off`, the automation engine applies a comfort-floor guard before executing the shutoff. The guard fires on every 30-minute coordinator update until the indoor temperature has risen to the comfort floor.
+> **Issue #249 role change:** This guard is no longer the primary defense against the home falling below the comfort floor on warm/hot days. The comfort-band model (§6e) arms the thermostat with an explicit heat floor (`setback_heat` or `comfort_heat` depending on context) as part of every scheduled state update — the thermostat will heat the home back up without CA polling. §6b remains as a lightweight always-on safety net that fires if the band is somehow not in place or the floor is transiently breached during a transition.
+
+When `apply_classification()` runs and the day type is `warm` or `hot` and the indoor temperature is below `comfort_heat`, the automation engine applies a comfort-floor guard to prevent the home from sitting below the comfort floor.
 
 | Condition | Action | Event emitted |
 |---|---|---|
-| `day_type in (warm, hot)` AND `indoor_temp < comfort_heat` | Set HVAC to `heat`, target = `comfort_heat` | `warm_day_comfort_gap` |
-| `day_type in (warm, hot)` AND `indoor_temp >= comfort_heat` | Set HVAC to `off` as normal | — |
-| `day_type in (warm, hot)` AND indoor temp unavailable | Set HVAC to `off` as normal (fail safe) | — |
+| `day_type in (warm, hot)` AND `indoor_temp < comfort_heat` | Set HVAC to `heat`, target = `comfort_heat` (backstop) | `warm_day_comfort_gap` |
+| `day_type in (warm, hot)` AND `indoor_temp >= comfort_heat` | Apply comfort band normally (§6e) | — |
+| `day_type in (warm, hot)` AND indoor temp unavailable | Apply comfort band normally (fail-open) | — |
 
-**Why this guard exists:** Without it, the daily warm-day shutoff can leave the home 2–3°F below the comfort floor all morning. This accumulates comfort violations and depresses `comfort_score` even though the system was technically following the warm-day classification correctly.
+**Why this guard still exists (as backstop):** Even with the band armed, a mid-cycle transition (HA restart, manual mode change, thermostat reconnect) can briefly leave the home below the comfort floor before the next 30-minute cycle re-arms the band. §6b catches that window and fires a `warm_day_comfort_gap` event so the situation is visible in the event log.
 
-**Interaction with occupancy guards:** The comfort-floor heat command goes through `_set_temperature_for_mode()`, so occupancy-away and vacation redirection (§6a) still applies — the guard will not heat to `comfort_heat` if the occupancy mode is `away` or `vacation`.
+**Primary defense (Issue #249):** The comfort-band model in §6e arms the heat floor on every `apply_classification()` call — `comfort_heat` while the occupant is home + awake (any day type), or the setback floor when away/asleep. The thermostat holds that floor autonomously between 30-minute cycles — no supervisor polling needed for normal operation. §6b activates only when the band has lapsed.
 
-**30-minute convergence:** `apply_classification()` is called on every coordinator update (every 30 min). Once indoor temperature reaches `comfort_heat`, the guard condition is no longer met and the next update sets HVAC off normally. No separate timer is needed.
+**Interaction with occupancy guards:** The comfort-floor heat command goes through `_set_temperature_for_mode()`, so occupancy-away and vacation redirection (§6a) still applies.
 
-**Event frequency — `warm_day_state_confirmed` / `warm_day_setback_applied`:** `warm_day_state_confirmed` fires on every 30-minute coordinator update cycle while the thermostat is already in the correct warm-day state (mode=off, no setpoint change needed) — not once per day. Sixty or more firings in 48 hours is expected on a sustained warm day; this is a heartbeat, not a loop or a bug. `warm_day_setback_applied` fires only when an actual setpoint or mode change is made (e.g., resetting the setpoint from a ceiling guard's 74°F back to the 79°F setback value), which is infrequent.
+**Event frequency — `warm_day_state_confirmed` / `warm_day_setback_applied`:** `warm_day_state_confirmed` fires on every 30-minute coordinator update cycle while the thermostat is already in the correct warm-day state — not once per day. Sixty or more firings in 48 hours is expected on a sustained warm day; this is a heartbeat, not a loop or a bug. `warm_day_setback_applied` fires only when an actual setpoint or mode change is made, which is infrequent.
 
 **Event frequency — `incident_detected`:** Emitted at most once per 30-min cycle per incident class (deduplicated within each call to `_detect_and_emit_incidents()`). The proactive variant (`setpoint_mode_inconsistency`) may fire at command time inside `_set_temperature()` rather than post-cycle, once per inconsistent command issued. See [Incident Classes](incident-classes.md) for the full list of classes and their detection timing.
 
 **Test coverage:** `tests/test_warm_day_comfort_gap.py`
 
-### 6c. Warm-Day ODE Ceiling Guard (Issue #136)
+### 6c. Warm-Day ODE Ceiling Guard (Issue #136) _(passive safety backstop — Issue #249)_
 
-When the day classification is `warm` or `mild` (HVAC mode = `off`) and the thermal model has a calibrated `k_passive`, the automation engine evaluates a **ceiling guard** on every 30-minute coordinator cycle. The guard fires proactively to prevent indoor temperature from breaching `comfort_cool` before natural ventilation can recover.
+> **Issue #249 role change:** This guard is no longer the primary defense against the home exceeding `comfort_cool` on warm/mild days. The comfort-band model (§6e) arms the thermostat with an explicit cool ceiling (`comfort_cool`) as part of every scheduled state update — the thermostat will cool the home back down without CA polling the ODE. §6c remains as a lightweight always-on safety net. In normal operation the ODE curve, built against the armed setpoint, predicts no breach — so the guard is naturally dormant. It activates only when the band has lapsed (HA restart, manual override, thermostat reconnect) or when outdoor conditions change sharply mid-cycle before the next 30-minute re-arm.
+
+When the day classification is `warm` or `mild` and the thermal model has a calibrated `k_passive`, the automation engine evaluates a **ceiling guard** on every 30-minute coordinator cycle. The guard fires proactively to prevent indoor temperature from breaching `comfort_cool` in situations where the comfort band is not currently holding.
 
 #### Purpose
 
 The guard closes the "read-render split" gap: `_build_predicted_indoor_future()` feeds the chart every 30 min with an accurate indoor forecast, but prior to Issue #136 that forecast was never routed into `apply_classification()`. The ceiling guard routes it: if the ODE curve predicts a `comfort_cool` breach and free cooling cannot keep up, the guard sets HVAC to `cool` at `comfort_cool` before (or as soon as) the breach occurs.
+
+With the comfort band armed (Issue #249), the ODE curve is constructed against the armed ceiling setpoint and therefore predicts no breach under normal conditions — the guard is dormant. It becomes active again if the band lapses for any reason.
 
 #### Dormancy: when the guard defers to free cooling (3-condition — Issue #247)
 
@@ -784,6 +797,95 @@ The open time is always `MILD_WINDOW_OPEN_HOUR` (10am). Only the close time is d
 - `test_mild_day_uses_const_fallback_when_no_ode`
 - `test_mild_day_close_time_uses_ode_crossover`
 - `test_mild_day_constants_in_const_py`
+
+---
+
+### 6e. Comfort-Band Programming (Issue #249)
+
+The home is held inside the comfort band continuously by the thermostat itself — recurring afternoon ceiling drift (Issues #136/#218/#247) becomes structurally impossible because the ceiling setpoint is always armed, not re-armed reactively 30 minutes later.
+
+#### The One-Decision / One-Actuation Model
+
+Every scheduled state handler (classification apply, bedtime, morning wakeup, occupancy change) does two things and only two things:
+
+1. **Decide the band** — call `select_comfort_band(...)` to produce a `ComfortBand(floor, ceiling, active, reason)`.
+2. **Actuate the band** — call `_apply_comfort_band(band)` to emit the right command shape for the thermostat's capabilities.
+
+There is no `off` sentinel, no off+setback divergence, and no per-handler HVAC-mode branching. The thermostat's own deadband holds the home inside `[floor, ceiling]` between 30-minute cycles; CA's role is to keep the band programmed, not to supervise the thermostat every cycle.
+
+#### `select_comfort_band` — Band-Edge Rules
+
+`select_comfort_band(classification, config, *, occupancy_mode, in_sleep_window, aggressive_savings) → ComfortBand`
+
+`ComfortBand(floor, ceiling, active, reason)` where `active ∈ {"ceiling", "floor"}`.
+
+**Occupied + awake = the full comfort band.** While the occupant is home/guest and awake, the band is `[comfort_heat, comfort_cool]` on **any** day type — the "lazy posture" the thermostat runs itself with: it pre-heats the cold morning up to `comfort_heat` and cools the warm afternoon down to `comfort_cool`. Both edges are held at comfort; suppression to a setback edge happens **only** when away or asleep. The **`active`** field (`"ceiling"` on warm/hot/mild days, `"floor"` on cool/cold days) does **not** change the band for a dual thermostat — it only tells `_apply_comfort_band` which single edge a single-mode device should defend.
+
+| Context | floor | ceiling | active | Notes |
+|---|---|---|---|---|
+| Home/guest — any day type (awake) | `comfort_heat` | `comfort_cool` | `"floor"` if heat day else `"ceiling"` | Full comfort band; thermostat pre-heats the morning and cools the afternoon |
+| Home/guest — `aggressive_savings=True` | `comfort_heat − CEILING_ESCALATION_SAVINGS_MARGIN_F` | `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` | as above | BOTH edges widened so the system runs less |
+| Home/guest — `hot` day with pre-cool | `comfort_heat` | `comfort_cool + pre_condition_target` (≤ comfort_cool) | `"ceiling"` | Classifier's negative pre-cool offset lowers the ceiling |
+| Sleep window (any day type) | `sleep_heat` | `sleep_cool` | `"floor"` (cool/cold) or `"ceiling"` (warm/hot) | Configured `sleep_heat`/`sleep_cool` band |
+| Away occupancy | `setback_heat` | `setback_cool` | `"ceiling"` | Setback band — suppression only applies when nobody is home |
+| Vacation occupancy | `setback_heat − VACATION_SETBACK_EXTRA` | `setback_cool + VACATION_SETBACK_EXTRA` | `"ceiling"` | Deep-setback band |
+
+**`aggressive_savings` edge widening:** widens **both** comfort edges by `CEILING_ESCALATION_SAVINGS_MARGIN_F` (2.0°F) — `floor − margin`, `ceiling + margin` — so the system tolerates a wider band before heating or cooling. Setback and sleep bands are unaffected.
+
+**Single-mode devices:** a cool-only thermostat defends the ceiling (it has no heat to give); a heat-only thermostat defends the floor. For these, `active` selects which comfort edge is armed; the other edge is simply not this device's job. A dual (`heat_cool`) thermostat holds both edges at comfort with one command.
+
+#### `_apply_comfort_band` — Command Shapes
+
+`_apply_comfort_band(band)` reads `self._get_thermostat_capabilities()` and emits exactly one service call (or none if the device cannot serve the active edge):
+
+| Thermostat capability | Command shape |
+|---|---|
+| Dual (`heat_cool`) capable | `_set_hvac_mode("heat_cool")` (if mode changed) + `_set_temperature_dual(band.floor, band.ceiling)` — both edges sent every call; the unchanged side is reiterated automatically |
+| Cool-capable, `active = "ceiling"` | `_set_hvac_mode("cool")` (if mode changed) + `_set_temperature(band.ceiling)` |
+| Heat-capable, `active = "floor"` | `_set_hvac_mode("heat")` (if mode changed) + `_set_temperature(band.floor)` |
+| Device cannot serve the active edge (e.g. heat-only thermostat on a warm day) | No-op — skip this cycle (defensive; not a fallback path) |
+
+Mode changes are issued only when the thermostat is not already in the target mode — the existing idempotent `_set_hvac_mode` setter (line ~1258) enforces this. Dry-run mode is respected throughout.
+
+**Emitted event:** `comfort_band_applied` — payload: `{floor, ceiling, active, mode, reason}`. Every call to `_apply_comfort_band` that results in a service call emits this event. Visible in the Daily Record's event list and the AI activity report.
+
+**Bedtime / occupancy payloads updated:** `bedtime_setback`, `morning_wakeup`, `occupancy_setback` event payloads now also carry `floor/ceiling/active/mode` so the timeline shows the full band context, not just a single setpoint.
+
+#### Nat-Vent and Economizer with the Band Armed
+
+Natural ventilation and the economizer **no longer set `hvac_mode=off`** when they activate (Issue #249 Design §4). They manage only the fan; the comfort band remains armed throughout:
+
+- **Nat-vent active (windows open, outdoor cooler than indoor):** fan on, `_natural_vent_active = True`, band unchanged. The thermostat self-arbitrates: if the breeze keeps the home below the ceiling, the compressor idles for free. If the breeze fails and indoor rises above `comfort_cool`, the thermostat cools without waiting for the next CA 30-minute cycle.
+- **Economizer maintain phase:** fan on (or HVAC fan mode), band unchanged. The compressor is not needed as long as the open windows can hold the ceiling.
+- **Escalation:** when the ODE ceiling guard (§6c) fires, nat-vent is cleared (`_natural_vent_active = False`) and a `nat_vent_ceiling_escalation` event is emitted — the band was already armed at the cool ceiling, so "escalation" means allowing the compressor to run rather than re-programming the setpoint.
+
+**Why no more HVAC off on nat-vent:** Turning HVAC off on nat-vent activation disarmed the floor. If outdoor conditions changed mid-night (cold snap), CA would not re-heat until the next 30-minute cycle noticed the floor breach — up to 30 minutes of the home sitting below the comfort floor. With the band always armed, the thermostat heats immediately.
+
+#### Scheduled Handlers That Use the Band
+
+All scheduled state handlers now route through `select_comfort_band` + `_apply_comfort_band`. The old per-handler divergent off/heat/cool/setback bodies are replaced:
+
+| Handler | Band context |
+|---|---|
+| `apply_classification()` (30-min cycle) | Daytime band, or sleep band when `_in_sleep_window()` matches |
+| `handle_bedtime()` | Sleep band (`sleep_heat` / `sleep_cool` / adaptive) |
+| `handle_morning_wakeup()` | Comfort band (home/guest) |
+| `handle_occupancy_away()` | Setback band |
+| `handle_occupancy_vacation()` | Deep-setback band |
+| `_apply_current_scheduled_state()` | Comfort band for current time context |
+
+#### Interaction with §6b and §6c
+
+With the band armed, both the comfort-floor guard (§6b) and the ODE ceiling guard (§6c) are naturally dormant under normal conditions — the thermostat holds both edges between CA cycles. Both guards remain in place as lightweight always-on safety nets that activate if the band lapses (HA restart, manual override recovery, thermostat reconnect). Neither guard is gated or disabled; they simply find no condition to act on when the band is programmed.
+
+#### Constants
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `CEILING_ESCALATION_SAVINGS_MARGIN_F` | `2.0°F` | Ceiling tolerance above `comfort_cool` for `aggressive_savings` mode |
+| `VACATION_SETBACK_EXTRA` | `3°F` | Extra depth beyond normal away setback for vacation bands |
+
+**Test coverage:** `tests/test_thermostat_program.py` (`select_comfort_band` band-edge rules across all occupancy / sleep / aggressive cases; `_apply_comfort_band` dual/cool/heat/no-op command shapes, idempotent mode, dry-run); `tests/test_warm_day_setback.py::TestWarmDayBandArming` + `tests/test_warm_day_comfort_gap.py` (warm-day band arming); `tests/test_occupancy_setback_mode.py`, `tests/test_occupancy_automation.py`, `tests/test_bedtime_setback.py` (handler band integration); `tests/test_window_hvac_interaction.py`, `tests/test_door_window.py`, `tests/test_fan_control.py`, `tests/test_economizer.py` (nat-vent/economizer band-stays-armed); `tests/test_production_harness.py` + `tools/simulations/golden/cold_morning_warm_day_no_breach.json`, `…/startup_indoor_below_heat_floor_warm_day.json` and the `p3_*` pending scenarios (end-to-end band arming on the real engine).
 
 ---
 
@@ -1227,15 +1329,17 @@ This is the definitive reference for expected system behavior across all classif
 
 ### Classification Contexts
 
-| Code | Day Type | HVAC Mode | windows_recommended | Window Period |
+| Code | Day Type | HVAC Mode / Band | windows_recommended | Window Period |
 |------|----------|-----------|---------------------|---------------|
 | C1 | Hot | cool | False | N/A |
-| C2 | Warm | off | True | In period (6–10 AM) |
-| C3 | Warm | off | True | Outside period |
-| C4 | Warm | off | False | N/A (today_low too high) |
-| C5 | Mild | off | True | In period (10 AM – 5 PM) |
+| C2 | Warm | band `[comfort_heat, comfort_cool]` ¹ | True | In period (6–10 AM) |
+| C3 | Warm | band `[comfort_heat, comfort_cool]` ¹ | True | Outside period |
+| C4 | Warm | band `[comfort_heat, comfort_cool]` ¹ | False | N/A (today_low too high) |
+| C5 | Mild | band `[comfort_heat, comfort_cool]` ¹ | True | In period (10 AM – 5 PM) |
 | C6 | Cool | heat | False | N/A |
 | C7 | Cold | heat | False | N/A |
+
+¹ Issue #249: warm/mild days arm a comfort band rather than setting `hvac_mode=off`. The band values shown are for home/guest occupancy; setback bands apply when away/vacation. See [§6e Comfort-Band Programming](#6e-comfort-band-programming-issue-249).
 
 ### Events
 
@@ -1254,16 +1358,18 @@ This is the definitive reference for expected system behavior across all classif
 | | E1: Sensor Open | E2: All Closed | E3: Grace+Open | E4: Override | E5: Fan Change | E6: Class Change | E7: Resume |
 |---|---|---|---|---|---|---|---|
 | C1 (hot/cool) | Pause HVAC→off, notify | Resume to cool, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace | Re-apply classification | Resume cool, manual grace |
-| **C2 (warm/off/win=T/in)** | **No pause** (planned window) | No-op (not paused) | **No re-pause** (planned) | N/A (not paused) | No grace (HVAC off) | Re-apply; comfort-floor guard fires if indoor < comfort_heat (see §6b) | N/A (not paused) |
-| C3 (warm/off/win=T/out) | No pause (HVAC already off) | No-op | N/A | N/A | No grace | Re-apply; comfort-floor guard fires if indoor < comfort_heat (see §6b) | N/A |
-| C4 (warm/off/win=F) | No pause (HVAC already off) | No-op | N/A | N/A | No grace | Re-apply; comfort-floor guard fires if indoor < comfort_heat (see §6b) | N/A |
-| **C5 (mild/off/win=T/in)** | **No pause** (planned window) | No-op | **No re-pause** (planned) | N/A | No grace | Re-apply | N/A |
+| **C2 (warm/band/win=T/in)** | **No pause** (planned window) | No-op (not paused) | **No re-pause** (planned) | N/A (not paused) | Fan on, band stays armed | Re-apply band `[comfort_heat, comfort_cool]`; §6b backstop fires if indoor < comfort_heat | N/A (not paused) |
+| C3 (warm/band/win=T/out) | No pause (band armed, not paused) | No-op | N/A | N/A | Fan on, band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A |
+| C4 (warm/band/win=F) | No pause (band armed, not paused) | No-op | N/A | N/A | Band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A |
+| **C5 (mild/band/win=T/in)** | **No pause** (planned window) | No-op | **No re-pause** (planned) | N/A | Fan on, band stays armed | Re-apply band `[comfort_heat, comfort_cool]` | N/A |
 | C6 (cool/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace | Re-apply | Resume heat, manual grace |
 | C7 (cold/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace | Re-apply | Resume heat, manual grace |
 
 **Bolded cells** have corresponding test coverage in `tests/test_windows_recommended_integration.py`.
 
-**Warm-day comfort-floor guard (§6b):** In C2, C3, and C4 contexts, `apply_classification()` runs every 30 minutes. If `indoor_temp < comfort_heat`, HVAC is set to heat at `comfort_heat` and the `warm_day_comfort_gap` event is emitted instead of setting HVAC off. Once indoor temp reaches the floor, the next update applies the normal warm-day shutoff. Test coverage: `tests/test_warm_day_comfort_gap.py`.
+**Comfort-band model (Issue #249, §6e):** In C2–C5 contexts (warm/mild days), `apply_classification()` now programs a comfort band rather than setting `hvac_mode=off`. The band arms the thermostat with both a floor and a ceiling; the thermostat self-arbitrates between them. Nat-vent and economizer activate the fan only — the band remains armed throughout, so free cooling stays free and the compressor engages only if the breeze can't hold the ceiling.
+
+**Comfort-floor guard (§6b — passive backstop):** In C2, C3, and C4 contexts, the band floor (`comfort_heat` while home + awake; `setback_heat` away/asleep) keeps the home from falling below the floor autonomously. The `warm_day_comfort_gap` event and §6b heat-up path remain as a safety backstop for situations where the band has lapsed (HA restart, thermostat reconnect). Test coverage: `tests/test_warm_day_comfort_gap.py`.
 
 This logic table MUST be kept current for any changes to automation behavior.
 
@@ -1278,8 +1384,10 @@ This logic table MUST be kept current for any changes to automation behavior.
 | C2×E3 | test_windows_recommended_integration.py | test_grace_expiry_no_repause_during_window_period |
 | C2→C1×E6 | test_windows_recommended_integration.py | test_classification_change_warm_to_hot_enables_pause |
 | C3×E1 | test_windows_recommended_integration.py | test_pause_fires_outside_window_period_with_active_hvac |
-| C2×E6 (comfort gap) | test_warm_day_comfort_gap.py | warm-day indoor < comfort_heat → heat first, then off |
-| C4×E6 (comfort gap) | test_warm_day_comfort_gap.py | warm-day (no window rec) indoor < comfort_heat → heat first |
+| C2×E6 (band armed) | test_warm_day_comfort_gap.py | TestWarmDayBandArmingReplacesComfortGap — band `[comfort_heat, comfort_cool]` armed; §6b backstop only if band lapses |
+| C4×E6 (band armed) | test_warm_day_setback.py | TestWarmDayBandArming::test_warm_day_dual_thermostat_sets_dual_setpoints |
+| C2×E5 / C3×E5 / C5×E5 (band stays armed on nat-vent) | test_window_hvac_interaction.py, test_door_window.py | Band remains armed when fan activates; no `hvac_mode=off` issued |
+| C2×E6 / C5×E6 (band applied on re-classification) | test_thermostat_program.py, test_production_harness.py | `apply_classification` arms band `[comfort_heat, comfort_cool]` (occupied+awake, any day type) |
 
 ---
 

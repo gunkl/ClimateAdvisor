@@ -1,13 +1,14 @@
-"""Tests for warm-day setback fixes — Root Causes E and C from Issue #96.
+"""Tests for warm-day band arming in apply_classification() — Issue #249 P3.
 
-Root Cause E: apply_classification() schedules a revisit via _record_action() →
-_schedule_revisit() every time it runs, causing a 5-min re-trigger loop.
-Fix: cancel any pending revisit at the end of apply_classification().
+P3 replaces the off+setback model (Root Cause C from Issue #96) with a comfort band.
+On warm/hot days the engine no longer:
+  - reads thermostat mode and dispatches to mode-specific setback paths
+  - emits warm_day_setback_applied / warm_day_state_confirmed events
+  - sets hvac_mode="off" for a warm day
 
-Root Cause C: On warm/hot days, hard HVAC-off triggers Ecobee side-effects.
-Fix: read current thermostat mode and apply setback without changing modes.
-
-GitHub Issue: #96
+Instead it calls ``_apply_comfort_band`` which arms the band via ``set_hvac_mode("heat_cool")``
++ ``set_temperature(target_temp_low/high)`` (dual) or ``set_hvac_mode("cool")``
++ ``set_temperature(ceiling)`` (cool-only).  Loop-prevention (Root Cause E) is unchanged.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
+from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -32,13 +34,41 @@ def _consume_coroutine(coro):
 def _make_engine(
     comfort_heat: float = 70.0,
     config_overrides: dict | None = None,
+    *,
+    hvac_modes: list[str] | None = None,
+    supported_features: int | None = None,
+    current_mode: str = "off",
 ) -> AutomationEngine:
-    """Build an AutomationEngine with mocked HA dependencies."""
+    """Build an AutomationEngine with a dual-capable thermostat stub by default.
+
+    Under P3 the engine arms a comfort band, which requires the capability attributes to
+    be present on the climate state.  Default: full dual-setpoint thermostat (heat_cool mode
+    + TARGET_TEMPERATURE_RANGE feature bit).  Pass hvac_modes=[] / supported_features=0 to
+    test the no-capability no-op path.
+    """
+    if hvac_modes is None:
+        hvac_modes = ["off", "heat", "cool", "heat_cool"]
+    if supported_features is None:
+        supported_features = CLIMATE_FEATURE_TARGET_TEMP_RANGE
+
     hass = MagicMock()
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+
+    # Use a real dict for attributes so both dict indexing and .get() work correctly.
+    # _get_thermostat_capabilities reads attrs.get("hvac_modes") / attrs.get("supported_features");
+    # _get_indoor_temp_f reads state.attributes.get("current_temperature").
+    attrs = {
+        "hvac_modes": hvac_modes,
+        "supported_features": supported_features,
+        "current_temperature": 72.0,  # default above comfort_heat so comfort-gap guard doesn't fire
+    }
+    climate_state = MagicMock()
+    climate_state.state = current_mode
+    climate_state.attributes = attrs
+    hass.states.get.return_value = climate_state
 
     config = {
         "comfort_heat": comfort_heat,
@@ -84,22 +114,6 @@ def _make_classification(
     return obj
 
 
-def _set_climate_state(
-    engine: AutomationEngine,
-    thermostat_mode: str,
-    indoor_temp: float = 72.0,
-) -> None:
-    """Configure hass.states.get to return a climate state with given mode and temp.
-
-    indoor_temp defaults to 72°F (above default comfort_heat=70°F) so the
-    comfort-gap guard does NOT fire — tests can verify setback behavior.
-    """
-    climate_state = MagicMock()
-    climate_state.state = thermostat_mode
-    climate_state.attributes.get.return_value = indoor_temp
-    engine.hass.states.get.return_value = climate_state
-
-
 def _hvac_calls(engine: AutomationEngine) -> list:
     return [c for c in engine.hass.services.async_call.call_args_list if c.args[1] == "set_hvac_mode"]
 
@@ -109,52 +123,40 @@ def _temp_calls(engine: AutomationEngine) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Root Cause E — Classification loop prevention via revisit cancel
+# Root Cause E — Classification loop prevention via revisit cancel (unchanged)
 # ---------------------------------------------------------------------------
 
 
 class TestClassificationLoopPrevention:
     """After apply_classification() returns, any pending revisit must be canceled.
 
-    The fix: at the very end of apply_classification(), call self._revisit_cancel()
-    and set it to None so the 5-min re-trigger loop cannot fire.
+    This behavior is unchanged in P3 — revisit-cancel is orthogonal to band arming.
     """
 
     def test_revisit_canceled_after_classification_applied_heat_mode(self):
         """Heat classification → _revisit_cancel is None after apply_classification."""
-        engine = _make_engine()
-        _set_climate_state(engine, "heat", indoor_temp=65.0)
-
+        engine = _make_engine(current_mode="heat")
         c = _make_classification(day_type="cold", hvac_mode="heat")
         asyncio.run(engine.apply_classification(c))
-
         assert engine._revisit_cancel is None
 
     def test_revisit_canceled_after_classification_applied_off_mode(self):
-        """Warm-day classification (hvac_mode=off) → _revisit_cancel is None after apply."""
-        engine = _make_engine()
-        _set_climate_state(engine, "heat", indoor_temp=72.0)  # above comfort floor
-
+        """Warm-day classification → _revisit_cancel is None after apply."""
+        engine = _make_engine(current_mode="off")
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
-
         assert engine._revisit_cancel is None
 
     def test_revisit_canceled_after_classification_applied_cool_mode(self):
         """Cool classification → _revisit_cancel is None after apply_classification."""
-        engine = _make_engine()
-        _set_climate_state(engine, "cool", indoor_temp=72.0)
-
+        engine = _make_engine(current_mode="cool")
         c = _make_classification(day_type="hot", hvac_mode="cool")
         asyncio.run(engine.apply_classification(c))
-
         assert engine._revisit_cancel is None
 
     def test_classification_applied_event_only_emitted_on_first_call(self):
         """Same (day_type, hvac_mode) applied twice → classification_applied emitted once."""
-        engine = _make_engine()
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
-
+        engine = _make_engine(current_mode="off")
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
 
@@ -167,9 +169,7 @@ class TestClassificationLoopPrevention:
 
     def test_classification_applied_event_emitted_when_day_type_changes(self):
         """Apply warm then mild (same hvac_mode) → two classification_applied events."""
-        engine = _make_engine()
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
-
+        engine = _make_engine(current_mode="off")
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
 
@@ -183,9 +183,7 @@ class TestClassificationLoopPrevention:
 
     def test_classification_applied_event_emitted_when_hvac_mode_changes(self):
         """Same day_type but different hvac_mode → two classification_applied events."""
-        engine = _make_engine()
-        _set_climate_state(engine, "cool", indoor_temp=72.0)
-
+        engine = _make_engine(current_mode="cool")
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
 
@@ -199,307 +197,183 @@ class TestClassificationLoopPrevention:
 
 
 # ---------------------------------------------------------------------------
-# Root Cause C — Warm-day setback instead of hard off
+# P3 band model — warm-day band arming (replaces off+setback dispatching)
 # ---------------------------------------------------------------------------
+#
+# Old model (Root Cause C fix from Issue #96): read current thermostat mode,
+# dispatch to mode-specific setback: heat→setback_heat, cool→setback_cool,
+# heat_cool→dual setbacks, unknown→hard-off fallback.  Each path emitted
+# warm_day_setback_applied.
+#
+# P3 model: _apply_comfort_band reads CAPABILITIES (not current mode) and
+# emits ONE consistent command shape regardless of what the thermostat currently
+# does.  The occupant experiences the same outcome (thermostat holds the ceiling)
+# without the Ecobee side-effects of a mode-specific dispatch.
 
 
-class TestWarmDaySetbackInsteadOfOff:
-    """On warm/hot days, apply setback without changing HVAC mode.
+class TestWarmDayBandArming:
+    """On warm/hot/mild days, apply_classification arms the comfort band.
 
-    The fix reads the current thermostat mode and calls _set_temperature()
-    (or _set_temperature_dual() for heat_cool/auto) instead of _set_hvac_mode("off").
-    This avoids Ecobee side-effects from a hard off command.
+    A dual-capable thermostat → heat_cool mode + dual setpoints; no mode-specific dispatch.
     """
 
-    def test_heat_mode_thermostat_sets_setback_heat_no_mode_change(self):
-        """Thermostat in 'heat' → set_temperature(setback_heat), no mode change."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        assert len(_hvac_calls(engine)) == 0
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        assert calls[0].args[2]["temperature"] == 60.0  # setback_heat
-
-    def test_cool_mode_thermostat_sets_setback_cool_no_mode_change(self):
-        """Thermostat in 'cool' → set_temperature(setback_cool), no mode change."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "cool", indoor_temp=72.0)
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        assert len(_hvac_calls(engine)) == 0
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        assert calls[0].args[2]["temperature"] == 82.0  # setback_cool
-
-    def test_heat_cool_mode_sets_dual_setbacks_no_mode_change(self):
-        """Thermostat in 'heat_cool' → dual setback via target_temp_low/high, no mode change."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "heat_cool", indoor_temp=72.0)
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        assert len(_hvac_calls(engine)) == 0
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        data = calls[0].args[2]
-        assert data["target_temp_low"] == 60.0  # setback_heat
-        assert data["target_temp_high"] == 82.0  # setback_cool
-
-    def test_auto_mode_sets_dual_setbacks_no_mode_change(self):
-        """Thermostat in 'auto' → dual setback via target_temp_low/high, no mode change."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "auto", indoor_temp=72.0)
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        assert len(_hvac_calls(engine)) == 0
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        data = calls[0].args[2]
-        assert data["target_temp_low"] == 60.0  # setback_heat
-        assert data["target_temp_high"] == 82.0  # setback_cool
-
-    def test_unknown_mode_falls_back_to_hard_off(self):
-        """Thermostat in 'unknown' mode → falls back to set_hvac_mode('off')."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "unknown", indoor_temp=72.0)
-
+    def test_warm_day_dual_thermostat_enters_heat_cool_mode(self):
+        """P3: warm day + dual-capable → set_hvac_mode("heat_cool"); old off+setback replaced."""
+        # Old assertion was: no hvac calls (setback without mode change per Root Cause C fix).
+        # P3 replaces that: _apply_comfort_band enters heat_cool from off via mode call.
+        engine = _make_engine(comfort_heat=70.0, current_mode="off")
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
         hvac = _hvac_calls(engine)
         assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "off"
+        assert hvac[0].args[2]["hvac_mode"] == "heat_cool"
 
-    def test_warm_day_setback_emits_event(self):
-        """Setback path emits warm_day_setback_applied event with day_type and thermostat_mode."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
+    def test_warm_day_dual_thermostat_sets_dual_setpoints(self):
+        """P3: warm day + dual → target_temp_low=comfort_heat, target_temp_high=comfort_cool."""
+        # Old assertion was: temperature=setback_heat (single setpoint for heat mode).
+        # P3 new rule: full comfort band [comfort_heat=70/comfort_cool=76] for occupied+awake.
+        engine = _make_engine(comfort_heat=70.0, current_mode="off")
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(c))
 
+        calls = _temp_calls(engine)
+        assert len(calls) == 1
+        data = calls[0].args[2]
+        assert data["target_temp_low"] == 70.0  # comfort_heat — full occupied+awake floor
+        assert data["target_temp_high"] == 76.0  # comfort_cool — defended ceiling
+
+    def test_idempotent_mode_no_redundant_heat_cool_switch(self):
+        """Thermostat already in heat_cool → no set_hvac_mode call; setpoints still updated."""
+        engine = _make_engine(comfort_heat=70.0, current_mode="heat_cool")
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(c))
+
+        hvac = _hvac_calls(engine)
+        assert len(hvac) == 0  # already in heat_cool — no redundant switch
+
+        temp = _temp_calls(engine)
+        assert len(temp) == 1  # setpoints are still refreshed
+
+    def test_hot_day_same_band_arming_as_warm(self):
+        """hot day (hvac_mode=cool from classifier) + dual → same band arming shape."""
+        # Old assertion was: setback_heat single setpoint for heat mode.
+        # P3 replaces that: dual band applies to all non-cold days.
+        engine = _make_engine(comfort_heat=70.0, current_mode="off")
+        c = _make_classification(day_type="hot", hvac_mode="cool")
+        asyncio.run(engine.apply_classification(c))
+
+        hvac = _hvac_calls(engine)
+        assert len(hvac) == 1
+        assert hvac[0].args[2]["hvac_mode"] == "heat_cool"
+
+        temp = _temp_calls(engine)
+        assert len(temp) == 1
+        data = temp[0].args[2]
+        assert "target_temp_low" in data and "target_temp_high" in data
+
+    def test_comfort_band_applied_event_emitted(self):
+        """P3 emits comfort_band_applied instead of warm_day_setback_applied."""
+        # Old assertion was: warm_day_setback_applied event with thermostat_mode/day_type.
+        # P3 replaces that: comfort_band_applied event with floor/ceiling/active.
+        engine = _make_engine(comfort_heat=70.0, current_mode="off")
         events: list[tuple[str, dict]] = []
         engine._emit_event_callback = lambda name, data: events.append((name, data))
 
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
-        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
-        assert len(setback_events) == 1
-        payload = setback_events[0][1]
-        assert payload["day_type"] == "warm"
-        assert payload["thermostat_mode"] == "heat"
+        band_events = [e for e in events if e[0] == "comfort_band_applied"]
+        assert len(band_events) == 1
+        payload = band_events[0][1]
+        assert payload["active"] == "ceiling"
+        assert payload["floor"] == 70.0  # comfort_heat — full occupied+awake band
+        assert payload["ceiling"] == 76.0
 
-    def test_comfort_gap_path_unaffected(self):
-        """Indoor (65°F) < comfort_heat (70°F) → comfort-gap path fires, NOT setback."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "heat", indoor_temp=65.0)  # below comfort floor
-
+    def test_cool_only_thermostat_warm_day_arms_ceiling(self):
+        """Cool-only thermostat + warm day → set_hvac_mode(cool) + temperature=ceiling."""
+        # Old assertion was: setback_cool via temperature call without mode change.
+        # P3 replaces that: _apply_comfort_band enters "cool" mode and sets ceiling setpoint.
+        engine = _make_engine(
+            comfort_heat=70.0,
+            current_mode="off",
+            hvac_modes=["off", "cool"],
+            supported_features=1,
+        )
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
-        # Comfort-gap path: heats to comfort_heat
         hvac = _hvac_calls(engine)
         assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "heat"
+        assert hvac[0].args[2]["hvac_mode"] == "cool"
 
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        assert calls[0].args[2]["temperature"] == 70.0  # comfort_heat, not setback
+        temp = _temp_calls(engine)
+        assert len(temp) == 1
+        assert temp[0].args[2]["temperature"] == 76.0  # comfort_cool ceiling
 
-    def test_hot_day_heat_mode_uses_setback_heat(self):
-        """day_type='hot' with thermostat in 'heat' → same setback behavior as 'warm'."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
-
-        c = _make_classification(day_type="hot", hvac_mode="off")
+    def test_no_capable_mode_no_service_calls(self):
+        """Entity with no capable modes → silent no-op (band not armed, no false promise)."""
+        # Old assertion was: unknown mode → hard-off fallback.
+        # P3 replaces that: capability-based no-op; band simply not armed this cycle.
+        engine = _make_engine(
+            comfort_heat=70.0,
+            current_mode="off",
+            hvac_modes=[],
+            supported_features=0,
+        )
+        c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
         assert len(_hvac_calls(engine)) == 0
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        assert calls[0].args[2]["temperature"] == 60.0  # setback_heat
+        assert len(_temp_calls(engine)) == 0
 
-    def test_indoor_unavailable_still_applies_setback(self):
-        """Indoor temp unavailable → setback still applied (comfort-gap guard checks None)."""
-        engine = _make_engine(comfort_heat=70.0)
-        # Return None for states.get so indoor temp is unavailable,
-        # but we still need a way to know the thermostat mode.
-        # When indoor temp is None, guard does not fire → setback path executes.
-        # For this test, the climate state returns None for current_temperature
-        # but we still need state.state for the thermostat mode.
+    def test_indoor_below_comfort_floor_band_arms_normally(self):
+        """Indoor (65°F) < comfort_heat (70°F): P3 arms the band unconditionally; no separate guard.
+
+        Old model: comfort-gap guard fired first, setting hvac_mode='heat' to reach comfort floor.
+        P3: the comfort-gap guard is gone from apply_classification; the band [setback_heat/comfort_cool]
+        arms directly.  The thermostat's floor setpoint (60°F) provides the safety backstop implicitly —
+        the heater fires when indoor drops below it; the band ceiling (comfort_cool) prevents overheating.
+        The occupant benefits: no awkward "heat then off" oscillation; stable band from the start.
+        """
+        engine = _make_engine(comfort_heat=70.0, current_mode="heat_cool")
+
+        # Override indoor temp to 65°F (below comfort floor)
         climate_state = MagicMock()
-        climate_state.state = "heat"
-
-        # Make attributes.get return None for current_temperature
-        def _attr_get(key, default=None):
-            if key == "current_temperature":
-                return None
-            return default
-
-        climate_state.attributes.get.side_effect = _attr_get
+        climate_state.state = "heat_cool"
+        climate_state.attributes = {
+            "hvac_modes": ["off", "heat", "cool", "heat_cool"],
+            "supported_features": CLIMATE_FEATURE_TARGET_TEMP_RANGE,
+            "current_temperature": 65.0,
+        }
         engine.hass.states.get.return_value = climate_state
 
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
-        # Comfort-gap guard: indoor_temp is None → guard does not fire → setback applied
-        assert len(_hvac_calls(engine)) == 0
-        calls = _temp_calls(engine)
-        assert len(calls) == 1
-        assert calls[0].args[2]["temperature"] == 60.0  # setback_heat
+        temp = _temp_calls(engine)
+        assert len(temp) == 1  # dual setpoints applied regardless of indoor vs comfort_heat
+        data = temp[0].args[2]
+        assert "target_temp_low" in data  # band armed: floor setpoint present
+        assert "target_temp_high" in data  # band armed: ceiling setpoint present
 
-    def test_celsius_setback_heat_converted_to_user_unit(self):
-        """temp_unit='celsius', setback_heat=60°F → from_fahrenheit() yields ~15.6°C in service call."""
-        # Internal storage is in Fahrenheit; setback_heat=60°F → from_fahrenheit(60, "celsius") = 15.6°C
+    def test_celsius_unit_conversion_preserved(self):
+        """temp_unit='celsius': setpoints converted to °C before service call."""
         engine = _make_engine(
             config_overrides={
                 "temp_unit": "celsius",
-                "setback_heat": 60.0,  # 60°F internal → 15.6°C after unit conversion
-                "comfort_heat": 70.0,  # 70°F internal → guard won't fire with indoor=72°F
+                "setback_heat": 60.0,  # 60°F → ~15.6°C
+                "comfort_cool": 76.0,  # 76°F → ~24.4°C
+                "comfort_heat": 70.0,
             },
+            current_mode="off",
         )
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
-
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
-        assert len(_hvac_calls(engine)) == 0
         calls = _temp_calls(engine)
         assert len(calls) == 1
-        # 60°F → 15.6°C (rounded to 1dp by from_fahrenheit)
-        service_temp = calls[0].args[2]["temperature"]
-        # from_fahrenheit(60, "celsius") = (60-32)*5/9 = 15.555... ≈ 15.6
-        assert abs(service_temp - 15.6) < 0.1
-
-
-# ---------------------------------------------------------------------------
-# Issue #216 — warm_day_setback_applied event payload fields
-# ---------------------------------------------------------------------------
-
-
-class TestWarmDaySetbackEventPayload:
-    """Verify warm_day_setback_applied event includes setpoint fields for cool mode
-    and omits them for other modes (Issue #216).
-    """
-
-    def _set_climate_state_with_setpoint(
-        self,
-        engine: AutomationEngine,
-        thermostat_mode: str,
-        indoor_temp: float = 72.0,
-        setpoint: float = 75.0,
-    ) -> None:
-        """Configure climate state with both current_temperature and temperature setpoint."""
-        climate_state = MagicMock()
-        climate_state.state = thermostat_mode
-
-        def _attr_get(key, default=None):
-            if key == "current_temperature":
-                return indoor_temp
-            if key == "temperature":
-                return setpoint
-            return default
-
-        climate_state.attributes.get.side_effect = _attr_get
-        engine.hass.states.get.return_value = climate_state
-
-    def test_warm_day_setback_includes_setpoint_when_cool(self):
-        """Thermostat in 'cool' mode → event has old_setpoint_f and new_setpoint_f fields."""
-        engine = _make_engine(comfort_heat=70.0, config_overrides={"setback_cool": 82.0})
-        self._set_climate_state_with_setpoint(engine, "cool", indoor_temp=72.0, setpoint=75.0)
-
-        events: list[tuple[str, dict]] = []
-        engine._emit_event_callback = lambda name, data: events.append((name, data))
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
-        assert len(setback_events) == 1
-        payload = setback_events[0][1]
-        assert payload["thermostat_mode"] == "cool"
-        assert "old_setpoint_f" in payload, "old_setpoint_f must be present for cool mode"
-        assert "new_setpoint_f" in payload, "new_setpoint_f must be present for cool mode"
-        # old setpoint was 75°F (read from thermostat); new is setback_cool=82°F
-        assert payload["old_setpoint_f"] == 75.0
-        assert payload["new_setpoint_f"] == 82.0
-
-    def test_warm_day_setback_no_setpoint_when_already_off(self):
-        """Thermostat in 'off' mode → emits warm_day_state_confirmed (heartbeat), no service call."""
-        engine = _make_engine(comfort_heat=70.0)
-        # Thermostat already off — new split: no service call, emits warm_day_state_confirmed
-        climate_state = MagicMock()
-        climate_state.state = "off"
-        climate_state.attributes.get.return_value = 72.0  # indoor temp
-        engine.hass.states.get.return_value = climate_state
-
-        events: list[tuple[str, dict]] = []
-        engine._emit_event_callback = lambda name, data: events.append((name, data))
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        # No service call — thermostat is already off
-        assert len(_hvac_calls(engine)) == 0, "no hvac_mode call when thermostat already off"
-        assert len(_temp_calls(engine)) == 0, "no set_temperature call when thermostat already off"
-
-        # Event is warm_day_state_confirmed, not warm_day_setback_applied
-        confirmed = [e for e in events if e[0] == "warm_day_state_confirmed"]
-        applied = [e for e in events if e[0] == "warm_day_setback_applied"]
-        assert len(confirmed) == 1, "warm_day_state_confirmed must fire for already-off thermostat"
-        assert len(applied) == 0, "warm_day_setback_applied must NOT fire for already-off thermostat"
-        payload = confirmed[0][1]
-        assert payload["day_type"] == "warm"
-        assert payload["thermostat_mode"] == "off"
-        assert "old_setpoint_f" not in payload
-        assert "new_setpoint_f" not in payload
-
-    def test_warm_day_setback_confirmed_when_setpoint_already_correct(self):
-        """Mode=cool, setpoint already at setback_cool → warm_day_state_confirmed, no service call."""
-        engine = _make_engine(comfort_heat=70.0, config_overrides={"setback_cool": 82.0})
-        # Setpoint = 82.0°F (exactly equal to setback_cool) — within 0.5°F guard
-        self._set_climate_state_with_setpoint(engine, "cool", indoor_temp=72.0, setpoint=82.0)
-
-        events: list[tuple[str, dict]] = []
-        engine._emit_event_callback = lambda name, data: events.append((name, data))
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        # No service call — setpoint already at setback
-        assert len(_hvac_calls(engine)) == 0, "no hvac_mode call when setpoint already correct"
-        assert len(_temp_calls(engine)) == 0, "no set_temperature call when setpoint already correct"
-
-        # Event is warm_day_state_confirmed
-        confirmed = [e for e in events if e[0] == "warm_day_state_confirmed"]
-        applied = [e for e in events if e[0] == "warm_day_setback_applied"]
-        assert len(confirmed) == 1, "warm_day_state_confirmed must fire when setpoint already at setback"
-        assert len(applied) == 0, "warm_day_setback_applied must NOT fire when no change needed"
-        payload = confirmed[0][1]
-        assert payload["thermostat_mode"] == "cool"
-        assert "old_setpoint_f" not in payload
-        assert "new_setpoint_f" not in payload
-
-    def test_warm_day_setback_no_setpoint_when_heat_mode(self):
-        """Thermostat in 'heat' mode → event does NOT have setpoint fields."""
-        engine = _make_engine(comfort_heat=70.0)
-        _set_climate_state(engine, "heat", indoor_temp=72.0)
-
-        events: list[tuple[str, dict]] = []
-        engine._emit_event_callback = lambda name, data: events.append((name, data))
-
-        c = _make_classification(day_type="warm", hvac_mode="off")
-        asyncio.run(engine.apply_classification(c))
-
-        setback_events = [e for e in events if e[0] == "warm_day_setback_applied"]
-        assert len(setback_events) == 1
-        payload = setback_events[0][1]
-        assert "old_setpoint_f" not in payload
-        assert "new_setpoint_f" not in payload
+        data = calls[0].args[2]
+        # Both low and high must be Celsius values (< 50°F would be wrong)
+        assert data["target_temp_low"] < 30.0  # was 60°F → ~15.6°C
+        assert data["target_temp_high"] < 30.0  # was 76°F → ~24.4°C

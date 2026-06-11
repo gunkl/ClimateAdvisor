@@ -1,16 +1,17 @@
 {
   "name": "away_cold_day_setback_heat",
-  "description": "Cold day (high 45F): home at start, classification applies heat mode. User leaves at 09:00 — setback should use setback_HEAT (62F), NOT setback_cool. User returns at 17:00 — comfort_heat (70F) restored. Verifies cold-day away setback selects the correct setback direction.",
+  "description": "Cold day (high 45F): home at start, classification applies heat mode. User leaves at 09:00 — P3 comfort band arms [setback_heat=62 / setback_cool=79] with active=ceiling. User returns at 17:00 — comfort_heat (70F) restored.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "Key assertion: setback_applied with target=62F (setback_heat), not 79F (setback_cool).",
-    "The simulator _handle_occupancy_away() branches on classification.hvac_mode:",
-    "  hvac_mode='heat' → uses setback_heat (62F)",
-    "  hvac_mode='cool' → uses setback_cool (79F)",
-    "Cold-day classification: hvac_mode='heat'. Away → setback_heat(62) + modifier(0) = 62F.",
-    "comfort_restored on return: comfort_heat=70F.",
-    "Covers Priority 6b away_cold_day from plan abundant-mapping-clarke.md."
+    "P3 migration (Issue #249): select_comfort_band(away) always uses active='ceiling' regardless of day type.",
+    "The away band is [floor=setback_heat=62, ceiling=setback_cool=79, active=ceiling].",
+    "The ceiling (setback_cool=79F) is the primary defended edge — AC will not exceed 79F in an empty home.",
+    "The floor (setback_heat=62F) is the safety backstop — heat will fire if indoor drops below 62F.",
+    "P3 CHANGE: previous behavior branched on hvac_mode (heat→setback_heat, cool→setback_cool).",
+    "Now the band always covers both edges and active='ceiling' is the primary temperature.",
+    "comfort_restored on return: comfort_heat=70F (single setpoint, heat mode).",
+    "NOTE: expect_temp updated from 62F (old setback_heat target) to 79F (P3 band ceiling)."
   ],
   "config": {
     "comfort_heat": 70,
@@ -64,14 +65,14 @@
     {
       "at": "2026-01-15T09:00:00",
       "expect": "setback_applied",
-      "expect_temp": 62.0,
-      "reason": "Away on cold/heat day: setback_heat=62F applied (NOT setback_cool — cold day test)"
+      "expect_temp": 79.0,
+      "reason": "P3: away setback arms band [setback_heat=62 / setback_cool=79] with active=ceiling. Primary temperature is ceiling=79F (setback_cool). Floor=62F remains as safety backstop."
     },
     {
       "at": "2026-01-15T12:00:00",
       "expect": "setback_applied",
-      "expect_temp": 62.0,
-      "reason": "Classification while away on cold day: heat setback reapplied (62F), comfort NOT restored"
+      "expect_temp": 79.0,
+      "reason": "P3: classification cycle while away reapplies away band ceiling=79F (setback_cool). Comfort NOT restored."
     },
     {
       "at": "2026-01-15T17:00:00",
@@ -82,8 +83,8 @@
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Cold-day away setback uses setback_heat (62F), not setback_cool; comfort restored on return",
-    "observed_behavior": "classification_applied (heat, 70F) → setback_applied (62F) on away → setback maintained on cycle → comfort_restored (70F) on return",
-    "expected_behavior": "Away setback on cold/heat day targets setback_heat, mirroring the setback direction of the active classification"
+    "summary": "P3: cold-day away setback arms dual band [62/79] with ceiling=setback_cool as primary; comfort restored on return",
+    "observed_behavior": "classification_applied (heat, 70F) → setback_applied (ceiling=79F, away band) → setback maintained on cycle → comfort_restored (70F) on return",
+    "expected_behavior": "P3 away setback covers both edges simultaneously. Ceiling=setback_cool is the primary edge. Floor=setback_heat guards against excessive cooling. Occupant returns to a home that was never too hot (>79F) or too cold (<62F)."
   }
 }

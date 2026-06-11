@@ -1,19 +1,22 @@
 {
   "name": "startup_indoor_below_heat_floor_warm_day",
-  "description": "Startup heating recovery on warm day with cold indoor",
+  "description": "Startup on a warm day with cold indoor: the comfort band [comfort_heat, comfort_cool] is armed and the thermostat pre-heats indoor up to comfort_heat (Issue #249).",
   "source": "synthetic",
-  "issue": 218,
+  "issue": 249,
   "verdict": {
     "type": "positive",
-    "summary": "On warm day startup when indoor is below comfort_heat floor despite warm outdoor, heating comfort guard fires to recover comfort",
-    "observed_behavior": "warm day with indoor 65F < comfort_heat 70F and outdoor 80F",
-    "expected_behavior": "warm_day_comfort_floor guard fires, heat set to comfort_heat 70F"
+    "summary": "On a warm-day startup when indoor is below comfort_heat despite warm outdoor, the comfort band is armed so the thermostat pre-heats to comfort_heat — occupant comfort recovered without a 30-min supervisory guard",
+    "observed_behavior": "warm day with indoor 65F < comfort_heat 70F and outdoor 80F — comfort band [70/74] armed at classification",
+    "expected_behavior": "comfort_band_applied with floor=comfort_heat 70F; the thermostat's deadband heats indoor up to the floor"
   },
+  "notes": [
+    "Issue #249 (supersedes the #218 warm_day_comfort_gap framing): the occupied band is the full comfort band on any day type; the band floor = comfort_heat, so the thermostat itself heats a cold-indoor startup up to comfort_heat. No separate comfort-floor guard.",
+    "Regression guard: if the band floor were suppressed to setback_heat, a cold-indoor occupant on a warm day would be left cold."
+  ],
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 74,
-    "natural_vent_delta": 3.0,
-    "warm_day_comfort_gap_guard": true
+    "natural_vent_delta": 3.0
   },
   "events": [
     {
@@ -21,7 +24,7 @@
       "type": "temp_update",
       "indoor_f": 65.0,
       "outdoor_f": 80.0,
-      "note": "Warm day morning: outdoor 80F (very hot), but indoor only 65F (below comfort_heat 70F). This is unusual but possible after cold night."
+      "note": "Warm day morning: outdoor 80F (very hot), but indoor only 65F (below comfort_heat 70F) after a cold night."
     },
     {
       "time": "2026-05-24T08:01:00",
@@ -29,14 +32,22 @@
       "day_type": "warm",
       "hvac_mode": "off",
       "windows_recommended": false,
-      "note": "Warm-day classification would normally say hvac_mode=off, but indoor 65F < comfort_heat 70F \u00e2\u20ac\u201d warm-day comfort-floor guard should fire heat"
+      "note": "Warm-day classification arms the comfort band [70/74]; the thermostat's deadband heats indoor 65F up to the comfort_heat floor."
     }
   ],
   "assertions": [
     {
       "at": "2026-05-24T08:01:00",
-      "expect": "warm_day_comfort_gap",
-      "reason": "Warm-day classification but indoor 65F < comfort_heat 70F \u2014 system heats to the comfort floor first (warm_day_comfort_gap) so the occupant is not left cold; HVAC coasts off once at the floor."
+      "expect": "comfort_band_armed",
+      "reason": "Issue #249: warm-day classification arms the occupied comfort band; indoor 65F < comfort_heat 70F is recovered by the thermostat holding the band floor. Replaces the old warm_day_comfort_gap guard.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-05-24T08:01:00",
+      "expect": "expect_band",
+      "expect_band": {"floor": 70.0, "ceiling": 74.0},
+      "reason": "Occupied + awake uses the full comfort band [comfort_heat=70, comfort_cool=74]; the floor at comfort_heat is what recovers the cold-indoor occupant.",
+      "track": "logic"
     }
   ]
 }

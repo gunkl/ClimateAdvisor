@@ -1,14 +1,15 @@
 {
   "name": "overnight_with_adaptive_setback_and_wakeup",
-  "description": "Warm summer day: afternoon cooling (14:00–22:00), bedtime at 22:30 applies cool setback (default depth = comfort_cool + 3F = 77F, clamped to setback_cool=79F), morning wakeup at 07:00 restores comfort. Full overnight cycle.",
+  "description": "Warm summer day: afternoon cooling (14:00–22:00), bedtime at 22:30 applies P3 sleep band (ceiling=DEFAULT_SLEEP_COOL=78F), morning wakeup at 07:00 restores comfort. Full overnight cycle.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
-    "DEFAULT_SETBACK_DEPTH_COOL_F = 3.0. comfort_cool=74. setback_cool=79.",
-    "Bedtime target = comfort_cool(74) + 3 = 77F. This is below the ceiling setback_cool(79), so 77F applies.",
+    "P3 migration (Issue #249): bedtime no longer uses comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F.",
+    "P3 uses select_comfort_band(in_sleep_window=True): ceiling = sleep_cool or DEFAULT_SLEEP_COOL = 78F.",
+    "DEFAULT_SLEEP_COOL = 78.0 (const.py). With comfort_cool=74, this is 4F above comfort ceiling.",
     "Wakeup restores comfort_cool=74F.",
-    "No thermal model configured — uses default setback depth path.",
-    "Covers Priority 5 overnight bedtime/wakeup from plan abundant-mapping-clarke.md."
+    "No thermal model configured — uses default sleep band path.",
+    "NOTE: expect_temp updated from 77F (old formula) to 78F (DEFAULT_SLEEP_COOL in P3)."
   ],
   "config": {
     "comfort_heat": 70,
@@ -54,14 +55,19 @@
     {
       "at": "2026-07-15T14:00:00",
       "expect": "classification_applied",
-      "expect_temp": 74.0,
-      "reason": "Afternoon classification: cool mode at comfort_cool=74F"
+      "reason": "Afternoon classification: warm day, comfort band armed."
+    },
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "expect_band",
+      "expect_band": {"ceiling": 74.0},
+      "reason": "P3: comfort band ceiling=comfort_cool=74F confirms cool defense target at classification time."
     },
     {
       "at": "2026-07-15T22:30:00",
       "expect": "setback_applied",
-      "expect_temp": 77.0,
-      "reason": "Bedtime cool setback: comfort_cool(74) + DEFAULT_SETBACK_DEPTH_COOL_F(3) = 77F (below ceiling 79F)"
+      "expect_temp": 78.0,
+      "reason": "P3 bedtime: sleep band ceiling = DEFAULT_SLEEP_COOL = 78F (active=ceiling, warm night). Previously 77F = comfort_cool+3; P3 uses sleep_cool/DEFAULT_SLEEP_COOL directly."
     },
     {
       "at": "2026-07-16T07:00:00",
@@ -72,8 +78,8 @@
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Overnight cycle: cool classification → bedtime setback (77F) → morning comfort restore (74F)",
-    "observed_behavior": "classification_applied (74F) at 14:00; setback_applied (77F) at 22:30; comfort_restored (74F) at 07:00",
-    "expected_behavior": "Standard overnight cycle with default-depth cool setback and morning comfort restore"
+    "summary": "P3 overnight cycle: cool classification → sleep band (78F ceiling) → morning comfort restore (74F)",
+    "observed_behavior": "classification_applied (74F) at 14:00; setback_applied (band ceiling=78F) at 22:30; comfort_restored (74F) at 07:00",
+    "expected_behavior": "P3: sleep band [66/78] active=ceiling. Occupant sleeps in home set to 78F ceiling — cooler than daytime comfort 74F? Wait, 78>74. Sleepers tolerate warmer. Band floor 66F guards against overcooling during the night."
   }
 }

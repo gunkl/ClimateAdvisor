@@ -1,0 +1,89 @@
+{
+  "name": "p3_warm_day_natvent_band_stays_armed",
+  "description": "Issue #249 P3: Warm day with window open triggers nat-vent (fan on). The comfort band remains armed in heat_cool mode — no HVAC off command. Fan circulates fresh air; thermostat self-manages within the band.",
+  "source": "synthetic",
+  "issue": 249,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md):",
+    "(a) Scenario effectiveness: if _apply_comfort_band is reverted to HVAC-off on nat-vent activation,",
+    "    comfort_band_armed at 08:05 fails (thermostat turned off instead of band-armed).",
+    "    If _natural_vent_active is not set True, nat_vent_still_active fails.",
+    "(b) Docs↔production alignment: sensor_opened now carries hvac_mode_change 'off→band-armed'",
+    "    (not 'off→off'); any doc describing nat-vent as HVAC-off must be updated.",
+    "(c) Occupant experience: without band-armed during nat-vent, the thermostat drops to off and the",
+    "    home could overheat if outdoor temps rise mid-day. Band arm ensures a ceiling fallback.",
+    "Regression proof: remove comfort_band_applied from sensor_opened path → comfort_band_armed at",
+    "18:05 fails; set _natural_vent_active=False → nat_vent_still_active fails."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.living_room_window"]
+  },
+  "events": [
+    {
+      "time": "2026-06-15T07:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 65.0,
+      "note": "Morning: outdoor 65F well below indoor 74F — nat-vent eligible."
+    },
+    {
+      "time": "2026-06-15T08:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Warm-day classification. Band armed at [62/76]. windows_recommended=false so sensor_open goes through the nat-vent eligibility check (not the planned-period bypass)."
+    },
+    {
+      "time": "2026-06-15T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "User opens window per recommendation: outdoor 65F < indoor 74F, indoor > comfort_heat=70F — nat-vent activates."
+    },
+    {
+      "time": "2026-06-15T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 67.0,
+      "note": "Mid-morning: outdoor still below indoor, nat-vent running. Band still armed."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-15T08:05:00",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open: outdoor 65F < indoor 74F, indoor > comfort_heat=70F, outdoor <= threshold 79F — nat-vent activates (fan on).",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T08:05:00",
+      "expect": "comfort_band_armed",
+      "reason": "P3: band remains armed after nat-vent activation. Fan circulates air; thermostat holds the [70/76] band. If band were dropped (HVAC off), the ceiling guard would not fire when outdoor rises.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T10:00:00",
+      "expect": "nat_vent_still_active",
+      "reason": "10 AM: outdoor still below indoor, nat-vent not exited. _natural_vent_active=True.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-06-15T10:00:00",
+      "expect": "expect_band",
+      "expect_band": {"floor": 70.0, "ceiling": 76.0},
+      "reason": "Band must still be [comfort_heat=70/comfort_cool=76] at 10 AM — nat-vent does not change the thermostat's band setpoints. Occupied+awake uses the full comfort band.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "P3: nat-vent activates (fan on) and comfort band stays armed [70/76] — no HVAC-off command on window open",
+    "observed_behavior": "classification_applied; sensor_opened→natural_ventilation; _natural_vent_active=True; comfort_band_applied [70/76] persists; no set_hvac_mode(off)",
+    "expected_behavior": "Occupant opens windows per recommendation — fan circulates; thermostat self-manages within the full comfort band. If outdoor eventually rises, ceiling guard escalates to AC with the band already set."
+  }
+}

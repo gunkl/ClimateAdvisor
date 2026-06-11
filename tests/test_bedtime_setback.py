@@ -211,10 +211,16 @@ class TestHandleBedtimeOccupancySkip:
 
 
 class TestHandleBedtimeHvacOffSkip:
-    """When classification.hvac_mode is 'off', bedtime must emit skipped event."""
+    """When classification.hvac_mode is 'off', bedtime arms the sleep band (no skip)."""
 
-    def test_hvac_off_emits_bedtime_setback_skipped(self):
-        """hvac_mode='off': emit 'bedtime_setback_skipped' with reason='hvac_off'."""
+    def test_hvac_off_emits_bedtime_setback_event(self):
+        """hvac_mode='off': emit 'bedtime_setback' (band armed, not skipped).
+
+        #249 P3: the old model emitted 'bedtime_setback_skipped' with reason='hvac_off'
+        because it dispatched on hvac_mode to pick a single setpoint.  The band model
+        always arms the sleep band; off-mode days select active='ceiling' (warm-day path)
+        and the band emits 'bedtime_setback' regardless of hvac_mode.
+        """
         engine = _make_engine()
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda event, data: emitted.append((event, data))
@@ -223,13 +229,18 @@ class TestHandleBedtimeHvacOffSkip:
 
         asyncio.run(engine.handle_bedtime())
 
-        skip_events = [(e, d) for e, d in emitted if e == "bedtime_setback_skipped"]
-        assert len(skip_events) == 1, f"Expected 1 skip event, got {len(skip_events)}: {emitted}"
-        _, data = skip_events[0]
-        assert data["reason"] == "hvac_off"
+        # Band model: bedtime_setback is emitted even for off-mode days.
+        setback_events = [(e, d) for e, d in emitted if e == "bedtime_setback"]
+        assert len(setback_events) == 1, f"Expected 1 bedtime_setback event, got: {emitted}"
+        _, data = setback_events[0]
+        assert data["mode"] == "off"
 
-    def test_hvac_off_writes_skipped_reason_to_today_record(self):
-        """hvac_mode='off': _today_record.setback_skipped_reason must be 'hvac_off'."""
+    def test_hvac_off_does_not_write_skipped_reason(self):
+        """hvac_mode='off': setback_skipped_reason stays None (band is applied, not skipped).
+
+        #249 P3: the old model wrote setback_skipped_reason='hvac_off'; the band model
+        never skips for hvac_mode='off' — the sleep band is armed for all hvac_modes.
+        """
         engine = _make_engine()
         engine._emit_event_callback = lambda *_: None
         engine._today_record = _make_today_record()
@@ -238,7 +249,8 @@ class TestHandleBedtimeHvacOffSkip:
 
         asyncio.run(engine.handle_bedtime())
 
-        assert engine._today_record.setback_skipped_reason == "hvac_off"
+        # Band model does not write a skipped reason for off-mode days.
+        assert engine._today_record.setback_skipped_reason is None
 
 
 class TestHandleBedtimeNoClassificationSkip:
@@ -274,7 +286,11 @@ class TestHandleBedtimeHeatApplied:
         assert len(setback_events) == 1, f"Expected 'bedtime_setback' event, got {emitted}"
 
     def test_heat_event_contains_required_keys(self):
-        """'bedtime_setback' event data must have mode, target_f, depth_f, adaptive, modifier."""
+        """'bedtime_setback' event data must have mode, floor, ceiling, active, modifier.
+
+        #249 P3: event payload changed from {target_f, depth_f, adaptive} to {floor, ceiling,
+        active} — the band carries both edges and the active flag instead of a single setpoint.
+        """
         engine = _make_engine()
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda event, data: emitted.append((event, data))
@@ -287,9 +303,9 @@ class TestHandleBedtimeHeatApplied:
         assert len(setback_events) == 1
         _, data = setback_events[0]
         assert "mode" in data, f"Missing 'mode' in event data: {data}"
-        assert "target_f" in data, f"Missing 'target_f' in event data: {data}"
-        assert "depth_f" in data, f"Missing 'depth_f' in event data: {data}"
-        assert "adaptive" in data, f"Missing 'adaptive' in event data: {data}"
+        assert "floor" in data, f"Missing 'floor' in event data: {data}"
+        assert "ceiling" in data, f"Missing 'ceiling' in event data: {data}"
+        assert "active" in data, f"Missing 'active' in event data: {data}"
         assert "modifier" in data, f"Missing 'modifier' in event data: {data}"
         assert data["mode"] == "heat"
 
@@ -365,7 +381,11 @@ class TestHandleBedtimeCoolApplied:
         assert len(setback_events) == 1, f"Expected 'bedtime_setback' event, got {emitted}"
 
     def test_cool_event_data_has_mode_cool(self):
-        """'bedtime_setback' event data must have mode='cool'."""
+        """'bedtime_setback' event data must have mode='cool', floor, ceiling, active, modifier.
+
+        #249 P3: event payload changed from {target_f, depth_f, adaptive} to {floor, ceiling,
+        active} — the band carries both edges and the active flag instead of a single setpoint.
+        """
         engine = _make_engine()
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda event, data: emitted.append((event, data))
@@ -380,9 +400,9 @@ class TestHandleBedtimeCoolApplied:
         assert len(setback_events) == 1
         _, data = setback_events[0]
         assert data["mode"] == "cool"
-        assert "target_f" in data
-        assert "depth_f" in data
-        assert "adaptive" in data
+        assert "floor" in data
+        assert "ceiling" in data
+        assert "active" in data
         assert "modifier" in data
 
     def test_cool_writes_setback_cool_applied_f(self):

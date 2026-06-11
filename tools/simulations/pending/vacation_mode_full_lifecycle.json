@@ -61,8 +61,13 @@
     {
       "at": "2026-07-15T08:00:00",
       "expect": "classification_applied",
-      "expect_temp": 74.0,
-      "reason": "Initial morning classification at home — cool mode at comfort_cool=74F"
+      "reason": "Initial morning classification at home — warm day comfort band armed."
+    },
+    {
+      "at": "2026-07-15T08:00:00",
+      "expect": "expect_band",
+      "expect_band": {"ceiling": 74.0},
+      "reason": "P3: comfort band ceiling=comfort_cool=74F at home before vacation. Confirms correct home-mode band before vacation setback."
     },
     {
       "at": "2026-07-15T10:00:00",

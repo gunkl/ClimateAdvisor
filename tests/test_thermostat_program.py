@@ -1,25 +1,25 @@
-"""Tests for the thermostat program-selection function (Issue #249, Phase 2).
+"""Tests for comfort-band selection and actuation (Issue #249, P3).
 
-`select_thermostat_program` is the pure decision layer: it maps a day classification + occupancy +
-sleep window + savings posture + thermostat capability into a concrete `ThermostatProgram` (mode +
-band). It performs NO HA state access and changes NO production behavior in this phase (it is unused
-until P3 wiring). These tests are the all-homes matrix: thermostat type × day type × occupancy ×
-sleep × aggressive.
+``select_comfort_band`` is the pure decision layer: maps day classification + occupancy +
+sleep window + savings posture into a capability-free ``ComfortBand`` (floor/ceiling/active).
+``_apply_comfort_band`` is the actuation primitive: reads live thermostat capabilities and
+emits the correct service-call shape (dual / cool / heat / no-op).
 
-Owner-refined model under test: a band-capable thermostat stays in ONE stable `heat_cool` mode and
-the plan is expressed purely as the [low, high] band, with a side "disabled" by pushing its setpoint
-to a safety setback (the "heat=61 on a warm day" rule) rather than switching modes. Single-mode
-thermostats arm the single threatened edge; `mode="off"` is the graceful fallback.
+All-homes matrix: day type × occupancy × sleep × aggressive.
+Actuation matrix: dual-capable / cool-only / heat-only / no-capable × active edge.
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
 
 from custom_components.climate_advisor.automation import (
+    AutomationEngine,
+    ComfortBand,
     _in_sleep_window,
-    parse_thermostat_capabilities,
-    select_thermostat_program,
+    select_comfort_band,
 )
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
@@ -34,7 +34,10 @@ from custom_components.climate_advisor.const import (
     OCCUPANCY_VACATION,
 )
 
-# Fixed config so expected band edges are explicit numbers.
+# ---------------------------------------------------------------------------
+# Config and classification helpers
+# ---------------------------------------------------------------------------
+
 CONFIG = {
     "comfort_heat": 70.0,
     "comfort_cool": 74.0,
@@ -44,15 +47,9 @@ CONFIG = {
     "sleep_cool": 78.0,
 }
 
-# Capability fixtures (built through the P1 parser for realism).
-BAND = parse_thermostat_capabilities(["off", "heat", "cool", "heat_cool"], CLIMATE_FEATURE_TARGET_TEMP_RANGE)
-COOL_ONLY = parse_thermostat_capabilities(["off", "cool"], 1)
-HEAT_ONLY = parse_thermostat_capabilities(["off", "heat"], 1)
-UNKNOWN = parse_thermostat_capabilities(None, None)
-
 
 def _classification(day_type: str, *, pre_condition_target: float | None = None) -> DayClassification:
-    """Build a real DayClassification; hvac_mode is computed from day_type by the classifier."""
+    """Build a real DayClassification; hvac_mode is derived from day_type by the classifier."""
     c = DayClassification(
         day_type=day_type,
         trend_direction="stable",
@@ -68,165 +65,150 @@ def _classification(day_type: str, *, pre_condition_target: float | None = None)
     return c
 
 
-def _program(day_type, caps, *, occupancy=OCCUPANCY_HOME, sleep=False, aggressive=False, pre=None):
-    return select_thermostat_program(
+def _band(day_type, *, occupancy=OCCUPANCY_HOME, sleep=False, aggressive=False, pre=None):
+    """Call select_comfort_band with the shared CONFIG."""
+    return select_comfort_band(
         _classification(day_type, pre_condition_target=pre),
         CONFIG,
         occupancy_mode=occupancy,
-        capabilities=caps,
         in_sleep_window=sleep,
         aggressive_savings=aggressive,
     )
 
 
 # ---------------------------------------------------------------------------
-# Band-capable thermostat (heat_cool) — the preferred, always-on band
+# select_comfort_band — pure function; all-homes matrix
 # ---------------------------------------------------------------------------
 
 
-class TestBandCapable:
-    def test_warm_day_arms_ceiling_suppresses_floor(self):
-        """WARM (off): hold comfort_cool ceiling; floor pushed to setback_heat (the heat=61 rule)."""
-        p = _program(DAY_TYPE_WARM, BAND)
-        assert p.mode == "heat_cool"
-        assert p.setpoint_low == 60.0  # suppressed floor (safety)
-        assert p.setpoint_high == 74.0  # active ceiling = comfort_cool
-        assert p.setpoint is None
+class TestSelectComfortBandWarmDays:
+    """Warm/mild/hot days defend the ceiling; floor is the full comfort_heat (no suppression)."""
+
+    def test_warm_day_active_ceiling_setback_floor(self):
+        """WARM: active="ceiling"; floor = comfort_heat (full band); ceiling = comfort_cool."""
+        b = _band(DAY_TYPE_WARM)
+        assert b.active == "ceiling"
+        assert b.floor == 70.0  # comfort_heat — full occupied+awake band
+        assert b.ceiling == 74.0  # comfort_cool — the defended edge
 
     def test_mild_day_same_as_warm(self):
-        p = _program(DAY_TYPE_MILD, BAND)
-        assert (p.mode, p.setpoint_low, p.setpoint_high) == ("heat_cool", 60.0, 74.0)
+        b = _band(DAY_TYPE_MILD)
+        assert b.active == "ceiling"
+        assert (b.floor, b.ceiling) == (70.0, 74.0)
 
-    def test_hot_day_defends_ceiling(self):
-        """HOT (cool) defends the ceiling. The classifier sets a pre-cool offset on hot days, so the
-        armed ceiling is comfort_cool plus that (negative) offset; the floor is suppressed."""
+    def test_hot_day_defends_ceiling_with_possible_precool(self):
+        """HOT day: same ceiling defense; pre-cool offset may lower ceiling."""
         c = _classification(DAY_TYPE_HOT)
-        p = select_thermostat_program(
-            c,
-            CONFIG,
-            occupancy_mode=OCCUPANCY_HOME,
-            capabilities=BAND,
-            in_sleep_window=False,
-            aggressive_savings=False,
+        b = select_comfort_band(
+            c, CONFIG, occupancy_mode=OCCUPANCY_HOME, in_sleep_window=False, aggressive_savings=False
         )
-        offset = c.pre_condition_target if (c.pre_condition_target and c.pre_condition_target < 0) else 0.0
-        assert p.setpoint_high == 74.0 + offset
-        assert p.setpoint_high <= 74.0  # never above the comfort ceiling on a hot day
-        assert p.setpoint_low == 60.0
+        offset = float(c.pre_condition_target) if (c.pre_condition_target and c.pre_condition_target < 0) else 0.0
+        assert b.active == "ceiling"
+        assert b.ceiling == 74.0 + offset
+        assert b.floor == 70.0  # comfort_heat — full occupied+awake band
 
     def test_hot_day_precool_lowers_ceiling(self):
-        p = _program(DAY_TYPE_HOT, BAND, pre=-2.0)
-        assert p.setpoint_high == 72.0  # comfort_cool 74 + (-2) pre-cool offset
-        assert p.setpoint_low == 60.0
-
-    def test_cold_day_arms_floor_suppresses_ceiling(self):
-        """COLD (heat): hold comfort_heat floor; ceiling pushed to setback_cool."""
-        p = _program(DAY_TYPE_COLD, BAND)
-        assert (p.setpoint_low, p.setpoint_high) == (70.0, 80.0)
-
-    def test_cool_day_arms_floor(self):
-        p = _program(DAY_TYPE_COOL, BAND)
-        assert (p.setpoint_low, p.setpoint_high) == (70.0, 80.0)
+        """Pre-cool offset of -2°F lowers ceiling from 74 to 72."""
+        b = _band(DAY_TYPE_HOT, pre=-2.0)
+        assert b.ceiling == 72.0
+        assert b.floor == 70.0
 
     def test_aggressive_savings_widens_active_ceiling(self):
-        """Warm + aggressive → ceiling raised by the savings margin (74 + 2)."""
-        p = _program(DAY_TYPE_WARM, BAND, aggressive=True)
-        assert p.setpoint_high == 76.0
-        assert p.setpoint_low == 60.0  # suppressed floor unaffected by margin
+        """aggressive_savings widens BOTH edges: floor = comfort_heat - 2 = 68, ceiling = 74 + 2 = 76."""
+        b = _band(DAY_TYPE_WARM, aggressive=True)
+        assert b.active == "ceiling"
+        assert b.ceiling == 76.0
+        assert b.floor == 68.0  # comfort_heat - 2.0 (savings widens both edges)
+
+
+class TestSelectComfortBandColdDays:
+    """Cold/cool days defend the floor; ceiling is the full comfort_cool (no suppression)."""
+
+    def test_cold_day_active_floor_setback_ceiling(self):
+        """COLD: active="floor"; floor = comfort_heat (defended); ceiling = comfort_cool (full band)."""
+        b = _band(DAY_TYPE_COLD)
+        assert b.active == "floor"
+        assert b.floor == 70.0  # comfort_heat — the defended edge
+        assert b.ceiling == 74.0  # comfort_cool — full occupied+awake band
+
+    def test_cool_day_same_as_cold(self):
+        b = _band(DAY_TYPE_COOL)
+        assert b.active == "floor"
+        assert (b.floor, b.ceiling) == (70.0, 74.0)
 
     def test_aggressive_savings_widens_active_floor(self):
-        """Cold + aggressive → floor lowered by the savings margin (70 - 2)."""
-        p = _program(DAY_TYPE_COLD, BAND, aggressive=True)
-        assert p.setpoint_low == 68.0
-        assert p.setpoint_high == 80.0  # suppressed ceiling unaffected
+        """aggressive_savings widens BOTH edges: floor = comfort_heat - 2 = 68, ceiling = comfort_cool + 2 = 76."""
+        b = _band(DAY_TYPE_COLD, aggressive=True)
+        assert b.active == "floor"
+        assert b.floor == 68.0
+        assert b.ceiling == 76.0  # comfort_cool + 2.0 (savings widens both edges)
 
-    def test_away_uses_setback_band(self):
-        p = _program(DAY_TYPE_WARM, BAND, occupancy=OCCUPANCY_AWAY)
-        assert (p.setpoint_low, p.setpoint_high) == (60.0, 80.0)
+
+class TestSelectComfortBandOccupancy:
+    """Away/vacation override the day-type band with setback values."""
+
+    def test_away_uses_setback_band_active_ceiling(self):
+        """Away: setback_heat floor, setback_cool ceiling; active="ceiling"."""
+        b = _band(DAY_TYPE_WARM, occupancy=OCCUPANCY_AWAY)
+        assert b.active == "ceiling"
+        assert (b.floor, b.ceiling) == (60.0, 80.0)
+
+    def test_away_cold_day_same_setback_band(self):
+        """Away overrides day-type — cold day still gets setback band, active="ceiling"."""
+        b = _band(DAY_TYPE_COLD, occupancy=OCCUPANCY_AWAY)
+        assert b.active == "ceiling"
+        assert (b.floor, b.ceiling) == (60.0, 80.0)
 
     def test_vacation_uses_deeper_setback_band(self):
-        p = _program(DAY_TYPE_WARM, BAND, occupancy=OCCUPANCY_VACATION)
-        assert (p.setpoint_low, p.setpoint_high) == (57.0, 83.0)  # ±VACATION_SETBACK_EXTRA(3)
+        """Vacation: setback ± VACATION_SETBACK_EXTRA (3°F); active="ceiling"."""
+        b = _band(DAY_TYPE_WARM, occupancy=OCCUPANCY_VACATION)
+        assert b.active == "ceiling"
+        assert (b.floor, b.ceiling) == (57.0, 83.0)  # 60-3 / 80+3
 
-    def test_sleep_window_uses_sleep_band(self):
-        p = _program(DAY_TYPE_WARM, BAND, sleep=True)
-        assert (p.setpoint_low, p.setpoint_high) == (66.0, 78.0)
-
-    def test_sleep_window_cold_night_same_band(self):
-        p = _program(DAY_TYPE_COLD, BAND, sleep=True)
-        assert (p.setpoint_low, p.setpoint_high) == (66.0, 78.0)
-
-    def test_away_overrides_aggressive(self):
-        """Savings margin widens only the comfort band, never the away setback band."""
-        p = _program(DAY_TYPE_WARM, BAND, occupancy=OCCUPANCY_AWAY, aggressive=True)
-        assert (p.setpoint_low, p.setpoint_high) == (60.0, 80.0)
+    def test_away_overrides_aggressive_savings(self):
+        """Savings margin only applies to the comfort band; away setback is unaffected."""
+        b = _band(DAY_TYPE_WARM, occupancy=OCCUPANCY_AWAY, aggressive=True)
+        assert (b.floor, b.ceiling) == (60.0, 80.0)
 
 
-# ---------------------------------------------------------------------------
-# Single-mode thermostats — arm the threatened edge only
-# ---------------------------------------------------------------------------
+class TestSelectComfortBandSleep:
+    """Sleep window uses sleep_heat/sleep_cool; active edge follows day type."""
+
+    def test_sleep_warm_night_active_ceiling(self):
+        """Sleep on a warm night: active="ceiling" (ceiling-threat day)."""
+        b = _band(DAY_TYPE_WARM, sleep=True)
+        assert b.active == "ceiling"
+        assert (b.floor, b.ceiling) == (66.0, 78.0)
+
+    def test_sleep_cold_night_active_floor(self):
+        """Sleep on a cold night: active="floor" (floor-threat day)."""
+        b = _band(DAY_TYPE_COLD, sleep=True)
+        assert b.active == "floor"
+        assert (b.floor, b.ceiling) == (66.0, 78.0)
 
 
-class TestSingleMode:
-    def test_cool_only_warm_arms_ceiling(self):
-        p = _program(DAY_TYPE_WARM, COOL_ONLY)
-        assert p.mode == "cool"
-        assert p.setpoint == 74.0
-        assert p.setpoint_low is None and p.setpoint_high is None
+class TestComfortBandInvariants:
+    """ComfortBand dataclass invariants."""
 
-    def test_cool_only_warm_aggressive(self):
-        p = _program(DAY_TYPE_WARM, COOL_ONLY, aggressive=True)
-        assert (p.mode, p.setpoint) == ("cool", 76.0)
+    def test_comfort_band_is_frozen(self):
+        """ComfortBand must be immutable — guards against accidental mutation in callers."""
+        b = _band(DAY_TYPE_WARM)
+        try:
+            b.ceiling = 99.0  # type: ignore[misc]
+        except Exception as exc:
+            assert "frozen" in type(exc).__name__.lower() or "attribute" in str(exc).lower()
+        else:
+            raise AssertionError("ComfortBand should be immutable")
 
-    def test_cool_only_cold_day_cannot_heat_falls_back_off(self):
-        """A cool-only unit cannot defend the floor on a cold day → off sentinel (no false promise)."""
-        p = _program(DAY_TYPE_COLD, COOL_ONLY)
-        assert p.mode == "off"
-
-    def test_heat_only_cold_arms_floor(self):
-        p = _program(DAY_TYPE_COLD, HEAT_ONLY)
-        assert (p.mode, p.setpoint) == ("heat", 70.0)
-
-    def test_heat_only_warm_day_cannot_cool_falls_back_off(self):
-        p = _program(DAY_TYPE_WARM, HEAT_ONLY)
-        assert p.mode == "off"
-
-    def test_cool_only_away_defends_ceiling(self):
-        p = _program(DAY_TYPE_WARM, COOL_ONLY, occupancy=OCCUPANCY_AWAY)
-        assert (p.mode, p.setpoint) == ("cool", 80.0)  # wide setback ceiling
-
-    def test_heat_only_away_defends_floor(self):
-        p = _program(DAY_TYPE_WARM, HEAT_ONLY, occupancy=OCCUPANCY_AWAY)
-        assert (p.mode, p.setpoint) == ("heat", 60.0)  # setback floor
-
-    def test_unknown_thermostat_falls_back_off(self):
-        p = _program(DAY_TYPE_WARM, UNKNOWN)
-        assert p.mode == "off"
-        assert p.setpoint is None
+    def test_reason_is_descriptive(self):
+        """Reason string must include the band numbers and day type for log readability."""
+        b = _band(DAY_TYPE_WARM)
+        assert "comfort" in b.reason
+        assert "74" in b.reason  # comfort_cool ceiling
 
 
 # ---------------------------------------------------------------------------
-# ThermostatProgram invariant
-# ---------------------------------------------------------------------------
-
-
-def test_program_is_frozen():
-    p = _program(DAY_TYPE_WARM, BAND)
-    try:
-        p.mode = "cool"  # type: ignore[misc]
-    except Exception as exc:  # FrozenInstanceError
-        assert "frozen" in type(exc).__name__.lower() or "attribute" in str(exc).lower()
-    else:
-        raise AssertionError("ThermostatProgram should be immutable")
-
-
-def test_reason_is_descriptive():
-    p = _program(DAY_TYPE_WARM, BAND)
-    assert "comfort" in p.reason and "74" in p.reason
-
-
-# ---------------------------------------------------------------------------
-# _in_sleep_window
+# _in_sleep_window — unchanged pure helper
 # ---------------------------------------------------------------------------
 
 
@@ -253,3 +235,257 @@ class TestInSleepWindow:
 
     def test_malformed_time_returns_false(self):
         assert _in_sleep_window(datetime(2026, 6, 10, 23, 0), {"sleep_time": "bad", "wake_time": "07:00"}) is False
+
+
+# ---------------------------------------------------------------------------
+# _apply_comfort_band — actuation primitive (requires capability stub)
+# ---------------------------------------------------------------------------
+#
+# These tests verify the command shape emitted by _apply_comfort_band:
+# - dual-capable → set_hvac_mode("heat_cool") if not already + set_temperature(low/high)
+# - cool-only + active="ceiling" → set_hvac_mode("cool") + set_temperature(ceiling)
+# - heat-only + active="floor" → set_hvac_mode("heat") + set_temperature(floor)
+# - no capable mode → NO service calls (band not armed)
+# - dry_run → DRY RUN log lines; no actual calls
+
+
+def _consume_coroutine(coro):
+    """Close AsyncMock coroutines to prevent 'never awaited' warnings in the full suite."""
+    if asyncio.iscoroutine(coro):
+        coro.close()
+
+
+def _make_apply_engine(
+    *,
+    hvac_modes: list[str],
+    supported_features: int,
+    current_mode: str = "off",
+    dry_run: bool = False,
+    config_overrides: dict | None = None,
+) -> AutomationEngine:
+    """Build a minimal AutomationEngine wired to test _apply_comfort_band.
+
+    Sets ``hvac_modes`` + ``supported_features`` on the climate state so
+    ``_get_thermostat_capabilities()`` detects the correct capability tier.
+    ``current_mode`` is the live thermostat state (used for idempotent-mode checks).
+    """
+    hass = MagicMock()
+    hass.services = MagicMock()
+    hass.services.async_call = AsyncMock()
+    hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+    # State returned for BOTH the capability read AND the current-mode read in _apply_comfort_band
+    state = MagicMock()
+    state.state = current_mode
+    state.attributes = {
+        "hvac_modes": hvac_modes,
+        "supported_features": supported_features,
+    }
+    hass.states = MagicMock()
+    hass.states.get = MagicMock(return_value=state)
+
+    config = {
+        "comfort_heat": 70.0,
+        "comfort_cool": 74.0,
+        "setback_heat": 60.0,
+        "setback_cool": 80.0,
+        "temp_unit": "fahrenheit",
+        "notify_service": "notify.notify",
+    }
+    if config_overrides:
+        config.update(config_overrides)
+
+    eng = AutomationEngine(
+        hass=hass,
+        climate_entity="climate.test",
+        weather_entity="weather.home",
+        door_window_sensors=[],
+        notify_service=config["notify_service"],
+        config=config,
+    )
+    eng.dry_run = dry_run
+    return eng
+
+
+# dual-capable thermostat: heat_cool mode + TARGET_TEMPERATURE_RANGE feature bit
+_DUAL_MODES = ["off", "heat", "cool", "heat_cool"]
+_DUAL_FEATURES = CLIMATE_FEATURE_TARGET_TEMP_RANGE
+
+# cool-only thermostat (no heat_cool, no range feature)
+_COOL_MODES = ["off", "cool"]
+_COOL_FEATURES = 1  # single-target only
+
+# heat-only thermostat
+_HEAT_MODES = ["off", "heat"]
+_HEAT_FEATURES = 1
+
+
+def _hvac_calls(eng: AutomationEngine) -> list:
+    return [c for c in eng.hass.services.async_call.call_args_list if c.args[1] == "set_hvac_mode"]
+
+
+def _temp_calls(eng: AutomationEngine) -> list:
+    return [c for c in eng.hass.services.async_call.call_args_list if c.args[1] == "set_temperature"]
+
+
+class TestApplyComfortBandDual:
+    """Dual-setpoint capable thermostat — uses heat_cool + target_temp_low/high."""
+
+    def test_warm_day_band_emits_dual_setpoints(self):
+        """Warm band [floor=60, ceiling=74, active=ceiling]: dual set_temperature call."""
+        eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test warm"))
+
+        hvac = _hvac_calls(eng)
+        assert len(hvac) == 1
+        assert hvac[0].args[2]["hvac_mode"] == "heat_cool"
+
+        temp = _temp_calls(eng)
+        assert len(temp) == 1
+        data = temp[0].args[2]
+        assert data["target_temp_low"] == 60.0  # floor
+        assert data["target_temp_high"] == 74.0  # ceiling
+
+    def test_cold_day_band_emits_dual_setpoints(self):
+        """Cold band [floor=70, ceiling=80, active=floor]: same dual shape."""
+        eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
+        band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test cold"))
+
+        temp = _temp_calls(eng)
+        assert len(temp) == 1
+        data = temp[0].args[2]
+        assert data["target_temp_low"] == 70.0
+        assert data["target_temp_high"] == 80.0
+
+    def test_no_mode_change_when_already_in_heat_cool(self):
+        """Thermostat already in heat_cool → _set_hvac_mode NOT called (idempotent)."""
+        eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="heat_cool")
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test idempotent"))
+
+        hvac = _hvac_calls(eng)
+        assert len(hvac) == 0  # already in heat_cool — no redundant mode switch
+
+        temp = _temp_calls(eng)
+        assert len(temp) == 1  # but setpoints are still updated
+
+    def test_comfort_band_applied_event_emitted(self):
+        """comfort_band_applied event contains floor, ceiling, active, mode, reason."""
+        eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
+        events: list[tuple] = []
+        eng._emit_event_callback = lambda n, d: events.append((n, d))
+
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="band reason")
+        asyncio.run(eng._apply_comfort_band(band, reason="test event"))
+
+        applied = [e for e in events if e[0] == "comfort_band_applied"]
+        assert len(applied) == 1
+        payload = applied[0][1]
+        assert payload["floor"] == 60.0
+        assert payload["ceiling"] == 74.0
+        assert payload["active"] == "ceiling"
+        assert payload["mode"] == "dual"
+
+
+class TestApplyComfortBandCoolOnly:
+    """Cool-only thermostat — arms cool mode + single ceiling setpoint."""
+
+    def test_ceiling_band_sets_cool_mode_and_ceiling_setpoint(self):
+        """active=ceiling + cool-capable → set_hvac_mode(cool) + set_temperature(ceiling)."""
+        eng = _make_apply_engine(hvac_modes=_COOL_MODES, supported_features=_COOL_FEATURES, current_mode="off")
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test cool"))
+
+        hvac = _hvac_calls(eng)
+        assert len(hvac) == 1
+        assert hvac[0].args[2]["hvac_mode"] == "cool"
+
+        temp = _temp_calls(eng)
+        assert len(temp) == 1
+        # Single setpoint call uses "temperature" key, not target_temp_low/high
+        assert temp[0].args[2]["temperature"] == 74.0
+        assert "target_temp_low" not in temp[0].args[2]
+
+    def test_no_mode_change_when_already_cool(self):
+        """Already in cool mode → no set_hvac_mode call; setpoint still updated."""
+        eng = _make_apply_engine(hvac_modes=_COOL_MODES, supported_features=_COOL_FEATURES, current_mode="cool")
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test idempotent cool"))
+
+        hvac = _hvac_calls(eng)
+        assert len(hvac) == 0  # already in cool — no redundant mode switch
+
+        temp = _temp_calls(eng)
+        assert len(temp) == 1
+
+    def test_floor_band_no_op_cool_only_cannot_heat(self):
+        """active=floor on cool-only thermostat → no service calls (can't defend the floor)."""
+        eng = _make_apply_engine(hvac_modes=_COOL_MODES, supported_features=_COOL_FEATURES, current_mode="cool")
+        band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test no-op"))
+
+        # Cool-only can't defend a floor threat — silent no-op, no false promise
+        assert len(_hvac_calls(eng)) == 0
+        assert len(_temp_calls(eng)) == 0
+
+
+class TestApplyComfortBandHeatOnly:
+    """Heat-only thermostat — arms heat mode + single floor setpoint."""
+
+    def test_floor_band_sets_heat_mode_and_floor_setpoint(self):
+        """active=floor + heat-capable → set_hvac_mode(heat) + set_temperature(floor)."""
+        eng = _make_apply_engine(hvac_modes=_HEAT_MODES, supported_features=_HEAT_FEATURES, current_mode="off")
+        band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test heat"))
+
+        hvac = _hvac_calls(eng)
+        assert len(hvac) == 1
+        assert hvac[0].args[2]["hvac_mode"] == "heat"
+
+        temp = _temp_calls(eng)
+        assert len(temp) == 1
+        assert temp[0].args[2]["temperature"] == 70.0
+
+    def test_ceiling_band_no_op_heat_only_cannot_cool(self):
+        """active=ceiling on heat-only thermostat → no service calls (can't defend the ceiling)."""
+        eng = _make_apply_engine(hvac_modes=_HEAT_MODES, supported_features=_HEAT_FEATURES, current_mode="heat")
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test no-op"))
+
+        # Heat-only can't cool — silent no-op per the spec
+        assert len(_hvac_calls(eng)) == 0
+        assert len(_temp_calls(eng)) == 0
+
+
+class TestApplyComfortBandNoCapability:
+    """No capable mode available (empty/unknown modes) → no service calls."""
+
+    def test_no_modes_no_calls(self):
+        """Entity with no capable modes → silent no-op (defensive, not a legacy fallback)."""
+        eng = _make_apply_engine(hvac_modes=[], supported_features=0, current_mode="off")
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+        asyncio.run(eng._apply_comfort_band(band, reason="test no-capable"))
+
+        assert len(_hvac_calls(eng)) == 0
+        assert len(_temp_calls(eng)) == 0
+
+
+class TestApplyComfortBandDryRun:
+    """dry_run=True → DRY RUN log entries; no actual service calls."""
+
+    def test_dry_run_dual_logs_without_service_calls(self, caplog):
+        import logging
+
+        eng = _make_apply_engine(
+            hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off", dry_run=True
+        )
+        band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
+
+        with caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.automation"):
+            asyncio.run(eng._apply_comfort_band(band, reason="test dry run"))
+
+        eng.hass.services.async_call.assert_not_called()
+        dry_msgs = [r.message for r in caplog.records if "[DRY RUN]" in r.message]
+        assert len(dry_msgs) >= 1  # at least one DRY RUN log line (mode change + temp)

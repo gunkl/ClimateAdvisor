@@ -53,11 +53,18 @@ AUTOMATION_LOGGER = "custom_components.climate_advisor.automation"
 # ── Helpers ──────────────────────────────────────────────────────
 
 
-def _make_state(state_value: str) -> MagicMock:
-    """Create a mock HA state object."""
+def _make_state(state_value: str, hvac_modes: list | None = None) -> MagicMock:
+    """Create a mock HA state object.
+
+    #249 P3: _apply_comfort_band reads attributes.hvac_modes + supported_features.
+    Pass hvac_modes to give the stub thermostat capability; omit for coordinator toggle states.
+    """
     mock = MagicMock()
     mock.state = state_value
-    mock.attributes = {}
+    if hvac_modes is not None:
+        mock.attributes = {"hvac_modes": hvac_modes, "supported_features": 1}
+    else:
+        mock.attributes = {}
     return mock
 
 
@@ -374,41 +381,51 @@ class TestVacationSetback:
     """Test handle_occupancy_vacation() deeper setback logic."""
 
     def test_vacation_heat_deeper_than_away(self):
-        """Vacation heat setback is VACATION_SETBACK_EXTRA degrees deeper."""
+        """Vacation band ceiling (setback_cool+EXTRA) is deeper than away ceiling (setback_cool).
+
+        #249 P3: the vacation band always arms the ceiling on a cool-capable thermostat.
+        setback_modifier is not applied to occupancy bands — it applies to bedtime/wakeup only.
+        Vacation ceiling = setback_cool (80) + VACATION_SETBACK_EXTRA (3) = 83.
+        """
         engine = _make_automation_engine()
         c = _make_classification(day_type="cold", hvac_mode="heat", setback_modifier=2.0)
         engine._current_classification = c
-        # Actual thermostat mode must match so the heat branch is entered
-        engine.hass.states.get.return_value = _make_state("heat")
+        # Provide cool capability so the band can arm the ceiling edge.
+        engine.hass.states.get.return_value = _make_state("heat", hvac_modes=["off", "heat", "cool"])
 
         asyncio.run(engine.handle_occupancy_vacation())
 
         calls = engine.hass.services.async_call.call_args_list
-        climate_calls = [c for c in calls if c[0][0] == "climate"]
-        assert len(climate_calls) == 1
+        # _apply_comfort_band may emit set_hvac_mode + set_temperature; filter to set_temperature.
+        temp_calls = [c for c in calls if c[0][0] == "climate" and c[0][1] == "set_temperature"]
+        assert len(temp_calls) == 1
 
-        service_data = climate_calls[0][0][2]
-        # setback_heat (60) + modifier (2) - VACATION_SETBACK_EXTRA (3) = 59
-        expected = 60 + 2.0 - VACATION_SETBACK_EXTRA
+        service_data = temp_calls[0][0][2]
+        # Vacation band ceiling = setback_cool + VACATION_SETBACK_EXTRA (no modifier in band).
+        expected = 80 + VACATION_SETBACK_EXTRA
         assert service_data["temperature"] == expected
 
     def test_vacation_cool_deeper_than_away(self):
-        """Vacation cool setback is VACATION_SETBACK_EXTRA degrees deeper."""
+        """Vacation band ceiling (setback_cool+EXTRA) is deeper than away ceiling (setback_cool).
+
+        #249 P3: setback_modifier is not applied to occupancy bands.
+        Vacation ceiling = setback_cool (80) + VACATION_SETBACK_EXTRA (3) = 83.
+        """
         engine = _make_automation_engine()
         c = _make_classification(day_type="hot", hvac_mode="cool", setback_modifier=2.0)
         engine._current_classification = c
-        # Actual thermostat mode must match so the cool branch is entered
-        engine.hass.states.get.return_value = _make_state("cool")
+        # Provide cool capability so the band can arm the ceiling edge.
+        engine.hass.states.get.return_value = _make_state("cool", hvac_modes=["off", "heat", "cool"])
 
         asyncio.run(engine.handle_occupancy_vacation())
 
         calls = engine.hass.services.async_call.call_args_list
-        climate_calls = [c for c in calls if c[0][0] == "climate"]
-        assert len(climate_calls) == 1
+        temp_calls = [c for c in calls if c[0][0] == "climate" and c[0][1] == "set_temperature"]
+        assert len(temp_calls) == 1
 
-        service_data = climate_calls[0][0][2]
-        # setback_cool (80) - modifier (2) + VACATION_SETBACK_EXTRA (3) = 81
-        expected = 80 - 2.0 + VACATION_SETBACK_EXTRA
+        service_data = temp_calls[0][0][2]
+        # Vacation band ceiling = setback_cool + VACATION_SETBACK_EXTRA (no modifier in band).
+        expected = 80 + VACATION_SETBACK_EXTRA
         assert service_data["temperature"] == expected
 
     def test_vacation_no_classification_safe(self):
@@ -421,13 +438,18 @@ class TestVacationSetback:
         engine.hass.services.async_call.assert_not_called()
 
     def test_vacation_dry_run(self, caplog):
-        """Vacation setback in dry-run mode logs but does not call service."""
+        """Vacation setback in dry-run mode logs but does not call service.
+
+        #249 P3: _apply_comfort_band routes through _set_hvac_mode and _set_temperature, both
+        of which check dry_run and log '[DRY RUN]' instead of calling async_call.
+        Thermostat needs hvac_modes capability so the band picks a command path to log.
+        """
         engine = _make_automation_engine()
         engine.dry_run = True
         c = _make_classification(day_type="cold", hvac_mode="heat", setback_modifier=0.0)
         engine._current_classification = c
-        # Actual thermostat mode must match so the heat branch is entered
-        engine.hass.states.get.return_value = _make_state("heat")
+        # Provide cool capability so the band selects the ceiling path and emits a DRY RUN log.
+        engine.hass.states.get.return_value = _make_state("heat", hvac_modes=["off", "heat", "cool"])
 
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             asyncio.run(engine.handle_occupancy_vacation())

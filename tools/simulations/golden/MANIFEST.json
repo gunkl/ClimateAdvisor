@@ -4,134 +4,119 @@
     "policy": "Modify only via: python tools/simulate.py --sign <scenario-name>"
   },
   "nat-vent-comfort-floor-exit-restores-heat": {
-    "sha256": "4095cec9bf0a141d63dfdca1f3dd2d498aff40b5e7af2e0ea012ef4860b63c66",
-    "signed": "2026-06-07",
+    "sha256": "a726b6aed94660123275ee3d26ed473765271c61a722d45cae162c1bc7c5d4d6",
+    "signed": "2026-06-10",
     "issue": 99
   },
   "nat-vent-fan-preserved-on-thermostat-event": {
-    "sha256": "268d271fe02989a70c7b406cbc3c242f6282d3e36452d05e860c9a5c0ffca045",
-    "signed": "2026-06-07",
+    "sha256": "8f986a5b5d6e5ffef84af61e009afddbd1d757e348c3f645f12a2062c0e22899",
+    "signed": "2026-06-10",
     "issue": 95
   },
   "2026-03-28-overnight": {
-    "sha256": "7b778a39f0cdf50e0f5a6af31e317a9fcfd9f302cf9b0059879cc45d51fd06c7",
-    "signed": "2026-06-09",
+    "sha256": "65deb17e5237191cefdda5468694f11539456d0c540f765a1b590b13594d1566",
+    "signed": "2026-06-10",
     "issue": 69
   },
   "away-mode-classification-cycle": {
-    "sha256": "da62bbad569c0bb5a7d09507bf990e2027c621d1742f1f16a412f6e9c43925fb",
-    "signed": "2026-04-20",
+    "sha256": "9b1a1574bfb2a983bbe3017100954c97e42cdd9c6dd16279255b6e1c4a5bd296",
+    "signed": "2026-06-10",
     "issue": 85
   },
   "nat-vent-at-comfort-floor-no-activate": {
-    "sha256": "1d10b5062c7113cbc8380a2bcefca693645d2976a5b2cde8e11b92f5eaa4d905",
-    "signed": "2026-06-08",
+    "sha256": "c3fed8f57dfadaea51b65851c41f45d49a710d363f5a604394ed90d4e5a65af6",
+    "signed": "2026-06-10",
     "issue": 115
   },
   "nat-vent-evening-activation": {
-    "sha256": "f8657379ad693be8b37bbb06c6890e53bbc64e1d08fa49e48dd7b05c0f0f9c6b",
-    "signed": "2026-04-20",
+    "sha256": "20c90ee48bce399afa0949a63b1af280a168e197db7130450cc3941a3a4a9f3f",
+    "signed": "2026-06-10",
     "issue": 115
   },
   "nat-vent-indoor-hot-outdoor-near-comfort": {
-    "sha256": "0a20b5dd79d8953ae42c08ec9ef5f4f5c5b30ef29b76cb860b3f366597619a51",
-    "signed": "2026-04-20",
+    "sha256": "92d8fe0a3479c6f9b9b4c201c6e5394fd488d3dc062478cf8dfff4d01c624230",
+    "signed": "2026-06-10",
     "issue": 115
   },
   "nat-vent-outdoor-rises-above-indoor-exit": {
-    "sha256": "f4d16daaba950e01e96f971acf15af41a4f98a04b8025e6a90ed19b6d0fa8375",
-    "signed": "2026-04-20",
+    "sha256": "2faf2ba3e7ae0b6787253d8d5039bdaa7873cfc1e2ad61deb8ed772ff77dce1b",
+    "signed": "2026-06-10",
     "issue": 115
   },
   "nat-vent-outdoor-warmer-no-activate": {
-    "sha256": "b33f8bc0daebb2835ebe974f508806336577548db3a9220ff62e549527a73205",
-    "signed": "2026-06-08",
+    "sha256": "c979931641a0866aaba86960f7248834e09e61ebb82edabc1a7957c134015f88",
+    "signed": "2026-06-10",
     "issue": 115
   },
-  "warm-day-setback-cool-mode": {
-    "sha256": "190202f71da8dd6c6cb924dbf4969ee630e0f2fb0136fef18fd67b264f5f508b",
-    "signed": "2026-04-20",
-    "issue": 96
-  },
-  "warm-day-setback-heat-cool-mode": {
-    "sha256": "08db7f1870c9a5ded2ca99bc3b63d2e15ef46bd6dda50cab6b40b45693e9b05e",
-    "signed": "2026-04-20",
-    "issue": 96
-  },
-  "warm-day-setback-heat-mode": {
-    "sha256": "cc7d7a2bea16482b5874f150b140d7d57429f16eea1c0a92e9a1387798324d6b",
-    "signed": "2026-04-20",
-    "issue": 96
-  },
   "cold_morning_warm_day_no_breach": {
-    "sha256": "c440fa9cb74b2d6784f2b97f6f83023bf55ea16b5c4a022a54fb7e2437aa35f6",
-    "signed": "2026-06-09",
-    "issue": 136
+    "sha256": "4a871e1b918974246f6057e46da54c0b12071cdf9f74d6d0e4e7289fe24feff3",
+    "signed": "2026-06-10",
+    "issue": 249
   },
   "cool_all_day_heat_all_day": {
-    "sha256": "f38783411bc6fde2c9bea8aa19f3df764f1227ee913960cba769c756f6b987d7",
-    "signed": "2026-06-07",
+    "sha256": "c37017e8be21f9589a74dc8363314cfc6988e089958bd36f434e7e218e3b9e89",
+    "signed": "2026-06-10",
     "issue": 136
   },
   "hot_all_day_no_nat_vent_window": {
-    "sha256": "8226b30e5b7272873c8291e1d2080e4b59479dc7b60df91d268bb810e96a1007",
-    "signed": "2026-06-08",
+    "sha256": "d450a8f0cb65834aedf2e66785280a82d1f849ae1f089f90bfb3fdb4481534c5",
+    "signed": "2026-06-10",
     "issue": 136
   },
   "mild_all_day_nat_vent_only": {
-    "sha256": "e3147bb0d0e2c549698b1acc5b43bc222ef9e81755fa2787ddb43ab6a6a0ed0a",
-    "signed": "2026-06-07",
+    "sha256": "27585a3981a1f663c38d7e1532219095b8a2d76f767befe5a2a77925d87dcc78",
+    "signed": "2026-06-10",
     "issue": 136
   },
   "warm_day_ceiling_breach_ac_defense": {
-    "sha256": "1faa8c9aef02ce5b340710d57c1885cab8ca78617d9b17b2b2bebd2c736da7ab",
-    "signed": "2026-06-09",
+    "sha256": "7a166987eaf61b18be1a5b01b36ad003c19740d9a26542bc81ed1e26097fac7e",
+    "signed": "2026-06-10",
     "issue": 136
   },
   "warm_day_forecast_improves_guard_dormant": {
-    "sha256": "65789d8514725d86eed8da4dd0399df675df1e2b56be65245538992eb8bcbdc4",
-    "signed": "2026-06-09",
+    "sha256": "04dc45199a196b5251c5a77d326ca735ce574ec2000b3f3a84099d94eaab1d4d",
+    "signed": "2026-06-10",
     "issue": 136
   },
   "away_occupancy_cool_mode_setback": {
-    "sha256": "d9f19d28b05bccebffa994d39c96809784d239b87dc8609ed782d2caa79bcaf9",
-    "signed": "2026-06-08",
+    "sha256": "b01c856418ef64215f382df9bed084f7ce460eef79de22f62b0ad2e63bf671d6",
+    "signed": "2026-06-10",
     "issue": 222
   },
   "away_occupancy_override_cleared": {
-    "sha256": "2a67ca3502d70c6bc75de3a7022a3e6cafa1ce0d16c60b8b25edb58e953f61e7",
-    "signed": "2026-06-08",
+    "sha256": "3c03f6328ac044e796e63ab186391fa832dafd91246fb0daeedbaee6b959d863",
+    "signed": "2026-06-10",
     "issue": 220
   },
   "away_setpoint_change_not_override": {
-    "sha256": "760860780514e9edcab839c5a5a46b9e09ef9f3e1015e34358a8c170480cb36b",
-    "signed": "2026-06-08",
+    "sha256": "693e86661023f76fc4f900e57cafbaf842c5770d4e5b1f5ba1360f0099064841",
+    "signed": "2026-06-10",
     "issue": 221
   },
   "nat_vent_active_indoor_in_band_guard_dormant": {
-    "sha256": "aa7670e2bb171559b8ecbcafd2697cfbf7f3f934ce1e78d7873423aa96371345",
-    "signed": "2026-06-07",
+    "sha256": "324173cda2b5e1f194caa839154761aa08813005c5f60aff1f21e2676c82b9f4",
+    "signed": "2026-06-10",
     "issue": 218
   },
   "nat_vent_ceiling_breach_hvac_escalation": {
-    "sha256": "359dd12b46406e2545ae05caa2b997dfc07b26f56aec858edeca0080ba5d519b",
-    "signed": "2026-06-07",
+    "sha256": "309d3a79b4cf365d44bebffac152949018dc50c04960fac5ef22af94e51f0961",
+    "signed": "2026-06-10",
     "issue": 218
   },
   "startup_indoor_above_cool_nat_vent_not_running": {
-    "sha256": "194393f70e9c6304d2117b7079c867da91cc6b34c20cfd7a00664f2c4e4e2ba3",
-    "signed": "2026-06-07",
+    "sha256": "a9b7c2a7b3a7fc4892c27ea9047629a41da7bf4745ceea4458e83c4a890d7162",
+    "signed": "2026-06-10",
     "issue": 218
   },
   "startup_indoor_above_cool_sensors_closed": {
-    "sha256": "b749353b91fa13f8a58687cb4f09597d3f558e28c736677dbd16642239b0a639",
-    "signed": "2026-06-07",
+    "sha256": "9495222dfd7d7c00658a8e5f8fd6ea23d79e0816974029f33c66c4c6cf2ad2bf",
+    "signed": "2026-06-10",
     "issue": 218
   },
   "startup_indoor_below_heat_floor_warm_day": {
-    "sha256": "f3da978dc2b1252708a1ab8fb9e1ac1666aa30e6210f05bf4d76c17b812c0f06",
-    "signed": "2026-06-08",
-    "issue": 218
+    "sha256": "8811423575ad2cf9a1919a8572558f64caea668e2048f4379db40e3f08f63e55",
+    "signed": "2026-06-10",
+    "issue": 249
   },
   "ceiling_guard_fires_when_outdoor_stays_below_indoor": {
     "sha256": "5f9e753a9a8300a52653b271ae179713603dfb0b366b6516d67d73aaac5791d4",

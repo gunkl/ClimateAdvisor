@@ -31,12 +31,34 @@ def _consume_coroutine(coro):
 
 
 def _make_automation_engine(config_overrides: dict | None = None) -> AutomationEngine:
-    """Create an AutomationEngine with mocked HA dependencies."""
+    """Create an AutomationEngine with mocked HA dependencies.
+
+    Under P3 the engine arms a comfort band via ``_apply_comfort_band``.  The climate state
+    must expose ``hvac_modes`` + ``supported_features`` so ``_get_thermostat_capabilities()``
+    detects a dual-setpoint capable thermostat and the band path reaches ``_set_hvac_mode``/
+    ``_set_temperature_dual`` — which emit DRY RUN logs when ``dry_run=True``.
+    """
+    from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
+
     hass = MagicMock()
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+
+    # Dual-capable climate state: band arming will reach the mode/temp primitives.
+    # Use a real dict for attributes so .get() works correctly for _get_thermostat_capabilities
+    # and _get_indoor_temp_f without needing to mock the dict's .get method.
+    _hvac_modes = ["off", "heat", "cool", "heat_cool"]
+    _features = CLIMATE_FEATURE_TARGET_TEMP_RANGE
+    climate_state = MagicMock()
+    climate_state.state = "heat_cool"
+    climate_state.attributes = {
+        "hvac_modes": _hvac_modes,
+        "supported_features": _features,
+        "current_temperature": 72.0,
+    }
+    hass.states.get.return_value = climate_state
 
     config = {
         "comfort_heat": 70,
@@ -232,6 +254,8 @@ class TestDryRunHighLevelLogic:
         assert "temperature" in dry_run_msgs[0].lower()
 
     def test_handle_occupancy_in_dry_run(self, caplog):
+        from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
+
         engine = _make_automation_engine()
         engine.dry_run = True
         engine._current_classification = _make_classification(
@@ -239,10 +263,18 @@ class TestDryRunHighLevelLogic:
             hvac_mode="heat",
             setback_modifier=0.0,
         )
-        # Provide actual thermostat state matching classification so the setback
-        # branch is entered (handle_occupancy_away now reads actual mode)
+        # Keep capability attributes on the state so _apply_comfort_band reaches the DRY RUN
+        # primitives.  Without hvac_modes/supported_features the band silently no-ops (P3 behavior:
+        # band only arms when capabilities are known), producing zero DRY RUN log lines.
+        _hvac_modes = ["off", "heat", "cool", "heat_cool"]
+        _features = CLIMATE_FEATURE_TARGET_TEMP_RANGE
         mock_state = MagicMock()
         mock_state.state = "heat"
+        mock_state.attributes = {
+            "hvac_modes": _hvac_modes,
+            "supported_features": _features,
+            "current_temperature": 72.0,
+        }
         engine.hass.states.get.return_value = mock_state
 
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):

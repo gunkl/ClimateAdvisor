@@ -45,8 +45,14 @@
     {
       "at": "2026-07-15T09:01:00",
       "expect": "classification_applied",
-      "expect_temp": 74.0,
-      "reason": "Guest occupancy: classification applies comfort_cool=74F — same as home mode, no away setback",
+      "reason": "Guest occupancy: classification applies comfort band — same as home mode, no away setback.",
+      "simulator_support": true
+    },
+    {
+      "at": "2026-07-15T09:01:00",
+      "expect": "expect_band",
+      "expect_band": {"ceiling": 74.0},
+      "reason": "P3: comfort band ceiling=comfort_cool=74F confirms guest receives home-mode comfort (not setback ceiling).",
       "simulator_support": true
     },
     {

@@ -1,21 +1,19 @@
 {
   "name": "cold_morning_warm_day_no_breach",
-  "description": "Cold night (62F) into a warm day (72F peak) that stays within the comfort band. Heat fires at 6 AM to close the comfort-floor gap, then classification sets HVAC off once indoor reaches comfort_heat. Windows open when outdoor drops below indoor in the evening.",
+  "description": "Cold night (65F) into a warm day (72F peak) that stays within the comfort band. Issue #249: the comfort band [comfort_heat, comfort_cool] is armed at classification, so the thermostat itself pre-heats the cold morning up to comfort_heat (70F) and would cool the afternoon at comfort_cool (74F). Windows open when outdoor drops below indoor in the evening; nat-vent keeps the band armed.",
   "source": "synthetic",
-  "issue": 136,
+  "issue": 249,
   "notes": [
-    "Covers the Heat\u00e2\u2020\u2019Off\u00e2\u2020\u2019NatVent transition pattern not covered by existing golden scenarios.",
-    "The warm-day comfort-floor guard ensures heat runs until indoor >= comfort_heat before HVAC goes off.",
-    "No ceiling breach occurs \u00e2\u20ac\u201d indoor never exceeds comfort_cool=74F \u00e2\u20ac\u201d so the ODE ceiling guard is dormant all day.",
-    "This is a gap-filling scenario: warm-day classification does NOT mean instant shutoff when indoor is below the comfort floor."
+    "Issue #249 (supersedes the #136 comfort-floor-guard framing): warm/mild days no longer set HVAC off + run a 30-min supervisory guard. The occupied band is the full comfort band [comfort_heat, comfort_cool] on ANY day type — the thermostat's own deadband pre-heats the cold morning to comfort_heat and holds the comfort_cool ceiling in the afternoon.",
+    "Occupant outcome preserved/improved: the cold morning (indoor 65F) is warmed to comfort_heat=70F by the thermostat holding the band floor — no occupant left cold.",
+    "Evening nat-vent activates when outdoor < indoor; the band stays armed (nat-vent only manages the fan), so the compressor self-arbitrates with the open window."
   ],
   "config": {
     "comfort_heat": 70,
     "comfort_cool": 74,
     "setback_heat": 62,
     "setback_cool": 80,
-    "natural_vent_delta": 3.0,
-    "warm_day_comfort_gap_guard": true
+    "natural_vent_delta": 3.0
   },
   "events": [
     {
@@ -23,7 +21,7 @@
       "type": "temp_update",
       "indoor_f": 65.0,
       "outdoor_f": 52.0,
-      "note": "Cold night \u00e2\u20ac\u201d indoor 65F is well below comfort_heat=70F; outdoor 52F"
+      "note": "Cold night — indoor 65F is well below comfort_heat=70F; outdoor 52F"
     },
     {
       "time": "2026-05-15T06:01:00",
@@ -33,14 +31,14 @@
       "windows_recommended": true,
       "window_open_time": "08:00",
       "window_close_time": "18:00",
-      "note": "Warm-day classification: hvac_mode=off. But indoor=65F < comfort_heat=70F \u00e2\u20ac\u201d comfort-floor guard fires heat instead."
+      "note": "Warm-day classification: the occupied comfort band [70/74] is armed. The thermostat pre-heats indoor 65F up to the comfort_heat floor (70F)."
     },
     {
       "time": "2026-05-15T08:00:00",
       "type": "temp_update",
       "indoor_f": 70.5,
       "outdoor_f": 60.0,
-      "note": "Heat has warmed indoor to 70.5F, above comfort_heat=70F. HVAC off now appropriate."
+      "note": "Thermostat has warmed indoor to 70.5F, at/above the comfort_heat floor."
     },
     {
       "time": "2026-05-15T08:01:00",
@@ -50,7 +48,7 @@
       "windows_recommended": true,
       "window_open_time": "08:00",
       "window_close_time": "18:00",
-      "note": "30-min classification re-evaluation: indoor=70.5F >= comfort_heat=70F \u00e2\u20ac\u201d HVAC off applied normally."
+      "note": "30-min re-evaluation: the comfort band [70/74] is re-armed; the thermostat now holds the band with no change needed."
     },
     {
       "time": "2026-05-15T18:00:00",
@@ -63,30 +61,40 @@
       "time": "2026-05-15T18:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "User opens window \u00e2\u20ac\u201d outdoor 65F < indoor 72F, indoor > comfort_heat=70F, outdoor < threshold 77F."
+      "note": "User opens window — outdoor 65F < indoor 72F, indoor > comfort_heat=70F, outdoor < threshold 77F."
     }
   ],
   "assertions": [
     {
       "at": "2026-05-15T06:01:00",
-      "expect": "warm_day_comfort_gap",
-      "reason": "Cold morning, indoor below comfort_heat on a warm day \u2014 heat to the comfort floor first (warm_day_comfort_gap) so the occupant is not left cold."
+      "expect": "comfort_band_armed",
+      "reason": "Issue #249: warm-day classification arms the occupied comfort band; the thermostat's deadband then pre-heats the cold morning (indoor 65F) up to the comfort_heat floor — the occupant is not left cold. Replaces the old warm_day_comfort_gap guard.",
+      "track": "logic"
+    },
+    {
+      "at": "2026-05-15T06:01:00",
+      "expect": "expect_band",
+      "expect_band": {"floor": 70.0, "ceiling": 74.0},
+      "reason": "Occupied + awake on any day type uses the full comfort band [comfort_heat=70, comfort_cool=74] — no floor suppression. A suppressed floor (e.g. setback_heat=62) would leave the occupant cold on the morning.",
+      "track": "logic"
     },
     {
       "at": "2026-05-15T08:01:00",
-      "expect": "setback_applied",
-      "reason": "Second cycle: thermostat is running (heated at 06:01) and the day is warming \u2014 apply a warm-day setback to the running thermostat (Issue #96) rather than abruptly switching off. Occupant-correct; production is source of truth."
+      "expect": "comfort_band_armed",
+      "reason": "Second cycle: the comfort band is re-armed; the thermostat holds [70/74] natively (no float to setback). Replaces the old Issue #96 setback_applied.",
+      "track": "logic"
     },
     {
       "at": "2026-05-15T18:05:00",
       "expect": "natural_ventilation",
-      "reason": "Evening sensor_open: outdoor=65F < indoor=72F, indoor=72F > comfort_heat=70F, outdoor=65F <= threshold 74+3=77F \u00e2\u20ac\u201d nat vent activates."
+      "reason": "Evening sensor_open: outdoor=65F < indoor=72F, indoor=72F > comfort_heat=70F, outdoor=65F <= threshold 74+3=77F — nat vent activates and the band stays armed (fan-only; no HVAC off).",
+      "track": "logic"
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Cold-morning warm-day cycle stays within comfort band; nat-vent activates in evening when outdoor drops below indoor",
-    "observed_behavior": "classification_applied at 6 AM (guard not modeled in simulator) \u00e2\u2020\u2019 classification_applied at 8 AM after indoor recovers \u00e2\u2020\u2019 natural_ventilation at 6 PM",
-    "expected_behavior": "Heat fires until indoor >= comfort_heat, then HVAC off; evening nat-vent when outdoor < indoor"
+    "summary": "Cold-morning warm-day cycle: the comfort band pre-heats the morning to comfort_heat and holds the ceiling; evening nat-vent keeps the band armed when outdoor drops below indoor",
+    "observed_behavior": "comfort_band_applied [70/74] at 06:01 (thermostat pre-heats 65F->70F) -> comfort_band_applied [70/74] at 08:01 -> natural_ventilation at 18:05 (band stays armed)",
+    "expected_behavior": "Thermostat holds the comfort band all day; nat-vent in the evening manages only the fan"
   }
 }

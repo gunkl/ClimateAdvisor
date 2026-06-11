@@ -683,6 +683,31 @@ KNOWN_FIXES: dict[int, dict] = {
             "Coordinator cadence (re-evaluation still every 30 min + 5-min revisit) — unchanged",
         ],
     },
+    249: {
+        "issue": 249,
+        "title": "Thermostat-is-the-controller: program a comfort band instead of HVAC off + supervisory guards",
+        "version_fixed": "0.3.57",
+        "scope_covered": [
+            "select_comfort_band() computes [floor, ceiling] from classification/occupancy/sleep/savings;"
+            " occupied+awake = full comfort band [comfort_heat, comfort_cool] on ANY day type",
+            "_apply_comfort_band() arms the band via the thermostat's command shape:"
+            " dual -> heat_cool + target_temp_low/high; single -> cool@ceiling or heat@floor;"
+            " emits comfort_band_applied",
+            "All scheduled handlers (apply_classification, handle_bedtime, handle_occupancy_away/vacation,"
+            " handle_morning_wakeup) route through the band primitive — no more off+setback divergence",
+            "Nat-vent and economizer no longer set HVAC off — the band stays armed and only the fan is managed;"
+            " the compressor self-arbitrates with the open window (free cooling stays free)",
+            "aggressive_savings widens BOTH comfort edges by CEILING_ESCALATION_SAVINGS_MARGIN_F",
+            "away/vacation/sleep keep setback/sleep bands; §6b/§6c demoted to passive backstops",
+            "Thermostat capability detection (P1: ThermostatCapabilities) + sim harness arms the band",
+        ],
+        "scope_not_covered": [
+            "Adaptive bedtime setback depth (compute_bedtime_setback) — the sleep band uses configured"
+            " sleep_heat/sleep_cool; adaptive depth is a follow-up",
+            "Heat-only thermostat on a warm day (cannot defend the ceiling) — band no-ops with an INFO log",
+            "Single-setpoint mid-day edge re-selection — the band holds both edges via the device's shape",
+        ],
+    },
 }
 
 GITHUB_REPO = "gunkl/ClimateAdvisor"

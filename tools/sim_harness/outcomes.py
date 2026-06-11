@@ -23,6 +23,14 @@ Mapped (production → legacy):
     (warm-day setback applied to existing thermostat mode in production;
      legacy emits "setback_applied" from _handle_classification for the
      same condition — Issue #96 warm-day setback path)
+  comfort_band_applied          → comfort_band_applied  (Issue #249 P3)
+    Payload: {floor, ceiling, active, mode, reason}.
+    target_temp = ceiling when active="ceiling"; floor when active="floor".
+    §8 justification: this event did not exist before P3.  Adding it here is
+    purely additive — it maps a BRAND-NEW event type to a BRAND-NEW outcome
+    label that no pre-P3 scenario ever asserted.  It cannot silently pass a
+    real regression from before P3 because no pre-P3 scenario uses the
+    "comfort_band_applied" expect string.
   sensor_opened  result=natural_ventilation  → natural_ventilation
   sensor_opened  result=paused               → paused
   sensor_all_closed  was_nat_vent or was_paused  → resumed
@@ -32,6 +40,15 @@ Mapped (production → legacy):
   nat_vent_comfort_floor_exit   → nat_vent_comfort_floor_exit
   nat_vent_outdoor_rise_exit    → nat_vent_outdoor_rise_exit
   bedtime_setback               → setback_applied
+    (P3 payload changed: was {target_f}; now {mode, floor, ceiling, active,
+     modifier}.  target_temp = floor when active="floor"; ceiling when
+     active="ceiling".  This is a payload-shape migration for a pre-existing
+     event type — the outcome label is unchanged.  §8 note: the previous
+     target_f read returned None for P3 payloads, causing expect_temp
+     assertions to fail even though the behavior was correct.  Reading
+     floor/ceiling/active is the semantically correct fix — it cannot make a
+     real setback failure pass silently because the extracted temp still comes
+     from the live engine's band computation, not a fabricated value.)
   bedtime_setback_skipped       → bedtime_setback_skipped
   grace_expired  re_paused=True   → paused
   grace_expired  re_paused=False  → resumed
@@ -43,6 +60,11 @@ Mapped (production → legacy):
 
 Occupancy / wakeup (Issue #240 — production emits these directly now):
   occupancy_setback            → setback_applied  (away/vacation)
+    P3 payload: {mode, floor, ceiling, occupancy}.  Previously had target_f;
+    now carries both edges.  Away and vacation always use active="ceiling"
+    (see select_comfort_band in automation.py), so target_temp = ceiling.
+    §8 note: same rationale as bedtime_setback above — payload-shape migration,
+    outcome label unchanged.
   occupancy_comfort_restored   → comfort_restored (home return)
   morning_wakeup               → comfort_restored (wakeup success path)
   (Previously production emitted no event and these were guessed from the
@@ -177,6 +199,13 @@ def production_decisions(result: Any) -> list[ProductionDecision]:
     # classification_applied therefore carry no target_temp in their payload —
     # the legacy Decision records it, so we recover it from the same-timestamp
     # set_temperature action to keep expect_temp assertions comparable.
+    #
+    # P3 note: for dual-setpoint (heat_cool mode) band actions, the action_log carries
+    # both target_temp_low (floor) and target_temp_high (ceiling).  _temps_by_timestamp
+    # returns target_temp_low (the floor) as the fallback for dual actions — this is
+    # consistent with the legacy _temp_at semantics (floor = the heat setback reference).
+    # New P3 scenarios that need to assert on the ceiling should use the expect_band
+    # assertion type (check_assertion custom type) rather than expect_temp.
     temp_by_ts = _temps_by_timestamp(result.action_log)
     for dec in decisions:
         if dec.target_temp is None and dec.time in temp_by_ts:
@@ -248,6 +277,23 @@ def _map_event_to_outcome(
         target = payload.get("new_setpoint_f")
         return ProductionDecision(ts_str, event_type, "setback_applied", target)
 
+    # --- Comfort band (Issue #249 P3) ---
+    # _apply_comfort_band emits this event after arming the thermostat.
+    # This event is intentionally NOT mapped to a decisions-list outcome here.
+    # Adding it to the decisions list would make production_outcome_at return
+    # "comfort_band_applied" at every timestamp that triggers a band arm — which
+    # would break ALL pre-P3 golden assertions that expect "classification_applied",
+    # "setback_applied", etc. at those same timestamps.
+    # Instead, comfort_band_applied is handled ONLY via check_assertion custom types:
+    #   expect="comfort_band_armed"   — band was armed (any edge)
+    #   expect="expect_band"          — band floor/ceiling match (+ expect_band dict)
+    # New P3 scenarios that want to assert on the band use those assertion types.
+    # §8 justification: this is purely additive (new event, new assertion types, no
+    # pre-P3 semantic changed).  The decisions list is unchanged; the event is silently
+    # skipped below in the UNMAPPED guard.
+    if event_type == "comfort_band_applied":
+        return None  # handled via check_assertion custom types only
+
     # --- Natural ventilation exit events ---
     if event_type == "nat_vent_comfort_floor_exit":
         return ProductionDecision(ts_str, event_type, "nat_vent_comfort_floor_exit")
@@ -262,7 +308,18 @@ def _map_event_to_outcome(
 
     # --- Bedtime ---
     if event_type == "bedtime_setback":
-        target = payload.get("target_f")
+        # P3 payload changed from {target_f} to {mode, floor, ceiling, active, modifier}.
+        # Read the active edge: active="floor" → heat night (use floor);
+        # active="ceiling" → cool night (use ceiling).  Fall back to target_f for
+        # pre-P3 payloads.
+        active_edge = payload.get("active")
+        if active_edge == "floor":
+            target: float | None = float(payload["floor"]) if "floor" in payload else None
+        elif active_edge == "ceiling":
+            target = float(payload["ceiling"]) if "ceiling" in payload else None
+        else:
+            # Pre-P3 payload shape fallback
+            target = payload.get("target_f")
         return ProductionDecision(ts_str, event_type, "setback_applied", target)
 
     if event_type == "bedtime_setback_skipped":
@@ -270,9 +327,16 @@ def _map_event_to_outcome(
 
     # --- Occupancy (Issue #240 — production now emits these directly) ---
     if event_type == "occupancy_setback":
-        # away/vacation setback; legacy outcome is "setback_applied"
-        target = payload.get("target_f")
-        return ProductionDecision(ts_str, event_type, "setback_applied", target)
+        # away/vacation setback; legacy outcome is "setback_applied".
+        # P3 payload changed from {target_f} to {mode, floor, ceiling, occupancy}.
+        # Away and vacation always use active="ceiling" (see select_comfort_band —
+        # occupancy_mode==away/vacation → active="ceiling") so the semantically
+        # correct target_temp is the ceiling (setback_cool edge).
+        target = payload.get("ceiling")
+        if target is None:
+            # Pre-P3 payload shape fallback
+            target = payload.get("target_f")
+        return ProductionDecision(ts_str, event_type, "setback_applied", float(target) if target is not None else None)
 
     if event_type == "occupancy_comfort_restored":
         target = payload.get("target_f")
@@ -280,9 +344,18 @@ def _map_event_to_outcome(
 
     # --- Morning wakeup ---
     if event_type == "morning_wakeup":
-        # success path (Issue #240); legacy outcome is "comfort_restored"
+        # success path (Issue #240); legacy outcome is "comfort_restored".
+        # P3 payload: {mode, floor, ceiling, active} — no target_f.
+        # Wakeup restores comfort, which means arming the daytime band (active edge).
+        # Read the active edge: ceiling for warm/hot days (cool defense), floor for cold.
         target = payload.get("target_f")
-        return ProductionDecision(ts_str, event_type, "comfort_restored", target)
+        if target is None:
+            active_edge = payload.get("active")
+            if active_edge == "ceiling":
+                target = payload.get("ceiling")
+            elif active_edge == "floor":
+                target = payload.get("floor")
+        return ProductionDecision(ts_str, event_type, "comfort_restored", float(target) if target is not None else None)
 
     if event_type == "morning_wakeup_skipped":
         return ProductionDecision(ts_str, event_type, "morning_wakeup_skipped")
@@ -414,18 +487,82 @@ def check_assertion(
         return False
 
     # --- ODE ceiling guard (Issue #236 D) ---
-    # Production emits "ceiling_guard_fired" when it pre-cools. The legacy scenarios use
-    # bespoke labels; map them to the production decision at the asserted time. "fires"/
+    # Production emits "ceiling_guard_fired" when it pre-cools.  The legacy scenarios use
+    # bespoke labels; map them to the production decision at the asserted time.  "fires"/
     # "would_fire" => a ceiling_guard_fired decision at/just-before that time; "dormant*"
-    # => the guard did NOT fire (the active decision is something else).
+    # => the guard did NOT fire in the scheduler cycle at the assertion timestamp.
+    #
+    # §8 note on ceiling_guard_dormant*: the previous implementation used
+    # production_outcome_at(decisions, at) — a "last decision at or before T" lookup.
+    # This returns the most recent decision, which may be a ceiling_guard_fired from a
+    # PRIOR cycle (e.g. fired at 12:30, dormancy asserted at 14:30).  That caused false
+    # negatives: the guard correctly stayed dormant at 14:30 but the old check found the
+    # 12:30 event and said "not dormant".  The semantically correct check is: did the
+    # guard fire in the SAME cycle as the assertion (i.e. does any ceiling_guard_fired
+    # event in the event_log share the same ISO-minute as the assertion timestamp)?  This
+    # precisely answers "did the guard fire when this temp_update/classification ran?"
+    # This cannot silently pass a regression: if the guard fires at the assertion time it
+    # will be caught — only stale prior-cycle firings are excluded.
     if expect in ("ceiling_guard_fires_cool", "ceiling_guard_would_fire"):
         if production_outcome_at(decisions, assertion["at"]) == "ceiling_guard_fired":
             return expect
         return False
     if expect.startswith("ceiling_guard_dormant"):
-        if production_outcome_at(decisions, assertion["at"]) != "ceiling_guard_fired":
-            return expect
+        at_str = assertion["at"]
+        # Check if any ceiling_guard_fired event shares the same ISO-minute (first 16 chars)
+        # as the assertion timestamp.  This scopes the check to the same scheduler cycle.
+        at_minute = at_str[:16]  # "2026-05-20T14:30"
+        fired_this_cycle = any(
+            d.outcome == "ceiling_guard_fired" and _naive_iso(d.time)[:16] == at_minute for d in decisions
+        )
+        return expect if not fired_this_cycle else False
+
+    # --- comfort_band_armed (Issue #249 P3) ---
+    # Asserts that at least one comfort_band_applied event exists at or before the
+    # assertion time.  Used by scenarios that want to verify the band was armed without
+    # asserting specific floor/ceiling values.  Reads from event_log directly (the
+    # outcome is not in the decisions list).
+    if expect == "comfort_band_armed":
+        at_str = assertion["at"]
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type == "comfort_band_applied" and ev_ts is not None and _naive_iso(ev_ts) <= at_str:
+                return "comfort_band_armed"
         return False
+
+    # --- expect_band floor/ceiling check (Issue #249 P3) ---
+    # Allows scenarios to assert the exact floor and ceiling values of the most recent
+    # comfort_band_applied event at or before the assertion time.
+    # Payload: {"expect_band": {"floor": F, "ceiling": C}} (either key is optional).
+    # Reads directly from result.event_log (comfort_band_applied events are NOT in
+    # the decisions list — they are silent/unmapped to preserve legacy outcome semantics).
+    # §8 justification: purely additive — reads a new P3 event type, no legacy semantics changed.
+    if expect == "expect_band":
+        band_spec = assertion.get("expect_band", {})
+        expected_floor = band_spec.get("floor")
+        expected_ceiling = band_spec.get("ceiling")
+        at_str = assertion["at"]
+        # Find the most recent comfort_band_applied event at or before the assertion time
+        last_band_payload: dict | None = None
+        last_band_ts: str = ""
+        for ev_type, ev_payload, ev_ts in result.event_log:
+            if ev_type != "comfort_band_applied" or ev_ts is None:
+                continue
+            ts_naive = _naive_iso(ev_ts)
+            if ts_naive <= at_str and ts_naive >= last_band_ts:
+                last_band_payload = ev_payload
+                last_band_ts = ts_naive
+        if last_band_payload is None:
+            return False  # no band event found
+        got_floor = last_band_payload.get("floor")
+        got_ceil = last_band_payload.get("ceiling")
+        _tol = 0.01
+        floor_ok = expected_floor is None or (
+            got_floor is not None and abs(float(got_floor) - float(expected_floor)) < _tol
+        )
+        ceil_ok = expected_ceiling is None or (
+            got_ceil is not None and abs(float(got_ceil) - float(expected_ceiling)) < _tol
+        )
+        return expect if (floor_ok and ceil_ok) else False
 
     # --- nat_vent_fan_preserved (Issue #236 C) ---
     # Legacy emits a distinct "nat_vent_fan_preserved" outcome; production keeps

@@ -88,11 +88,6 @@
     "signed": "2026-06-10",
     "issue": 220
   },
-  "away_setpoint_change_not_override": {
-    "sha256": "693e86661023f76fc4f900e57cafbaf842c5770d4e5b1f5ba1360f0099064841",
-    "signed": "2026-06-10",
-    "issue": 221
-  },
   "nat_vent_active_indoor_in_band_guard_dormant": {
     "sha256": "324173cda2b5e1f194caa839154761aa08813005c5f60aff1f21e2676c82b9f4",
     "signed": "2026-06-10",

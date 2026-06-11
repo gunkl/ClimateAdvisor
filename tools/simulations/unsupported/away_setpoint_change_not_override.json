@@ -64,5 +64,6 @@
     "summary": "CA-issued setback setpoint change while away is not flagged as a manual override",
     "observed_behavior": "Simulator confirms setback_applied (79F) passes. Production validation required for override_not_detected \u00e2\u20ac\u201d this is a coordinator listener-layer behavior outside simulator scope.",
     "expected_behavior": "setback_applied (79F) at classification event; manual_override_active remains False in production after CA-issued setpoint change"
-  }
+  },
+  "unsupported_reason": "Integration-tier (Issue #221): both assertions are track:integration and the key assertion override_not_detected is simulator_support:false \u2014 it needs the coordinator's _async_thermostat_changed state-listener layer, which the Tier-A production harness cannot exercise headlessly. Deferred to the Tier B HeadlessTarry Docker harness (Issue #236 follow-on). Moved out of golden/ in #243 because it contributed no runnable Tier-A assertions (it was the 'skipped \u2014 no assertions' golden)."
 }

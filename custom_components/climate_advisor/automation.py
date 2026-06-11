@@ -36,6 +36,8 @@ from .const import (
     CONF_NATURAL_VENT_DELTA,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
+    CONF_SLEEP_COOL,
+    CONF_SLEEP_HEAT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -44,6 +46,8 @@ from .const import (
     DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_SLEEP_COOL,
+    DEFAULT_SLEEP_HEAT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
     ECONOMIZER_EVENING_START_HOUR,
@@ -119,6 +123,148 @@ def parse_thermostat_capabilities(hvac_modes: Any, supported_features: Any) -> T
         supports_dual_setpoint=supports_dual_setpoint,
         raw_supported_features=features,
     )
+
+
+@dataclass(frozen=True)
+class ThermostatProgram:
+    """A concrete thermostat program (mode + setpoints) computed from the plan (Issue #249).
+
+    Owner-refined model: a band-capable thermostat stays in ONE stable ``heat_cool`` mode, always on,
+    and every day's plan is expressed purely as the ``[setpoint_low, setpoint_high]`` band — a side is
+    "disabled" by pushing its setpoint out of firing range (a safety setback), never by switching modes.
+    Single-mode thermostats fall back to arming the single threatened edge. ``mode == "off"`` is the
+    graceful-fallback sentinel (the thermostat cannot defend the active edge — e.g. heat-only on a hot
+    day); callers keep their current behavior rather than make a false comfort guarantee.
+
+    All setpoints are internal Fahrenheit. For ``heat_cool`` only ``setpoint_low``/``setpoint_high`` are
+    set; for ``cool``/``heat`` only ``setpoint`` is set; for ``off`` all are ``None``.
+    """
+
+    mode: str  # "heat_cool" | "cool" | "heat" | "off"
+    setpoint: float | None
+    setpoint_low: float | None
+    setpoint_high: float | None
+    reason: str
+
+
+def select_thermostat_program(
+    classification: DayClassification,
+    config: dict,
+    *,
+    occupancy_mode: str,
+    capabilities: ThermostatCapabilities,
+    in_sleep_window: bool,
+    aggressive_savings: bool,
+) -> ThermostatProgram:
+    """Compute the thermostat program (mode + band) for the current plan — pure, no HA state access.
+
+    The comfort band ``[floor, ceiling]`` is derived from the classification, occupancy, sleep window,
+    and savings posture; the *active* edge (the one the day actually threatens) is held at comfort while
+    the other edge is suppressed to a safety setback so it rarely fires. The band is then mapped onto the
+    thermostat's capability:
+
+    - ``supports_dual_setpoint`` → one stable ``heat_cool`` band (preferred — never switches modes).
+    - else single ``cool``/``heat`` arming the active edge only.
+    - else ``off`` sentinel (graceful fallback — caller keeps current behavior).
+
+    Day-type → active edge (classifier mapping): HOT→cool, WARM/MILD→off, COOL/COLD→heat; ``off`` and
+    ``cool`` both defend the *ceiling*, ``heat`` defends the *floor*.
+
+    Notes:
+    - ``aggressive_savings`` widens only the *active* comfort edge by ``CEILING_ESCALATION_SAVINGS_MARGIN_F``
+      (ceiling up / floor down) so the compressor fires less; setback/sleep bands are unaffected.
+    - The sleep band uses the configured ``sleep_heat``/``sleep_cool`` values (deterministic). Adaptive
+      sleep depth (``compute_bedtime_setback``) is deferred to the P3 wiring — note that helper returns
+      ``comfort_heat`` for an ``off`` day, which is not a usable sleep band here.
+    - away/vacation/sleep override the day-type band; this function is pure so callers pass the already
+      determined ``occupancy_mode`` and ``in_sleep_window``.
+    """
+    comfort_heat = float(config.get("comfort_heat", 70))
+    comfort_cool = float(config.get("comfort_cool", 75))
+    setback_heat = float(config.get("setback_heat", 60))
+    setback_cool = float(config.get("setback_cool", 80))
+    sleep_heat = float(config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
+    sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+    margin = CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive_savings else 0.0
+
+    # --- 1. Comfort band [floor, ceiling] for the current context ---
+    if occupancy_mode == OCCUPANCY_VACATION:
+        floor, ceiling, active, ctx = (
+            setback_heat - VACATION_SETBACK_EXTRA,
+            setback_cool + VACATION_SETBACK_EXTRA,
+            "none",
+            "vacation",
+        )
+    elif occupancy_mode == OCCUPANCY_AWAY:
+        floor, ceiling, active, ctx = setback_heat, setback_cool, "none", "away"
+    elif in_sleep_window:
+        active = "floor" if classification.hvac_mode == "heat" else "ceiling"
+        floor, ceiling, ctx = sleep_heat, sleep_cool, "sleep"
+    elif classification.hvac_mode == "heat":
+        # Cold day, occupied, awake — defend the floor; suppress the ceiling to a safety setback.
+        active = "floor"
+        floor, ceiling, ctx = comfort_heat - margin, setback_cool, "comfort"
+    else:
+        # Warm/mild ("off") or hot ("cool") day — defend the ceiling; suppress the floor (the "heat=61"
+        # safety backstop) so the heater essentially never fires but remains a sensible safety net.
+        active = "ceiling"
+        ceiling = comfort_cool + margin
+        if (
+            classification.hvac_mode == "cool"
+            and classification.pre_condition_target is not None
+            and classification.pre_condition_target < 0
+        ):
+            ceiling += float(classification.pre_condition_target)  # pre-cool lowers the ceiling
+        floor, ctx = setback_heat, "comfort"
+
+    reason = (
+        f"{ctx} band [{floor:.0f}/{ceiling:.0f}] (day={classification.day_type}, active={active}"
+        f"{', aggressive' if aggressive_savings else ''})"
+    )
+
+    # --- 2. Map the band onto the thermostat's capability ---
+    if capabilities.supports_dual_setpoint:
+        return ThermostatProgram("heat_cool", None, floor, ceiling, reason)
+
+    # Single-mode fallback — arm only the active edge. ("none" = away/vacation: defend whichever edge
+    # the unit can; a cool-capable unit holds the wide setback ceiling, a heat-only unit the floor.)
+    if active in ("ceiling", "none") and capabilities.supports_cool:
+        return ThermostatProgram("cool", ceiling, None, None, f"{reason} -> cool-only")
+    if active in ("floor", "none") and capabilities.supports_heat:
+        return ThermostatProgram("heat", floor, None, None, f"{reason} -> heat-only")
+
+    return ThermostatProgram(
+        "off",
+        None,
+        None,
+        None,
+        f"{reason} -> no capable mode (modes={list(capabilities.modes)}) — fallback",
+    )
+
+
+def _in_sleep_window(now: datetime, config: dict) -> bool:
+    """Return True if ``now`` falls in the configured sleep window (Issue #249).
+
+    The window runs ``sleep_time`` → ``wake_time`` with midnight wraparound (the common night-owl
+    case where ``sleep_time > wake_time``, e.g. 22:30 → 07:00): in-window iff
+    ``now >= sleep_time OR now < wake_time``. Returns False when either time is unset or malformed —
+    callers treat "unknown" as awake (apply the daytime program), matching the prior inline behavior.
+    """
+    from datetime import time as dt_time  # noqa: PLC0415
+
+    sleep_time = config.get("sleep_time")
+    wake_time = config.get("wake_time")
+    if not sleep_time or not wake_time:
+        return False
+    try:
+        sleep_h, sleep_m = map(int, str(sleep_time).split(":"))
+        wake_h, wake_m = map(int, str(wake_time).split(":"))
+        now_time = now.time().replace(second=0, microsecond=0)
+        sleep_t = dt_time(sleep_h, sleep_m)
+        wake_t = dt_time(wake_h, wake_m)
+    except (ValueError, AttributeError):
+        return False
+    return now_time >= sleep_t or now_time < wake_t
 
 
 def _parse_forecast_dt(dt_str: str | None) -> datetime | None:
@@ -2116,32 +2262,16 @@ class AutomationEngine:
 
         now = dt_util.now()
 
-        # Determine if we're in a bedtime window (after sleep_time OR before wake_time)
-        sleep_time = self.config.get("sleep_time")  # e.g. "22:30"
-        wake_time = self.config.get("wake_time")  # e.g. "07:00"
-
-        if sleep_time and wake_time:
-            try:
-                from datetime import time as dt_time  # noqa: PLC0415
-
-                sleep_h, sleep_m = map(int, sleep_time.split(":"))
-                wake_h, wake_m = map(int, wake_time.split(":"))
-                now_time = now.time().replace(second=0, microsecond=0)
-                sleep_t = dt_time(sleep_h, sleep_m)
-                wake_t = dt_time(wake_h, wake_m)
-
-                # Bedtime window: after sleep_time OR before wake_time
-                in_bedtime_window = now_time >= sleep_t or now_time < wake_t
-                if in_bedtime_window:
-                    _LOGGER.info(
-                        "Grace expired: in bedtime window (%s–%s) — applying bedtime setback",
-                        sleep_time,
-                        wake_time,
-                    )
-                    await self.handle_bedtime()
-                    return
-            except (ValueError, AttributeError):
-                pass  # malformed config — fall through to classification
+        # Determine if we're in a bedtime window (after sleep_time OR before wake_time).
+        # Issue #249: extracted to the shared module-level _in_sleep_window() helper.
+        if _in_sleep_window(now, self.config):
+            _LOGGER.info(
+                "Grace expired: in bedtime window (%s–%s) — applying bedtime setback",
+                self.config.get("sleep_time"),
+                self.config.get("wake_time"),
+            )
+            await self.handle_bedtime()
+            return
 
         # Otherwise apply current classification
         if self._current_classification:

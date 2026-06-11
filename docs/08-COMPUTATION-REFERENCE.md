@@ -525,6 +525,7 @@ The `_set_temperature_for_mode()` safety net catches all indirect callers (door/
 | `reason` value | Trigger condition |
 |---|---|
 | `"occupancy"` | `_occupancy_mode` is `away` or `vacation` at bedtime |
+| `"manual_override"` | `_manual_override_active` is set (Issue #204) — bedtime setback is skipped to respect the user's revealed preference rather than fighting their manual adjustment |
 | `"hvac_off"` | Classification `hvac_mode` is not `heat` or `cool` (mild/warm night) |
 | `"no_classification"` | No current classification available at bedtime time |
 
@@ -549,7 +550,7 @@ No event is emitted when HVAC is `off` (mild/warm day) — no setpoint change oc
 | `setback_cool_applied_f` | `float \| None` | Fire path, cool mode | Applied cool setback setpoint (°F) |
 | `setback_depth_f` | `float \| None` | Fire path | Depth of setback from comfort setpoint (°F) |
 | `setback_was_adaptive` | `bool \| None` | Fire path | `True` when thermal model drove the depth; `False` for default |
-| `setback_skipped_reason` | `str \| None` | Skip path | One of `"occupancy"`, `"hvac_off"`, `"no_classification"` |
+| `setback_skipped_reason` | `str \| None` | Skip path | One of `"occupancy"`, `"manual_override"`, `"hvac_off"`, `"no_classification"` |
 
 All five fields default to `None` at record creation. On a fire night, `setback_skipped_reason` stays `None`; on a skip night, all applied-value fields stay `None`. Accessible via `learning_db.py --daily` (see §Diagnostic Tools).
 
@@ -1269,7 +1270,7 @@ All four must be true simultaneously for natural ventilation to activate.
 | `outdoor_temp < comfort_cool + nat_vent_delta` | Ceiling | Outdoor air too warm (even for transitional cooling) should not enter; `nat_vent_delta` provides a configurable tolerance band above `comfort_cool` |
 | At least one door/window sensor open | Physical prerequisite | Natural ventilation requires an open path for airflow |
 
-When all conditions are met: HVAC is set to `off`, the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`.
+When all conditions are met: the comfort band **stays armed** (HVAC is **not** set to `off` — Issue #249; the thermostat self-arbitrates with the open window), the fan is activated (per the configured `fan_mode`), and `_natural_vent_active` is set to `True`. Activation is gated on **fan configuration + temperature, not occupancy** — a configured fan is the user's opt-in to fan-assisted ventilation, so nat-vent runs for free cooling home or away (#231 handles the comfort-ceiling exit so an empty home is not over-cooled); a user opts out of nat-vent by not configuring a fan.
 
 ### Exit Hierarchy
 

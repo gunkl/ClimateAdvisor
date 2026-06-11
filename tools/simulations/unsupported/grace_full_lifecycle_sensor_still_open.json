@@ -1,0 +1,99 @@
+{
+  "name": "grace_full_lifecycle_sensor_still_open",
+  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). At 13:12 sensor opens again while grace is active — grace blocks re-pause. Grace expires at 13:15 with sensor still open → re-pause fires.",
+  "source": "synthetic",
+  "issue": 229,
+  "unsupported_reason": "Integration-tier: the grace-blocking-re-pause behavior (sensor_open during active grace returns no_action rather than re-pausing) depends on the coordinator's _grace_active flag, which is set and cleared by async_call_later timers in _handle_contact_sensor_change. The Tier-A harness runs the production AutomationEngine headlessly without the coordinator timer/listener layer; grace_active is never set by the harness, so sensor_open during what the scenario intends to be the grace window does not see the block. The re-pause-on-grace-expiry path (grace_end with sensor open) needs the coordinator grace timer to fire _check_grace_expiry. Deferred to Tier-B HeadlessTarry harness (#236 follow-on) which wires the full coordinator state-listener/timer layer.",
+  "notes": [
+    "Tests the grace period full lifecycle: pause → grace → sensor opens during grace (blocked) → re-pause on grace expiry.",
+    "Gap 2 (grace expiry re-check) IS already implemented in simulate.py — grace_end event checks sensors_open and re-pauses if any are open.",
+    "All 4 assertions are logic-track: (1) initial sensor_open → paused; (2) sensor_close → resumed; (3) sensor_open during grace → no_action (grace active); (4) grace_end with sensor open → re-paused.",
+    "manual_grace_seconds=300 is a config hint for documentation; actual grace timer logic lives in coordinator.py."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 300
+  },
+  "events": [
+    {
+      "time": "2026-07-15T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon. Indoor above comfort_cool=74F. Outdoor too warm for nat vent."
+    },
+    {
+      "time": "2026-07-15T12:31:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at 74F."
+    },
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Back door opens. Outdoor 88F > indoor 76F — nat vent not eligible. Automation pauses."
+    },
+    {
+      "time": "2026-07-15T13:10:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.back_door",
+      "note": "Door closes. All sensors closed — automation resumes and grace period begins (5 min = 300s)."
+    },
+    {
+      "time": "2026-07-15T13:10:01",
+      "type": "grace_start",
+      "note": "Grace period marker: grace_active=True for 5 minutes (ends at 13:15)."
+    },
+    {
+      "time": "2026-07-15T13:12:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door opens again at 13:12, while grace is still active (expires at 13:15). Grace should block re-pause."
+    },
+    {
+      "time": "2026-07-15T13:15:00",
+      "type": "grace_end",
+      "note": "Grace period expires at 13:15. Sensor is still open — should re-pause automation."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:00:00",
+      "expect": "paused",
+      "reason": "Sensor opens with outdoor (88F) > indoor (76F) — nat vent ineligible. Automation pauses.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:10:00",
+      "expect": "resumed",
+      "reason": "All sensors closed — automation resumes. Grace period begins.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:12:00",
+      "expect": "no_action",
+      "reason": "Sensor opens during active grace period — grace blocks re-pause. Coordinator _handle_contact_sensor_change() checks _grace_active and suppresses re-pause.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:15:00",
+      "expect": "paused",
+      "reason": "Grace expires with sensor still open → re-pause fires. Coordinator _check_grace_expiry() checks sensors_open and re-pauses if any sensor is open.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace period blocks re-pause during active window; grace expiry with open sensor triggers re-pause",
+    "observed_behavior": "paused (13:00) → resumed (13:10) → grace blocks re-pause (13:12) → re-paused on grace expiry (13:15)",
+    "expected_behavior": "Grace period prevents rapid pause/resume oscillation; re-pause fires if sensor is still open when grace expires"
+  },
+  "pending_issue": 245
+}

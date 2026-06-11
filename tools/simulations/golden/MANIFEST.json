@@ -137,5 +137,40 @@
     "sha256": "8c2d425245479d61bed288f2e92f4b0e3c9d640cb68fc9842ef01935483dda02",
     "signed": "2026-06-10",
     "issue": 249
+  },
+  "away_with_active_natvent_transition": {
+    "sha256": "10329e957a044a97c35e45aa2ca51f24f9470351c383dcf5edc67c77c68ef935",
+    "signed": "2026-06-10",
+    "issue": 229
+  },
+  "away_natvent_exits_at_comfort_ceiling": {
+    "sha256": "13b11561e98b75b2bc3733acd28911cb2ce1faf4c186a78b1a934d4452a8967a",
+    "signed": "2026-06-10",
+    "issue": 231
+  },
+  "mild_day_planned_window_no_pause": {
+    "sha256": "4f2fc4aa772f55ea299b4d45ceb1108afb8ed3f50ae83a0cf8b64f56025e15a5",
+    "signed": "2026-06-10",
+    "issue": 229
+  },
+  "warm_day_planned_window_no_pause": {
+    "sha256": "decd0f9b97e6d8062445c116003107b81e1f9cca31baa4360f5f815609436f1d",
+    "signed": "2026-06-10",
+    "issue": 229
+  },
+  "away_morning_wakeup_skipped_assertion": {
+    "sha256": "2ea261feff910e67b949b8efc06c03479f09cfe106564af4945d42a8a7925131",
+    "signed": "2026-06-10",
+    "issue": 229
+  },
+  "morning_wakeup_skipped_away_occupancy": {
+    "sha256": "f577212489dfad85c6c23232b3177bbd7ef0a8431b0069b41d044957f78cb9cc",
+    "signed": "2026-06-10",
+    "issue": 229
+  },
+  "away_natvent_activates_free_cooling": {
+    "sha256": "9f4c6745e1b2ecc30c8612d5f64d01e9a2745fa385e539f95ee7e41aed8c4857",
+    "signed": "2026-06-10",
+    "issue": 231
   }
 }

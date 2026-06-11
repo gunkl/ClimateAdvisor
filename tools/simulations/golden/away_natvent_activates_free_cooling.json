@@ -1,0 +1,66 @@
+{
+  "name": "away_natvent_activates_free_cooling",
+  "description": "Away mode, warm day: a window opens while away with outdoor (68F) cooler than indoor (74F). Natural ventilation activates — free cooling is free cooling, home or away. The user opts into fan-assisted ventilation by configuring a fan; occupancy does not gate it. #231 ensures nat-vent exits at the comfort ceiling so an empty home is not over-cooled below comfort.",
+  "source": "synthetic",
+  "issue": 231,
+  "notes": [
+    "Occupant outcome: the home pre-cools for free off the open window + configured fan while away, cutting the AC load on return. The user chose this by configuring a fan; not configuring a fan is how a user opts out of nat-vent.",
+    "Design note: nat-vent activation is gated on fan configuration + temperature, NOT occupancy. (An earlier change, #254, wrongly added an occupancy block; reverted — fan config is the opt-in.)",
+    "Regression proof: if an occupancy guard is (re-)added to nat-vent activation, the 14:00 assertion flips from 'natural_ventilation' to 'paused' and this scenario fails."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-15T09:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Morning classification — comfort band armed (occupied)"
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "occupancy_away",
+      "note": "User leaves — away setback applied (setback_cool=79F)"
+    },
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 68.0,
+      "note": "Afternoon: indoor 74F, outdoor 68F — nat-vent eligible by temperature (outdoor < indoor, indoor > comfort_heat)"
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens while away with cool outdoor air — nat-vent activates (free cooling); occupancy does not block it"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "reason": "Away setback applied: setback_cool=79F",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open while away with outdoor (68F) < indoor (74F) and a fan configured — natural ventilation activates for free cooling. Occupancy does not gate nat-vent; the user opts in/out via fan configuration. #231 handles the comfort-ceiling exit so the empty home is not over-cooled.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent activates while away for free cooling — fan configuration is the opt-in, not occupancy; #231 exits at the comfort ceiling",
+    "observed_behavior": "classification_applied -> away setback (79F) -> natural_ventilation on sensor_open at 14:00 (free cooling)",
+    "expected_behavior": "An open window with cool outdoor air activates fan-assisted ventilation regardless of occupancy; users opt out by not configuring a fan"
+  }
+}

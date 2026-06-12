@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.5": [
+        "Fix #284: Door/window close and dashboard Resume now correctly restore both heat and"
+        " cool setpoints in heat_cool (dual-setpoint) mode. Previously,"
+        " _set_temperature_for_mode() silently returned without writing when the classification"
+        " used heat_cool — leaving the thermostat at whatever the Ecobee's own schedule had set"
+        " until the next 30-min coordinator cycle.",
+        "Fix #284: AI investigator context now includes target_temp_low and target_temp_high"
+        " from the live thermostat entity — absence of these fields made Issue #281 root cause"
+        " analysis inconclusive.",
+        "Fix #284: CA dashboard now shows a (CA: X/Y) indicator when live thermostat setpoints"
+        " diverge from CA's configured comfort band by more than 1°F.",
+    ],
     "0.4.4": [
         "Fix #282: HA restart now clears all override and grace state (clean slate)."
         " CA starts in fresh automation mode after every restart. Override state and grace"
@@ -897,6 +909,31 @@ KNOWN_FIXES: dict[int, dict] = {
             " trade-off — clean slate is simpler and more predictable than partial restoration)",
             "Override state is still NOT restored after restart — users must re-override"
             " post-restart if they want CA paused",
+        ],
+    },
+    284: {
+        "issue": 284,
+        "title": "heat_cool setpoint write failure in door/window close and dashboard resume paths",
+        "version_fixed": "0.4.5",
+        "scope_covered": [
+            "_set_temperature_for_mode(): added heat_cool branch calling _set_temperature_dual("
+            "comfort_heat, comfort_cool) — previously returned silently, leaving thermostat at"
+            " Ecobee-schedule values until next 30-min coordinator cycle",
+            "Call site automation.py door/window close resume (~line 1668): now correctly writes"
+            " both setpoints when classification is heat_cool",
+            "Call site automation.py dashboard user resume (~line 1988): same fix",
+            "ai_skills_investigator.py: target_temp_low and target_temp_high added to HVAC entity"
+            " section of investigator context",
+            "api.py: ca_target_heat and ca_target_cool added to status response",
+            "frontend/index.html: conflict indicator (CA: X/Y) shown when live thermostat"
+            " setpoints diverge from CA's comfort band by >1°F",
+        ],
+        "scope_not_covered": [
+            "The 30-min coordinator cycle path (_apply_comfort_band) was already correct — this"
+            " fix only affects event-driven restore paths outside the main cycle",
+            "Setpoint tolerance / deadband not implemented — CA still overwrites if the Ecobee's"
+            " own schedule applies different values; the correct fix is to update CA's comfort"
+            " band config to match the desired setpoints",
         ],
     },
 }

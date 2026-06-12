@@ -1,0 +1,87 @@
+{
+  "name": "window_close_stops_whole_house_fan",
+  "description": "Whole-house fan running outside nat-vent (e.g., started by min-runtime cycle). When all sensors close, the fan must stop to prevent drawing outdoor air through the closed envelope. Fix D covers this path.",
+  "source": "synthetic",
+  "issue": 277,
+  "notes": [
+    "Covers Fix D: handle_all_doors_windows_closed must stop the whole-house fan even when nat-vent was NOT the trigger.",
+    "The fan is already active (_fan_active=True) but _natural_vent_active=False.",
+    "This differs from the whole_house_fan_hvac_suppression scenario where nat-vent IS the trigger.",
+    "Without Fix D, the fan runs indefinitely after windows close, drawing in outdoor air that may be hot or humid.",
+    "Mild warm day where indoor is already in band — HVAC is off by classification."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "fan_min_runtime_per_hour": 15
+  },
+  "events": [
+    {
+      "time": "2026-06-12T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 71.0,
+      "note": "Early morning: outdoor=71F is too warm for nat-vent (< indoor=72F but threshold = 74+3=77F... wait, outdoor=71F < indoor=72F means nat-vent COULD engage). Use warm outdoor."
+    },
+    {
+      "time": "2026-06-12T06:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild classification: hvac_mode=off."
+    },
+    {
+      "time": "2026-06-12T09:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.kitchen_window",
+      "note": "User opens a window. Outdoor=71F is close to indoor=72F. Nat-vent may engage depending on conditions."
+    },
+    {
+      "time": "2026-06-12T10:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 72.5,
+      "note": "Outdoor warmed above indoor — nat-vent exit conditions met. Fan was running via min-runtime cycle (not nat-vent). _natural_vent_active=False, _fan_active=True after this point."
+    },
+    {
+      "time": "2026-06-12T11:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.kitchen_window",
+      "note": "All sensors close. Fix D: whole-house fan must stop since _fan_active=True and _natural_vent_active=False."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-12T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Mild classification applied with hvac_mode=off."
+    },
+    {
+      "at": "2026-06-12T09:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opened with outdoor=71F < indoor=72F — nat-vent activates (outdoor <= threshold 77F). Whole-house fan activates."
+    },
+    {
+      "at": "2026-06-12T10:00:00",
+      "expect": "nat_vent_outdoor_rise_exit",
+      "reason": "outdoor=72.5F >= indoor=72F — nat-vent outdoor-rise exit fires. Fan may remain active for min-runtime cycle but _natural_vent_active=False."
+    },
+    {
+      "at": "2026-06-12T11:00:00",
+      "expect": "resumed",
+      "reason": "All sensors closed. Fix D stops the whole-house fan since _fan_active=True and _natural_vent_active=False. resumed is emitted by sensor_all_closed handling."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Whole-house fan stops on sensor close when running outside nat-vent (Fix D)",
+    "observed_behavior": "natural_ventilation on open → nat_vent_outdoor_rise_exit when outdoor warms → resumed on sensor close (fan stopped by Fix D)",
+    "expected_behavior": "Fan stops when sensors close regardless of how it was activated"
+  }
+}

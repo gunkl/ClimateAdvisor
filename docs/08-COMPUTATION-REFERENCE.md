@@ -37,6 +37,9 @@ The automation logic table and all threshold constants in this document are expr
 | What is the comfort-band programming model introduced in Issue #249? | CA programs a floor+ceiling band every 30 min via one `select_comfort_band` decision and one `_apply_comfort_band` actuation; the thermostat's own deadband holds the house inside the band continuously — no more off+supervisor pattern. | [§6e Comfort-Band Programming](08-COMPUTATION-REFERENCE.md#6e-comfort-band-programming-issue-249) |
 | What command shape does `_apply_comfort_band` emit per thermostat capability? | Dual-capable: `heat_cool` mode + `set_temperature(target_temp_low=floor, target_temp_high=ceiling)`. Cool-only (active=ceiling): `cool` + `set_temperature(ceiling)`. Heat-only (active=floor): `heat` + `set_temperature(floor)`. | [§6e — `_apply_comfort_band` command shapes](08-COMPUTATION-REFERENCE.md#_apply_comfort_band-command-shapes) |
 | Why does nat-vent no longer set HVAC off when windows open (Issue #249)? | The band stays armed when nat-vent activates; the thermostat self-arbitrates — free cooling is free, AC kicks in only if the breeze can't hold the ceiling. Turning HVAC off also disarmed the floor, making cold-snap escalation impossible. | [§6e — Nat-vent and economizer with the band armed](08-COMPUTATION-REFERENCE.md#nat-vent-and-economizer-with-the-band-armed) |
+| What are the two fan archetypes and how does each affect HVAC mode and fan-stops-on-close behavior? | `FAN_MODE_HVAC` (HVAC blower): band stays armed, HVAC unchanged when fan activates, fan does NOT stop when windows close unless `_natural_vent_active=True`. `FAN_MODE_WHOLE_HOUSE` (exhaust fan): HVAC set to off on activation (mode captured in `_pre_fan_hvac_mode`), restored on deactivation, fan stops when ALL sensors close even if `_natural_vent_active=False`. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) |
+| Why does `_set_hvac_mode("off")` also set `_fan_command_time` (Issue #277 Bug A1)? | The `set_fan_mode(auto)` assertion inside `_set_hvac_mode("off")` sets `_fan_command_time = dt_util.now()` before the service call, so cloud thermostat echoes of the fan_mode attribute change are suppressed within the `_is_recent_fan_command` window instead of triggering a false manual override. | [§9b Race Guard — `_set_hvac_mode("off")` fan_command_time](08-COMPUTATION-REFERENCE.md#_set_hvac_mode-off-fan_command_time-guard-issue-277-bug-a1) |
+| How does `_async_thermostat_changed()` prevent a single event from triggering both a setpoint and a fan override (Issue #277 Bug B)? | A local `_setpoint_override_detected` flag is initialized to `False` before Block 2 (setpoint detection) and Block 3 (fan_mode detection). If Block 2 fires and sets it `True`, Block 3 is suppressed via `and not _setpoint_override_detected`. One event → at most one override type. | [§9b Setpoint/Fan Mutual Exclusion](08-COMPUTATION-REFERENCE.md#setpointfan-override-mutual-exclusion-issue-277-bug-b) |
 
 ## 1. Day Classification
 
@@ -954,9 +957,39 @@ Fans activate during natural ventilation and during the economizer (both phases 
 | `hvac_fan` | `climate.set_fan_mode` → `"on"` on the thermostat entity | `climate.set_fan_mode` → `"auto"` on the thermostat entity |
 | `both` | Both `whole_house_fan` and `hvac_fan` actions | Both deactivate actions |
 
+### Fan Archetype Behavioral Contract (Issue #277)
+
+`FAN_MODE_HVAC` and `FAN_MODE_WHOLE_HOUSE` have different behavioral roles. These contracts were implicit before Issue #277; they are now explicit.
+
+#### `FAN_MODE_HVAC` — HVAC Blower / Air Circulation
+
+The HVAC fan circulates indoor air through the duct system. It is an integral part of the thermostat and does not exchange air with the outdoors.
+
+| Behavior | Detail |
+|---|---|
+| On activation | `climate.set_fan_mode(on)` issued; comfort band **stays armed**; HVAC mode unchanged; thermostat self-arbitrates (compressor runs if needed) |
+| On deactivation | `climate.set_fan_mode(auto)` issued; comfort band unchanged |
+| Stops when windows close? | **No** — unless `_natural_vent_active = True` at the time all sensors close. Fan-only circulation is independent of window state; only the nat-vent path stops the fan on sensor-close. |
+| HVAC mode captured? | No — `_pre_fan_hvac_mode` is not set |
+
+#### `FAN_MODE_WHOLE_HOUSE` — Separate Exhaust / Air Exchange Fan
+
+The whole-house fan is a dedicated appliance (e.g., `fan.*` or `switch.*` entity) that pulls outdoor air through the house. Running it with active heating or cooling wastes energy or fights the thermostat.
+
+| Behavior | Detail |
+|---|---|
+| On activation | Fan entity turned on; **HVAC set to `off`**; current thermostat mode captured in `_pre_fan_hvac_mode` |
+| On deactivation | Fan entity turned off; HVAC mode restored from `_pre_fan_hvac_mode` (then `_pre_fan_hvac_mode` cleared) |
+| Stops when windows close? | **Yes** — when ALL monitored sensors close, the fan deactivates and HVAC is restored, regardless of `_natural_vent_active` value |
+| HVAC mode captured? | Yes — `_pre_fan_hvac_mode: str \| None` holds the thermostat mode at activation time (e.g., `"heat_cool"`, `"cool"`) |
+
+#### `FAN_MODE_BOTH`
+
+Each component (HVAC fan + whole-house fan) follows its own archetype contract above. `_pre_fan_hvac_mode` is still set, because the whole-house fan component requires HVAC suppression.
+
 ### 9a. Fan State Tracking
 
-The coordinator maintains five internal fields to manage fan state across activate/deactivate calls and detect user overrides:
+The coordinator maintains six internal fields to manage fan state across activate/deactivate calls and detect user overrides:
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -966,10 +999,11 @@ The coordinator maintains five internal fields to manage fan state across activa
 | `_fan_override_time` | `datetime \| None` | Timestamp of when the fan override was detected |
 | `_fan_command_pending` | `bool` | Set to `True` immediately before the integration issues a fan command; cleared immediately after |
 | `_fan_command_time` | `datetime \| None` | Timestamp recorded at the start of every `_activate_fan()` and `_deactivate_fan()` call; used by `_is_recent_fan_command()` as a timestamp-based secondary guard |
+| `_pre_fan_hvac_mode` | `str \| None` | **`FAN_MODE_WHOLE_HOUSE` only.** Captures the thermostat's HVAC mode immediately before fan activation (e.g., `"heat_cool"`, `"cool"`). Restored to the thermostat on deactivation, then cleared to `None`. `None` when no whole-house fan session is active or when using `FAN_MODE_HVAC`. Persisted in state across HA restarts so HVAC restoration survives a restart during a fan session. |
 
-**`_activate_fan()`** sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-on service call, then sets `_fan_active = True` and records `_fan_on_since`. If `_fan_override_active` is `True` at activation time, the call is skipped so the integration does not fight the user's manual setting.
+**`_activate_fan()`** sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-on service call, then sets `_fan_active = True` and records `_fan_on_since`. If `_fan_override_active` is `True` at activation time, the call is skipped so the integration does not fight the user's manual setting. For `FAN_MODE_WHOLE_HOUSE` (or `both`), the current thermostat HVAC mode is captured in `_pre_fan_hvac_mode` and HVAC is set to `off` before the fan is turned on.
 
-**`_deactivate_fan()`** follows the same pattern in reverse: sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-off service call, then clears `_fan_active` and `_fan_on_since`. Override state is not checked on deactivation — the intent is always to stop the fan when the economizer or transition logic calls for it.
+**`_deactivate_fan()`** follows the same pattern in reverse: sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-off service call, then clears `_fan_active` and `_fan_on_since`. Override state is not checked on deactivation — the intent is always to stop the fan when the economizer or transition logic calls for it. For `FAN_MODE_WHOLE_HOUSE` (or `both`), HVAC mode is restored from `_pre_fan_hvac_mode` and that field is cleared to `None`.
 
 ### 9b. Fan Override Detection
 
@@ -1010,6 +1044,51 @@ The fix (Issue #206) expands the guard at both the pause-path and normal-path de
 | `_is_recent_hvac_command(threshold_seconds=30.0)` | Timestamp check | HVAC mode / setpoint changes | 30 s | Secondary: catches races where the HVAC flag cleared before the HA event arrived |
 | `_is_expected_confirmation` | Boolean flag | Fan_mode attribute changes from HVAC mode transitions | 120 s | Tertiary: suppresses delayed fan_mode echoes from HVAC mode changes on cloud thermostats |
 | `_is_recent_fan_command(threshold_seconds=30.0)` | Timestamp check | Fan mode changes (`climate.set_fan_mode`) | 30 s | Quaternary: suppresses fan echo races where `_fan_command_pending` cleared before the HA event arrived |
+
+#### `_set_hvac_mode("off")` fan_command_time Guard (Issue #277 Bug A1)
+
+`_set_hvac_mode("off")` includes an internal `set_fan_mode(auto)` assertion that resets the thermostat's fan mode as part of switching HVAC off. This fan-mode call produces a delayed echo on cloud thermostats — the same class of echo suppressed by `_is_recent_fan_command()` elsewhere.
+
+Before Issue #277, this path did not set `_fan_command_time`, so the echo arrived outside the 30-second `_is_recent_fan_command()` window and was misdetected as a user manual fan override, triggering an unwanted grace period.
+
+**Fix:** `_set_hvac_mode("off")` now sets `self._fan_command_time = dt_util.now()` immediately before the `set_fan_mode(auto)` service call. This stamps the command time into the same timestamp the Quaternary guard reads, extending echo suppression to 30 seconds from the HVAC-off command.
+
+**Why here (not in `_activate_fan`/`_deactivate_fan`):** The `set_fan_mode(auto)` inside `_set_hvac_mode("off")` is not a fan activation/deactivation — it is a cleanup step bundled with the HVAC-mode command. It is therefore not routed through `_activate_fan()` or `_deactivate_fan()`, and those helpers' existing `_fan_command_time` stamps do not cover it.
+
+#### Setpoint/Fan Override Mutual Exclusion (Issue #277 Bug B)
+
+A single thermostat event can carry both a setpoint attribute change and a `fan_mode` attribute change simultaneously. Before Issue #277, both Block 2 (setpoint-override detection) and Block 3 (fan-mode override detection) in `_async_thermostat_changed()` evaluated independently — a single physical user action could trigger two simultaneous overrides (setpoint + fan), each starting its own grace timer.
+
+**Fix:** A local boolean `_setpoint_override_detected` is initialized to `False` at the start of the function, before Block 2. If Block 2 fires (a setpoint override is detected and recorded), it sets `_setpoint_override_detected = True`. Block 3's fan-override condition is guarded by `and not _setpoint_override_detected`:
+
+```python
+_setpoint_override_detected = False  # initialized before Block 2
+
+# Block 2 — setpoint detection
+if <setpoint changed by user>:
+    handle_manual_override(...)
+    _setpoint_override_detected = True
+
+# Block 3 — fan_mode detection
+if <fan_mode changed> and not _setpoint_override_detected:
+    handle_fan_manual_override(...)
+```
+
+**Invariant:** one thermostat event → at most one override type recorded. If a setpoint change and a fan_mode change arrive in the same event, only the setpoint override fires; the fan_mode change is treated as a correlated side-effect, not a separate user action.
+
+#### Fan Override Detection Diagnostic Logging (Issue #277 Bug H)
+
+When `handle_fan_manual_override()` fires from `_async_thermostat_changed()`, the INFO-level log line now includes the following fields to make false-positive investigations self-contained without requiring a debug log level:
+
+| Field | Meaning |
+|---|---|
+| `old_fan_mode` | The thermostat's `fan_mode` attribute before the change |
+| `new_fan_mode` | The thermostat's `fan_mode` attribute after the change |
+| `fan_cmd` age (seconds) | `(now − _fan_command_time).total_seconds()` — time since the last fan command; `None` if `_fan_command_time` is unset |
+| `hvac_cmd` age (seconds) | `(now − _hvac_command_time).total_seconds()` — time since the last HVAC command; `None` if unset |
+| `expected_confirmation` | Current value of `_is_expected_confirmation` at the moment the override is recorded |
+
+These values make it possible to determine, from the log alone, whether the override was a real user action or a delayed echo that arrived just outside a suppression window.
 
 #### Mode Override Detection — `_last_commanded_hvac_mode` (Issue #269 Bug C)
 
@@ -1261,6 +1340,7 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `_fan_override_time` | `None` | UTC timestamp of when the fan override was detected |
 | `_fan_command_pending` | `False` | Set during integration-issued fan commands to suppress false override detection |
 | `_fan_command_time` | `None` | UTC timestamp of the most recent `_activate_fan()` / `_deactivate_fan()` call; read by `_is_recent_fan_command()` |
+| `_pre_fan_hvac_mode` | `None` | HVAC mode captured before whole-house fan activation; restored on deactivation (`FAN_MODE_WHOLE_HOUSE` / `both` only) |
 
 ---
 
@@ -1746,4 +1826,4 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 
 ---
 
-_Last Updated: 2026-06-11_
+_Last Updated: 2026-06-12_

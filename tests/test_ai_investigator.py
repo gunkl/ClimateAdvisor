@@ -1359,3 +1359,149 @@ class TestWindowCompliancePerRecordFix:
         result = investigation_fallback(coord)
         # Not a windows-recommended day — should not trigger incongruity
         assert "2026-04-10" not in result["incongruities"]
+
+
+# ---------------------------------------------------------------------------
+# Group: Timing Correlation Section — Fix G (Issue #277)
+# ---------------------------------------------------------------------------
+
+
+class TestTimingCorrelations:
+    """Fix G: _build_timing_correlations() flags manual events that occur at exact
+    automation intervals (±2 min) after automation events.
+
+    All tests in this class MUST FAIL before the fix (the function does not exist yet).
+    After fix: the function must be importable and produce the described output.
+    """
+
+    @staticmethod
+    def _make_event(event_type: str, source: str, t: datetime.datetime) -> dict:
+        return {"type": event_type, "source": source, "time": t}
+
+    def test_timing_correlations_function_importable(self):
+        """_build_timing_correlations must be importable from ai_skills_investigator.
+
+        MUST FAIL before fix: function does not exist yet.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import (  # noqa: F401
+            _build_timing_correlations,
+        )
+
+    def test_30min_delta_flagged_as_timing_coincident(self):
+        """grace_expired at T, override_detected at T+30min → [TIMING-COINCIDENT].
+
+        MUST FAIL before fix: function does not exist.
+        After fix: the output must contain '[TIMING-COINCIDENT]'.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        now = datetime.datetime.now(datetime.UTC)
+        auto_event = self._make_event("grace_expired", "automation", now)
+        manual_event = self._make_event("override_detected", "manual", now + datetime.timedelta(minutes=30))
+        result = _build_timing_correlations([auto_event, manual_event])
+        assert "[TIMING-COINCIDENT]" in result, (
+            "Fix G: override_detected at exactly T+30min after grace_expired should be "
+            "flagged as [TIMING-COINCIDENT].\n"
+            f"Got output:\n{result}"
+        )
+
+    def test_30min_delta_within_2min_window_flagged(self):
+        """override_detected at T+31min (within ±2 min of 30min interval) → flagged.
+
+        MUST FAIL before fix.
+        After fix: ±2 min tolerance must apply.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        now = datetime.datetime.now(datetime.UTC)
+        auto_event = self._make_event("classification_applied", "automation", now)
+        manual_event = self._make_event("override_detected", "manual", now + datetime.timedelta(minutes=31))
+        result = _build_timing_correlations([auto_event, manual_event])
+        assert "[TIMING-COINCIDENT]" in result, (
+            f"Fix G: T+31min is within ±2 min of 30min interval — must be flagged.\nGot output:\n{result}"
+        )
+
+    def test_45min_delta_not_flagged(self):
+        """override_detected at T+45min (not within ±2 min of any interval) → [OK].
+
+        MUST FAIL before fix: function doesn't exist.
+        After fix: no [TIMING-COINCIDENT] flag for 45-min delta.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        now = datetime.datetime.now(datetime.UTC)
+        auto_event = self._make_event("classification_applied", "automation", now)
+        manual_event = self._make_event("override_detected", "manual", now + datetime.timedelta(minutes=45))
+        result = _build_timing_correlations([auto_event, manual_event])
+        assert "[TIMING-COINCIDENT]" not in result, (
+            f"Fix G: T+45min is NOT within ±2 min of any known interval — must NOT flag.\nGot output:\n{result}"
+        )
+        assert "[OK]" in result, f"Fix G: non-coincident manual event should be marked [OK].\nGot output:\n{result}"
+
+    def test_90min_grace_interval_flagged(self):
+        """Manual event at T+90min (manual grace interval) → [TIMING-COINCIDENT].
+
+        MUST FAIL before fix.
+        After fix: 90-min interval is in the known interval list.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        now = datetime.datetime.now(datetime.UTC)
+        auto_event = self._make_event("grace_started", "automation", now)
+        manual_event = self._make_event("manual_override_cleared", "manual", now + datetime.timedelta(minutes=90))
+        result = _build_timing_correlations([auto_event, manual_event])
+        assert "[TIMING-COINCIDENT]" in result, (
+            f"Fix G: T+90min matches the manual grace interval — must be flagged.\nGot output:\n{result}"
+        )
+
+    def test_output_contains_timing_correlations_header(self):
+        """Output must start with '=== TIMING CORRELATIONS ===' header.
+
+        MUST FAIL before fix.
+        """
+        from custom_components.climate_advisor.ai_skills_investigator import _build_timing_correlations
+
+        result = _build_timing_correlations([])
+        assert "TIMING CORRELATIONS" in result, (
+            f"Fix G: output must contain 'TIMING CORRELATIONS' header.\nGot:\n{result}"
+        )
+
+    def test_automation_intervals_constants_defined(self):
+        """_AUTOMATION_INTERVALS_SECONDS must be defined as a module-level constant.
+
+        MUST FAIL before fix.
+        """
+        import custom_components.climate_advisor.ai_skills_investigator as _inv
+
+        assert hasattr(_inv, "_AUTOMATION_INTERVALS_SECONDS"), (
+            "Fix G: _AUTOMATION_INTERVALS_SECONDS must be a module-level constant "
+            "so the interval list can be extended without modifying function internals."
+        )
+        intervals = _inv._AUTOMATION_INTERVALS_SECONDS
+        # Must be a dict or list mapping names to seconds
+        assert isinstance(intervals, (dict, list)), (
+            f"_AUTOMATION_INTERVALS_SECONDS must be dict or list, got {type(intervals)}"
+        )
+
+    def test_timing_correlations_included_in_investigator_context(self):
+        """async_build_investigator_context must include the TIMING CORRELATIONS section.
+
+        MUST FAIL before fix: context does not include this section yet.
+        """
+        now = datetime.datetime.now(datetime.UTC)
+        # Create a log with a timing-coincident pair
+        events = [
+            {"type": "grace_expired", "source": "automation", "time": now},
+            {
+                "type": "override_detected",
+                "source": "manual",
+                "time": now + datetime.timedelta(minutes=30),
+            },
+        ]
+        coord = _make_coordinator(event_log=events)
+        hass = _make_hass()
+        context = asyncio.run(async_build_investigator_context(hass, coord))
+        assert "TIMING CORRELATIONS" in context, (
+            "Fix G: investigator context must include TIMING CORRELATIONS section.\n"
+            f"Context snippet (first 3000 chars):\n{context[:3000]}"
+        )

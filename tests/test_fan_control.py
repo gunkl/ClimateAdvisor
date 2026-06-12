@@ -168,7 +168,14 @@ class TestActivateFan:
         assert calls[0][0][2]["entity_id"] == "climate.thermostat"
 
     def test_activate_both_fans(self):
-        """fan_mode=both → calls both fan.turn_on and climate.set_fan_mode 'on'."""
+        """fan_mode=both → calls fan.turn_on, suppresses HVAC, then sets fan_mode 'on'.
+
+        Fix C (Issue #277): FAN_MODE_BOTH includes a whole-house fan, so HVAC is
+        suppressed to 'off' first (which asserts fan_mode='auto'), then the HVAC
+        fan-only mode is activated (fan_mode='on').  Two set_fan_mode calls total:
+        1. 'auto'  — asserted by _set_hvac_mode('off') fan-assertion guard
+        2. 'on'    — activated by the FAN_MODE_HVAC branch in _activate_fan
+        """
         engine = _make_automation_engine(
             {
                 CONF_FAN_MODE: FAN_MODE_BOTH,
@@ -183,8 +190,10 @@ class TestActivateFan:
         assert fan_calls[0][0][2]["entity_id"] == "fan.attic"
 
         hvac_fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
-        assert len(hvac_fan_calls) == 1
-        assert hvac_fan_calls[0][0][2]["fan_mode"] == "on"
+        # Two calls: 'auto' (from HVAC-off fan assertion) then 'on' (from fan-only activation)
+        assert len(hvac_fan_calls) == 2, f"Expected 2 set_fan_mode calls; got {hvac_fan_calls}"
+        assert hvac_fan_calls[0][0][2]["fan_mode"] == "auto"
+        assert hvac_fan_calls[1][0][2]["fan_mode"] == "on"
 
     def test_fan_disabled_skips_all_activate(self):
         """fan_mode=disabled → no service calls on activate."""

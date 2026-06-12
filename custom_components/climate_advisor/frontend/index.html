@@ -871,9 +871,21 @@
       // target_temp_low/high (dual); cool/heat expose the single current_setpoint.
       let hvacTemps = '';
       if (data.hvac_mode === 'heat_cool' && (data.target_temp_low != null || data.target_temp_high != null)) {
-        const lo = data.target_temp_low != null ? data.target_temp_low + unitSym : '—';
-        const hi = data.target_temp_high != null ? data.target_temp_high + unitSym : '—';
-        hvacTemps = `Heat ${lo} · Cool ${hi}`;
+        const lo = data.target_temp_low != null ? Math.round(data.target_temp_low) + unitSym : '—';
+        const hi = data.target_temp_high != null ? Math.round(data.target_temp_high) + unitSym : '—';
+        const caTargetHeat = data.ca_target_heat;
+        const caTargetCool = data.ca_target_cool;
+        const diverged = caTargetHeat != null && caTargetCool != null
+            && data.target_temp_low != null && data.target_temp_high != null
+            && (Math.abs(data.target_temp_low - caTargetHeat) > 1
+                || Math.abs(data.target_temp_high - caTargetCool) > 1);
+        if (diverged) {
+          const caLo = Math.round(caTargetHeat) + unitSym;
+          const caHi = Math.round(caTargetCool) + unitSym;
+          hvacTemps = `Heat ${lo} · Cool ${hi} <span style="color:#888;font-size:0.85em">(CA: ${caLo}/${caHi})</span>`;
+        } else {
+          hvacTemps = `Heat ${lo} · Cool ${hi}`;
+        }
       } else if (data.current_setpoint != null) {
         hvacTemps = data.current_setpoint + unitSym;
       }

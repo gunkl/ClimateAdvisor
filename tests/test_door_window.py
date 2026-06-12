@@ -15,6 +15,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_AUTOMATION_GRACE_NOTIFY,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -1373,3 +1374,95 @@ class TestPhysicalWindowTrackingOnHotDay:
         self._simulate_debounce_expired(record, windows_recommended=False)
 
         assert record.window_physical_open_time == first_time
+
+
+# ---------------------------------------------------------------------------
+# Issue #284 — _set_temperature_for_mode heat_cool gap
+# ---------------------------------------------------------------------------
+
+
+def _make_classification_for_heat_cool() -> DayClassification:
+    """Create a heat_cool DayClassification without invoking __post_init__."""
+    obj = object.__new__(DayClassification)
+    obj.day_type = "mild"
+    obj.hvac_mode = "heat_cool"
+    obj.trend_direction = "stable"
+    obj.trend_magnitude = 1.0
+    obj.today_high = 72.0
+    obj.today_low = 55.0
+    obj.tomorrow_high = 73.0
+    obj.tomorrow_low = 56.0
+    obj.pre_condition = False
+    obj.pre_condition_target = None
+    obj.windows_recommended = False
+    obj.window_open_time = None
+    obj.window_close_time = None
+    obj.setback_modifier = 0.0
+    return obj
+
+
+class TestSetTemperatureForModeHeatCool:
+    """Issue #284: _set_temperature_for_mode must call _set_temperature_dual in heat_cool mode.
+
+    Before the fix the function had ``else: return`` which silently did nothing
+    for heat_cool classifications, leaving the thermostat on its Ecobee schedule
+    values after a door/window close or dashboard resume.
+    """
+
+    def test_door_window_close_calls_set_temperature_dual_in_heat_cool_mode(self):
+        """handle_all_doors_windows_closed in heat_cool mode calls _set_temperature_dual
+        with comfort_heat and comfort_cool (Issue #284).
+        """
+        engine = _make_automation_engine(
+            config_overrides={
+                "comfort_heat": 68,
+                "comfort_cool": 74,
+            }
+        )
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "heat_cool"
+        engine._current_classification = _make_classification_for_heat_cool()
+
+        # Mock _set_temperature_dual so we can assert it is called
+        engine._set_temperature_dual = AsyncMock()
+
+        with patch(
+            "custom_components.climate_advisor.automation.async_call_later",
+            return_value=MagicMock(),
+        ):
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        engine._set_temperature_dual.assert_awaited_once_with(
+            68,
+            74,
+            reason="door/window closed — restoring comfort",
+        )
+
+    def test_dashboard_resume_calls_set_temperature_dual_in_heat_cool_mode(self):
+        """resume_from_pause in heat_cool mode calls _set_temperature_dual with
+        comfort_heat and comfort_cool (Issue #284).
+        """
+        engine = _make_automation_engine(
+            config_overrides={
+                "comfort_heat": 68,
+                "comfort_cool": 74,
+            }
+        )
+        engine._paused_by_door = True
+        engine._current_classification = _make_classification_for_heat_cool()
+
+        # Mock _set_temperature_dual so we can assert it is called
+        engine._set_temperature_dual = AsyncMock()
+
+        _patch_call_later = "custom_components.climate_advisor.automation.async_call_later"
+        _patch_callback = "custom_components.climate_advisor.automation.callback"
+
+        with patch(_patch_call_later) as mock_call_later, patch(_patch_callback, side_effect=lambda f: f):
+            mock_call_later.return_value = MagicMock()
+            asyncio.run(engine.resume_from_pause())
+
+        engine._set_temperature_dual.assert_awaited_once_with(
+            68,
+            74,
+            reason="user resumed from door/window pause",
+        )

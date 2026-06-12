@@ -1362,6 +1362,13 @@ class AutomationEngine:
                 # Pre-cool: target is below comfort
                 target = target + c.pre_condition_target
                 reason = f"{reason} (pre-cool offset {format_temp_delta(abs(c.pre_condition_target), unit)})"
+        elif c.hvac_mode == "heat_cool":
+            await self._set_temperature_dual(
+                self.config["comfort_heat"],
+                self.config["comfort_cool"],
+                reason=reason,
+            )
+            return
         else:
             return
 

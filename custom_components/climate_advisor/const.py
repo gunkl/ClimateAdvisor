@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.4": [
+        "Fix #282: HA restart now clears all override and grace state (clean slate)."
+        " CA starts in fresh automation mode after every restart. Override state and grace"
+        " timers are no longer carried over. The 5-minute startup settling window remains.",
+        "Fix #282: Manual grace expiry now notifies the user by default."
+        " Message updated to: 'Your manual thermostat override has expired."
+        " Climate Advisor has resumed automated control.'",
+        "Fix #282: Brief thermostat adjustments that self-revert within the confirmation"
+        " window now send a notification: 'treated as transient, CA continues normal operation.'",
+        "Fix #282: Changing thermostat mode while an override grace is active now restarts"
+        " the confirmation window for the new mode, rather than being silently ignored.",
+    ],
     "0.4.3": [
         "Fix #277: Whole-house fan now suppresses HVAC while active (sets thermostat off;"
         " restores prior mode when fan stops). Running AC while exhausting conditioned air"
@@ -860,6 +872,31 @@ KNOWN_FIXES: dict[int, dict] = {
             "06:41 grace period root cause — unconfirmed; Bug H logging will make next occurrence"
             " diagnosable from HA logs",
             "FAN_MODE_HVAC (HVAC blower) HVAC behavior — band stays armed per Issue #249 §4; no change in this fix",
+        ],
+    },
+    282: {
+        "issue": 282,
+        "title": "Override lifecycle — clean slate restart, grace notify, PATH B feedback, second override",
+        "version_fixed": "0.4.4",
+        "scope_covered": [
+            "restore_state(): all override/grace fields (manual_override_active, grace_active,"
+            " override_confirm_pending and related timestamps) now explicitly cleared to"
+            " False/None regardless of saved state — clean slate on restart",
+            "get_serializable_state(): override/grace fields removed (no point saving what isn't restored)",
+            "async_restore_state(): grace-timer reschedule block removed — no grace timer"
+            " is rescheduled after HA restart",
+            "CONF_MANUAL_GRACE_NOTIFY default changed to True — manual grace expiry now"
+            " notifies the user with override-specific message by default",
+            "_confirm_override_expired PATH B: user notification sent when thermostat"
+            " self-reverts within confirmation window",
+            "_async_thermostat_changed: new branch detects mode change during active grace"
+            " (different mode than current override) — clears override and restarts confirmation",
+        ],
+        "scope_not_covered": [
+            "If user deliberately overrides and HA restarts, the override is lost (accepted"
+            " trade-off — clean slate is simpler and more predictable than partial restoration)",
+            "Override state is still NOT restored after restart — users must re-override"
+            " post-restart if they want CA paused",
         ],
     },
 }

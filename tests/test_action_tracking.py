@@ -145,8 +145,8 @@ class TestActionTracking:
         assert engine._last_action_time == "2026-03-19T14:00:00"
         assert engine._last_action_reason == "test"
 
-    def test_serializable_state_includes_override_fields(self):
-        """get_serializable_state() must include manual override fields."""
+    def test_serializable_state_omits_override_fields(self):
+        """get_serializable_state() must NOT include manual override fields (clean-slate policy)."""
         engine = _make_automation_engine()
         engine._manual_override_active = True
         engine._manual_override_mode = "heat"
@@ -154,12 +154,12 @@ class TestActionTracking:
 
         state = engine.get_serializable_state()
 
-        assert state["manual_override_active"] is True
-        assert state["manual_override_mode"] == "heat"
-        assert state["manual_override_time"] == "2026-03-19T14:00:00"
+        assert "manual_override_active" not in state
+        assert "manual_override_mode" not in state
+        assert "manual_override_time" not in state
 
-    def test_restore_state_loads_override_fields(self):
-        """restore_state() must populate manual override fields."""
+    def test_restore_state_ignores_override_fields(self):
+        """restore_state() must always clear override fields — clean slate on restart."""
         engine = _make_automation_engine()
         engine.restore_state(
             {
@@ -169,6 +169,6 @@ class TestActionTracking:
             }
         )
 
-        assert engine._manual_override_active is True
-        assert engine._manual_override_mode == "cool"
-        assert engine._manual_override_time == "2026-03-19T15:00:00"
+        assert engine._manual_override_active is False
+        assert engine._manual_override_mode is None
+        assert engine._manual_override_time is None

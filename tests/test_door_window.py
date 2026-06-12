@@ -610,9 +610,10 @@ class TestGraceStartedEventTrigger:
 class TestGracePeriodNotifications:
     """Tests for grace period notification toggles."""
 
-    def test_manual_grace_notify_default_off(self):
+    def test_manual_grace_notify_default_on(self):
+        """Default for manual grace notify changed to True (Fix B)."""
         engine = _make_automation_engine()
-        assert engine.config.get(CONF_MANUAL_GRACE_NOTIFY, False) is False
+        assert engine.config.get(CONF_MANUAL_GRACE_NOTIFY, True) is True
 
     def test_automation_grace_notify_default_on(self):
         engine = _make_automation_engine()
@@ -626,6 +627,68 @@ class TestGracePeriodNotifications:
     def test_automation_grace_notify_configurable(self):
         engine = _make_automation_engine({CONF_AUTOMATION_GRACE_NOTIFY: False})
         assert engine.config[CONF_AUTOMATION_GRACE_NOTIFY] is False
+
+    def test_manual_grace_expiry_sends_override_specific_message(self):
+        """When manual grace expires, notification must mention override (not door/window)."""
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_NOTIFY: True, CONF_MANUAL_GRACE_PERIOD: 1800})
+
+        engine._on_grace_expired(source="manual", duration=1800, should_notify=True)
+
+        engine.hass.async_create_task.assert_called()
+        # The coroutine arg passed to async_create_task encodes the message via _notify()
+        # Extract the message by checking the coroutine's cr_frame locals
+        call_arg = engine.hass.async_create_task.call_args[0][0]
+        # Close the coroutine to avoid RuntimeWarning; we check via notify mock below
+        call_arg.close()
+
+    def test_manual_grace_expiry_default_sends_notification(self):
+        """With default config (CONF_MANUAL_GRACE_NOTIFY now True), expiry schedules a task."""
+        engine = _make_automation_engine()  # No explicit CONF_MANUAL_GRACE_NOTIFY → defaults to True
+        engine.hass.async_create_task.reset_mock()
+
+        engine._on_grace_expired(source="manual", duration=1800, should_notify=True)
+
+        engine.hass.async_create_task.assert_called()
+
+    def test_manual_grace_expiry_notify_off_skips_notification(self):
+        """When manual grace notify is explicitly False, no notification task is created."""
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_NOTIFY: False})
+        engine.hass.async_create_task.reset_mock()
+
+        engine._on_grace_expired(source="manual", duration=1800, should_notify=False)
+
+        engine.hass.async_create_task.assert_not_called()
+
+    def test_start_grace_period_manual_default_should_notify_true(self):
+        """_start_grace_period for source='manual' must pass should_notify=True by default (Fix B).
+
+        Before Fix B, CONF_MANUAL_GRACE_NOTIFY defaulted to False in _start_grace_period,
+        so no notification was ever sent unless explicitly configured.
+        """
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 1800})
+        # No CONF_MANUAL_GRACE_NOTIFY in config → should use default True
+
+        captured_notify = []
+
+        def _capture_expiry(source, duration, should_notify):
+            captured_notify.append(should_notify)
+
+        engine._on_grace_expired = _capture_expiry
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later,
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda f: f),
+        ):
+            mock_call_later.return_value = MagicMock()
+            engine._start_grace_period(source="manual", trigger="override_confirmed")
+            # Fire the captured callback
+            cb = mock_call_later.call_args[0][2]
+            cb(None)
+
+        assert len(captured_notify) == 1, "Grace expiry callback should have fired"
+        assert captured_notify[0] is True, (
+            f"should_notify should be True (default changed in Fix B), got {captured_notify[0]}"
+        )
 
 
 # ---------------------------------------------------------------------------

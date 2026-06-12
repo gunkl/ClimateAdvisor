@@ -132,6 +132,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
                 "fan_override_active": ae._fan_override_active,
                 "paused_by_door": ae.is_paused_by_door,
+                "ca_target_heat": coordinator.config.get("comfort_heat"),
+                "ca_target_cool": coordinator.config.get("comfort_cool"),
             }
         )
 

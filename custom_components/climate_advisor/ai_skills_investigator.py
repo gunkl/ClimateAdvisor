@@ -635,17 +635,23 @@ async def async_build_investigator_context(
         climate_entity_id: str = (coordinator.config or {}).get("climate_entity", "")
         hvac_mode = "unknown"
         current_temp = "unknown"
+        target_temp_low = "unknown"
+        target_temp_high = "unknown"
         if climate_entity_id:
             climate_state = hass.states.get(climate_entity_id)
             if climate_state is not None:
                 hvac_mode = climate_state.state
                 current_temp = climate_state.attributes.get("current_temperature", "unknown")
+                target_temp_low = climate_state.attributes.get("target_temp_low", "unknown")
+                target_temp_high = climate_state.attributes.get("target_temp_high", "unknown")
 
         lines += [
             "=== HVAC ENTITY ===",
-            f"  entity_id:     {climate_entity_id or 'not configured'}",
-            f"  hvac_mode:     {hvac_mode}",
-            f"  current_temp:  {current_temp}",
+            f"  entity_id:        {climate_entity_id or 'not configured'}",
+            f"  hvac_mode:        {hvac_mode}",
+            f"  current_temp:     {current_temp}",
+            f"  target_temp_low:  {target_temp_low}",
+            f"  target_temp_high: {target_temp_high}",
             "",
         ]
     except Exception:

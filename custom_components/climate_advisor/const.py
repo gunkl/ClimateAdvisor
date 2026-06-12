@@ -4,9 +4,27 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.1": [
+        "Fix #269: Manual overrides now correctly detected in heat_cool (dual-setpoint) mode."
+        " Four bugs fixed: CA's own mode command no longer triggers a false fan override grace period"
+        " (cloud-thermostat echo arrives after the 30s guard); heat_cool → cool mode switch is now"
+        " detected as a manual override; dual setpoint changes (target_temp_high/target_temp_low)"
+        " are now visible and trigger a grace period; hvac_mode now captured in incident records.",
+        "Fix #264: Economizer (comfort-band fan assist) no longer re-applies the full classification"
+        " setpoint when it exits, overriding a user's manual adjustment during the fan-only period.",
+        "Fix #266: Dashboard Status tab now shows the actual band setpoints [heat_floor/cool_ceiling]"
+        " for heat_cool thermostats rather than a single target_temperature.",
+        "Fix #190: Forecast pipeline — tomorrow's high no longer shows as day-after-tomorrow in"
+        " negative-UTC-offset timezones after 5 pm (evening UTC rollover). Reference date is now"
+        " local calendar date; forecast entries are matched by raw API date.",
+        "Feat #193: Activity report now includes a full event log (last 12 h, chronological) and a"
+        " per-override detail section showing each manual setpoint change with time, direction, and"
+        " duration. The Timeline section reflects the complete sequence, including automation"
+        " re-assertions after an override cleared.",
+    ],
     "0.4.0": [
         "Feat #249: Thermostat-is-the-controller — Climate Advisor now programs a comfort band"
         " [comfort_heat, comfort_cool] and lets the thermostat's own deadband hold it, instead of"
@@ -738,6 +756,40 @@ KNOWN_FIXES: dict[int, dict] = {
             "No economizer on/off toggle added — it remains gated only by hot-day + window-open +"
             " outdoor<=comfort_cool+delta + time-window eligibility",
             "Restart re-evaluation (home sits paused after restart with an open contact) — tracked in #263",
+        ],
+    },
+    266: {
+        "issue": 266,
+        "title": "Dashboard Status tab shows dual comfort band setpoints for heat_cool thermostats",
+        "version_fixed": "0.4.1",
+        "scope_covered": [
+            "Status card HVAC section: reads target_temp_low/target_temp_high when thermostat is in"
+            " heat_cool mode; displays as 'Band: Xf / Yf' instead of a single target_temperature",
+            "Status card is now status-only (no inline activity report) — activity report is a separate"
+            " on-demand panel",
+        ],
+        "scope_not_covered": [
+            "Historical band setpoint display in chart overlay — chart uses target_band time-series",
+        ],
+    },
+    269: {
+        "issue": 269,
+        "title": "heat_cool manual override blind spots — 4 bugs",
+        "version_fixed": "0.4.1",
+        "scope_covered": [
+            "Bug A: fan_mode change detection guard now includes _is_expected_confirmation (120s) so"
+            " cloud-thermostat fan attribute echoes after CA's mode command are suppressed",
+            "Bug B: hvac_mode now stored in coordinator.data and captured in incident_detected records",
+            "Bug C: mode override detection uses _last_commanded_hvac_mode or classification.hvac_mode"
+            " — heat_cool → cool user switch is now detected as a manual override",
+            "Bug D: setpoint detection reads target_temp_high/target_temp_low in heat_cool mode"
+            " (temperature attribute is None); grace trigger uses _last_commanded_hvac_mode",
+        ],
+        "scope_not_covered": [
+            "Bug A false-negative: genuine fan change within 120s of a CA mode command (and while mode"
+            " still matches last commanded) will be suppressed — bounded and documented trade-off",
+            "Dual setpoint override recording uses the cooling setpoint (target_temp_high) as the"
+            " representative value; independent heat-floor change has magnitude but no dedicated label",
         ],
     },
 }

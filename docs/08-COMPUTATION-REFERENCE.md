@@ -1018,15 +1018,16 @@ Clearing the override flag at these transitions means the integration will not s
 
 ### 9d. Fan Status Sensor Values
 
-The `sensor.climate_advisor_fan_status` entity exposes one of five state strings:
+The `sensor.climate_advisor_fan_status` entity exposes one of six state strings:
 
 | Sensor state | Meaning |
 |---|---|
 | `disabled` | Fan control is not configured (`fan_mode = disabled`) |
 | `inactive` | Fan is off; integration is in control |
-| `active` | Fan is on; integration activated it (economizer maintain phase) |
-| `override — on` | Fan is on; user turned it on manually — integration standing down |
-| `override — off` | Fan is off; user turned it off manually — integration standing down |
+| `active` | Fan is on; integration activated it (nat-vent or economizer) |
+| `running (manual override)` | Fan is on; user turned it on manually — `_fan_override_active=True` |
+| `off (manual override)` | Fan is off; manual override still in effect (user turned off before grace expired) |
+| `running (untracked)` | Thermostat reports fan running (`fan_mode=on` or `hvac_action=fan`) but `_fan_active=False` — typical after HA restart or user-initiated fan run from thermostat app |
 
 The sensor also exposes these attributes:
 - `fan_runtime_minutes` — minutes since the integration last activated the fan (0.0 when inactive or in override)

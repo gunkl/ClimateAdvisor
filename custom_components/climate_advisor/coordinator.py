@@ -542,40 +542,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if auto_state:
             self.automation_engine.restore_state(auto_state)
 
-        # Restore grace period timer if grace was active when state was saved (Issue #227)
-        ae = self.automation_engine
-        if getattr(ae, "_grace_active", False) and getattr(ae, "_grace_end_time", None):
-            try:
-                import datetime as _dt
-
-                end_time = _dt.datetime.fromisoformat(ae._grace_end_time)
-                remaining = (end_time - _dt.datetime.now(_dt.UTC)).total_seconds()
-                if remaining <= 0:
-                    # Grace expired during the restart — clear immediately
-                    _LOGGER.info(
-                        "Grace period expired during HA restart (end_time=%s) — clearing override immediately",
-                        ae._grace_end_time,
-                    )
-                    ae._grace_active = False
-                    ae._grace_end_time = None
-                    ae.clear_manual_override(reason="grace_expired_on_restart")
-                    # Let the first coordinator cycle re-apply classification (within 30s)
-                else:
-                    # Grace still active — re-schedule the expiry callback
-                    _LOGGER.info(
-                        "Restoring grace timer after HA restart: %.0f seconds remaining",
-                        remaining,
-                    )
-                    ae._reschedule_grace_timer(remaining)
-            except Exception as exc:
-                _LOGGER.warning(
-                    "Could not restore grace timer (end_time=%s): %s — clearing override as safety",
-                    getattr(ae, "_grace_end_time", None),
-                    exc,
-                )
-                ae._grace_active = False
-                ae._grace_end_time = None
-                ae.clear_manual_override(reason="grace_restore_failed")
+        # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
+        # The coordinator does not reschedule grace timers on restart.
 
         # Observe-only mode
         self._automation_enabled = state.get("automation_enabled", True)
@@ -2256,6 +2224,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.automation_engine._temp_command_pending,
                     self._is_recent_hvac_command(threshold_seconds=3.0),
                 )
+        elif (
+            # Fix D (Issue #282): mode change to a DIFFERENT mode while grace is active.
+            # The existing elif below guards with `not _manual_override_active`, so this
+            # branch fires first and handles the re-override case.
+            old_state.state != new_state.state
+            and new_state.state not in ("unavailable", "unknown")
+            and self.automation_engine._manual_override_active
+            and new_state.state != self.automation_engine._manual_override_mode
+            and not self.automation_engine._hvac_command_pending
+            and not self.automation_engine._fan_command_pending
+            and not self.automation_engine._temp_command_pending
+            and not self._is_recent_hvac_command()
+            and not _is_expected_confirmation
+        ):
+            # User switched to a different mode while grace was running — clear the
+            # old override and register the new one so the grace period restarts.
+            _LOGGER.info(
+                "New mode change during active override grace: %s → was overriding %s — restarting",
+                new_state.state,
+                self.automation_engine._manual_override_mode,
+            )
+            self.automation_engine.clear_manual_override(reason="new_override_during_grace")
+            self.automation_engine.handle_manual_override(
+                old_mode=old_state.state,
+                new_mode=new_state.state,
+                classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
+            )
         elif (
             old_state.state != new_state.state
             and new_state.state not in ("unavailable", "unknown")

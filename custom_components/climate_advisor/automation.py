@@ -835,6 +835,16 @@ class AutomationEngine:
                         "override_self_resolved",
                         {"detected_mode": detected_mode, "current_mode": current_mode},
                     )
+                if self.config.get(CONF_MANUAL_GRACE_NOTIFY, True):
+                    self.hass.async_create_task(
+                        self._notify(
+                            "Brief thermostat adjustment detected — treated as transient "
+                            "(reverted within confirmation window). "
+                            "Climate Advisor continues normal operation.",
+                            "Climate Advisor",
+                            notification_type="override_self_resolved",
+                        )
+                    )
 
         self._override_confirm_cancel = async_call_later(self.hass, confirm_seconds, _confirm_override_expired)
 
@@ -1994,7 +2004,7 @@ class AutomationEngine:
 
         if source == "manual":
             duration = self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS)
-            should_notify = self.config.get(CONF_MANUAL_GRACE_NOTIFY, False)
+            should_notify = self.config.get(CONF_MANUAL_GRACE_NOTIFY, True)
         else:
             duration = self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS)
             should_notify = self.config.get(CONF_AUTOMATION_GRACE_NOTIFY, True)
@@ -2076,11 +2086,16 @@ class AutomationEngine:
             self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
 
         if should_notify:
+            if source == "manual":
+                message = "Your manual thermostat override has expired. Climate Advisor has resumed automated control."
+            else:
+                message = (
+                    f"Automation grace period expired ({duration // 60} minutes). "
+                    "HVAC will now respond normally to door/window sensor changes."
+                )
             self.hass.async_create_task(
                 self._notify(
-                    f"⏱️ {source.capitalize()} grace period expired "
-                    f"({duration // 60} minutes). HVAC will now respond "
-                    f"normally to door/window sensor changes.",
+                    message,
                     "Climate Advisor",
                     notification_type="grace_expired",
                 )
@@ -2716,8 +2731,11 @@ class AutomationEngine:
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.
 
-        Grace timers are cleared on restart (natural reset point).
-        Only pause state is restored so HVAC resumes correctly.
+        Design decision: HA restart = clean slate for override and grace state.
+        Manual overrides and grace periods are user-interactive; carrying them
+        across a restart would silently suppress CA automation without the user
+        knowing the system restarted.  Only pause state and fan state are
+        restored so HVAC resumes correctly from its last known mode.
         """
         self._paused_by_door = state.get("paused_by_door", False)
         self._pre_pause_mode = state.get("pre_pause_mode")
@@ -2725,9 +2743,6 @@ class AutomationEngine:
         self._economizer_phase = state.get("economizer_phase", "inactive")
         self._last_action_time = state.get("last_action_time")
         self._last_action_reason = state.get("last_action_reason")
-        self._manual_override_active = state.get("manual_override_active", False)
-        self._manual_override_mode = state.get("manual_override_mode")
-        self._manual_override_time = state.get("manual_override_time")
         self._fan_active = state.get("fan_active", False)
         self._fan_on_since = state.get("fan_on_since")
         self._fan_override_active = state.get("fan_override_active", False)
@@ -2743,42 +2758,46 @@ class AutomationEngine:
                 self._last_welcome_home_notified = None
         else:
             self._last_welcome_home_notified = None
-        # Restore grace period state so coordinator can decide whether to
-        # re-schedule the timer or clear it (Issue #227).
-        self._grace_active = state.get("grace_active", False)
-        self._last_resume_source = state.get("last_resume_source")
-        self._grace_end_time = state.get("grace_end_time")
-        self._grace_duration_seconds = int(state.get("grace_duration_seconds", 0))
+        # Clean slate on restart: override and grace state are always cleared.
+        # The user is back in front of a fresh system — carry-over would mean
+        # CA silently blocks automation without any visible sign of an override.
+        self._manual_override_active = False
+        self._manual_override_mode = None
+        self._manual_override_time = None
+        self._override_confirm_pending = False
+        self._override_confirm_time = None
+        self._override_confirm_mode = None
+        self._override_confirm_source = None
+        self._grace_active = False
+        self._grace_end_time = None
+        self._grace_duration_seconds = None
+        self._last_resume_source = None
         _LOGGER.info(
             "Restored automation state: paused=%s, pre_pause_mode=%s, "
-            "last_action=%s, manual_override=%s, fan_active=%s, fan_override=%s",
+            "last_action=%s, fan_active=%s, fan_override=%s "
+            "(override/grace state cleared — clean slate on restart)",
             self._paused_by_door,
             self._pre_pause_mode,
             self._last_action_reason,
-            self._manual_override_active,
             self._fan_active,
             self._fan_override_active,
         )
 
     def get_serializable_state(self) -> dict[str, Any]:
-        """Return a JSON-serializable snapshot of the engine's internal state."""
+        """Return a JSON-serializable snapshot of the engine's internal state.
+
+        Override and grace state are intentionally omitted: they are always
+        cleared on restore (clean-slate policy), so saving them provides no
+        benefit and would only clutter the persisted JSON.
+        """
         return {
             "paused_by_door": self._paused_by_door,
             "pre_pause_mode": self._pre_pause_mode,
-            "grace_active": self._grace_active,
-            "last_resume_source": self._last_resume_source,
-            "grace_end_time": self._grace_end_time,
-            "grace_duration_seconds": self._grace_duration_seconds,
             "dry_run": self.dry_run,
             "economizer_active": self._economizer_active,
             "economizer_phase": self._economizer_phase,
             "last_action_time": self._last_action_time,
             "last_action_reason": self._last_action_reason,
-            "manual_override_active": self._manual_override_active,
-            "manual_override_mode": self._manual_override_mode,
-            "manual_override_time": self._manual_override_time,
-            "override_confirm_pending": self._override_confirm_pending,
-            "override_confirm_time": self._override_confirm_time,
             "fan_active": self._fan_active,
             "fan_on_since": self._fan_on_since,
             "fan_override_active": self._fan_override_active,

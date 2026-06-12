@@ -440,6 +440,7 @@ class TestAutomationRestoreState:
     """Test the AutomationEngine.restore_state method."""
 
     def test_restore_paused_state(self):
+        """Pause state (paused_by_door, pre_pause_mode) IS restored; grace/override are clean-slated."""
         from custom_components.climate_advisor.automation import AutomationEngine
 
         engine = AutomationEngine(
@@ -464,13 +465,11 @@ class TestAutomationRestoreState:
 
         assert engine._paused_by_door is True
         assert engine._pre_pause_mode == "heat"
-        # Grace state is preserved by restore_state (Issue #227);
-        # the coordinator's async_restore_state decides whether to
-        # re-schedule or clear the timer based on the remaining time.
-        assert engine._grace_active is True
-        assert engine._last_resume_source == "automation"
-        assert engine._grace_end_time == "2099-01-01T00:00:00+00:00"
-        assert engine._grace_duration_seconds == 5400
+        # Clean-slate on restart: grace and override state always reset
+        assert engine._grace_active is False
+        assert engine._last_resume_source is None
+        assert engine._grace_end_time is None
+        assert engine._grace_duration_seconds is None
 
     def test_restore_empty_state(self):
         from custom_components.climate_advisor.automation import AutomationEngine
@@ -506,6 +505,68 @@ class TestAutomationRestoreState:
 
         assert engine._paused_by_door is True
         assert engine._pre_pause_mode is None
+
+    def test_restore_clean_slates_override_state(self):
+        """Restart always clears manual override state — no carry-over from prior session."""
+        from custom_components.climate_advisor.automation import AutomationEngine
+
+        engine = AutomationEngine(
+            hass=MagicMock(),
+            climate_entity="climate.thermostat",
+            weather_entity="weather.home",
+            door_window_sensors=[],
+            notify_service="notify.mobile",
+            config={},
+        )
+
+        engine.restore_state(
+            {
+                "manual_override_active": True,
+                "manual_override_mode": "heat",
+                "manual_override_time": "2026-06-12T08:00:00",
+                "grace_active": True,
+                "grace_end_time": "2026-06-12T09:00:00",
+                "grace_duration_seconds": 3600,
+                "last_resume_source": "manual",
+                "override_confirm_pending": True,
+                "override_confirm_time": "2026-06-12T07:55:00",
+            }
+        )
+
+        assert engine._manual_override_active is False
+        assert engine._manual_override_mode is None
+        assert engine._manual_override_time is None
+        assert engine._grace_active is False
+        assert engine._grace_end_time is None
+        assert engine._grace_duration_seconds is None
+        assert engine._last_resume_source is None
+        assert engine._override_confirm_pending is False
+        assert engine._override_confirm_time is None
+
+    def test_get_serializable_state_omits_override_and_grace_keys(self):
+        """get_serializable_state() must not include override/grace keys — they are clean-slated."""
+        from custom_components.climate_advisor.automation import AutomationEngine
+
+        engine = AutomationEngine(
+            hass=MagicMock(),
+            climate_entity="climate.thermostat",
+            weather_entity="weather.home",
+            door_window_sensors=[],
+            notify_service="notify.mobile",
+            config={},
+        )
+
+        serialized = engine.get_serializable_state()
+
+        assert "manual_override_active" not in serialized
+        assert "manual_override_mode" not in serialized
+        assert "manual_override_time" not in serialized
+        assert "grace_active" not in serialized
+        assert "grace_end_time" not in serialized
+        assert "grace_duration_seconds" not in serialized
+        assert "last_resume_source" not in serialized
+        assert "override_confirm_pending" not in serialized
+        assert "override_confirm_time" not in serialized
 
 
 # ---------------------------------------------------------------------------

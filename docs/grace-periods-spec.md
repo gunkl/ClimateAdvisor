@@ -10,10 +10,12 @@
 | How long does each grace type last by default, and can it be configured? | Manual grace defaults to 1800 s (30 min); automation grace defaults to 300 s (5 min). Both durations are configurable via `manual_grace_seconds` and `automation_grace_seconds` in config; a value of 0 disables grace entirely. | [§ Grace Period Types](#grace-period-types) |
 | What does an active grace period suppress? | A door or window opening during an active grace period does NOT pause HVAC (unless outdoor temperature is already cool enough to qualify for natural ventilation). | [§ Manual Grace — What It Suppresses](#manual-grace) |
 | When a grace timer fires, what are the three possible outcomes? | (1) Within planned window period → clear grace silently. (2) A sensor is still open → clear grace flags, then schedule `_re_pause_for_open_sensor()`. (3) All sensors closed → clear grace flags, optionally send notification. | [§ Timer Lifecycle — Expiry Callback](#timer-lifecycle) |
-| Is grace state persisted across HA restarts? | Yes (fixed v0.3.56 / #227). `async_restore_state()` re-schedules the grace timer with remaining duration; if already expired during restart, override is cleared immediately. Pause state (`_paused_by_door`, `_pre_pause_mode`) was already persisted. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage) |
+| Is grace state persisted across HA restarts? | No (Issue #282 — clean slate). Override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) is NOT restored on restart. Pause state (`_paused_by_door`, `_pre_pause_mode`) IS preserved. CA always starts in clean automation mode after restart. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage) |
 | What happens to an active grace period when occupancy changes? | The engine has no explicit occupancy-triggered grace cancellation. Grace timers run to expiry regardless of occupancy transitions; occupancy handlers (`handle_occupancy_away`, `handle_occupancy_home`) do not call `_cancel_grace_timers()`. | [§ Occupancy Interaction](#occupancy-interaction) |
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
 | What are all the callsites that clear a manual override, and under what conditions? | Seven callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
+| Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
+| What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
 
 ---
 
@@ -121,9 +123,9 @@ The grace period state machine is embedded within the broader pause/resume lifec
 
 **Restoration on dashboard resume:** `resume_from_pause()` does NOT use `_pre_pause_mode`. It uses `_current_classification.hvac_mode` instead (L1449–L1456), because the classification may have changed since the pause was set. `_pre_pause_mode` is set to `None` at L1443.
 
-**HA restart during PAUSED state:** `restore_state()` reads `paused_by_door` and `pre_pause_mode` from the persisted dict (L2044–L2045). Pause state survives restart. Grace timers do NOT survive restart — `_grace_active` is explicitly reset to `False` (L2068). The docstring at L2040–L2042 confirms: "Grace timers are cleared on restart (natural reset point)."
+**HA restart during PAUSED state:** `restore_state()` reads `paused_by_door` and `pre_pause_mode` from the persisted dict. Pause state survives restart — HVAC remains off and the pre-pause mode is ready for restoration when sensors close.
 
-**HA restart during GRACE state (fixed v0.3.56 / #227):** Grace timer is restored. `async_restore_state()` reads `_grace_end_time` and re-schedules `_grace_expired` with remaining duration. If the grace window expired during the restart, override is cleared immediately. Prior to this fix, grace was always discarded on restart — `_manual_override_active` stayed `True` indefinitely.
+**HA restart during GRACE or OVERRIDE state (Issue #282 — clean slate):** Override and grace state are NOT restored. `restore_state()` does not restore `_manual_override_active`, `_grace_active`, `_override_confirm_pending`, or their companion timestamps. CA always starts in clean automation mode after restart. The 5-minute `_first_run` settling window (see §11 of `08-COMPUTATION-REFERENCE.md`) provides a debounce gap before any automation action is taken. Previously (#227) the grace timer was restored on restart; Issue #282 reverts this in favor of the simpler clean-slate model.
 
 ---
 
@@ -139,7 +141,7 @@ Confirmed from code:
 
 4. **Grace suppresses new pauses but not natural ventilation.** The early-return in `handle_door_window_open()` at L1053–L1066 exits only when `outdoor >= nat_vent_threshold`. When outdoor is cool enough, execution falls through to the nat-vent evaluation path. Grace does not unconditionally suppress all sensor-open behavior.
 
-5. **Grace timer is restored across HA restarts (fixed v0.3.56 / #227).** `async_restore_state()` reads `_grace_end_time` from the persisted state dict and computes remaining duration. If remaining > 0: `async_call_later(remaining, _grace_expired)` re-schedules the expiry callback. If already expired: `clear_manual_override()` is called immediately. Exception path: `clear_manual_override()` as safety fallback. Prior to this fix, `restore_state()` unconditionally set `_grace_active = False`, leaving `_manual_override_active = True` indefinitely after restart.
+5. **Override and grace state are NOT restored across HA restarts (Issue #282 — clean slate).** `restore_state()` does not read `manual_override_active`, `grace_active`, `override_confirm_pending`, or their companion timestamps from the persisted dict. CA always enters clean automation mode after restart. Pause state (`_paused_by_door`, `_pre_pause_mode`) is still restored. Previously (#227) the grace timer was restored to prevent indefinite lock; Issue #282 supersedes this with the clean-slate model and a `_first_run` settling window instead.
 
 6. **Automation grace is always the source after a door-close resume; manual grace is always the source after a user action.** The `source` parameter passed to `_start_grace_period()` is hardcoded at each call site — `"automation"` in `handle_all_doors_windows_closed()` (L1214, L1231) and `"manual"` in `handle_manual_override_during_pause()` (L1426), `resume_from_pause()` (L1459), `handle_fan_manual_override()` (L1426), and `_confirm_override()` (L1651).
 
@@ -180,24 +182,26 @@ Confirmed from code:
 
 *(See also the invariants section above for the full storage contract.)*
 
-**Serialized fields in `get_serializable_state()`:**
+**Serialized fields in `get_serializable_state()` (Issue #282):**
+
+Override, grace, and confirmation-window fields are NOT included in the serialized state. `get_serializable_state()` omits `manual_override_active`, `grace_active`, `grace_end_time`, `override_confirm_pending`, and their companion timestamps entirely — there is no point saving what is not restored.
+
+Pause state fields ARE serialized:
 ```
 "paused_by_door": bool
 "pre_pause_mode": str | None
-"grace_active": bool
-"last_resume_source": str | None
-"grace_end_time": str | None  (ISO timestamp — informational, not used on restore)
 ```
 
-**Fields restored in `restore_state()`:**
+**Fields restored in `restore_state()` (Issue #282 — clean slate):**
 ```
-_paused_by_door   ← "paused_by_door"   (default: False)
-_pre_pause_mode   ← "pre_pause_mode"   (default: None)
-_grace_active     = False              (always reset)
-_last_resume_source = None             (always reset)
+_paused_by_door         ← "paused_by_door"   (default: False)
+_pre_pause_mode         ← "pre_pause_mode"   (default: None)
+_manual_override_active = False              (always reset — NOT read from state)
+_grace_active           = False              (always reset — NOT read from state)
+_override_confirm_pending = False            (always reset — NOT read from state)
+_last_resume_source     = None               (always reset)
+_grace_end_time         = None               (always reset)
 ```
-
-`_grace_end_time` is NOT restored (stays as `None` after restart). This is consistent — without an active timer, the end time is meaningless.
 
 ---
 
@@ -223,12 +227,11 @@ There is no polling path that periodically re-evaluates sensor states during a p
 
 ### HA Restart During Grace
 
-**Fixed in v0.3.56 / #227.** Grace timer is now restored on restart. `async_restore_state()` reads `_grace_end_time` from the persisted state dict and recomputes remaining duration:
-- **Remaining > 0:** `async_call_later(remaining, _grace_expired)` re-schedules the callback. `_grace_active` is set to `True`. System resumes grace normally.
-- **Already expired:** `clear_manual_override(reason="grace_expired_during_restart")` is called immediately. `_manual_override_active` is cleared; system returns to normal scheduling.
-- **Exception:** `clear_manual_override(reason="grace_restore_error")` as safety fallback.
+**Issue #282 — clean slate.** Override and grace state are NOT restored after restart. `_manual_override_active`, `_grace_active`, and `_override_confirm_pending` are always reset to `False`. `async_restore_state()` no longer calls `_reschedule_grace_timer()`. CA resumes in clean automation mode after every restart.
 
-Prior to this fix, grace timer was unconditionally discarded on restart. `_manual_override_active` stayed `True` indefinitely and the dashboard showed "0 min remaining" with no self-resolution path.
+The 5-minute `_first_run` settling window prevents the system from taking any HVAC action immediately after startup, allowing the thermostat to stabilize before CA evaluates the state.
+
+**History:** v0.3.56 / #227 introduced grace timer restoration to prevent `_manual_override_active` staying `True` indefinitely. Issue #282 supersedes this with a clean-slate approach: override state is simply discarded on restart, and the `_first_run` window provides the equivalent protection period.
 
 ### HA Restart During PAUSED State
 
@@ -315,6 +318,8 @@ This blocks ALL downstream classification effects: HVAC mode changes, temperatur
        └─ [PATH B: state returned to classification]
            _override_confirm_pending = False
            Event: "override_self_resolved"
+           Notification sent (if notify service configured): "Brief thermostat adjustment
+             detected — treated as transient. Climate Advisor continues normal operation."
            apply_classification() unblocked immediately
            No grace period started
 ```
@@ -346,6 +351,18 @@ This means an occupancy transition, a fan override, or a dashboard cancel that c
 ### Persistence
 
 `_override_confirm_pending` and its companion variables are **not persisted** across HA restarts. `restore_state()` does not restore them. On restart, any in-flight confirmation window is silently abandoned and the flags reset to `False`. This is intentional — an HA restart is itself a transient event, and the mode state that triggered the confirmation may no longer reflect user intent after restart.
+
+### Second Override During Active Grace (Issue #201)
+
+If `_async_thermostat_changed()` detects that the thermostat mode has changed to a **different mode** while `_manual_override_active = True` (i.e., an active grace period is already running), a new detection branch fires:
+
+1. `clear_manual_override()` is called to cancel the current override and grace timer.
+2. `handle_manual_override(new_mode)` is called to start a fresh `CONF_OVERRIDE_CONFIRM_PERIOD` confirmation window for the new mode.
+3. If the new mode is still divergent at window expiry (PATH A), a new full-duration grace period starts for the new mode.
+
+**Invariant:** only one confirmation window is active at a time. Starting a new window (`start_override_confirmation()`) immediately after `clear_manual_override()` ensures no timer is orphaned. The net effect is that the most recent user action always wins — the previous grace is cancelled and the system monitors the new mode with a fresh debounce.
+
+**This branch is distinct from the normal detection path.** The normal path in `_async_thermostat_changed()` checks `not _manual_override_active` before calling `handle_manual_override()`. This second-override branch explicitly checks `_manual_override_active = True AND new_mode ≠ _manual_override_mode`, which bypasses the normal gate.
 
 ---
 

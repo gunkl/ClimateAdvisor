@@ -40,6 +40,9 @@ The automation logic table and all threshold constants in this document are expr
 | What are the two fan archetypes and how does each affect HVAC mode and fan-stops-on-close behavior? | `FAN_MODE_HVAC` (HVAC blower): band stays armed, HVAC unchanged when fan activates, fan does NOT stop when windows close unless `_natural_vent_active=True`. `FAN_MODE_WHOLE_HOUSE` (exhaust fan): HVAC set to off on activation (mode captured in `_pre_fan_hvac_mode`), restored on deactivation, fan stops when ALL sensors close even if `_natural_vent_active=False`. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) |
 | Why does `_set_hvac_mode("off")` also set `_fan_command_time` (Issue #277 Bug A1)? | The `set_fan_mode(auto)` assertion inside `_set_hvac_mode("off")` sets `_fan_command_time = dt_util.now()` before the service call, so cloud thermostat echoes of the fan_mode attribute change are suppressed within the `_is_recent_fan_command` window instead of triggering a false manual override. | [§9b Race Guard — `_set_hvac_mode("off")` fan_command_time](08-COMPUTATION-REFERENCE.md#_set_hvac_mode-off-fan_command_time-guard-issue-277-bug-a1) |
 | How does `_async_thermostat_changed()` prevent a single event from triggering both a setpoint and a fan override (Issue #277 Bug B)? | A local `_setpoint_override_detected` flag is initialized to `False` before Block 2 (setpoint detection) and Block 3 (fan_mode detection). If Block 2 fires and sets it `True`, Block 3 is suppressed via `and not _setpoint_override_detected`. One event → at most one override type. | [§9b Setpoint/Fan Mutual Exclusion](08-COMPUTATION-REFERENCE.md#setpointfan-override-mutual-exclusion-issue-277-bug-b) |
+| What override and grace state is preserved vs discarded on HA restart (Issue #282)? | Pause state (`_paused_by_door`, `_pre_pause_mode`) is preserved. Override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) is discarded — CA always starts in clean automation mode. A 5-minute `_first_run` settling window replaces persisted override as the startup debounce. | [§11 Clean-Slate Override State on HA Restart](08-COMPUTATION-REFERENCE.md#clean-slate-override-state-on-ha-restart-issue-282) |
+| What notification does the user receive when PATH B (transient thermostat adjustment) fires (Issue #200)? | "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." No grace period starts; automation resumes immediately. | [§11 PATH B Notification](08-COMPUTATION-REFERENCE.md#path-b-notification--transient-thermostat-adjustment-issue-200) |
+| What happens if the user changes to a different HVAC mode while a grace period is already active (Issue #201)? | The current override and grace are cleared, and a fresh 10-minute confirmation window starts for the new mode. Latest user action wins. | [§11 Second Override During Active Grace](08-COMPUTATION-REFERENCE.md#second-override-during-active-grace-issue-201) |
 
 ## 1. Day Classification
 
@@ -1176,12 +1179,33 @@ The sensor also exposes these attributes:
 
 | Type | Trigger | Default Duration | Configurable? | Effect | Notify on Expiry (default) |
 |---|---|---|---|---|---|
-| Manual | User overrides thermostat — mode change **or setpoint-only change** (v0.3.55+, Issue #197) — or clicks "Resume HVAC (override pause)" | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | No (`CONF_MANUAL_GRACE_NOTIFY = False`) |
+| Manual | User overrides thermostat — mode change **or setpoint-only change** (v0.3.55+, Issue #197) — or clicks "Resume HVAC (override pause)" | `1800s` (30 min) | Yes — `CONF_MANUAL_GRACE_PERIOD` | Blocks door/window sensor from re-pausing HVAC; classification skips HVAC mode changes | Yes (`CONF_MANUAL_GRACE_NOTIFY = True`, Issue #282). Message: "Your manual thermostat override has expired. Climate Advisor has resumed automated control." |
 | Automation | Climate Advisor resumes HVAC after all sensors close | `300s` (5 min) | Yes — `CONF_AUTOMATION_GRACE_PERIOD` | Blocks door/window sensor from immediately re-pausing HVAC | Yes (`CONF_AUTOMATION_GRACE_NOTIFY = True`) |
 
-Both grace periods are cancelled and reset on HA restart. Only one grace timer of each type is active at a time; starting a new one cancels the previous.
+Only one grace timer of each type is active at a time; starting a new one cancels the previous.
 
 **Grace expiry sensor re-check:** When either grace period expires, the system re-checks whether any monitored contact sensor is currently open. If one or more sensors are still open, HVAC is re-paused immediately (`_paused_by_door = True`, HVAC set to `off`) rather than restoring normal automation. This prevents the safety issue of running HVAC with a door or window open after the grace window closes.
+
+### Clean-Slate Override State on HA Restart (Issue #282)
+
+CA always starts in clean automation mode after an HA restart. `restore_state()` does **not** restore override or grace state — those fields are intentionally omitted from `get_serializable_state()`.
+
+**What is preserved across restarts:**
+
+| Field | Preserved? | Notes |
+|---|---|---|
+| `_paused_by_door` | Yes | Sensor-driven pause state survives restart |
+| `_pre_pause_mode` | Yes | HVAC mode to restore when sensors close |
+| `_fan_active` | Yes | Fan session state |
+| `_pre_fan_hvac_mode` | Yes | HVAC mode captured before whole-house fan activation |
+| `_last_action_time` / `_last_action_reason` | Yes | Last automation action metadata |
+| `_occupancy_mode` | Yes | Current occupancy state |
+| `_manual_override_active` | **No** | Cleared on restart — clean slate |
+| `_grace_active` / `_grace_end_time` | **No** | Cleared on restart — clean slate |
+| `_override_confirm_pending` | **No** | Cleared on restart — clean slate |
+| `_manual_override_mode` / `_manual_override_time` | **No** | Cleared on restart |
+
+**Settling window:** `restore_state()` sets `_first_run = True`. The coordinator's `_async_update_data()` delays the first full automation evaluation by 5 minutes (`_first_run` guard) to let the thermostat and HA state settle before CA takes any HVAC action. This replaces the role previously played by persisted override state in preventing false automations after restart.
 
 ### Startup Override Logic
 
@@ -1195,7 +1219,29 @@ On first data update after startup, Climate Advisor checks whether the HVAC's cu
 | `cool` | `cool` | No override — modes match |
 | `cool` | `heat` or `off` | Manual override set — respects current state |
 
-This prevents unnecessary override lockouts after a Home Assistant restart when the HVAC is already in the mode that Climate Advisor would have set anyway. See Issue #42.
+This prevents unnecessary override lockouts after a Home Assistant restart when the HVAC is already in the mode that Climate Advisor would have set anyway. See Issue #42. This check runs after the 5-minute `_first_run` settling window.
+
+### PATH B Notification — Transient Thermostat Adjustment (Issue #200)
+
+When the thermostat self-reverts to the expected mode within the `CONF_OVERRIDE_CONFIRM_PERIOD` confirmation window (PATH B — `override_self_resolved`), a user notification is sent:
+
+> "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation."
+
+This informs the occupant that a brief thermostat blip was observed but was not treated as an intentional override. No grace period starts; normal automation resumes immediately. Notification is sent only when a notify service is configured.
+
+For the full confirmation-window state machine (PATH A vs PATH B), see [Grace Periods Spec — Override Confirmation Delay](grace-periods-spec.md#override-confirmation-delay).
+
+### Second Override During Active Grace (Issue #201)
+
+If the user changes the thermostat to a **different mode** while `_manual_override_active = True` (i.e., a grace period is already running), the engine treats this as a new, distinct override:
+
+1. The current override and grace timer are cleared via `clear_manual_override()`.
+2. A new 10-minute `CONF_OVERRIDE_CONFIRM_PERIOD` confirmation window starts for the new mode.
+3. If the new mode is still divergent after the confirmation window (PATH A), a fresh 30-minute grace period begins.
+
+This prevents the scenario where an occupant makes two sequential manual adjustments and the second one is silently ignored because grace from the first is still active. The net effect is that the latest user intent always wins: CA monitors the newest mode change with a fresh confirmation window.
+
+**Invariant:** only one confirmation window is active at a time. Starting a new window cancels the previous one (via `clear_manual_override()` then `start_override_confirmation()`).
 
 ---
 

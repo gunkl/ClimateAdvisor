@@ -397,10 +397,10 @@ class TestClearCancelsPending:
 
 
 class TestSerializableState:
-    """get_serializable_state() exposes the confirmation pending fields."""
+    """get_serializable_state() omits confirmation pending fields (clean-slate policy)."""
 
-    def test_pending_fields_in_serializable_state(self):
-        """Pending fields appear in get_serializable_state() output."""
+    def test_pending_fields_not_in_serializable_state(self):
+        """Pending/override fields are omitted from get_serializable_state() — clean-slate policy."""
         engine = _make_automation_engine(config_overrides={CONF_OVERRIDE_CONFIRM_PERIOD: 600})
 
         state_obj = MagicMock()
@@ -410,15 +410,83 @@ class TestSerializableState:
         _start_confirmation_and_capture(engine, source="normal")
 
         serialized = engine.get_serializable_state()
-        assert "override_confirm_pending" in serialized
-        assert serialized["override_confirm_pending"] is True
-        assert "override_confirm_time" in serialized
-        assert serialized["override_confirm_time"] is not None
+        assert "override_confirm_pending" not in serialized
+        assert "override_confirm_time" not in serialized
+        assert "manual_override_active" not in serialized
 
-    def test_pending_false_in_serializable_state_when_inactive(self):
-        """When no confirmation is pending, fields are False/None."""
+    def test_grace_fields_not_in_serializable_state(self):
+        """Grace fields are omitted from get_serializable_state() — clean-slate policy."""
         engine = _make_automation_engine()
 
         serialized = engine.get_serializable_state()
-        assert serialized.get("override_confirm_pending") is False
-        assert serialized.get("override_confirm_time") is None
+        assert "grace_active" not in serialized
+        assert "grace_end_time" not in serialized
+        assert "grace_duration_seconds" not in serialized
+        assert "last_resume_source" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# Tests: PATH B sends transient notification (Fix C)
+# ---------------------------------------------------------------------------
+
+
+class TestPathBTransientNotification:
+    """PATH B (self-resolved) must send a notification about the transient event."""
+
+    def test_path_b_sends_transient_notification(self):
+        """When override self-resolves (PATH B), a notification is scheduled."""
+        engine = _make_automation_engine(config_overrides={CONF_OVERRIDE_CONFIRM_PERIOD: 600})
+
+        c = _make_classification(day_type="cold", hvac_mode="heat")
+        engine._current_classification = c
+
+        # Thermostat starts divergent
+        divergent_state = MagicMock()
+        divergent_state.state = "cool"
+        engine.hass.states.get.return_value = divergent_state
+
+        fired = _start_confirmation_and_capture(engine, source="normal")
+        assert fired is not None
+
+        # Reset mock so we only see post-fire activity
+        engine.hass.async_create_task.reset_mock()
+
+        # Thermostat returns to classification mode (self-resolved)
+        resolved_state = MagicMock()
+        resolved_state.state = "heat"
+        engine.hass.states.get.return_value = resolved_state
+
+        fired(None)
+
+        # PATH B must schedule a notification
+        engine.hass.async_create_task.assert_called()
+
+    def test_path_b_notification_suppressed_when_grace_notify_off(self):
+        """When CONF_MANUAL_GRACE_NOTIFY is False, PATH B notification is suppressed."""
+        from custom_components.climate_advisor.const import CONF_MANUAL_GRACE_NOTIFY
+
+        engine = _make_automation_engine(
+            config_overrides={
+                CONF_OVERRIDE_CONFIRM_PERIOD: 600,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+
+        c = _make_classification(day_type="cold", hvac_mode="heat")
+        engine._current_classification = c
+
+        divergent_state = MagicMock()
+        divergent_state.state = "cool"
+        engine.hass.states.get.return_value = divergent_state
+
+        fired = _start_confirmation_and_capture(engine, source="normal")
+        engine.hass.async_create_task.reset_mock()
+
+        resolved_state = MagicMock()
+        resolved_state.state = "heat"
+        engine.hass.states.get.return_value = resolved_state
+
+        fired(None)
+
+        # Notification should NOT be scheduled when gate is off
+        engine.hass.async_create_task.assert_not_called()

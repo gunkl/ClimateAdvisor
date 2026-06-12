@@ -31,6 +31,9 @@ The automation logic table and all threshold constants in this document are expr
 | How does MILD day window scheduling change when the ODE is available (Fix C, Issue #147)? | Before Fix C: MILD days used hardcoded `time(10, 0)` open / `time(17, 0)` close. After Fix C: constants `MILD_WINDOW_OPEN_HOUR = 10` and `MILD_WINDOW_CLOSE_HOUR = 17` are fallbacks; when the ODE is available, `nat_vent_cutoff` drives the close time — the same dynamic logic as warm days. | [§6d. MILD Day Dynamic Window Close Time](08-COMPUTATION-REFERENCE.md#6d-mild-day-dynamic-window-close-time-fix-c-issue-147) |
 | What invariant must `_async_send_briefing()` maintain when replacing `_today_record`? | It must copy all accumulated counters (`hvac_runtime_minutes`, `comfort_violations_minutes`, etc.) from the existing same-day record before constructing the new one. Creating a fresh `DailyRecord` unconditionally resets all counters to zero (Issue #176 bug). | [DailyRecord Persistence Invariant](08-COMPUTATION-REFERENCE.md#dailyrecord-persistence-invariant-issue-176) |
 | Why must `_async_thermostat_changed()` check all three command-pending flags, not just `_hvac_command_pending`? | Automation sequences (e.g., nat vent exit) call `_deactivate_fan()` before `_set_hvac_mode()`. The fan command sets `_fan_command_pending` but leaves `_hvac_command_pending` False. Checking only `_hvac_command_pending` bypasses the override-detection guard during that window. | [§9b Compound command-pending guard](08-COMPUTATION-REFERENCE.md#compound-command-pending-guard-in-_async_thermostat_changed-issue-205206) |
+| Why was a manual mode override not detected on dual-setpoint (`heat_cool`) thermostats? | CA commands `heat_cool` mode but the old code compared the thermostat's `hvac_mode` against `classification.hvac_mode` (e.g., `"cool"`). A user switching from `heat_cool` to `cool` evaluated as equal and was ignored. Fix: compare against `_last_commanded_hvac_mode` first. | [§9b Mode Override Detection — `_last_commanded_hvac_mode`](08-COMPUTATION-REFERENCE.md#mode-override-detection--_last_commanded_hvac_mode-issue-269-bug-c) |
+| Why was a manual setpoint change not detected on dual-setpoint (`heat_cool`) thermostats? | In `heat_cool` mode the `temperature` attribute is `None`; only `target_temp_low`/`target_temp_high` are populated. The setpoint override check now reads those attributes when mode is `heat_cool`. | [§9b Dual Setpoint Override Detection](08-COMPUTATION-REFERENCE.md#dual-setpoint-override-detection--heat_cool-mode-issue-269-bug-d) |
+| Why do cloud thermostats (Nest, Ecobee) falsely trigger fan overrides after HVAC mode changes? | Cloud polling echoes `fan_mode` attribute changes as delayed side-effects 30–120 s after the command, outside the 30 s `_is_recent_hvac_command` window. The `_is_expected_confirmation` flag extends suppression to 120 s for the `fan_mode` path. | [§9b `_is_expected_confirmation`](08-COMPUTATION-REFERENCE.md#_is_expected_confirmation-issue-269-bug-a) |
 | What is the comfort-band programming model introduced in Issue #249? | CA programs a floor+ceiling band every 30 min via one `select_comfort_band` decision and one `_apply_comfort_band` actuation; the thermostat's own deadband holds the house inside the band continuously — no more off+supervisor pattern. | [§6e Comfort-Band Programming](08-COMPUTATION-REFERENCE.md#6e-comfort-band-programming-issue-249) |
 | What command shape does `_apply_comfort_band` emit per thermostat capability? | Dual-capable: `heat_cool` mode + `set_temperature(target_temp_low=floor, target_temp_high=ceiling)`. Cool-only (active=ceiling): `cool` + `set_temperature(ceiling)`. Heat-only (active=floor): `heat` + `set_temperature(floor)`. | [§6e — `_apply_comfort_band` command shapes](08-COMPUTATION-REFERENCE.md#_apply_comfort_band-command-shapes) |
 | Why does nat-vent no longer set HVAC off when windows open (Issue #249)? | The band stays armed when nat-vent activates; the thermostat self-arbitrates — free cooling is free, AC kicks in only if the breeze can't hold the ceiling. Turning HVAC off also disarmed the floor, making cold-snap escalation impossible. | [§6e — Nat-vent and economizer with the band armed](08-COMPUTATION-REFERENCE.md#nat-vent-and-economizer-with-the-band-armed) |
@@ -994,10 +997,40 @@ The fix (Issue #206) expands the guard at both the pause-path and normal-path de
 
 **`_is_recent_hvac_command(threshold_seconds=3.0)`** is a secondary guard that inspects `_hvac_command_time` to catch race conditions where the flag was already cleared before the listener fired. It does not replace the flag check — it is an additional fallback for sub-second timing races.
 
-| Guard | Type | Purpose |
-|---|---|---|
-| `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending` | Flag check (synchronous) | Primary: suppresses both pause-path and normal-path override detection during any automation-issued command sequence |
-| `_is_recent_hvac_command(threshold_seconds=3.0)` | Timestamp check | Secondary fallback: catches races where the command flag was cleared before the HA state-change event arrived |
+**`_is_expected_confirmation` (Issue #269 Bug A):** A third suppression layer for the `fan_mode` attribute-change path specifically. Cloud thermostats (e.g., Nest, Ecobee via cloud polling) sometimes echo a `fan_mode` attribute change as a delayed side-effect of an HVAC mode transition, arriving 30–120 seconds after the original command — outside the 30-second `_is_recent_hvac_command` window. When `_is_expected_confirmation` is `True`, the `fan_mode` change guard suppresses false override detection for up to 120 seconds after the last HVAC command. The three guards are evaluated in order: flag check → `_is_recent_hvac_command(30s)` → `_is_expected_confirmation(120s)`.
+
+| Guard | Type | Window | Purpose |
+|---|---|---|---|
+| `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending` | Flag check (synchronous) | Until flag cleared | Primary: suppresses both pause-path and normal-path override detection during any automation-issued command sequence |
+| `_is_recent_hvac_command(threshold_seconds=30.0)` | Timestamp check | 30 s | Secondary fallback: catches races where the command flag was cleared before the HA state-change event arrived |
+| `_is_expected_confirmation` | Boolean flag | 120 s | Tertiary: suppresses `fan_mode` attribute changes that arrive as delayed side-effects of HVAC mode transitions on cloud thermostats |
+
+#### Mode Override Detection — `_last_commanded_hvac_mode` (Issue #269 Bug C)
+
+The normal-path override detection in `_async_thermostat_changed()` compares the thermostat's reported `hvac_mode` against the expected mode. Prior to Issue #269, that comparison was always against `classification.hvac_mode`. For dual-setpoint thermostats, CA commands `heat_cool` mode (§6e), but `classification.hvac_mode` may be `"cool"` or `"heat"`. A user switching from `heat_cool` back to `cool` would evaluate as `"cool" != "cool"` = `False` and go undetected.
+
+The fix replaces the comparison target with `ae._last_commanded_hvac_mode or classification.hvac_mode`:
+- When CA has issued a mode command, `_last_commanded_hvac_mode` holds the actual mode sent to the thermostat (e.g., `"heat_cool"`).
+- If no command has been issued in this session, it falls back to `classification.hvac_mode`.
+
+This ensures mode overrides are correctly detected regardless of whether the thermostat is single- or dual-setpoint capable.
+
+#### Dual Setpoint Override Detection — `heat_cool` Mode (Issue #269 Bug D)
+
+Setpoint override detection reads the thermostat's temperature attributes to determine whether the user has manually changed a setpoint. When the thermostat is in `heat_cool` mode, `temperature` (the single-setpoint attribute) is `None` — only `target_temp_low` and `target_temp_high` are populated.
+
+The fix gates attribute selection on the current thermostat mode:
+
+| Thermostat mode | Attribute read for setpoint check |
+|---|---|
+| `heat_cool` | `target_temp_low` and `target_temp_high` |
+| `heat`, `cool`, `off`, other | `temperature` (single-setpoint attribute) |
+
+The grace-period trigger in the same block also now compares against `ae._last_commanded_hvac_mode` rather than `classification.hvac_mode`, consistent with the Bug C fix above.
+
+#### `hvac_mode` in Coordinator Data (Issue #269 Bug B)
+
+`hvac_mode` — the thermostat's current operating mode string (`"heat_cool"`, `"cool"`, `"heat"`, `"off"`) — is now included in the coordinator's data dict returned by `_async_update_data()`. `_detect_and_emit_incidents()` reads it from `coordinator.data` to populate incident records with the actual thermostat mode at detection time, rather than deriving it indirectly from other attributes.
 
 **Test coverage:** `tests/test_override_automation_boundary.py` — compound guard invariant.
 
@@ -1705,4 +1738,4 @@ Issue #125 adds a `thermal_pipeline` key to the debug-state API response. This k
 
 ---
 
-_Last Updated: 2026-06-08_
+_Last Updated: 2026-06-11_

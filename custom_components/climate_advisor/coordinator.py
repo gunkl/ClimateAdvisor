@@ -1482,6 +1482,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_OVERRIDE_SINCE: self.automation_engine._fan_override_time,
             ATTR_FAN_RUNNING: fan_running,
             ATTR_HVAC_ACTION: hvac_action,
+            "hvac_mode": hvac_mode,
             ATTR_HVAC_RUNTIME_TODAY: hvac_runtime_today,
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",
@@ -2258,10 +2259,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command()
             and not _is_expected_confirmation
             and self._current_classification
-            and new_state.state != self._current_classification.hvac_mode
+            and new_state.state
+            != (
+                self.automation_engine._last_commanded_hvac_mode
+                or (self._current_classification.hvac_mode if self._current_classification else None)
+            )
         ):
             # Mode changed outside of door/window pause to something
-            # different from what classification dictates — manual override
+            # different from what CA is actively controlling — manual override
             _LOGGER.info(
                 "Manual HVAC override detected: %s -> %s (classification wants %s)",
                 old_state.state,
@@ -2461,11 +2466,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         )
 
         # Detect manual override: temperature changed but not by us
-        new_temp = new_state.attributes.get("temperature")
-        old_temp = old_state.attributes.get("temperature")
+        # In heat_cool mode the thermostat exposes target_temp_high/target_temp_low, not temperature.
+        if new_state.state == "heat_cool":
+            _new_high = new_state.attributes.get("target_temp_high")
+            _old_high = old_state.attributes.get("target_temp_high")
+            _new_low = new_state.attributes.get("target_temp_low")
+            _old_low = old_state.attributes.get("target_temp_low")
+            _setpoint_changed = (_new_high != _old_high) or (_new_low != _old_low)
+            # Use the cooling (high) setpoint as the representative value for override_details
+            new_temp, old_temp = _new_high, _old_high
+        else:
+            new_temp = new_state.attributes.get("temperature")
+            old_temp = old_state.attributes.get("temperature")
+            _setpoint_changed = new_temp != old_temp
 
         if (
-            new_temp != old_temp
+            _setpoint_changed
             and self._today_record
             and not self.automation_engine._temp_command_pending
             and not self.automation_engine._hvac_command_pending
@@ -2490,17 +2506,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pass  # Non-numeric temps, skip detail recording
             _LOGGER.debug("Possible manual override detected: %s -> %s", old_temp, new_temp)
             await self._async_save_state()
-            # Setpoint-only override: mode matches classification but user moved the setpoint.
-            # Trigger the same override confirmation + grace mechanism as a mode change.
+            # Setpoint-only override: mode matches what CA is actively controlling.
+            # Use _last_commanded_hvac_mode so heat_cool mode is handled (classification.hvac_mode
+            # is always "cool"/"heat"/"off" — never "heat_cool" — so the old check missed heat_cool).
             ae = self.automation_engine
+            _ca_active_mode = ae._last_commanded_hvac_mode or (
+                self._current_classification.hvac_mode if self._current_classification else None
+            )
             if (
                 not ae._manual_override_active
                 and not ae._override_confirm_pending
                 and self._current_classification is not None
-                and new_state.state == self._current_classification.hvac_mode
+                and new_state.state == _ca_active_mode
             ):
                 _LOGGER.info(
-                    "Setpoint-only manual override detected: %s -> %s (mode=%s matches classification)",
+                    "Setpoint-only manual override detected: %s -> %s (mode=%s matches CA active mode)",
                     old_temp,
                     new_temp,
                     new_state.state,
@@ -2509,7 +2529,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     source="setpoint",
                     old_mode=old_state.state,
                     new_mode=new_state.state,
-                    classification_mode=self._current_classification.hvac_mode,
+                    classification_mode=(
+                        self._current_classification.hvac_mode if self._current_classification else None
+                    ),
                 )
 
         # Detect manual fan_mode attribute changes on thermostat (Issue #37)
@@ -2523,6 +2545,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._fan_override_active
             and not self.automation_engine._hvac_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
+            and not _is_expected_confirmation
         ):
             _LOGGER.info(
                 "Manual HVAC fan_mode change detected: %s -> %s",

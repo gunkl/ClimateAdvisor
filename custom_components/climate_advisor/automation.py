@@ -413,6 +413,7 @@ class AutomationEngine:
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
+        self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -2450,6 +2451,7 @@ class AutomationEngine:
             _LOGGER.info("[DRY RUN] Would activate fan — %s", reason)
             return
 
+        self._fan_command_time = dt_util.now()
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -2495,6 +2497,7 @@ class AutomationEngine:
             _LOGGER.info("[DRY RUN] Would deactivate fan — %s", reason)
             return
 
+        self._fan_command_time = dt_util.now()
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):

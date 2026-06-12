@@ -127,6 +127,7 @@ def _make_coordinator_stub(
     ae._fan_override_active = fan_override_active
     ae._temp_command_pending = temp_command_pending
     ae._temp_command_time = None
+    ae._fan_command_time = None  # no recent fan command by default
     ae._fan_active = False
     ae._natural_vent_active = False
     # Bug A / C / D — explicit values (not truthy MagicMock defaults)
@@ -142,6 +143,7 @@ def _make_coordinator_stub(
     coord._async_save_state = AsyncMock()
 
     coord._is_recent_temp_command = MagicMock(return_value=False)
+    coord._is_recent_fan_command = MagicMock(return_value=False)
 
     if hvac_command_age_seconds is None:
         coord._is_recent_hvac_command = MagicMock(return_value=False)

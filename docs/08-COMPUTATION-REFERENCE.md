@@ -965,10 +965,11 @@ The coordinator maintains five internal fields to manage fan state across activa
 | `_fan_override_active` | `bool` | Whether a user manual fan override is in effect |
 | `_fan_override_time` | `datetime \| None` | Timestamp of when the fan override was detected |
 | `_fan_command_pending` | `bool` | Set to `True` immediately before the integration issues a fan command; cleared immediately after |
+| `_fan_command_time` | `datetime \| None` | Timestamp recorded at the start of every `_activate_fan()` and `_deactivate_fan()` call; used by `_is_recent_fan_command()` as a timestamp-based secondary guard |
 
-**`_activate_fan()`** sets `_fan_command_pending = True`, issues the fan-on service call, then sets `_fan_active = True` and records `_fan_on_since`. If `_fan_override_active` is `True` at activation time, the call is skipped so the integration does not fight the user's manual setting.
+**`_activate_fan()`** sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-on service call, then sets `_fan_active = True` and records `_fan_on_since`. If `_fan_override_active` is `True` at activation time, the call is skipped so the integration does not fight the user's manual setting.
 
-**`_deactivate_fan()`** follows the same pattern in reverse: sets `_fan_command_pending = True`, issues the fan-off service call, then clears `_fan_active` and `_fan_on_since`. Override state is not checked on deactivation — the intent is always to stop the fan when the economizer or transition logic calls for it.
+**`_deactivate_fan()`** follows the same pattern in reverse: sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-off service call, then clears `_fan_active` and `_fan_on_since`. Override state is not checked on deactivation — the intent is always to stop the fan when the economizer or transition logic calls for it.
 
 ### 9b. Fan Override Detection
 
@@ -976,7 +977,9 @@ Fan override detection runs in two places:
 
 1. **`_async_fan_entity_changed()`** — a state-change listener registered on the `fan_entity` (for `fan_mode == whole_house_fan` or `both`). When the entity state changes, the listener checks whether `_fan_command_pending` is set. If the flag is clear, the state change was user-initiated, not integration-initiated, and a fan override is recorded: `_fan_override_active = True`, `_fan_override_time = utcnow()`.
 
-2. **`_async_thermostat_changed()`** — the existing thermostat state listener is extended to also inspect the thermostat's `fan_mode` attribute (for `fan_mode == hvac_fan` or `both`). If the fan_mode attribute changes while `_fan_command_pending` is clear, a fan override is recorded using the same fields.
+2. **`_async_thermostat_changed()`** — the existing thermostat state listener is extended to also inspect the thermostat's `fan_mode` attribute (for `fan_mode == hvac_fan` or `both`). If the fan_mode attribute changes while `_fan_command_pending` is clear **and** `_is_recent_fan_command(30.0)` returns `False`, a fan override is recorded using the same fields. The 30-second window is required because cloud-connected thermostats can echo the integration's own `climate.set_fan_mode` call seconds after `_fan_command_pending` has already been cleared (Issue #239).
+
+The same guard applies in **`_async_fan_entity_changed()`** (belt-and-suspenders): `_fan_command_pending` is checked first; `_is_recent_fan_command(30.0)` is checked as the fallback.
 
 #### Compound command-pending guard in `_async_thermostat_changed()` (Issue #205/206)
 
@@ -995,15 +998,18 @@ All three flags must be tested together. Testing only `_hvac_command_pending` is
 
 The fix (Issue #206) expands the guard at both the pause-path and normal-path detection sites to `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending`. If **any** of the three flags is `True`, the state change is treated as automation-issued and suppressed.
 
-**`_is_recent_hvac_command(threshold_seconds=3.0)`** is a secondary guard that inspects `_hvac_command_time` to catch race conditions where the flag was already cleared before the listener fired. It does not replace the flag check — it is an additional fallback for sub-second timing races.
+**`_is_recent_hvac_command(threshold_seconds=3.0)`** is a secondary guard that inspects `_hvac_command_time` to catch race conditions where the HVAC flag was already cleared before the listener fired.
 
-**`_is_expected_confirmation` (Issue #269 Bug A):** A third suppression layer for the `fan_mode` attribute-change path specifically. Cloud thermostats (e.g., Nest, Ecobee via cloud polling) sometimes echo a `fan_mode` attribute change as a delayed side-effect of an HVAC mode transition, arriving 30–120 seconds after the original command — outside the 30-second `_is_recent_hvac_command` window. When `_is_expected_confirmation` is `True`, the `fan_mode` change guard suppresses false override detection for up to 120 seconds after the last HVAC command. The three guards are evaluated in order: flag check → `_is_recent_hvac_command(30s)` → `_is_expected_confirmation(120s)`.
+**`_is_expected_confirmation` (Issue #269 Bug A):** A third suppression layer for the `fan_mode` attribute-change path specifically. Cloud thermostats (e.g., Nest, Ecobee via cloud polling) sometimes echo a `fan_mode` attribute change as a delayed side-effect of an HVAC mode transition, arriving 30–120 seconds after the original command — outside the 30-second `_is_recent_hvac_command` window. When `_is_expected_confirmation` is `True`, the `fan_mode` change guard suppresses false override detection for up to 120 seconds after the last HVAC command.
 
-| Guard | Type | Window | Purpose |
-|---|---|---|---|
-| `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending` | Flag check (synchronous) | Until flag cleared | Primary: suppresses both pause-path and normal-path override detection during any automation-issued command sequence |
-| `_is_recent_hvac_command(threshold_seconds=30.0)` | Timestamp check | 30 s | Secondary fallback: catches races where the command flag was cleared before the HA state-change event arrived |
-| `_is_expected_confirmation` | Boolean flag | 120 s | Tertiary: suppresses `fan_mode` attribute changes that arrive as delayed side-effects of HVAC mode transitions on cloud thermostats |
+**`_is_recent_fan_command(threshold_seconds=30.0)` (Issue #239):** A fourth suppression layer for direct fan service calls. `climate.set_fan_mode` calls do not update `_hvac_command_time`, so `_is_recent_hvac_command()` never fires for fan-mode echoes. This guard reads `_fan_command_time` (set at the start of `_activate_fan()` and `_deactivate_fan()`) and suppresses false overrides within 30 seconds of any fan command.
+
+| Guard | Type | Applies to | Window | Purpose |
+|---|---|---|---|---|
+| `_hvac_command_pending OR _fan_command_pending OR _temp_command_pending` | Flag check (synchronous) | All command types | Until cleared | Primary: suppresses both paths during any automation-issued command |
+| `_is_recent_hvac_command(threshold_seconds=30.0)` | Timestamp check | HVAC mode / setpoint changes | 30 s | Secondary: catches races where the HVAC flag cleared before the HA event arrived |
+| `_is_expected_confirmation` | Boolean flag | Fan_mode attribute changes from HVAC mode transitions | 120 s | Tertiary: suppresses delayed fan_mode echoes from HVAC mode changes on cloud thermostats |
+| `_is_recent_fan_command(threshold_seconds=30.0)` | Timestamp check | Fan mode changes (`climate.set_fan_mode`) | 30 s | Quaternary: suppresses fan echo races where `_fan_command_pending` cleared before the HA event arrived |
 
 #### Mode Override Detection — `_last_commanded_hvac_mode` (Issue #269 Bug C)
 
@@ -1254,6 +1260,7 @@ Complete list of all constants from `const.py` that affect runtime behavior.
 | `_fan_override_active` | `False` | Whether a user manual fan override is in effect |
 | `_fan_override_time` | `None` | UTC timestamp of when the fan override was detected |
 | `_fan_command_pending` | `False` | Set during integration-issued fan commands to suppress false override detection |
+| `_fan_command_time` | `None` | UTC timestamp of the most recent `_activate_fan()` / `_deactivate_fan()` call; read by `_is_recent_fan_command()` |
 
 ---
 

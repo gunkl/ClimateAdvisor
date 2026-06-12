@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.2": [
+        "Fix #239: CA's own fan activation no longer triggers a spurious manual-override grace period."
+        " When CA calls climate.set_fan_mode for natural ventilation, the fan_mode echo from a cloud"
+        " thermostat can arrive after _fan_command_pending has already cleared. A new _fan_command_time"
+        " timestamp guard (_is_recent_fan_command, 30 s) mirrors the existing _is_recent_temp_command"
+        " pattern and suppresses false override detection. Parallel fix to #221/#225.",
+    ],
     "0.4.1": [
         "Fix #269: Manual overrides now correctly detected in heat_cool (dual-setpoint) mode."
         " Four bugs fixed: CA's own mode command no longer triggers a false fan override grace period"
@@ -790,6 +797,25 @@ KNOWN_FIXES: dict[int, dict] = {
             " still matches last commanded) will be suppressed — bounded and documented trade-off",
             "Dual setpoint override recording uses the cooling setpoint (target_temp_high) as the"
             " representative value; independent heat-floor change has magnitude but no dedicated label",
+        ],
+    },
+    239: {
+        "issue": 239,
+        "title": "CA fan activation falsely detected as manual override (fan_command_time race guard)",
+        "version_fixed": "0.4.2",
+        "scope_covered": [
+            "AutomationEngine._fan_command_time: datetime | None — timestamp set at the start of"
+            " _activate_fan() and _deactivate_fan() before any service call",
+            "coordinator._is_recent_fan_command(threshold_seconds=30.0) — reads _fan_command_time;"
+            " mirrors _is_recent_temp_command pattern",
+            "_async_thermostat_changed fan_mode detection guard: now includes"
+            " not _is_recent_fan_command(30.0) — suppresses echoes from CA's own set_fan_mode calls",
+            "_async_fan_entity_changed guard: same guard added as belt-and-suspenders",
+        ],
+        "scope_not_covered": [
+            "Restart race: if HA restarts mid-fan-session, _fan_command_time resets to None;"
+            " an echo arriving immediately after restart is not suppressed (30-second window is"
+            " acceptable given infrequency of restart-coincident echoes)",
         ],
     },
 }

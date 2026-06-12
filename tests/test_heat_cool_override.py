@@ -340,10 +340,7 @@ class TestBugBHvacModeInData:
         import ast
         import pathlib
 
-        coordinator_path = pathlib.Path(
-            "c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-issue-269"
-            "/custom_components/climate_advisor/coordinator.py"
-        )
+        coordinator_path = pathlib.Path(__file__).parent.parent / "custom_components/climate_advisor/coordinator.py"
         source = coordinator_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
 
@@ -371,10 +368,7 @@ class TestBugBHvacModeInData:
         import ast
         import pathlib
 
-        coordinator_path = pathlib.Path(
-            "c:/Users/David/Documents/VSCode Projects/ClimateAdvisor-issue-269"
-            "/custom_components/climate_advisor/coordinator.py"
-        )
+        coordinator_path = pathlib.Path(__file__).parent.parent / "custom_components/climate_advisor/coordinator.py"
         source = coordinator_path.read_text(encoding="utf-8")
         tree = ast.parse(source)
 

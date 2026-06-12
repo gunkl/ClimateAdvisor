@@ -97,6 +97,10 @@ def _make_coord(*, temp_command_time: datetime | None = None):
     ae._hvac_command_time = None
     ae._manual_override_active = False
     ae._override_confirm_pending = False
+    # Must be explicitly None (not truthy MagicMock) so Bug C/D _ca_active_mode
+    # falls back to classification.hvac_mode correctly.
+    ae._last_commanded_hvac_mode = None
+    ae._last_commanded_hvac_time = None
     ae.handle_manual_override_during_pause = AsyncMock()
     ae.handle_manual_override = MagicMock()
     ae.handle_fan_manual_override = MagicMock()

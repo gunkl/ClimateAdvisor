@@ -178,6 +178,148 @@ Scientific, evidence-based, methodical. Prefer "no evidence of X" over "X is fin
 """
 
 
+# Known automation cycle intervals (name → seconds).
+# Used by _build_timing_correlations to flag manual events that coincide with
+# automation-cycle boundaries. Extend this dict to add new intervals.
+_AUTOMATION_INTERVALS_SECONDS: dict[str, int] = {
+    "coordinator_cycle": 30 * 60,  # 30 min — main coordinator update cycle
+    "manual_grace": 90 * 60,  # 90 min — manual override grace period
+    "sensor_grace": 5 * 60,  # 5 min  — door/window sensor grace period
+    "override_confirmation": 10 * 60,  # 10 min — override confirmation window
+}
+
+# How close a delta must be to a known interval to be flagged (seconds).
+_TIMING_TOLERANCE_S: int = 2 * 60  # ±2 minutes
+
+# Event types treated as automation-sourced for timing correlation purposes.
+_TIMING_AUTO_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "classification_applied",
+        "comfort_band_applied",
+        "grace_started",
+        "grace_expired",
+        "nat_vent_started",
+        "nat_vent_ended",
+        "nat_vent_ceiling_escalation",
+        "nat_vent_comfort_floor_exit",
+        "nat_vent_predicted_floor_exit",
+        "nat_vent_outdoor_rise_exit",
+        "nat_vent_away_ceiling_exit",
+        "ceiling_guard_fired",
+        "warm_day_state_confirmed",
+        "warm_day_setback_applied",
+        "warm_day_comfort_gap",
+        "occupancy_setback",
+        "occupancy_comfort_restored",
+        "morning_wakeup",
+    }
+)
+
+# Event types treated as manual-sourced for timing correlation purposes.
+_TIMING_MANUAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "override_detected",
+        "override_confirmed",
+        "override_cleared",
+        "override_self_resolved",
+        "manual_override_cleared",
+        "handle_manual_override",
+        "handle_fan_manual_override",
+    }
+)
+
+
+def _build_timing_correlations(events: list) -> str:
+    """Build a TIMING CORRELATIONS section for the investigator context.
+
+    Scans the event log for manual events that occur within ±2 minutes of a
+    known automation interval after an automation event. These coincidences
+    suggest the "manual" event may actually be automation-caused.
+
+    Returns a formatted string starting with '=== TIMING CORRELATIONS ==='.
+    """
+    import datetime as _dt
+
+    lines: list[str] = ["=== TIMING CORRELATIONS ==="]
+    if not events:
+        lines.append("  (no events to correlate)")
+        return "\n".join(lines)
+
+    # Resolve timestamps to UTC datetime objects
+    resolved: list[tuple] = []  # (dt | None, event_dict)
+    for entry in events:
+        if not isinstance(entry, dict):
+            continue
+        raw_time = entry.get("time")
+        event_dt = None
+        if isinstance(raw_time, _dt.datetime):
+            event_dt = raw_time
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=_dt.UTC)
+        elif raw_time is not None:
+            try:
+                event_dt = _dt.datetime.fromisoformat(str(raw_time))
+                if event_dt.tzinfo is None:
+                    event_dt = event_dt.replace(tzinfo=_dt.UTC)
+            except ValueError:
+                pass
+        resolved.append((event_dt, entry))
+
+    # Collect automation events (with parseable timestamps)
+    auto_events = [
+        (dt, e)
+        for dt, e in resolved
+        if dt is not None and (e.get("source") in ("automation",) or str(e.get("type", "")) in _TIMING_AUTO_EVENT_TYPES)
+    ]
+
+    # Check each manual event against all prior automation events
+    found_any = False
+    for evt_dt, evt in resolved:
+        etype = str(evt.get("type", ""))
+        is_manual = evt.get("source") == "manual" or etype in _TIMING_MANUAL_EVENT_TYPES
+        if not is_manual or evt_dt is None:
+            continue
+
+        # Find the nearest prior automation event
+        prior_auto = [(adt, ae) for adt, ae in auto_events if adt < evt_dt]
+        if not prior_auto:
+            lines.append(f"  [OK] {evt_dt.strftime('%H:%M')} — {etype}: no prior automation event in window")
+            found_any = True
+            continue
+
+        # Most recent prior automation event
+        nearest_adt, nearest_ae = max(prior_auto, key=lambda x: x[0])
+        delta_s = (evt_dt - nearest_adt).total_seconds()
+        time_str = evt_dt.strftime("%H:%M")
+        prior_type = str(nearest_ae.get("type", "?"))
+        prior_time_str = nearest_adt.strftime("%H:%M")
+
+        # Check against known intervals
+        matched_interval: str | None = None
+        for interval_name, interval_s in _AUTOMATION_INTERVALS_SECONDS.items():
+            if abs(delta_s - interval_s) <= _TIMING_TOLERANCE_S:
+                matched_interval = interval_name
+                break
+
+        if matched_interval is not None:
+            delta_min = delta_s / 60
+            lines.append(
+                f"  [TIMING-COINCIDENT] {time_str} — {etype}: "
+                f"{delta_min:.0f}m after {prior_type} at {prior_time_str} "
+                f"(\u2248{matched_interval.replace('_', '-')}) — may be automation-caused"
+            )
+        else:
+            lines.append(
+                f"  [OK] {time_str} — {etype}: no matching automation interval (delta={delta_s:.0f}s from {prior_type})"
+            )
+        found_any = True
+
+    if not found_any:
+        lines.append("  (no manual events in window)")
+
+    return "\n".join(lines)
+
+
 def _fmt_window_compliance(compliance: dict) -> str:
     """Format window_compliance with its denominator for unambiguous AI interpretation.
 
@@ -687,6 +829,17 @@ async def async_build_investigator_context(
     except Exception:
         _LOGGER.warning("investigator: failed to read event log â€” skipping")
         lines += ["=== EVENT LOG ===", "  unavailable", ""]
+
+    # ------------------------------------------------------------------
+    # 4b. Timing correlation analysis
+    # ------------------------------------------------------------------
+    try:
+        raw_log: list[Any] = getattr(coordinator, "_event_log", []) or []
+        lines.append(_build_timing_correlations(raw_log))
+        lines.append("")
+    except Exception:
+        _LOGGER.warning("investigator: failed to build timing correlations -- skipping")
+        lines += ["=== TIMING CORRELATIONS ===", "  unavailable", ""]
 
     # ------------------------------------------------------------------
     # 5. Recent AI report history

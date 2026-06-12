@@ -1,4 +1,4 @@
-"""TDD tests for Issue #149 — activity report quality fixes.
+"""TDD tests for activity report quality fixes (Issue #149 and Issue #277-F).
 
 Written BEFORE implementation. Tests are expected to fail on unmodified code
 for the bugs being fixed and pass for regression guards.
@@ -589,4 +589,186 @@ class TestHvacPeakCapture:
         assert obs["peak_indoor_f"] == pytest.approx(72.0), (
             f"Expected peak_indoor_f=72.0 (peak must not decrease), got {obs['peak_indoor_f']}.\n"
             "Bug D regression guard: max(prior_peak, final) — never lower the peak."
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestSetpointEventFieldClarity — Fix F (Issue #277)
+# ---------------------------------------------------------------------------
+
+
+from custom_components.climate_advisor.ai_skills_activity import (  # noqa: E402
+    async_build_activity_context,
+)
+
+
+def _make_mock_coordinator_for_activity(event_log: list | None = None) -> MagicMock:
+    """Return a minimal coordinator mock suitable for async_build_activity_context."""
+    coord = MagicMock()
+    coord.data = {
+        "day_type": "mild",
+        "trend": "stable",
+        "hvac_action": "heating",
+        "automation_status": "active",
+        "last_action_time": "08:00",
+        "last_action_reason": "wake-up",
+        "next_automation_action": "setback",
+        "next_automation_time": "22:30",
+        "occupancy_mode": "home",
+        "fan_status": "inactive",
+        "contact_status": "all_closed",
+        "learning_suggestions": [],
+    }
+    coord.config = {
+        "climate_entity": "climate.test",
+        "comfort_heat": 68,
+        "comfort_cool": 76,
+        "setback_heat": 60,
+        "setback_cool": 82,
+        "wake_time": "06:30",
+        "sleep_time": "22:30",
+        "briefing_time": "06:00",
+        "learning_enabled": True,
+        "fan_mode": "disabled",
+        "temp_unit": "fahrenheit",
+    }
+    coord._today_record = MagicMock()
+    coord._today_record.hvac_runtime_minutes = 30.0
+    coord._today_record.manual_overrides = 0
+    coord._today_record.override_details = []
+    coord._hvac_on_since = None
+    coord.automation_engine = MagicMock()
+    coord.automation_engine._manual_override_active = False
+    coord._event_log = event_log or []
+    # learning engine — disable to avoid attribute errors
+    coord.learning = MagicMock()
+    coord.learning.get_engine_status.return_value = {
+        "k_passive": {"active": False},
+        "k_solar": {"active": False},
+        "solar_phase_offset_h": {"active": False},
+        "k_vent_window": {"active": False},
+        "k_active_hvac": {"active": False},
+        "ode_version": "v3",
+        "physics_eligible": False,
+        "physics_eligible_reason": "no data",
+    }
+    coord.learning.get_thermal_model.return_value = {}
+    return coord
+
+
+def _make_mock_hass_for_activity() -> MagicMock:
+    """Return a minimal hass mock for activity context tests."""
+    hass = MagicMock()
+    climate_state = MagicMock()
+    climate_state.state = "heat"
+    climate_state.attributes = {"current_temperature": 70.0}
+    hass.states.get.return_value = climate_state
+    return hass
+
+
+class TestSetpointEventFieldClarity:
+    """Fix F: override_detected setpoint events must render temp values in a
+    [settings: ...] annotation, not embedded in the event type description.
+
+    Tests in this class MUST FAIL before the fix and PASS after.
+    """
+
+    def _build_context_with_event(self, event: dict) -> str:
+        import asyncio
+
+        coord = _make_mock_coordinator_for_activity(event_log=[event])
+        hass = _make_mock_hass_for_activity()
+        import custom_components.climate_advisor.ai_skills_activity as _act_mod
+
+        now = datetime.now(tz=UTC)
+        with patch.object(_act_mod.dt_util, "now", return_value=now):
+            return asyncio.run(async_build_activity_context(hass, coord, hours=24))
+
+    @staticmethod
+    def _recent_dt(**kwargs) -> datetime:
+        """Return a UTC datetime within the last 24h window."""
+        from datetime import UTC, datetime, timedelta
+
+        return datetime.now(UTC) - timedelta(hours=1, **kwargs)
+
+    def test_setpoint_override_event_has_settings_annotation(self):
+        """override_detected with old_temp/new_temp → [settings: ...] appears in rendered line.
+
+        MUST FAIL before fix: current renderer embeds nothing for these fields;
+        there is no [settings:] annotation in the output.
+        After fix: a line like '[settings: setpoint: 74°F→76°F]' must appear.
+        """
+        event = {
+            "type": "override_detected",
+            "time": self._recent_dt(),
+            "source": "manual",
+            "old_temp": 74,
+            "new_temp": 76,
+        }
+        context = self._build_context_with_event(event)
+        assert "[settings:" in context, (
+            "Fix F: override_detected event with old_temp/new_temp must produce a "
+            "'[settings: setpoint: X°F→Y°F]' annotation in the event log line.\n"
+            f"Context EVENT LOG section:\n{context}"
+        )
+
+    def test_settings_annotation_contains_temperature_values(self):
+        """[settings:] annotation must include old and new temp values.
+
+        MUST FAIL before fix: no [settings:] annotation is emitted.
+        After fix: both 74 and 76 must appear in the annotation.
+        """
+        event = {
+            "type": "override_detected",
+            "time": self._recent_dt(),
+            "source": "manual",
+            "old_temp": 74,
+            "new_temp": 76,
+        }
+        context = self._build_context_with_event(event)
+        # Both temperature values must appear in the annotation
+        assert "74" in context, (
+            f"Fix F: old_temp=74 must appear in the [settings:] annotation.\nGot context:\n{context}"
+        )
+        assert "76" in context, (
+            f"Fix F: new_temp=76 must appear in the [settings:] annotation.\nGot context:\n{context}"
+        )
+        assert "[settings:" in context, "Fix F: [settings:] annotation must be present for setpoint override event."
+
+    def test_non_setpoint_override_event_no_spurious_annotation(self):
+        """override_detected without old_temp/new_temp → no [settings:] annotation.
+
+        MUST PASS before and after fix (regression guard).
+        """
+        event = {
+            "type": "override_detected",
+            "time": self._recent_dt(),
+            "source": "manual",
+            "old_mode": "heat",
+            "new_mode": "cool",
+        }
+        context = self._build_context_with_event(event)
+        # old_mode/new_mode — no temperature settings annotation expected
+        # (those are mode-level overrides, not setpoint overrides)
+        assert "[settings:" not in context or "setpoint:" not in context, (
+            "Fix F regression guard: override_detected without old_temp/new_temp "
+            "must NOT produce a setpoint [settings:] annotation."
+        )
+
+    def test_system_prompt_instructs_settings_column_for_setpoint_source(self):
+        """_SYSTEM_PROMPT must contain guidance about setpoint→Settings column routing.
+
+        MUST FAIL before fix: current prompt has no 'source=setpoint' routing guidance.
+        After fix: prompt must mention that setpoint values go in Settings, not Event.
+        """
+        assert "source=setpoint" in _SYSTEM_PROMPT or "setpoint" in _SYSTEM_PROMPT.lower(), (
+            "Fix F: _SYSTEM_PROMPT must contain guidance about routing setpoint "
+            "temperature values to the Settings column, not embedding them in Event.\n"
+            f"Current _SYSTEM_PROMPT (first 500 chars):\n{_SYSTEM_PROMPT[:500]}"
+        )
+        # Specifically, it must have guidance about settings column for setpoint overrides
+        assert "Settings" in _SYSTEM_PROMPT and ("old_temp" in _SYSTEM_PROMPT or "setpoint:" in _SYSTEM_PROMPT), (
+            "Fix F: _SYSTEM_PROMPT must instruct the AI to put old_temp/new_temp "
+            "values in the Settings column for override_detected events.\n"
+            f"Current _SYSTEM_PROMPT:\n{_SYSTEM_PROMPT}"
         )

@@ -409,6 +409,9 @@ class AutomationEngine:
         self._fan_override_active: bool = False
         self._fan_override_time: str | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
+        # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
+        # Restored when the whole-house fan deactivates so AC/heat resumes.
+        self._pre_fan_hvac_mode: str | None = None
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
@@ -1198,6 +1201,10 @@ class AutomationEngine:
             if mode == "off" and not self._natural_vent_active:
                 _fan_cfg = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
                 if _fan_cfg in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+                    # Stamp _fan_command_time BEFORE the service call so the race guard
+                    # suppresses the cloud-thermostat echo that arrives >30 s later
+                    # (Issue #277 Fix A1).
+                    self._fan_command_time = dt_util.now()
                     try:
                         await self.hass.services.async_call(
                             "climate",
@@ -1629,6 +1636,14 @@ class AutomationEngine:
                     )
                     self._start_grace_period("automation", trigger="sensor_closed_resume")
             return
+
+        # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
+        # when all sensors close — otherwise it draws outdoor air through a closed
+        # envelope, counteracting HVAC and wasting energy for the occupant.
+        _fan_cfg_d = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if self._fan_active and _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._natural_vent_active:
+            _LOGGER.info("All sensors closed — stopping whole-house fan (was running outside nat-vent)")
+            await self._deactivate_fan(reason="all sensors closed — stopping whole-house fan")
 
         if not self._paused_by_door:
             return
@@ -2455,6 +2470,16 @@ class AutomationEngine:
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                # Capture current HVAC mode before suppressing it (Issue #277 Fix C).
+                # Whole-house fan exchanges outdoor air directly — running AC/heat
+                # simultaneously fights the fan and wastes energy.
+                _cs = self.hass.states.get(self.climate_entity)
+                self._pre_fan_hvac_mode = _cs.state if _cs else None
+                await self._set_hvac_mode(
+                    "off",
+                    reason="whole-house fan active — suppressing HVAC to prevent fighting outdoor air exchange",
+                )
+
                 fan_entity = self.config.get(CONF_FAN_ENTITY)
                 if fan_entity:
                     domain = fan_entity.split(".")[0]  # "fan" or "switch"
@@ -2506,6 +2531,15 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]
                     await self.hass.services.async_call(domain, "turn_off", {"entity_id": fan_entity})
                     _LOGGER.warning("Deactivated %s fan (%s) — %s", domain, fan_entity, reason)
+
+                # Restore prior HVAC mode that was suppressed when the fan activated
+                # (Issue #277 Fix C). Only restore if we have a stored mode to go back to.
+                if self._pre_fan_hvac_mode is not None:
+                    await self._set_hvac_mode(
+                        self._pre_fan_hvac_mode,
+                        reason=f"whole-house fan stopped — restoring HVAC mode ({self._pre_fan_hvac_mode})",
+                    )
+                    self._pre_fan_hvac_mode = None
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                 await self.hass.services.async_call(
@@ -2699,6 +2733,7 @@ class AutomationEngine:
         self._fan_override_active = state.get("fan_override_active", False)
         self._fan_override_time = state.get("fan_override_time")
         self._fan_min_runtime_active = state.get("fan_min_runtime_active", False)
+        self._pre_fan_hvac_mode = state.get("pre_fan_hvac_mode")
         # _fan_min_cycle_cancel is not serializable; cycle restarts fresh from coordinator startup
         last_notified = state.get("last_welcome_home_notified")
         if last_notified:
@@ -2749,6 +2784,7 @@ class AutomationEngine:
             "fan_override_active": self._fan_override_active,
             "fan_override_time": self._fan_override_time,
             "fan_min_runtime_active": self._fan_min_runtime_active,
+            "pre_fan_hvac_mode": self._pre_fan_hvac_mode,
             "last_welcome_home_notified": (
                 self._last_welcome_home_notified.isoformat() if self._last_welcome_home_notified else None
             ),

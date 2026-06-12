@@ -2474,6 +2474,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Detect manual override: temperature changed but not by us
         # In heat_cool mode the thermostat exposes target_temp_high/target_temp_low, not temperature.
+        # _setpoint_override_detected gates Block 3 (fan_mode): a single thermostat event that
+        # includes BOTH a setpoint change AND a fan_mode change must only fire the setpoint path.
+        _setpoint_override_detected = False
         if new_state.state == "heat_cool":
             _new_high = new_state.attributes.get("target_temp_high")
             _old_high = old_state.attributes.get("target_temp_high")
@@ -2495,6 +2498,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
         ):
+            # Mark setpoint detection as fired so Block 3 (fan_mode) is suppressed for this event.
+            # A single event that changes both setpoint and fan_mode has one root cause; two
+            # simultaneous grace periods from one event would confuse the automation engine.
+            _setpoint_override_detected = True
             self._today_record.manual_overrides += 1
             try:
                 old_val = float(old_temp)
@@ -2554,11 +2561,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not _is_expected_confirmation
             and not self._is_recent_fan_command(threshold_seconds=30.0)
+            and not _setpoint_override_detected
         ):
+            _fan_ct = self.automation_engine._fan_command_time
+            try:
+                _fan_cmd_age = (
+                    f"{(dt_util.now() - _fan_ct).total_seconds():.0f}s ago" if _fan_ct is not None else "None"
+                )
+            except (TypeError, AttributeError):
+                _fan_cmd_age = "None"
+            try:
+                _hvac_cmd_age = (
+                    f"{(dt_util.now() - _last_cmd_time).total_seconds():.0f}s ago"
+                    if _last_cmd_time is not None
+                    else "None"
+                )
+            except (TypeError, AttributeError):
+                _hvac_cmd_age = "None"
             _LOGGER.info(
-                "Manual HVAC fan_mode change detected: %s -> %s",
+                "Manual HVAC fan_mode change detected: %s -> %s (fan_cmd=%s, hvac_cmd=%s, expected_confirmation=%s)",
                 old_fan_mode,
                 new_fan_mode,
+                _fan_cmd_age,
+                _hvac_cmd_age,
+                _is_expected_confirmation,
             )
             self.automation_engine.handle_fan_manual_override()
 

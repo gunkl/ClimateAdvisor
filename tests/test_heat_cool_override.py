@@ -684,3 +684,255 @@ class TestBugDHeatCoolSetpointDetection:
             "Setpoint change when _temp_command_pending=True must NOT be counted "
             "(CA issued the setpoint command itself)."
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fix B — Mutual exclusion: setpoint and fan_mode detection blocks
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFixBMutualExclusion:
+    """When a single thermostat state-change event includes BOTH a setpoint change
+    AND a fan_mode change, only the setpoint detection must fire — not both.
+
+    Without the fix, Block 2 (setpoint) and Block 3 (fan_mode) both run, producing
+    two simultaneous grace periods from one root cause.
+
+    Fix: _setpoint_override_detected flag gates Block 3.
+    """
+
+    def test_setpoint_and_fan_mode_change_fires_only_setpoint_override(self):
+        """Single event with both setpoint change and fan_mode change.
+
+        Occupant experience: after CA's coordinator cycle re-applies the comfort band,
+        the cloud thermostat echoes back BOTH a new setpoint AND a fan_mode attribute
+        change. Without the fix, the occupant gets two grace periods at once — one for
+        a setpoint override and one for a spurious fan override — each independently
+        resetting the automation timer.
+
+        Expected: handle_manual_override() (setpoint) called once,
+                  handle_fan_manual_override() NOT called.
+        """
+        cmd_time = _NOW_BASE - timedelta(minutes=10)
+        coord = _make_coordinator_stub(
+            last_commanded_hvac_mode="heat_cool",
+            last_commanded_hvac_time=cmd_time,
+            classification=_make_classification(hvac_mode="cool"),
+        )
+
+        # Both setpoint and fan_mode changed in the same event
+        event = _make_event(
+            old_hvac_mode="heat_cool",
+            new_hvac_mode="heat_cool",
+            old_target_high=72.0,
+            new_target_high=74.0,  # setpoint changed
+            old_target_low=68.0,
+            new_target_low=68.0,
+            old_fan_mode="auto",
+            new_fan_mode="on",  # fan_mode also changed
+        )
+
+        mock_dt = MagicMock()
+        mock_dt.now.return_value = _NOW_BASE
+        with patch(_PATCH_CALLBACK, side_effect=lambda fn: fn), patch(_PATCH_DT_UTIL, mock_dt):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        ae = coord.automation_engine
+        assert ae.handle_manual_override.call_count == 1, (
+            "handle_manual_override() (setpoint) must be called once. Fix B: setpoint block should fire normally."
+        )
+        assert ae.handle_fan_manual_override.call_count == 0, (
+            "handle_fan_manual_override() must NOT be called when a setpoint override "
+            "was already detected in the same event. "
+            "Fix B: add _setpoint_override_detected guard to Block 3."
+        )
+
+    def test_fan_mode_change_without_setpoint_change_fires_fan_override(self):
+        """Fan_mode changes without any setpoint change → fan override fires normally.
+
+        This verifies that Fix B's guard does NOT suppress fan overrides when there is
+        no accompanying setpoint change.
+        """
+        coord = _make_coordinator_stub(
+            last_commanded_hvac_mode=None,
+            last_commanded_hvac_time=None,
+        )
+
+        # Only fan_mode changed — no setpoint change
+        event = _make_event(
+            old_hvac_mode="cool",
+            new_hvac_mode="cool",
+            old_temp=72.0,
+            new_temp=72.0,  # unchanged
+            old_fan_mode="auto",
+            new_fan_mode="on",  # fan_mode changed
+        )
+
+        with patch(_PATCH_CALLBACK, side_effect=lambda fn: fn):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        ae = coord.automation_engine
+        assert ae.handle_fan_manual_override.call_count == 1, (
+            "handle_fan_manual_override() must still fire when fan_mode changes without "
+            "any setpoint change. Fix B must not over-suppress fan overrides."
+        )
+
+    def test_setpoint_change_alone_does_not_suppress_later_events(self):
+        """A setpoint override in one event must not affect detection in a separate event.
+
+        _setpoint_override_detected is a local variable (per event call), so it resets
+        each invocation. Two consecutive calls — first setpoint-only, then fan-only —
+        must each fire their respective handler.
+        """
+        cmd_time = _NOW_BASE - timedelta(minutes=10)
+        coord = _make_coordinator_stub(
+            last_commanded_hvac_mode="heat_cool",
+            last_commanded_hvac_time=cmd_time,
+            classification=_make_classification(hvac_mode="cool"),
+        )
+
+        # Event 1: setpoint only
+        event_setpoint = _make_event(
+            old_hvac_mode="heat_cool",
+            new_hvac_mode="heat_cool",
+            old_target_high=72.0,
+            new_target_high=74.0,
+        )
+        # Event 2: fan_mode only (no setpoint change)
+        event_fan = _make_event(
+            old_hvac_mode="heat_cool",
+            new_hvac_mode="heat_cool",
+            old_fan_mode="auto",
+            new_fan_mode="on",
+        )
+
+        mock_dt = MagicMock()
+        mock_dt.now.return_value = _NOW_BASE
+        with patch(_PATCH_CALLBACK, side_effect=lambda fn: fn), patch(_PATCH_DT_UTIL, mock_dt):
+            asyncio.run(coord._async_thermostat_changed(event_setpoint))
+            # Reset fan_override_active so second event can fire
+            coord.automation_engine._fan_override_active = False
+            asyncio.run(coord._async_thermostat_changed(event_fan))
+
+        ae = coord.automation_engine
+        assert ae.handle_fan_manual_override.call_count == 1, (
+            "The second event (fan-only) must fire handle_fan_manual_override(). "
+            "_setpoint_override_detected is a local variable and must reset between calls."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fix H — Fan detection diagnostic logging
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFixHFanDetectionLogging:
+    """When handle_fan_manual_override() fires from _async_thermostat_changed,
+    the INFO log message must include old_fan_mode, new_fan_mode, and fan_cmd age.
+
+    Without the fix, the log only says "Manual HVAC fan_mode change detected: X -> Y"
+    with no guard state, making post-hoc diagnosis from logs impossible.
+    """
+
+    def test_fan_override_log_includes_old_and_new_fan_mode(self):
+        """The INFO log message must include both old_fan_mode and new_fan_mode values."""
+        coord = _make_coordinator_stub(
+            last_commanded_hvac_mode=None,
+            last_commanded_hvac_time=None,
+        )
+
+        event = _make_event(
+            old_hvac_mode="cool",
+            new_hvac_mode="cool",
+            old_fan_mode="auto",
+            new_fan_mode="on",
+        )
+
+        with (
+            patch(_PATCH_CALLBACK, side_effect=lambda fn: fn),
+            patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_log,
+        ):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        # Find the fan_mode detection INFO call
+        info_calls = [call for call in mock_log.info.call_args_list]
+        fan_log_calls = [
+            call for call in info_calls if "fan_mode" in str(call).lower() and "detected" in str(call).lower()
+        ]
+        assert fan_log_calls, (
+            "Expected an INFO log message containing 'fan_mode' and 'detected' "
+            "when handle_fan_manual_override() fires. Fix H: add diagnostic log."
+        )
+        log_str = str(fan_log_calls[0])
+        assert "auto" in log_str, f"Log message must include old_fan_mode ('auto'). Got: {log_str}"
+        assert "on" in log_str, f"Log message must include new_fan_mode ('on'). Got: {log_str}"
+
+    def test_fan_override_log_includes_fan_cmd_age(self):
+        """The INFO log message must include fan_cmd age information."""
+        coord = _make_coordinator_stub(
+            last_commanded_hvac_mode=None,
+            last_commanded_hvac_time=None,
+        )
+        # Set a specific fan_command_time so we can verify age is logged
+        coord.automation_engine._fan_command_time = _NOW_BASE - timedelta(seconds=45)
+
+        event = _make_event(
+            old_hvac_mode="cool",
+            new_hvac_mode="cool",
+            old_fan_mode="auto",
+            new_fan_mode="on",
+        )
+
+        mock_dt = MagicMock()
+        mock_dt.now.return_value = _NOW_BASE
+        with (
+            patch(_PATCH_CALLBACK, side_effect=lambda fn: fn),
+            patch(_PATCH_DT_UTIL, mock_dt),
+            patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_log,
+        ):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        info_calls = [call for call in mock_log.info.call_args_list]
+        fan_log_calls = [
+            call for call in info_calls if "fan_mode" in str(call).lower() and "detected" in str(call).lower()
+        ]
+        assert fan_log_calls, "Expected fan detection INFO log. Fix H: add diagnostic log."
+        log_str = str(fan_log_calls[0])
+        # The age should appear — "45s ago" or similar
+        assert "fan_cmd" in log_str.lower() or "45" in log_str, (
+            f"Log message must include fan_cmd age (e.g. '45s ago' or similar). Got: {log_str}. "
+            "Fix H: include _fan_command_time age in the log message."
+        )
+
+    def test_fan_override_log_shows_none_when_no_prior_fan_command(self):
+        """When _fan_command_time is None, the log must reflect that (e.g. 'None')."""
+        coord = _make_coordinator_stub(
+            last_commanded_hvac_mode=None,
+            last_commanded_hvac_time=None,
+        )
+        # Explicitly None (default in stub)
+        coord.automation_engine._fan_command_time = None
+
+        event = _make_event(
+            old_hvac_mode="cool",
+            new_hvac_mode="cool",
+            old_fan_mode="auto",
+            new_fan_mode="on",
+        )
+
+        with (
+            patch(_PATCH_CALLBACK, side_effect=lambda fn: fn),
+            patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_log,
+        ):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        info_calls = [call for call in mock_log.info.call_args_list]
+        fan_log_calls = [
+            call for call in info_calls if "fan_mode" in str(call).lower() and "detected" in str(call).lower()
+        ]
+        assert fan_log_calls, "Expected fan detection INFO log."
+        log_str = str(fan_log_calls[0])
+        assert "None" in log_str or "none" in log_str.lower(), (
+            f"When _fan_command_time is None, the log must say 'None'. Got: {log_str}. "
+            "Fix H: handle None fan_command_time in the diagnostic log."
+        )

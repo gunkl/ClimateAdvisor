@@ -4,9 +4,27 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.3": [
+        "Fix #277: Whole-house fan now suppresses HVAC while active (sets thermostat off;"
+        " restores prior mode when fan stops). Running AC while exhausting conditioned air"
+        " is no longer possible.",
+        "Fix #277: All sensors closing now stops the whole-house fan even when natural"
+        " ventilation was not the trigger — the whole-house fan serves no purpose with"
+        " windows sealed.",
+        "Fix #277: CA's own HVAC-off command (which asserts fan_mode=auto as a side effect)"
+        " no longer triggers a spurious fan manual-override grace period. Cloud thermostat"
+        " echoes arriving after the 30s guard window are now suppressed.",
+        "Fix #277: A single thermostat event that includes both a setpoint change and a"
+        " fan_mode change now triggers at most one override response — setpoint wins."
+        " Previously, CA's coordinator re-application produced both a setpoint override and"
+        " a fan grace period simultaneously.",
+        "Fix #277: Activity report event log now places setpoint values in the Settings"
+        " column for override_detected entries. AI investigator flags events that occur at"
+        " exact automation intervals as timing-coincident (may be automation-caused).",
+    ],
     "0.4.2": [
         "Fix #239: CA's own fan activation no longer triggers a spurious manual-override grace period."
         " When CA calls climate.set_fan_mode for natural ventilation, the fan_mode echo from a cloud"
@@ -816,6 +834,32 @@ KNOWN_FIXES: dict[int, dict] = {
             "Restart race: if HA restarts mid-fan-session, _fan_command_time resets to None;"
             " an echo arriving immediately after restart is not suppressed (30-second window is"
             " acceptable given infrequency of restart-coincident echoes)",
+        ],
+    },
+    277: {
+        "issue": 277,
+        "title": "Fan override false positives, whole-house fan behavioral gaps, timeline clarity",
+        "version_fixed": "0.4.3",
+        "scope_covered": [
+            "Bug A1: _set_hvac_mode('off') fan_command_time guard — set_fan_mode(auto) assertion"
+            " now stamps _fan_command_time before the service call; cloud echo suppressed by"
+            " _is_recent_fan_command(30s)",
+            "Bug B: _setpoint_override_detected mutual exclusion flag — single thermostat event"
+            " triggers at most one override type (setpoint wins over fan_mode)",
+            "Bug C: FAN_MODE_WHOLE_HOUSE HVAC suppression — _activate_fan captures _pre_fan_hvac_mode"
+            " and sets HVAC off; _deactivate_fan restores prior mode; field persisted across restarts",
+            "Bug D: handle_all_doors_windows_closed whole-house path — fan stopped when _fan_active"
+            " and FAN_MODE_WHOLE_HOUSE/BOTH regardless of _natural_vent_active",
+            "Bug F: activity report setpoint values in Settings column for override_detected events",
+            "Bug G: AI investigator timing correlation section — [TIMING-COINCIDENT] flags for"
+            " events at known automation intervals (30/90/5/10 min) after automation events",
+            "Bug H: fan detection diagnostic logging — old/new fan_mode, fan_cmd age, hvac_cmd age,"
+            " expected_confirmation value logged at INFO when handle_fan_manual_override() fires",
+        ],
+        "scope_not_covered": [
+            "06:41 grace period root cause — unconfirmed; Bug H logging will make next occurrence"
+            " diagnosable from HA logs",
+            "FAN_MODE_HVAC (HVAC blower) HVAC behavior — band stays armed per Issue #249 §4; no change in this fix",
         ],
     },
 }

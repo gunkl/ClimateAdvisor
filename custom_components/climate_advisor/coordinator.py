@@ -1050,6 +1050,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return False
         return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
 
+    def _is_recent_fan_command(self, threshold_seconds: float = 30.0) -> bool:
+        """Check if a fan command was issued recently (race guard)."""
+        cmd_time = self.automation_engine._fan_command_time
+        if cmd_time is None:
+            return False
+        return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
+
     def _any_sensor_open(self) -> bool:
         """Return True if any monitored contact sensor is currently open."""
         return any(self._is_sensor_open(s) for s in self._resolved_sensors)
@@ -2546,6 +2553,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self.automation_engine._hvac_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not _is_expected_confirmation
+            and not self._is_recent_fan_command(threshold_seconds=30.0)
         ):
             _LOGGER.info(
                 "Manual HVAC fan_mode change detected: %s -> %s",
@@ -2570,6 +2578,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Skip if fan override is already active
         if self.automation_engine._fan_override_active:
+            return
+
+        # Skip if a fan command was issued recently (cloud thermostat echo guard)
+        if self._is_recent_fan_command(threshold_seconds=30.0):
             return
 
         on_states = {"on"}

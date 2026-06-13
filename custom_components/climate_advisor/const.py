@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.9"
+VERSION = "0.4.10"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.10": [
+        "Fix #301: CA no longer uses heat_cool dual-setpoint mode. Every thermostat command is"
+        " now a single climate.set_temperature call containing both the mode (cool or heat) and"
+        " the single relevant setpoint — CA sets the bound that matters and lets the thermostat"
+        " manage its own band internally.",
+        "Fix #301: If the thermostat does not accept a commanded setpoint within 10 seconds,"
+        " CA automatically retries the same command 15 minutes later. The retry is cancelled if"
+        " a newer command has been issued in the meantime.",
+        "Fix #301: README now documents that thermostats must have their built-in schedules"
+        " and comfort programs disabled, and their hold type set to 'hold until I change',"
+        " for CA to operate correctly.",
+    ],
     "0.4.9": [
         "Fix #299: CA setpoint writes to the Ecobee thermostat now bypass HA's deduplication"
         " filter. Every setpoint command sends an intentionally-offset pre-write followed by the"
@@ -1115,6 +1127,35 @@ KNOWN_FIXES: dict[int, dict] = {
             " bypass behavior, no additional change needed",
             "Ecobee comfort-program reversion triggered by Ecobee app or physical thermostat"
             " control — CA will detect and re-apply on the next 30-min coordinator cycle",
+        ],
+    },
+    301: {
+        "version_fixed": "0.4.10",
+        "title": "Revert heat_cool dual-setpoint; single-setpoint operation + 15-minute retry",
+        "scope_covered": [
+            "automation.py _set_temperature(): single climate.set_temperature call with"
+            " {hvac_mode: mode, temperature: service_temp}; sets _last_commanded_hvac_mode/"
+            " _hvac_command_time so coordinator suppresses the embedded mode-change echo",
+            "automation.py _check_single_setpoint_accepted(): schedules 15-minute retry via"
+            " async_call_later(900) on mismatch; retry is nonce-guarded (_write_seq) and"
+            " cancels if a newer command has been issued",
+            "automation.py _set_temperature_for_mode(): all caps.supports_dual_setpoint branches"
+            " removed; always single-setpoint (heat→floor, cool→ceiling)",
+            "automation.py _apply_comfort_band(): dual-setpoint path removed; ceiling guard"
+            " uses mode='cool', floor guard uses mode='heat'",
+            "automation.py _set_temperature_dual(): deleted entirely",
+            "coordinator.py _async_thermostat_changed(): _is_expected_confirmation simplified —"
+            " _setpoints_match dual-setpoint block removed (mode + 120s window sufficient)",
+            "README.md: Thermostat Setup Requirements section added — disable built-in"
+            " schedules/comfort programs; set hold type to indefinite",
+        ],
+        "scope_not_covered": [
+            "Persistent rejection loop cap — if a thermostat indefinitely rejects CA's setpoint"
+            " the 15-min retry fires indefinitely (bounded to one write per 15 min, emits"
+            " setpoint_rejected event each cycle; 30-min classification cycle issues new commands"
+            " that cancel stale retries in practice)",
+            "Tier B integration test for off→cool echo suppression — coordinator confirmation"
+            " logic is correct but no headless test drives the state-listener layer for this path",
         ],
     },
 }

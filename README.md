@@ -198,6 +198,16 @@ Choose where indoor and outdoor temperature readings come from:
 ### Step 7: Schedule
 Set your wake time, bedtime, and when you want the daily briefing.
 
+### Thermostat Setup Requirements
+
+Climate Advisor acts as the scheduler — the thermostat is the executor. For reliable operation, your thermostat must be configured so that CA's commands are held exactly as sent:
+
+1. **Disable built-in schedules and comfort programs** — Turn off any manufacturer-defined schedules, comfort programs, or "Smart Home/Away" features. If the thermostat applies its own schedule after CA sets a setpoint, the physical device will silently revert to its own values even though HA still shows CA's last command.
+
+2. **Set hold type to "Hold until I change"** (indefinite hold) — Many thermostats default to "hold until next scheduled transition," which means the thermostat reverts to its comfort program at the next scheduled event (e.g., 8 am "Home" program). CA issues commands that should persist until CA explicitly changes them. On Ecobee: Settings → Preferences → Hold Action → **Until I change it**.
+
+Without these settings, CA's setpoints will appear to apply momentarily but then be overridden by the thermostat's own schedule, causing the thermostat display and HA's entity state to disagree.
+
 ### Options Flow (Edit After Setup)
 All settings are editable after setup, plus advanced options:
 - **Learning enabled**: Toggle the learning engine on/off

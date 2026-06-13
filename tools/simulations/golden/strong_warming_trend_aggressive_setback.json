@@ -10,8 +10,8 @@
     "  sleep_heat = config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT) = 66.0F (not in scenario config).",
     "  Sleep band = [66/78]. The setback_modifier is stored in the bedtime_setback event payload for",
     "  transparency but does not currently change the band ceiling (adaptive wiring is a P3 follow-up).",
-    "Classification at 14:00: dual band [comfort_heat=70 / comfort_cool=74]. production_temp_at",
-    "  returns the floor (70F) for dual-setpoint actions per outcomes.py §P3 note.",
+    "Classification at 14:00: single-setpoint cool mode, temperature=comfort_cool=74F.",
+    "  production_temp_at reads the temperature field from the set_temperature action.",
     "Bedtime at 22:30: sleep band [66/78]. production_temp_at returns ceiling (78F) for cool mode",
     "  (active='ceiling' → outcomes.py reads ceiling from bedtime_setback payload).",
     "Covers Priority 7 warming trend setback from plan abundant-mapping-clarke.md."
@@ -49,8 +49,8 @@
     {
       "at": "2026-07-15T14:00:00",
       "expect": "classification_applied",
-      "expect_temp": 70.0,
-      "reason": "Warm-day classification applied: dual band [comfort_heat=70 / comfort_cool=74]. production_temp_at returns floor=70 for dual-setpoint actions. setback_modifier=-3.0 stored in classification for downstream use."
+      "expect_temp": 74.0,
+      "reason": "Warm-day classification applied: cool mode single-setpoint temperature=74 (comfort_cool). setback_modifier=-3.0 stored in classification for downstream use."
     },
     {
       "at": "2026-07-15T22:30:00",
@@ -62,7 +62,7 @@
   "verdict": {
     "type": "positive",
     "summary": "Warming trend classification and standard sleep band both applied correctly; setback_modifier stored in event payload",
-    "observed_behavior": "classification_applied (dual band floor=70) → setback_applied (sleep band ceiling=78) at bedtime",
+    "observed_behavior": "classification_applied (cool mode temperature=74) → setback_applied (sleep band ceiling=78) at bedtime",
     "expected_behavior": "Classification arms comfort band; bedtime arms sleep band [66/78]. setback_modifier carried in payload for future adaptive wiring."
   }
 }

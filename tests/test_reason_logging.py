@@ -35,8 +35,8 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
 
     Under P3 the engine calls ``_apply_comfort_band`` which reads thermostat capabilities.
     The climate state must expose ``hvac_modes`` + ``supported_features`` so the band path
-    reaches the logging primitives (``_set_hvac_mode`` / ``_set_temperature_dual``).
-    Default: full dual-setpoint thermostat (heat_cool + TARGET_TEMPERATURE_RANGE).
+    reaches the logging primitive (``_set_temperature``).  (Issue #301: _set_temperature_dual removed.)
+    Default: heat_cool + TARGET_TEMPERATURE_RANGE capable thermostat; single-setpoint mode used.
     """
     from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
 
@@ -118,17 +118,16 @@ class TestApplyClassificationLogging:
     """Reason logging for apply_classification() — P3 band model.
 
     P3 routes all classification actions through ``_apply_comfort_band``, which calls
-    ``_set_hvac_mode`` + ``_set_temperature_dual`` (dual-capable thermostat).  The log
-    messages now come from those primitives with the classification reason embedded.
+    ``_set_temperature`` (Issue #301: single-setpoint only).  The log messages now come
+    from that primitive with the classification reason embedded.
     """
 
     def test_heat_mode_logs_reason(self, caplog):
-        """Cold day → band arming: 'Set dual temperature' log containing the daily classification
-        reason with 'cold day'.  Mode change only fires if thermostat is not already in heat_cool.
+        """Cold day → band arming: 'Set temperature' log containing the daily classification
+        reason with 'cold day'.  Mode change only fires if thermostat is not already in the target mode.
 
         Old assertion: mode log contained 'cold day'; temp log existed.
-        P3: _set_temperature_dual logs 'Set dual temperature [70°F / 80°F] — daily classification — cold day …'.
-        The engine default is current_mode='heat_cool', so _set_hvac_mode is idempotent (no mode call).
+        P3/301: _set_temperature logs 'Set temperature [70°F] (heat) — daily classification — cold day …'.
         Only the temperature log is guaranteed; mode log may or may not fire.
         """
         engine = _make_automation_engine()
@@ -148,11 +147,11 @@ class TestApplyClassificationLogging:
         assert "cold day" in temp_msgs[0]
 
     def test_cool_mode_with_precool_logs_band_reason(self, caplog):
-        """Hot day with pre-cool → band arming logs 'Set dual temperature' with daily-classification
+        """Hot day with pre-cool → band arming logs 'Set temperature' with daily-classification
         reason.  The pre-cool offset lowers the band ceiling; the reason string reflects the band.
 
         Old assertion: 'pre-cool offset' appeared in the temperature log string.
-        P3: _set_temperature_dual logs the classification reason (not 'pre-cool offset'); the
+        P3/301: _set_temperature logs the classification reason (not 'pre-cool offset'); the
         pre-cool offset is baked into the ceiling value in the band (e.g. '72°F' instead of '75°F').
         """
         engine = _make_automation_engine()
@@ -251,20 +250,19 @@ class TestOccupancyLogging:
     """Reason logging for occupancy handlers — P3 band model.
 
     P3 routes handle_occupancy_away() through _apply_comfort_band with reason
-    'occupancy away — setback band'.  The log messages come from _set_hvac_mode /
-    _set_temperature_dual, which embed that reason string.
+    'occupancy away — setback band'.  The log messages come from _set_temperature
+    (Issue #301: single-setpoint only), which embeds that reason string.
 
     Old assertions checked mode-specific reason phrases ('heat setback', 'base 60',
     'modifier 2') derived from the old setback-by-current-mode dispatch.  P3 replaces
-    that dispatch with a single band reason; the setback values are reflected in the
-    dual setpoint numbers in the log line.
+    that dispatch with a single band reason; the setback value appears in the log line.
     """
 
     def test_occupancy_away_heat_logs_reason(self, caplog):
-        """handle_occupancy_away(): dual-temp log must contain 'occupancy away' + 'setback'.
+        """handle_occupancy_away(): temp log must contain 'occupancy away' + 'setback'.
 
         Old assertion: 'heat setback', 'base 60', 'modifier 2' in the temp log.
-        P3: _set_temperature_dual logs 'Set dual temperature [60°F / 80°F] — occupancy away — setback band'.
+        P3/301: _set_temperature logs 'Set temperature [60°F] (heat) — occupancy away — setback band'.
         """
         from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
 
@@ -350,18 +348,18 @@ class TestBedtimeLogging:
 
     P3 routes handle_bedtime() through _apply_comfort_band with reason
     'bedtime — sleep band [<floor>/<ceiling>]'.  The log messages come from
-    _set_temperature_dual which embeds that reason string.
+    _set_temperature (Issue #301: single-setpoint only) which embeds that reason string.
 
     Old assertions checked mode-specific phrases ('heat setback', 'comfort 70', 'modifier 2')
     derived from the old setback-by-classification dispatch.  P3 replaces that with a single
-    sleep-band reason; the setback values appear as the dual setpoint numbers.
+    sleep-band reason; the setback value appears in the log line.
     """
 
     def test_bedtime_heat_logs_reason(self, caplog):
-        """handle_bedtime(): dual-temp log must contain 'bedtime' + 'sleep band'.
+        """handle_bedtime(): temp log must contain 'bedtime' + 'sleep band'.
 
         Old assertion: 'heat setback', 'comfort 70', 'modifier 2' in the temp log.
-        P3: _set_temperature_dual logs 'Set dual temperature [66°F / 78°F] — bedtime — sleep band [66/78]'.
+        P3/301: _set_temperature logs 'Set temperature [66°F] (heat) — bedtime — sleep band [66/78]'.
         """
         engine = _make_automation_engine()
         c = _make_classification(day_type="cold", hvac_mode="heat", setback_modifier=2.0)
@@ -413,10 +411,10 @@ class TestMorningWakeupLogging:
     """
 
     def test_morning_wakeup_heat_logs_reason(self, caplog):
-        """handle_morning_wakeup(): dual-temp log must contain 'morning wake-up' + 'comfort band'.
+        """handle_morning_wakeup(): temp log must contain 'morning wake-up' + 'comfort band'.
 
         Old assertion: 'morning wake-up' + 'heat comfort' in temp log.
-        P3: _set_temperature_dual logs '… morning wake-up — comfort band [70/80]'.
+        P3/301: _set_temperature logs '… morning wake-up — comfort band [70/80]'.
         """
         engine = _make_automation_engine()
         c = _make_classification(day_type="cold", hvac_mode="heat")

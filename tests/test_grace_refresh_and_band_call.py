@@ -1,16 +1,15 @@
-"""Tests for Fix 1 (grace-expiry refresh callback) and Fix 4 (single service call in
-_apply_comfort_band for dual-setpoint thermostats).
+"""Tests for Fix 1 (grace-expiry refresh callback) and single service call in
+_apply_comfort_band (Issue #301: single-setpoint only).
 
 Fix 1 — Issue #290: When a grace period expires, the engine must call
 _request_refresh_callback so the coordinator immediately pushes updated
 sensor state to HA. Without this, the occupant sees stale sensor values
 until the next 30-min poll.
 
-Fix 4 — Issue #290: _apply_comfort_band for a dual-setpoint thermostat must
-emit ONE climate.set_temperature call (with hvac_mode embedded in the
-payload). The former code emitted a separate set_hvac_mode call first, which
-created a short window where Ecobee could revert to its own schedule before
-the setpoints arrived.
+Issue #301: _apply_comfort_band always uses _set_temperature() — a single
+climate.set_temperature call with hvac_mode embedded in the payload.
+The former dual-setpoint (heat_cool) path is removed; even heat_cool-capable
+thermostats receive a single-mode setpoint call (cool or heat).
 """
 
 from __future__ import annotations
@@ -110,9 +109,8 @@ def _minimal_engine() -> AutomationEngine:
             "_hourly_forecast_temps": [],
             "_occupancy_mode": "home",
             "_write_seq": 0,
-            "_pending_setpoint_low": None,
-            "_pending_setpoint_high": None,
             "_pending_setpoint_single": None,
+            "_pending_setpoint_mode": None,
         }
     )
     return engine
@@ -201,30 +199,27 @@ class TestGraceExpiryTriggersRefreshCallback:
 
 
 # ---------------------------------------------------------------------------
-# FIX 4: Single service call in _apply_comfort_band (dual-setpoint path)
+# Issue #301: Single service call in _apply_comfort_band (single-setpoint only)
 # ---------------------------------------------------------------------------
 
 
 class TestApplyComfortBandSingleServiceCall:
-    """Fix P1/P2 (Issue #299) — For a dual-setpoint thermostat in 'cool' mode,
-    _apply_comfort_band issues two set_temperature calls (pre-write + target write)
-    with NO separate set_hvac_mode call.
+    """Issue #301 — _apply_comfort_band always issues ONE climate.set_temperature call.
 
-    hvac_mode='heat_cool' is embedded in the PRE-WRITE ONLY when a mode switch is needed.
-    The target write intentionally omits hvac_mode to prevent Ecobee comfort-program reassertion.
+    The dual-setpoint (heat_cool) path is removed. Even a heat_cool-capable thermostat
+    receives a single-mode call: active="ceiling" → hvac_mode="cool" + temperature=ceiling;
+    active="floor" → hvac_mode="heat" + temperature=floor.
+    No separate set_hvac_mode call and no pre-write offset step.
     """
 
-    def test_dual_setpoint_thermostat_issues_two_set_temperature_calls(self):
-        """Double-write: pre-write with mode+offset, then target write without mode (Issue #299).
+    def test_heat_cool_thermostat_ceiling_band_issues_one_call_with_cool_mode(self):
+        """heat_cool-capable thermostat + active=ceiling → ONE set_temperature call, hvac_mode='cool'.
 
-        When thermostat is in 'cool' mode (needs mode switch):
-        - Call 1 (pre-write): hvac_mode='heat_cool' + widened setpoints (floor-1, ceiling+1)
-        - Call 2 (target write): NO hvac_mode + exact setpoints
-        No separate set_hvac_mode call issued.
+        Occupant impact (Issue #301): the Ecobee was reverting to its comfort program when
+        CA sent heat_cool mode. Single-mode cool command is held properly by the thermostat.
         """
         engine = _minimal_engine()
 
-        # Thermostat is currently in 'cool' mode (would previously trigger a mode switch)
         state_mock = MagicMock()
         state_mock.state = "cool"
         state_mock.attributes = {
@@ -239,55 +234,46 @@ class TestApplyComfortBandSingleServiceCall:
 
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate"]
-        # Two set_temperature calls — no separate set_hvac_mode
-        assert len(climate_calls) == 2, (
-            f"Expected 2 climate service calls (pre-write + target), got {len(climate_calls)}: {climate_calls}"
+        # Single call (Issue #301): one set_temperature call with hvac_mode + temperature
+        assert len(climate_calls) == 1, (
+            f"Expected 1 climate service call (single-setpoint), got {len(climate_calls)}: {climate_calls}"
         )
-        assert all(c.args[1] == "set_temperature" for c in climate_calls), (
-            "All climate calls must be set_temperature, not set_hvac_mode"
+        assert climate_calls[0].args[1] == "set_temperature", (
+            "The single call must be set_temperature, not set_hvac_mode"
         )
-
-        pre_write = climate_calls[0].args[2]
-        target_write = climate_calls[1].args[2]
-
-        # Pre-write must include hvac_mode to trigger mode switch on Ecobee
-        assert pre_write.get("hvac_mode") == "heat_cool", (
-            f"Pre-write must include hvac_mode='heat_cool', got {pre_write}"
+        call_data = climate_calls[0].args[2]
+        assert call_data.get("hvac_mode") == "cool", f"Ceiling band must send hvac_mode='cool', got {call_data}"
+        assert call_data.get("temperature") == 76.0, (
+            f"Ceiling band must send temperature=ceiling (76.0), got {call_data}"
         )
-        # Target write must NOT include hvac_mode to prevent comfort-program reassertion (Fix P1)
-        assert "hvac_mode" not in target_write, (
-            f"Target write must omit hvac_mode to prevent Ecobee comfort-program lookup, got {target_write}"
-        )
-        assert "target_temp_low" in target_write
-        assert "target_temp_high" in target_write
+        # No dual-setpoint keys
+        assert "target_temp_low" not in call_data
+        assert "target_temp_high" not in call_data
 
-    def test_already_in_heat_cool_mode_two_calls_no_hvac_mode(self):
-        """Thermostat already in heat_cool: two set_temperature calls, neither includes hvac_mode.
+    def test_heat_cool_thermostat_floor_band_issues_one_call_with_heat_mode(self):
+        """heat_cool-capable thermostat + active=floor → ONE set_temperature call, hvac_mode='heat'.
 
-        Double-write (Issue #299) always issues a pre-write + target write to bypass HA
-        deduplication. When the thermostat is already in heat_cool, no mode switch is needed,
-        so neither call includes hvac_mode.
+        Issue #301: floor defense uses heat mode + single temperature, not dual setpoints.
         """
         engine = _minimal_engine()
 
         state_mock = MagicMock()
-        state_mock.state = "heat_cool"
+        state_mock.state = "heat"
         state_mock.attributes = {
             "hvac_modes": ["off", "heat", "cool", "heat_cool"],
             "supported_features": CLIMATE_FEATURE_TARGET_TEMP_RANGE | 1,
         }
         engine.hass.states.get.return_value = state_mock
 
-        band = ComfortBand(floor=68.0, ceiling=76.0, active="ceiling", reason="test")
+        band = ComfortBand(floor=68.0, ceiling=76.0, active="floor", reason="test")
 
         asyncio.run(engine._apply_comfort_band(band, reason="test"))
 
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate"]
-        assert len(climate_calls) == 2, (
-            f"Expected 2 set_temperature calls (pre-write + target), got {len(climate_calls)}"
+        assert len(climate_calls) == 1, (
+            f"Expected 1 climate service call (single-setpoint), got {len(climate_calls)}: {climate_calls}"
         )
-        assert all(c.args[1] == "set_temperature" for c in climate_calls)
-        # No hvac_mode in either call — thermostat already in the right mode
-        assert "hvac_mode" not in climate_calls[0].args[2]
-        assert "hvac_mode" not in climate_calls[1].args[2]
+        call_data = climate_calls[0].args[2]
+        assert call_data.get("hvac_mode") == "heat", f"Floor band must send hvac_mode='heat', got {call_data}"
+        assert call_data.get("temperature") == 68.0, f"Floor band must send temperature=floor (68.0), got {call_data}"

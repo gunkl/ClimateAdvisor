@@ -417,9 +417,8 @@ class AutomationEngine:
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
-        self._pending_setpoint_low: float | None = None  # dual setpoint validation: commanded low (service units)
-        self._pending_setpoint_high: float | None = None  # dual setpoint validation: commanded high (service units)
         self._pending_setpoint_single: float | None = None  # single setpoint validation: commanded temp (service units)
+        self._pending_setpoint_mode: str | None = None  # single setpoint validation: commanded mode ("cool"|"heat")
         self._write_seq: int = 0  # monotonic counter: validation callbacks skip if a newer write has superseded them
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
@@ -1189,41 +1188,26 @@ class AutomationEngine:
         _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
 
     async def _apply_comfort_band(self, band: ComfortBand, *, reason: str) -> None:
-        """Arm the thermostat with the comfort band using the right command shape (Issue #249 P3).
+        """Arm the thermostat with the comfort band (always single-setpoint).
 
-        Reads live thermostat capabilities and emits ONE command:
-        - dual-setpoint capable → ensure ``heat_cool`` mode, then ``set_temperature`` with both
-          ``target_temp_low=band.floor`` and ``target_temp_high=band.ceiling``.
-        - single, ``active="ceiling"``, cool-capable → set mode ``cool`` (if changed) + ``set_temperature``
-          at ``band.ceiling``.
-        - single, ``active="floor"``, heat-capable → set mode ``heat`` (if changed) + ``set_temperature``
-          at ``band.floor``.
-        - device cannot serve the active edge or state unavailable → log debug and return (defensive
-          no-op, not a legacy fallback).
+        Reads live thermostat capabilities and emits ONE ``set_temperature`` call with
+        ``hvac_mode`` included so the thermostat is in the right mode and HA deduplication
+        is bypassed:
+        - ``active="ceiling"``, cool-capable → ``set_temperature`` with ``hvac_mode="cool"``
+          and ``temperature=band.ceiling``.
+        - ``active="floor"``, heat-capable → ``set_temperature`` with ``hvac_mode="heat"``
+          and ``temperature=band.floor``.
+        - device cannot serve the active edge or state unavailable → log and return (defensive
+          no-op).
 
         Emits ``comfort_band_applied`` event so the harness/scenarios can assert on band decisions.
         """
         caps = self._get_thermostat_capabilities()
-        _cs = self.hass.states.get(self.climate_entity)
-        _current_mode = _cs.state if _cs else None
 
-        if caps.supports_dual_setpoint:
-            # Issue #290 Fix 4: emit ONE atomic set_temperature call with hvac_mode
-            # embedded in the payload.  A preceding set_hvac_mode call created a
-            # revert window on Ecobee — the thermostat received the mode change,
-            # briefly re-applied its own schedule, then received the setpoints.
-            # _set_temperature_dual already includes hvac_mode="heat_cool" so no
-            # separate mode call is needed.
-            await self._set_temperature_dual(band.floor, band.ceiling, reason=reason)
-            _cmd_shape = "dual"
-        elif band.active == "ceiling" and caps.supports_cool:
-            if _current_mode != "cool":
-                await self._set_hvac_mode("cool", reason=f"{reason} [band: entering cool]")
+        if band.active == "ceiling" and caps.supports_cool:
             await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
         elif band.active == "floor" and caps.supports_heat:
-            if _current_mode != "heat":
-                await self._set_hvac_mode("heat", reason=f"{reason} [band: entering heat]")
             await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
         else:
@@ -1293,30 +1277,29 @@ class AutomationEngine:
             self._hvac_command_pending = False
 
     async def _set_temperature(self, temperature: float, *, reason: str, mode: str = "cool") -> None:
-        """Set the thermostat target temperature.
+        """Set the thermostat target temperature with hvac_mode in a single call.
 
         Args:
             temperature: Target temperature in internal Fahrenheit.
             reason: Human-readable reason for logging.
-            mode: "cool" (ceiling setpoint) or "heat" (floor setpoint).  Determines the
-                pre-write offset direction for HA deduplication bypass (Issue #299):
-                cool ceiling goes up by 1 (won't trigger cooling), heat floor goes down by 1
-                (won't trigger heating).
+            mode: "cool" (ceiling setpoint) or "heat" (floor setpoint).  Sent as
+                ``hvac_mode`` in the service call so the thermostat is always in the
+                correct mode and HA deduplication is bypassed (the mode key makes
+                every call distinct even when temperature hasn't changed).
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         # Convert internal °F to user's unit before sending to HA climate entity
         service_temp = from_fahrenheit(temperature, unit)
         if self.dry_run:
             _LOGGER.info(
-                "[DRY RUN] Would set temperature to %s — %s",
+                "[DRY RUN] Would set temperature to %s (%s mode) — %s",
                 format_temp(temperature, unit),
+                mode,
                 reason,
             )
             return
-        # Check setpoint is appropriate for current HVAC mode
-        _current_mode_state = self.hass.states.get(self.climate_entity)
-        _current_mode = _current_mode_state.state if _current_mode_state else None
-        if _current_mode == "cool" and temperature < (self.config.get("comfort_heat", 70) - 1.0):
+        # Check setpoint is appropriate for commanded mode
+        if mode == "cool" and temperature < (self.config.get("comfort_heat", 70) - 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
                 temperature,
@@ -1327,13 +1310,13 @@ class AutomationEngine:
                     {
                         "incident_class": "setpoint_mode_inconsistency",
                         "incident_id": dt_util.now().isoformat(),
-                        "hvac_mode": _current_mode,
+                        "hvac_mode": mode,
                         "setpoint_f": temperature,
                         "comfort_heat": self.config.get("comfort_heat", 70),
                         "comfort_cool": self.config.get("comfort_cool", 76),
                     },
                 )
-        elif _current_mode == "heat" and temperature > (self.config.get("comfort_cool", 76) + 1.0):
+        elif mode == "heat" and temperature > (self.config.get("comfort_cool", 76) + 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: heat mode but target %.1fF is above comfort_cool threshold",
                 temperature,
@@ -1344,33 +1327,39 @@ class AutomationEngine:
                     {
                         "incident_class": "setpoint_mode_inconsistency",
                         "incident_id": dt_util.now().isoformat(),
-                        "hvac_mode": _current_mode,
+                        "hvac_mode": mode,
                         "setpoint_f": temperature,
                         "comfort_heat": self.config.get("comfort_heat", 70),
                         "comfort_cool": self.config.get("comfort_cool", 76),
                     },
                 )
-        # Set state tracking to TARGET values before writes so the validation callback
-        # always compares against the intended final setpoint.
+        # Set state tracking BEFORE the write so the validation callback always
+        # compares against the intended final setpoint.
+        _now = dt_util.now()
         self._pending_setpoint_single = service_temp
+        self._pending_setpoint_mode = mode
         self._write_seq += 1
         _my_seq = self._write_seq
+        self._temp_command_time = _now
         self._temp_command_pending = True
-        self._temp_command_time = dt_util.now()
+        # hvac_mode is embedded in the set_temperature call, so register it as a
+        # commanded mode change — coordinator uses these to suppress mode-change
+        # echoes from CA's own writes (mirrors what _set_hvac_mode used to do).
+        self._last_commanded_hvac_mode = mode
+        self._last_commanded_hvac_time = _now
+        self._hvac_command_time = _now
         try:
-            # Pre-write: offset setpoint to bypass HA deduplication.  Direction is chosen
-            # so the temporary offset does not trigger unnecessary conditioning (Issue #299).
-            _pre_temp = service_temp + 1.0 if mode == "cool" else service_temp - 1.0
+            # Single call: hvac_mode + temperature together.  Including hvac_mode in every
+            # call bypasses HA deduplication (the mode key makes each call distinct) and
+            # ensures the thermostat is always in the correct mode.
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
-                {"entity_id": self.climate_entity, "temperature": _pre_temp},
-            )
-            # Target write: correct setpoint.
-            await self.hass.services.async_call(
-                "climate",
-                "set_temperature",
-                {"entity_id": self.climate_entity, "temperature": service_temp},
+                {
+                    "entity_id": self.climate_entity,
+                    "hvac_mode": mode,
+                    "temperature": service_temp,
+                },
             )
         finally:
             self._temp_command_pending = False
@@ -1387,9 +1376,10 @@ class AutomationEngine:
             _TOLERANCE = 0.6
             if abs(float(reported) - self._pending_setpoint_single) > _TOLERANCE:
                 _LOGGER.error(
-                    "Setpoint validation FAILED: commanded=%.1f, "
-                    "thermostat reports=%.1f — thermostat may have rejected the command",
+                    "Setpoint validation FAILED: commanded=%.1f (%s mode), "
+                    "thermostat reports=%.1f — scheduling retry in 15 minutes",
                     self._pending_setpoint_single,
+                    self._pending_setpoint_mode,
                     reported,
                 )
                 if self._emit_event_callback:
@@ -1400,10 +1390,31 @@ class AutomationEngine:
                             "reported": float(reported),
                         },
                     )
+                # Retry after 15 minutes if no newer command has superseded this one.
+                _retry_seq = _my_seq
+                _retry_temp = service_temp
+                _retry_mode = mode
+
+                async def _retry_callback(_now: Any) -> None:
+                    if self._write_seq != _retry_seq:
+                        return  # newer command superseded; skip retry
+                    _LOGGER.warning(
+                        "Retrying setpoint write after rejection: %.0f°F %s",
+                        _retry_temp,
+                        _retry_mode,
+                    )
+                    await self._set_temperature(_retry_temp, reason="retry/setpoint_rejected", mode=_retry_mode)
+
+                async_call_later(
+                    self.hass,
+                    900,
+                    lambda _now: self.hass.async_create_task(_retry_callback(_now)),
+                )
             else:
                 _LOGGER.info(
-                    "Setpoint confirmed by thermostat: temperature=%.1f",
+                    "Setpoint confirmed by thermostat: temperature=%.1f (%s mode)",
                     reported,
+                    self._pending_setpoint_mode,
                 )
 
         async_call_later(
@@ -1417,128 +1428,6 @@ class AutomationEngine:
             reason,
         )
         self._record_action(f"Set temp to {format_temp(temperature, unit)}", reason)
-
-    async def _set_temperature_dual(self, low: float, high: float, *, reason: str) -> None:
-        """Set target_temp_low and target_temp_high for heat_cool/auto thermostat modes.
-
-        Uses the same flag/logging/record_action pattern as _set_temperature().
-        low/high are internal Fahrenheit values; converted to user unit before service call.
-
-        Two-write strategy (Issue #299):
-        1. Pre-write: offset setpoints (low-1, high+1 in service units) to bypass HA's
-           Ecobee integration deduplication — without this, identical setpoints are silently
-           dropped when the HA entity already reports the same values (stale optimistic state).
-        2. Target write: correct setpoints WITHOUT hvac_mode (only included in pre-write if a
-           mode transition is needed) — omitting hvac_mode prevents the Ecobee from re-evaluating
-           its comfort program on every steady-state write.
-        """
-        unit = self.config.get("temp_unit", "fahrenheit")
-        service_low = from_fahrenheit(low, unit)
-        service_high = from_fahrenheit(high, unit)
-        if self.dry_run:
-            _LOGGER.info(
-                "[DRY RUN] Would set dual temperature low=%s high=%s — %s",
-                format_temp(low, unit),
-                format_temp(high, unit),
-                reason,
-            )
-            return
-        # Set state tracking to TARGET values before any writes so the validation
-        # callback always compares against the intended final setpoints.
-        self._last_commanded_hvac_mode = "heat_cool"
-        self._last_commanded_hvac_time = dt_util.now()
-        self._pending_setpoint_low = service_low
-        self._pending_setpoint_high = service_high
-        self._write_seq += 1
-        _my_seq = self._write_seq
-        self._temp_command_pending = True
-        self._temp_command_time = dt_util.now()
-        try:
-            # Determine whether a mode transition is needed.
-            _climate_state = self.hass.states.get(self.climate_entity)
-            _needs_mode_switch = _climate_state is None or _climate_state.state != "heat_cool"
-
-            # Pre-write: offset setpoints to guarantee HA sends a command even when entity
-            # state already matches the target (deduplication bypass).  The -1/+1 direction
-            # widens the band, so the thermostat will not trigger unnecessary conditioning.
-            _pre_data: dict = {
-                "entity_id": self.climate_entity,
-                "target_temp_low": service_low - 1.0,
-                "target_temp_high": service_high + 1.0,
-            }
-            if _needs_mode_switch:
-                _pre_data["hvac_mode"] = "heat_cool"
-            await self.hass.services.async_call("climate", "set_temperature", _pre_data)
-
-            # Target write: correct setpoints.  hvac_mode is intentionally omitted here —
-            # the mode was already set (or was already heat_cool) so including it would
-            # trigger the Ecobee to re-evaluate its comfort program instead of holding.
-            await self.hass.services.async_call(
-                "climate",
-                "set_temperature",
-                {
-                    "entity_id": self.climate_entity,
-                    "target_temp_low": service_low,
-                    "target_temp_high": service_high,
-                },
-            )
-        finally:
-            self._temp_command_pending = False
-
-        async def _check_dual_setpoint_accepted() -> None:
-            # Skip if a newer write has superseded this one.
-            if self._write_seq != _my_seq:
-                return
-            state = self.hass.states.get(self.climate_entity)
-            if state is None:
-                return
-            reported_low = state.attributes.get("target_temp_low")
-            reported_high = state.attributes.get("target_temp_high")
-            if reported_low is None or reported_high is None:
-                return
-            _TOLERANCE = 0.6
-            low_ok = abs(float(reported_low) - self._pending_setpoint_low) <= _TOLERANCE
-            high_ok = abs(float(reported_high) - self._pending_setpoint_high) <= _TOLERANCE
-            if not (low_ok and high_ok):
-                _LOGGER.error(
-                    "Setpoint validation FAILED: commanded low=%.1f high=%.1f, "
-                    "thermostat reports low=%.1f high=%.1f — thermostat may have rejected the command",
-                    self._pending_setpoint_low,
-                    self._pending_setpoint_high,
-                    reported_low,
-                    reported_high,
-                )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "setpoint_rejected",
-                        {
-                            "commanded_low": self._pending_setpoint_low,
-                            "commanded_high": self._pending_setpoint_high,
-                            "reported_low": float(reported_low),
-                            "reported_high": float(reported_high),
-                        },
-                    )
-            else:
-                _LOGGER.info(
-                    "Setpoint confirmed by thermostat: low=%.1f high=%.1f",
-                    reported_low,
-                    reported_high,
-                )
-
-        async_call_later(
-            self.hass,
-            10,
-            lambda _now: self.hass.async_create_task(_check_dual_setpoint_accepted()),
-        )
-        _LOGGER.warning(
-            "Set dual temperature [%s / %s] (service: %.4g / %.4g) — %s",
-            format_temp(low, unit),
-            format_temp(high, unit),
-            service_low,
-            service_high,
-            reason,
-        )
-        self._record_action(f"Set dual temp [{format_temp(low, unit)}/{format_temp(high, unit)}]", reason)
 
     async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str) -> None:
         """Set temperature based on the classification and current period.
@@ -1557,14 +1446,9 @@ class AutomationEngine:
             return
 
         unit = self.config.get("temp_unit", "fahrenheit")
-        caps = self._get_thermostat_capabilities()
         if c.hvac_mode == "heat":
             floor_target = float(self.config["comfort_heat"])
-            if caps.supports_dual_setpoint:
-                ceil = float(self.config.get("comfort_cool", 75))
-                await self._set_temperature_dual(floor_target, ceil, reason=reason)
-            else:
-                await self._set_temperature(floor_target, reason=reason, mode="heat")
+            await self._set_temperature(floor_target, reason=reason, mode="heat")
             return
         elif c.hvac_mode == "cool":
             ceiling_target = float(self.config["comfort_cool"])
@@ -1572,18 +1456,7 @@ class AutomationEngine:
                 # Pre-cool: target is below comfort
                 ceiling_target = ceiling_target + c.pre_condition_target
                 reason = f"{reason} (pre-cool offset {format_temp_delta(abs(c.pre_condition_target), unit)})"
-            if caps.supports_dual_setpoint:
-                floor = float(self.config.get("comfort_heat", 70))
-                await self._set_temperature_dual(floor, ceiling_target, reason=reason)
-            else:
-                await self._set_temperature(ceiling_target, reason=reason, mode="cool")
-            return
-        elif c.hvac_mode == "heat_cool":
-            await self._set_temperature_dual(
-                self.config["comfort_heat"],
-                self.config["comfort_cool"],
-                reason=reason,
-            )
+            await self._set_temperature(ceiling_target, reason=reason, mode="cool")
             return
         else:
             return

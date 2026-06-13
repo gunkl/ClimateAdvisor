@@ -172,5 +172,65 @@
     "sha256": "9f4c6745e1b2ecc30c8612d5f64d01e9a2745fa385e539f95ee7e41aed8c4857",
     "signed": "2026-06-10",
     "issue": 231
+  },
+  "away_cold_day_setback_heat": {
+    "sha256": "3534ae1acf97ea014038ab7f27015128eda0cb750bbf657a09e89d1f091d6780",
+    "signed": "2026-06-13",
+    "issue": 229
+  },
+  "cancel_override_then_resume": {
+    "sha256": "e4fd293b37b41d15ba2a1ecb0ffa08e6333bdd7ee3dd63f12696eb632ea67475",
+    "signed": "2026-06-13",
+    "issue": 226
+  },
+  "ceiling_guard_dormancy_nat_vent_active_in_band": {
+    "sha256": "18c95ac064f52e71c719d55570f783fa1ce9194a360b9b8cdc7d5633b29e7798",
+    "signed": "2026-06-13",
+    "issue": 218
+  },
+  "cold_day_occupancy_away": {
+    "sha256": "29a0c6051599b39c6779f5433627fad4834681ff9c321d00b03908b4a097ab85",
+    "signed": "2026-06-13",
+    "issue": 229
+  },
+  "grace_prevents_sensor_repause": {
+    "sha256": "d5cc199a9a1b7344afb38ee57353f4a7044f578ac785c869e37a4d8174397f7f",
+    "signed": "2026-06-13",
+    "issue": 227
+  },
+  "grace_timer_expired_on_restart": {
+    "sha256": "e2c4e8226585232cd36d76501c0b8327ee4350f3010b8e3cee8151bcc7795720",
+    "signed": "2026-06-13",
+    "issue": 227
+  },
+  "guest_mode_maintains_comfort": {
+    "sha256": "b021b7ec296c32e96f32ef01069fc178578fbd7ffd088fd2bd8f79f29e885bc3",
+    "signed": "2026-06-13",
+    "issue": 229
+  },
+  "overnight_with_adaptive_setback_and_wakeup": {
+    "sha256": "7c82f52639201eb51e2e183052af5c0c2ace9cd378111de2295b8e3bc8e95988",
+    "signed": "2026-06-13",
+    "issue": 229
+  },
+  "strong_warming_trend_aggressive_setback": {
+    "sha256": "cf0347a7b1051e997e5ad1f60a965c04ca1e0c44617c59e0943226b4f6742bc6",
+    "signed": "2026-06-13",
+    "issue": 229
+  },
+  "vacation_mode_full_lifecycle": {
+    "sha256": "5dfe1f15ba040fe24fd5483b31445683d88b443b145991f34f12fba91e598615",
+    "signed": "2026-06-13",
+    "issue": 229
+  },
+  "whole_house_fan_hvac_suppression": {
+    "sha256": "3e6b1adba47bbb96497b7383296240cf5726baf01513e63bc402c81c500e458e",
+    "signed": "2026-06-13",
+    "issue": 277
+  },
+  "window_close_stops_whole_house_fan": {
+    "sha256": "de37d3a7db22a37e04f430abfaf73974b5964d02724df7a0a4ce37219481089b",
+    "signed": "2026-06-13",
+    "issue": 277
   }
 }

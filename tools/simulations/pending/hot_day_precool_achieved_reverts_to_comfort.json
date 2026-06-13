@@ -1,0 +1,119 @@
+{
+  "name": "hot_day_precool_achieved_reverts_to_comfort",
+  "description": "Issue #295: On a hot day (forecast 90°F, comfort_cool=75°F, pre_condition_target=-2°F), the AC pre-cools the home toward 73°F. Once the home reaches 73°F the _pre_condition_achieved flag is set and select_comfort_band() reverts the ceiling to 75°F. A later cycle with indoor=74°F (above target) confirms the flag stays set and ceiling remains 75°F — the system does not re-arm the lower setpoint.",
+  "source": "synthetic",
+  "issue": 295,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: deleting the 'and not pre_condition_achieved' guard in",
+    "    select_comfort_band() causes the t=60m assertion (expect_band ceiling=75) to FAIL —",
+    "    the ceiling would be 73 instead of 75 on every cycle after achievement.",
+    "(b) Docs↔production alignment: docs/08-COMPUTATION-REFERENCE.md §4 pre-conditioning",
+    "    table must document the exit condition before this scenario is promoted to golden.",
+    "    The scenario is the regression anchor that forces a doc update if the guard is removed.",
+    "(c) Occupant experience: if this scenario fails to catch a regression, occupants on a hot",
+    "    day pay extra energy to hold 73°F all afternoon instead of their configured 75°F",
+    "    comfort ceiling. The AC runs harder and longer than necessary from mid-morning onward."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-06-13T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 80.0,
+      "note": "Morning: indoor=76°F (above comfort_cool=75), outdoor=80°F. Outdoor above indoor so no nat-vent."
+    },
+    {
+      "time": "2026-06-13T06:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "pre_condition": true,
+      "pre_condition_target": -2.0,
+      "today_high": 90.0,
+      "today_low": 65.0,
+      "windows_recommended": false,
+      "note": "Hot day: hvac_mode=cool, pre_condition_target=-2. Absolute target=75+(-2)=73°F. Indoor=76 > 73 so flag not set yet. Band ceiling should be 73°F."
+    },
+    {
+      "time": "2026-06-13T06:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 82.0,
+      "note": "30-min cycle: AC has cooled home to 73°F — exactly at the pre-cool target. Achievement should be detected."
+    },
+    {
+      "time": "2026-06-13T06:31:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "pre_condition": true,
+      "pre_condition_target": -2.0,
+      "today_high": 90.0,
+      "today_low": 65.0,
+      "windows_recommended": false,
+      "note": "30-min coordinator cycle: same classification re-applied with indoor=73°F. Achievement gate fires. Band ceiling should now be 75°F (comfort_cool)."
+    },
+    {
+      "time": "2026-06-13T07:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 84.0,
+      "note": "60-min cycle: indoor drifted up slightly to 74°F (above pre-cool target 73°F). Flag should remain True."
+    },
+    {
+      "time": "2026-06-13T07:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "pre_condition": true,
+      "pre_condition_target": -2.0,
+      "today_high": 90.0,
+      "today_low": 65.0,
+      "windows_recommended": false,
+      "note": "60-min cycle: indoor=74°F (above 73 target but flag already True). Band ceiling must stay 75°F — flag must NOT be cleared by drift above target."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-13T06:01:00",
+      "expect": "expect_band",
+      "expect_band": {
+        "floor": 70,
+        "ceiling": 73
+      },
+      "reason": "At t=0 (indoor=76°F > target=73°F), pre-cool achievement not yet reached. select_comfort_band() lowers ceiling by pre_condition_target (-2°F): 75 + (-2) = 73°F. Floor stays at comfort_heat=70°F."
+    },
+    {
+      "at": "2026-06-13T06:31:00",
+      "expect": "expect_band",
+      "expect_band": {
+        "floor": 70,
+        "ceiling": 75
+      },
+      "reason": "At t=30m (indoor=73°F = target=73°F), _pre_condition_achieved is set True. select_comfort_band() skips the ceiling lowering. Ceiling reverts to comfort_cool=75°F. Occupant comfort ceiling is restored for the rest of the day."
+    },
+    {
+      "at": "2026-06-13T07:01:00",
+      "expect": "expect_band",
+      "expect_band": {
+        "floor": 70,
+        "ceiling": 75
+      },
+      "reason": "At t=60m (indoor=74°F, which is above target=73°F), the flag is already True and remains True — drift above target does not clear the achievement. Ceiling stays at 75°F. Without the fix the ceiling would re-arm at 73°F, causing the AC to over-cool all afternoon."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Pre-cool achievement gate: ceiling lowers to 73°F until home reaches target, then reverts to comfort_cool=75°F for the rest of the day",
+    "observed_behavior": "Band ceiling=73 at t=0 → Band ceiling=75 at t=30m (achievement) → Band ceiling=75 at t=60m (flag persists through drift)",
+    "expected_behavior": "Occupant pre-cools home to 73°F on a hot day, then the system holds 75°F (their configured comfort setting) for the afternoon — not 73°F all day"
+  }
+}

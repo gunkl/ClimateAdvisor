@@ -352,7 +352,19 @@ def _dispatch_event(
 
     elif etype == "classification":
         classification = _build_classification_from_event(event)
-        asyncio.run(engine.apply_classification(classification))
+        # Issue #295: pass the current injected indoor temp so apply_classification
+        # can evaluate the pre-cool achievement gate — mirrors coordinator behaviour
+        # where _get_indoor_temp() is always passed on each cycle.
+        _cls_indoor_f = None
+        _climate_st = fake_hass.states.get(climate_entity)
+        if _climate_st is not None:
+            _cls_indoor_f = _climate_st.attributes.get("current_temperature")
+            if _cls_indoor_f is not None:
+                try:
+                    _cls_indoor_f = float(_cls_indoor_f)
+                except (TypeError, ValueError):
+                    _cls_indoor_f = None
+        asyncio.run(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
 
     elif etype == "occupancy_away":
         engine.set_occupancy_mode("away")
@@ -465,7 +477,15 @@ def _handle_temp_update(
     # periodic ceiling-guard re-evaluation. Legacy ignores this field.
     predicted = event.get("predicted_indoor")
     if predicted and getattr(engine, "_current_classification", None) is not None:
-        asyncio.run(engine.apply_classification(engine._current_classification, predicted_indoor=predicted))
+        # Issue #295: pass current indoor temp so achievement gate is evaluated on cycle.
+        _tu_indoor_f = float(indoor_f) if indoor_f is not None else None
+        asyncio.run(
+            engine.apply_classification(
+                engine._current_classification,
+                predicted_indoor=predicted,
+                indoor_temp=_tu_indoor_f,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +507,8 @@ def _snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_occupancy_mode",
         "_override_confirm_pending",
         "_economizer_active",
+        "_pre_condition_achieved",  # Issue #295
+        "_pre_condition_achieved_date",  # Issue #295
     ):
         snap[attr] = getattr(engine, attr, None)
 

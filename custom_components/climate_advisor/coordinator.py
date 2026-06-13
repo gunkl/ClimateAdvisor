@@ -1300,6 +1300,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await self.automation_engine.apply_classification(
                 self._current_classification,
                 predicted_indoor=self._last_predicted_indoor,
+                indoor_temp=self._get_indoor_temp(),
             )
 
             # If the day type changed since the briefing was generated,
@@ -1964,6 +1965,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         await self.automation_engine.apply_classification(
             classification,
             predicted_indoor=self._last_predicted_indoor,
+            indoor_temp=self._get_indoor_temp(),
         )
 
         # Initialize today's learning record, preserving any counters already accumulated

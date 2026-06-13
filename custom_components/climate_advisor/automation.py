@@ -153,6 +153,7 @@ def select_comfort_band(
     occupancy_mode: str,
     in_sleep_window: bool,
     aggressive_savings: bool,
+    pre_condition_achieved: bool = False,
 ) -> ComfortBand:
     """Compute the comfort band for the current plan — pure, no HA state access.
 
@@ -203,6 +204,7 @@ def select_comfort_band(
             classification.hvac_mode == "cool"
             and classification.pre_condition_target is not None
             and classification.pre_condition_target < 0
+            and not pre_condition_achieved
         ):
             ceiling += float(classification.pre_condition_target)  # pre-cool lowers the ceiling
         ctx = "comfort"
@@ -472,6 +474,12 @@ class AutomationEngine:
 
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
+
+        # Pre-cool achievement gate (Issue #295) — once the home reaches the pre-cool
+        # target temperature for the day, revert to comfort_cool ceiling for the rest
+        # of the day rather than holding the lower pre-cool setpoint all afternoon.
+        self._pre_condition_achieved: bool = False
+        self._pre_condition_achieved_date: str | None = None
 
     async def _notify(self, message: str, title: str, notification_type: str) -> None:
         """Send a notification via configured channels, filtered by per-event preferences."""
@@ -883,6 +891,7 @@ class AutomationEngine:
         self,
         classification: DayClassification,
         predicted_indoor: list[dict] | None = None,
+        indoor_temp: float | None = None,
     ) -> None:
         """Apply a new day classification — adjust HVAC behavior accordingly.
 
@@ -895,6 +904,9 @@ class AutomationEngine:
                 (list of {"ts": ISO str, "temp": float} entries). When provided
                 and the model is calibrated, the ceiling guard evaluates whether
                 to pre-cool before comfort_cool is breached.
+            indoor_temp: Current indoor temperature in °F. When provided, used
+                to evaluate the pre-cool achievement gate (Issue #295). When
+                None the achievement check is skipped for this cycle.
         """
         self._current_classification = classification
 
@@ -958,6 +970,32 @@ class AutomationEngine:
                 classification.hvac_mode,
             )
 
+        # Issue #295: pre-cool achievement gate — daily reset + detection.
+        # Reset the flag at the start of each new calendar day so the pre-cool
+        # ceiling offset re-arms each morning.  Check whether the home has
+        # already reached the pre-cool target temperature; if so, set the flag
+        # so select_comfort_band() reverts to comfort_cool for the rest of the day.
+        _today = dt_util.now().strftime("%Y-%m-%d")
+        if self._pre_condition_achieved_date != _today:
+            self._pre_condition_achieved = False
+            self._pre_condition_achieved_date = _today
+
+        if (
+            not self._pre_condition_achieved
+            and classification.pre_condition
+            and classification.pre_condition_target is not None
+            and classification.pre_condition_target < 0
+            and indoor_temp is not None
+        ):
+            _absolute_target = float(self.config.get("comfort_cool", 75)) + float(classification.pre_condition_target)
+            if indoor_temp <= _absolute_target:
+                self._pre_condition_achieved = True
+                _LOGGER.info(
+                    "Pre-cool achieved (indoor=%.1f°F ≤ target=%.1f°F) — reverting to comfort ceiling for rest of day",
+                    indoor_temp,
+                    _absolute_target,
+                )
+
         # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
         cls_reason = (
             f"daily classification — {classification.day_type} day,"
@@ -969,6 +1007,7 @@ class AutomationEngine:
             occupancy_mode=self._occupancy_mode,
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            pre_condition_achieved=self._pre_condition_achieved,
         )
         await self._apply_comfort_band(_band, reason=cls_reason)
 
@@ -2906,15 +2945,20 @@ class AutomationEngine:
         self._grace_end_time = None
         self._grace_duration_seconds = None
         self._last_resume_source = None
+        # Issue #295: pre-cool achievement gate — restored so a restart mid-day after
+        # the home reached the pre-cool target does not re-arm the lower ceiling offset.
+        self._pre_condition_achieved = state.get("pre_condition_achieved", False)
+        self._pre_condition_achieved_date = state.get("pre_condition_achieved_date")
         _LOGGER.info(
             "Restored automation state: paused=%s, pre_pause_mode=%s, "
-            "last_action=%s, fan_active=%s, fan_override=%s "
+            "last_action=%s, fan_active=%s, fan_override=%s, precool_achieved=%s "
             "(override/grace state cleared — clean slate on restart)",
             self._paused_by_door,
             self._pre_pause_mode,
             self._last_action_reason,
             self._fan_active,
             self._fan_override_active,
+            self._pre_condition_achieved,
         )
 
     def get_serializable_state(self) -> dict[str, Any]:
@@ -2950,6 +2994,10 @@ class AutomationEngine:
                 if self._current_classification
                 else None
             ),
+            # Issue #295: pre-cool achievement gate — persisted so an HA restart after
+            # the home reached the pre-cool target does not re-arm the lower ceiling.
+            "pre_condition_achieved": self._pre_condition_achieved,
+            "pre_condition_achieved_date": self._pre_condition_achieved_date,
         }
 
     def cleanup(self) -> None:

@@ -6,6 +6,9 @@ repos:
       - id: check-json
       - id: end-of-file-fixer
       - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: [--fix, lf]
+        files: ^tools/simulations/.*\.json$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.6

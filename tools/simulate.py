@@ -286,11 +286,41 @@ def print_cases_summary() -> None:
 # ------------------------------------------------------------------
 
 
+def _normalize_lf(path: Path) -> bool:
+    """Normalize CRLF to LF in a file in-place. Returns True if file was changed."""
+    raw = path.read_bytes()
+    normalized = raw.replace(b"\r\n", b"\n")
+    if raw == normalized:
+        return False
+    path.write_bytes(normalized)
+    return True
+
+
 def _file_sha256(path: Path) -> str:
-    """Compute SHA-256 hex digest of a file."""
+    """Compute SHA-256 hex digest of a file, normalizing CRLF→LF for platform consistency."""
     h = hashlib.sha256()
-    h.update(path.read_bytes())
+    h.update(path.read_bytes().replace(b"\r\n", b"\n"))
     return h.hexdigest()
+
+
+def fix_crlf_all() -> int:
+    """Normalize CRLF→LF in all scenario JSON files across all state directories."""
+    fixed: list[str] = []
+    for state, d in STATE_DIRS.items():
+        if not d.exists():
+            continue
+        for path in sorted(d.glob("*.json")):
+            if _normalize_lf(path):
+                fixed.append(f"  {state}/{path.name}")
+    if MANIFEST_PATH.exists() and _normalize_lf(MANIFEST_PATH):
+        fixed.append("  golden/MANIFEST.json")
+    if fixed:
+        print(f"Normalized {len(fixed)} file(s) to LF:")
+        for f in fixed:
+            print(f)
+    else:
+        print("All scenario files already use LF — nothing to do.")
+    return 0
 
 
 def check_integrity() -> int:
@@ -392,6 +422,10 @@ def sign_scenario(name: str) -> int:
     except KeyboardInterrupt:
         print("\nAborted — MANIFEST not updated.")
         return 1
+
+    # Normalize line endings before hashing so the stored hash is always LF-based
+    if _normalize_lf(path):
+        print(f"  (normalized CRLF→LF in {path.name} before signing)")
 
     # Update MANIFEST
     manifest: dict = {}
@@ -564,10 +598,20 @@ def main() -> int:
         metavar="NAME",
         help="Sign a golden scenario into MANIFEST.json after human review",
     )
+    parser.add_argument(
+        "--fix-crlf",
+        action="store_true",
+        dest="fix_crlf",
+        help="Normalize CRLF→LF in all scenario JSON files (run before --sign on Windows)",
+    )
     args = parser.parse_args()
 
     for d in STATE_DIRS.values():
         d.mkdir(parents=True, exist_ok=True)
+
+    # Normalize CRLF in all scenario files
+    if args.fix_crlf:
+        return fix_crlf_all()
 
     # Golden integrity check
     if args.check_integrity:

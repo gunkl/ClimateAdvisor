@@ -229,6 +229,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.automation_engine._revisit_callback = self.async_request_refresh
         self.automation_engine._sensor_check_callback = self._any_sensor_open
         self.automation_engine._emit_event_callback = self._emit_event
+        _LOGGER.debug(
+            "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
+            config.get("temp_unit", "fahrenheit"),
+            config.get("comfort_heat", 0),
+            config.get("comfort_cool", 0),
+        )
 
         # Event log ring buffer (Issue #76) — timestamped automation events for debug download
         self._event_log: list[dict] = []

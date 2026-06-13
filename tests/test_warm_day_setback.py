@@ -6,9 +6,9 @@ On warm/hot days the engine no longer:
   - emits warm_day_setback_applied / warm_day_state_confirmed events
   - sets hvac_mode="off" for a warm day
 
-Instead it calls ``_apply_comfort_band`` which arms the band via ``set_hvac_mode("heat_cool")``
-+ ``set_temperature(target_temp_low/high)`` (dual) or ``set_hvac_mode("cool")``
-+ ``set_temperature(ceiling)`` (cool-only).  Loop-prevention (Root Cause E) is unchanged.
+Instead it calls ``_apply_comfort_band`` which arms the band via a single atomic
+``set_temperature(hvac_mode="heat_cool", target_temp_low/high)`` (dual — Fix 4, Issue #290) or
+``set_hvac_mode("cool") + set_temperature(ceiling)`` (cool-only).  Loop-prevention (Root Cause E) is unchanged.
 """
 
 from __future__ import annotations
@@ -218,16 +218,24 @@ class TestWarmDayBandArming:
     """
 
     def test_warm_day_dual_thermostat_enters_heat_cool_mode(self):
-        """P3: warm day + dual-capable → set_hvac_mode("heat_cool"); old off+setback replaced."""
-        # Old assertion was: no hvac calls (setback without mode change per Root Cause C fix).
-        # P3 replaces that: _apply_comfort_band enters heat_cool from off via mode call.
+        """P3+Fix4: warm day + dual-capable → hvac_mode="heat_cool" embedded in set_temperature payload.
+
+        Fix 4 (Issue #290): the dual path emits ONE atomic set_temperature call with hvac_mode
+        in the payload; no separate set_hvac_mode call.  Old P3 assertion was: 1 set_hvac_mode
+        call to "heat_cool".  Now: 0 set_hvac_mode calls; hvac_mode in set_temperature data.
+        """
         engine = _make_engine(comfort_heat=70.0, current_mode="off")
         c = _make_classification(day_type="warm", hvac_mode="off")
         asyncio.run(engine.apply_classification(c))
 
+        # Fix 4: NO separate set_hvac_mode call for dual-setpoint path
         hvac = _hvac_calls(engine)
-        assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "heat_cool"
+        assert len(hvac) == 0
+
+        # hvac_mode="heat_cool" must appear inside the set_temperature payload
+        temp = _temp_calls(engine)
+        assert len(temp) == 1
+        assert temp[0].args[2].get("hvac_mode") == "heat_cool"
 
     def test_warm_day_dual_thermostat_sets_dual_setpoints(self):
         """P3: warm day + dual → target_temp_low=comfort_heat, target_temp_high=comfort_cool."""
@@ -256,21 +264,24 @@ class TestWarmDayBandArming:
         assert len(temp) == 1  # setpoints are still refreshed
 
     def test_hot_day_same_band_arming_as_warm(self):
-        """hot day (hvac_mode=cool from classifier) + dual → same band arming shape."""
-        # Old assertion was: setback_heat single setpoint for heat mode.
-        # P3 replaces that: dual band applies to all non-cold days.
+        """hot day (hvac_mode=cool from classifier) + dual → same single-call atomic shape as warm.
+
+        Fix 4 (Issue #290): dual path — no separate set_hvac_mode; hvac_mode="heat_cool" in payload.
+        Old P3 assertion was: 1 set_hvac_mode call to "heat_cool".  Now: 0 set_hvac_mode calls.
+        """
         engine = _make_engine(comfort_heat=70.0, current_mode="off")
         c = _make_classification(day_type="hot", hvac_mode="cool")
         asyncio.run(engine.apply_classification(c))
 
+        # Fix 4: NO separate set_hvac_mode call for dual-setpoint path
         hvac = _hvac_calls(engine)
-        assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "heat_cool"
+        assert len(hvac) == 0
 
         temp = _temp_calls(engine)
         assert len(temp) == 1
         data = temp[0].args[2]
         assert "target_temp_low" in data and "target_temp_high" in data
+        assert data.get("hvac_mode") == "heat_cool"
 
     def test_comfort_band_applied_event_emitted(self):
         """P3 emits comfort_band_applied instead of warm_day_setback_applied."""

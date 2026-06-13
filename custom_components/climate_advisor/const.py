@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.6"
+VERSION = "0.4.7"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.7": [
+        "Fix #290: Grace period expiry now immediately triggers a coordinator refresh so sensor"
+        " entities reflect cleared override state without waiting up to 30 minutes.",
+        "Fix #290: On HA restart, if the system is in the sleep window and no manual override"
+        " is active, bedtime setback is re-applied on the first classification cycle (prevents"
+        " sleeping at daytime comfort temps after a restart mid-night).",
+        "Fix #290: After every climate.set_temperature or _set_temperature_dual() call, a"
+        " 10-second validation callback checks whether the thermostat accepted the commanded"
+        " setpoints; mismatches are logged as ERROR with commanded vs reported values.",
+        "Fix #290: AI activity report Settings column now correctly shows setpoint changes:"
+        " override_detected event payload includes old_setpoint_f and new_setpoint_f fields"
+        " that the annotation code uses to build the [settings: setpoint: X°F→Y°F] string.",
+    ],
     "0.4.6": [
         "Fix #286: climate.set_temperature for dual-setpoint (heat_cool) thermostats now"
         " includes hvac_mode='heat_cool' in the service payload. Without this key the Ecobee"
@@ -963,6 +976,44 @@ KNOWN_FIXES: dict[int, dict] = {
             " mechanism; investigate via startup log and thermostat state history",
             "Ecobee SmartAway / comfort program conflicts not addressed — if the Ecobee's own"
             " occupancy detection fires during a CA write, it may still override CA's setpoints",
+        ],
+    },
+    290: {
+        "version_fixed": "0.4.7",
+        "title": "Grace expiry UI stale, bedtime lost on restart, setpoint validation, AI report Settings column",
+        "scope_covered": [
+            "automation.py _on_grace_expired(): calls _request_refresh_callback() on all three"
+            " expiry paths so the coordinator immediately updates sensor state after override clears",
+            "coordinator.py _check_startup_override(): if system is in sleep window and no override"
+            " is active, calls handle_bedtime() so setback is re-applied on HA restart mid-night",
+            "automation.py _set_temperature_dual() / _set_temperature(): 10-second"
+            " async_call_later validation callback logs ERROR when thermostat reports setpoints"
+            " that diverge from commanded values by more than 0.6 (service units); also emits"
+            " setpoint_rejected event",
+            "automation.py _set_temperature_dual(): sets _last_commanded_hvac_mode='heat_cool'"
+            " after the service call so override detection compares against the correct mode",
+            "automation.py handle_manual_override() / start_override_confirmation():"
+            " accept old_setpoint_f / new_setpoint_f params and include them in override_detected"
+            " event payload",
+            "coordinator.py setpoint-only override path: passes old_temp / new_temp as"
+            " old_setpoint_f / new_setpoint_f to handle_manual_override()",
+            "ai_skills_activity.py: annotation code reads old_setpoint_f / new_setpoint_f from"
+            " override_detected event (not the non-existent old_temp / new_temp); system prompt"
+            " updated to match",
+            "fake_hass.py: set_temperature service handler now updates entity state from"
+            " hvac_mode in payload, matching real HA behavior",
+        ],
+        "scope_not_covered": [
+            "Retry mechanism if setpoint validation fails — CA logs the mismatch but does not"
+            " re-send the command; a subsequent classification cycle (30 min) will re-apply",
+            "Grace period stuck-at-0 display issue in the dashboard when _cancel_grace_timers()"
+            " is called without clearing _grace_end_time — cosmetic only, not addressed here",
+            "Setpoint validation silently no-ops when thermostat drops the temperature attribute"
+            " entirely (entity unavailable) — avoids false ERROR but means the failure goes"
+            " undetected until the next classification cycle",
+            "Startup bedtime recovery skipped when thermostat mode diverges from classification"
+            " on restart — the mode-mismatch branch sets an override instead; this may be correct"
+            " (real mode divergence is a legitimate override signal) but is untested",
         ],
     },
 }

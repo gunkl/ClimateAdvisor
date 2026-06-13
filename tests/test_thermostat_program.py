@@ -242,7 +242,7 @@ class TestInSleepWindow:
 # ---------------------------------------------------------------------------
 #
 # These tests verify the command shape emitted by _apply_comfort_band:
-# - dual-capable → set_hvac_mode("heat_cool") if not already + set_temperature(low/high)
+# - dual-capable → ONE atomic set_temperature(hvac_mode="heat_cool", low, high) — Fix 4, Issue #290
 # - cool-only + active="ceiling" → set_hvac_mode("cool") + set_temperature(ceiling)
 # - heat-only + active="floor" → set_hvac_mode("heat") + set_temperature(floor)
 # - no capable mode → NO service calls (band not armed)
@@ -332,32 +332,47 @@ class TestApplyComfortBandDual:
     """Dual-setpoint capable thermostat — uses heat_cool + target_temp_low/high."""
 
     def test_warm_day_band_emits_dual_setpoints(self):
-        """Warm band [floor=60, ceiling=74, active=ceiling]: dual set_temperature call."""
+        """Warm band [floor=60, ceiling=74, active=ceiling]: single set_temperature call with hvac_mode embedded.
+
+        Fix 4 (Issue #290): the dual path emits ONE atomic set_temperature call with
+        hvac_mode="heat_cool" in the payload.  No separate set_hvac_mode call is issued
+        so the thermostat receives mode + setpoints atomically (prevents Ecobee revert window).
+        """
         eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
         band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test warm"))
 
+        # Fix 4: NO separate set_hvac_mode call for dual-setpoint path
         hvac = _hvac_calls(eng)
-        assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "heat_cool"
+        assert len(hvac) == 0
 
         temp = _temp_calls(eng)
         assert len(temp) == 1
         data = temp[0].args[2]
         assert data["target_temp_low"] == 60.0  # floor
         assert data["target_temp_high"] == 74.0  # ceiling
+        # hvac_mode is embedded in the set_temperature payload
+        assert data.get("hvac_mode") == "heat_cool"
 
     def test_cold_day_band_emits_dual_setpoints(self):
-        """Cold band [floor=70, ceiling=80, active=floor]: same dual shape."""
+        """Cold band [floor=70, ceiling=80, active=floor]: single set_temperature call with hvac_mode embedded.
+
+        Fix 4 (Issue #290): same atomic pattern as warm-day dual; no separate set_hvac_mode call.
+        """
         eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
         band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test cold"))
+
+        # Fix 4: NO separate set_hvac_mode call for dual-setpoint path
+        hvac = _hvac_calls(eng)
+        assert len(hvac) == 0
 
         temp = _temp_calls(eng)
         assert len(temp) == 1
         data = temp[0].args[2]
         assert data["target_temp_low"] == 70.0
         assert data["target_temp_high"] == 80.0
+        assert data.get("hvac_mode") == "heat_cool"
 
     def test_no_mode_change_when_already_in_heat_cool(self):
         """Thermostat already in heat_cool → _set_hvac_mode NOT called (idempotent)."""

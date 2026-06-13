@@ -28,7 +28,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .automation import AutomationEngine, compute_bedtime_setback
+from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
@@ -229,6 +229,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.automation_engine._revisit_callback = self.async_request_refresh
         self.automation_engine._sensor_check_callback = self._any_sensor_open
         self.automation_engine._emit_event_callback = self._emit_event
+        self.automation_engine._request_refresh_callback = lambda: self.hass.async_create_task(
+            self.async_request_refresh()
+        )
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1111,6 +1114,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "First run: HVAC is '%s' which matches classification — no override needed",
             current,
         )
+
+        # Fix 2 (Issue #290): if restart killed the post-grace scheduled-state task
+        # and we're now in a sleep window with no active override, apply bedtime setback.
+        if _in_sleep_window(dt_util.now(), self.config) and not self.automation_engine._manual_override_active:
+            _LOGGER.info(
+                "First run: in sleep window with no active override — applying bedtime setback (restart recovery)"
+            )
+            self.hass.async_create_task(self.automation_engine.handle_bedtime())
+
         return False
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -2547,6 +2559,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     classification_mode=(
                         self._current_classification.hvac_mode if self._current_classification else None
                     ),
+                    old_setpoint_f=old_temp,
+                    new_setpoint_f=new_temp,
                 )
 
         # Detect manual fan_mode attribute changes on thermostat (Issue #37)

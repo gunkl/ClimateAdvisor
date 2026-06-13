@@ -84,6 +84,8 @@ class _FakeServices:
             if service == "set_hvac_mode" and "hvac_mode" in data:
                 st.state = data["hvac_mode"]
             elif service == "set_temperature":
+                if "hvac_mode" in data:
+                    st.state = data["hvac_mode"]
                 if "temperature" in data:
                     st.attributes["temperature"] = data["temperature"]
                 if "target_temp_low" in data:

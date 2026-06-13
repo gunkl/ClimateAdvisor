@@ -8,7 +8,7 @@ being sent to the HA climate.set_temperature service.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 
@@ -241,3 +241,261 @@ class TestSetTemperatureDual:
         asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="dry run"))
 
         engine.hass.services.async_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: post-command setpoint validation (Fix 3, Issue #290)
+# ---------------------------------------------------------------------------
+
+
+def _make_automation_with_task_runner(
+    temp_unit: str = "fahrenheit",
+    comfort_cool: float = 76.0,
+    comfort_heat: float = 68.0,
+) -> AutomationEngine:
+    """Create an AutomationEngine whose async_create_task actually runs coroutines.
+
+    This lets validation callback tests exercise _check_dual_setpoint_accepted /
+    _check_single_setpoint_accepted directly without needing a real event loop.
+    """
+    hass = MagicMock()
+    hass.services.async_call = AsyncMock()
+
+    def _run_coroutine(coro):
+        asyncio.run(coro)
+
+    hass.async_create_task = MagicMock(side_effect=_run_coroutine)
+
+    config: dict = {
+        "climate_entity": "climate.test_thermostat",
+        "temp_unit": temp_unit,
+        "comfort_heat": comfort_heat,
+        "comfort_cool": comfort_cool,
+        "setback_heat": 60.0,
+        "setback_cool": 80.0,
+        "notify_service": "notify.notify",
+    }
+    engine = AutomationEngine(
+        hass=hass,
+        climate_entity=config["climate_entity"],
+        weather_entity="weather.forecast_home",
+        door_window_sensors=[],
+        notify_service=config["notify_service"],
+        config=config,
+    )
+    return engine
+
+
+class TestSetpointValidation:
+    """Post-command thermostat validation fires 10 s after _set_temperature_dual/single.
+
+    Pattern: patch async_call_later to capture the scheduled lambda, then invoke
+    it with a mock _now to run the validation coroutine synchronously.
+    """
+
+    # ── dual setpoint: MISMATCH ───────────────────────────────────────────────
+
+    def test_setpoint_validation_mismatch_logs_error(self):
+        """Dual setpoint validation fires and logs error when thermostat reports wrong values.
+
+        Occupant impact: if the thermostat silently rejects a setpoint command,
+        the home may heat or cool to the wrong temperature all day with no alert.
+
+        Setup: command low=68.0 high=74.0, thermostat reports low=67.0 high=77.0
+        (both outside ±0.6°F tolerance).
+        Expected: _LOGGER.error called, 'setpoint_rejected' event emitted.
+        """
+        engine = _make_automation_with_task_runner()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        # Thermostat state reports wrong values after the command
+        wrong_state = MagicMock()
+        wrong_state.attributes = {
+            "target_temp_low": 67.0,
+            "target_temp_high": 77.0,
+        }
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_callbacks: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later,
+            ),
+            patch("custom_components.climate_advisor.automation._LOGGER") as mock_logger,
+        ):
+            asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="comfort band"))
+
+            assert len(captured_callbacks) == 1, "Expected exactly one async_call_later call"
+            delay, callback = captured_callbacks[0]
+            assert delay == 10, f"Validation delay should be 10 s, got {delay}"
+
+            # Fire the callback inside the patch context so _LOGGER is still mocked
+            callback(None)
+
+        mock_logger.error.assert_called_once()
+        error_msg = mock_logger.error.call_args[0][0]
+        assert "FAILED" in error_msg or "validation" in error_msg.lower(), (
+            f"Expected validation failure message, got: {error_msg}"
+        )
+
+        rejected = [e for e in emitted_events if e[0] == "setpoint_rejected"]
+        assert len(rejected) == 1, f"Expected 'setpoint_rejected' event, got: {emitted_events}"
+        payload = rejected[0][1]
+        assert payload["commanded_low"] == 68.0
+        assert payload["commanded_high"] == 74.0
+        assert payload["reported_low"] == 67.0
+        assert payload["reported_high"] == 77.0
+
+    # ── dual setpoint: MATCH ─────────────────────────────────────────────────
+
+    def test_setpoint_validation_match_logs_info(self):
+        """Dual setpoint validation succeeds when thermostat reports matching values.
+
+        Occupant impact: confirmation that the thermostat accepted the setpoint
+        means heating/cooling will proceed as intended.
+
+        Setup: command low=68.0 high=74.0, thermostat reports exactly that.
+        Expected: _LOGGER.info called with 'confirmed', no error, no event.
+        """
+        engine = _make_automation_with_task_runner()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        # Thermostat state reports matching values
+        ok_state = MagicMock()
+        ok_state.attributes = {
+            "target_temp_low": 68.0,
+            "target_temp_high": 74.0,
+        }
+        engine.hass.states.get = MagicMock(return_value=ok_state)
+
+        captured_callbacks: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later,
+            ),
+            patch("custom_components.climate_advisor.automation._LOGGER") as mock_logger,
+        ):
+            asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="comfort band"))
+
+            assert len(captured_callbacks) == 1
+            _, callback = captured_callbacks[0]
+
+            # Fire the callback inside the patch context so _LOGGER is still mocked
+            callback(None)
+
+        mock_logger.error.assert_not_called()
+        rejected = [e for e in emitted_events if e[0] == "setpoint_rejected"]
+        assert len(rejected) == 0, f"No rejection event expected, got: {rejected}"
+
+        # Info log must mention confirmation
+        info_calls = [str(c) for c in mock_logger.info.call_args_list]
+        confirmed = any("confirmed" in c.lower() for c in info_calls)
+        assert confirmed, f"Expected 'confirmed' in info log, calls: {info_calls}"
+
+    # ── single setpoint: MISMATCH ─────────────────────────────────────────────
+
+    def test_single_setpoint_validation_mismatch_logs_error(self):
+        """Single setpoint validation fires and logs error when thermostat reports wrong value.
+
+        Occupant impact: if the thermostat rejects a heat/cool setpoint command,
+        the home stays at the wrong temperature without any operator alert.
+
+        Setup: command 72.0°F, thermostat reports temperature=69.0 (outside ±0.6°F).
+        Expected: _LOGGER.error called, 'setpoint_rejected' event emitted.
+        """
+        engine = _make_automation_with_task_runner()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        wrong_state = MagicMock()
+        wrong_state.state = "heat"
+        wrong_state.attributes = {"temperature": 69.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_callbacks: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later,
+            ),
+            patch("custom_components.climate_advisor.automation._LOGGER") as mock_logger,
+        ):
+            asyncio.run(engine._set_temperature(72.0, reason="heat setback"))
+
+            assert len(captured_callbacks) == 1
+            _, callback = captured_callbacks[0]
+
+            # Fire the callback inside the patch context so _LOGGER is still mocked
+            callback(None)
+
+        mock_logger.error.assert_called()
+        rejected = [e for e in emitted_events if e[0] == "setpoint_rejected"]
+        assert len(rejected) == 1, f"Expected 'setpoint_rejected' event, got: {emitted_events}"
+        payload = rejected[0][1]
+        assert payload["commanded"] == 72.0
+        assert payload["reported"] == 69.0
+
+    # ── single setpoint: MATCH ────────────────────────────────────────────────
+
+    def test_single_setpoint_validation_match_logs_info(self):
+        """Single setpoint validation succeeds when thermostat reports matching value.
+
+        Setup: command 72.0°F, thermostat reports temperature=72.0 (within ±0.6°F).
+        Expected: no error, no event, info log contains 'confirmed'.
+        """
+        engine = _make_automation_with_task_runner()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        ok_state = MagicMock()
+        ok_state.state = "heat"
+        ok_state.attributes = {"temperature": 72.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=ok_state)
+
+        captured_callbacks: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later,
+            ),
+            patch("custom_components.climate_advisor.automation._LOGGER") as mock_logger,
+        ):
+            asyncio.run(engine._set_temperature(72.0, reason="heat setback"))
+
+            assert len(captured_callbacks) == 1
+            _, callback = captured_callbacks[0]
+
+            # Fire the callback inside the patch context so _LOGGER is still mocked
+            callback(None)
+
+        mock_logger.error.assert_not_called()
+        rejected = [e for e in emitted_events if e[0] == "setpoint_rejected"]
+        assert len(rejected) == 0
+
+        info_calls = [str(c) for c in mock_logger.info.call_args_list]
+        confirmed = any("confirmed" in c.lower() for c in info_calls)
+        assert confirmed, f"Expected 'confirmed' in info log, calls: {info_calls}"

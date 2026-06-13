@@ -1129,6 +1129,26 @@ KNOWN_FIXES: dict[int, dict] = {
             " control — CA will detect and re-apply on the next 30-min coordinator cycle",
         ],
     },
+    263: {
+        "version_fixed": "0.4.7",
+        "title": "Post-restart pause recovery — clear _paused_by_door on restart (clean-slate)",
+        "scope_covered": [
+            "automation.py restore_state(): _paused_by_door and _pre_pause_mode are no longer"
+            " restored from persisted state; engine starts clean on every HA restart",
+            "Door/window state-change listener re-detects open sensors via None→'on' entity"
+            " transition; HVAC briefly re-arms then re-pauses after the configured debounce"
+            " (default 5 min) — strictly better than sitting paused indefinitely when cloud"
+            " weather or thermostat services are slow to reconnect (Issue #263)",
+            "tests/test_paused_restart_recovery.py: 7 new TDD tests covering clean-slate behavior",
+            "docs/08-COMPUTATION-REFERENCE.md §11: documents the design decision and debounce timing",
+        ],
+        "scope_not_covered": [
+            "Sensor entity that never re-registers after restart (broken sensor) — HVAC stays"
+            " armed; user must manually re-pause or re-configure the sensor",
+            "Debounce window (5 min) during which HVAC briefly runs — acceptable trade-off vs"
+            " indefinite pause; no shorter debounce path is implemented",
+        ],
+    },
     301: {
         "version_fixed": "0.4.10",
         "title": "Revert heat_cool dual-setpoint; single-setpoint operation + 15-minute retry",

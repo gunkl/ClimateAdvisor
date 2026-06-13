@@ -336,11 +336,17 @@ async def async_build_activity_context(
     climate_entity_id: str = options.get("climate_entity", "")
     hvac_mode = "unknown"
     current_temp = "unknown"
+    target_temp: float | None = None
+    target_temp_low: float | None = None
+    target_temp_high: float | None = None
     if climate_entity_id:
         climate_state = hass.states.get(climate_entity_id)
         if climate_state is not None:
             hvac_mode = climate_state.state
             current_temp = climate_state.attributes.get("current_temperature", "unknown")
+            target_temp = climate_state.attributes.get("temperature")
+            target_temp_low = climate_state.attributes.get("target_temp_low")
+            target_temp_high = climate_state.attributes.get("target_temp_high")
 
     # --- Automation state ---
     automation_status = data.get(ATTR_AUTOMATION_STATUS, "unknown")
@@ -505,6 +511,8 @@ async def async_build_activity_context(
         f"  HVAC action:       {hvac_action}",
         f"  HVAC runtime today:{hvac_runtime_today} min",
         f"  Indoor temp:       {current_temp}",
+        f"  Setpoint (single): {target_temp if target_temp is not None else 'N/A'}",
+        f"  Setpoint low/high: {target_temp_low if target_temp_low is not None else 'N/A'} / {target_temp_high if target_temp_high is not None else 'N/A'}",
         "",
         "## AUTOMATION STATE",
         f"  Status:            {automation_status}",

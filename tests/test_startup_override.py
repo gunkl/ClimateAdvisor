@@ -263,6 +263,7 @@ class TestStartupBedtimeRecovery:
 
         assert result is False
         coord.hass.async_create_task.assert_not_called()
+        assert coord.automation_engine._manual_override_active is False
 
     def test_startup_bedtime_not_applied_when_override_active(self):
         """No bedtime recovery when a manual override is already active.
@@ -288,3 +289,58 @@ class TestStartupBedtimeRecovery:
 
         assert result is False
         coord.hass.async_create_task.assert_not_called()
+
+
+class TestStartupHeatCoolCompatibility:
+    """heat_cool thermostat state is CA-compatible with 'cool' or 'heat' recommendations.
+
+    Occupant impact: without this fix, every restart on a heat_cool thermostat
+    triggers a false manual-override flag — CA stops managing the home until the
+    user explicitly clears the override, letting temperature drift unchecked.
+    """
+
+    def test_heat_cool_state_cool_recommended_no_override(self):
+        """heat_cool state + 'cool' recommended → compatible, no override set.
+
+        A dual-setpoint thermostat is already defending both comfort edges; CA
+        is not in conflict with the classifier recommendation.
+        """
+        coord = _make_coordinator()
+        classification = _make_classification(day_type="hot", hvac_mode="cool")
+        climate_state = _make_climate_state("heat_cool")
+
+        result = coord._check_startup_override(climate_state, classification)
+
+        assert result is False
+        assert coord.automation_engine._manual_override_active is False
+
+    def test_heat_cool_state_heat_recommended_no_override(self):
+        """heat_cool state + 'heat' recommended → compatible, no override set.
+
+        On a cold day the classifier recommends 'heat'; a heat_cool thermostat
+        satisfies this by defending the floor — no override needed.
+        """
+        coord = _make_coordinator()
+        classification = _make_classification(day_type="cold", hvac_mode="heat")
+        climate_state = _make_climate_state("heat_cool")
+
+        result = coord._check_startup_override(climate_state, classification)
+
+        assert result is False
+        assert coord.automation_engine._manual_override_active is False
+
+    def test_cool_state_heat_recommended_still_sets_override(self):
+        """'cool' state + 'heat' recommended → still incompatible, override set.
+
+        The fix must not suppress legitimate overrides: a thermostat running AC
+        when the classifier recommends heat is a genuine conflict.
+        """
+        coord = _make_coordinator()
+        classification = _make_classification(day_type="cold", hvac_mode="heat")
+        climate_state = _make_climate_state("cool")
+
+        result = coord._check_startup_override(climate_state, classification)
+
+        assert result is True
+        assert coord.automation_engine._manual_override_active is True
+        assert coord.automation_engine._manual_override_mode == "cool"

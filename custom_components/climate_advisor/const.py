@@ -4,9 +4,25 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.7"
+VERSION = "0.4.8"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.8": [
+        "Fix #293: After every HA restart, CA no longer treats a heat_cool thermostat state as"
+        " a manual override. The startup check now recognises heat_cool as CA-compatible with"
+        " cool/heat classifier outputs, preventing a spurious 30-min grace period that blocked"
+        " automation each morning.",
+        "Fix #293: When natural ventilation ends (door/window sensors close), CA now uses the"
+        " dual-setpoint heat_cool command for capable thermostats instead of reverting to"
+        " single-setpoint cool mode. Ecobee users no longer see the band drop from [68/74] to"
+        " a single 72°F setpoint after every ventilation cycle.",
+        "Fix #293: AI activity investigator now includes active thermostat setpoints"
+        " (single-setpoint temperature and dual-setpoint low/high) in its context block so the"
+        " AI can explain pre-cool offsets and band boundaries in morning summaries.",
+        "Fix #293: GitHub issue titles generated from the dashboard no longer include a"
+        " redundant 'Climate Advisor: ' prefix; the full AI-generated summary is used up to"
+        " 100 characters.",
+    ],
     "0.4.7": [
         "Fix #290: Grace period expiry now immediately triggers a coordinator refresh so sensor"
         " entities reflect cleared override state without waiting up to 30 minutes.",
@@ -1014,6 +1030,36 @@ KNOWN_FIXES: dict[int, dict] = {
             "Startup bedtime recovery skipped when thermostat mode diverges from classification"
             " on restart — the mode-mismatch branch sets an override instead; this may be correct"
             " (real mode divergence is a legitimate override signal) but is untested",
+        ],
+    },
+    293: {
+        "version_fixed": "0.4.8",
+        "title": "heat_cool startup override false positive + nat-vent restore drops dual-setpoint mode",
+        "scope_covered": [
+            "coordinator.py _check_startup_override(): heat_cool thermostat state is now treated"
+            " as CA-compatible with cool/heat classifier outputs — no spurious override on restart",
+            "automation.py _set_temperature_for_mode(): checks _get_thermostat_capabilities();"
+            " for dual-setpoint thermostats emits _set_temperature_dual(floor, ceiling) on both"
+            " cool and heat paths, preserving heat_cool mode after nat-vent restore",
+            "ai_skills_activity.py async_build_activity_context(): reads temperature,"
+            " target_temp_low, target_temp_high from climate entity and includes them in context"
+            " block so AI can see and explain active setpoints",
+            "frontend/index.html openGithubIssueModal(): GitHub issue title no longer prefixed"
+            " with 'Climate Advisor:'; substring limit increased from 80 to 100 chars",
+            "tests/test_startup_override.py TestStartupHeatCoolCompatibility: three cases covering"
+            " heat_cool+cool→no override, heat_cool+heat→no override, cool+heat→override fires",
+            "tests/test_nat_vent_restore_dual_setpoint.py TestNatVentRestoreDualSetpoint:"
+            " dual-setpoint cool/pre-condition uses dual call, single-setpoint thermostat uses"
+            " single call, heat mode dual call",
+        ],
+        "scope_not_covered": [
+            "heat_cool startup state when the thermostat is in heat_cool but classification"
+            " is 'off' — treated as incompatible (legitimate override signal) and not changed",
+            "Nat-vent restore for thermostats that support heat_cool but currently in 'off' mode"
+            " — _set_temperature_for_mode() does not handle the off→heat_cool transition",
+            "pre_condition_target design question: 72°F ceiling persists all day on hot days by"
+            " design (thermal buffer); making it morning-only (cease offset once indoor ≤ target)"
+            " is out of scope for this fix",
         ],
     },
 }

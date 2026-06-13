@@ -1,0 +1,87 @@
+{
+  "name": "nat_vent_restore_uses_dual_setpoint",
+  "description": "Issue #293 Fix B: when natural ventilation ends on a dual-setpoint thermostat (heat_cool mode + TARGET_TEMP_RANGE), the engine's restore call must arm both setpoints (target_temp_low + target_temp_high) rather than a single temperature. Without this fix, only one edge is commanded — leaving the thermostat partially armed and the undefended edge (e.g. the heat floor) subject to drift.",
+  "source": "synthetic",
+  "issue": 293,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md):",
+    "(a) Scenario effectiveness: if _set_temperature_for_mode reverts to always calling",
+    "    _set_temperature (single setpoint) on a cool classification, the dual_setback_applied",
+    "    assertion fails — target_temp_low is missing from the action_log, and the thermostat",
+    "    receives only a ceiling setpoint while the floor drifts.",
+    "(b) Docs↔production alignment: docs/08-COMPUTATION-REFERENCE.md should document that",
+    "    _set_temperature_for_mode is capability-aware after Issue #293.  The scenario is the",
+    "    regression anchor that forces a doc update if the dual path is removed.",
+    "(c) Occupant experience: if this scenario fails to catch a regression, occupants on a",
+    "    dual-setpoint thermostat see nat-vent restore arm only the AC ceiling — the heat floor",
+    "    is undefended.  On a warm day with cool nights, indoor temps can fall below comfort_heat",
+    "    after nat-vent closes, requiring manual intervention to warm the home.",
+    "Regression proof: change _set_temperature_for_mode to always call _set_temperature() on a",
+    "cool classification → dual_setback_applied fails (target_temp_low absent from action_log).",
+    "The thermostat must enter heat_cool mode with dual setpoints."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0
+  },
+  "events": [
+    {
+      "time": "2026-07-20T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor 72F (within band), outdoor 65F — nat-vent conditions met (outdoor < indoor, delta >= 3F)"
+    },
+    {
+      "time": "2026-07-20T08:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "pre_condition": true,
+      "pre_condition_target": -2.0,
+      "windows_recommended": true,
+      "note": "Hot day: pre-cool target is comfort_cool + (-2) = 72F. Windows recommended."
+    },
+    {
+      "time": "2026-07-20T09:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens — nat-vent activates (indoor 72F, outdoor 65F, delta 7F >= 3F)"
+    },
+    {
+      "time": "2026-07-20T11:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window closes — nat-vent ends; _set_temperature_for_mode restores comfort (dual setpoint path for heat_cool thermostat)"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-20T09:00:00",
+      "expect": "natural_ventilation",
+      "reason": "sensor_open with outdoor (65F) below indoor (72F) and delta >= natural_vent_delta — nat-vent activates",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-20T11:00:00",
+      "expect": "resumed",
+      "reason": "sensor_close — all sensors closed, nat-vent ends and engine restores comfort mode",
+      "track": "logic"
+    },
+    {
+      "at": "2026-07-20T11:00:00",
+      "expect": "dual_setback_applied",
+      "reason": "Fix B (#293): _set_temperature_for_mode on a dual-setpoint thermostat must issue climate.set_temperature with target_temp_low=68F (comfort_heat) and target_temp_high=72F (comfort_cool + pre_condition_target -2). A single-edge command leaves the floor undefended — occupant wakes to a home cooler than comfort_heat.",
+      "track": "logic"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent restore on a dual-setpoint thermostat arms both setpoints [68F / 72F] — thermostat defends both comfort edges autonomously after windows close",
+    "observed_behavior": "natural_ventilation on sensor_open; resumed on sensor_close; dual set_temperature [target_temp_low=68, target_temp_high=72] emitted",
+    "expected_behavior": "Occupant closes window after cooling the house with outside air; thermostat immediately holds both comfort_heat floor and pre-cooled ceiling without requiring manual mode change"
+  }
+}

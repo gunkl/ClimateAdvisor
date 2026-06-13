@@ -1464,14 +1464,27 @@ class AutomationEngine:
             return
 
         unit = self.config.get("temp_unit", "fahrenheit")
+        caps = self._get_thermostat_capabilities()
         if c.hvac_mode == "heat":
-            target = self.config["comfort_heat"]
+            floor_target = float(self.config["comfort_heat"])
+            if caps.supports_dual_setpoint:
+                ceil = float(self.config.get("comfort_cool", 76))
+                await self._set_temperature_dual(floor_target, ceil, reason=reason)
+            else:
+                await self._set_temperature(floor_target, reason=reason)
+            return
         elif c.hvac_mode == "cool":
-            target = self.config["comfort_cool"]
+            ceiling_target = float(self.config["comfort_cool"])
             if c.pre_condition and c.pre_condition_target and c.pre_condition_target < 0:
                 # Pre-cool: target is below comfort
-                target = target + c.pre_condition_target
+                ceiling_target = ceiling_target + c.pre_condition_target
                 reason = f"{reason} (pre-cool offset {format_temp_delta(abs(c.pre_condition_target), unit)})"
+            if caps.supports_dual_setpoint:
+                floor = float(self.config.get("comfort_heat", 68))
+                await self._set_temperature_dual(floor, ceiling_target, reason=reason)
+            else:
+                await self._set_temperature(ceiling_target, reason=reason)
+            return
         elif c.hvac_mode == "heat_cool":
             await self._set_temperature_dual(
                 self.config["comfort_heat"],
@@ -1481,8 +1494,6 @@ class AutomationEngine:
             return
         else:
             return
-
-        await self._set_temperature(target, reason=reason)
 
     async def _schedule_pre_condition(self, c: DayClassification) -> None:
         """Schedule pre-heating or pre-cooling based on trend.

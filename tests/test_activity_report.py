@@ -769,3 +769,114 @@ class TestSetpointEventFieldClarity:
             "values in the Settings column for override_detected events.\n"
             f"Current _SYSTEM_PROMPT:\n{_SYSTEM_PROMPT}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestThermostatSetpointFields — Fix C (Issue #293)
+# ---------------------------------------------------------------------------
+
+
+def _make_hass_with_setpoints(
+    *,
+    temperature: float | None = None,
+    target_temp_low: float | None = None,
+    target_temp_high: float | None = None,
+) -> MagicMock:
+    """Return a hass mock with climate state carrying the given setpoint attributes."""
+    hass = MagicMock()
+    climate_state = MagicMock()
+    climate_state.state = "cool"
+    attrs: dict = {"current_temperature": 73.0}
+    if temperature is not None:
+        attrs["temperature"] = temperature
+    if target_temp_low is not None:
+        attrs["target_temp_low"] = target_temp_low
+    if target_temp_high is not None:
+        attrs["target_temp_high"] = target_temp_high
+    climate_state.attributes = attrs
+    hass.states.get.return_value = climate_state
+    return hass
+
+
+def _build_context_for_setpoint_test(hass: MagicMock) -> str:
+    """Call async_build_activity_context with the given hass mock."""
+    import asyncio
+
+    coord = _make_mock_coordinator_for_activity()
+    import custom_components.climate_advisor.ai_skills_activity as _act_mod
+
+    now = datetime.now(tz=UTC)
+    with patch.object(_act_mod.dt_util, "now", return_value=now):
+        return asyncio.run(async_build_activity_context(hass, coord, hours=24))
+
+
+class TestThermostatSetpointFields:
+    """Fix C (Issue #293): thermostat setpoint fields must appear in AI context.
+
+    When CA applies a pre-cool or setback offset, the AI investigator must see
+    the active thermostat setpoints so it can explain why the thermostat is set
+    to a temperature different from comfort_cool/comfort_heat.
+
+    All tests in this class MUST FAIL before the fix (fields absent) and
+    PASS after (fields present in context).
+    """
+
+    def test_single_setpoint_appears_in_context(self):
+        """climate.temperature=72.0 → '72.0' under Setpoint label in context.
+
+        Single-setpoint (cool or heat only) thermostats use the 'temperature'
+        attribute. The context must surface this value so the AI can compare
+        it to comfort_cool (76) and explain the 4°F pre-cool offset.
+        """
+        hass = _make_hass_with_setpoints(temperature=72.0)
+        context = _build_context_for_setpoint_test(hass)
+        assert "72.0" in context, (
+            "Fix C: climate.attributes['temperature']=72.0 must appear in the context "
+            "under the setpoint field.\n"
+            f"Context CLASSIFICATION section (first 1000 chars):\n{context[:1000]}"
+        )
+        assert "Setpoint" in context, (
+            f"Fix C: context must contain a 'Setpoint' label in the CLASSIFICATION section.\nContext:\n{context[:1000]}"
+        )
+
+    def test_dual_setpoint_low_appears_in_context(self):
+        """target_temp_low=68.0 → '68.0' appears in context under low/high label."""
+        hass = _make_hass_with_setpoints(target_temp_low=68.0, target_temp_high=74.0)
+        context = _build_context_for_setpoint_test(hass)
+        assert "68.0" in context, (
+            "Fix C: climate.attributes['target_temp_low']=68.0 must appear in context.\n"
+            f"Context (first 1000 chars):\n{context[:1000]}"
+        )
+
+    def test_dual_setpoint_high_appears_in_context(self):
+        """target_temp_high=74.0 → '74.0' appears in context under low/high label."""
+        hass = _make_hass_with_setpoints(target_temp_low=68.0, target_temp_high=74.0)
+        context = _build_context_for_setpoint_test(hass)
+        assert "74.0" in context, (
+            "Fix C: climate.attributes['target_temp_high']=74.0 must appear in context.\n"
+            f"Context (first 1000 chars):\n{context[:1000]}"
+        )
+
+    def test_na_shown_when_no_setpoints_present(self):
+        """No setpoint attributes → 'N/A' appears in context (not an exception).
+
+        Some thermostat integrations do not expose temperature/target_temp_low/high
+        (e.g., when in 'off' mode). The context must show 'N/A' gracefully.
+        """
+        hass = _make_hass_with_setpoints()  # no setpoint attrs
+        context = _build_context_for_setpoint_test(hass)
+        assert "N/A" in context, (
+            "Fix C: when no setpoint attributes are present, context must show 'N/A' "
+            "rather than omitting the field or raising an exception.\n"
+            f"Context (first 1000 chars):\n{context[:1000]}"
+        )
+
+    def test_single_setpoint_na_when_only_dual_set(self):
+        """target_temp_low/high set but 'temperature' absent → single-setpoint row shows N/A."""
+        hass = _make_hass_with_setpoints(target_temp_low=68.0, target_temp_high=74.0)
+        context = _build_context_for_setpoint_test(hass)
+        # Single-setpoint row must be present and show N/A for the absent 'temperature' attr
+        assert "N/A" in context, (
+            "Fix C: 'temperature' attribute absent → single-setpoint row must show N/A.\n"
+            f"Context (first 1000 chars):\n{context[:1000]}"
+        )

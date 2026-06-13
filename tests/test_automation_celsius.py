@@ -75,8 +75,9 @@ class TestSetTemperatureCelsius:
 
         asyncio.run(engine._set_temperature(75.2, reason="test"))
 
-        engine.hass.services.async_call.assert_called_once()
-        call_args = engine.hass.services.async_call.call_args
+        # Double-write (Issue #299): pre-write + target-write = 2 calls
+        assert engine.hass.services.async_call.call_count == 2
+        call_args = engine.hass.services.async_call.call_args  # last call = target write
         domain, service, data = call_args[0]
         assert domain == "climate"
         assert service == "set_temperature"
@@ -93,8 +94,9 @@ class TestSetTemperatureCelsius:
 
         asyncio.run(engine._set_temperature(75.0, reason="test"))
 
-        engine.hass.services.async_call.assert_called_once()
-        call_args = engine.hass.services.async_call.call_args
+        # Double-write (Issue #299): pre-write + target-write = 2 calls
+        assert engine.hass.services.async_call.call_count == 2
+        call_args = engine.hass.services.async_call.call_args  # last call = target write
         domain, service, data = call_args[0]
         assert domain == "climate"
         assert service == "set_temperature"
@@ -179,23 +181,31 @@ class TestSetTemperatureDual:
     its internal hold values within 1 second of CA's write.
     """
 
-    def test_dual_includes_hvac_mode_heat_cool(self):
-        """Service data for _set_temperature_dual must include hvac_mode='heat_cool'.
+    def test_dual_includes_hvac_mode_in_pre_write_only(self):
+        """_set_temperature_dual issues two calls when a mode switch is needed (Issue #299).
 
-        Without this key the Ecobee ignores the setpoints and reverts to its
-        own hold within seconds — observed as 74/68 → 77/67 in 1 second.
+        Fix P1 (Issue #299): hvac_mode='heat_cool' is only included in the pre-write when
+        the thermostat is not already in heat_cool mode. The target write omits hvac_mode to
+        prevent the Ecobee from evaluating its comfort program and overwriting CA's setpoints.
+
+        When the thermostat state is unknown/non-heat_cool (as in the test harness):
+        - Call 1 (pre-write): includes hvac_mode='heat_cool' + offset setpoints
+        - Call 2 (target write): NO hvac_mode + exact setpoints
         """
         engine = _make_automation(temp_unit="fahrenheit", comfort_heat=68.0, comfort_cool=74.0)
-
+        # hass.states.get() returns a MagicMock whose .state != "heat_cool" → mode switch needed
         asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="test"))
 
-        call_args = engine.hass.services.async_call.call_args
-        domain, service, data = call_args[0]
-        assert domain == "climate"
-        assert service == "set_temperature"
-        assert data.get("hvac_mode") == "heat_cool", (
-            "hvac_mode='heat_cool' must be present in set_temperature payload "
-            "so Ecobee processes mode and setpoints atomically"
+        assert engine.hass.services.async_call.call_count == 2
+        pre_write_args = engine.hass.services.async_call.call_args_list[0][0]
+        target_write_args = engine.hass.services.async_call.call_args_list[1][0]
+        # Pre-write must include hvac_mode so the mode switch reaches the Ecobee
+        assert pre_write_args[2].get("hvac_mode") == "heat_cool", (
+            "pre-write must include hvac_mode='heat_cool' to trigger the mode switch"
+        )
+        # Target write must NOT include hvac_mode — omitting it prevents Ecobee comfort-program lookup
+        assert "hvac_mode" not in target_write_args[2], (
+            "target write must omit hvac_mode to prevent Ecobee comfort-program reassertion (Fix P1)"
         )
 
     def test_dual_fahrenheit_passthrough(self):

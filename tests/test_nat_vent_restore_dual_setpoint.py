@@ -110,6 +110,10 @@ def _minimal_engine(comfort_heat: float = 68.0, comfort_cool: float = 74.0) -> A
             "_thermal_model": {},
             "_hourly_forecast_temps": [],
             "_occupancy_mode": "home",
+            "_write_seq": 0,
+            "_pending_setpoint_low": None,
+            "_pending_setpoint_high": None,
+            "_pending_setpoint_single": None,
         }
     )
     return engine
@@ -175,9 +179,10 @@ class TestNatVentRestoreDualSetpoint:
 
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate" and c.args[1] == "set_temperature"]
-        assert len(climate_calls) == 1, f"Expected 1 set_temperature call, got {len(climate_calls)}"
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(climate_calls) == 2, f"Expected 2 set_temperature calls, got {len(climate_calls)}"
 
-        payload = climate_calls[0].args[2]
+        payload = climate_calls[1].args[2]  # target write has the correct setpoints
         # Dual path: must carry both setpoints
         assert "target_temp_high" in payload, f"Expected target_temp_high in payload, got {payload}"
         assert "target_temp_low" in payload, f"Expected target_temp_low in payload, got {payload}"
@@ -215,9 +220,10 @@ class TestNatVentRestoreDualSetpoint:
 
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate" and c.args[1] == "set_temperature"]
-        assert len(climate_calls) == 1, f"Expected 1 set_temperature call, got {len(climate_calls)}"
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(climate_calls) == 2, f"Expected 2 set_temperature calls, got {len(climate_calls)}"
 
-        payload = climate_calls[0].args[2]
+        payload = climate_calls[1].args[2]  # target write has the correct setpoint
         # Single path: must carry only temperature
         assert "temperature" in payload, f"Expected 'temperature' in single-setpoint payload, got {payload}"
         assert abs(payload["temperature"] - 72.0) < 0.1, (
@@ -253,9 +259,10 @@ class TestNatVentRestoreDualSetpoint:
 
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate" and c.args[1] == "set_temperature"]
-        assert len(climate_calls) == 1, f"Expected 1 set_temperature call, got {len(climate_calls)}"
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(climate_calls) == 2, f"Expected 2 set_temperature calls, got {len(climate_calls)}"
 
-        payload = climate_calls[0].args[2]
+        payload = climate_calls[1].args[2]  # target write has the correct setpoints
         # Dual path: must carry both setpoints
         assert "target_temp_low" in payload, f"Expected target_temp_low in dual payload, got {payload}"
         assert "target_temp_high" in payload, f"Expected target_temp_high in dual payload, got {payload}"

@@ -127,7 +127,7 @@ class TestAwayTransitionClearsOverride:
             clear_calls.append(reason)
             original_clear(reason=reason)
 
-        async def _spy_set_temperature(temp, reason=""):
+        async def _spy_set_temperature(temp, reason="", mode="cool"):
             # Capture the override state at the moment _set_temperature is called.
             set_temp_states.append(engine._manual_override_active)
 
@@ -152,7 +152,7 @@ class TestAwayTransitionClearsOverride:
             reasons.append(reason)
             original_clear(reason=reason)
 
-        async def _noop_set_temperature(temp, reason=""):
+        async def _noop_set_temperature(temp, reason="", mode="cool"):
             pass
 
         engine.clear_manual_override = _spy_clear
@@ -176,7 +176,7 @@ class TestAwayTransitionClearsOverride:
             clear_called.append(reason)
             original_clear(reason=reason)
 
-        async def _noop_set_temperature(temp, reason=""):
+        async def _noop_set_temperature(temp, reason="", mode="cool"):
             pass
 
         engine.clear_manual_override = _spy_clear
@@ -206,7 +206,7 @@ class TestVacationTransitionClearsOverride:
             clear_calls.append(reason)
             original_clear(reason=reason)
 
-        async def _spy_set_temperature(temp, reason=""):
+        async def _spy_set_temperature(temp, reason="", mode="cool"):
             set_temp_states.append(engine._manual_override_active)
 
         engine.clear_manual_override = _spy_clear
@@ -231,7 +231,7 @@ class TestVacationTransitionClearsOverride:
             clear_called.append(reason)
             original_clear(reason=reason)
 
-        async def _noop_set_temperature(temp, reason=""):
+        async def _noop_set_temperature(temp, reason="", mode="cool"):
             pass
 
         engine.clear_manual_override = _spy_clear

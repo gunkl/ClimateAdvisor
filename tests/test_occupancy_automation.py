@@ -125,8 +125,9 @@ class TestApplyClassificationOccupancy:
         # Away band active='ceiling' → set_temperature(setback_cool=80), not comfort_cool (75).
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
-        set_temp = temp_calls[0][0][2]["temperature"]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        set_temp = temp_calls[1][0][2]["temperature"]  # target write
         assert set_temp == 80  # setback_cool (away ceiling), not comfort_cool (75)
 
     def test_away_heat_reapplies_heat_setback(self):
@@ -145,8 +146,9 @@ class TestApplyClassificationOccupancy:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
-        set_temp = temp_calls[0][0][2]["temperature"]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        set_temp = temp_calls[1][0][2]["temperature"]  # target write
         # Away band active='ceiling'; thermostat has cool → set_temperature(setback_cool=80).
         assert set_temp == 80  # setback_cool (away ceiling), not setback_heat (60)
 
@@ -357,8 +359,9 @@ class TestBedtimeOccupancy:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        assert len(temp_calls) >= 1
-        set_temp = temp_calls[0][0][2]["temperature"]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        set_temp = temp_calls[1][0][2]["temperature"]  # target write
         assert set_temp == pytest.approx(67.0, abs=0.1)  # sleep band floor = sleep_heat
 
 
@@ -384,8 +387,9 @@ class TestSetTemperatureForModeOccupancy:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
-        set_temp = temp_calls[0][0][2]["temperature"]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        set_temp = temp_calls[1][0][2]["temperature"]  # target write
         # Away band active='ceiling' on cool-capable thermostat → setback_cool.
         assert set_temp == 80  # setback_cool
 
@@ -405,8 +409,9 @@ class TestSetTemperatureForModeOccupancy:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
-        set_temp = temp_calls[0][0][2]["temperature"]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        set_temp = temp_calls[1][0][2]["temperature"]  # target write
         # Vacation band active='ceiling' on cool-capable thermostat: setback_cool + VACATION_SETBACK_EXTRA.
         # = 80 + 3 = 83
         assert set_temp == 83
@@ -422,8 +427,9 @@ class TestSetTemperatureForModeOccupancy:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call[0][0] == "climate" and call[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
-        set_temp = temp_calls[0][0][2]["temperature"]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        set_temp = temp_calls[1][0][2]["temperature"]  # target write
         assert set_temp == 75  # comfort_cool
 
 

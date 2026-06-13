@@ -109,6 +109,10 @@ def _minimal_engine() -> AutomationEngine:
             "_thermal_model": {},
             "_hourly_forecast_temps": [],
             "_occupancy_mode": "home",
+            "_write_seq": 0,
+            "_pending_setpoint_low": None,
+            "_pending_setpoint_high": None,
+            "_pending_setpoint_single": None,
         }
     )
     return engine
@@ -202,16 +206,22 @@ class TestGraceExpiryTriggersRefreshCallback:
 
 
 class TestApplyComfortBandSingleServiceCall:
-    """Fix 4 — For a dual-setpoint thermostat in 'cool' mode, _apply_comfort_band
-    must issue exactly ONE climate.set_temperature call, NOT a separate
-    set_hvac_mode call first.
+    """Fix P1/P2 (Issue #299) — For a dual-setpoint thermostat in 'cool' mode,
+    _apply_comfort_band issues two set_temperature calls (pre-write + target write)
+    with NO separate set_hvac_mode call.
 
-    The hvac_mode must appear INSIDE the set_temperature payload so Ecobee
-    receives mode + setpoints atomically.
+    hvac_mode='heat_cool' is embedded in the PRE-WRITE ONLY when a mode switch is needed.
+    The target write intentionally omits hvac_mode to prevent Ecobee comfort-program reassertion.
     """
 
-    def test_single_async_call_for_dual_setpoint_thermostat(self):
-        """Exactly one async_call to climate domain; hvac_mode in the payload."""
+    def test_dual_setpoint_thermostat_issues_two_set_temperature_calls(self):
+        """Double-write: pre-write with mode+offset, then target write without mode (Issue #299).
+
+        When thermostat is in 'cool' mode (needs mode switch):
+        - Call 1 (pre-write): hvac_mode='heat_cool' + widened setpoints (floor-1, ceiling+1)
+        - Call 2 (target write): NO hvac_mode + exact setpoints
+        No separate set_hvac_mode call issued.
+        """
         engine = _minimal_engine()
 
         # Thermostat is currently in 'cool' mode (would previously trigger a mode switch)
@@ -227,23 +237,37 @@ class TestApplyComfortBandSingleServiceCall:
 
         asyncio.run(engine._apply_comfort_band(band, reason="test"))
 
-        # Exactly one service call — no separate set_hvac_mode call
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate"]
-        assert len(climate_calls) == 1, f"Expected 1 climate service call, got {len(climate_calls)}: {climate_calls}"
+        # Two set_temperature calls — no separate set_hvac_mode
+        assert len(climate_calls) == 2, (
+            f"Expected 2 climate service calls (pre-write + target), got {len(climate_calls)}: {climate_calls}"
+        )
+        assert all(c.args[1] == "set_temperature" for c in climate_calls), (
+            "All climate calls must be set_temperature, not set_hvac_mode"
+        )
 
-        # The single call must be set_temperature (not set_hvac_mode)
-        the_call = climate_calls[0]
-        assert the_call.args[1] == "set_temperature", f"Expected set_temperature, got {the_call.args[1]}"
+        pre_write = climate_calls[0].args[2]
+        target_write = climate_calls[1].args[2]
 
-        # hvac_mode must be embedded in the payload
-        payload = the_call.args[2]
-        assert payload.get("hvac_mode") == "heat_cool", f"Expected hvac_mode='heat_cool' in payload, got {payload}"
-        assert "target_temp_low" in payload
-        assert "target_temp_high" in payload
+        # Pre-write must include hvac_mode to trigger mode switch on Ecobee
+        assert pre_write.get("hvac_mode") == "heat_cool", (
+            f"Pre-write must include hvac_mode='heat_cool', got {pre_write}"
+        )
+        # Target write must NOT include hvac_mode to prevent comfort-program reassertion (Fix P1)
+        assert "hvac_mode" not in target_write, (
+            f"Target write must omit hvac_mode to prevent Ecobee comfort-program lookup, got {target_write}"
+        )
+        assert "target_temp_low" in target_write
+        assert "target_temp_high" in target_write
 
-    def test_already_in_heat_cool_mode_still_single_call(self):
-        """Thermostat already in heat_cool: still just one set_temperature call."""
+    def test_already_in_heat_cool_mode_two_calls_no_hvac_mode(self):
+        """Thermostat already in heat_cool: two set_temperature calls, neither includes hvac_mode.
+
+        Double-write (Issue #299) always issues a pre-write + target write to bypass HA
+        deduplication. When the thermostat is already in heat_cool, no mode switch is needed,
+        so neither call includes hvac_mode.
+        """
         engine = _minimal_engine()
 
         state_mock = MagicMock()
@@ -260,5 +284,10 @@ class TestApplyComfortBandSingleServiceCall:
 
         calls = engine.hass.services.async_call.call_args_list
         climate_calls = [c for c in calls if c.args[0] == "climate"]
-        assert len(climate_calls) == 1
-        assert climate_calls[0].args[1] == "set_temperature"
+        assert len(climate_calls) == 2, (
+            f"Expected 2 set_temperature calls (pre-write + target), got {len(climate_calls)}"
+        )
+        assert all(c.args[1] == "set_temperature" for c in climate_calls)
+        # No hvac_mode in either call — thermostat already in the right mode
+        assert "hvac_mode" not in climate_calls[0].args[2]
+        assert "hvac_mode" not in climate_calls[1].args[2]

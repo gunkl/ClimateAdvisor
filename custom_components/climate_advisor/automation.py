@@ -420,6 +420,7 @@ class AutomationEngine:
         self._pending_setpoint_low: float | None = None  # dual setpoint validation: commanded low (service units)
         self._pending_setpoint_high: float | None = None  # dual setpoint validation: commanded high (service units)
         self._pending_setpoint_single: float | None = None  # single setpoint validation: commanded temp (service units)
+        self._write_seq: int = 0  # monotonic counter: validation callbacks skip if a newer write has superseded them
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
@@ -1153,6 +1154,7 @@ class AutomationEngine:
                         await self._set_temperature(
                             _comfort_cool_cg,
                             reason="ODE ceiling guard — target comfort_cool",
+                            mode="cool",
                         )
                         if self._emit_event_callback:
                             self._emit_event_callback(
@@ -1217,12 +1219,12 @@ class AutomationEngine:
         elif band.active == "ceiling" and caps.supports_cool:
             if _current_mode != "cool":
                 await self._set_hvac_mode("cool", reason=f"{reason} [band: entering cool]")
-            await self._set_temperature(band.ceiling, reason=reason)
+            await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
         elif band.active == "floor" and caps.supports_heat:
             if _current_mode != "heat":
                 await self._set_hvac_mode("heat", reason=f"{reason} [band: entering heat]")
-            await self._set_temperature(band.floor, reason=reason)
+            await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
         else:
             # The thermostat advertises no mode that can defend the active edge (e.g. a heat-only
@@ -1290,12 +1292,16 @@ class AutomationEngine:
         finally:
             self._hvac_command_pending = False
 
-    async def _set_temperature(self, temperature: float, *, reason: str) -> None:
+    async def _set_temperature(self, temperature: float, *, reason: str, mode: str = "cool") -> None:
         """Set the thermostat target temperature.
 
         Args:
             temperature: Target temperature in internal Fahrenheit.
             reason: Human-readable reason for logging.
+            mode: "cool" (ceiling setpoint) or "heat" (floor setpoint).  Determines the
+                pre-write offset direction for HA deduplication bypass (Issue #299):
+                cool ceiling goes up by 1 (won't trigger cooling), heat floor goes down by 1
+                (won't trigger heating).
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         # Convert internal °F to user's unit before sending to HA climate entity
@@ -1344,9 +1350,23 @@ class AutomationEngine:
                         "comfort_cool": self.config.get("comfort_cool", 76),
                     },
                 )
+        # Set state tracking to TARGET values before writes so the validation callback
+        # always compares against the intended final setpoint.
+        self._pending_setpoint_single = service_temp
+        self._write_seq += 1
+        _my_seq = self._write_seq
         self._temp_command_pending = True
         self._temp_command_time = dt_util.now()
         try:
+            # Pre-write: offset setpoint to bypass HA deduplication.  Direction is chosen
+            # so the temporary offset does not trigger unnecessary conditioning (Issue #299).
+            _pre_temp = service_temp + 1.0 if mode == "cool" else service_temp - 1.0
+            await self.hass.services.async_call(
+                "climate",
+                "set_temperature",
+                {"entity_id": self.climate_entity, "temperature": _pre_temp},
+            )
+            # Target write: correct setpoint.
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
@@ -1354,9 +1374,10 @@ class AutomationEngine:
             )
         finally:
             self._temp_command_pending = False
-        self._pending_setpoint_single = service_temp
 
         async def _check_single_setpoint_accepted() -> None:
+            if self._write_seq != _my_seq:
+                return
             state = self.hass.states.get(self.climate_entity)
             if state is None:
                 return
@@ -1402,6 +1423,14 @@ class AutomationEngine:
 
         Uses the same flag/logging/record_action pattern as _set_temperature().
         low/high are internal Fahrenheit values; converted to user unit before service call.
+
+        Two-write strategy (Issue #299):
+        1. Pre-write: offset setpoints (low-1, high+1 in service units) to bypass HA's
+           Ecobee integration deduplication — without this, identical setpoints are silently
+           dropped when the HA entity already reports the same values (stale optimistic state).
+        2. Target write: correct setpoints WITHOUT hvac_mode (only included in pre-write if a
+           mode transition is needed) — omitting hvac_mode prevents the Ecobee from re-evaluating
+           its comfort program on every steady-state write.
         """
         unit = self.config.get("temp_unit", "fahrenheit")
         service_low = from_fahrenheit(low, unit)
@@ -1414,27 +1443,52 @@ class AutomationEngine:
                 reason,
             )
             return
+        # Set state tracking to TARGET values before any writes so the validation
+        # callback always compares against the intended final setpoints.
+        self._last_commanded_hvac_mode = "heat_cool"
+        self._last_commanded_hvac_time = dt_util.now()
+        self._pending_setpoint_low = service_low
+        self._pending_setpoint_high = service_high
+        self._write_seq += 1
+        _my_seq = self._write_seq
         self._temp_command_pending = True
         self._temp_command_time = dt_util.now()
         try:
+            # Determine whether a mode transition is needed.
+            _climate_state = self.hass.states.get(self.climate_entity)
+            _needs_mode_switch = _climate_state is None or _climate_state.state != "heat_cool"
+
+            # Pre-write: offset setpoints to guarantee HA sends a command even when entity
+            # state already matches the target (deduplication bypass).  The -1/+1 direction
+            # widens the band, so the thermostat will not trigger unnecessary conditioning.
+            _pre_data: dict = {
+                "entity_id": self.climate_entity,
+                "target_temp_low": service_low - 1.0,
+                "target_temp_high": service_high + 1.0,
+            }
+            if _needs_mode_switch:
+                _pre_data["hvac_mode"] = "heat_cool"
+            await self.hass.services.async_call("climate", "set_temperature", _pre_data)
+
+            # Target write: correct setpoints.  hvac_mode is intentionally omitted here —
+            # the mode was already set (or was already heat_cool) so including it would
+            # trigger the Ecobee to re-evaluate its comfort program instead of holding.
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
                 {
                     "entity_id": self.climate_entity,
-                    "hvac_mode": "heat_cool",
                     "target_temp_low": service_low,
                     "target_temp_high": service_high,
                 },
             )
         finally:
             self._temp_command_pending = False
-        self._last_commanded_hvac_mode = "heat_cool"
-        self._last_commanded_hvac_time = dt_util.now()
-        self._pending_setpoint_low = service_low
-        self._pending_setpoint_high = service_high
 
         async def _check_dual_setpoint_accepted() -> None:
+            # Skip if a newer write has superseded this one.
+            if self._write_seq != _my_seq:
+                return
             state = self.hass.states.get(self.climate_entity)
             if state is None:
                 return
@@ -1507,10 +1561,10 @@ class AutomationEngine:
         if c.hvac_mode == "heat":
             floor_target = float(self.config["comfort_heat"])
             if caps.supports_dual_setpoint:
-                ceil = float(self.config.get("comfort_cool", 76))
+                ceil = float(self.config.get("comfort_cool", 75))
                 await self._set_temperature_dual(floor_target, ceil, reason=reason)
             else:
-                await self._set_temperature(floor_target, reason=reason)
+                await self._set_temperature(floor_target, reason=reason, mode="heat")
             return
         elif c.hvac_mode == "cool":
             ceiling_target = float(self.config["comfort_cool"])
@@ -1519,10 +1573,10 @@ class AutomationEngine:
                 ceiling_target = ceiling_target + c.pre_condition_target
                 reason = f"{reason} (pre-cool offset {format_temp_delta(abs(c.pre_condition_target), unit)})"
             if caps.supports_dual_setpoint:
-                floor = float(self.config.get("comfort_heat", 68))
+                floor = float(self.config.get("comfort_heat", 70))
                 await self._set_temperature_dual(floor, ceiling_target, reason=reason)
             else:
-                await self._set_temperature(ceiling_target, reason=reason)
+                await self._set_temperature(ceiling_target, reason=reason, mode="cool")
             return
         elif c.hvac_mode == "heat_cool":
             await self._set_temperature_dual(
@@ -2514,6 +2568,15 @@ class AutomationEngine:
 
     async def handle_bedtime(self) -> None:
         """Apply bedtime setback."""
+        # Issue #299: guard against double-write when this task is fired via async_create_task
+        # in _check_startup_override() while apply_classification() runs in the same coordinator
+        # cycle.  apply_classification() runs first (it is awaited), sets _temp_command_time, and
+        # clears _temp_command_pending in its finally block.  By the time handle_bedtime() runs,
+        # the flag is already clear — a time-based cooldown is required.
+        if self._temp_command_time is not None and (dt_util.now() - self._temp_command_time).total_seconds() < 30:
+            _LOGGER.debug("handle_bedtime: skipping — setpoint write within last 30s (startup dedup guard)")
+            return
+
         # Issue #85: vacation/away already has a setback — don't override it with sleep temps
         if self._occupancy_mode in (OCCUPANCY_VACATION, OCCUPANCY_AWAY):
             _LOGGER.info("Bedtime skipped — %s mode (setback already active)", self._occupancy_mode)

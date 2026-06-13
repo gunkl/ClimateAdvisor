@@ -4,9 +4,29 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.8"
+VERSION = "0.4.9"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.9": [
+        "Fix #299: CA setpoint writes to the Ecobee thermostat now bypass HA's deduplication"
+        " filter. Every setpoint command sends an intentionally-offset pre-write followed by the"
+        " exact target, guaranteeing the command reaches the physical thermostat even when HA's"
+        " optimistic state already matches the target.",
+        "Fix #299: Dual-setpoint (heat_cool) writes no longer include hvac_mode in every call."
+        " The mode switch is sent only when the thermostat is not already in heat_cool mode,"
+        " preventing the Ecobee from applying its comfort-program setpoints (65/75) instead of"
+        " CA's commanded values (e.g. 68/74).",
+        "Fix #299: CA now verifies that reported thermostat setpoints match its commanded values"
+        " within 1°F before treating a state change as a confirmation. When setpoints differ by"
+        " more than 1°F in heat_cool mode the event is treated as an Ecobee comfort-program"
+        " reassertion, not a confirmation, preventing false-positive override suppression.",
+        "Fix #299: handle_bedtime() now skips the setpoint write if another setpoint command was"
+        " issued within the last 30 seconds, eliminating a startup race where the coordinator's"
+        " initial classification cycle and the sleep-window bedtime handler both fired and"
+        " produced a double-write that triggered the Ecobee comfort-program reversion.",
+        "Fix #299: Fallback default temperatures in _set_temperature_for_mode() corrected from"
+        " 68°F/76°F to 70°F/75°F, matching the documented comfort defaults.",
+    ],
     "0.4.8": [
         "Fix #293: After every HA restart, CA no longer treats a heat_cool thermostat state as"
         " a manual override. The startup check now recognises heat_cool as CA-compatible with"
@@ -1060,6 +1080,41 @@ KNOWN_FIXES: dict[int, dict] = {
             "pre_condition_target design question: 72°F ceiling persists all day on hot days by"
             " design (thermal buffer); making it morning-only (cease offset once indoor ≤ target)"
             " is out of scope for this fix",
+        ],
+    },
+    299: {
+        "version_fixed": "0.4.9",
+        "title": "Ecobee dual-setpoint desync — double-write dedup bypass, hvac_mode conditional,"
+        " setpoint confirmation check, startup cooldown guard",
+        "scope_covered": [
+            "automation.py _set_temperature(): now issues two service calls — offset pre-write"
+            " (temp±1°F, direction chosen to never trigger conditioning) then exact target write;"
+            " accepts mode='cool'|'heat' parameter so offset direction is always safe",
+            "automation.py _set_temperature_dual(): same double-write pattern"
+            " (low-1/high+1 pre-write then exact target); hvac_mode='heat_cool' included in"
+            " pre-write only when thermostat is not already in heat_cool mode — omitted in"
+            " target write in all cases; _write_seq nonce prevents stale validation callbacks",
+            "automation.py _apply_comfort_band(): passes explicit mode='cool' or mode='heat'"
+            " to all _set_temperature() callsites so offset direction is correct for each path",
+            "automation.py _set_temperature_for_mode(): fallback defaults corrected to"
+            " comfort_heat=70°F and comfort_cool=75°F (were 68°F/76°F)",
+            "automation.py handle_bedtime(): 30-second cooldown guard skips the bedtime"
+            " setpoint write if _temp_command_time is within the last 30s — eliminates startup"
+            " race between coordinator's first classification cycle and the sleep-window handler",
+            "coordinator.py _async_thermostat_changed(): _is_expected_confirmation() now checks"
+            " that reported heat_cool setpoints are within 1°F of CA's pending setpoints;"
+            " setpoints outside this window are treated as an Ecobee comfort-program reassertion,"
+            " not a CA write confirmation",
+            "All caller test files updated: 11 test files revised to expect 2 service calls"
+            " per setpoint write (pre-write + target) and verify values at the correct call index",
+        ],
+        "scope_not_covered": [
+            "Two-step mode transition (set_hvac_mode then set_temperature with delay) — not"
+            " needed after hold-type change to 'hold until I change again' on the Ecobee device",
+            "Celsius homes: pre-write offset is ±1°C (≈1.8°F); functionally identical dedup"
+            " bypass behavior, no additional change needed",
+            "Ecobee comfort-program reversion triggered by Ecobee app or physical thermostat"
+            " control — CA will detect and re-apply on the next 30-min coordinator cycle",
         ],
     },
 }

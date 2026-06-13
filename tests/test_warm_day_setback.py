@@ -232,10 +232,12 @@ class TestWarmDayBandArming:
         hvac = _hvac_calls(engine)
         assert len(hvac) == 0
 
-        # hvac_mode="heat_cool" must appear inside the set_temperature payload
+        # Double-write (Issue #299): pre-write + target write = 2 calls
         temp = _temp_calls(engine)
-        assert len(temp) == 1
+        assert len(temp) == 2
+        # hvac_mode in pre-write (index 0) only when mode switch needed
         assert temp[0].args[2].get("hvac_mode") == "heat_cool"
+        assert "hvac_mode" not in temp[1].args[2]  # target write omits it
 
     def test_warm_day_dual_thermostat_sets_dual_setpoints(self):
         """P3: warm day + dual → target_temp_low=comfort_heat, target_temp_high=comfort_cool."""
@@ -246,8 +248,9 @@ class TestWarmDayBandArming:
         asyncio.run(engine.apply_classification(c))
 
         calls = _temp_calls(engine)
-        assert len(calls) == 1
-        data = calls[0].args[2]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(calls) == 2
+        data = calls[1].args[2]  # target write has the correct setpoints
         assert data["target_temp_low"] == 70.0  # comfort_heat — full occupied+awake floor
         assert data["target_temp_high"] == 76.0  # comfort_cool — defended ceiling
 
@@ -261,12 +264,14 @@ class TestWarmDayBandArming:
         assert len(hvac) == 0  # already in heat_cool — no redundant switch
 
         temp = _temp_calls(engine)
-        assert len(temp) == 1  # setpoints are still refreshed
+        # Double-write (Issue #299): pre-write + target write = 2 calls even in steady state
+        assert len(temp) == 2
 
     def test_hot_day_same_band_arming_as_warm(self):
-        """hot day (hvac_mode=cool from classifier) + dual → same single-call atomic shape as warm.
+        """hot day (hvac_mode=cool from classifier) + dual → double-write atomic shape (Issue #299).
 
-        Fix 4 (Issue #290): dual path — no separate set_hvac_mode; hvac_mode="heat_cool" in payload.
+        Fix P1/P2 (Issue #299): dual path — no separate set_hvac_mode; hvac_mode="heat_cool" in
+        pre-write only; target write omits it to prevent Ecobee comfort-program reassertion.
         Old P3 assertion was: 1 set_hvac_mode call to "heat_cool".  Now: 0 set_hvac_mode calls.
         """
         engine = _make_engine(comfort_heat=70.0, current_mode="off")
@@ -278,10 +283,13 @@ class TestWarmDayBandArming:
         assert len(hvac) == 0
 
         temp = _temp_calls(engine)
-        assert len(temp) == 1
-        data = temp[0].args[2]
-        assert "target_temp_low" in data and "target_temp_high" in data
-        assert data.get("hvac_mode") == "heat_cool"
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        pre_write = temp[0].args[2]
+        target_write = temp[1].args[2]
+        assert "target_temp_low" in target_write and "target_temp_high" in target_write
+        assert pre_write.get("hvac_mode") == "heat_cool"
+        assert "hvac_mode" not in target_write
 
     def test_comfort_band_applied_event_emitted(self):
         """P3 emits comfort_band_applied instead of warm_day_setback_applied."""
@@ -319,8 +327,9 @@ class TestWarmDayBandArming:
         assert hvac[0].args[2]["hvac_mode"] == "cool"
 
         temp = _temp_calls(engine)
-        assert len(temp) == 1
-        assert temp[0].args[2]["temperature"] == 76.0  # comfort_cool ceiling
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        assert temp[1].args[2]["temperature"] == 76.0  # target write — comfort_cool ceiling
 
     def test_no_capable_mode_no_service_calls(self):
         """Entity with no capable modes → silent no-op (band not armed, no false promise)."""
@@ -363,8 +372,9 @@ class TestWarmDayBandArming:
         asyncio.run(engine.apply_classification(c))
 
         temp = _temp_calls(engine)
-        assert len(temp) == 1  # dual setpoints applied regardless of indoor vs comfort_heat
-        data = temp[0].args[2]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        data = temp[1].args[2]  # target write has the exact setpoints
         assert "target_temp_low" in data  # band armed: floor setpoint present
         assert "target_temp_high" in data  # band armed: ceiling setpoint present
 
@@ -383,8 +393,9 @@ class TestWarmDayBandArming:
         asyncio.run(engine.apply_classification(c))
 
         calls = _temp_calls(engine)
-        assert len(calls) == 1
-        data = calls[0].args[2]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(calls) == 2
+        data = calls[1].args[2]  # target write has the correct Celsius values
         # Both low and high must be Celsius values (< 50°F would be wrong)
         assert data["target_temp_low"] < 30.0  # was 60°F → ~15.6°C
         assert data["target_temp_high"] < 30.0  # was 76°F → ~24.4°C

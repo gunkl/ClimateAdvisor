@@ -398,9 +398,10 @@ class TestVacationSetback:
         calls = engine.hass.services.async_call.call_args_list
         # _apply_comfort_band may emit set_hvac_mode + set_temperature; filter to set_temperature.
         temp_calls = [c for c in calls if c[0][0] == "climate" and c[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
 
-        service_data = temp_calls[0][0][2]
+        service_data = temp_calls[1][0][2]  # target write has the correct value
         # Vacation band ceiling = setback_cool + VACATION_SETBACK_EXTRA (no modifier in band).
         expected = 80 + VACATION_SETBACK_EXTRA
         assert service_data["temperature"] == expected
@@ -421,9 +422,10 @@ class TestVacationSetback:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [c for c in calls if c[0][0] == "climate" and c[0][1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
 
-        service_data = temp_calls[0][0][2]
+        service_data = temp_calls[1][0][2]  # target write has the correct value
         # Vacation band ceiling = setback_cool + VACATION_SETBACK_EXTRA (no modifier in band).
         expected = 80 + VACATION_SETBACK_EXTRA
         assert service_data["temperature"] == expected

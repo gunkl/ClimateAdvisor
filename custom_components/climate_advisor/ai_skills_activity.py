@@ -48,7 +48,7 @@ Column definitions:
 - **Settings**: Thermostat settings changed by this event. Use the following rules:
   - If event data has `old_hvac_mode` and `new_hvac_mode` fields that differ â†’ show "mode: Xâ†’Y"
   - If event data also has `new_setpoint_f` or `old_setpoint` â†’ append ", setpoint: Aâ†’BÂ°F" (round to 1 decimal if needed)
-  - For `override_detected` events where `old_temp` and `new_temp` are present â†’ Settings must show "setpoint: XÂ°Fâ†’YÂ°F". The Event column should state the event type only (e.g., "Setpoint override detected"). Do NOT embed temperature values in the Event description.
+  - For `override_detected` events where `old_setpoint_f` and `new_setpoint_f` are present â†’ Settings must show "setpoint: XÂ°Fâ†’YÂ°F". The Event column should state the event type only (e.g., "Setpoint override detected"). Do NOT embed temperature values in the Event description.
   - For `override_detected` events with only `old_mode`/`new_mode` (no temp values) â†’ use `old_mode`â†’`new_mode` from event data for the mode change in Settings
   - warm_day_state_confirmed: heartbeat — thermostat already in correct warm-day state, no change. Leave Settings blank.
   - warm_day_setback_applied: actual setpoint or mode change was made (cool→setback_cool, heat→setback_heat, or hard off). If old_setpoint_f/new_setpoint_f present → "setpoint: A→B°F".
@@ -593,14 +593,15 @@ async def async_build_activity_context(
             label = _event_source_label(event_type, data_fields)
             label_str = f" source_label={label}" if label is not None else ""
 
-            # For override_detected events with old_temp/new_temp, annotate
+            # For override_detected events with old_setpoint_f/new_setpoint_f, annotate
             # [settings: setpoint: X°F→Y°F] so AI routes temp values to Settings.
             settings_str = ""
             if event_type == "override_detected":
-                old_t = data_fields.get("old_temp")
-                new_t = data_fields.get("new_temp")
+                old_t = data_fields.get("old_setpoint_f")
+                new_t = data_fields.get("new_setpoint_f")
                 if old_t is not None and new_t is not None:
-                    settings_str = f" [settings: setpoint: {old_t}°F→{new_t}°F]"
+                    _unit_sym = "°C" if _temp_unit == "celsius" else "°F"
+                    settings_str = f" [settings: setpoint: {old_t}{_unit_sym}→{new_t}{_unit_sym}]"
 
             line = f"  {time_str} Ã¢â‚¬â€ {event_type}: {fields_str}{label_str}{settings_str}".rstrip(": ")
             event_lines.append(line)

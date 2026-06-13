@@ -415,6 +415,9 @@ class AutomationEngine:
         self._hvac_command_pending: bool = False  # transient: distinguishes integration vs manual HVAC changes
         self._temp_command_pending: bool = False  # transient: distinguishes integration vs manual temp changes
         self._temp_command_time: datetime | None = None  # last system-initiated temp setpoint command timestamp
+        self._pending_setpoint_low: float | None = None  # dual setpoint validation: commanded low (service units)
+        self._pending_setpoint_high: float | None = None  # dual setpoint validation: commanded high (service units)
+        self._pending_setpoint_single: float | None = None  # single setpoint validation: commanded temp (service units)
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
@@ -440,6 +443,11 @@ class AutomationEngine:
 
         # Event log callback — set by coordinator after construction
         self._emit_event_callback: Any | None = None
+
+        # Coordinator refresh callback — called after grace expiry so HA sensor
+        # state updates immediately rather than waiting for the next 30-min poll
+        # (Issue #290 Fix 1).  Set by coordinator after construction.
+        self._request_refresh_callback: Any | None = None
 
         # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
         self._today_record: Any | None = None
@@ -703,6 +711,8 @@ class AutomationEngine:
         old_mode: str | None = None,
         new_mode: str | None = None,
         classification_mode: str | None = None,
+        old_setpoint_f: float | None = None,
+        new_setpoint_f: float | None = None,
     ) -> None:
         """Handle a manual thermostat change (outside of door/window pause).
 
@@ -718,12 +728,16 @@ class AutomationEngine:
             old_mode: Previous hvac_mode (from coordinator for enriched event payload).
             new_mode: New hvac_mode detected.
             classification_mode: What classification expects (for event payload).
+            old_setpoint_f: Previous thermostat setpoint in degrees F (setpoint overrides only).
+            new_setpoint_f: New thermostat setpoint in degrees F (setpoint overrides only).
         """
         self.start_override_confirmation(
             source=source,
             old_mode=old_mode,
             new_mode=new_mode,
             classification_mode=classification_mode,
+            old_setpoint_f=old_setpoint_f,
+            new_setpoint_f=new_setpoint_f,
         )
 
     def start_override_confirmation(
@@ -733,6 +747,8 @@ class AutomationEngine:
         old_mode: str | None = None,
         new_mode: str | None = None,
         classification_mode: str | None = None,
+        old_setpoint_f: float | None = None,
+        new_setpoint_f: float | None = None,
     ) -> None:
         """Begin the override confirmation window (Issue #76).
 
@@ -742,6 +758,8 @@ class AutomationEngine:
             old_mode: Previous hvac_mode (for enriched event payload).
             new_mode: New hvac_mode detected.
             classification_mode: What classification expects (for event payload).
+            old_setpoint_f: Previous thermostat setpoint in degrees F (setpoint overrides only).
+            new_setpoint_f: New thermostat setpoint in degrees F (setpoint overrides only).
         """
         state = self.hass.states.get(self.climate_entity)
         detected_mode = state.state if state else "unknown"
@@ -782,6 +800,8 @@ class AutomationEngine:
                         "old_mode": old_mode,
                         "new_mode": new_mode,
                         "classification_mode": classification_mode,
+                        "old_setpoint_f": old_setpoint_f,
+                        "new_setpoint_f": new_setpoint_f,
                     },
                 )
         else:
@@ -1147,8 +1167,12 @@ class AutomationEngine:
         _current_mode = _cs.state if _cs else None
 
         if caps.supports_dual_setpoint:
-            if _current_mode != "heat_cool":
-                await self._set_hvac_mode("heat_cool", reason=f"{reason} [band: entering heat_cool]")
+            # Issue #290 Fix 4: emit ONE atomic set_temperature call with hvac_mode
+            # embedded in the payload.  A preceding set_hvac_mode call created a
+            # revert window on Ecobee — the thermostat received the mode change,
+            # briefly re-applied its own schedule, then received the setpoints.
+            # _set_temperature_dual already includes hvac_mode="heat_cool" so no
+            # separate mode call is needed.
             await self._set_temperature_dual(band.floor, band.ceiling, reason=reason)
             _cmd_shape = "dual"
         elif band.active == "ceiling" and caps.supports_cool:
@@ -1291,6 +1315,42 @@ class AutomationEngine:
             )
         finally:
             self._temp_command_pending = False
+        self._pending_setpoint_single = service_temp
+
+        async def _check_single_setpoint_accepted() -> None:
+            state = self.hass.states.get(self.climate_entity)
+            if state is None:
+                return
+            reported = state.attributes.get("temperature")
+            if reported is None:
+                return
+            _TOLERANCE = 0.6
+            if abs(float(reported) - self._pending_setpoint_single) > _TOLERANCE:
+                _LOGGER.error(
+                    "Setpoint validation FAILED: commanded=%.1f, "
+                    "thermostat reports=%.1f — thermostat may have rejected the command",
+                    self._pending_setpoint_single,
+                    reported,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "setpoint_rejected",
+                        {
+                            "commanded": self._pending_setpoint_single,
+                            "reported": float(reported),
+                        },
+                    )
+            else:
+                _LOGGER.info(
+                    "Setpoint confirmed by thermostat: temperature=%.1f",
+                    reported,
+                )
+
+        async_call_later(
+            self.hass,
+            10,
+            lambda _now: self.hass.async_create_task(_check_single_setpoint_accepted()),
+        )
         _LOGGER.warning(
             "Set temperature to %s — %s",
             format_temp(temperature, unit),
@@ -1330,6 +1390,53 @@ class AutomationEngine:
             )
         finally:
             self._temp_command_pending = False
+        self._last_commanded_hvac_mode = "heat_cool"
+        self._last_commanded_hvac_time = dt_util.now()
+        self._pending_setpoint_low = service_low
+        self._pending_setpoint_high = service_high
+
+        async def _check_dual_setpoint_accepted() -> None:
+            state = self.hass.states.get(self.climate_entity)
+            if state is None:
+                return
+            reported_low = state.attributes.get("target_temp_low")
+            reported_high = state.attributes.get("target_temp_high")
+            if reported_low is None or reported_high is None:
+                return
+            _TOLERANCE = 0.6
+            low_ok = abs(float(reported_low) - self._pending_setpoint_low) <= _TOLERANCE
+            high_ok = abs(float(reported_high) - self._pending_setpoint_high) <= _TOLERANCE
+            if not (low_ok and high_ok):
+                _LOGGER.error(
+                    "Setpoint validation FAILED: commanded low=%.1f high=%.1f, "
+                    "thermostat reports low=%.1f high=%.1f — thermostat may have rejected the command",
+                    self._pending_setpoint_low,
+                    self._pending_setpoint_high,
+                    reported_low,
+                    reported_high,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "setpoint_rejected",
+                        {
+                            "commanded_low": self._pending_setpoint_low,
+                            "commanded_high": self._pending_setpoint_high,
+                            "reported_low": float(reported_low),
+                            "reported_high": float(reported_high),
+                        },
+                    )
+            else:
+                _LOGGER.info(
+                    "Setpoint confirmed by thermostat: low=%.1f high=%.1f",
+                    reported_low,
+                    reported_high,
+                )
+
+        async_call_later(
+            self.hass,
+            10,
+            lambda _now: self.hass.async_create_task(_check_dual_setpoint_accepted()),
+        )
         _LOGGER.warning(
             "Set dual temperature [%s / %s] (service: %.4g / %.4g) — %s",
             format_temp(low, unit),
@@ -2066,6 +2173,8 @@ class AutomationEngine:
             self._manual_grace_cancel = None
             self._automation_grace_cancel = None
             self.clear_manual_override(reason="grace_expired")
+            if self._request_refresh_callback:
+                self._request_refresh_callback()
             return
 
         # If any contact sensor is still open, re-pause instead of clearing
@@ -2080,6 +2189,8 @@ class AutomationEngine:
             self._manual_grace_cancel = None
             self._automation_grace_cancel = None
             self.clear_manual_override(reason="grace_expired")
+            if self._request_refresh_callback:
+                self._request_refresh_callback()
             if self._emit_event_callback:
                 self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
             self.hass.async_create_task(self._re_pause_for_open_sensor())
@@ -2091,6 +2202,8 @@ class AutomationEngine:
         self._manual_grace_cancel = None
         self._automation_grace_cancel = None
         self.clear_manual_override(reason="grace_expired")
+        if self._request_refresh_callback:
+            self._request_refresh_callback()
         _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
         if self._emit_event_callback:
             self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})

@@ -195,3 +195,96 @@ class TestStartupOverride:
 
         assert result is False
         assert coord.automation_engine._manual_override_active is False
+
+
+class TestStartupBedtimeRecovery:
+    """Verify that a restart inside a sleep window triggers bedtime setback (Issue #290)."""
+
+    def test_startup_bedtime_applied_in_sleep_window(self):
+        """If restart kills the scheduled-state task inside a sleep window,
+        _check_startup_override() must fire handle_bedtime() via async_create_task.
+
+        Occupant impact: without recovery the home stays at the daytime setpoint
+        overnight, wasting energy and potentially disrupting sleep comfort.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        coord = _make_coordinator()
+
+        # HVAC matches classification — mode-mismatch path does NOT fire
+        classification = _make_classification(day_type="mild", hvac_mode="heat")
+        climate_state = _make_climate_state("heat")
+
+        # No manual override active after restart
+        coord.automation_engine._manual_override_active = False
+
+        # Capture coroutines created via async_create_task
+        created_coros: list = []
+
+        def _capture_and_close(coro):
+            created_coros.append(coro)
+            coro.close()
+
+        coord.hass.async_create_task = MagicMock(side_effect=_capture_and_close)
+        coord.automation_engine.handle_bedtime = AsyncMock()
+
+        with patch(
+            "custom_components.climate_advisor.coordinator._in_sleep_window",
+            return_value=True,
+        ):
+            result = coord._check_startup_override(climate_state, classification)
+
+        # Function returns False (no override set)
+        assert result is False
+        # async_create_task was called exactly once (for handle_bedtime)
+        assert coord.hass.async_create_task.call_count == 1
+
+    def test_startup_bedtime_not_applied_outside_sleep_window(self):
+        """No bedtime recovery when restart happens outside the sleep window.
+
+        Occupant impact: daytime HVAC behavior should not be interrupted
+        by spurious bedtime calls during waking hours.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        coord = _make_coordinator()
+
+        classification = _make_classification(day_type="mild", hvac_mode="heat")
+        climate_state = _make_climate_state("heat")
+
+        coord.automation_engine._manual_override_active = False
+        coord.automation_engine.handle_bedtime = AsyncMock()
+
+        with patch(
+            "custom_components.climate_advisor.coordinator._in_sleep_window",
+            return_value=False,
+        ):
+            result = coord._check_startup_override(climate_state, classification)
+
+        assert result is False
+        coord.hass.async_create_task.assert_not_called()
+
+    def test_startup_bedtime_not_applied_when_override_active(self):
+        """No bedtime recovery when a manual override is already active.
+
+        Occupant impact: user explicitly chose a different mode; bedtime setback
+        must not silently overwrite their preference.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        coord = _make_coordinator()
+
+        classification = _make_classification(day_type="mild", hvac_mode="heat")
+        climate_state = _make_climate_state("heat")
+
+        coord.automation_engine._manual_override_active = True
+        coord.automation_engine.handle_bedtime = AsyncMock()
+
+        with patch(
+            "custom_components.climate_advisor.coordinator._in_sleep_window",
+            return_value=True,
+        ):
+            result = coord._check_startup_override(climate_state, classification)
+
+        assert result is False
+        coord.hass.async_create_task.assert_not_called()

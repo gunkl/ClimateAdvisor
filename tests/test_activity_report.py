@@ -692,22 +692,20 @@ class TestSetpointEventFieldClarity:
         return datetime.now(UTC) - timedelta(hours=1, **kwargs)
 
     def test_setpoint_override_event_has_settings_annotation(self):
-        """override_detected with old_temp/new_temp → [settings: ...] appears in rendered line.
+        """override_detected with old_setpoint_f/new_setpoint_f → [settings: ...] appears in rendered line.
 
-        MUST FAIL before fix: current renderer embeds nothing for these fields;
-        there is no [settings:] annotation in the output.
         After fix: a line like '[settings: setpoint: 74°F→76°F]' must appear.
         """
         event = {
             "type": "override_detected",
             "time": self._recent_dt(),
             "source": "manual",
-            "old_temp": 74,
-            "new_temp": 76,
+            "old_setpoint_f": 74,
+            "new_setpoint_f": 76,
         }
         context = self._build_context_with_event(event)
         assert "[settings:" in context, (
-            "Fix F: override_detected event with old_temp/new_temp must produce a "
+            "Fix F: override_detected event with old_setpoint_f/new_setpoint_f must produce a "
             "'[settings: setpoint: X°F→Y°F]' annotation in the event log line.\n"
             f"Context EVENT LOG section:\n{context}"
         )
@@ -715,23 +713,22 @@ class TestSetpointEventFieldClarity:
     def test_settings_annotation_contains_temperature_values(self):
         """[settings:] annotation must include old and new temp values.
 
-        MUST FAIL before fix: no [settings:] annotation is emitted.
         After fix: both 74 and 76 must appear in the annotation.
         """
         event = {
             "type": "override_detected",
             "time": self._recent_dt(),
             "source": "manual",
-            "old_temp": 74,
-            "new_temp": 76,
+            "old_setpoint_f": 74,
+            "new_setpoint_f": 76,
         }
         context = self._build_context_with_event(event)
         # Both temperature values must appear in the annotation
         assert "74" in context, (
-            f"Fix F: old_temp=74 must appear in the [settings:] annotation.\nGot context:\n{context}"
+            f"Fix F: old_setpoint_f=74 must appear in the [settings:] annotation.\nGot context:\n{context}"
         )
         assert "76" in context, (
-            f"Fix F: new_temp=76 must appear in the [settings:] annotation.\nGot context:\n{context}"
+            f"Fix F: new_setpoint_f=76 must appear in the [settings:] annotation.\nGot context:\n{context}"
         )
         assert "[settings:" in context, "Fix F: [settings:] annotation must be present for setpoint override event."
 

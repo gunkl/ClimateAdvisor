@@ -160,3 +160,84 @@ class TestSetTemperatureCelsius:
         call_args = engine.hass.services.async_call.call_args
         data = call_args[0][2]
         assert data["entity_id"] == "climate.test_thermostat"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _set_temperature_dual() service payload
+# ---------------------------------------------------------------------------
+
+
+class TestSetTemperatureDual:
+    """Verify _set_temperature_dual() sends a well-formed service call.
+
+    The service data must include:
+      - hvac_mode: "heat_cool"  (so Ecobee accepts the setpoints atomically)
+      - target_temp_low / target_temp_high in the user's unit
+      - entity_id
+
+    Regression for Issue #286: missing hvac_mode caused Ecobee to snap back to
+    its internal hold values within 1 second of CA's write.
+    """
+
+    def test_dual_includes_hvac_mode_heat_cool(self):
+        """Service data for _set_temperature_dual must include hvac_mode='heat_cool'.
+
+        Without this key the Ecobee ignores the setpoints and reverts to its
+        own hold within seconds — observed as 74/68 → 77/67 in 1 second.
+        """
+        engine = _make_automation(temp_unit="fahrenheit", comfort_heat=68.0, comfort_cool=74.0)
+
+        asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="test"))
+
+        call_args = engine.hass.services.async_call.call_args
+        domain, service, data = call_args[0]
+        assert domain == "climate"
+        assert service == "set_temperature"
+        assert data.get("hvac_mode") == "heat_cool", (
+            "hvac_mode='heat_cool' must be present in set_temperature payload "
+            "so Ecobee processes mode and setpoints atomically"
+        )
+
+    def test_dual_fahrenheit_passthrough(self):
+        """Fahrenheit config: service receives the exact float values passed in."""
+        engine = _make_automation(temp_unit="fahrenheit")
+
+        asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="test"))
+
+        call_args = engine.hass.services.async_call.call_args
+        data = call_args[0][2]
+        assert data["target_temp_low"] == 68.0
+        assert data["target_temp_high"] == 74.0
+
+    def test_dual_celsius_conversion(self):
+        """Celsius config: service receives °C-converted values.
+
+        68.0°F → 20.0°C, 74.0°F → 23.333...°C.
+        """
+        engine = _make_automation(temp_unit="celsius")
+
+        asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="test"))
+
+        call_args = engine.hass.services.async_call.call_args
+        data = call_args[0][2]
+        assert abs(data["target_temp_low"] - 20.0) < 0.01, f"Expected 20.0°C, got {data['target_temp_low']}"
+        assert abs(data["target_temp_high"] - 23.333) < 0.01, f"Expected 23.333°C, got {data['target_temp_high']}"
+
+    def test_dual_entity_id_forwarded(self):
+        """The correct climate entity ID is always included in dual service call."""
+        engine = _make_automation(temp_unit="fahrenheit")
+
+        asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="entity check"))
+
+        call_args = engine.hass.services.async_call.call_args
+        data = call_args[0][2]
+        assert data["entity_id"] == "climate.test_thermostat"
+
+    def test_dual_dry_run_skips_service_call(self):
+        """In dry_run mode, _set_temperature_dual never calls climate.set_temperature."""
+        engine = _make_automation(temp_unit="fahrenheit")
+        engine.dry_run = True
+
+        asyncio.run(engine._set_temperature_dual(68.0, 74.0, reason="dry run"))
+
+        engine.hass.services.async_call.assert_not_called()

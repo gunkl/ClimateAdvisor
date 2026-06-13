@@ -1323,6 +1323,7 @@ class AutomationEngine:
                 "set_temperature",
                 {
                     "entity_id": self.climate_entity,
+                    "hvac_mode": "heat_cool",
                     "target_temp_low": service_low,
                     "target_temp_high": service_high,
                 },
@@ -1330,9 +1331,11 @@ class AutomationEngine:
         finally:
             self._temp_command_pending = False
         _LOGGER.warning(
-            "Set dual temperature [%s / %s] — %s",
+            "Set dual temperature [%s / %s] (service: %.4g / %.4g) — %s",
             format_temp(low, unit),
             format_temp(high, unit),
+            service_low,
+            service_high,
             reason,
         )
         self._record_action(f"Set dual temp [{format_temp(low, unit)}/{format_temp(high, unit)}]", reason)

@@ -2840,14 +2840,20 @@ class AutomationEngine:
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.
 
-        Design decision: HA restart = clean slate for override and grace state.
-        Manual overrides and grace periods are user-interactive; carrying them
-        across a restart would silently suppress CA automation without the user
-        knowing the system restarted.  Only pause state and fan state are
-        restored so HVAC resumes correctly from its last known mode.
+        Design decision: HA restart = clean slate for override, grace, AND pause state.
+        - Manual overrides and grace periods are user-interactive; restoring them would
+          silently suppress CA automation without the user knowing the system restarted.
+        - Pause state (_paused_by_door / _pre_pause_mode) is also cleared: the
+          door/window state-change listener re-detects any open sensors quickly after
+          startup (None → "on" transition), re-pausing after the configured debounce
+          (default 5 min). A brief HVAC re-arm is preferable to sitting paused
+          indefinitely if cloud weather/thermostat services are slow to reconnect
+          (Issue #263/#306).
+        - Fan state and pre-condition achievement ARE restored (see below).
         """
-        self._paused_by_door = state.get("paused_by_door", False)
-        self._pre_pause_mode = state.get("pre_pause_mode")
+        # _paused_by_door and _pre_pause_mode are intentionally NOT restored here.
+        # __init__ already sets both to their clean defaults (False / None).
+        # The door/window listener re-detects open sensors on startup.
         self._economizer_active = state.get("economizer_active", False)
         self._economizer_phase = state.get("economizer_phase", "inactive")
         self._last_action_time = state.get("last_action_time")
@@ -2886,11 +2892,9 @@ class AutomationEngine:
         self._pre_condition_achieved = state.get("pre_condition_achieved", False)
         self._pre_condition_achieved_date = state.get("pre_condition_achieved_date")
         _LOGGER.info(
-            "Restored automation state: paused=%s, pre_pause_mode=%s, "
-            "last_action=%s, fan_active=%s, fan_override=%s, precool_achieved=%s "
-            "(override/grace state cleared — clean slate on restart)",
-            self._paused_by_door,
-            self._pre_pause_mode,
+            "Restored automation state: last_action=%s, fan_active=%s, fan_override=%s, "
+            "precool_achieved=%s "
+            "(override/grace/pause state cleared — clean slate on restart per Issue #263)",
             self._last_action_reason,
             self._fan_active,
             self._fan_override_active,

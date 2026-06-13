@@ -440,7 +440,7 @@ class TestAutomationRestoreState:
     """Test the AutomationEngine.restore_state method."""
 
     def test_restore_paused_state(self):
-        """Pause state (paused_by_door, pre_pause_mode) IS restored; grace/override are clean-slated."""
+        """Pause state is NOT restored on restart (clean slate per Issue #306); grace/override are also clean-slated."""
         from custom_components.climate_advisor.automation import AutomationEngine
 
         engine = AutomationEngine(
@@ -463,8 +463,8 @@ class TestAutomationRestoreState:
             }
         )
 
-        assert engine._paused_by_door is True
-        assert engine._pre_pause_mode == "heat"
+        assert engine._paused_by_door is False
+        assert engine._pre_pause_mode is None  # Issue #306: pause state NOT restored on restart
         # Clean-slate on restart: grace and override state always reset
         assert engine._grace_active is False
         assert engine._last_resume_source is None
@@ -490,6 +490,11 @@ class TestAutomationRestoreState:
         assert engine._grace_active is False
 
     def test_restore_missing_keys_uses_defaults(self):
+        """restore_state with a persisted paused_by_door=True must leave pause cleared.
+
+        Clean-slate rule (Issue #263/#306): pause state is NOT restored across restarts.
+        The door/window listener re-detects open sensors within 30–90 s of startup.
+        """
         from custom_components.climate_advisor.automation import AutomationEngine
 
         engine = AutomationEngine(
@@ -503,7 +508,8 @@ class TestAutomationRestoreState:
 
         engine.restore_state({"paused_by_door": True})
 
-        assert engine._paused_by_door is True
+        # Pause state is NOT restored — clean slate on restart.
+        assert engine._paused_by_door is False
         assert engine._pre_pause_mode is None
 
     def test_restore_clean_slates_override_state(self):

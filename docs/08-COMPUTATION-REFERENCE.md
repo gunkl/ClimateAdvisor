@@ -40,7 +40,7 @@ The automation logic table and all threshold constants in this document are expr
 | What are the two fan archetypes and how does each affect HVAC mode and fan-stops-on-close behavior? | `FAN_MODE_HVAC` (HVAC blower): band stays armed, HVAC unchanged when fan activates, fan does NOT stop when windows close unless `_natural_vent_active=True`. `FAN_MODE_WHOLE_HOUSE` (exhaust fan): HVAC set to off on activation (mode captured in `_pre_fan_hvac_mode`), restored on deactivation, fan stops when ALL sensors close even if `_natural_vent_active=False`. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) |
 | Why does `_set_hvac_mode("off")` also set `_fan_command_time` (Issue #277 Bug A1)? | The `set_fan_mode(auto)` assertion inside `_set_hvac_mode("off")` sets `_fan_command_time = dt_util.now()` before the service call, so cloud thermostat echoes of the fan_mode attribute change are suppressed within the `_is_recent_fan_command` window instead of triggering a false manual override. | [§9b Race Guard — `_set_hvac_mode("off")` fan_command_time](08-COMPUTATION-REFERENCE.md#_set_hvac_mode-off-fan_command_time-guard-issue-277-bug-a1) |
 | How does `_async_thermostat_changed()` prevent a single event from triggering both a setpoint and a fan override (Issue #277 Bug B)? | A local `_setpoint_override_detected` flag is initialized to `False` before Block 2 (setpoint detection) and Block 3 (fan_mode detection). If Block 2 fires and sets it `True`, Block 3 is suppressed via `and not _setpoint_override_detected`. One event → at most one override type. | [§9b Setpoint/Fan Mutual Exclusion](08-COMPUTATION-REFERENCE.md#setpointfan-override-mutual-exclusion-issue-277-bug-b) |
-| What override and grace state is preserved vs discarded on HA restart (Issue #282)? | Pause state (`_paused_by_door`, `_pre_pause_mode`) is preserved. Override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) is discarded — CA always starts in clean automation mode. A 5-minute `_first_run` settling window replaces persisted override as the startup debounce. | [§11 Clean-Slate Override State on HA Restart](08-COMPUTATION-REFERENCE.md#clean-slate-override-state-on-ha-restart-issue-282) |
+| What override and grace state is preserved vs discarded on HA restart (Issue #282/#306)? | Both pause state (`_paused_by_door`, `_pre_pause_mode`) and override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) are discarded — CA always starts in full clean-slate automation mode. Open sensors are re-detected within 30–90 s via the state-change listener (None → "on" transition). A 5-minute `_first_run` settling window provides startup debounce. | [§11 Clean-Slate Override State on HA Restart](08-COMPUTATION-REFERENCE.md#clean-slate-override-state-on-ha-restart-issue-282) |
 | What notification does the user receive when PATH B (transient thermostat adjustment) fires (Issue #200)? | "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." No grace period starts; automation resumes immediately. | [§11 PATH B Notification](08-COMPUTATION-REFERENCE.md#path-b-notification--transient-thermostat-adjustment-issue-200) |
 | What happens if the user changes to a different HVAC mode while a grace period is already active (Issue #201)? | The current override and grace are cleared, and a fresh 10-minute confirmation window starts for the new mode. Latest user action wins. | [§11 Second Override During Active Grace](08-COMPUTATION-REFERENCE.md#second-override-during-active-grace-issue-201) |
 
@@ -1189,16 +1189,16 @@ Only one grace timer of each type is active at a time; starting a new one cancel
 
 **Grace expiry sensor re-check:** When either grace period expires, the system re-checks whether any monitored contact sensor is currently open. If one or more sensors are still open, HVAC is re-paused immediately (`_paused_by_door = True`, HVAC set to `off`) rather than restoring normal automation. This prevents the safety issue of running HVAC with a door or window open after the grace window closes.
 
-### Clean-Slate Override State on HA Restart (Issue #282)
+### Clean-Slate Override State on HA Restart (Issue #282 / #306)
 
-CA always starts in clean automation mode after an HA restart. `restore_state()` does **not** restore override or grace state — those fields are intentionally omitted from `get_serializable_state()`.
+CA always starts in full clean-slate automation mode after an HA restart. `restore_state()` does **not** restore override, grace, or pause state. All three categories are intentionally kept out of `get_serializable_state()` (override/grace since Issue #282; pause state since Issue #306).
 
 **What is preserved across restarts:**
 
 | Field | Preserved? | Notes |
 |---|---|---|
-| `_paused_by_door` | Yes | Sensor-driven pause state survives restart |
-| `_pre_pause_mode` | Yes | HVAC mode to restore when sensors close |
+| `_paused_by_door` | **No** | Cleared on restart (Issue #306). Open sensors are re-detected quickly via the state-change listener (entity transitions from `None` → `"on"` when HA reconnects); HVAC re-arms briefly and re-pauses after the configured debounce (default 5 min). |
+| `_pre_pause_mode` | **No** | Cleared on restart (Issue #306). Re-captured when the re-detected open sensor triggers a fresh pause. |
 | `_fan_active` | Yes | Fan session state |
 | `_pre_fan_hvac_mode` | Yes | HVAC mode captured before whole-house fan activation |
 | `_last_action_time` / `_last_action_reason` | Yes | Last automation action metadata |
@@ -1207,6 +1207,8 @@ CA always starts in clean automation mode after an HA restart. `restore_state()`
 | `_grace_active` / `_grace_end_time` | **No** | Cleared on restart — clean slate |
 | `_override_confirm_pending` | **No** | Cleared on restart — clean slate |
 | `_manual_override_mode` / `_manual_override_time` | **No** | Cleared on restart |
+
+**Why pause state is not restored (Issue #306):** Persisting `_paused_by_door` risks leaving CA paused indefinitely if cloud services (weather, thermostat) reconnect slowly — the sensor may not fire a state-change callback unless it transitions away from `None`. Re-detecting via the normal `None → "on"` listener path is more reliable than trusting stale persisted state. The sensor entity registers quickly after HA startup, but the re-pause takes the configured debounce (default 5 min) before `handle_door_window_open()` fires. During that window HVAC briefly re-arms — a small trade-off that is strictly better than sitting paused indefinitely on a hot day. This matches the existing clean-slate policy for manual overrides and grace periods.
 
 **Settling window:** `restore_state()` sets `_first_run = True`. The coordinator's `_async_update_data()` delays the first full automation evaluation by 5 minutes (`_first_run` guard) to let the thermostat and HA state settle before CA takes any HVAC action. This replaces the role previously played by persisted override state in preventing false automations after restart.
 

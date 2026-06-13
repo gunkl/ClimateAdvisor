@@ -232,7 +232,9 @@ class TestDoorWindowLogging:
 
         messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         mode_msgs = [m for m in messages if "Set HVAC mode" in m]
-        temp_msgs = [m for m in messages if "Set temperature" in m]
+        # Match both single-setpoint ("Set temperature") and dual-setpoint ("Set dual temperature")
+        # log variants; "Action recorded" lines use "temp" (not "temperature") so are excluded.
+        temp_msgs = [m for m in messages if "temperature" in m]
         assert len(mode_msgs) >= 1
         assert "door/window closed" in mode_msgs[0]
         assert "restoring heat mode" in mode_msgs[0]
@@ -330,7 +332,9 @@ class TestOccupancyLogging:
             asyncio.run(engine.handle_occupancy_home())
 
         messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-        temp_msgs = [m for m in messages if "Set temperature" in m]
+        # Match both single-setpoint ("Set temperature") and dual-setpoint ("Set dual temperature")
+        # log variants; "Action recorded" lines use "temp" (not "temperature") so are excluded.
+        temp_msgs = [m for m in messages if "temperature" in m]
         assert len(temp_msgs) == 1
         assert "occupancy home" in temp_msgs[0]
         assert "heat comfort" in temp_msgs[0]

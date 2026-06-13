@@ -3017,8 +3017,8 @@
     const ts = _currentReport.timestamp ? new Date(_currentReport.timestamp).toLocaleString() : '';
     const summary = (data.summary || '').replace(/\s+/g, ' ').trim().substring(0, 120);
     document.getElementById('github-issue-title').value = summary
-      ? 'Climate Advisor: ' + summary.substring(0, 80)
-      : 'Climate Advisor: ' + rType + ' — ' + ts;
+      ? summary.substring(0, 100)
+      : rType + ' — ' + ts;
     document.getElementById('github-issue-body').value = _formatCurrentReport();
     document.getElementById('github-issue-labels').value = 'bug';
     document.getElementById('github-issue-status').textContent = '';

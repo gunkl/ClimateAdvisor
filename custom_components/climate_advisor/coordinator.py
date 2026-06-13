@@ -1099,7 +1099,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         current = climate_state.state
         recommended = classification.hvac_mode
-        if current != recommended:
+        # heat_cool is CA-compatible with both "cool" and "heat" classifier outputs:
+        # the thermostat autonomously defends both edges, so no mode mismatch exists.
+        _compatible = (current == recommended) or (current == "heat_cool" and recommended in ("cool", "heat"))
+        if not _compatible:
             _LOGGER.info(
                 "First run: HVAC is '%s' but classification recommends '%s' — treating as manual override",
                 current,

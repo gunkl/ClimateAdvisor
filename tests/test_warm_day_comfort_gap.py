@@ -151,7 +151,9 @@ class TestWarmDayBandArmingReplacesComfortGap:
         assert len(hvac_calls) == 0
         # hvac_mode="heat_cool" must appear inside the set_temperature payload
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
         assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
 
     def test_indoor_below_comfort_sets_dual_setpoints(self):
@@ -166,12 +168,13 @@ class TestWarmDayBandArmingReplacesComfortGap:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        assert len(temp_calls) == 1
-        data = temp_calls[0].args[2]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        data = temp_calls[0].args[2]  # pre-write carries hvac_mode + setpoint keys
         # P3: dual setpoints; old assertion was temperature=70.0 (comfort_heat single target)
         assert "target_temp_low" in data
         assert "target_temp_high" in data
-        # Fix 4: hvac_mode embedded in the set_temperature payload
+        # hvac_mode in pre-write only (Fix P1); target write omits it to prevent comfort-program lookup
         assert data.get("hvac_mode") == "heat_cool"
 
     def test_indoor_at_comfort_floor_arms_band_not_off(self):
@@ -185,7 +188,9 @@ class TestWarmDayBandArmingReplacesComfortGap:
         # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
         assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
 
     def test_indoor_above_comfort_floor_arms_band_not_off(self):
@@ -199,7 +204,9 @@ class TestWarmDayBandArmingReplacesComfortGap:
         # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
         assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
 
     def test_indoor_unavailable_arms_band(self):
@@ -223,7 +230,9 @@ class TestWarmDayBandArmingReplacesComfortGap:
         # Fix 4: NO separate set_hvac_mode for dual path; band arms regardless of indoor temp
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
         assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
 
     def test_no_warm_day_comfort_gap_event(self):
@@ -251,7 +260,9 @@ class TestWarmDayBandArmingReplacesComfortGap:
         # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        assert len(temp_calls) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp_calls) == 2
+        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
         assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
 
     def test_no_log_about_deferred_off(self, caplog):

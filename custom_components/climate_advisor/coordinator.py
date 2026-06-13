@@ -2193,11 +2193,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # the state-change event arrives (e.g. 3–30s for Ecobee/Nest cloud round-trips).
         _last_cmd_mode = self.automation_engine._last_commanded_hvac_mode
         _last_cmd_time = self.automation_engine._last_commanded_hvac_time
+        # Fix P3 (Issue #299): also verify setpoints match when in heat_cool mode.
+        # If mode matches but setpoints differ by >1°F, the Ecobee applied its own
+        # comfort program instead of holding CA's commanded values — not a confirmation.
+        _pending_low = getattr(self.automation_engine, "_pending_setpoint_low", None)
+        _pending_high = getattr(self.automation_engine, "_pending_setpoint_high", None)
+        _reported_low = new_state.attributes.get("target_temp_low")
+        _reported_high = new_state.attributes.get("target_temp_high")
+        _setpoints_match = (
+            _last_cmd_mode != "heat_cool"
+            or _pending_low is None
+            or _pending_high is None
+            or _reported_low is None
+            or _reported_high is None
+            or (abs(float(_reported_low) - _pending_low) <= 1.0 and abs(float(_reported_high) - _pending_high) <= 1.0)
+        )
         _is_expected_confirmation = (
             _last_cmd_mode is not None
             and _last_cmd_time is not None
             and new_state.state == _last_cmd_mode
             and (dt_util.now() - _last_cmd_time).total_seconds() < 120
+            and _setpoints_match
         )
 
         # Detect manual HVAC override during a door/window pause.

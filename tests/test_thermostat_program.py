@@ -347,17 +347,21 @@ class TestApplyComfortBandDual:
         assert len(hvac) == 0
 
         temp = _temp_calls(eng)
-        assert len(temp) == 1
-        data = temp[0].args[2]
-        assert data["target_temp_low"] == 60.0  # floor
-        assert data["target_temp_high"] == 74.0  # ceiling
-        # hvac_mode is embedded in the set_temperature payload
-        assert data.get("hvac_mode") == "heat_cool"
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        # Pre-write (index 0) includes hvac_mode for the mode switch; target write (index 1) has exact setpoints
+        pre_write = temp[0].args[2]
+        target_write = temp[1].args[2]
+        assert target_write["target_temp_low"] == 60.0  # floor
+        assert target_write["target_temp_high"] == 74.0  # ceiling
+        # hvac_mode is embedded in the pre-write when a mode switch is needed (Fix P1/Issue #299)
+        assert pre_write.get("hvac_mode") == "heat_cool"
+        assert "hvac_mode" not in target_write  # target write omits it
 
     def test_cold_day_band_emits_dual_setpoints(self):
-        """Cold band [floor=70, ceiling=80, active=floor]: single set_temperature call with hvac_mode embedded.
+        """Cold band [floor=70, ceiling=80, active=floor]: two set_temperature calls (pre-write + target).
 
-        Fix 4 (Issue #290): same atomic pattern as warm-day dual; no separate set_hvac_mode call.
+        Fix P1/P2 (Issue #299): double-write for deduplication bypass; hvac_mode in pre-write only.
         """
         eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
         band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
@@ -368,11 +372,14 @@ class TestApplyComfortBandDual:
         assert len(hvac) == 0
 
         temp = _temp_calls(eng)
-        assert len(temp) == 1
-        data = temp[0].args[2]
-        assert data["target_temp_low"] == 70.0
-        assert data["target_temp_high"] == 80.0
-        assert data.get("hvac_mode") == "heat_cool"
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        pre_write = temp[0].args[2]
+        target_write = temp[1].args[2]
+        assert target_write["target_temp_low"] == 70.0
+        assert target_write["target_temp_high"] == 80.0
+        assert pre_write.get("hvac_mode") == "heat_cool"
+        assert "hvac_mode" not in target_write
 
     def test_no_mode_change_when_already_in_heat_cool(self):
         """Thermostat already in heat_cool → _set_hvac_mode NOT called (idempotent)."""
@@ -384,7 +391,8 @@ class TestApplyComfortBandDual:
         assert len(hvac) == 0  # already in heat_cool — no redundant mode switch
 
         temp = _temp_calls(eng)
-        assert len(temp) == 1  # but setpoints are still updated
+        # Double-write (Issue #299): pre-write + target write = 2 calls even in steady state
+        assert len(temp) == 2
 
     def test_comfort_band_applied_event_emitted(self):
         """comfort_band_applied event contains floor, ceiling, active, mode, reason."""
@@ -418,10 +426,11 @@ class TestApplyComfortBandCoolOnly:
         assert hvac[0].args[2]["hvac_mode"] == "cool"
 
         temp = _temp_calls(eng)
-        assert len(temp) == 1
-        # Single setpoint call uses "temperature" key, not target_temp_low/high
-        assert temp[0].args[2]["temperature"] == 74.0
-        assert "target_temp_low" not in temp[0].args[2]
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        # Single setpoint call uses "temperature" key; target write (index 1) has the correct value
+        assert temp[1].args[2]["temperature"] == 74.0
+        assert "target_temp_low" not in temp[1].args[2]
 
     def test_no_mode_change_when_already_cool(self):
         """Already in cool mode → no set_hvac_mode call; setpoint still updated."""
@@ -433,7 +442,8 @@ class TestApplyComfortBandCoolOnly:
         assert len(hvac) == 0  # already in cool — no redundant mode switch
 
         temp = _temp_calls(eng)
-        assert len(temp) == 1
+        # Double-write (Issue #299): pre-write + target write = 2 calls even in steady state
+        assert len(temp) == 2
 
     def test_floor_band_no_op_cool_only_cannot_heat(self):
         """active=floor on cool-only thermostat → no service calls (can't defend the floor)."""
@@ -460,8 +470,9 @@ class TestApplyComfortBandHeatOnly:
         assert hvac[0].args[2]["hvac_mode"] == "heat"
 
         temp = _temp_calls(eng)
-        assert len(temp) == 1
-        assert temp[0].args[2]["temperature"] == 70.0
+        # Double-write (Issue #299): pre-write + target write = 2 calls
+        assert len(temp) == 2
+        assert temp[1].args[2]["temperature"] == 70.0  # target write
 
     def test_ceiling_band_no_op_heat_only_cannot_cool(self):
         """active=ceiling on heat-only thermostat → no service calls (can't defend the ceiling)."""

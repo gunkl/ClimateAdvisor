@@ -287,6 +287,8 @@ class TestTempCommandTimeIsSet:
         ae.config = {"temp_unit": "fahrenheit"}
         ae._temp_command_pending = False
         ae._temp_command_time = None
+        ae._write_seq = 0
+        ae._pending_setpoint_single = None
         ae._record_action = MagicMock()
 
         # Bind the real method
@@ -313,6 +315,11 @@ class TestTempCommandTimeIsSet:
         ae.config = {"temp_unit": "fahrenheit"}
         ae._temp_command_pending = False
         ae._temp_command_time = None
+        ae._write_seq = 0
+        ae._pending_setpoint_low = None
+        ae._pending_setpoint_high = None
+        ae._last_commanded_hvac_mode = None
+        ae._last_commanded_hvac_time = None
         ae._record_action = MagicMock()
 
         ae._set_temperature_dual = types.MethodType(AutomationEngine._set_temperature_dual, ae)

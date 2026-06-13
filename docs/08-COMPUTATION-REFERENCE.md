@@ -97,16 +97,18 @@ Threshold constants: `TREND_THRESHOLD_SIGNIFICANT = 10`, `TREND_THRESHOLD_MODERA
 
 Pre-conditioning sets the HVAC system up ahead of an expected temperature change.
 
-| Trigger | Target temperature formula | When applied |
-|---|---|---|
-| Hot day (`day_type == hot`) | `comfort_cool + (-2)` = `comfort_cool - 2` | At classification time (morning) |
-| Moderate cold front (`cooling`, magnitude 5–9°F) | `comfort_heat + 2.0` | Scheduled at 7:00 PM |
-| Significant cold front (`cooling`, magnitude ≥ 10°F) | `comfort_heat + 3.0` | Scheduled at 7:00 PM |
-| ODE ceiling defense (`warm` or `mild` day, model calibrated, breach predicted) | `comfort_cool` | Reactive: passive safety backstop (§6c); naturally dormant when the comfort band is armed because the band's ceiling already holds the house below `comfort_cool` |
+| Trigger | Target temperature formula | When applied | Exit condition |
+|---|---|---|---|
+| Hot day (`day_type == hot`) | `comfort_cool + (-2)` = `comfort_cool - 2` | At classification time (morning) | Once `indoor_temp ≤ comfort_cool + pre_condition_target` (e.g. ≤ 73°F), `_pre_condition_achieved` is set and the ceiling offset is skipped for the rest of the day; flag resets daily. |
+| Moderate cold front (`cooling`, magnitude 5–9°F) | `comfort_heat + 2.0` | Scheduled at 7:00 PM | Not yet implemented. |
+| Significant cold front (`cooling`, magnitude ≥ 10°F) | `comfort_heat + 3.0` | Scheduled at 7:00 PM | Not yet implemented. |
+| ODE ceiling defense (`warm` or `mild` day, model calibrated, breach predicted) | `comfort_cool` | Reactive: passive safety backstop (§6c); naturally dormant when the comfort band is armed because the band's ceiling already holds the house below `comfort_cool` | N/A — fires only when a breach is predicted; not a sustained hold. |
 
 > **Issue #249 — band model change:** Warm and mild days previously issued an `hvac_mode=off` command at classification time and relied on §6b/§6c guards to rescue the home if temperatures drifted. The automation engine now programs the occupied comfort band `[comfort_heat, comfort_cool]` (suppression to setback applies only away/asleep) instead. The thermostat holds both edges autonomously; the pre-conditioning column above reflects the new steady-state where the ODE ceiling guard is a passive backstop rather than the primary defense. See [§6e](#6e-comfort-band-programming-issue-249).
 
 **Hot-day pre-cool detail:** The `pre_condition_target` is stored as `-2.0` (a negative offset). `_set_temperature_for_mode()` applies it as `comfort_cool + pre_condition_target`, so a `comfort_cool` of 75°F yields a pre-cool target of **73°F**.
+
+**Pre-cool exit:** `_pre_condition_achieved` is set on `AutomationEngine` when `indoor_temp ≤ absolute_target` (i.e. `indoor_temp ≤ comfort_cool + pre_condition_target`). It is passed to `select_comfort_band()` to suppress the ceiling offset for subsequent 30-min cycles — the ceiling reverts to `comfort_cool` for the rest of the day. The flag persists through HA restarts (serialized to state) and resets at the start of each new day.
 
 **Cold-front pre-heat detail:** The pre-heat target is stored in `config["_pending_preheat"]` for the coordinator to schedule. The target is `comfort_heat + pre_condition_target` (e.g., 70 + 3 = **73°F** for a significant cold front).
 
@@ -835,7 +837,8 @@ There is no `off` sentinel, no off+setback divergence, and no per-handler HVAC-m
 |---|---|---|---|---|
 | Home/guest — any day type (awake) | `comfort_heat` | `comfort_cool` | `"floor"` if heat day else `"ceiling"` | Full comfort band; thermostat pre-heats the morning and cools the afternoon |
 | Home/guest — `aggressive_savings=True` | `comfort_heat − CEILING_ESCALATION_SAVINGS_MARGIN_F` | `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` | as above | BOTH edges widened so the system runs less |
-| Home/guest — `hot` day with pre-cool | `comfort_heat` | `comfort_cool + pre_condition_target` (≤ comfort_cool) | `"ceiling"` | Classifier's negative pre-cool offset lowers the ceiling |
+| Home/guest — `hot` day, pre-cool **not yet achieved** (`_pre_condition_achieved=False`) | `comfort_heat` | `comfort_cool + pre_condition_target` (e.g. 73°F when `comfort_cool=75`) | `"ceiling"` | Classifier's negative offset lowers the ceiling until the target is reached |
+| Home/guest — `hot` day, pre-cool **achieved** (`_pre_condition_achieved=True`) | `comfort_heat` | `comfort_cool` (e.g. 75°F) | `"ceiling"` | Normal ceiling restored; offset skipped for the rest of the day; flag resets daily |
 | Sleep window (any day type) | `sleep_heat` | `sleep_cool` | `"floor"` (cool/cold) or `"ceiling"` (warm/hot) | Configured `sleep_heat`/`sleep_cool` band |
 | Away occupancy | `setback_heat` | `setback_cool` | `"ceiling"` | Setback band — suppression only applies when nobody is home |
 | Vacation occupancy | `setback_heat − VACATION_SETBACK_EXTRA` | `setback_cool + VACATION_SETBACK_EXTRA` | `"ceiling"` | Deep-setback band |

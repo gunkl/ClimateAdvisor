@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.6": [
+        "Fix #286: climate.set_temperature for dual-setpoint (heat_cool) thermostats now"
+        " includes hvac_mode='heat_cool' in the service payload. Without this key the Ecobee"
+        " integration silently ignored the setpoints and reverted to its internal hold values"
+        " within 1 second. Log now shows actual service values (post-unit-conversion) so"
+        " unit-mismatch issues are diagnosable from logs alone.",
+    ],
     "0.4.5": [
         "Fix #284: Door/window close and dashboard Resume now correctly restore both heat and"
         " cool setpoints in heat_cool (dual-setpoint) mode. Previously,"
@@ -934,6 +941,28 @@ KNOWN_FIXES: dict[int, dict] = {
             "Setpoint tolerance / deadband not implemented — CA still overwrites if the Ecobee's"
             " own schedule applies different values; the correct fix is to update CA's comfort"
             " band config to match the desired setpoints",
+        ],
+    },
+    286: {
+        "issue": 286,
+        "title": "Dual setpoint service call missing hvac_mode — Ecobee reverts to internal hold",
+        "version_fixed": "0.4.6",
+        "scope_covered": [
+            "_set_temperature_dual(): added 'hvac_mode': 'heat_cool' to climate.set_temperature"
+            " service payload — without it the Ecobee integration accepted the HA state update"
+            " but the physical thermostat snapped back to its internal hold within ~1 second",
+            "Log message now shows actual service values (service_low/service_high after"
+            " from_fahrenheit conversion) alongside display-formatted values — previously the"
+            " log showed internal °F strings regardless of what was actually sent to HA",
+            "coordinator.py: DEBUG log at startup includes temp_unit, comfort_heat, comfort_cool"
+            " — surfaces unit misconfiguration without requiring a config audit",
+        ],
+        "scope_not_covered": [
+            "Post-command confirmation check not implemented — if the Ecobee still reverts after"
+            " the hvac_mode fix (e.g., due to remaining internal hold programs), CA has no retry"
+            " mechanism; investigate via startup log and thermostat state history",
+            "Ecobee SmartAway / comfort program conflicts not addressed — if the Ecobee's own"
+            " occupancy detection fires during a CA write, it may still override CA's setpoints",
         ],
     },
 }

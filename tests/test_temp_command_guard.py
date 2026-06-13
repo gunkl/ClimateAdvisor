@@ -1,16 +1,17 @@
 """Tests for _temp_command_time race guard (Issue #221).
 
 Verifies that a thermostat setpoint change fired by the integration's own
-_set_temperature() or _set_temperature_dual() call does NOT get recorded as a
-manual override, even after _temp_command_pending has been cleared (the finally
-block runs before _async_thermostat_changed fires).
+_set_temperature() call does NOT get recorded as a manual override, even after
+_temp_command_pending has been cleared (the finally block runs before
+_async_thermostat_changed fires).
+
+Issue #301: _set_temperature_dual() removed; all writes use single-setpoint.
 
 Test coverage:
 1. Setpoint change within 30 s of _set_temperature() → no manual override
 2. Setpoint change after 30 s of _set_temperature() → manual override recorded
 3. _temp_command_time is set by _set_temperature()
-4. _temp_command_time is set by _set_temperature_dual()
-5. _is_recent_temp_command() returns False when _temp_command_time is None
+4. _is_recent_temp_command() returns False when _temp_command_time is None
 """
 
 from __future__ import annotations
@@ -298,35 +299,5 @@ class TestTempCommandTimeIsSet:
         with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
             mock_dt.now.return_value = cmd_now
             asyncio.run(ae._set_temperature(72.0, reason="away setback"))
-
-        assert ae._temp_command_time == cmd_now
-
-    def test_set_temperature_dual_sets_command_time(self):
-        """_set_temperature_dual() sets _temp_command_time before calling the service."""
-        AutomationEngine = _get_automation_class()
-        ae = object.__new__(AutomationEngine)
-
-        hass = MagicMock()
-        hass.services.async_call = AsyncMock()
-
-        ae.hass = hass
-        ae.climate_entity = "climate.test"
-        ae.dry_run = False
-        ae.config = {"temp_unit": "fahrenheit"}
-        ae._temp_command_pending = False
-        ae._temp_command_time = None
-        ae._write_seq = 0
-        ae._pending_setpoint_low = None
-        ae._pending_setpoint_high = None
-        ae._last_commanded_hvac_mode = None
-        ae._last_commanded_hvac_time = None
-        ae._record_action = MagicMock()
-
-        ae._set_temperature_dual = types.MethodType(AutomationEngine._set_temperature_dual, ae)
-
-        cmd_now = datetime(2026, 6, 7, 12, 0, 0)
-        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
-            mock_dt.now.return_value = cmd_now
-            asyncio.run(ae._set_temperature_dual(68.0, 76.0, reason="heat_cool setback"))
 
         assert ae._temp_command_time == cmd_now

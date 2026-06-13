@@ -35,8 +35,8 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
 
     Under P3 the engine arms a comfort band via ``_apply_comfort_band``.  The climate state
     must expose ``hvac_modes`` + ``supported_features`` so ``_get_thermostat_capabilities()``
-    detects a dual-setpoint capable thermostat and the band path reaches ``_set_hvac_mode``/
-    ``_set_temperature_dual`` — which emit DRY RUN logs when ``dry_run=True``.
+    detects thermostat capabilities and the band path reaches ``_set_temperature``
+    — which emits DRY RUN logs when ``dry_run=True``.  (Issue #301: _set_temperature_dual removed.)
     """
     from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
 

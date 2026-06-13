@@ -6,6 +6,11 @@ with a persistent comfort band.  ``apply_classification`` now unconditionally ar
 backstop without a separate supervisory check.  The ODE ceiling guard (Issue #136) is unchanged:
 it still pre-cools when thermal prediction shows an imminent breach.
 
+Issue #301: _apply_comfort_band always issues ONE set_temperature call with hvac_mode in the
+payload. The former dual-setpoint (heat_cool) path is removed — even heat_cool-capable
+thermostats receive a single cool or heat call. Tests updated to assert 1 call with
+hvac_mode='cool' (ceiling-active warm days) instead of 2 calls with heat_cool.
+
 The old TestWarmDayComfortGap tests asserting ``set_hvac_mode("off")`` or ``set_hvac_mode("heat")``
 based on indoor temperature comparisons are replaced by band-arming assertions.
 """
@@ -133,13 +138,12 @@ class TestWarmDayBandArmingReplacesComfortGap:
     """P3: warm day always arms the comfort band; the old off+heat dispatch is gone."""
 
     def test_indoor_below_comfort_arms_band_not_heat_mode(self):
-        """Indoor (68°F) < comfort_heat (70°F): P3+Fix4 arms the band atomically; no separate mode call.
+        """Indoor (68°F) < comfort_heat (70°F): P3 arms the ceiling band; no separate mode call.
 
         Old model: set hvac_mode='heat' to reach the comfort floor first.
-        P3: arm the dual band [setback_heat/comfort_cool] — the floor setpoint (60°F)
-        is a safety backstop; the heater fires naturally if indoor drops below it.
-        Fix 4 (Issue #290): dual path emits ONE set_temperature call with hvac_mode="heat_cool"
-        embedded; no separate set_hvac_mode call so Ecobee cannot revert between the two calls.
+        P3: arm the band — the floor setpoint (60°F) is a safety backstop;
+        the heater fires naturally if indoor drops below it.
+        Issue #301: single call with hvac_mode='cool' (ceiling-active warm day).
         """
         engine = _make_engine(comfort_heat=70.0, indoor_temp=68.0, current_mode="off")
         c = _make_warm_off_classification()
@@ -147,20 +151,19 @@ class TestWarmDayBandArmingReplacesComfortGap:
 
         calls = engine.hass.services.async_call.call_args_list
         hvac_calls = [call for call in calls if call.args[1] == "set_hvac_mode"]
-        # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
-        # hvac_mode="heat_cool" must appear inside the set_temperature payload
+        # hvac_mode='cool' must appear inside the set_temperature payload
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp_calls) == 2
-        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
-        assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
+        # Single call (Issue #301)
+        assert len(temp_calls) == 1
+        assert temp_calls[0].args[2].get("hvac_mode") == "cool"
 
-    def test_indoor_below_comfort_sets_dual_setpoints(self):
-        """Indoor below comfort floor: dual setpoints [60/76] always set, not a single heat target.
+    def test_indoor_below_comfort_sets_ceiling_setpoint(self):
+        """Indoor below comfort floor: single cool setpoint is sent, not dual setpoints.
 
-        Fix 4 (Issue #290): hvac_mode="heat_cool" is now embedded in this same set_temperature
-        payload rather than being a preceding separate service call.
+        Issue #301: dual-setpoint path removed. CA sends temperature=comfort_cool (76°F)
+        with hvac_mode='cool'. The thermostat's own floor setpoint (comfort_heat) provides
+        the safety backstop implicitly.
         """
         engine = _make_engine(comfort_heat=70.0, indoor_temp=68.0, current_mode="off")
         c = _make_warm_off_classification()
@@ -168,49 +171,54 @@ class TestWarmDayBandArmingReplacesComfortGap:
 
         calls = engine.hass.services.async_call.call_args_list
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp_calls) == 2
-        data = temp_calls[0].args[2]  # pre-write carries hvac_mode + setpoint keys
-        # P3: dual setpoints; old assertion was temperature=70.0 (comfort_heat single target)
-        assert "target_temp_low" in data
-        assert "target_temp_high" in data
-        # hvac_mode in pre-write only (Fix P1); target write omits it to prevent comfort-program lookup
-        assert data.get("hvac_mode") == "heat_cool"
+        # Single call (Issue #301)
+        assert len(temp_calls) == 1
+        data = temp_calls[0].args[2]
+        # Single-setpoint: temperature key, no dual setpoint keys
+        assert "temperature" in data
+        assert "target_temp_low" not in data
+        assert "target_temp_high" not in data
+        assert data.get("hvac_mode") == "cool"
 
     def test_indoor_at_comfort_floor_arms_band_not_off(self):
-        """Indoor = comfort_heat (70°F): P3+Fix4 arms band atomically; no separate hvac_mode='off' or mode call."""
+        """Indoor = comfort_heat (70°F): P3 arms ceiling band; no separate mode call.
+
+        Issue #301: single set_temperature call with hvac_mode='cool'.
+        """
         engine = _make_engine(comfort_heat=70.0, indoor_temp=70.0, current_mode="off")
         c = _make_warm_off_classification()
         asyncio.run(engine.apply_classification(c))
 
         calls = engine.hass.services.async_call.call_args_list
         hvac_calls = [call for call in calls if call.args[1] == "set_hvac_mode"]
-        # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp_calls) == 2
-        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
-        assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
+        # Single call (Issue #301)
+        assert len(temp_calls) == 1
+        assert temp_calls[0].args[2].get("hvac_mode") == "cool"
 
     def test_indoor_above_comfort_floor_arms_band_not_off(self):
-        """Indoor (72°F) > comfort_heat (70°F): P3+Fix4 arms band atomically; no separate mode call."""
+        """Indoor (72°F) > comfort_heat (70°F): P3 arms ceiling band; no separate mode call.
+
+        Issue #301: single set_temperature call with hvac_mode='cool'.
+        """
         engine = _make_engine(comfort_heat=70.0, indoor_temp=72.0, current_mode="off")
         c = _make_warm_off_classification()
         asyncio.run(engine.apply_classification(c))
 
         calls = engine.hass.services.async_call.call_args_list
         hvac_calls = [call for call in calls if call.args[1] == "set_hvac_mode"]
-        # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp_calls) == 2
-        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
-        assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
+        # Single call (Issue #301)
+        assert len(temp_calls) == 1
+        assert temp_calls[0].args[2].get("hvac_mode") == "cool"
 
     def test_indoor_unavailable_arms_band(self):
-        """Indoor temp unavailable: P3+Fix4 arms band atomically regardless of indoor temp."""
+        """Indoor temp unavailable: P3 arms ceiling band regardless of indoor temp.
+
+        Issue #301: single set_temperature call with hvac_mode='cool'.
+        """
         engine = _make_engine(comfort_heat=70.0, indoor_temp=72.0, current_mode="off")
         # Override states.get to return state without indoor temp
         climate_state = MagicMock()
@@ -227,13 +235,11 @@ class TestWarmDayBandArmingReplacesComfortGap:
 
         calls = engine.hass.services.async_call.call_args_list
         hvac_calls = [call for call in calls if call.args[1] == "set_hvac_mode"]
-        # Fix 4: NO separate set_hvac_mode for dual path; band arms regardless of indoor temp
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp_calls) == 2
-        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
-        assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
+        # Single call (Issue #301); band arms regardless of indoor temp
+        assert len(temp_calls) == 1
+        assert temp_calls[0].args[2].get("hvac_mode") == "cool"
 
     def test_no_warm_day_comfort_gap_event(self):
         """warm_day_comfort_gap event no longer exists in P3; replaced by comfort_band_applied."""
@@ -250,20 +256,18 @@ class TestWarmDayBandArmingReplacesComfortGap:
         assert len(band_events) == 1  # P3 event replaces it
 
     def test_guard_applies_to_any_off_day_type(self):
-        """Any day_type with hvac_mode='off' (mild, warm) arms the ceiling band atomically (Fix 4)."""
+        """Any day_type with hvac_mode='off' (mild, warm) arms the ceiling band (Issue #301)."""
         engine = _make_engine(comfort_heat=70.0, indoor_temp=65.0, current_mode="off")
         c = _make_warm_off_classification(day_type="mild")
         asyncio.run(engine.apply_classification(c))
 
         calls = engine.hass.services.async_call.call_args_list
         hvac_calls = [call for call in calls if call.args[1] == "set_hvac_mode"]
-        # Fix 4: NO separate set_hvac_mode for dual path
         assert len(hvac_calls) == 0
         temp_calls = [call for call in calls if call.args[1] == "set_temperature"]
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp_calls) == 2
-        # hvac_mode in pre-write (index 0) only when mode switch needed; target write omits it
-        assert temp_calls[0].args[2].get("hvac_mode") == "heat_cool"
+        # Single call (Issue #301)
+        assert len(temp_calls) == 1
+        assert temp_calls[0].args[2].get("hvac_mode") == "cool"
 
     def test_no_log_about_deferred_off(self, caplog):
         """'Warm-day off deferred' log no longer exists in P3 — band armed instead."""

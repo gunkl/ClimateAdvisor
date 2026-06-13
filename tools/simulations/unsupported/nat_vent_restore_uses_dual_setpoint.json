@@ -3,6 +3,7 @@
   "description": "Issue #293 Fix B: when natural ventilation ends on a dual-setpoint thermostat (heat_cool mode + TARGET_TEMP_RANGE), the engine's restore call must arm both setpoints (target_temp_low + target_temp_high) rather than a single temperature. Without this fix, only one edge is commanded — leaving the thermostat partially armed and the undefended edge (e.g. the heat floor) subject to drift.",
   "source": "synthetic",
   "issue": 293,
+  "unsupported_reason": "Issue #301 removed the dual-setpoint (_set_temperature_dual) code path entirely. CA now sends single-setpoint commands only (hvac_mode=cool or heat). The dual_setback_applied event type and target_temp_low/high service data no longer exist in production. This scenario documents the deliberate scope decision to drop heat_cool dual-setpoint behavior.",
   "notes": [
     "Three-exercise protocol (CLAUDE.md):",
     "(a) Scenario effectiveness: if _set_temperature_for_mode reverts to always calling",

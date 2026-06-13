@@ -329,70 +329,77 @@ def _temp_calls(eng: AutomationEngine) -> list:
 
 
 class TestApplyComfortBandDual:
-    """Dual-setpoint capable thermostat — uses heat_cool + target_temp_low/high."""
+    """heat_cool-capable thermostat — Issue #301: single-setpoint only.
 
-    def test_warm_day_band_emits_dual_setpoints(self):
-        """Warm band [floor=60, ceiling=74, active=ceiling]: single set_temperature call with hvac_mode embedded.
+    CA no longer uses dual setpoints (heat_cool mode). For a heat_cool-capable thermostat,
+    _apply_comfort_band issues ONE set_temperature call using cool or heat mode based on
+    the active edge, not heat_cool.
+    """
 
-        Fix 4 (Issue #290): the dual path emits ONE atomic set_temperature call with
-        hvac_mode="heat_cool" in the payload.  No separate set_hvac_mode call is issued
-        so the thermostat receives mode + setpoints atomically (prevents Ecobee revert window).
+    def test_warm_day_band_emits_single_cool_setpoint(self):
+        """Warm band [floor=60, ceiling=74, active=ceiling]: ONE set_temperature call, hvac_mode='cool'.
+
+        Issue #301: dual-setpoint (heat_cool) path removed. Even for a heat_cool-capable
+        thermostat, CA sends a single cool command to avoid Ecobee comfort-program reassertion.
         """
         eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
         band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test warm"))
 
-        # Fix 4: NO separate set_hvac_mode call for dual-setpoint path
+        # No separate set_hvac_mode call
         hvac = _hvac_calls(eng)
         assert len(hvac) == 0
 
         temp = _temp_calls(eng)
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp) == 2
-        # Pre-write (index 0) includes hvac_mode for the mode switch; target write (index 1) has exact setpoints
-        pre_write = temp[0].args[2]
-        target_write = temp[1].args[2]
-        assert target_write["target_temp_low"] == 60.0  # floor
-        assert target_write["target_temp_high"] == 74.0  # ceiling
-        # hvac_mode is embedded in the pre-write when a mode switch is needed (Fix P1/Issue #299)
-        assert pre_write.get("hvac_mode") == "heat_cool"
-        assert "hvac_mode" not in target_write  # target write omits it
+        # Single call (Issue #301): one set_temperature call with hvac_mode + temperature
+        assert len(temp) == 1
+        call_data = temp[0].args[2]
+        assert call_data.get("hvac_mode") == "cool"
+        assert call_data["temperature"] == 74.0  # ceiling
+        # No dual-setpoint keys
+        assert "target_temp_low" not in call_data
+        assert "target_temp_high" not in call_data
 
-    def test_cold_day_band_emits_dual_setpoints(self):
-        """Cold band [floor=70, ceiling=80, active=floor]: two set_temperature calls (pre-write + target).
+    def test_cold_day_band_emits_single_heat_setpoint(self):
+        """Cold band [floor=70, ceiling=80, active=floor]: ONE set_temperature call, hvac_mode='heat'.
 
-        Fix P1/P2 (Issue #299): double-write for deduplication bypass; hvac_mode in pre-write only.
+        Issue #301: floor defense uses heat mode + single temperature, not heat_cool dual setpoints.
         """
         eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="off")
         band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test cold"))
 
-        # Fix 4: NO separate set_hvac_mode call for dual-setpoint path
         hvac = _hvac_calls(eng)
         assert len(hvac) == 0
 
         temp = _temp_calls(eng)
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp) == 2
-        pre_write = temp[0].args[2]
-        target_write = temp[1].args[2]
-        assert target_write["target_temp_low"] == 70.0
-        assert target_write["target_temp_high"] == 80.0
-        assert pre_write.get("hvac_mode") == "heat_cool"
-        assert "hvac_mode" not in target_write
+        # Single call (Issue #301)
+        assert len(temp) == 1
+        call_data = temp[0].args[2]
+        assert call_data.get("hvac_mode") == "heat"
+        assert call_data["temperature"] == 70.0  # floor
+        assert "target_temp_low" not in call_data
+        assert "target_temp_high" not in call_data
 
-    def test_no_mode_change_when_already_in_heat_cool(self):
-        """Thermostat already in heat_cool → _set_hvac_mode NOT called (idempotent)."""
+    def test_heat_cool_capable_thermostat_uses_single_setpoint(self):
+        """heat_cool-capable thermostat: CA sends cool mode, not heat_cool (Issue #301).
+
+        The Ecobee reverts to its comfort program on heat_cool commands. Single-mode
+        cool commands are held properly.
+        """
         eng = _make_apply_engine(hvac_modes=_DUAL_MODES, supported_features=_DUAL_FEATURES, current_mode="heat_cool")
         band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
-        asyncio.run(eng._apply_comfort_band(band, reason="test idempotent"))
+        asyncio.run(eng._apply_comfort_band(band, reason="test single-setpoint"))
 
         hvac = _hvac_calls(eng)
-        assert len(hvac) == 0  # already in heat_cool — no redundant mode switch
+        assert len(hvac) == 0
 
         temp = _temp_calls(eng)
-        # Double-write (Issue #299): pre-write + target write = 2 calls even in steady state
-        assert len(temp) == 2
+        assert len(temp) == 1
+        call_data = temp[0].args[2]
+        # Must be 'cool', NOT 'heat_cool'
+        assert call_data.get("hvac_mode") == "cool"
+        assert call_data["temperature"] == 74.0
 
     def test_comfort_band_applied_event_emitted(self):
         """comfort_band_applied event contains floor, ceiling, active, mode, reason."""
@@ -409,41 +416,44 @@ class TestApplyComfortBandDual:
         assert payload["floor"] == 60.0
         assert payload["ceiling"] == 74.0
         assert payload["active"] == "ceiling"
-        assert payload["mode"] == "dual"
+        assert payload["mode"] == "cool"
 
 
 class TestApplyComfortBandCoolOnly:
     """Cool-only thermostat — arms cool mode + single ceiling setpoint."""
 
     def test_ceiling_band_sets_cool_mode_and_ceiling_setpoint(self):
-        """active=ceiling + cool-capable → set_hvac_mode(cool) + set_temperature(ceiling)."""
+        """active=ceiling + cool-capable → ONE set_temperature(hvac_mode='cool', temperature=ceiling).
+
+        Issue #301: single call with hvac_mode embedded. No separate set_hvac_mode.
+        """
         eng = _make_apply_engine(hvac_modes=_COOL_MODES, supported_features=_COOL_FEATURES, current_mode="off")
         band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test cool"))
 
         hvac = _hvac_calls(eng)
-        assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "cool"
+        assert len(hvac) == 0  # no separate set_hvac_mode call
 
         temp = _temp_calls(eng)
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp) == 2
-        # Single setpoint call uses "temperature" key; target write (index 1) has the correct value
-        assert temp[1].args[2]["temperature"] == 74.0
-        assert "target_temp_low" not in temp[1].args[2]
+        # Single call (Issue #301)
+        assert len(temp) == 1
+        call_data = temp[0].args[2]
+        assert call_data.get("hvac_mode") == "cool"
+        assert call_data["temperature"] == 74.0
+        assert "target_temp_low" not in call_data
 
-    def test_no_mode_change_when_already_cool(self):
-        """Already in cool mode → no set_hvac_mode call; setpoint still updated."""
+    def test_already_in_cool_mode_still_issues_single_call(self):
+        """Already in cool mode → ONE set_temperature call still issued (idempotent-safe)."""
         eng = _make_apply_engine(hvac_modes=_COOL_MODES, supported_features=_COOL_FEATURES, current_mode="cool")
         band = ComfortBand(floor=60.0, ceiling=74.0, active="ceiling", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test idempotent cool"))
 
         hvac = _hvac_calls(eng)
-        assert len(hvac) == 0  # already in cool — no redundant mode switch
+        assert len(hvac) == 0
 
         temp = _temp_calls(eng)
-        # Double-write (Issue #299): pre-write + target write = 2 calls even in steady state
-        assert len(temp) == 2
+        # Single call even in steady-state (Issue #301: hvac_mode in call bypasses HA dedup)
+        assert len(temp) == 1
 
     def test_floor_band_no_op_cool_only_cannot_heat(self):
         """active=floor on cool-only thermostat → no service calls (can't defend the floor)."""
@@ -460,19 +470,23 @@ class TestApplyComfortBandHeatOnly:
     """Heat-only thermostat — arms heat mode + single floor setpoint."""
 
     def test_floor_band_sets_heat_mode_and_floor_setpoint(self):
-        """active=floor + heat-capable → set_hvac_mode(heat) + set_temperature(floor)."""
+        """active=floor + heat-capable → ONE set_temperature(hvac_mode='heat', temperature=floor).
+
+        Issue #301: single call with hvac_mode embedded. No separate set_hvac_mode.
+        """
         eng = _make_apply_engine(hvac_modes=_HEAT_MODES, supported_features=_HEAT_FEATURES, current_mode="off")
         band = ComfortBand(floor=70.0, ceiling=80.0, active="floor", reason="test")
         asyncio.run(eng._apply_comfort_band(band, reason="test heat"))
 
         hvac = _hvac_calls(eng)
-        assert len(hvac) == 1
-        assert hvac[0].args[2]["hvac_mode"] == "heat"
+        assert len(hvac) == 0  # no separate set_hvac_mode call
 
         temp = _temp_calls(eng)
-        # Double-write (Issue #299): pre-write + target write = 2 calls
-        assert len(temp) == 2
-        assert temp[1].args[2]["temperature"] == 70.0  # target write
+        # Single call (Issue #301)
+        assert len(temp) == 1
+        call_data = temp[0].args[2]
+        assert call_data.get("hvac_mode") == "heat"
+        assert call_data["temperature"] == 70.0
 
     def test_ceiling_band_no_op_heat_only_cannot_cool(self):
         """active=ceiling on heat-only thermostat → no service calls (can't defend the ceiling)."""
@@ -501,7 +515,7 @@ class TestApplyComfortBandNoCapability:
 class TestApplyComfortBandDryRun:
     """dry_run=True → DRY RUN log entries; no actual service calls."""
 
-    def test_dry_run_dual_logs_without_service_calls(self, caplog):
+    def test_dry_run_logs_without_service_calls(self, caplog):
         import logging
 
         eng = _make_apply_engine(
@@ -514,4 +528,4 @@ class TestApplyComfortBandDryRun:
 
         eng.hass.services.async_call.assert_not_called()
         dry_msgs = [r.message for r in caplog.records if "[DRY RUN]" in r.message]
-        assert len(dry_msgs) >= 1  # at least one DRY RUN log line (mode change + temp)
+        assert len(dry_msgs) >= 1  # at least one DRY RUN log line

@@ -133,8 +133,6 @@ def _make_coordinator_stub(
     # Bug A / C / D / P3 — explicit values (not truthy MagicMock defaults)
     ae._last_commanded_hvac_mode = last_commanded_hvac_mode
     ae._last_commanded_hvac_time = last_commanded_hvac_time
-    ae._pending_setpoint_low = None  # Fix P3: setpoint confirmation check (Issue #299)
-    ae._pending_setpoint_high = None
     ae.handle_manual_override_during_pause = AsyncMock()
     ae.handle_manual_override = MagicMock()
     ae.handle_fan_manual_override = MagicMock()

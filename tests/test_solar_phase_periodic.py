@@ -155,6 +155,7 @@ def _make_build_state_stub(mod, fit_date):
     """Minimal stub sufficient for _build_state_dict to run."""
     coord = MagicMock(spec=mod.ClimateAdvisorCoordinator)
     coord._solar_phase_backfill = True
+    coord._solar_phase_ac_backfill = False  # Issue #312
     coord._last_solar_phase_fit_date = fit_date
     coord._current_classification = None
     coord._today_record = None

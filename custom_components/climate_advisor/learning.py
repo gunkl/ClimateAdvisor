@@ -1101,6 +1101,15 @@ class LearningEngine:
             if k_solar is not None and solar_factor > 0:
                 thermal_equilibrium_f += (k_solar / abs(k_passive)) * solar_factor
 
+        _solar_obs = cache.get("observation_count_solar", 0)
+        _conf_solar = "none"
+        if _solar_obs >= 100:
+            _conf_solar = "high"
+        elif _solar_obs >= 50:
+            _conf_solar = "medium"
+        elif _solar_obs >= 20:
+            _conf_solar = "low"
+
         return {
             "k_active_heat": k_active_heat,
             "k_active_cool": k_active_cool,
@@ -1119,10 +1128,11 @@ class LearningEngine:
             "observation_count_passive": cache.get("observation_count_passive", 0),
             "observation_count_fan_only": cache.get("observation_count_fan_only", 0),
             "observation_count_vent": cache.get("observation_count_vent", 0),
-            "observation_count_solar": cache.get("observation_count_solar", 0),
+            "observation_count_solar": _solar_obs,
             "confidence": confidence,
             "confidence_k_passive": _grade_passive_confidence(cache),
             "confidence_k_hvac": cache.get("confidence", "none"),
+            "confidence_k_solar": _conf_solar,
             "avg_r_squared_passive": cache.get("avg_r_squared_passive"),
             "last_observation_date": cache.get("last_observation_date"),
             "swing_heat_f": cache.get("swing_heat_f"),

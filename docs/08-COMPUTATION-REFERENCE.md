@@ -43,6 +43,7 @@ The automation logic table and all threshold constants in this document are expr
 | What override and grace state is preserved vs discarded on HA restart (Issue #282/#306)? | Both pause state (`_paused_by_door`, `_pre_pause_mode`) and override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) are discarded — CA always starts in full clean-slate automation mode. Open sensors are re-detected within 30–90 s via the state-change listener (None → "on" transition). A 5-minute `_first_run` settling window provides startup debounce. | [§11 Clean-Slate Override State on HA Restart](08-COMPUTATION-REFERENCE.md#clean-slate-override-state-on-ha-restart-issue-282) |
 | What notification does the user receive when PATH B (transient thermostat adjustment) fires (Issue #200)? | "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." No grace period starts; automation resumes immediately. | [§11 PATH B Notification](08-COMPUTATION-REFERENCE.md#path-b-notification--transient-thermostat-adjustment-issue-200) |
 | What happens if the user changes to a different HVAC mode while a grace period is already active (Issue #201)? | The current override and grace are cleared, and a fresh 10-minute confirmation window starts for the new mode. Latest user action wins. | [§11 Second Override During Active Grace](08-COMPUTATION-REFERENCE.md#second-override-during-active-grace-issue-201) |
+| How does `_run_solar_phase_chart_log_fit()` stay current without re-scanning months of history on every cycle (Issue #310)? | Two-tier schedule: one-shot backfill (30-day lookback, `backfill_done` flag) runs once on fresh install; periodic daily re-fit (2-day lookback, `_last_solar_phase_fit_date` gate) runs at most once per calendar day thereafter. | [§5e-v Two-tier fit scheduling](08-COMPUTATION-REFERENCE.md#two-tier-fit-scheduling-issue-310) |
 
 ## 1. Day Classification
 
@@ -422,6 +423,15 @@ learning (Issue #185):
 3. **EWMA update** — per-committed-window: observed offset, old→new EWMA value, and window size. Final summary: `N/M windows committed (K rejected)`.
 
 Individual window rejections are logged at DEBUG level with the reject reason.
+
+##### Two-tier fit scheduling (Issue #310)
+
+`_run_solar_phase_chart_log_fit()` is invoked on two distinct schedules so the EWMA stays current without redundant computation.
+
+1. **One-shot backfill** (`backfill=True`, lookback up to 30 days): runs once on fresh install via `_solar_phase_backfill`, gated by a `backfill_done` flag persisted in coordinator state. This captures the full available chart_log history and produces an initial `solar_phase_offset_h` estimate before the first daily cycle runs.
+2. **Periodic daily re-fit** (`backfill=False`, lookback 2 days): gated by `_last_solar_phase_fit_date` (persisted in coordinator state). Runs at most once per calendar day, and only after the one-shot backfill has completed. Each daily run folds the two most recent days of chart_log windows into the EWMA, keeping the phase offset current as new observations accumulate.
+
+The two-tier design avoids re-scanning months of history on every coordinator cycle while ensuring that a newly deployed instance learns a reasonable phase offset from its first day of data.
 
 #### 5e-vi. HVAC Commit Path — Single-Point Estimator and Proxy-Aware Gating (Issue #130)
 

@@ -27,6 +27,12 @@ RELEASE_NOTES: dict[str, list[str]] = {
         " persisted, so the fit ran exactly once and then never again — solar phase estimation was"
         " frozen from the first time the dashboard was opened. Now _maybe_run_periodic_solar_phase_fit()"
         " fires once per calendar day after the backfill completes.",
+        "Feat #312: CA now estimates solar phase offset from AC duty cycle patterns when"
+        " passive-window observations are unavailable (common in summer when AC runs during"
+        " peak solar hours). A secondary EWMA (α=0.07, min 3 qualifying days) accumulates"
+        " AC-based estimates without contaminating the primary passive EWMA. A 5-tier resolver"
+        " picks the freshest available estimate; a 90-day staleness gate ensures stale"
+        " home-specific data is still preferred over the generic prior.",
     ],
     "0.4.12": [
         "Fix #184/#308: k_solar confidence is now graded (none/low/medium/high) based on committed"
@@ -41,8 +47,17 @@ RELEASE_NOTES: dict[str, list[str]] = {
     "0.4.11": [
         "Fix #290: Grace expiry UI refresh, bedtime recovery on HA restart, setpoint validation,"
         " and AI report Settings column display.",
+        "Fix #263: After an HA restart with a door or window open, automation no longer stays"
+        " paused indefinitely. Pause state is no longer persisted across restarts; the"
+        " door/window state-change listener re-detects open sensors within ~5 minutes and"
+        " re-pauses cleanly — eliminating the race where slow cloud reconnect left the home"
+        " with HVAC off and no nat-vent for up to 30 minutes after restart.",
     ],
     "0.4.10": [
+        "Fix #295: On hot days, CA no longer holds the pre-cool temperature offset (−2°F) after"
+        " the home reaches the comfort ceiling. Once the pre-cool target is met, a"
+        " _pre_condition_achieved flag is set and the ceiling reverts to the configured comfort"
+        " setpoint for the rest of the day — preventing unnecessary overcooling.",
         "Fix #301: CA no longer uses heat_cool dual-setpoint mode. Every thermostat command is"
         " now a single climate.set_temperature call containing both the mode (cool or heat) and"
         " the single relevant setpoint — CA sets the bound that matters and lets the thermostat"
@@ -1165,7 +1180,7 @@ KNOWN_FIXES: dict[int, dict] = {
         ],
     },
     263: {
-        "version_fixed": "0.4.7",
+        "version_fixed": "0.4.11",
         "title": "Post-restart pause recovery — clear _paused_by_door on restart (clean-slate)",
         "scope_covered": [
             "automation.py restore_state(): _paused_by_door and _pre_pause_mode are no longer"
@@ -1182,6 +1197,28 @@ KNOWN_FIXES: dict[int, dict] = {
             " armed; user must manually re-pause or re-configure the sensor",
             "Debounce window (5 min) during which HVAC briefly runs — acceptable trade-off vs"
             " indefinite pause; no shorter debounce path is implemented",
+        ],
+    },
+    295: {
+        "version_fixed": "0.4.10",
+        "title": "Pre-cool ceiling reverts to comfort setpoint after target achieved (#249 gap)",
+        "scope_covered": [
+            "AutomationEngine: _pre_condition_achieved flag — set when indoor_temp ≤"
+            " comfort_cool + pre_condition_target; resets daily (date-keyed); persisted"
+            " and restored via state dict so the gate survives HA restarts",
+            "select_comfort_band(): receives pre_condition_achieved parameter; ceiling"
+            " lowering skipped once flag is True — prevents the −2°F offset from holding"
+            " all day after the home is already pre-cooled",
+            "coordinator.py: both apply_classification() call sites pass indoor_temp so"
+            " the gate evaluates correctly on every 30-min cycle",
+            "tests/test_pre_condition_achieved.py: 18 new unit tests covering flag lifecycle,"
+            " ceiling guard, daily reset, and state persistence",
+            "Pending simulation scenario: hot_day_precool_achieved_reverts_to_comfort",
+        ],
+        "scope_not_covered": [
+            "Hot days where indoor never reaches the pre-cool target — ceiling continues to"
+            " apply for the full day (intended; home hasn't been pre-cooled yet)",
+            "Consecutive hot days — flag resets at midnight so each day starts fresh",
         ],
     },
     301: {
@@ -1237,6 +1274,32 @@ KNOWN_FIXES: dict[int, dict] = {
             " visible via 'Solar phase fit: 0 windows passed quality filter' in ha_logs",
             "solar_gain abandonment rate — still 99/100 'abandoned' (flat indoor temps); addressed"
             " separately if #185 logging confirms HVAC-on is blocking all passive windows",
+        ],
+    },
+    312: {
+        "version_fixed": "0.4.13",
+        "title": "AC duty-cycle secondary solar phase estimator — seasonal adaptation (#312)",
+        "scope_covered": [
+            "coordinator.py: _is_ac_duty_solar_day() quality filter (5 gates: setpoint"
+            " presence, range [68-80°F], stability <1.5°F, ≥4 cool entries in 11-16h,"
+            " indoor breach of setpoint); _estimate_ac_duty_solar_phase() peak-duty estimator;"
+            " _run_ac_duty_solar_phase_fit() daily backfill runner",
+            "learning.py: update_ac_duty_solar_phase_offset() — secondary EWMA α=0.07,"
+            " writes to solar_phase_offset_ac_h only; never touches primary passive EWMA",
+            "learning.py: _resolve_solar_phase_offset(cache) — 5-tier resolver:"
+            " fresh primary → fresh secondary (obs≥3) → stale primary → stale secondary → default",
+            "learning.py: solar_phase_offset_last_obs_date and solar_phase_offset_ac_last_obs_date"
+            " fields; THERMAL_PARAM_STALE_DAYS=90 staleness gate — stale home-specific data"
+            " is preferred over generic default, masked only when fresh data is available",
+            "tests/test_solar_ac_phase.py: 21 new tests covering quality filter (5 reject"
+            " paths + pass), AC phase estimator, 4 resolver precedence tests, 8 staleness tests",
+            "docs/08-COMPUTATION-REFERENCE.md §5e-viii: two-EWMA architecture and 5-tier resolver documented",
+        ],
+        "scope_not_covered": [
+            "Days with setpoint variance >1.5°F during 11-18h window are rejected — homes"
+            " with frequent away/vacation setpoint changes learn the secondary EWMA slowly",
+            "k_solar staleness gate — not yet implemented; tracked as future investigation"
+            " in #314 (closed as working-as-designed for k_passive; only k_solar is at risk)",
         ],
     },
     313: {

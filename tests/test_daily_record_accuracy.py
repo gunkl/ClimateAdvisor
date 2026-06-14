@@ -184,6 +184,7 @@ def _make_thermostat_coordinator_stub(*, temp_command_pending: bool = False):
     # Helpers used inside _async_thermostat_changed
     coord._is_recent_hvac_command = MagicMock(return_value=False)
     coord._is_recent_temp_command = MagicMock(return_value=False)
+    coord._is_recent_fan_command = MagicMock(return_value=False)
     coord._emit_event = MagicMock()
     coord._hvac_on_since = None
     coord._pending_thermal_event = None

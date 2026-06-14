@@ -96,6 +96,7 @@ def _make_coord(*, temp_command_time: datetime | None = None):
     ae._temp_command_pending = False  # cleared (as in production post-finally)
     ae._temp_command_time = temp_command_time
     ae._hvac_command_time = None
+    ae._fan_command_time = None
     ae._manual_override_active = False
     ae._override_confirm_pending = False
     # Must be explicitly None (not truthy MagicMock) so Bug C/D _ca_active_mode
@@ -301,3 +302,135 @@ class TestTempCommandTimeIsSet:
             asyncio.run(ae._set_temperature(72.0, reason="away setback"))
 
         assert ae._temp_command_time == cmd_now
+
+
+# ---------------------------------------------------------------------------
+# Tests: fan command pending / recent fan command suppresses setpoint override
+# (Bug 1A — Issue #313)
+# ---------------------------------------------------------------------------
+
+
+def _make_state_cool(temp: float) -> MagicMock:
+    """Like _make_state() but hvac_mode='cool' for setpoint override detection."""
+    s = MagicMock()
+    s.state = "cool"
+    s.attributes = {
+        "hvac_action": "cooling",
+        "temperature": temp,
+        "fan_mode": "auto",
+    }
+    return s
+
+
+class TestFanCommandSetpointGuard:
+    """Fan command guards must suppress setpoint override detection.
+
+    Before Bug 1A fix: _fan_command_pending and _is_recent_fan_command were
+    NOT checked in the setpoint-override block, so a CA-issued fan command
+    could race with the thermostat event and be recorded as a manual override.
+    """
+
+    def _make_coord_fan(
+        self,
+        *,
+        fan_command_pending: bool,
+        fan_command_time,
+    ):
+        """Coordinator stub configured for fan-guard setpoint tests."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = _make_coord(temp_command_time=None)
+
+        ae = coord.automation_engine
+        ae._fan_command_pending = fan_command_pending
+        ae._fan_command_time = fan_command_time
+        # Ensure HVAC command guards are inactive so only fan guards matter
+        ae._hvac_command_pending = False
+        ae._hvac_command_time = None
+        ae._temp_command_pending = False
+        ae._temp_command_time = None
+        # Set last commanded hvac to cool >2 min ago so _is_expected_confirmation
+        # does not suppress the override path
+        ae._last_commanded_hvac_mode = "cool"
+        ae._last_commanded_hvac_time = datetime(2026, 6, 7, 11, 55, 0)
+
+        # Bind real _is_recent_fan_command so it reads ae._fan_command_time
+        coord._is_recent_fan_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_fan_command, coord)
+        # _is_recent_hvac_command is already mocked to return False in _make_coord()
+
+        # Update classification to hvac_mode='cool' so mode-match logic fires
+        coord._current_classification.hvac_mode = "cool"
+
+        return coord
+
+    def test_fan_command_pending_suppresses_override(self):
+        """_fan_command_pending=True must suppress setpoint override detection.
+
+        FAILS before Bug 1A fix: the pending flag is not checked, so the
+        override is recorded even while the fan command is still in flight.
+        """
+        now = datetime(2026, 6, 7, 12, 0, 0)
+        coord = self._make_coord_fan(
+            fan_command_pending=True,
+            fan_command_time=now,
+        )
+
+        old = _make_state_cool(74.0)
+        new = _make_state_cool(77.0)
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord.automation_engine.handle_manual_override.assert_not_called()
+        assert coord._today_record.manual_overrides == 0, (
+            "_fan_command_pending should suppress setpoint override but manual_overrides > 0"
+        )
+
+    def test_recent_fan_command_suppresses_override(self):
+        """_is_recent_fan_command(30s) must suppress setpoint override detection.
+
+        FAILS before Bug 1A fix: the recency check is not in the setpoint block,
+        so a setpoint change arriving 15 s after a CA fan command is wrongly
+        recorded as a user manual override.
+        """
+        now = datetime(2026, 6, 7, 12, 0, 0)
+        fan_cmd_time = now - timedelta(seconds=15)  # 15 s ago — within 30 s window
+        coord = self._make_coord_fan(
+            fan_command_pending=False,
+            fan_command_time=fan_cmd_time,
+        )
+
+        old = _make_state_cool(74.0)
+        new = _make_state_cool(77.0)
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord.automation_engine.handle_manual_override.assert_not_called()
+        assert coord._today_record.manual_overrides == 0, (
+            "_is_recent_fan_command(30s) should suppress override but manual_overrides > 0"
+        )
+
+    def test_expired_fan_command_allows_genuine_override(self):
+        """Fan command older than 30 s must NOT suppress a genuine user override.
+
+        This is a regression guard: after the race window closes, real user
+        setpoint changes must still be detected.  Must PASS before AND after fix.
+        """
+        now = datetime(2026, 6, 7, 12, 0, 0)
+        fan_cmd_time = now - timedelta(seconds=60)  # 60 s ago — window expired
+        coord = self._make_coord_fan(
+            fan_command_pending=False,
+            fan_command_time=fan_cmd_time,
+        )
+
+        old = _make_state_cool(74.0)
+        new = _make_state_cool(77.0)
+
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(coord._async_thermostat_changed(_make_thermostat_event(old, new)))
+
+        coord.automation_engine.handle_manual_override.assert_called_once()
+        assert coord._today_record.manual_overrides == 1, "Expired fan command should NOT suppress a genuine override"

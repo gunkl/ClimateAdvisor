@@ -1958,21 +1958,19 @@ class AutomationEngine:
                                     self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                             return
 
-        # NEW (Issue #115): exit if outdoor ≥ indoor — airflow now heating not cooling
+        # NEW (Issue #115): exit if outdoor > indoor — airflow now strictly heating
         indoor = self._get_indoor_temp_f()
-        if self._natural_vent_active and outdoor is not None and indoor is not None and outdoor >= indoor:
+        if self._natural_vent_active and outdoor is not None and indoor is not None and outdoor > indoor:
             self._natural_vent_active = False
             self._paused_by_door = True
             self._nat_vent_outdoor_exit_time = dt_util.now()
             await self._deactivate_fan(
                 reason=(
-                    f"nat vent exit: outdoor {outdoor:.1f}\u00b0F \u2265 indoor {indoor:.1f}\u00b0F"
-                    " \u2014 airflow reversed"
+                    f"nat vent exit: outdoor {outdoor:.1f}\u00b0F > indoor {indoor:.1f}\u00b0F \u2014 airflow reversed"
                 )
             )
             _LOGGER.info(
-                "Natural vent exit: outdoor %.1f\u00b0F \u2265 indoor %.1f\u00b0F"
-                " \u2014 airflow reversed, entering pause",
+                "Natural vent exit: outdoor %.1f\u00b0F > indoor %.1f\u00b0F \u2014 airflow reversed, entering pause",
                 outdoor,
                 indoor,
             )
@@ -2629,6 +2627,47 @@ class AutomationEngine:
             self._fan_active = True
             self._fan_on_since = dt_util.now().isoformat()
             self._record_action("Fan activated", reason)
+
+            # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
+            # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
+            # covers any delayed state report.
+            _verify_seq = self._write_seq
+            _expected_temp = self._pending_setpoint_single
+            _expected_mode = self._last_commanded_hvac_mode
+
+            async def _do_verify_after_fan_on() -> None:
+                if self._write_seq != _verify_seq:
+                    return  # newer command issued — skip
+                if _expected_temp is None or _expected_mode is None:
+                    return  # no active setpoint
+                if self._manual_override_active:
+                    return  # genuine confirmed override — don't fight it
+                current_state = self.hass.states.get(self.climate_entity)
+                if current_state is None:
+                    return
+                actual = current_state.attributes.get("temperature")
+                if actual is None:
+                    return
+                try:
+                    if (
+                        abs(float(actual) - _expected_temp) > 0.6
+                    ):  # 0.6°F — same tolerance as _check_single_setpoint_accepted
+                        _LOGGER.info(
+                            "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
+                            float(actual),
+                            _expected_temp,
+                            _expected_mode,
+                        )
+                        await self._set_temperature(
+                            _expected_temp, reason="post-fan-verify/repair", mode=_expected_mode
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+            def _verify_setpoint_after_fan_on(_now: Any) -> None:
+                self.hass.async_create_task(_do_verify_after_fan_on())
+
+            async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_on)
         finally:
             self._fan_command_pending = False
 
@@ -2676,6 +2715,47 @@ class AutomationEngine:
             self._fan_active = False
             self._fan_on_since = None
             self._record_action("Fan deactivated", reason)
+
+            # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
+            # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
+            # covers any delayed state report.
+            _verify_seq = self._write_seq
+            _expected_temp = self._pending_setpoint_single
+            _expected_mode = self._last_commanded_hvac_mode
+
+            async def _do_verify_after_fan_off() -> None:
+                if self._write_seq != _verify_seq:
+                    return  # newer command issued — skip
+                if _expected_temp is None or _expected_mode is None:
+                    return  # no active setpoint
+                if self._manual_override_active:
+                    return  # genuine confirmed override — don't fight it
+                current_state = self.hass.states.get(self.climate_entity)
+                if current_state is None:
+                    return
+                actual = current_state.attributes.get("temperature")
+                if actual is None:
+                    return
+                try:
+                    if (
+                        abs(float(actual) - _expected_temp) > 0.6
+                    ):  # 0.6°F — same tolerance as _check_single_setpoint_accepted
+                        _LOGGER.info(
+                            "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
+                            float(actual),
+                            _expected_temp,
+                            _expected_mode,
+                        )
+                        await self._set_temperature(
+                            _expected_temp, reason="post-fan-verify/repair", mode=_expected_mode
+                        )
+                except (ValueError, TypeError):
+                    pass
+
+            def _verify_setpoint_after_fan_off(_now: Any) -> None:
+                self.hass.async_create_task(_do_verify_after_fan_off())
+
+            async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_off)
         finally:
             self._fan_command_pending = False
 

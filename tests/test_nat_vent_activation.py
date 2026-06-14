@@ -298,12 +298,17 @@ class TestNatVentOutdoorRiseExit:
         assert rise_events[0][1]["outdoor"] == 74.5
         assert rise_events[0][1]["indoor"] == 74.0
 
-    def test_outdoor_equal_indoor_fires_exit(self):
-        """outdoor 74.0F == indoor 74.0F (boundary) → directional exit fires."""
+    def test_outdoor_equal_indoor_does_not_exit(self):
+        """outdoor 74.0F == indoor 74.0F (boundary) → directional exit does NOT fire (Bug #313 fix).
+
+        Equal temps mean neutral airflow — not reversed — so nat vent should stay active.
+        The exit condition is strict: outdoor > indoor (not >=).
+        """
         engine = _make_engine(indoor_f=74.0)
         engine._natural_vent_active = True
         engine._paused_by_door = False
         engine._last_outdoor_temp = 74.0
+        engine._deactivate_fan = AsyncMock()
 
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
@@ -311,9 +316,9 @@ class TestNatVentOutdoorRiseExit:
         with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        assert engine._natural_vent_active is False
+        assert engine._natural_vent_active is True, "nat vent must stay active when outdoor == indoor"
         rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
-        assert len(rise_events) == 1
+        assert len(rise_events) == 0, "nat_vent_outdoor_rise_exit must not fire on equal temps"
 
     def test_outdoor_rise_exit_fires_before_threshold_exit(self):
         """outdoor 74.5F >= indoor 74.0F but still below threshold 75F — directional exit fires first."""
@@ -743,3 +748,280 @@ class TestProactiveFloorExit:
         assert len(floor_events) == 1
         assert "time_to_floor_hr" in floor_events[0][1]
         assert floor_events[0][1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
+
+
+# ---------------------------------------------------------------------------
+# Bug #313 Fix — equal outdoor==indoor should NOT exit nat vent
+# ---------------------------------------------------------------------------
+
+
+class TestNatVentExitEqualTemps:
+    """Bug #313: outdoor >= indoor exit condition must be strict (>), not >=.
+
+    Equal temps mean neutral airflow — not reversed.  Exiting nat vent when
+    outdoor == indoor causes the occupant to lose free cooling unnecessarily
+    every time a sensor read happens to land on exactly the same value as indoor.
+
+    These three tests document the correct post-fix semantics:
+      1. Equal temps → nat vent STAYS active  (was wrong: exited)
+      2. outdoor > indoor → nat vent exits     (regression guard, unchanged)
+      3. outdoor < indoor → nat vent stays     (regression guard, unchanged)
+    """
+
+    def test_equal_temps_does_not_exit_nat_vent(self):
+        """outdoor == indoor (72.0 == 72.0) → nat vent stays active after fix.
+
+        Before the fix (outdoor >= indoor) this test FAILS because the engine
+        exits nat vent on equal temps.  After the fix (outdoor > indoor) it passes.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=72.0)
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 72.0  # equal to indoor
+        engine._deactivate_fan = AsyncMock()
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        # Equal temps → airflow is neutral, not reversed → do NOT exit
+        assert engine._natural_vent_active is True, (
+            "nat vent should stay active when outdoor == indoor (neutral airflow)"
+        )
+        rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
+        assert len(rise_events) == 0, "nat_vent_outdoor_rise_exit must NOT fire on equal temps"
+
+    def test_outdoor_above_indoor_exits_nat_vent(self):
+        """outdoor > indoor (73.0 > 72.0) → nat vent exits (regression guard).
+
+        This must still exit after the fix — strictly greater means reversed airflow.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=72.0)
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 73.0  # strictly above indoor
+        engine._deactivate_fan = AsyncMock()
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False, (
+            "nat vent must exit when outdoor strictly > indoor (reversed airflow)"
+        )
+        rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
+        assert len(rise_events) == 1
+
+    def test_outdoor_below_indoor_stays_active(self):
+        """outdoor < indoor (71.0 < 72.0) → nat vent stays active (regression guard).
+
+        Outdoor cooler than indoor — airflow is beneficial.  Must not exit.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=72.0)
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 71.0  # strictly below indoor
+        engine._deactivate_fan = AsyncMock()
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True, (
+            "nat vent must stay active when outdoor < indoor (beneficial airflow)"
+        )
+        rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
+        assert len(rise_events) == 0
+
+
+# ---------------------------------------------------------------------------
+# Bug #313 1B — post-fan verify-and-repair callback
+# ---------------------------------------------------------------------------
+
+_ACL_PATH = "custom_components.climate_advisor.automation.async_call_later"
+
+
+def _make_fan_engine(indoor_f: float = 72.0) -> AutomationEngine:
+    """Engine with FAN_MODE_HVAC so _activate_fan/_deactivate_fan reach the callback."""
+    from custom_components.climate_advisor.const import FAN_MODE_HVAC
+
+    engine = _make_engine(indoor_f=indoor_f)
+    engine.config["fan_mode"] = FAN_MODE_HVAC
+    return engine
+
+
+class TestPostFanVerify:
+    """Bug #313-1B: post-fan 30s setpoint verify-and-repair callback.
+
+    After every fan activation or deactivation the engine schedules a 30s callback
+    that re-asserts the last commanded setpoint if the thermostat has drifted.
+    This guards against Ecobee comfort-program reversions after fan commands.
+    """
+
+    def test_activate_fan_schedules_verify_callback(self):
+        """_activate_fan() schedules exactly one async_call_later(30s) callback."""
+        engine = _make_fan_engine()
+        engine._pending_setpoint_single = 72.0
+        engine._last_commanded_hvac_mode = "cool"
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with patch(_ACL_PATH, side_effect=_fake_acl):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        # Should have scheduled exactly one verify callback
+        verify_calls = [(d, cb) for d, cb in captured_callbacks if d == 30.0]
+        assert len(verify_calls) == 1, "Expected exactly one 30s verify callback from _activate_fan"
+
+    def test_deactivate_fan_schedules_verify_callback(self):
+        """_deactivate_fan() schedules exactly one async_call_later(30s) callback."""
+        engine = _make_fan_engine()
+        engine._fan_active = True
+        engine._pending_setpoint_single = 72.0
+        engine._last_commanded_hvac_mode = "cool"
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with patch(_ACL_PATH, side_effect=_fake_acl):
+            asyncio.run(engine._deactivate_fan(reason="test"))
+
+        verify_calls = [(d, cb) for d, cb in captured_callbacks if d == 30.0]
+        assert len(verify_calls) == 1, "Expected exactly one 30s verify callback from _deactivate_fan"
+
+    def test_verify_callback_repairs_drifted_setpoint(self):
+        """Callback fires and re-asserts setpoint when thermostat drifted > 0.6°F."""
+        engine = _make_fan_engine(indoor_f=72.0)
+        engine._pending_setpoint_single = 70.0
+        engine._last_commanded_hvac_mode = "cool"
+        engine._manual_override_active = False
+
+        # Thermostat reports 71.9°F — drifted 1.9°F away from commanded 70.0°F
+        climate_state = MagicMock()
+        climate_state.state = "cool"
+        climate_state.attributes = {"current_temperature": 72.0, "temperature": 71.9}
+        engine.hass.states.get = MagicMock(return_value=climate_state)
+
+        # Capture _set_temperature calls
+        engine._set_temperature = AsyncMock()
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with patch(_ACL_PATH, side_effect=_fake_acl):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        assert len(captured_callbacks) == 1
+        _delay, verify_cb = captured_callbacks[0]
+
+        # Wire async_create_task to capture and run the inner coroutine
+        # (the sync wrapper calls hass.async_create_task with the inner coro)
+        captured_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured_coros.append(c))
+
+        verify_cb(None)
+        assert len(captured_coros) == 1
+        asyncio.run(captured_coros[0])
+
+        engine._set_temperature.assert_called_once()
+        call_kwargs = engine._set_temperature.call_args
+        assert call_kwargs[1]["reason"] == "post-fan-verify/repair"
+        assert call_kwargs[1]["mode"] == "cool"
+
+    def test_verify_callback_skips_when_write_seq_advanced(self):
+        """Callback is a no-op when a newer write command superseded it (_write_seq changed)."""
+        engine = _make_fan_engine()
+        engine._pending_setpoint_single = 70.0
+        engine._last_commanded_hvac_mode = "cool"
+        engine._manual_override_active = False
+
+        climate_state = MagicMock()
+        climate_state.state = "cool"
+        climate_state.attributes = {"temperature": 71.9}
+        engine.hass.states.get = MagicMock(return_value=climate_state)
+
+        engine._set_temperature = AsyncMock()
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with patch(_ACL_PATH, side_effect=_fake_acl):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        # Advance write_seq before callback fires (simulates a newer command)
+        engine._write_seq += 1
+
+        captured_callbacks[0][1](None)  # sync wrapper; inner coro closed by _consume_coroutine
+
+        engine._set_temperature.assert_not_called()
+
+    def test_verify_callback_skips_when_manual_override_active(self):
+        """Callback is a no-op when a genuine manual override is active."""
+        engine = _make_fan_engine()
+        engine._pending_setpoint_single = 70.0
+        engine._last_commanded_hvac_mode = "cool"
+        engine._manual_override_active = True  # user took control
+
+        climate_state = MagicMock()
+        climate_state.state = "cool"
+        climate_state.attributes = {"temperature": 71.9}
+        engine.hass.states.get = MagicMock(return_value=climate_state)
+
+        engine._set_temperature = AsyncMock()
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with patch(_ACL_PATH, side_effect=_fake_acl):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        captured_callbacks[0][1](None)  # sync wrapper; inner coro closed by _consume_coroutine
+
+        engine._set_temperature.assert_not_called()
+
+    def test_verify_callback_skips_when_setpoint_within_tolerance(self):
+        """Callback is a no-op when thermostat is within 0.6°F of commanded setpoint."""
+        engine = _make_fan_engine()
+        engine._pending_setpoint_single = 70.0
+        engine._last_commanded_hvac_mode = "cool"
+        engine._manual_override_active = False
+
+        # Thermostat reports 70.4°F — within 0.6°F tolerance
+        climate_state = MagicMock()
+        climate_state.state = "cool"
+        climate_state.attributes = {"temperature": 70.4}
+        engine.hass.states.get = MagicMock(return_value=climate_state)
+
+        engine._set_temperature = AsyncMock()
+
+        captured_callbacks: list = []
+
+        def _fake_acl(hass, delay, callback):
+            captured_callbacks.append((delay, callback))
+
+        with patch(_ACL_PATH, side_effect=_fake_acl):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        captured_callbacks[0][1](None)  # sync wrapper; inner coro closed by _consume_coroutine
+
+        engine._set_temperature.assert_not_called()

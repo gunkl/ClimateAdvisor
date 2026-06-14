@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.13"
+VERSION = "0.4.14"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.14": [
+        "Fix #313: Fan commands no longer trigger false manual-override detection. When Ecobee"
+        " reverts its setpoint after a fan mode change, the coordinator now suppresses the"
+        " setpoint-change override check for 30s after any fan command (matching the existing"
+        " guard on hvac and temp commands).",
+        "Fix #313: After every fan activation or deactivation, CA schedules a 30-second"
+        " verify-and-repair callback. If the thermostat's setpoint has drifted more than 0.6°F"
+        " from what CA commanded, CA re-asserts the correct setpoint — so any delayed Ecobee"
+        " state report arrives within the temp-command recency window and is not misread as an"
+        " override.",
+        "Fix #313: Natural ventilation no longer exits when outdoor and indoor temperatures are"
+        " equal. Equal temps mean neutral airflow (no benefit but no harm); only when outdoor is"
+        " strictly warmer than indoor does nat-vent exit due to airflow reversal.",
+    ],
     "0.4.13": [
         "Fix #185/#310: solar_phase_offset_h now re-fits daily from the chart_log passive-daytime"
         " windows (incremental 2-day lookback). Previously, the one-shot startup backfill flag was"
@@ -1223,6 +1237,42 @@ KNOWN_FIXES: dict[int, dict] = {
             " visible via 'Solar phase fit: 0 windows passed quality filter' in ha_logs",
             "solar_gain abandonment rate — still 99/100 'abandoned' (flat indoor temps); addressed"
             " separately if #185 logging confirms HVAC-on is blocking all passive windows",
+        ],
+    },
+    313: {
+        "version_fixed": "0.4.14",
+        "title": "False override + premature nat-vent exit after fan command (#313)",
+        "scope_covered": [
+            "coordinator.py _async_thermostat_changed(): setpoint-override detection block now"
+            " checks `not self.automation_engine._fan_command_pending` and"
+            " `not self._is_recent_fan_command(threshold_seconds=30.0)` — matches the existing"
+            " pattern in the fan-mode change detection block at line ~2585",
+            "automation.py _activate_fan(): schedules 30s sync callback"
+            " (_verify_setpoint_after_fan_on) via async_call_later; callback re-asserts the"
+            " last commanded setpoint via _set_temperature() if thermostat drifted >0.6°F,"
+            " using _write_seq guard to skip if a newer command was issued",
+            "automation.py _deactivate_fan(): same 30s verify-and-repair callback pattern"
+            " (_verify_setpoint_after_fan_off)",
+            "automation.py nat-vent exit condition: `outdoor >= indoor` changed to"
+            " `outdoor > indoor` — equal temps (neutral airflow) no longer exit nat-vent",
+            "tests/test_temp_command_guard.py: TestFanCommandSetpointGuard — 3 tests for"
+            " pending flag, 30s recency, and expired (60s) genuine override",
+            "tests/test_nat_vent_activation.py: TestNatVentExitEqualTemps — 3 tests"
+            " (equal stays active, above exits, below stays active); TestPostFanVerify — 6"
+            " tests (schedule on activate, schedule on deactivate, repair on drift, skip on"
+            " write_seq advance, skip on manual override, skip within tolerance)",
+        ],
+        "scope_not_covered": [
+            "Ecobee setpoint reversion >60s after the fan command (i.e., after the 30s verify"
+            " fires but before the next classify cycle): the existing 15-min retry (#301) covers"
+            " persistent drift; a second occurrence in the same session will be caught by the"
+            " next classify cycle's setpoint re-assertion",
+            "Pre-fan state validation (check thermostat matches expected setpoint BEFORE fan"
+            " command): not needed for the #313 incident (setpoint was correct before fan-on);"
+            " can be added if pre-drift becomes observed in production",
+            "Tier B integration test for the full cascade (fan command → Ecobee revert →"
+            " verify fires → re-assert): requires the coordinator state-listener layer;"
+            " deferred to Tier B",
         ],
     },
     308: {

@@ -941,7 +941,7 @@ class TestMinFanRuntime:
             asyncio.run(engine._fan_cycle_on())
         engine.hass.services.async_call.assert_called()
         assert engine._fan_min_runtime_active is True
-        mock_later.assert_called_once()
+        assert mock_later.call_count == 2  # 30s verify + runtime deactivation
         assert engine._fan_min_cycle_cancel is cancel_mock
 
     def test_cycle_on_skips_when_zero(self):
@@ -1011,7 +1011,8 @@ class TestMinFanRuntime:
             asyncio.run(engine._fan_cycle_on())
         engine.hass.services.async_call.assert_called()
         assert engine._fan_min_runtime_active is True
-        mock_later.assert_not_called()
+        assert mock_later.call_count == 1  # only 30s verify; no deactivation for always-on
+        assert mock_later.call_args[0][1] == 30.0
         assert engine._fan_min_cycle_cancel is None
 
     def test_cycle_off_deactivates_fan_and_schedules_next_on(self):
@@ -1031,8 +1032,8 @@ class TestMinFanRuntime:
         assert engine._fan_min_runtime_active is False
         # Deactivation service call was made
         engine.hass.services.async_call.assert_called()
-        # Next "on" is scheduled for (60 - 10) * 60 = 3000 seconds
-        mock_later.assert_called_once()
+        # Next "on" is scheduled for (60 - 10) * 60 = 3000 seconds; also 30s verify
+        assert mock_later.call_count == 2  # 30s verify + next-cycle scheduling
         assert mock_later.call_args[0][1] == (60 - 10) * 60
         assert engine._fan_min_cycle_cancel is cancel_mock
 

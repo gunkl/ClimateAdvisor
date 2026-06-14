@@ -112,6 +112,11 @@ from .const import (
     OCCUPANCY_VACATION,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
+    REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY,
+    REJECT_AC_NO_COOL_SETPOINTS,
+    REJECT_AC_NO_SETPOINT_BREACH,
+    REJECT_AC_SETPOINT_OUT_OF_RANGE,
+    REJECT_AC_SETPOINT_UNSTABLE,
     REJECT_NO_INTERIOR_PEAK,
     REJECT_OLS_BAD_FIT,
     REJECT_OLS_BOUNDS,
@@ -157,6 +162,13 @@ from .const import (
     THERMAL_SOLAR_FACTOR_MIN_RANGE,
     THERMAL_SOLAR_MIN_RATE_F_PER_HR,
     THERMAL_SOLAR_MIN_SAMPLES,
+    THERMAL_SOLAR_PHASE_AC_MIN_COOL_ENTRIES,
+    THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_END_H,
+    THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_START_H,
+    THERMAL_SOLAR_PHASE_AC_SETPOINT_MAX_F,
+    THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN_F,
+    THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F,
+    THERMAL_SOLAR_PHASE_AC_STABILITY_WINDOW_END_H,
     THERMAL_SOLAR_PHASE_ALPHA,
     THERMAL_SOLAR_PHASE_MIN_DT_F,
     THERMAL_SOLAR_PHASE_MIN_ENTRIES,
@@ -316,6 +328,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Solar phase offset (Issue #147)
         self._solar_phase_offset: float = THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
         self._solar_phase_backfill: bool = False
+        self._solar_phase_ac_backfill: bool = False  # Issue #312: AC duty cycle estimator
 
         # Occupancy state machine
         self._occupancy_mode: str = OCCUPANCY_HOME
@@ -576,6 +589,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._vent_k_backfill_v2 = bool(state.get("vent_k_backfill_v2", False))
         # Solar phase offset backfill flag (Issue #147)
         self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
+        self._solar_phase_ac_backfill = bool(state.get("solar_phase_ac_backfill", False))  # Issue #312
 
         # Prediction archive — restore only on same-day restores (already gated above)
         raw_archive = state.get("pred_archive")
@@ -669,6 +683,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
             "vent_k_backfill_v2": self._vent_k_backfill_v2,
             "solar_phase_backfill": self._solar_phase_backfill,
+            "solar_phase_ac_backfill": self._solar_phase_ac_backfill,  # Issue #312
             "event_log": list(self._event_log),
         }
 
@@ -1244,6 +1259,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._run_solar_phase_chart_log_fit(backfill=True)
                         self._solar_phase_backfill = True
                         _LOGGER.info("chart_log solar_phase: phase offset backfill complete")
+                    if not self._solar_phase_ac_backfill:
+                        self._run_ac_duty_solar_phase_fit()
+                        # Flag is set inside the method after completion
 
             # Refresh the thermal model on every 30-min cycle, not just at the daily
             # briefing. get_thermal_model() is a pure computation (no I/O), so calling it
@@ -1925,6 +1943,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._current_classification = classification
         self._last_outdoor_temp = forecast.current_outdoor_temp
         self._apply_outdoor_windows_gate()
+
+        # Daily incremental solar phase re-fit (Issue #310/#312)
+        if self.config.get("learning_enabled", True):
+            self._maybe_run_periodic_solar_phase_fit()
 
         # Inject thermal model into automation engine for adaptive scheduling
         if self.config.get("learning_enabled", True):
@@ -3782,6 +3804,86 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             rejected,
         )
 
+    def _run_ac_duty_solar_phase_fit(self) -> None:
+        """Estimate solar phase offset from AC duty cycle pattern (Issue #312).
+
+        Secondary estimator — only used when the primary (passive window) method has
+        never produced an observation. Reads the chart_log, groups entries by local
+        calendar date, applies quality filter, estimates peak-load hour, and updates
+        the EWMA via learning.update_ac_duty_solar_phase_offset().
+
+        Sets self._solar_phase_ac_backfill = True on completion.
+        """
+        chart_log = getattr(self, "_chart_log", None)
+        if chart_log is None:
+            _LOGGER.debug("AC duty solar phase fit: chart_log not initialized — skipping")
+            return
+        entries = list(getattr(chart_log, "_entries", []))
+        if not entries:
+            _LOGGER.debug("AC duty solar phase fit: chart_log empty — skipping")
+            return
+
+        # Group entries by local calendar date
+        from collections import defaultdict
+
+        days: dict[str, list[dict]] = defaultdict(list)
+        for entry in entries:
+            h = _entry_hour(entry)
+            if h is None:
+                continue
+            try:
+                day_str = datetime.fromisoformat(entry["ts"]).strftime("%Y-%m-%d")
+            except (KeyError, ValueError):
+                continue
+            days[day_str].append(entry)
+
+        committed = 0
+        rejected = 0
+        for day_str, day_entries in sorted(days.items()):
+            ok, reason = _is_ac_duty_solar_day(day_entries)
+            if not ok:
+                rejected += 1
+                _LOGGER.debug("AC duty solar phase: skip day=%s reason=%s", day_str, reason)
+                continue
+            offset = _estimate_ac_duty_solar_phase(day_entries)
+            if offset is None:
+                rejected += 1
+                continue
+            self.learning.update_ac_duty_solar_phase_offset(offset, day_str)
+            committed += 1
+
+        current: float | None = None
+        if hasattr(self, "learning") and hasattr(self.learning, "_state"):
+            current = (self.learning._state.thermal_model_cache or {}).get("solar_phase_offset_ac_h")
+        _LOGGER.info(
+            "AC duty solar phase fit: committed=%d rejected=%d current_offset=%s",
+            committed,
+            rejected,
+            f"{current:.2f}h" if current is not None else "none",
+        )
+        self._solar_phase_ac_backfill = True
+
+    def _maybe_run_periodic_solar_phase_fit(self) -> None:
+        """Run the incremental daily solar phase re-fit if due (Issue #310/#312).
+
+        Called once per day from _async_send_briefing after the primary backfill has
+        completed. Runs both the primary passive-window estimator (backfill=False) and
+        the secondary AC duty cycle estimator to pick up any new observations since the
+        last backfill.
+
+        No-ops until the initial backfill has been run at least once
+        (_solar_phase_backfill must be True).
+        """
+        if not self._solar_phase_backfill:
+            return
+        _today = dt_util.now().date()
+        if getattr(self, "_last_solar_phase_fit_date", None) == _today:
+            return
+        self._run_solar_phase_chart_log_fit(backfill=False)
+        self._run_ac_duty_solar_phase_fit()
+        self._last_solar_phase_fit_date = _today
+        _LOGGER.info("chart_log solar_phase: daily incremental re-fit complete (date=%s)", _today)
+
     def _start_decay_observation(self, obs_type: str) -> None:
         """Create a new monitoring observation for a passive/fan/vent/solar type."""
         import uuid as _uuid_mod
@@ -5292,6 +5394,110 @@ def _estimate_solar_phase_offset(
     )
 
     return phase_obs_clamped, None
+
+
+def _entry_hour(entry: dict) -> int | None:
+    """Parse local hour from a chart_log entry ts field. Returns None on failure."""
+    try:
+        return datetime.fromisoformat(entry["ts"]).hour
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _is_ac_duty_solar_day(day_entries: list[dict]) -> tuple[bool, str]:
+    """Quality filter for AC duty cycle solar phase estimation.
+
+    Returns (True, "") if the day qualifies, or (False, reject_reason) otherwise.
+    Pure function — no instance state.
+
+    Quality gates (in order):
+      1. At least one entry in 11:00-18:00 has setpoint_cool field.
+      1b. Setpoint must be in [SETPOINT_MIN_F, SETPOINT_MAX_F].
+      2. Setpoint spread across 11:00-18:00 < SETPOINT_STABILITY_F.
+      3. >= AC_MIN_COOL_ENTRIES cool entries in 11:00-16:00.
+      4. At least one 11:00-16:00 entry has indoor > median setpoint.
+    """
+    # Collect entries in the stability window (11:00-18:00)
+    stability_entries = [
+        e
+        for e in day_entries
+        if _entry_hour(e) is not None
+        and THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_START_H <= _entry_hour(e) < THERMAL_SOLAR_PHASE_AC_STABILITY_WINDOW_END_H
+    ]
+
+    # Gate 1: must have setpoint_cool field in at least one stability-window entry
+    setpoints = [e["setpoint_cool"] for e in stability_entries if e.get("setpoint_cool") is not None]
+    if not setpoints:
+        return False, REJECT_AC_NO_COOL_SETPOINTS
+
+    # Gate 1b: setpoint must be in a reasonable range
+    if min(setpoints) < THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN_F or max(setpoints) > THERMAL_SOLAR_PHASE_AC_SETPOINT_MAX_F:
+        return False, REJECT_AC_SETPOINT_OUT_OF_RANGE
+
+    # Gate 2: setpoint must be stable across the stability window
+    if max(setpoints) - min(setpoints) > THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F:
+        return False, REJECT_AC_SETPOINT_UNSTABLE
+
+    # Gate 3: >= AC_MIN_COOL_ENTRIES cool entries in peak window (11:00-16:00)
+    peak_cool_count = sum(
+        1
+        for e in day_entries
+        if e.get("hvac") == "cool"
+        and _entry_hour(e) is not None
+        and THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_START_H <= _entry_hour(e) < THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_END_H
+    )
+    if peak_cool_count < THERMAL_SOLAR_PHASE_AC_MIN_COOL_ENTRIES:
+        return False, REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY
+
+    # Gate 4: at least one peak-window entry has indoor > median setpoint
+    median_setpoint = sorted(setpoints)[len(setpoints) // 2]
+    breach = any(
+        e.get("indoor", 0) > median_setpoint
+        for e in day_entries
+        if _entry_hour(e) is not None
+        and THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_START_H <= _entry_hour(e) < THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_END_H
+    )
+    if not breach:
+        return False, REJECT_AC_NO_SETPOINT_BREACH
+
+    return True, ""
+
+
+def _estimate_ac_duty_solar_phase(day_entries: list[dict]) -> float | None:
+    """Estimate solar phase offset from AC duty cycle peak hour.
+
+    Counts cool entries per hour in the 11:00-16:00 window, computes duty fraction,
+    finds the peak-duty hour, and returns (peak_hour - 13) clamped to
+    [THERMAL_SOLAR_PHASE_OFFSET_MIN, THERMAL_SOLAR_PHASE_OFFSET_MAX].
+
+    Returns None if no cool entries exist in the window.
+    Pure function — no instance state.
+    """
+    # Count cool and total entries per hour in 11:00-16:00 window
+    cool_counts: dict[int, int] = {}
+    total_counts: dict[int, int] = {}
+    for e in day_entries:
+        h = _entry_hour(e)
+        _start = THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_START_H
+        _end = THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_END_H
+        in_peak = h is not None and _start <= h < _end
+        if not in_peak:
+            continue
+        total_counts[h] = total_counts.get(h, 0) + 1
+        if e.get("hvac") == "cool":
+            cool_counts[h] = cool_counts.get(h, 0) + 1
+
+    if not cool_counts:
+        return None
+
+    # Duty fraction per hour
+    duty = {h: cool_counts[h] / total_counts[h] for h in cool_counts if total_counts.get(h, 0) > 0}
+    if not duty:
+        return None
+
+    peak_hour = max(duty, key=lambda h: duty[h])
+    offset = float(peak_hour - 13)
+    return max(float(THERMAL_SOLAR_PHASE_OFFSET_MIN), min(float(THERMAL_SOLAR_PHASE_OFFSET_MAX), offset))
 
 
 def _simulate_indoor_physics_v3(

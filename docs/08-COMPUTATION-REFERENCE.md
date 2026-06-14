@@ -37,6 +37,8 @@ The automation logic table and all threshold constants in this document are expr
 | What is the comfort-band programming model introduced in Issue #249? | CA programs a floor+ceiling band every 30 min via one `select_comfort_band` decision and one `_apply_comfort_band` actuation; the thermostat's own deadband holds the house inside the band continuously — no more off+supervisor pattern. | [§6e Comfort-Band Programming](08-COMPUTATION-REFERENCE.md#6e-comfort-band-programming-issue-249) |
 | What command shape does `_apply_comfort_band` emit per thermostat capability? | Dual-capable: `heat_cool` mode + `set_temperature(target_temp_low=floor, target_temp_high=ceiling)`. Cool-only (active=ceiling): `cool` + `set_temperature(ceiling)`. Heat-only (active=floor): `heat` + `set_temperature(floor)`. | [§6e — `_apply_comfort_band` command shapes](08-COMPUTATION-REFERENCE.md#_apply_comfort_band-command-shapes) |
 | Why does nat-vent no longer set HVAC off when windows open (Issue #249)? | The band stays armed when nat-vent activates; the thermostat self-arbitrates — free cooling is free, AC kicks in only if the breeze can't hold the ceiling. Turning HVAC off also disarmed the floor, making cold-snap escalation impossible. | [§6e — Nat-vent and economizer with the band armed](08-COMPUTATION-REFERENCE.md#nat-vent-and-economizer-with-the-band-armed) |
+| How does the solar phase offset resolver decide which EWMA to use, and what is the fallback? | Fresh primary wins; fresh secondary (≥ 3 obs) next; then stale primary; stale secondary; generic default only when nothing has ever been learned. Staleness = last_obs_date absent or > 90 days old (`THERMAL_PARAM_STALE_DAYS`). | [§5e-viii Two-EWMA Solar Phase Architecture](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
+| What quality gates must a chart_log day pass before the AC duty cycle solar phase method estimates an offset? | Five gates: setpoint_cool field present; setpoint in [68, 80]°F; spread < 1.5°F over 11:00–18:00; ≥ 4 cool entries in 11:00–16:00; at least one 11:00–16:00 entry has indoor > median setpoint. | [§5e-viii AC duty cycle quality filter](08-COMPUTATION-REFERENCE.md#5e-viii-solar-phase-offset--two-ewma-architecture-issue-312) |
 | What are the two fan archetypes and how does each affect HVAC mode and fan-stops-on-close behavior? | `FAN_MODE_HVAC` (HVAC blower): band stays armed, HVAC unchanged when fan activates, fan does NOT stop when windows close unless `_natural_vent_active=True`. `FAN_MODE_WHOLE_HOUSE` (exhaust fan): HVAC set to off on activation (mode captured in `_pre_fan_hvac_mode`), restored on deactivation, fan stops when ALL sensors close even if `_natural_vent_active=False`. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) |
 | Why does `_set_hvac_mode("off")` also set `_fan_command_time` (Issue #277 Bug A1)? | The `set_fan_mode(auto)` assertion inside `_set_hvac_mode("off")` sets `_fan_command_time = dt_util.now()` before the service call, so cloud thermostat echoes of the fan_mode attribute change are suppressed within the `_is_recent_fan_command` window instead of triggering a false manual override. | [§9b Race Guard — `_set_hvac_mode("off")` fan_command_time](08-COMPUTATION-REFERENCE.md#_set_hvac_mode-off-fan_command_time-guard-issue-277-bug-a1) |
 | How does `_async_thermostat_changed()` prevent a single event from triggering both a setpoint and a fan override (Issue #277 Bug B)? | A local `_setpoint_override_detected` flag is initialized to `False` before Block 2 (setpoint detection) and Block 3 (fan_mode detection). If Block 2 fires and sets it `True`, Block 3 is suppressed via `and not _setpoint_override_detected`. One event → at most one override type. | [§9b Setpoint/Fan Mutual Exclusion](08-COMPUTATION-REFERENCE.md#setpointfan-override-mutual-exclusion-issue-277-bug-b) |
@@ -518,6 +520,86 @@ by 5/9 for Celsius), never `from_fahrenheit()`. The +32 offset does not apply.
 | `THERMAL_SWING_CONF_LOW` | 1 | none → low threshold |
 | `THERMAL_SWING_CONF_MEDIUM` | 3 | low → medium threshold |
 | `THERMAL_SWING_CONF_HIGH` | 10 | medium → high threshold |
+
+#### 5e-viii. Solar Phase Offset — Two-EWMA Architecture (Issue #312)
+
+The solar phase offset (`solar_phase_offset_h`) corrects the `solar_factor` sinusoid so it peaks at the hour where heat actually reaches the interior rather than at a fixed 1 pm clock-noon. Two independent EWMAs learn this offset from different signal sources; a resolver selects the best available value at call time.
+
+**Two-EWMA architecture:**
+
+| EWMA | Cache key | Alpha | Source | Trust |
+|---|---|---|---|---|
+| Primary | `solar_phase_offset_h` | 0.10 (`THERMAL_SOLAR_PHASE_ALPHA`) | Passive-decay chart_log windows (`_run_solar_phase_chart_log_fit()`) | Higher — measures thermal response directly, no confound |
+| Secondary | `solar_phase_offset_ac_h` | 0.07 (`THERMAL_SOLAR_PHASE_AC_ALPHA`) | AC duty cycle peak hour (`_run_ac_duty_solar_phase_fit()`) | Lower — AC cycling is an indirect proxy; alpha is slower to reflect this |
+
+The two EWMAs never cross-update: `update_solar_phase_offset()` in `learning.py` writes only `solar_phase_offset_h`; `update_ac_duty_solar_phase_offset()` writes only `solar_phase_offset_ac_h`.
+
+**Resolver — `_resolve_solar_phase_offset(cache)` (`learning.py`):**
+
+Each EWMA stores a `last_obs_date` field (`solar_phase_offset_last_obs_date`, `solar_phase_offset_ac_last_obs_date`). A parameter is **stale** if its date is absent or older than `THERMAL_PARAM_STALE_DAYS` (90 days). Stale home-specific data is still preferred over a generic default — the default is only used when nothing has ever been learned.
+
+```
+1. primary = cache["solar_phase_offset_h"]
+   if primary is not None AND fresh (within 90 days) → return primary   ← preferred
+
+2. secondary = cache["solar_phase_offset_ac_h"]
+   ac_obs = cache["solar_phase_offset_ac_obs_count"]
+   if secondary is not None AND ac_obs >= 3 AND fresh → return secondary
+
+3. if primary is not None (stale) → return primary                       ← best stale data
+
+4. if secondary is not None AND ac_obs >= 3 (stale) → return secondary  ← next best stale
+
+5. return THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT (2)                       ← nothing ever learned
+```
+
+The secondary requires at least 3 accepted observations (`THERMAL_SOLAR_PHASE_AC_MIN_OBS`) before it is trusted in either the fresh or stale tier. The default prior (`THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT = 2`, peak at 3 pm local) is only returned when both EWMAs have never received an accepted observation.
+
+**Staleness principle (applies to all computed thermal parameters — see Issue #314):** A learned value is only "current" if it was recently observed. An EWMA frozen by seasonal inactivity is stale, but it still encodes home-specific geometry and is a better estimate than a generic prior. The resolver prefers fresh > stale > default, with primary (passive method) winning within each tier.
+
+`get_thermal_model()` returns `solar_phase_offset_h` as the **resolved** value — call sites (ODE, chart) receive the best available estimate without needing to know which source was used. The raw secondary EWMA is also exposed as `solar_phase_offset_ac_h` for diagnostic inspection.
+
+**AC duty cycle quality filter — `_is_ac_duty_solar_day(day_entries)` (`coordinator.py`):**
+
+The AC duty method is only meaningful on days where the thermostat was cooling steadily in the midday window. Days that don't meet the quality criteria are rejected before estimation.
+
+| Gate | Criterion | Constant | Reject code |
+|---|---|---|---|
+| 1 | At least one 11:00–18:00 chart_log entry has a `setpoint_cool` field | — | `ac_no_cool_setpoints` |
+| 1b | All setpoints in [68, 80]°F | `THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN/MAX_F` | `ac_setpoint_out_of_range` |
+| 2 | Setpoint spread across 11:00–18:00 < 1.5°F | `THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F` | `ac_setpoint_unstable` |
+| 3 | ≥ 4 cool entries in 11:00–16:00 | `THERMAL_SOLAR_PHASE_AC_MIN_COOL_ENTRIES` | `ac_insufficient_midday_activity` |
+| 4 | At least one 11:00–16:00 entry has indoor > median setpoint | — | `ac_no_setpoint_breach` |
+
+Gates are evaluated in order; the first failure returns `(False, reject_code)`. A day passing all gates returns `(True, "")`. The function is a pure module-level helper — no coordinator state.
+
+**Estimation — `_estimate_ac_duty_solar_phase(day_entries)` (`coordinator.py`):**
+
+1. For each hour in 11:00–16:00, compute `duty_fraction = cool_entries / total_entries`.
+2. Identify `peak_hour = argmax(duty_fraction)`.
+3. `offset = peak_hour − 13`, clamped to `[THERMAL_SOLAR_PHASE_OFFSET_MIN (0), THERMAL_SOLAR_PHASE_OFFSET_MAX (4)]`.
+
+A `peak_hour` of 14 (2 pm) yields `offset = 1`; a peak at 16 (4 pm) yields `offset = 3`. Returns `None` if no cool entries exist in the window (should not occur after gate 3, but guards the return).
+
+**Integration — `_run_ac_duty_solar_phase_fit()` (`coordinator.py`):**
+
+Called once per coordinator update cycle (inside the `_run_solar_phase_chart_log_fit()` block). Iterates chart_log entries grouped by date. For each date, calls `_is_ac_duty_solar_day()` then `_estimate_ac_duty_solar_phase()`; on success calls `learning.update_ac_duty_solar_phase_offset(offset, date_str)`. Rejection reasons are logged at DEBUG level; accepted estimates at INFO.
+
+**Constants summary:**
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `THERMAL_SOLAR_PHASE_AC_ALPHA` | 0.07 | Secondary EWMA smoothing factor |
+| `THERMAL_SOLAR_PHASE_AC_MIN_OBS` | 3 | Minimum observations before secondary is trusted by resolver |
+| `THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN_F` | 68.0 | Setpoint range lower bound |
+| `THERMAL_SOLAR_PHASE_AC_SETPOINT_MAX_F` | 80.0 | Setpoint range upper bound |
+| `THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F` | 1.5 | Max allowed setpoint spread across 11:00–18:00 |
+| `THERMAL_SOLAR_PHASE_AC_MIN_COOL_ENTRIES` | 4 | Min cool entries in 11:00–16:00 to qualify |
+| `THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT` | 2 | Default prior (resolves to 3 pm peak) |
+| `THERMAL_SOLAR_PHASE_OFFSET_MIN` | 0 | Offset clamp lower bound |
+| `THERMAL_SOLAR_PHASE_OFFSET_MAX` | 4 | Offset clamp upper bound (5 pm peak) |
+
+**Test coverage:** `tests/test_solar_phase.py` — `TestAcDutySolarPhase` (quality filter reject paths, estimation, EWMA update, resolver priority).
 
 ---
 

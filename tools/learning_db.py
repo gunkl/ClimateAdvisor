@@ -206,6 +206,88 @@ def _print_model_summary(db: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Section A2: Solar Model Detail
+# ---------------------------------------------------------------------------
+
+
+def _print_solar_model_section(db: dict) -> None:
+    """Print a focused Solar Model section: phase offset, confidence, and rejection summary."""
+    cache = db.get("thermal_model_cache") or {}
+    rejection_log = db.get("rejection_log") or {}
+
+    print("Solar Model")
+    print("-----------")
+
+    # --- Phase offset ---
+    phase_offset = cache.get("solar_phase_offset_h")
+    first_offset_date = cache.get("first_active_date_phase_offset")
+    if phase_offset is None:
+        print("solar_phase_offset_h:    None  (no phase observations yet)")
+    else:
+        since_str = f"  (since {first_offset_date})" if first_offset_date else ""
+        print(f"solar_phase_offset_h:    {phase_offset:.3f} h{since_str}")
+
+    # --- Committed solar observations + confidence ---
+    n_solar = cache.get("observation_count_solar", 0)
+    first_solar_date = cache.get("first_active_date_solar")
+    since_solar = f"  (since {first_solar_date})" if first_solar_date else ""
+
+    # Derive confidence_k_solar directly (mirrors learning.py logic)
+    if n_solar >= 100:
+        conf_solar = "high"
+    elif n_solar >= 50:
+        conf_solar = "medium"
+    elif n_solar >= 20:
+        conf_solar = "low"
+    else:
+        conf_solar = "none"
+
+    print(f"observation_count_solar: {n_solar}{since_solar}")
+    print(f"confidence_k_solar:      {conf_solar}")
+
+    # --- Solar rejection summary ---
+    solar_rejections = rejection_log.get("solar_gain")
+    if not isinstance(solar_rejections, list):
+        solar_rejections = []
+
+    total_attempted = n_solar + len(solar_rejections)
+    print()
+    print(
+        f"Solar rejection summary: {len(solar_rejections)} rejected / {total_attempted} attempted / {n_solar} committed"
+    )
+
+    if solar_rejections:
+        # Dominant rejection reason
+        reason_counts: dict[str, int] = {}
+        for entry in solar_rejections:
+            if not isinstance(entry, dict):
+                continue
+            rc = str(entry.get("reason_code", entry.get("reason", "unknown")))
+            reason_counts[rc] = reason_counts.get(rc, 0) + 1
+        if reason_counts:
+            top_reason, top_count = max(reason_counts.items(), key=lambda x: x[1])
+            all_reasons = ", ".join(f"{rc} ({n})" for rc, n in sorted(reason_counts.items(), key=lambda x: -x[1]))
+            print(f"Dominant rejection:      {top_reason} ({top_count}/{len(solar_rejections)}) — all: {all_reasons}")
+
+        # Last 3 rejection events (most recent first)
+        print("Last 3 solar_gain rejections:")
+        last_3 = list(reversed(solar_rejections))[:3]
+        for entry in last_3:
+            if not isinstance(entry, dict):
+                continue
+            ts = entry.get("timestamp", "?")
+            reason = entry.get("reason_code", entry.get("reason", "?"))
+            elapsed_raw = entry.get("elapsed_minutes")
+            elapsed = f"{elapsed_raw}min" if elapsed_raw is not None else "?min"
+            n_samples = entry.get("n_samples", entry.get("sample_count", "-"))
+            print(f"  {ts}  {str(reason):<20} elapsed={elapsed:<7} n={n_samples}")
+    else:
+        print("  (no solar_gain rejections recorded)")
+
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Section B: Rejection Log
 # ---------------------------------------------------------------------------
 
@@ -708,6 +790,7 @@ def main() -> None:
 
     if show_model:
         _print_model_summary(db)
+        _print_solar_model_section(db)
 
     if show_rejections:
         _print_rejection_log(db, last_n=args.last, filter_type=filter_type)

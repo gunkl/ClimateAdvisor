@@ -3630,13 +3630,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         chart_log = getattr(self, "_chart_log", None)
         if chart_log is None:
+            _LOGGER.debug("Solar phase fit: chart_log not initialized — skipping")
             return
         entries = list(getattr(chart_log, "_entries", []))
         if not entries:
+            _LOGGER.debug("Solar phase fit: chart_log empty — skipping")
             return
 
         days = 30 if backfill else 2
         cutoff = dt_util.now() - timedelta(days=days)
+
+        # Structured entry log: total entries and date range for observability
+        try:
+            _ts_first = entries[0].get("ts", "?")
+            _ts_last = entries[-1].get("ts", "?")
+        except (IndexError, AttributeError):
+            _ts_first = _ts_last = "?"
+        _LOGGER.info(
+            "Solar phase fit: %d chart_log entries available, scanning last %d day(s) (%s–%s)",
+            len(entries),
+            days,
+            _ts_first,
+            _ts_last,
+        )
+
         windows: list[list[dict]] = []
         current: list[dict] = []
 
@@ -3701,10 +3718,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _flush_solar()
 
         if not windows:
+            _current_offset = (
+                getattr(self, "learning", None)
+                and getattr(self.learning, "_state", None)
+                and (self.learning._state.thermal_model_cache or {}).get("solar_phase_offset_h")
+            )
+            _LOGGER.info(
+                "Solar phase fit: 0 qualifying passive-daytime windows — offset unchanged at %.2fh",
+                _current_offset if isinstance(_current_offset, (int, float)) else 0.0,
+            )
             return
+
+        _LOGGER.info(
+            "Solar phase fit: %d passive-daytime windows found, evaluating%s",
+            len(windows),
+            " (backfill)" if backfill else "",
+        )
 
         target_windows = windows if backfill else windows[-1:]
         committed = 0
+        rejected = 0
 
         for window in target_windows:
             obs, reject_reason = _estimate_solar_phase_offset(window)
@@ -3714,21 +3747,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     len(window),
                     reject_reason,
                 )
+                rejected += 1
                 continue
+            _old_offset = (
+                (self.learning._state.thermal_model_cache or {}).get("solar_phase_offset_h")
+                if hasattr(self, "learning") and hasattr(self.learning, "_state")
+                else None
+            )
             self.learning.update_solar_phase_offset(obs, THERMAL_SOLAR_PHASE_ALPHA)
+            _new_offset = (
+                (self.learning._state.thermal_model_cache or {}).get("solar_phase_offset_h")
+                if hasattr(self, "learning") and hasattr(self.learning, "_state")
+                else None
+            )
             committed += 1
+            _LOGGER.info(
+                "Solar phase EWMA: observed=%.2fh old=%.2f→new=%.2fh (window %d entries)",
+                obs,
+                _old_offset if isinstance(_old_offset, (int, float)) else 0.0,
+                _new_offset if isinstance(_new_offset, (int, float)) else obs,
+                len(window),
+            )
             _LOGGER.debug(
                 "chart_log solar_phase: committed obs=%.2f (window %d entries)",
                 obs,
                 len(window),
             )
 
-        if committed > 0:
-            _LOGGER.info(
-                "chart_log solar_phase: committed %d phase observations%s",
-                committed,
-                " (backfill)" if backfill else "",
-            )
+        _LOGGER.info(
+            "Solar phase fit: %d/%d windows committed%s (%d rejected)",
+            committed,
+            len(target_windows),
+            " (backfill)" if backfill else "",
+            rejected,
+        )
 
     def _start_decay_observation(self, obs_type: str) -> None:
         """Create a new monitoring observation for a passive/fan/vent/solar type."""

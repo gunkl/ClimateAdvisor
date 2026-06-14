@@ -269,6 +269,17 @@ over daylight hours (8–18 local), `Q_hvac = ±k_active` when HVAC is driving t
 Physics prediction activates when either confidence is > "none", enabling prediction on
 homes with passive-only observations (zero HVAC cycles recorded).
 
+`confidence_k_solar` is graded from `observation_count_solar` (fixed in Issue #308 — was hardcoded `"none"`):
+
+| Threshold | Grade |
+|---|---|
+| 0–19 observations | `"none"` |
+| ≥ 20 observations | `"low"` |
+| ≥ 50 observations | `"medium"` |
+| ≥ 100 observations | `"high"` |
+
+`confidence_k_solar` is exposed as an alias key in the dict returned by `get_thermal_model()`.
+
 #### 5e-i. Sampling Cadence — Per-Type Decimation (Issue #122 H1)
 
 The coordinator polls every 30 seconds. Sampling slow decay phenomena at poll rate yields
@@ -399,6 +410,18 @@ acceptable because: (a) `k_solar` is used in predictions that integrate over hou
 periods where lag averages out; (b) the EWMA smoothing (α = 0.05 at "low" grade) further
 attenuates single-observation error; (c) a cloud-aware, lag-corrected solar model is
 deferred to future scope.
+
+**`_run_solar_phase_chart_log_fit()` — structured INFO logging (Issue #308):** This method
+(`coordinator.py`) estimates `solar_phase_offset_h` from passive-daytime chart_log windows
+(regime: HVAC off, fan off, windows closed, local hours 8–20). As of Issue #308 it emits
+structured `INFO` log lines at three points useful for diagnosing solar phase offset
+learning (Issue #185):
+
+1. **Entry** — total chart_log entries available, date range scanned, and lookback window (2 days or 30 days for backfill).
+2. **Window filtering** — count of passive-daytime windows found, or an "offset unchanged" message when zero qualify.
+3. **EWMA update** — per-committed-window: observed offset, old→new EWMA value, and window size. Final summary: `N/M windows committed (K rejected)`.
+
+Individual window rejections are logged at DEBUG level with the reject reason.
 
 #### 5e-vi. HVAC Commit Path — Single-Point Estimator and Proxy-Aware Gating (Issue #130)
 

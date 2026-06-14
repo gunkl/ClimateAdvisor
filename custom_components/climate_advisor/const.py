@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.11"
+VERSION = "0.4.12"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.12": [
+        "Fix #184/#308: k_solar confidence is now graded (none/low/medium/high) based on committed"
+        " solar_gain observation count — thresholds: low ≥20, medium ≥50, high ≥100. Previously"
+        " hardcoded to 'none' permanently regardless of how many observations had been collected.",
+        "Fix #185/#308: _run_solar_phase_chart_log_fit() now emits structured INFO log lines at"
+        " entry, window filtering, EWMA update, and no-qualifying-windows exit — making it possible"
+        " to diagnose why solar_phase_offset_h is or isn't learning from chart_log passive windows.",
+        "Fix #308: tools/learning_db.py --model now includes a Solar Model section showing"
+        " solar_phase_offset_h, observation_count_solar, confidence_k_solar, and a rejection summary.",
+    ],
+    "0.4.11": [
+        "Fix #290: Grace expiry UI refresh, bedtime recovery on HA restart, setpoint validation,"
+        " and AI report Settings column display.",
+    ],
     "0.4.10": [
         "Fix #301: CA no longer uses heat_cool dual-setpoint mode. Every thermostat command is"
         " now a single climate.set_temperature call containing both the mode (cool or heat) and"
@@ -1176,6 +1190,31 @@ KNOWN_FIXES: dict[int, dict] = {
             " that cancel stale retries in practice)",
             "Tier B integration test for off→cool echo suppression — coordinator confirmation"
             " logic is correct but no headless test drives the state-listener layer for this path",
+        ],
+    },
+    308: {
+        "version_fixed": "0.4.12",
+        "title": "k_solar confidence ladder + solar phase fit structured logging (#184/#185)",
+        "scope_covered": [
+            "learning.py get_thermal_model(): confidence_k_solar graded from observation_count_solar"
+            " (none=0–19, low=≥20, medium=≥50, high=≥100); confidence_k_solar alias key added",
+            "coordinator.py _run_solar_phase_chart_log_fit(): INFO logs at entry (entry count,"
+            " date range), window filtering (N qualified), each EWMA update (old→new), and"
+            " no-qualifying-windows exit; DEBUG logs for chart_log=None and empty-buffer guards",
+            "tools/learning_db.py --model: Solar Model section with solar_phase_offset_h,"
+            " first_active_date_phase_offset, observation_count_solar, confidence_k_solar,"
+            " and rejection summary (attempts / committed / dominant reason / last 3 events)",
+            "tests/test_solar_learning.py: 11 TDD tests — 9 confidence ladder, 2 logging",
+            "docs/08-COMPUTATION-REFERENCE.md §5e: confidence_k_solar table + logging note",
+        ],
+        "scope_not_covered": [
+            "Root cause of solar_phase_offset_h not updating (#185) — logging added in this PR;"
+            " check 'Solar phase fit:' lines in ha_logs after deploy to determine if no qualifying"
+            " chart_log windows exist (HVAC almost always on in summer) or peak-finding is failing."
+            " A follow-up fix issue will be opened based on what the logs reveal.",
+            "solar_gain abandonment rate (#184 context) — 99/100 rejections are 'abandoned' due to"
+            " flat indoor temps; this is a data quality issue (HVAC prevents free-decay windows),"
+            " not addressed by the confidence fix alone",
         ],
     },
 }

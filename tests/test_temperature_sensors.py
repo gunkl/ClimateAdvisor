@@ -248,6 +248,8 @@ def _make_update_data_coord(
     coord._sample_all_observations = MagicMock()
     coord._check_hvac_stabilization = AsyncMock()
 
+    coord._solar_phase_backfill = False  # Issue #310: periodic refit guard
+    coord._last_solar_phase_fit_date = None  # Issue #310
     coord._event_log = []
     coord.data = None  # Required by _detect_and_emit_incidents (called from _async_update_data)
     coord._async_update_data = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)

@@ -197,6 +197,7 @@ def _make_restore_coord_stub(ae_mock=None):
     coord._passive_k_backfill_v2 = False
     coord._vent_k_backfill_v2 = False
     coord._solar_phase_backfill = False
+    coord._last_solar_phase_fit_date = None  # Issue #310
 
     coord._async_save_state = AsyncMock()
     coord._set_occupancy_mode = MagicMock()

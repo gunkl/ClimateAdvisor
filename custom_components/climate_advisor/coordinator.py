@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -316,6 +316,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Solar phase offset (Issue #147)
         self._solar_phase_offset: float = THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
         self._solar_phase_backfill: bool = False
+        # Periodic daily re-fit tracker (Issue #310): date of last incremental fit
+        self._last_solar_phase_fit_date: date | None = None
 
         # Occupancy state machine
         self._occupancy_mode: str = OCCUPANCY_HOME
@@ -576,6 +578,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._vent_k_backfill_v2 = bool(state.get("vent_k_backfill_v2", False))
         # Solar phase offset backfill flag (Issue #147)
         self._solar_phase_backfill = bool(state.get("solar_phase_backfill", False))
+        # Periodic daily re-fit tracker (Issue #310)
+        _fit_date_str = state.get("last_solar_phase_fit_date")
+        self._last_solar_phase_fit_date = date.fromisoformat(_fit_date_str) if _fit_date_str else None
 
         # Prediction archive — restore only on same-day restores (already gated above)
         raw_archive = state.get("pred_archive")
@@ -669,6 +674,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "passive_k_backfill_v2": self._passive_k_backfill_v2,
             "vent_k_backfill_v2": self._vent_k_backfill_v2,
             "solar_phase_backfill": self._solar_phase_backfill,
+            "last_solar_phase_fit_date": (
+                self._last_solar_phase_fit_date.isoformat() if self._last_solar_phase_fit_date else None
+            ),
             "event_log": list(self._event_log),
         }
 
@@ -1243,7 +1251,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     if not self._solar_phase_backfill:
                         self._run_solar_phase_chart_log_fit(backfill=True)
                         self._solar_phase_backfill = True
+                        self._last_solar_phase_fit_date = dt_util.now().date()
                         _LOGGER.info("chart_log solar_phase: phase offset backfill complete")
+
+            # Periodic daily solar phase re-fit (Issue #310): run once per calendar day
+            # using only the last 2 days of chart_log (backfill=False). Stamping
+            # _last_solar_phase_fit_date in the one-shot block above prevents a double-fit
+            # on the same cycle when a fresh install runs both blocks back-to-back.
+            if self.config.get("learning_enabled", True):
+                self._maybe_run_periodic_solar_phase_fit()
 
             # Refresh the thermal model on every 30-min cycle, not just at the daily
             # briefing. get_thermal_model() is a pure computation (no I/O), so calling it
@@ -3617,6 +3633,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 committed,
                 " (backfill)" if backfill else "",
             )
+
+    def _maybe_run_periodic_solar_phase_fit(self) -> None:
+        """Run the incremental daily solar phase re-fit if due (Issue #310).
+
+        Fires at most once per calendar day after the one-shot startup backfill
+        (_solar_phase_backfill=True). Uses backfill=False (last 2 days only).
+        """
+        if not self._solar_phase_backfill:
+            return
+        _today = dt_util.now().date()
+        if self._last_solar_phase_fit_date == _today:
+            return
+        self._run_solar_phase_chart_log_fit(backfill=False)
+        self._last_solar_phase_fit_date = _today
+        _LOGGER.info("chart_log solar_phase: daily incremental re-fit complete (date=%s)", _today)
 
     def _run_solar_phase_chart_log_fit(self, *, backfill: bool = False) -> None:
         """Estimate solar_phase_offset_h from daytime passive chart_log windows.

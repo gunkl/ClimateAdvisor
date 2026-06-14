@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.12"
+VERSION = "0.4.13"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.13": [
+        "Fix #185/#310: solar_phase_offset_h now re-fits daily from the chart_log passive-daytime"
+        " windows (incremental 2-day lookback). Previously, the one-shot startup backfill flag was"
+        " persisted, so the fit ran exactly once and then never again — solar phase estimation was"
+        " frozen from the first time the dashboard was opened. Now _maybe_run_periodic_solar_phase_fit()"
+        " fires once per calendar day after the backfill completes.",
+    ],
     "0.4.12": [
         "Fix #184/#308: k_solar confidence is now graded (none/low/medium/high) based on committed"
         " solar_gain observation count — thresholds: low ≥20, medium ≥50, high ≥100. Previously"
@@ -1190,6 +1197,32 @@ KNOWN_FIXES: dict[int, dict] = {
             " that cancel stale retries in practice)",
             "Tier B integration test for off→cool echo suppression — coordinator confirmation"
             " logic is correct but no headless test drives the state-listener layer for this path",
+        ],
+    },
+    310: {
+        "version_fixed": "0.4.13",
+        "title": "Periodic daily solar phase re-fit — fixes frozen solar_phase_offset_h (#185)",
+        "scope_covered": [
+            "coordinator.py: _maybe_run_periodic_solar_phase_fit() — new method gates a daily"
+            " incremental (2-day) chart_log re-fit; fires once per calendar day after the one-shot"
+            " backfill completes (_solar_phase_backfill=True)",
+            "coordinator.py: _last_solar_phase_fit_date (date|None) persisted and restored via"
+            " _build_state_dict() / async_restore_state(); one-shot block stamps this date to prevent"
+            " a deploy-day double-fit",
+            "coordinator.py: _async_update_data() calls _maybe_run_periodic_solar_phase_fit() when"
+            " learning_enabled=True",
+            "tests/test_solar_phase_periodic.py: 9 tests — 5 gate tests calling real"
+            " _maybe_run_periodic_solar_phase_fit() via MethodType, 4 state persistence tests"
+            " calling real _build_state_dict() / async_restore_state()",
+            "docs/08-COMPUTATION-REFERENCE.md §5e-v: Two-tier fit scheduling subsection documenting"
+            " one-shot backfill gate and periodic daily re-fit",
+        ],
+        "scope_not_covered": [
+            "If no chart_log passive-daytime windows qualify (HVAC almost always on in summer),"
+            " the daily re-fit will find nothing to learn — the #308 structured logging makes this"
+            " visible via 'Solar phase fit: 0 windows passed quality filter' in ha_logs",
+            "solar_gain abandonment rate — still 99/100 'abandoned' (flat indoor temps); addressed"
+            " separately if #185 logging confirms HVAC-on is blocking all passive windows",
         ],
     },
     308: {

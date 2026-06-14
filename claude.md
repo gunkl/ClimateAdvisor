@@ -525,49 +525,39 @@ git merge origin/release/<version>   # or other pending branches
 
 **Never tag a release before the version bump is committed to main.**
 
-#### Step 1 — Version bump first (before deploying or tagging)
-Create a `release/X.Y.Z` branch from main:
-```bash
-gh issue create --title "Release vX.Y.Z — version bump, RELEASE_NOTES, KNOWN_FIXES"
-git worktree add ../ClimateAdvisor-release-XYZ -b release/X.Y.Z main
-```
-In the release worktree, update:
-- `const.py`: `VERSION = "X.Y.Z"`, add `RELEASE_NOTES["X.Y.Z"]`, add `KNOWN_FIXES` for all issues since last release
-- `manifest.json`: `"version": "X.Y.Z"`
-- Run tests, commit, push, create PR
+#### Inline version bump rule (MANDATORY for every PR)
 
-**What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry
-must have `scope_covered` (exact code paths fixed) and `scope_not_covered` (explicit gaps).
+**Every PR must include its own version bump.** Do NOT create a PR without first updating:
+- `const.py`: bump `VERSION` to the next patch (e.g. 0.4.14 → 0.4.15), add `RELEASE_NOTES["X.Y.Z"]` entry, add `KNOWN_FIXES[<issue>]` entry
+- `manifest.json`: `"version"` to match
 
-**What goes in RELEASE_NOTES**: Each entry is one line per issue, describing the user-visible change.
+This replaces the old pattern of separate `release/X.Y.Z` branches for patch fixes. Release branches are now only used when preparing a GitHub Release tag for distribution.
 
-#### Step 2 — Deploy (after version bump PR is ready, before merging to main)
-Build staging from main + release branch:
-```bash
-git checkout -b deploy/staging origin/main
-git merge origin/release/X.Y.Z
-python tests; python tools/deploy.py
-git tag -f deployed/current HEAD
-```
+**Version conflict on merge**: When two concurrent PRs both target the same next version, the one that merges second must increment again (e.g. both claim 0.4.15 → second becomes 0.4.16). Resolve this during conflict resolution: keep HEAD's version for the earlier-merged PR, bump the incoming branch's entry to the next number.
 
-#### Step 3 — User validates on the deployed instance
+**What goes in RELEASE_NOTES**: One line per issue in the version dict, describing the user-visible change. Format: `"Fix #N: <what the user now experiences differently>."` or `"Feat #N: ..."`.
 
-#### Step 4 — Create draft release (before merge, so notes are ready)
+**What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry must have `scope_covered` (exact code paths fixed) and `scope_not_covered` (explicit gaps).
+
+#### PR checklist (before `gh pr create`)
+1. Bump `VERSION` in `const.py` and `manifest.json` to the next patch version
+2. Add `RELEASE_NOTES["X.Y.Z"]` entry with one bullet per fixed issue
+3. Add `KNOWN_FIXES[<issue_number>]` entry with `version_fixed`, `title`, `scope_covered`, `scope_not_covered`
+4. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
+5. Then open the PR
+
+#### GitHub Release tagging (for distributable releases only)
+When creating a versioned GitHub Release (not every PR):
 ```bash
 gh release create --draft vX.Y.Z --title "vX.Y.Z — [summary]" --notes "..."
 ```
 Draft releases can be reviewed before publishing. Do NOT publish until the release PR is merged.
-
-#### Step 5 — User merges release PR to main
-
-#### Step 6 — User publishes the release
 After merge: `gh release edit vX.Y.Z --draft=false`
-Or publish via GitHub UI.
 
 #### Common mistakes to avoid
-- **Never bump VERSION in individual fix worktrees** — it causes merge conflicts and confusion
+- **Never open a PR without a version bump** — release notes fall out of sync
 - **Never deploy from individual fix worktrees** — see Multi-branch deploy rule above
-- **Never create a versioned release until the version bump is in main**
+- **Never create a versioned GitHub Release until the version bump is in main**
 - **const.py VERSION and manifest.json version must always match** — enforced by test_version_sync.py
 
 ### Issue Requirements

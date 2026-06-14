@@ -2553,8 +2553,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and self._today_record
             and not self.automation_engine._temp_command_pending
             and not self.automation_engine._hvac_command_pending
+            and not self.automation_engine._fan_command_pending
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
+            and not self._is_recent_fan_command(threshold_seconds=30.0)
         ):
             # Mark setpoint detection as fired so Block 3 (fan_mode) is suppressed for this event.
             # A single event that changes both setpoint and fan_mode has one root cause; two

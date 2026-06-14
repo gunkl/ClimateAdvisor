@@ -92,6 +92,7 @@ def _make_minimal_coordinator(*, initial_event_log: list | None = None):
     coord._passive_k_backfill_v2 = False
     coord._vent_k_backfill_v2 = False
     coord._solar_phase_backfill = False
+    coord._solar_phase_ac_backfill = False  # Issue #312
     coord._last_solar_phase_fit_date = None  # Issue #310
 
     # automation_engine — MagicMock (NOT AsyncMock) per project convention
@@ -146,6 +147,7 @@ def _make_restore_coordinator():
     coord._passive_k_backfill_v2 = False
     coord._vent_k_backfill_v2 = False
     coord._solar_phase_backfill = False
+    coord._solar_phase_ac_backfill = False  # Issue #312
     coord._last_solar_phase_fit_date = None  # Issue #310
 
     ae = MagicMock()

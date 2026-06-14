@@ -170,6 +170,53 @@ def _grade_swing_confidence(count: int) -> str:
     return "high"
 
 
+def _resolve_solar_phase_offset(cache: dict) -> float:
+    """Return the best current solar phase offset.
+
+    A parameter is stale if its last_obs_date is absent or older than THERMAL_PARAM_STALE_DAYS.
+    Stale home-specific measurements are always preferred over a generic default prior —
+    the default is only returned when nothing has ever been observed.
+
+    Priority:
+      1. Fresh primary (passive-decay fit, within THERMAL_PARAM_STALE_DAYS)
+      2. Fresh secondary (AC duty cycle, within THERMAL_PARAM_STALE_DAYS, obs >= min)
+      3. Stale primary (EWMA value preserved in cache — better than a generic prior)
+      4. Stale secondary (obs >= min — better than a generic prior)
+      5. Default prior (THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT) — only when nothing learned
+    """
+    from datetime import date as _date
+
+    from .const import THERMAL_PARAM_STALE_DAYS, THERMAL_SOLAR_PHASE_AC_MIN_OBS, THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT
+
+    def _is_stale(last_obs_date_str: str | None) -> bool:
+        if last_obs_date_str is None:
+            return True
+        try:
+            return (_date.today() - _date.fromisoformat(last_obs_date_str)).days > THERMAL_PARAM_STALE_DAYS
+        except (ValueError, TypeError):
+            return True
+
+    primary = cache.get("solar_phase_offset_h")
+    secondary = cache.get("solar_phase_offset_ac_h")
+    ac_obs = cache.get("solar_phase_offset_ac_obs_count", 0)
+    secondary_qualified = secondary is not None and ac_obs >= THERMAL_SOLAR_PHASE_AC_MIN_OBS
+
+    # Fresh data first
+    if primary is not None and not _is_stale(cache.get("solar_phase_offset_last_obs_date")):
+        return float(primary)
+    if secondary_qualified and not _is_stale(cache.get("solar_phase_offset_ac_last_obs_date")):
+        return float(secondary)
+
+    # Stale home-specific data beats a generic prior
+    if primary is not None:
+        return float(primary)
+    if secondary_qualified:
+        return float(secondary)
+
+    # Nothing has ever been learned — use configured default
+    return float(THERMAL_SOLAR_PHASE_OFFSET_H_DEFAULT)
+
+
 def _smooth_temps(temps: list[float]) -> list[float]:
     """Apply 3-sample centered moving average to smooth 1-degF integer staircase noise.
 
@@ -774,6 +821,10 @@ class LearningEngine:
                 "k_vent_window": None,
                 "k_solar": None,
                 "solar_phase_offset_h": None,
+                "solar_phase_offset_last_obs_date": None,
+                "solar_phase_offset_ac_h": None,
+                "solar_phase_offset_ac_obs_count": 0,
+                "solar_phase_offset_ac_last_obs_date": None,
                 "observation_count_heat": 0,
                 "observation_count_cool": 0,
                 "observation_count_passive": 0,
@@ -932,6 +983,10 @@ class LearningEngine:
                 "k_vent_window": None,
                 "k_solar": None,
                 "solar_phase_offset_h": None,
+                "solar_phase_offset_last_obs_date": None,
+                "solar_phase_offset_ac_h": None,
+                "solar_phase_offset_ac_obs_count": 0,
+                "solar_phase_offset_ac_last_obs_date": None,
                 "observation_count_heat": 0,
                 "observation_count_cool": 0,
                 "observation_count_passive": 0,
@@ -957,10 +1012,35 @@ class LearningEngine:
         new_val = obs_clamped if current is None else (1.0 - alpha) * float(current) + alpha * obs_clamped
 
         cache["solar_phase_offset_h"] = new_val
+        cache["solar_phase_offset_last_obs_date"] = _date.today().isoformat()
 
         if cache.get("first_active_date_phase_offset") is None:
             cache["first_active_date_phase_offset"] = _date.today().isoformat()
 
+        self._state.thermal_model_cache = cache
+
+    def update_ac_duty_solar_phase_offset(self, observed_offset_h: float, today_str: str) -> None:
+        """Update the secondary (AC duty cycle) solar phase EWMA.
+
+        Never called by the primary passive-decay path. Called by the coordinator's
+        AC duty cycle estimator (_run_ac_duty_solar_phase_fit) after Phase 2.
+
+        Args:
+            observed_offset_h: Estimated offset from AC duty peak (peak_hour - 13).
+            today_str: ISO date string (YYYY-MM-DD) for the observation date.
+        """
+        from .const import THERMAL_SOLAR_PHASE_AC_ALPHA
+
+        cache = self._state.thermal_model_cache or {}
+        current = cache.get("solar_phase_offset_ac_h")
+        if current is None:
+            cache["solar_phase_offset_ac_h"] = observed_offset_h
+        else:
+            cache["solar_phase_offset_ac_h"] = (
+                THERMAL_SOLAR_PHASE_AC_ALPHA * observed_offset_h + (1.0 - THERMAL_SOLAR_PHASE_AC_ALPHA) * current
+            )
+        cache["solar_phase_offset_ac_obs_count"] = cache.get("solar_phase_offset_ac_obs_count", 0) + 1
+        cache["solar_phase_offset_ac_last_obs_date"] = today_str
         self._state.thermal_model_cache = cache
 
     def get_engine_status(self) -> dict:
@@ -1117,7 +1197,9 @@ class LearningEngine:
             "k_vent": cache.get("k_vent"),
             "k_vent_window": cache.get("k_vent_window"),
             "k_solar": k_solar,
-            "solar_phase_offset_h": cache.get("solar_phase_offset_h"),
+            "solar_phase_offset_h": _resolve_solar_phase_offset(cache),
+            "solar_phase_offset_ac_h": cache.get("solar_phase_offset_ac_h"),
+            "solar_phase_offset_ac_obs_count": cache.get("solar_phase_offset_ac_obs_count", 0),
             "thermal_equilibrium_f": thermal_equilibrium_f,
             # Legacy compat
             "heating_rate_f_per_hour": round(k_active_heat, 2) if k_active_heat is not None else None,

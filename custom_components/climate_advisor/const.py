@@ -2096,6 +2096,23 @@ THERMAL_SOLAR_PHASE_MIN_ENTRIES = 3  # Min chart_log entries in window
 THERMAL_SOLAR_PHASE_MIN_WINDOW_H = 4  # Min window span (hours)
 THERMAL_SOLAR_PHASE_MIN_DT_F = 1.5  # Min indoor ΔT for visible peak
 THERMAL_SOLAR_PHASE_ALPHA = 0.10  # EWMA alpha (slow — stable building physics)
+THERMAL_PARAM_STALE_DAYS = 90  # days — parameter older than this treated as None at resolver
+
+# AC duty-cycle secondary solar phase estimator (Issue #312)
+THERMAL_SOLAR_PHASE_AC_ALPHA = 0.07  # EWMA alpha (slower — less reliable signal)
+THERMAL_SOLAR_PHASE_AC_MIN_OBS = 3  # Min observations before secondary is trusted
+THERMAL_SOLAR_PHASE_AC_SETPOINT_MIN_F = 68.0  # Setpoint range lower bound
+THERMAL_SOLAR_PHASE_AC_SETPOINT_MAX_F = 80.0  # Setpoint range upper bound
+THERMAL_SOLAR_PHASE_AC_SETPOINT_STABILITY_F = 1.5  # Max allowed setpoint spread (°F)
+THERMAL_SOLAR_PHASE_AC_MIN_COOL_ENTRIES = 4  # Min cool entries in 11:00-16:00 window
+THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_START_H = 11  # Peak window start (inclusive)
+THERMAL_SOLAR_PHASE_AC_PEAK_WINDOW_END_H = 16  # Peak window end (exclusive)
+THERMAL_SOLAR_PHASE_AC_STABILITY_WINDOW_END_H = 18  # Setpoint stability check end (exclusive)
+REJECT_AC_NO_COOL_SETPOINTS = "ac_no_cool_setpoints"
+REJECT_AC_SETPOINT_UNSTABLE = "ac_setpoint_unstable"
+REJECT_AC_SETPOINT_OUT_OF_RANGE = "ac_setpoint_out_of_range"
+REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY = "ac_insufficient_midday_activity"
+REJECT_AC_NO_SETPOINT_BREACH = "ac_no_setpoint_breach"
 
 # Shared cap across all observation types
 THERMAL_MAX_OBS_SAMPLES = 200

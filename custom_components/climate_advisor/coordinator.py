@@ -6244,7 +6244,8 @@ def _build_predicted_indoor_future(
     # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
     _ode_pc_trigger_h: float | None = None
     _ode_pc_target: float | None = None
-    if classification is not None and getattr(classification, "setback_modifier", 0.0) < 0:
+    _setback_mod = getattr(classification, "setback_modifier", None)
+    if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
         from .const import (
             CONF_SLEEP_COOL,
             PRE_COOL_MIN_HEADROOM_F,

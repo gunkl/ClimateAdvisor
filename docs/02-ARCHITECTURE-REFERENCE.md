@@ -281,6 +281,14 @@ Note: `config_flow.VERSION` (config entry schema) and `state.STATE_VERSION` (sta
 - Downsampling: raw points ≤3 days; hourly averages 4–30 days; daily summaries >30 days
 - Storage: `climate_advisor_chart_log.json` in HA config dir
 
+## Supported Thermostat Configuration
+
+CA issues separate `heat` and `cool` commands (dual `heat_cool` mode was dropped due to
+thermostat compatibility bugs). The underlying HVAC system must support **both** heating
+and cooling — heat-only or cool-only systems will not receive commands for their unsupported
+mode and `_apply_comfort_band` will no-op silently for that day type. This is expected
+behavior, not a defect.
+
 ## Observe-Only Mode (Disable Automation)
 
 Climate Advisor exposes a `switch.climate_advisor_automation` entity that controls whether real actions are executed.

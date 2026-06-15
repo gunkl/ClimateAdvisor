@@ -4,9 +4,13 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.14"
+VERSION = "0.4.15"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.15": [
+        "Fix #318: Sleep setpoint config no longer blocks users from setting sleep"
+        " temperatures cooler or warmer than daytime comfort bounds",
+    ],
     "0.4.14": [
         "Fix #313: Fan commands no longer trigger false manual-override detection. When Ecobee"
         " reverts its setpoint after a fan mode change, the coordinator now suppresses the"
@@ -1300,6 +1304,17 @@ KNOWN_FIXES: dict[int, dict] = {
             " with frequent away/vacation setpoint changes learn the secondary EWMA slowly",
             "k_solar staleness gate — not yet implemented; tracked as future investigation"
             " in #314 (closed as working-as-designed for k_passive; only k_solar is at risk)",
+        ],
+    },
+    318: {
+        "title": "Sleep setpoint ordering constraint regression",
+        "version_fixed": "0.4.15",
+        "scope_covered": [
+            "config_flow.py async_step_setpoints — removed 4 incorrect cross-field constraints"
+            " on sleep_cool/sleep_heat vs comfort/setback bounds",
+        ],
+        "scope_not_covered": [
+            "No runtime impact — automation.py uses sleep setpoints as-is; this fix is config flow validation only",
         ],
     },
     313: {

@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -1874,3 +1875,59 @@ class TestOptionsFlowMultiStep:
         assert defaults["notify_service"] == "notify.notify"
         assert defaults["wake_time"] == "06:30:00"
         assert defaults["learning_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Sleep setpoint ordering regression guard (Issue #318)
+# ---------------------------------------------------------------------------
+
+
+class TestSleepSetpointValidation:
+    """Regression guard: async_step_setpoints must NOT enforce any ordering
+    relationship between sleep setpoints and daytime comfort setpoints.
+
+    Fix #108 removed these constraints; Fix #112 re-introduced them (regression).
+    Fix #318 removes them again.
+
+    Implementation note: ClimateAdvisorOptionsFlow inherits from a MagicMock stub
+    (config_entries.OptionsFlow) in this test environment, making it impossible to
+    call the real method via types.MethodType or direct instantiation (the class
+    itself becomes a MagicMock with no real attributes). Instead we use a static
+    source-text guard: if the error-key strings are absent from config_flow.py, the
+    constraints cannot be active regardless of how the flow is wired internally.
+    This catches re-introduction even if the error key is spelled the same way.
+    """
+
+    _CONFIG_FLOW_PATH = os.path.normpath(
+        os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "custom_components",
+            "climate_advisor",
+            "config_flow.py",
+        )
+    )
+
+    @pytest.mark.parametrize(
+        "error_key",
+        [
+            pytest.param("sleep_must_be_above_comfort", id="sleep_cool_above_comfort"),
+            pytest.param("sleep_must_be_below_comfort", id="sleep_heat_below_comfort"),
+            pytest.param("sleep_must_be_above_setback", id="sleep_heat_above_setback"),
+            pytest.param("sleep_must_be_below_setback", id="sleep_cool_below_setback"),
+        ],
+    )
+    def test_sleep_ordering_error_keys_absent_from_source(self, error_key):
+        """The four sleep ordering error keys must not appear anywhere in config_flow.py.
+
+        Regression: Fix #112 re-introduced these keys after Fix #108 removed them.
+        If any of them reappears in the source, this test fails immediately, before
+        any config-flow test exercises the step.
+        """
+        with open(self._CONFIG_FLOW_PATH) as fh:
+            source = fh.read()
+        assert error_key not in source, (
+            f"Regression detected: '{error_key}' found in config_flow.py. "
+            "Sleep setpoint ordering constraints were removed in Fix #318 and must "
+            "not be re-introduced. See Issue #318 for history."
+        )

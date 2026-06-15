@@ -4,9 +4,12 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.20"
+VERSION = "0.4.21"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.21": [
+        "Fix #323: Automation Time card now shows local HH:MM instead of the raw ISO timestamp.",
+    ],
     "0.4.20": [
         "Fix #258 CI: test infrastructure patches for pre-cool feature — isinstance guard in"
         " _build_predicted_indoor_future prevents MagicMock comparison errors; pre-cool stub"

@@ -929,7 +929,7 @@
         </div>
         <div class="status-item">
           <div class="label">Automation Time</div>
-          <div class="value">${data.next_automation_time || '\u2014'}</div>
+          <div class="value">${data.next_automation_time ? new Date(data.next_automation_time).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '\u2014'}</div>
         </div>
         <div class="status-item">
           <div class="label">Fan</div>
@@ -2114,7 +2114,7 @@
           <table class="kv-table">
             <tr><td>Automation Enabled</td><td>${data.automation_enabled ? 'Yes' : 'No'}</td></tr>
             <tr><td>Next Automation Action</td><td>${data.next_automation_action || 'N/A'}</td></tr>
-            <tr><td>Next Automation Time</td><td>${data.next_automation_time || 'N/A'}</td></tr>
+            <tr><td>Next Automation Time</td><td>${data.next_automation_time ? new Date(data.next_automation_time).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'N/A'}</td></tr>
             <tr><td>Occupancy Mode</td><td>${data.occupancy_mode || 'home'}<span class="kv-desc">Guest &gt; Vacation &gt; Home/Away</span></td></tr>
             <tr><td>Paused by Door/Window</td><td>${data.paused_by_door ? 'Yes' : 'No'}</td></tr>
             <tr><td>Pre-Pause Mode</td><td>${data.pre_pause_mode || 'N/A'}<span class="kv-desc">HVAC mode before door paused automation</span></td></tr>

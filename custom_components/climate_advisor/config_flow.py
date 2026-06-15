@@ -612,15 +612,6 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 errors["setback_heat"] = "setback_must_be_lower"
             if user_input.get("setback_cool", 999) <= user_input.get("comfort_cool", 0):
                 errors["setback_cool"] = "setback_must_be_higher"
-            # Cross-field: sleep temps must be between setback and comfort
-            if user_input.get("sleep_heat", 999) >= user_input.get("comfort_heat", 0):
-                errors["sleep_heat"] = "sleep_must_be_below_comfort"
-            if user_input.get("sleep_heat", 0) <= user_input.get("setback_heat", 999):
-                errors["sleep_heat"] = "sleep_must_be_above_setback"
-            if user_input.get("sleep_cool", 0) <= user_input.get("comfort_cool", 999):
-                errors["sleep_cool"] = "sleep_must_be_above_comfort"
-            if user_input.get("sleep_cool", 999) >= user_input.get("setback_cool", 0):
-                errors["sleep_cool"] = "sleep_must_be_below_setback"
             if not errors:
                 # Convert display values → stored °F
                 for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"):

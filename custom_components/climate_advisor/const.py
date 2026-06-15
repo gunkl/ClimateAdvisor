@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.15"
+VERSION = "0.4.16"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.16": [
+        "Docs #261: Documented that heat-only and cool-only HVAC systems are unsupported."
+        " CA requires a system with both heating and cooling capability."
+        " Single-mode systems will not receive commands for their unsupported mode — this is"
+        " expected behavior. See docs/02-ARCHITECTURE-REFERENCE.md.",
+    ],
     "0.4.15": [
         "Fix #318: Sleep setpoint config no longer blocks users from setting sleep"
         " temperatures cooler or warmer than daytime comfort bounds",

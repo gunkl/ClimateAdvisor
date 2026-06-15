@@ -58,6 +58,15 @@ Mapped (production → legacy):
   override_self_resolved        → override_self_resolved
   override_cleared              → override_cleared
 
+Issue #258 — overnight pre-cool:
+  pre_cool_applied              → pre_cool_applied
+    Payload: {target, modifier, sleep_cool, floor, indoor, nat_vent_suppressed}.
+    target_temp = payload["target"] (the cool ceiling that was applied).
+  pre_cool_suppressed_nat_vent  → pre_cool_suppressed_nat_vent
+    Payload: {indoor, target, modifier}.  No setpoint was applied; nat-vent
+    already brought indoor to or below the pre-cool target.
+    target_temp = None (no service call made).
+
 Occupancy / wakeup (Issue #240 — production emits these directly now):
   occupancy_setback            → setback_applied  (away/vacation)
     P3 payload: {mode, floor, ceiling, occupancy}.  Previously had target_f;
@@ -385,6 +394,14 @@ def _map_event_to_outcome(
 
     if event_type == "override_cleared":
         return ProductionDecision(ts_str, event_type, "override_cleared")
+
+    # --- Overnight pre-cool (Issue #258) ---
+    if event_type == "pre_cool_applied":
+        target = payload.get("target")
+        return ProductionDecision(ts_str, event_type, "pre_cool_applied", float(target) if target is not None else None)
+
+    if event_type == "pre_cool_suppressed_nat_vent":
+        return ProductionDecision(ts_str, event_type, "pre_cool_suppressed_nat_vent")
 
     # --- Unmapped (FINDINGS) — documented, silently skip ---
     if event_type in UNMAPPED_PRODUCTION_EVENTS:

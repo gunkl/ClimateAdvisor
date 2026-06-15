@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_call_later,
+    async_track_point_in_time,
     async_track_state_change_event,
     async_track_time_change,
     async_track_time_interval,
@@ -290,6 +291,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_day_type: str | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
+
+        # Overnight pre-cool phase (Issue #258): scheduled once per warming-trend day
+        self._pre_cool_trigger_scheduled: bool = False
+        self._pre_cool_trigger_cancel: Any | None = None
+        self._pre_cool_status: str | None = None  # surfaced in status API
 
         # Startup coalescing (Issue #321): suppress override detection for 5 min after restart
         self._startup_coalesce_active: bool = True
@@ -1552,6 +1558,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _indoor_temp = self._get_indoor_temp()
         _outdoor_temp = forecast.current_outdoor_temp if forecast else None
 
+        # Schedule overnight pre-cool if a warming trend is active (idempotent — runs once per day)
+        self._maybe_schedule_pre_cool()
+
         next_auto = self._compute_next_automation_action(c)
         fan_running = self.automation_engine._fan_active
         result = {
@@ -1584,6 +1593,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FORECAST_LOW: c.today_low if c else None,
             ATTR_FORECAST_HIGH_TOMORROW: c.tomorrow_high if c else None,
             ATTR_FORECAST_LOW_TOMORROW: c.tomorrow_low if c else None,
+            "pre_cool_status": self._pre_cool_status,
         }
 
         # Append chart log entry (every coordinator tick — 30-min cadence)
@@ -2140,11 +2150,118 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
-        await self.automation_engine.handle_morning_wakeup()
+        await self.automation_engine.handle_morning_wakeup(indoor_temp=self._get_indoor_temp())
 
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
         await self.automation_engine.handle_bedtime()
+
+    def _compute_pre_cool_trigger_time(self) -> datetime | None:
+        """Compute the pre-cool trigger time for tonight.
+
+        Primary: nat-vent window close time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES.
+        Fallback: wake_time - PRE_COOL_WAKE_OFFSET_HOURS.
+        Returns None if there is no warming trend today.
+        """
+        from .const import (
+            CONF_SLEEP_COOL,
+            PRE_COOL_MIN_HEADROOM_F,
+            PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+            PRE_COOL_WAKE_OFFSET_HOURS,
+        )
+
+        c = self._current_classification
+        if not c or c.setback_modifier >= 0:
+            return None
+
+        # Verify the pre-cool target would actually differ from sleep_cool
+        sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
+        comfort_heat = float(self.config.get("comfort_heat", 70.0))
+        pre_cool_target = max(sleep_cool + c.setback_modifier, comfort_heat + PRE_COOL_MIN_HEADROOM_F)
+        if pre_cool_target >= sleep_cool:
+            _LOGGER.info(
+                "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
+                pre_cool_target,
+                sleep_cool,
+            )
+            return None
+
+        now = dt_util.now()
+        today = now.date()
+
+        # Primary: nat-vent window close time + delay
+        if c.window_close_time is not None:
+            wct_dt = dt_util.as_local(datetime.combine(today, c.window_close_time).replace(tzinfo=None))
+            # If window close is before midnight (typical), use today; else tomorrow
+            if wct_dt < now:
+                wct_dt = wct_dt + timedelta(days=1)
+            trigger = wct_dt + timedelta(minutes=PRE_COOL_POST_NAT_VENT_DELAY_MINUTES)
+            _LOGGER.info(
+                "Pre-cool scheduled for %s (nat-vent close %s + %dmin); target %.1f°F",
+                trigger.strftime("%H:%M"),
+                c.window_close_time.strftime("%H:%M"),
+                PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+                pre_cool_target,
+            )
+            return trigger
+
+        # Fallback: wake_time - offset
+        wake_str = self.config.get("wake_time", "06:30")
+        wake_h, wake_m = int(wake_str.split(":")[0]), int(wake_str.split(":")[1])
+        wake_dt = dt_util.as_local(datetime.combine(today, time(wake_h, wake_m)).replace(tzinfo=None))
+        # If wake_time already passed, schedule for tomorrow night
+        if wake_dt < now:
+            wake_dt = wake_dt + timedelta(days=1)
+        trigger = wake_dt - timedelta(hours=PRE_COOL_WAKE_OFFSET_HOURS)
+        _LOGGER.info(
+            "Pre-cool scheduled for %s (wake_time %s - %.0fh fallback); target %.1f°F",
+            trigger.strftime("%H:%M"),
+            wake_str,
+            PRE_COOL_WAKE_OFFSET_HOURS,
+            pre_cool_target,
+        )
+        return trigger
+
+    def _maybe_schedule_pre_cool(self) -> None:
+        """Schedule the overnight pre-cool trigger if a warming trend is active and not yet scheduled."""
+        if self._pre_cool_trigger_scheduled:
+            return
+        trigger_time = self._compute_pre_cool_trigger_time()
+        if trigger_time is None:
+            return
+        now = dt_util.now()
+        if trigger_time <= now:
+            _LOGGER.info("Pre-cool trigger time %s already passed; skipping scheduling", trigger_time.strftime("%H:%M"))
+            return
+
+        # Build the pre-cool target for status display
+        from .const import CONF_SLEEP_COOL, PRE_COOL_MIN_HEADROOM_F
+
+        c = self._current_classification
+        sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
+        comfort_heat = float(self.config.get("comfort_heat", 70.0))
+        pre_cool_target = max(sleep_cool + c.setback_modifier, comfort_heat + PRE_COOL_MIN_HEADROOM_F)
+
+        self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, trigger_time)
+        self._pre_cool_trigger_scheduled = True
+        self._pre_cool_status = (
+            f"pre-cool tonight ({pre_cool_target:.0f}°F @ {trigger_time.strftime('%I:%M %p').lstrip('0')})"
+        )
+
+    async def _async_pre_cool_trigger(self, now: datetime) -> None:
+        """Handle the overnight pre-cool trigger point."""
+        nat_vent_just_closed = not self.automation_engine.natural_vent_active
+        indoor_temp = self._get_indoor_temp()
+        result = await self.automation_engine.handle_pre_cool(
+            indoor_temp=indoor_temp,
+            nat_vent_just_closed=nat_vent_just_closed,
+        )
+        _LOGGER.info("Pre-cool trigger handler completed: %s", result)
+        if "suppressed" in result:
+            self._pre_cool_status = result.replace("suppressed: ", "pre-cool suppressed — ")
+        elif "applied" in result:
+            self._pre_cool_status = result.replace("applied: ", "pre-cool active (").rstrip() + ")"
+        await self.async_refresh()
 
     async def _async_end_of_day(self, now: datetime) -> None:
         """Finalize the day's record and reset for tomorrow."""
@@ -2185,6 +2302,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
         self._hourly_forecast_temps.clear()
+
+        # Reset pre-cool state for the new day
+        if self._pre_cool_trigger_cancel is not None:
+            self._pre_cool_trigger_cancel()
+            self._pre_cool_trigger_cancel = None
+        self._pre_cool_trigger_scheduled = False
+        self._pre_cool_status = None
+
         await self._async_save_state()
 
     async def _async_door_window_changed(self, event: Event) -> None:
@@ -5074,6 +5199,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except (ValueError, TypeError):
                 continue
 
+        # Compute pre-cool band parameters for chart dip visualization
+        _pc_trigger_h: float | None = None
+        _pc_target: float | None = None
+        if self._current_classification and self._current_classification.setback_modifier < 0:
+            _pc_trigger_time = self._compute_pre_cool_trigger_time()
+            if _pc_trigger_time is not None:
+                _pc_trigger_h = _pc_trigger_time.hour + _pc_trigger_time.minute / 60.0
+                from .const import CONF_SLEEP_COOL, PRE_COOL_MIN_HEADROOM_F
+
+                _pc_sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
+                _pc_comfort_heat = float(self.config.get("comfort_heat", 70.0))
+                _pc_target = max(
+                    _pc_sleep_cool + self._current_classification.setback_modifier,
+                    _pc_comfort_heat + PRE_COOL_MIN_HEADROOM_F,
+                )
+
         _raw_band = list(
             _compute_target_band_schedule(
                 _band_timestamps,
@@ -5087,6 +5228,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ),
                 thermal_model=thermal_model,
                 classification=self._current_classification,
+                pre_cool_trigger_h=_pc_trigger_h,
+                pre_cool_target=_pc_target,
             )
         )
         _hvac_mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
@@ -5745,6 +5888,8 @@ def _compute_target_band_schedule(
     setback_modifier: float = 0.0,
     thermal_model: dict | None = None,
     classification: Any | None = None,
+    pre_cool_trigger_h: float | None = None,
+    pre_cool_target: float | None = None,
 ) -> list[dict]:
     """Compute the dynamic target band (lower/upper) for each hourly timestamp.
 
@@ -5819,9 +5964,12 @@ def _compute_target_band_schedule(
             h_n = h + 24 if (night_owl and h < wake_h) else h
 
             if h_n < wake_h:
-                # Pre-wake: sleep band
+                # Pre-wake: sleep band; apply pre-cool ceiling from trigger time onward
                 lower = sleep_heat
-                upper = sleep_cool
+                if pre_cool_trigger_h is not None and pre_cool_target is not None and h_n >= pre_cool_trigger_h:
+                    upper = pre_cool_target
+                else:
+                    upper = sleep_cool
             elif h_n < wake_h + wake_ramp_h:
                 # Wake ramp: interpolate toward comfort
                 frac = (h_n - wake_h) / wake_ramp_h
@@ -5837,9 +5985,12 @@ def _compute_target_band_schedule(
                 lower = comfort_heat + frac * (sleep_heat - comfort_heat)
                 upper = comfort_cool + frac * (sleep_cool - comfort_cool)
             else:
-                # Post-sleep: sleep band
+                # Post-sleep: sleep band; apply pre-cool ceiling from trigger time onward
                 lower = sleep_heat
-                upper = sleep_cool
+                if pre_cool_trigger_h is not None and pre_cool_target is not None and h_n >= pre_cool_trigger_h:
+                    upper = pre_cool_target
+                else:
+                    upper = sleep_cool
 
         result.append({"ts": ts.isoformat(), "lower": round(lower, 1), "upper": round(upper, 1)})
 
@@ -6090,6 +6241,32 @@ def _build_predicted_indoor_future(
                 _future_timestamps_for_band.append(_lts)
         except (ValueError, TypeError):
             pass
+    # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
+    _ode_pc_trigger_h: float | None = None
+    _ode_pc_target: float | None = None
+    _setback_mod = getattr(classification, "setback_modifier", None)
+    if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
+        from .const import (
+            CONF_SLEEP_COOL,
+            PRE_COOL_MIN_HEADROOM_F,
+            PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+            PRE_COOL_WAKE_OFFSET_HOURS,
+        )
+
+        _wct = getattr(classification, "window_close_time", None)
+        if _wct is not None:
+            _ode_pc_trigger_h = _wct.hour + _wct.minute / 60.0 + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES / 60.0
+        else:
+            _wake_str = config.get("wake_time", "06:30")
+            _wake_h_raw = int(_wake_str.split(":")[0]) + int(_wake_str.split(":")[1]) / 60.0
+            _ode_pc_trigger_h = _wake_h_raw - PRE_COOL_WAKE_OFFSET_HOURS
+        _ode_sc = float(config.get(CONF_SLEEP_COOL) or config.get("sleep_cool", 78.0))
+        _ode_ch = float(config.get("comfort_heat", 70.0))
+        _ode_pc_target = max(
+            _ode_sc + classification.setback_modifier,
+            _ode_ch + PRE_COOL_MIN_HEADROOM_F,
+        )
+
     _band_schedule = _compute_target_band_schedule(
         _future_timestamps_for_band,
         _band_config,
@@ -6097,6 +6274,8 @@ def _build_predicted_indoor_future(
         now,
         thermal_model=thermal_model,
         classification=classification,
+        pre_cool_trigger_h=_ode_pc_trigger_h,
+        pre_cool_target=_ode_pc_target,
     )
     _band_lookup: dict[str, dict] = {b["ts"]: b for b in _band_schedule}
 

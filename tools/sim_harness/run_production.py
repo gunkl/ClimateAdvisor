@@ -454,6 +454,17 @@ def _dispatch_event(
         _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         asyncio.run(engine.nat_vent_temperature_check(indoor_temp))
 
+    elif etype == "pre_cool":
+        # Issue #258: Dispatch the pre-cool trigger to the production engine.
+        # nat_vent_just_closed=True when the event marks the post-nat-vent trigger;
+        # False when using the wake_time-4h fallback path.
+        indoor_f = event.get("indoor_f")
+        indoor_temp = float(indoor_f) if indoor_f is not None else None
+        if indoor_temp is not None:
+            _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
+        nat_vent_just_closed = bool(event.get("nat_vent_just_closed", False))
+        asyncio.run(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
+
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 
 

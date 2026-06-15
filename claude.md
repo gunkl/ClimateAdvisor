@@ -110,6 +110,44 @@ The briefing is the main way users interact with Climate Advisor. When making ch
 - Out-of-scope writes can cause data loss, config corruption, or security issues
 - This rule makes the integration safe to install, update, and uninstall cleanly
 
+### Observability Requirements (CRITICAL)
+
+**Decision**: Every new automation behavior in Climate Advisor MUST include logging, status page visibility, and chart coverage. These are not optional polish — they are part of the definition of done for every feature.
+
+#### Logging
+
+Every decision point in a new or modified automation flow must emit a log line:
+
+- **INFO** at the entry of any scheduled trigger: include the trigger name, relevant inputs (indoor temp, outdoor temp, computed target, modifier), and the resolved trigger time
+- **INFO** at each decision outcome: applied / suppressed / skipped — include the reason and the key values that drove the decision
+- **WARNING** when a target value is clamped or overridden by a guard (e.g., floor/ceiling clamping, occupancy redirect, morning heat guard)
+- **WARNING** when a safety guard fires that would otherwise have left the HVAC in an unexpected state
+- **NEVER** log credentials, tokens, entity names that reveal personal info, or partial API keys (see Security Requirements)
+
+Log format rule: lead with the decision outcome as a short phrase (e.g., `"Setpoint applied"`, `"Feature suppressed: free cooling achieved target"`), then key values as `key=value` pairs. This makes grep filtering easy and predictable.
+
+#### Status Page Visibility
+
+Any new automation phase or state that the occupant (or developer) would want to know about MUST appear in the dashboard Status tab via the existing status card infrastructure — **no new cards**. Use existing cards by extending the API fields they read from:
+
+- New state fields belong in the coordinator's `data` dict (returned by `_async_update_data()`)
+- Expose them via the status API (`api.py`) under a descriptive key (e.g., `pre_cool_status`, `grace_status`, `nat_vent_status`)
+- Wire into the relevant existing `.status-item` card in `loadStatus()` in `index.html` as an additional `.value` line, shown only when non-null
+- Follow the existing pattern: `automation_status` carries the primary state string; feature-specific fields append context when the feature is active
+
+Typical state values a status field should express: `"scheduled (X°F @ HH:MM)"`, `"active (X°F)"`, `"suppressed — reason"`, `null` when inactive (hidden from UI).
+
+#### Chart Coverage
+
+Any automation phase that changes the thermostat setpoint (even temporarily) MUST be reflected in the chart's Target Band:
+
+- The `_compute_target_band_schedule()` function in `coordinator.py` is the single source of truth
+- A setpoint that applies at a specific time window → the band must show the corresponding ceiling/floor change during that window
+- The ODE prediction curve (`_build_predicted_indoor_future()`) must also receive the same setpoint so the predicted indoor curve tracks the actual intended setpoint
+- Never let the chart show a band that conflicts with what the engine is actually doing
+
+**Violation protocol**: Same as Security — stop, flag, and ask before shipping if a proposed feature lacks logging, status page wiring, or chart coverage.
+
 ### Security Requirements (CRITICAL)
 
 **Decision**: All code written for Climate Advisor MUST follow these security rules. They apply to the integration, deployment tools, and tests.

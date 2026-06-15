@@ -295,8 +295,9 @@ class TestComputeBedtimeSetbackIntegration:
     def test_compute_bedtime_setback_cool_used_when_model_available(self):
         """With thermal_model + cool classification, sleep upper = compute_bedtime_setback() output.
 
-        Cool path negates setback_modifier: min(sleep_cool + (-modifier), setback_cool)
-        = min(78 + (-2), 80) = 76.0 — less extreme than raw sleep_cool=78.
+        Warming trend (modifier=-2.0) lowers the cool ceiling for thermal mass banking
+        (Issue #258 sign fix): min(sleep_cool + modifier, setback_cool)
+        = min(78 + (-2), 80) = 76.0 — lower than raw sleep_cool=78.
         """
         ts_sleep = _ts(2)  # 02:00 — deep sleep window
         thermal_model = {
@@ -307,7 +308,7 @@ class TestComputeBedtimeSetbackIntegration:
             "heating_rate_f_per_hour": 4.0,
             "cooling_rate_f_per_hour": -4.0,
         }
-        classification = SimpleNamespace(hvac_mode="cool", setback_modifier=2.0)
+        classification = SimpleNamespace(hvac_mode="cool", setback_modifier=-2.0)
         result = _compute_target_band_schedule(
             [ts_sleep],
             _BASE_CONFIG,

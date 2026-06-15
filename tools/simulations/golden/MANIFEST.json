@@ -214,8 +214,8 @@
     "issue": 229
   },
   "strong_warming_trend_aggressive_setback": {
-    "sha256": "af4547522c7faad17f77c6a5a070d8b89712a316e89583d45b44813d2be4adf3",
-    "signed": "2026-06-13",
+    "sha256": "ee9b0fa28fd6ef91bfca8865369f7d14989995fcf56a55f38f43e9f12bfee406",
+    "signed": "2026-06-15",
     "issue": 229
   },
   "vacation_mode_full_lifecycle": {
@@ -242,5 +242,15 @@
     "sha256": "80e32b07cbb768c35901f94b3ce416e150f6b039e43319db20e295b54737650c",
     "signed": "2026-06-15",
     "issue": 321
+  },
+  "warming_trend_pre_cool_applied": {
+    "sha256": "4c74ba82269948eac207694d54aeaab7bf2a51b24abc574850dab66b40fac1f6",
+    "signed": "2026-06-15",
+    "issue": 258
+  },
+  "warming_trend_pre_cool_nat_vent_bypass": {
+    "sha256": "0ecee88989fb299e7a443f225be96cd1f85350749586e3aca833a0be2dcd6153",
+    "signed": "2026-06-15",
+    "issue": 258
   }
 }

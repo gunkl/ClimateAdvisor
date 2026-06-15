@@ -149,6 +149,7 @@ def generate_briefing(
                 temp_unit=temp_unit,
                 predicted_indoor_future=predicted_indoor_future,
                 predicted_outdoor_future=predicted_outdoor_future,
+                pre_cool_target=bedtime_setback_cool,
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
@@ -594,6 +595,7 @@ def _warm_day_plan(
     temp_unit: str = FAHRENHEIT,
     predicted_indoor_future: list[dict] | None = None,
     predicted_outdoor_future: list[dict] | None = None,
+    pre_cool_target: float | None = None,
 ) -> list[str]:
     """Conversational plan for warm days (75-85\u00b0F)."""
     lines = []
@@ -660,6 +662,15 @@ def _warm_day_plan(
         lines.append(
             f"The AC will step in above {format_temp(comfort_cool, temp_unit)} as a safety net if"
             f" needed, but with good airflow you probably won't need it."
+        )
+
+    # Pre-cool night mention: warming trend + a lower sleep ceiling is planned
+    if pre_cool_target is not None and getattr(c, "setback_modifier", 0.0) < 0:
+        lines.append("")
+        lines.append(
+            f"Tonight I'll cool the home to {format_temp(pre_cool_target, temp_unit)} while"
+            f" you sleep to build up cold thermal mass before tomorrow's heat — so the house"
+            f" coasts longer before the AC needs to kick in."
         )
 
     if _nat_vent_recovers and _events is not None:

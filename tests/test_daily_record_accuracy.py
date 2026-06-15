@@ -124,6 +124,7 @@ def _make_coordinator_stub(*, sensor_open: bool = True, classification=None):
     coord._today_record = _make_today_record(windows_recommended=windows_rec)
     coord._resolved_sensors = [_SENSOR_ID]
     coord._door_open_timers = {}
+    coord._door_open_timer_expiry = {}
     coord._async_save_state = AsyncMock()
 
     # _is_sensor_open reads hass.states — configure based on sensor_open param
@@ -234,8 +235,11 @@ def _run_door_window_open(coord, entity_id: str = _SENSOR_ID) -> None:
     captured_task: list = []
 
     def _capture_task(coro):
-        """Capture and store the coroutine instead of discarding it."""
-        captured_task.append(coro)
+        """Capture _do_debounce; close immediate refresh coroutines to avoid RuntimeWarning."""
+        if hasattr(coro, "__qualname__") and "_do_debounce" in coro.__qualname__:
+            captured_task.append(coro)
+        else:
+            coro.close()
 
     coord.hass.async_create_task = MagicMock(side_effect=_capture_task)
 

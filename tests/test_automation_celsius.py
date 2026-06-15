@@ -276,6 +276,7 @@ class TestSetpointValidation:
                 "custom_components.climate_advisor.automation.async_call_later",
                 side_effect=fake_call_later,
             ),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
             patch("custom_components.climate_advisor.automation._LOGGER") as mock_logger,
         ):
             asyncio.run(engine._set_temperature(72.0, reason="heat setback"))
@@ -321,6 +322,7 @@ class TestSetpointValidation:
                 "custom_components.climate_advisor.automation.async_call_later",
                 side_effect=fake_call_later,
             ),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
             patch("custom_components.climate_advisor.automation._LOGGER") as mock_logger,
         ):
             asyncio.run(engine._set_temperature(72.0, reason="heat setback"))
@@ -380,10 +382,13 @@ class TestSetpointRetry:
         return engine
 
     def _fire_validation_cb(self, engine: AutomationEngine, validation_cb, captured_call_later: list) -> None:
-        """Invoke the 10s validation lambda: extract the inner coroutine via async_create_task and run it.
+        """Invoke the 10s validation callback: extract the inner coroutine via async_create_task and run it.
 
-        The validation callback is ``lambda _now: hass.async_create_task(coro)``.
-        We intercept async_create_task to grab the coroutine, then run it directly.
+        The validation callback is a @callback-decorated wrapper (_schedule_check) that calls
+        hass.async_create_task(_check_single_setpoint_accepted()). We intercept async_create_task
+        to grab the coroutine, then run it directly. Callers must patch automation.callback as
+        a pass-through (side_effect=lambda fn: fn) when calling _set_temperature so the
+        @callback decorator does not swallow _schedule_check in the test stub environment.
         """
         coros: list = []
 
@@ -418,9 +423,9 @@ class TestSetpointRetry:
             return MagicMock()
 
         # Run _set_temperature so validation is scheduled (10s), then fire it to trigger retry
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=fake_call_later,
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         ):
             asyncio.run(engine._set_temperature(75.0, reason="test", mode="cool"))
 
@@ -432,11 +437,11 @@ class TestSetpointRetry:
         # Reset so we can capture the retry call_later
         captured_call_later.clear()
 
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=fake_call_later,
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         ):
-            # Fire the validation lambda — mismatch detected, should schedule 900s retry
+            # Fire the validation callback — mismatch detected, should schedule 900s retry
             self._fire_validation_cb(engine, validation_cb, captured_call_later)
 
         # 900s retry must have been scheduled
@@ -464,9 +469,9 @@ class TestSetpointRetry:
             captured_call_later.append((delay, callback))
             return MagicMock()
 
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=fake_call_later,
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         ):
             asyncio.run(engine._set_temperature(75.0, reason="test", mode="cool"))
 
@@ -474,17 +479,17 @@ class TestSetpointRetry:
         validation_cb = captured_call_later[0][1]
         captured_call_later.clear()
 
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=fake_call_later,
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         ):
             self._fire_validation_cb(engine, validation_cb, captured_call_later)
 
-        # Capture retry callback (the lambda wrapping _retry_callback)
+        # Capture retry callback (_schedule_retry, now a @callback-decorated named function)
         assert len(captured_call_later) >= 1
         _, retry_lambda = captured_call_later[0]
 
-        # Now invoke the retry lambda — it fires _retry_callback via async_create_task
+        # Now invoke the retry callback — it fires _retry_callback via async_create_task
         retry_coros: list = []
 
         def capture_retry_task(coro):
@@ -530,9 +535,9 @@ class TestSetpointRetry:
             captured_call_later.append((delay, callback))
             return MagicMock()
 
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=fake_call_later,
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         ):
             asyncio.run(engine._set_temperature(75.0, reason="test", mode="cool"))
 
@@ -540,9 +545,9 @@ class TestSetpointRetry:
         validation_cb = captured_call_later[0][1]
         captured_call_later.clear()
 
-        with patch(
-            "custom_components.climate_advisor.automation.async_call_later",
-            side_effect=fake_call_later,
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         ):
             self._fire_validation_cb(engine, validation_cb, captured_call_later)
 

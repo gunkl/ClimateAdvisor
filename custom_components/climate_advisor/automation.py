@@ -1406,11 +1406,11 @@ class AutomationEngine:
                     )
                     await self._set_temperature(_retry_temp, reason="retry/setpoint_rejected", mode=_retry_mode)
 
-                async_call_later(
-                    self.hass,
-                    900,
-                    lambda _now: self.hass.async_create_task(_retry_callback(_now)),
-                )
+                @callback
+                def _schedule_retry(_now: Any) -> None:
+                    self.hass.async_create_task(_retry_callback(_now))
+
+                async_call_later(self.hass, 900, _schedule_retry)
             else:
                 _LOGGER.info(
                     "Setpoint confirmed by thermostat: temperature=%.1f (%s mode)",
@@ -1418,11 +1418,11 @@ class AutomationEngine:
                     self._pending_setpoint_mode,
                 )
 
-        async_call_later(
-            self.hass,
-            10,
-            lambda _now: self.hass.async_create_task(_check_single_setpoint_accepted()),
-        )
+        @callback
+        def _schedule_check(_now: Any) -> None:
+            self.hass.async_create_task(_check_single_setpoint_accepted())
+
+        async_call_later(self.hass, 10, _schedule_check)
         _LOGGER.warning(
             "Set temperature to %s — %s",
             format_temp(temperature, unit),
@@ -2910,6 +2910,7 @@ class AutomationEngine:
                 except (ValueError, TypeError):
                     pass
 
+            @callback
             def _verify_setpoint_after_fan_on(_now: Any) -> None:
                 self.hass.async_create_task(_do_verify_after_fan_on())
 
@@ -3008,6 +3009,7 @@ class AutomationEngine:
                 except (ValueError, TypeError):
                     pass
 
+            @callback
             def _verify_setpoint_after_fan_off(_now: Any) -> None:
                 self.hass.async_create_task(_do_verify_after_fan_off())
 

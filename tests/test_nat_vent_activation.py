@@ -924,14 +924,17 @@ class TestPostFanVerify:
         def _fake_acl(hass, delay, callback):
             captured_callbacks.append((delay, callback))
 
-        with patch(_ACL_PATH, side_effect=_fake_acl):
+        with (
+            patch(_ACL_PATH, side_effect=_fake_acl),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
             asyncio.run(engine._activate_fan(reason="test"))
 
         assert len(captured_callbacks) == 1
         _delay, verify_cb = captured_callbacks[0]
 
         # Wire async_create_task to capture and run the inner coroutine
-        # (the sync wrapper calls hass.async_create_task with the inner coro)
+        # (the @callback wrapper calls hass.async_create_task with the inner coro)
         captured_coros: list = []
         engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured_coros.append(c))
 

@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.21"
+VERSION = "0.4.22"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.22": [
+        "Fix #325: Four async_call_later callbacks in automation.py were missing the @callback"
+        " decorator — HA emitted a thread-safety WARNING on every setpoint verify and fan"
+        " verify event. The two lambda shortcuts (setpoint retry + setpoint verify) are now"
+        " named @callback functions; the two fan-verify undecorated defs also get the"
+        " decorator. No behavior change; eliminates the runtime warning.",
+    ],
     "0.4.21": [
         "Fix #323: Automation Time card now shows local HH:MM instead of the raw ISO timestamp.",
     ],
@@ -1452,6 +1459,20 @@ KNOWN_FIXES: dict[int, dict] = {
             "Pre-cool depth does not account for forecast peak hour or solar gains",
             "Cooling-trend nights (setback_modifier > 0): relaxed setback sign fix also corrects"
             " those (higher ceiling = less cooling = energy savings) but no new timed phase added",
+        ],
+    },
+    325: {
+        "version_fixed": "0.4.22",
+        "title": "async_call_later callbacks missing @callback decorator — HA thread-safety warning",
+        "scope_covered": [
+            "automation.py line 1409: lambda for _retry_callback → @callback _schedule_retry",
+            "automation.py line 1421: lambda for _check_single_setpoint_accepted → @callback _schedule_check",
+            "automation.py line 2913: _verify_setpoint_after_fan_on decorated with @callback",
+            "automation.py line 3011: _verify_setpoint_after_fan_off decorated with @callback",
+        ],
+        "scope_not_covered": [
+            "coordinator.py:245 _request_refresh_callback lambda — safe; only invoked from @callback context",
+            "_on_grace_expired / clear_fan_override async_create_task — safe; always called from @callback chain",
         ],
     },
     321: {

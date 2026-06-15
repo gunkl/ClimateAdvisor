@@ -2,7 +2,7 @@
 
 An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
 
-**Current version: 0.3.54**
+**Current version: 0.4.16**
 
 ## Dashboard
 
@@ -54,7 +54,7 @@ An intelligent HVAC management integration that uses weather forecasts, occupanc
 
 1. **6:00 AM** — Coordinator pulls forecast, classifies the day, and sends the daily briefing email/notification
 2. **6:30 AM** — Morning warm-up restores comfort setpoint
-3. **Throughout the day** — Automation engine responds to doors, windows, occupancy, and temperature changes
+3. **Throughout the day** — Automation engine responds to doors, windows, occupancy, and temperature changes. CA programs a target comfort band [`comfort_heat` / `comfort_cool`] and the thermostat's own deadband maintains it — every command is a single `heat` or `cool` setpoint, not a dual-setpoint hold.
 4. **10:30 PM** — Bedtime setback kicks in
 5. **11:59 PM** — Day's data is saved to the learning engine
 
@@ -92,7 +92,7 @@ Climate Advisor tracks occupancy state via configurable toggle entities:
 
 Supports whole-house fan and/or HVAC fan mode integration:
 
-- **Whole-house fan**: Controls a dedicated fan entity (switch or fan domain) during economizer maintain phase
+- **Whole-house fan**: Controls a dedicated fan entity (switch or fan domain) during economizer maintain phase. While the whole-house fan is active, CA sets the thermostat off so AC and the fan do not run simultaneously; prior mode is restored when the fan stops.
 - **HVAC fan mode**: Activates your thermostat's fan-only mode for ventilation
 - **Both**: Coordinates both fan types together
 - Integrated with the economizer two-phase cooling strategy (cool-down with AC, maintain with ventilation)
@@ -207,6 +207,8 @@ Climate Advisor acts as the scheduler — the thermostat is the executor. For re
 2. **Set hold type to "Hold until I change"** (indefinite hold) — Many thermostats default to "hold until next scheduled transition," which means the thermostat reverts to its comfort program at the next scheduled event (e.g., 8 am "Home" program). CA issues commands that should persist until CA explicitly changes them. On Ecobee: Settings → Preferences → Hold Action → **Until I change it**.
 
 Without these settings, CA's setpoints will appear to apply momentarily but then be overridden by the thermostat's own schedule, causing the thermostat display and HA's entity state to disagree.
+
+3. **Heating and cooling capability required** — CA issues separate `heat` and `cool` commands (dual-setpoint `heat_cool` mode is not used for thermostat compatibility reasons). The HVAC system must support both heating and cooling. Heat-only or cool-only systems will not receive commands for the unsupported mode and are not a supported configuration.
 
 ### Options Flow (Edit After Setup)
 All settings are editable after setup, plus advanced options:
@@ -438,13 +440,27 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] DailyRecord accumulated counters survive HA restart (#176)
 - [x] Predicted indoor evening drop fixed: ODE mode uses classification for today (#172)
 
-### Phase 3: Seasonal & Cost Intelligence (v0.3+) — Future
+### Phase 3: Thermostat-as-Controller & Compatibility (v0.4.x) — Current
+- [x] Comfort band model — CA programs `[comfort_heat / comfort_cool]` and the thermostat holds it; HVAC is no longer micromanaged every 30 min (#249)
+- [x] Single-setpoint commands — every thermostat write is `climate.set_temperature` with mode + setpoint; `heat_cool` dual-setpoint mode dropped for compatibility (#301)
+- [x] Whole-house fan suppresses HVAC while active (#277)
+- [x] Override detection overhaul — clean-slate on restart, grace expiry notification, transient override detection (#282, #290)
+- [x] Ecobee deduplication bypass — double-write ensures commands reach the physical thermostat (#299)
+- [x] Pre-cool gate — ceiling reverts after target achieved, no overcooling (#295)
+- [x] `k_solar` confidence ladder (`none` / `low` / `medium` / `high`, graded by observation count) (#308)
+- [x] Solar phase offset daily re-fit from chart_log passive windows (#310)
+- [x] AC duty solar phase estimator — secondary EWMA for homes with summer-only AC (#312)
+- [x] Fan command suppression of false overrides; 30s post-fan setpoint verify (#313)
+- [x] Sleep setpoint ordering fix — sleep temps independent of daytime comfort bounds (#318)
+- [x] Pause state not persisted across restarts — clean-slate after HA restart (#263)
+
+### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)
 - [ ] Anomaly detection (e.g., "heating 30% higher than last November")
 - [ ] Energy cost integration (utility rates → estimated cost)
 - [ ] Savings tracking vs. "no automation" baseline
 
-### Phase 4: Multi-Zone & Advanced (v0.4+) — Future
+### Phase 5: Multi-Zone & Advanced (v0.6+) — Future
 - [ ] Multi-zone HVAC support (multiple thermostats)
 - [ ] Room-level occupancy detection
 - [ ] Humidity-based decisions

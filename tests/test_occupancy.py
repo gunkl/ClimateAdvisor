@@ -193,6 +193,9 @@ def _make_coordinator(
     coordinator.automation_engine._grace_active = False
     coordinator.automation_engine._last_resume_source = None
     coordinator.automation_engine._override_confirm_pending = False
+    coordinator.automation_engine._manual_override_active = False
+    coordinator.automation_engine._grace_end_time = None
+    coordinator._startup_coalesce_active = False  # Bug 1 (Issue #321): suppress in unit tests
 
     return coordinator
 

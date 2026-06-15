@@ -447,6 +447,13 @@ def _dispatch_event(
         # via advance_to() before each event.
         pass
 
+    elif etype == "nat_vent_temperature_check":
+        # Bug 3 (Issue #321): Dispatch midpoint-cycling re-evaluation to the production engine.
+        # Used by nat_vent_thermostat_cycling pending scenario to assert cycling behavior.
+        indoor_temp = float(event.get("indoor_temp", event.get("indoor_f", 70.0)))
+        _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
+        asyncio.run(engine.nat_vent_temperature_check(indoor_temp))
+
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 
 

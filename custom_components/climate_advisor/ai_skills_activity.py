@@ -407,7 +407,12 @@ async def async_build_activity_context(
         # Suppress if CA intentionally has the fan running (e.g., natural ventilation).
         # hvac_mode=off + hvac_action=fan is expected when CA activated fan_mode=on.
         # Only warn when the thermostat reports activity CA cannot account for.
-        ca_fan_running = fan_status in ("active", "running (manual override)", "running (untracked)")
+        ca_fan_running = fan_status in (
+            "active",
+            "running (manual override)",
+            "running (untracked)",
+            "nat-vent (session active, fan idle)",
+        )
         if str(hvac_action).lower() == "fan" and ca_fan_running:
             pass  # Expected: CA activated HVAC fan-only mode for natural ventilation
         else:
@@ -493,6 +498,28 @@ async def async_build_activity_context(
                 override_detail_lines.append("  Current override:  active (start time unknown)")
         else:
             override_detail_lines.append("  Current override:  none active")
+
+        # Bug 2 (Issue #321): flag stuck grace for AI investigator attention.
+        # This condition fires when the override flag is still set but grace already
+        # expired and was not properly cleared -- occupant sees HVAC stuck in override.
+        if ae is not None:
+            _ae_grace_end = getattr(ae, "_grace_end_time", None)
+            _ae_override = getattr(ae, "_manual_override_active", False)
+            _ae_grace = getattr(ae, "_grace_active", False)
+            if _ae_override and not _ae_grace and _ae_grace_end is not None:
+                try:
+                    _grace_end_dt = datetime.datetime.fromisoformat(str(_ae_grace_end))
+                    if _grace_end_dt.tzinfo is None:
+                        _grace_end_dt = _grace_end_dt.replace(tzinfo=datetime.UTC)
+                    if dt_util.now() > _grace_end_dt:
+                        override_detail_lines.append(
+                            "  WARNING STUCK GRACE DETECTED: manual_override_active=True but "
+                            f"grace_end_time ({_ae_grace_end}) is in the past and no grace timer "
+                            "is active. This is a critical system error -- the override should "
+                            "have been cleared. Recommend flagging as top priority incongruity."
+                        )
+                except Exception:
+                    pass
     except Exception:
         _LOGGER.warning("activity_report: failed to build override detail section Ã¢â‚¬â€ skipping")
         override_detail_lines = ["  (unavailable)"]

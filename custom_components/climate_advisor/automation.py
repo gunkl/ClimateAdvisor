@@ -2053,6 +2053,95 @@ class AutomationEngine:
                     threshold,
                 )
 
+    async def nat_vent_temperature_check(self, current_temp: float) -> None:
+        """Thermostat-style cycling: keep indoor near the comfort midpoint during a nat-vent session.
+
+        Called on every thermostat temperature tick via coordinator._async_thermostat_changed.
+        Also called as a 30-minute backstop from check_natural_vent_conditions().
+
+        When indoor drops to (midpoint - hysteresis) the fan turns off temporarily — the
+        nat-vent SESSION stays active (_natural_vent_active=True) and HVAC suppression is
+        maintained (restore_hvac=False). When indoor warms back to (midpoint + hysteresis)
+        the fan re-engages, subject to the outdoor-warm guard.
+        """
+        if not self._natural_vent_active:
+            return
+
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_cool = float(self.config.get("comfort_cool", 75))
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+        off_threshold = nat_vent_target - hysteresis
+        on_threshold = nat_vent_target + hysteresis
+
+        # Hard floor exit takes priority over cycling — same threshold as check_natural_vent_conditions
+        if current_temp <= comfort_heat:
+            _LOGGER.info(
+                "Nat-vent hard exit via temp-check: indoor %.1f°F ≤ comfort_heat %.1f°F — ending session",
+                current_temp,
+                comfort_heat,
+            )
+            await self._deactivate_fan(reason="nat_vent_floor_exit", restore_hvac=True)
+            self._natural_vent_active = False
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_comfort_floor_exit",
+                    {"indoor_temp": current_temp, "comfort_heat": comfort_heat, "source": "temp_check"},
+                )
+            return
+
+        if self._fan_active and current_temp <= off_threshold:
+            _LOGGER.info(
+                "Nat-vent cycling: indoor %.1f°F ≤ off_threshold %.1f°F"
+                " (target=%.1f) — cycling fan off, session remains active",
+                current_temp,
+                off_threshold,
+                nat_vent_target,
+            )
+            # Deactivate the fan without restoring HVAC — session stays alive
+            await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False)
+            # _natural_vent_active intentionally left True — session continues
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_fan_off",
+                    {
+                        "indoor_temp": current_temp,
+                        "off_threshold": off_threshold,
+                        "target": nat_vent_target,
+                    },
+                )
+            return
+
+        if not self._fan_active and current_temp >= on_threshold:
+            outdoor = self._last_outdoor_temp
+            if outdoor is not None and outdoor >= current_temp:
+                _LOGGER.info(
+                    "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F"
+                    " but outdoor %.1f°F ≥ indoor — skipping re-activation"
+                    " (outdoor-warm exit condition active)",
+                    current_temp,
+                    on_threshold,
+                    outdoor,
+                )
+                return
+            _LOGGER.info(
+                "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F (target=%.1f, outdoor=%.1f°F) — cycling fan on",
+                current_temp,
+                on_threshold,
+                nat_vent_target,
+                outdoor if outdoor is not None else 0.0,
+            )
+            await self._activate_fan(reason="nat_vent_cycling_on")
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_fan_on",
+                    {
+                        "indoor_temp": current_temp,
+                        "on_threshold": on_threshold,
+                        "target": nat_vent_target,
+                    },
+                )
+
     async def handle_manual_override_during_pause(
         self,
         *,
@@ -2259,6 +2348,7 @@ class AutomationEngine:
             self._automation_grace_cancel()
             self._automation_grace_cancel = None
         self._grace_active = False
+        self._grace_end_time = None  # Bug 2 fix (Issue #321): prevent stuck-at-0 display
         self._last_resume_source = None
 
     async def _re_pause_for_open_sensor(self) -> None:
@@ -2697,8 +2787,16 @@ class AutomationEngine:
         finally:
             self._fan_command_pending = False
 
-    async def _deactivate_fan(self, *, reason: str) -> None:
-        """Deactivate fan based on configured fan_mode."""
+    async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True) -> None:
+        """Deactivate fan based on configured fan_mode.
+
+        Args:
+            reason: Human-readable reason for deactivation (logged).
+            restore_hvac: When True (default), restores the HVAC mode that was suppressed
+                when the whole-house fan activated. Pass False during nat-vent cycling
+                (Bug 3 / Issue #321) so the session can continue without re-engaging HVAC
+                between cycles — the fan turns off temporarily, but HVAC stays suppressed.
+        """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return
@@ -2723,7 +2821,9 @@ class AutomationEngine:
 
                 # Restore prior HVAC mode that was suppressed when the fan activated
                 # (Issue #277 Fix C). Only restore if we have a stored mode to go back to.
-                if self._pre_fan_hvac_mode is not None:
+                # Skipped during nat-vent cycling (restore_hvac=False) so HVAC stays
+                # suppressed between fan-on and fan-off cycles within the same session.
+                if restore_hvac and self._pre_fan_hvac_mode is not None:
                     await self._set_hvac_mode(
                         self._pre_fan_hvac_mode,
                         reason=f"whole-house fan stopped — restoring HVAC mode ({self._pre_fan_hvac_mode})",

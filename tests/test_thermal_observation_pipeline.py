@@ -607,6 +607,7 @@ class TestThermostatChangeDuringActiveHvacAddsSample:
             setattr(coord, method_name, types.MethodType(method, coord))
 
         coord._commit_observation = MagicMock()
+        coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
         coord._async_thermostat_changed = types.MethodType(ClimateAdvisorCoordinator._async_thermostat_changed, coord)
 
         return coord

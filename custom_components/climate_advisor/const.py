@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.17"
+VERSION = "0.4.18"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.18": [
+        "Fix #321: HA restart no longer causes spurious manual overrides. A 5-minute startup"
+        " coalescing window suppresses override detection; at the 5-minute mark CA evaluates"
+        " sensor states and nat-vent conditions, then applies the correct operating mode"
+        " with full INFO logging of every command issued.",
+        "Fix #321: Grace period stuck-at-0 now self-heals. If the grace expiry callback is"
+        " ever lost, the next 30-minute evaluation cycle detects the stale grace_end_time,"
+        " logs an ERROR, and force-clears the override so automation resumes.",
+        "Feat #321: Natural ventilation now acts as an active thermostat targeting the"
+        " midpoint of the comfort band. The fan cycles on when indoor reaches midpoint+1°F"
+        " and off at midpoint-1°F, re-evaluated on every thermostat temperature tick."
+        " Fan status surfaced as 'nat-vent (session active, fan idle)' when session is"
+        " active but fan is idling between cycles.",
+    ],
     "0.4.17": [
         "Feat #320: Add step-by-step logging for contact sensor debounce and nat vent gate"
         " evaluation. When a window opens, logs now show: sensor detected, debounce timer"
@@ -1392,6 +1406,29 @@ KNOWN_FIXES: dict[int, dict] = {
             " not addressed by the confidence fix alone",
         ],
     },
+    321: {
+        "version_fixed": "0.4.18",
+        "title": "Startup false override, stuck grace, nat-vent thermostat cycling",
+        "scope_covered": [
+            "coordinator.py: 5-minute startup coalescing window replaces _check_startup_override();"
+            " override detection suppressed during window; coalescing evaluates nat-vent and HVAC at t+5min",
+            "automation.py _cancel_grace_timers(): _grace_end_time now cleared on every cancel",
+            "coordinator.py _async_update_data(): stuck-grace guard detects stale grace_end_time"
+            " in past and force-clears override with ERROR log",
+            "automation.py: nat_vent_temperature_check() cycles fan on/off at midpoint±1°F;"
+            " called from _async_thermostat_changed on every temperature tick",
+            "automation.py _deactivate_fan(): restore_hvac=False parameter prevents HVAC mode"
+            " restore during fan cycling (only restores on hard session exit)",
+            "fan_status: new value 'nat-vent (session active, fan idle)' for cycling-paused state",
+            "ai_skills_activity.py: stuck-grace warning flag in investigator context",
+        ],
+        "scope_not_covered": [
+            "Nat-vent cycling not tested against real thermostat hardware (Tier B only)",
+            "Startup coalesce timer requires coordinator integration test (Tier B);"
+            " unit tests cover _do_startup_coalesce() logic directly",
+            "Stuck grace requires coordinator 30-min update cycle for integration test (Tier B)",
+        ],
+    },
     320: {
         "title": "Nat vent debounce visibility — step logging and next_automation surfacing",
         "version_fixed": "0.4.17",
@@ -1487,6 +1524,9 @@ CONF_EMAIL_DOOR_WINDOW_PAUSE = "email_door_window_pause"
 CONF_EMAIL_GRACE_EXPIRED = "email_grace_expired"
 CONF_EMAIL_GRACE_REPAUSE = "email_grace_repause"
 CONF_EMAIL_OCCUPANCY_HOME = "email_occupancy_home"
+
+# Startup coalescing window: suppress override detection for this many seconds after restart
+STARTUP_COALESCE_SECONDS: int = 300  # 5 minutes (Issue #321)
 
 # Debounce and grace period defaults (seconds)
 DEFAULT_SENSOR_DEBOUNCE_SECONDS = 300  # 5 minutes

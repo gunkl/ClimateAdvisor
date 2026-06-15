@@ -301,6 +301,13 @@ def _map_event_to_outcome(
     if event_type == "nat_vent_outdoor_rise_exit":
         return ProductionDecision(ts_str, event_type, "nat_vent_outdoor_rise_exit")
 
+    # --- Nat-vent thermostat cycling events (Issue #321 Bug 3) ---
+    if event_type == "nat_vent_fan_off":
+        return ProductionDecision(ts_str, event_type, "nat_vent_fan_off")
+
+    if event_type == "nat_vent_fan_on":
+        return ProductionDecision(ts_str, event_type, "nat_vent_fan_on")
+
     # --- Ceiling guard ---
     if event_type == "ceiling_guard_fired":
         target = payload.get("target_f")

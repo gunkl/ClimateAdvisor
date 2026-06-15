@@ -28,7 +28,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback
+from .automation import AutomationEngine, compute_bedtime_setback
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
@@ -291,6 +291,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
 
+        # Startup coalescing (Issue #321): suppress override detection for 5 min after restart
+        self._startup_coalesce_active: bool = True
+        self._startup_timer_fired: bool = False
+        self._startup_coalesce_expiry: str | None = None
+
         # Startup retry state — gentle backoff when weather entity isn't ready
         self._startup_retries_remaining: int = 5
         self._startup_retry_delay: int = 30  # seconds; doubles each attempt
@@ -444,6 +449,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self._async_fan_entity_changed,
                 )
             )
+
+        # Startup coalescing: suppress override detection for 5 minutes, then evaluate state (Issue #321)
+        _coalesce_expiry = dt_util.now() + timedelta(seconds=300)
+        self._startup_coalesce_expiry = _coalesce_expiry.isoformat()
+
+        @callback
+        def _on_startup_coalesce_timer(_now: Any) -> None:
+            self._startup_timer_fired = True
+            self.hass.async_create_task(self.async_request_refresh())
+
+        async_call_later(self.hass, 300, _on_startup_coalesce_timer)
+        _LOGGER.info(
+            "Startup coalescing window started — override detection suppressed for 300s, coalescing at %s",
+            _coalesce_expiry.strftime("%H:%M:%S"),
+        )
 
         # Start minimum fan runtime rolling cycle (Issue #77) — not clock-aligned
         await self.automation_engine.start_min_fan_runtime_cycles()
@@ -1102,56 +1122,79 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             c.windows_recommended = False
 
-    def _check_startup_override(
-        self,
-        climate_state: Any,
-        classification: Any,
-    ) -> bool:
-        """Check if manual override should be set on first run (Issue #42).
-
-        Only sets override when the current HVAC mode differs from what
-        the classification recommends.  If they match, no override is
-        needed — Climate Advisor already agrees with the current state.
-
-        Returns True if override was set, False otherwise.
-        """
-        if not climate_state or climate_state.state in (
-            "off",
-            "unavailable",
-            "unknown",
-        ):
-            return False
-
-        current = climate_state.state
-        recommended = classification.hvac_mode
-        # heat_cool is CA-compatible with both "cool" and "heat" classifier outputs:
-        # the thermostat autonomously defends both edges, so no mode mismatch exists.
-        _compatible = (current == recommended) or (current == "heat_cool" and recommended in ("cool", "heat"))
-        if not _compatible:
-            _LOGGER.info(
-                "First run: HVAC is '%s' but classification recommends '%s' — treating as manual override",
-                current,
-                recommended,
-            )
-            self.automation_engine._manual_override_active = True
-            self.automation_engine._manual_override_mode = current
-            self.automation_engine._manual_override_time = dt_util.now().isoformat()
-            return True
+    async def _do_startup_coalesce(self) -> None:
+        """Proactively coalesce HVAC and nat-vent state 5 minutes after restart (Issue #321)."""
+        open_sensors = [s for s in self._resolved_sensors if self._is_sensor_open(s)]
+        indoor = self._get_indoor_temp()
+        outdoor = self._last_outdoor_temp
+        c = self._current_classification
 
         _LOGGER.info(
-            "First run: HVAC is '%s' which matches classification — no override needed",
-            current,
+            "Startup coalescing: outdoor=%s°F, indoor=%s°F, open_sensors=%s, classification=%s",
+            f"{outdoor:.1f}" if outdoor is not None else "?",
+            f"{indoor:.1f}" if indoor is not None else "?",
+            open_sensors,
+            c.day_type if c else "none",
         )
 
-        # Fix 2 (Issue #290): if restart killed the post-grace scheduled-state task
-        # and we're now in a sleep window with no active override, apply bedtime setback.
-        if _in_sleep_window(dt_util.now(), self.config) and not self.automation_engine._manual_override_active:
-            _LOGGER.info(
-                "First run: in sleep window with no active override — applying bedtime setback (restart recovery)"
-            )
-            self.hass.async_create_task(self.automation_engine.handle_bedtime())
+        nat_vent_activated = False
+        hvac_commanded = False
 
-        return False
+        if open_sensors and outdoor is not None and indoor is not None:
+            comfort_heat = float(self.config.get("comfort_heat", 70))
+            comfort_cool = float(self.config.get("comfort_cool", 75))
+            nat_vent_delta = float(self.config.get("natural_vent_delta", 3.0))
+            nat_vent_threshold = comfort_cool + nat_vent_delta
+            if outdoor < indoor and indoor > comfort_heat and outdoor < nat_vent_threshold:
+                _LOGGER.info(
+                    "Startup coalescing: nat-vent conditions met"
+                    " (outdoor %.1f°F < indoor %.1f°F, indoor > comfort_heat %.1f°F,"
+                    " outdoor < threshold %.1f°F) — activating nat-vent",
+                    outdoor,
+                    indoor,
+                    comfort_heat,
+                    nat_vent_threshold,
+                )
+                first_sensor = open_sensors[0]
+                await self.automation_engine.handle_door_window_open(first_sensor)
+                nat_vent_activated = True
+            else:
+                _LOGGER.info(
+                    "Startup coalescing: nat-vent conditions not met"
+                    " (outdoor=%.1f, indoor=%.1f, comfort_heat=%.1f, threshold=%.1f)",
+                    outdoor or 0,
+                    indoor or 0,
+                    float(self.config.get("comfort_heat", 70)),
+                    float(self.config.get("comfort_cool", 75)) + float(self.config.get("natural_vent_delta", 3.0)),
+                )
+
+        if not nat_vent_activated and c:
+            climate_state = self.hass.states.get(self.config.get("climate_entity", ""))
+            current_mode = climate_state.state if climate_state else "unknown"
+            _LOGGER.info(
+                "Startup coalescing: HVAC mode=%s, classification=%s — applying classification",
+                current_mode,
+                c.hvac_mode,
+            )
+            indoor_temp = self._get_indoor_temp()
+            await self.automation_engine.apply_classification(
+                c,
+                predicted_indoor=self._last_predicted_indoor,
+                indoor_temp=indoor_temp,
+            )
+            hvac_commanded = True
+
+        self._emit_event(
+            "startup_coalesced",
+            {
+                "nat_vent_activated": nat_vent_activated,
+                "hvac_commanded": hvac_commanded,
+                "sensors_open_count": len(open_sensors),
+            },
+        )
+        self._startup_coalesce_active = False
+        _LOGGER.info("Startup coalescing complete — startup grace period ended")
+        self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
@@ -1191,12 +1234,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         event="classification_change",
                     )
 
-            # Startup safety: only set manual override if the current HVAC
-            # mode differs from the classification (Issue #42)
+            # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
             if self._first_run:
                 self._first_run = False
-                climate_state = self.hass.states.get(self.config["climate_entity"])
-                self._check_startup_override(climate_state, self._current_classification)
                 # Recover v3 pending_observations that survived restart
                 _pending_obs = self.learning._state.pending_observations
                 if isinstance(_pending_obs, dict):
@@ -1274,6 +1314,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._run_ac_duty_solar_phase_fit()
                         # Flag is set inside the method after completion
 
+            # Bug 1 (Issue #321): Startup coalescing — evaluate state at t+5min instead of detecting override at t+30s
+            if self._startup_timer_fired and self._startup_coalesce_active and self._current_classification:
+                await self._do_startup_coalesce()
+
             # Periodic daily solar phase re-fit (Issue #310): run once per calendar day
             # using only the last 2 days of chart_log (backfill=False). Stamping
             # _last_solar_phase_fit_date in the one-shot block above prevents a double-fit
@@ -1332,6 +1376,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if _ae_dt > _archive_cutoff:
                     break
                 self._pred_archive.setdefault(self._pred_archive_key(_ae_dt), _ae["temp"])
+
+            # Bug 2 (Issue #321): Detect stuck grace — override active but timer callback
+            # never fired. Force-clear so automation resumes on this cycle.
+            _ae = self.automation_engine
+            if _ae._manual_override_active and not _ae._grace_active and _ae._grace_end_time is not None:
+                _stuck_end = dt_util.parse_datetime(_ae._grace_end_time)
+                if _stuck_end is not None and dt_util.now() > _stuck_end:
+                    _LOGGER.error(
+                        "Stuck grace detected: manual_override_active=True but grace_end_time"
+                        " %s is in the past and no grace timer is active. Force-clearing"
+                        " override (Issue #321).",
+                        _ae._grace_end_time,
+                    )
+                    _ae.clear_manual_override(reason="stuck_grace_recovery")
+                    self._emit_event("stuck_grace_recovered", {"grace_end_time": _ae._grace_end_time})
 
             await self.automation_engine.apply_classification(
                 self._current_classification,
@@ -2231,6 +2290,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         old_state = event.data.get("old_state")
         if not new_state or not old_state:
             return
+
+        # Bug 1 (Issue #321): Suppress override detection during startup coalescing window
+        if self._startup_coalesce_active:
+            _LOGGER.debug(
+                "Startup coalescing active — suppressing thermostat override detection for %s",
+                new_state.state if new_state else "unknown",
+            )
+            return
+
+        # Bug 3 (Issue #321): Per-temperature-tick nat-vent cycling re-evaluation.
+        # Fires on every thermostat state event (including attribute-only changes) when
+        # a nat-vent session is active so the fan cycles before the hard comfort-floor exit.
+        _new_temp_attr = new_state.attributes.get("current_temperature")
+        _old_temp_attr = old_state.attributes.get("current_temperature")
+        if (
+            _new_temp_attr is not None
+            and _new_temp_attr != _old_temp_attr
+            and self.automation_engine._natural_vent_active
+        ):
+            await self.automation_engine.nat_vent_temperature_check(float(_new_temp_attr))
 
         # Expected-state confirmation suppression: if thermostat is confirming an automation
         # command (same mode, within 2 minutes), this is not a user override.
@@ -4608,15 +4687,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Compute the current automation status string."""
         if not self._automation_enabled:
             return "disabled"
+        # Bug 1 (Issue #321): Surface startup coalescing window in status
+        if self._startup_coalesce_active:
+            return "starting — initializing"
         # Check if windows are open during a planned window period (not a pause)
         if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():
             return "windows open (as planned)"
         if self.automation_engine.natural_vent_active:
-            return "natural ventilation"
+            # Bug 3 (Issue #321): surface midpoint target in status for at-a-glance visibility
+            _nh = float(self.config.get("comfort_heat", 70))
+            _nc = float(self.config.get("comfort_cool", 75))
+            _nt = (_nh + _nc) / 2.0
+            return f"windows open · nat-vent (target {_nt:.0f}°F)"
         if self.automation_engine.is_paused_by_door:
             return "paused — door/window open"
         if self.automation_engine._override_confirm_pending:
             return "override pending (confirming...)"
+        # Bug 2 (Issue #321): detect stuck grace before the normal grace-active path
+        _ae2 = self.automation_engine
+        if _ae2._manual_override_active and not _ae2._grace_active and _ae2._grace_end_time is not None:
+            _se = dt_util.parse_datetime(_ae2._grace_end_time)
+            if _se is not None and dt_util.now() > _se:
+                return "override (grace stuck — check logs)"
         if self.automation_engine._grace_active:
             if self.automation_engine._resumed_from_pause:
                 return "resumed — door/window override"
@@ -4695,6 +4787,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "running (manual override)" if ae._fan_active else "off (manual override)"
         if ae._fan_active:
             return "active"
+        # Bug 3 (Issue #321): nat-vent session active but fan is idle between cycles
+        if ae._natural_vent_active:
+            return "nat-vent (session active, fan idle)"
         # Ground-truth fallback: CA's flag says inactive, but check what the
         # thermostat is actually doing. Catches post-restart and externally-run fan.
         if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
@@ -4736,6 +4831,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         Returns:
             Tuple of (action_description, execution_time_str).
         """
+        # Bug 1 (Issue #321): Surface coalescing as the next imminent action
+        if self._startup_coalesce_active and self._startup_coalesce_expiry:
+            return ("Startup coalescing", self._startup_coalesce_expiry)
+
         if not c:
             return ("Waiting for classification...", "")
 
@@ -5182,6 +5281,41 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "occupancy_away_timer_pending": self._occupancy_away_timer_cancel is not None,
             "unit": unit,
             "thermal_pipeline": self._build_thermal_pipeline_summary(),
+            "startup_coalesce_active": self._startup_coalesce_active,
+            "startup_coalesce_seconds_remaining": (
+                max(
+                    0.0,
+                    (dt_util.parse_datetime(self._startup_coalesce_expiry) - dt_util.now()).total_seconds(),
+                )
+                if self._startup_coalesce_expiry and self._startup_coalesce_active
+                else None
+            ),
+            # Bug 2 (Issue #321): stuck-grace detection for debug pane
+            "grace_stuck": (
+                ae._manual_override_active
+                and not ae._grace_active
+                and ae._grace_end_time is not None
+                and dt_util.parse_datetime(ae._grace_end_time) is not None
+                and dt_util.now() > dt_util.parse_datetime(ae._grace_end_time)
+            ),
+            # Bug 3 (Issue #321): nat-vent cycling visibility in debug pane
+            "nat_vent_active": ae._natural_vent_active,
+            "nat_vent_target": (
+                (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0
+                if ae._natural_vent_active
+                else None
+            ),
+            "nat_vent_on_threshold": (
+                (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0 + 1.0
+                if ae._natural_vent_active
+                else None
+            ),
+            "nat_vent_off_threshold": (
+                (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0 - 1.0
+                if ae._natural_vent_active
+                else None
+            ),
+            "nat_vent_cycling_paused": ae._natural_vent_active and not ae._fan_active,
         }
 
     async def async_shutdown(self) -> None:

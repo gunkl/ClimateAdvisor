@@ -111,7 +111,9 @@ Pre-conditioning sets the HVAC system up ahead of an expected temperature change
 
 **Hot-day pre-cool detail:** The `pre_condition_target` is stored as `-2.0` (a negative offset). `_set_temperature_for_mode()` applies it as `comfort_cool + pre_condition_target`, so a `comfort_cool` of 75°F yields a pre-cool target of **73°F**.
 
-**Pre-cool exit:** `_pre_condition_achieved` is set on `AutomationEngine` when `indoor_temp ≤ absolute_target` (i.e. `indoor_temp ≤ comfort_cool + pre_condition_target`). It is passed to `select_comfort_band()` to suppress the ceiling offset for subsequent 30-min cycles — the ceiling reverts to `comfort_cool` for the rest of the day. The flag persists through HA restarts (serialized to state) and resets at the start of each new day.
+**Pre-cool exit:** `_pre_condition_achieved` is set on `AutomationEngine` when `indoor_temp ≤ absolute_target` (i.e. `indoor_temp ≤ comfort_cool + pre_condition_target`). It is passed to `select_comfort_band()` to suppress the ceiling offset for subsequent 30-min cycles — the ceiling reverts to `comfort_cool` for the rest of the day. The flag persists through HA restarts (serialized to state) and resets at the start of each new day. The flag is **not re-armed** if indoor temperature later drifts above the pre-cool target — once achieved, the offset is suppressed for the remainder of the day regardless of subsequent temperature changes.
+
+**Test coverage:** golden scenario `hot_day_precool_achieved_reverts_to_comfort` (Issue #295).
 
 **Cold-front pre-heat detail:** The pre-heat target is stored in `config["_pending_preheat"]` for the coordinator to schedule. The target is `comfort_heat + pre_condition_target` (e.g., 70 + 3 = **73°F** for a significant cold front).
 
@@ -1608,6 +1610,47 @@ All conditions met → natural ventilation activates.
 If outdoor were 76°F instead, the ceiling check would fail (`76 ≥ 75`) and nat vent would not activate despite outdoor still being cooler than indoor.
 
 Default value: `NAT_VENT_DELTA_DEFAULT = 3°F` (see §15 Defaults Reference).
+
+### Fan Cycling Within an Active Session (Issue #321)
+
+Once `_natural_vent_active = True`, the fan does not simply stay on until the session ends. Instead, the engine targets the midpoint of the comfort band and cycles the fan on and off using a hysteresis band to prevent rapid toggling.
+
+**Midpoint target:**
+
+```
+nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+```
+
+Example: `comfort_heat = 68°F`, `comfort_cool = 74°F` → `nat_vent_target = 71°F`.
+
+**Hysteresis thresholds** (constant `NAT_VENT_HYSTERESIS_F = 1.0°F`):
+
+| Threshold | Formula | Action when crossed |
+|---|---|---|
+| `off_threshold = nat_vent_target - NAT_VENT_HYSTERESIS_F` | e.g. 70°F | Fan cycles **off** — indoor has cooled enough |
+| `on_threshold = nat_vent_target + NAT_VENT_HYSTERESIS_F` | e.g. 72°F | Fan cycles **on** again (if outdoor < indoor) |
+
+**Fan cycles off (indoor ≤ off_threshold):**
+- `_fan_active` is set to `False`; fan deactivated.
+- `_natural_vent_active` remains `True` — the session is still active.
+- `fan_status` sensor reports `"nat-vent (session active, fan idle)"`.
+- The comfort band stays armed throughout; the thermostat continues to self-arbitrate.
+
+**Fan cycles on again (indoor ≥ on_threshold):**
+- Fan reactivates if `outdoor_temp < indoor_temp` (directional check still applies).
+- The on_threshold guard prevents re-activation the moment the fan turns off (1°F dead band).
+
+**Hard exit (session ends) — takes priority over cycling:**
+The exit hierarchy (§17 Exit Hierarchy above) is evaluated before the cycling logic. In particular:
+- Priority 2 — `indoor_temp ≤ comfort_heat` — fires first if indoor drops to the comfort floor, ending the session (`_natural_vent_active = False`) and restoring heat mode. Fan cycling cannot keep the session alive past the comfort floor.
+
+**Example sequence** (comfort band [68°F, 74°F], target = 71°F):
+1. Indoor = 73°F → fan on, session active.
+2. Indoor falls to 70°F (≤ off_threshold) → fan cycles off, session stays active.
+3. Indoor drifts back to 72°F (≥ on_threshold) → fan cycles on again.
+4. Indoor falls to 68°F (≤ comfort_heat) → hard exit; heat mode restored.
+
+**Test coverage:** `tests/test_nat_vent_thermostat.py`; golden scenario `nat_vent_thermostat_cycling` (Issue #321).
 
 ### Phase 2 Note
 

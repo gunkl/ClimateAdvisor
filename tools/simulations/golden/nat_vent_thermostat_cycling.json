@@ -1,0 +1,95 @@
+{
+  "name": "nat_vent_thermostat_cycling",
+  "description": "Issue #321: Nat-vent fan cycles on/off based on indoor midpoint thresholds during an active session. Config: comfort_heat=68, comfort_cool=74 → midpoint=71, off_threshold=70, on_threshold=72. Fan turns off when indoor drops to 70°F; turns on again when indoor rises to 72°F with outdoor still below indoor; session ends on comfort_heat floor breach.",
+  "source": "synthetic",
+  "issue": 321,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: deleting nat_vent_temperature_check() from automation.py",
+    "    causes the second assertion (expect nat_vent_fan_off at 10:30) to FAIL —",
+    "    the fan would stay on indefinitely regardless of indoor temperature.",
+    "(b) Docs↔production alignment: docs/08-COMPUTATION-REFERENCE.md §3 nat-vent section",
+    "    must document cycling thresholds (midpoint±1°F) before this is promoted to golden.",
+    "(c) Occupant experience: without cycling, the fan runs continuously during nat-vent,",
+    "    potentially over-cooling the home 2-3°F below the comfort floor. With cycling,",
+    "    the home is held near the band midpoint (71°F), improving sleep comfort."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-06-12T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 65.0,
+      "note": "Morning: indoor=73°F (above midpoint=71°F), outdoor=65°F. outdoor < indoor — nat-vent conditions met."
+    },
+    {
+      "time": "2026-06-12T08:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day classification: hvac_mode=off. Nat-vent eligible when sensors open."
+    },
+    {
+      "time": "2026-06-12T08:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_window",
+      "note": "User opens window. outdoor=65°F < indoor=73°F, indoor > comfort_heat=68°F, outdoor < threshold 77°F. Nat-vent activates, fan turns on."
+    },
+    {
+      "time": "2026-06-12T10:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "Indoor cooled to off_threshold=70°F (midpoint=71-1=70). Fan should cycle off. Nat-vent session stays active."
+    },
+    {
+      "time": "2026-06-12T11:30:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 72.0,
+      "note": "Indoor warmed back to on_threshold=72°F (midpoint=71+1=72). outdoor=65°F < indoor=72°F — fan cycles back on."
+    },
+    {
+      "time": "2026-06-12T13:00:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 68.0,
+      "note": "Indoor reaches comfort_heat floor=68°F — hard exit condition. Nat-vent session ends, fan deactivated."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-12T08:10:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opened with outdoor=65°F < indoor=73°F, outdoor < comfort_cool+delta=77°F — nat-vent activates and fan turns on."
+    },
+    {
+      "at": "2026-06-12T10:30:00",
+      "expect": "nat_vent_fan_off",
+      "reason": "nat_vent_temperature_check called with indoor=70°F = off_threshold (midpoint=71-1=70). Fan cycles off to avoid overcooling. Session remains active."
+    },
+    {
+      "at": "2026-06-12T11:30:00",
+      "expect": "nat_vent_fan_on",
+      "reason": "nat_vent_temperature_check called with indoor=72°F = on_threshold (midpoint=71+1=72), outdoor=65°F < indoor. Fan cycles back on to resume free cooling."
+    },
+    {
+      "at": "2026-06-12T13:00:00",
+      "expect": "nat_vent_comfort_floor_exit",
+      "reason": "Indoor=68°F reaches comfort_heat floor=68°F — hard nat-vent exit: session ends, fan deactivated, HVAC may resume."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent fan cycles on/off at midpoint±1°F thresholds; session ends on floor breach",
+    "observed_behavior": "natural_ventilation on window open → nat_vent_fan_off at 70°F → nat_vent_fan_on at 72°F → nat_vent_comfort_floor_exit at 68°F",
+    "expected_behavior": "Fan cycles to hold indoor near comfort band midpoint (71°F); occupant stays comfortable without overcooling; session ends cleanly when floor is reached"
+  }
+}

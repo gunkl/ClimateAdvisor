@@ -2,7 +2,7 @@
 
 An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
 
-**Current version: 0.4.16**
+**Current version: 0.4.18**
 
 ## Dashboard
 

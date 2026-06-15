@@ -156,6 +156,7 @@ def _make_thermostat_coord_stub(
     coord._abandon_observation = AsyncMock()
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
+    coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
 
     # Bind the real method under test
     coord._async_thermostat_changed = types.MethodType(ClimateAdvisorCoordinator._async_thermostat_changed, coord)

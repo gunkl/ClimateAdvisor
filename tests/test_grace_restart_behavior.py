@@ -135,6 +135,7 @@ def _make_thermostat_coord_stub(**ae_overrides):
     coord._today_record = _make_today_record()
     coord._async_save_state = AsyncMock()
 
+    coord._startup_coalesce_active = False  # Bug 1 (Issue #321): suppress coalescing in unit tests
     coord._is_recent_hvac_command = MagicMock(return_value=False)
     coord._is_recent_temp_command = MagicMock(return_value=False)
     coord._emit_event = MagicMock()

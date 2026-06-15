@@ -170,6 +170,7 @@ def _make_coordinator_stub(
     coord._read_chart_hvac_action = MagicMock(return_value="cool")
     coord._fan_is_running = MagicMock(return_value=False)
     coord._any_sensor_open = MagicMock(return_value=False)
+    coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
 
     # Bind the real method under test
     coord._async_thermostat_changed = types.MethodType(ClimateAdvisorCoordinator._async_thermostat_changed, coord)

@@ -252,6 +252,9 @@ def _make_update_data_coord(
     coord._last_solar_phase_fit_date = None  # Issue #310
     coord._event_log = []
     coord.data = None  # Required by _detect_and_emit_incidents (called from _async_update_data)
+    coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
+    coord._startup_timer_fired = False  # Bug 1 (Issue #321)
+    coord._startup_coalesce_expiry = None  # Bug 1 (Issue #321)
     coord._async_update_data = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)
     return coord
 

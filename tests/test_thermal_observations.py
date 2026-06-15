@@ -2481,6 +2481,7 @@ class TestHvacObservationLogging:
         coord._async_save_state = AsyncMock()
         coord._flush_hvac_runtime = MagicMock()
         coord._is_recent_hvac_command = MagicMock(return_value=False)
+        coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
 
         def _get_current_sample(elapsed: float) -> dict:
             return {

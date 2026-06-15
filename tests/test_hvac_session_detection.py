@@ -131,6 +131,7 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord._any_sensor_open = MagicMock(return_value=False)
     coord._cancel_all_debounce_timers = MagicMock()
     coord._chart_log = MagicMock()
+    coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
 
     coord._async_thermostat_changed = types.MethodType(ClimateAdvisorCoordinator._async_thermostat_changed, coord)
     return coord

@@ -905,7 +905,7 @@
         </div>
         <div class="status-item">
           <div class="label">Status</div>
-          <div class="value">${data.automation_status || 'unknown'}</div>
+          <div class="value">${data.automation_status || 'unknown'}${data.pre_cool_status ? `<br><span style="font-size:0.8rem;opacity:0.85">${escapeHtml(data.pre_cool_status)}</span>` : ''}</div>
         </div>
         <div class="status-item">
           <div class="label">Indoor</div>

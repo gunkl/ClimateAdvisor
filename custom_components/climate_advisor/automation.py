@@ -291,7 +291,8 @@ def compute_bedtime_setback(
         floor = config.get("setback_cool", 80)
         rate = (thermal_model or {}).get("cooling_rate_f_per_hour")
         default_depth = DEFAULT_SETBACK_DEPTH_COOL_F
-        setback_modifier = -setback_modifier  # cool setback goes up, not down
+        # Note: warming trend (setback_modifier < 0) intentionally lowers the cool ceiling
+        # to bank cold thermal mass before a hot day. No sign flip needed.
         # Explicit sleep temp takes priority over adaptive calculation
         _explicit = config.get(CONF_SLEEP_COOL)
         if _explicit is not None:
@@ -2636,7 +2637,114 @@ class AutomationEngine:
             reason=f"bedtime — sleep band [{_sleep_band.floor:.0f}/{_sleep_band.ceiling:.0f}]",
         )
 
-    async def handle_morning_wakeup(self) -> None:
+    async def handle_pre_cool(self, indoor_temp: float | None, nat_vent_just_closed: bool) -> str:
+        """Apply overnight pre-cool setpoint to bank cold thermal mass before a hot day.
+
+        Fires at the pre-cool trigger time (nat-vent close + delay, or wake_time - 4h).
+        Suppressed when nat-vent already brought indoor to or below the target.
+        Returns a short status string for logging.
+        """
+        from .const import CONF_SLEEP_COOL, PRE_COOL_MIN_HEADROOM_F
+
+        c = self._current_classification
+        if not c or c.setback_modifier >= 0:
+            _LOGGER.info(
+                "Pre-cool trigger fired: skipped — no warming trend (modifier=%s)",
+                getattr(c, "setback_modifier", "n/a"),
+            )
+            return "skipped: no warming trend"
+
+        if self._occupancy_mode in (OCCUPANCY_VACATION, OCCUPANCY_AWAY):
+            _LOGGER.info("Pre-cool skipped — %s mode (setback already active)", self._occupancy_mode)
+            return f"skipped: {self._occupancy_mode}"
+
+        if self._manual_override_active:
+            _LOGGER.info(
+                "Pre-cool skipped — manual override active (mode=%s since %s)",
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            return "skipped: manual override"
+
+        sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
+        comfort_heat = float(self.config.get("comfort_heat", 70.0))
+        raw_target = sleep_cool + c.setback_modifier  # setback_modifier is negative for warming trend
+        floor = comfort_heat + PRE_COOL_MIN_HEADROOM_F
+        pre_cool_target = max(raw_target, floor)
+
+        _LOGGER.info(
+            "Pre-cool trigger fired: indoor=%s°F, target=%.1f°F, modifier=%.1f (sleep_cool=%.1f, floor=%.1f)",
+            f"{indoor_temp:.1f}" if indoor_temp is not None else "unknown",
+            pre_cool_target,
+            c.setback_modifier,
+            sleep_cool,
+            floor,
+        )
+
+        if raw_target < floor:
+            _LOGGER.warning(
+                "Pre-cool target %.1f°F below floor %.1f°F (comfort_heat=%.1f + headroom=%.1f); clamped to %.1f°F",
+                raw_target,
+                floor,
+                comfort_heat,
+                PRE_COOL_MIN_HEADROOM_F,
+                pre_cool_target,
+            )
+
+        # If nat-vent just closed and already achieved target: suppress AC
+        if nat_vent_just_closed and indoor_temp is not None and indoor_temp <= pre_cool_target:
+            _LOGGER.info(
+                "Pre-cool suppressed: nat-vent brought indoor to %.1f°F (target %.1f°F) — no AC needed",
+                indoor_temp,
+                pre_cool_target,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "pre_cool_suppressed_nat_vent",
+                    {"indoor": indoor_temp, "target": pre_cool_target, "modifier": c.setback_modifier},
+                )
+            return f"suppressed: nat-vent achieved {indoor_temp:.1f}°F (target {pre_cool_target:.1f}°F)"
+
+        # Get sleep heat floor from current sleep band so we preserve it
+        _sleep_band = select_comfort_band(
+            c,
+            self.config,
+            occupancy_mode=self._occupancy_mode,
+            in_sleep_window=True,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        _pre_cool_band = ComfortBand(
+            floor=_sleep_band.floor,
+            ceiling=pre_cool_target,
+            active="ceiling",
+            reason=f"pre-cool — warming trend thermal mass banking (target {pre_cool_target:.0f}°F)",
+        )
+
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "pre_cool_applied",
+                {
+                    "target": pre_cool_target,
+                    "modifier": c.setback_modifier,
+                    "sleep_cool": sleep_cool,
+                    "floor": floor,
+                    "indoor": indoor_temp,
+                    "nat_vent_suppressed": False,
+                },
+            )
+
+        _LOGGER.info(
+            "Pre-cool setpoint applied: cool ceiling %.1f°F (heat floor unchanged at %.1f°F)",
+            pre_cool_target,
+            _sleep_band.floor,
+        )
+        await self._apply_comfort_band(
+            _pre_cool_band,
+            reason=f"pre-cool — warming trend [{_sleep_band.floor:.0f}/{pre_cool_target:.0f}]",
+        )
+        return f"applied: {pre_cool_target:.1f}°F"
+
+    async def handle_morning_wakeup(self, indoor_temp: float | None = None) -> None:
         """Restore comfort for morning wake-up."""
         # Issue #85: skip comfort restore when nobody is home
         if self._occupancy_mode not in (OCCUPANCY_HOME, OCCUPANCY_GUEST):
@@ -2666,6 +2774,28 @@ class AutomationEngine:
         c = self._current_classification
         if not c:
             return
+
+        # Morning pre-cool overshoot guard: warn if indoor is below comfort_heat (heat may fire)
+        _current_indoor = indoor_temp
+        _comfort_heat = float(self.config.get("comfort_heat", 70.0))
+        if _current_indoor is not None:
+            if _current_indoor < _comfort_heat:
+                _LOGGER.warning(
+                    "Morning check: indoor %.1f°F below comfort_heat %.1f°F — pre-cool overshoot; heat may fire",
+                    _current_indoor,
+                    _comfort_heat,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "pre_cool_overshoot",
+                        {"indoor": _current_indoor, "comfort_heat": _comfort_heat},
+                    )
+            else:
+                _LOGGER.info(
+                    "Morning check: indoor %.1f°F ≥ comfort_heat %.1f°F — within guard",
+                    _current_indoor,
+                    _comfort_heat,
+                )
 
         # Arm the daytime comfort band — waking up exits the sleep window.
         _wakeup_band = select_comfort_band(

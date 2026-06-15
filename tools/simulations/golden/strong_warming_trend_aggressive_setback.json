@@ -1,6 +1,6 @@
 {
   "name": "strong_warming_trend_aggressive_setback",
-  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. Production handle_bedtime() uses select_comfort_band() with DEFAULT_SLEEP_COOL=78F — the modifier is stored in the event payload for transparency but the band uses the configured sleep setpoints, not compute_bedtime_setback(). Verifies classification and bedtime band are both applied correctly.",
+  "description": "Strong warming trend: tomorrow +15F above today. setback_modifier=-3.0 passed via classification event. Bedtime fires at 22:30. Production handle_bedtime() uses select_comfort_band() with DEFAULT_SLEEP_COOL=78F — the band ceiling is unchanged at bedtime. The pre-cool phase (Issue #258) fires separately at wake_time-4h (~02:30) and lowers the cool ceiling to 75F (sleep_cool 78 + modifier -3). This scenario covers classification + bedtime only; warming_trend_pre_cool_applied covers the pre-cool trigger.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
@@ -8,13 +8,14 @@
     "Production handle_bedtime() uses select_comfort_band(in_sleep_window=True), which reads",
     "  sleep_cool = config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL) = 78.0F (not in scenario config).",
     "  sleep_heat = config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT) = 66.0F (not in scenario config).",
-    "  Sleep band = [66/78]. The setback_modifier is stored in the bedtime_setback event payload for",
-    "  transparency but does not currently change the band ceiling (adaptive wiring is a P3 follow-up).",
+    "  Sleep band = [66/78]. Bedtime applies normal sleep setpoints; the setback_modifier is carried",
+    "  in the bedtime_setback event payload for observability but does not change the bedtime ceiling.",
     "Classification at 14:00: single-setpoint cool mode, temperature=comfort_cool=74F.",
     "  production_temp_at reads the temperature field from the set_temperature action.",
     "Bedtime at 22:30: sleep band [66/78]. production_temp_at returns ceiling (78F) for cool mode",
     "  (active='ceiling' → outcomes.py reads ceiling from bedtime_setback payload).",
-    "Covers Priority 7 warming trend setback from plan abundant-mapping-clarke.md."
+    "Pre-cool phase (not in this scenario): fires at wake_time(06:30) - 4h = 02:30,",
+    "  target = sleep_cool(78) + modifier(-3) = 75F. See warming_trend_pre_cool_applied.json."
   ],
   "config": {
     "comfort_heat": 70,
@@ -42,7 +43,7 @@
     {
       "time": "2026-07-15T22:30:00",
       "type": "bedtime",
-      "note": "Bedtime: select_comfort_band(in_sleep_window=True) → [66/78]. setback_modifier stored in event payload."
+      "note": "Bedtime: select_comfort_band(in_sleep_window=True) → [66/78]. Pre-cool fires separately at 02:30."
     }
   ],
   "assertions": [
@@ -50,19 +51,19 @@
       "at": "2026-07-15T14:00:00",
       "expect": "classification_applied",
       "expect_temp": 74.0,
-      "reason": "Warm-day classification applied: cool mode single-setpoint temperature=74 (comfort_cool). setback_modifier=-3.0 stored in classification for downstream use."
+      "reason": "Warm-day classification applied: cool mode single-setpoint temperature=74 (comfort_cool). setback_modifier=-3.0 stored in classification for downstream use by handle_pre_cool at 02:30."
     },
     {
       "at": "2026-07-15T22:30:00",
       "expect": "setback_applied",
       "expect_temp": 78.0,
-      "reason": "Bedtime sleep band [66/78] applied via select_comfort_band(in_sleep_window=True). cool mode active='ceiling' so production_temp_at returns ceiling=78. setback_modifier=-3.0 is recorded in the bedtime_setback event payload; adaptive wiring to the band ceiling is a P3 follow-up."
+      "reason": "Bedtime sleep band [66/78] applied via select_comfort_band(in_sleep_window=True). cool mode active='ceiling' so production_temp_at returns ceiling=78. Bedtime setpoint is unchanged by setback_modifier — pre-cool fires separately at 02:30 via handle_pre_cool()."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Warming trend classification and standard sleep band both applied correctly; setback_modifier stored in event payload",
+    "summary": "Warming trend classification and standard sleep band both applied correctly at bedtime; pre-cool thermal mass banking fires separately via handle_pre_cool at 02:30",
     "observed_behavior": "classification_applied (cool mode temperature=74) → setback_applied (sleep band ceiling=78) at bedtime",
-    "expected_behavior": "Classification arms comfort band; bedtime arms sleep band [66/78]. setback_modifier carried in payload for future adaptive wiring."
+    "expected_behavior": "Classification arms comfort band at 74F; bedtime arms sleep band [66/78] at 22:30 (unchanged). Pre-cool lowers ceiling to 75F at 02:30 — see warming_trend_pre_cool_applied.json."
   }
 }

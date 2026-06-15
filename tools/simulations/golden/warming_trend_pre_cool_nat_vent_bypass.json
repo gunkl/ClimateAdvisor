@@ -1,0 +1,81 @@
+{
+  "name": "warming_trend_pre_cool_nat_vent_bypass",
+  "description": "Strong warming trend night with nat-vent success: setback_modifier=-3.0. Nat-vent window closes at ~01:30 and the home is already at 74F (below pre-cool target 75F). Pre-cool trigger fires 30min later at 02:00 with nat_vent_just_closed=True. handle_pre_cool() detects indoor(74F) <= target(75F) and suppresses AC — free cooling via open windows already banked the needed thermal mass. Occupant experience: same cool morning achieved with zero AC energy cost.",
+  "source": "synthetic",
+  "issue": 258,
+  "notes": [
+    "Config: comfort_heat=70, comfort_cool=74, natural_vent_delta=3.0.",
+    "  Natural vent configured — nat-vent close triggers the primary path (not wake_time-4h fallback).",
+    "Pre-cool target = sleep_cool(78) + modifier(-3.0) = 75.0F.",
+    "  floor = comfort_heat(70) + PRE_COOL_MIN_HEADROOM_F(2.0) = 72.0F. No clamp.",
+    "Nat-vent bypass condition: nat_vent_just_closed=True AND indoor_f(74.0) <= target(75.0).",
+    "  Both conditions met → pre_cool_suppressed_nat_vent event emitted; no set_temperature call.",
+    "Scenario effectiveness: if the nat-vent bypass is deleted from handle_pre_cool(),",
+    "  the engine emits pre_cool_applied instead of pre_cool_suppressed_nat_vent —",
+    "  the assertion fails and the regression is caught (wasted AC energy that nat-vent already handled)."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "wake_time": "06:30",
+    "sleep_time": "22:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-16T14:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "setback_modifier": -3.0,
+      "note": "Strong warming trend. Modifier=-3.0 seeds pre-cool target of 75F."
+    },
+    {
+      "time": "2026-07-16T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 80.0,
+      "note": "Evening — AC holding indoor near comfort band."
+    },
+    {
+      "time": "2026-07-16T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime: sleep band [66/78] applied. Nat-vent expected to open overnight."
+    },
+    {
+      "time": "2026-07-17T01:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 65.0,
+      "note": "Overnight: outdoor cooled to 65F, indoor 74F. Nat-vent has been cooling the home (simulated as temp_update; nat-vent open/close sequence deferred to integration track)."
+    },
+    {
+      "time": "2026-07-17T02:00:00",
+      "type": "pre_cool",
+      "indoor_f": 74.0,
+      "nat_vent_just_closed": true,
+      "note": "Pre-cool trigger fires after nat-vent close (nat_vent_close + 30min path). indoor=74F <= target=75F. Nat-vent bypass: suppress AC, free cooling achieved target."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-16T22:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 78.0,
+      "reason": "Bedtime sleep band [66/78] — ceiling=78F for cool mode. Nat-vent and pre-cool both pending."
+    },
+    {
+      "at": "2026-07-17T02:00:00",
+      "expect": "pre_cool_suppressed_nat_vent",
+      "reason": "Pre-cool trigger fired with nat_vent_just_closed=True and indoor(74F) <= target(75F). AC suppressed: free cooling via open windows already banked the thermal mass. No energy wasted running AC when nat-vent did the job."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent cooled home to 74F before pre-cool trigger; AC correctly suppressed because free cooling already achieved the pre-cool target of 75F",
+    "observed_behavior": "classification_applied (74F) → setback_applied (78F sleep ceiling) → pre_cool_suppressed_nat_vent (no AC call, indoor=74F)",
+    "expected_behavior": "When nat-vent brings indoor to or below the pre-cool target before the trigger fires, handle_pre_cool() emits pre_cool_suppressed_nat_vent and skips the AC service call. Occupant experience: same cool morning as warming_trend_pre_cool_applied, but at zero AC energy cost thanks to overnight nat-vent."
+  }
+}

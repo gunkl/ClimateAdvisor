@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.18"
+VERSION = "0.4.19"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.19": [
+        "Feat #258: Trend-aware overnight pre-cool — on warming-trend nights CA now banks cold"
+        " thermal mass by lowering the AC ceiling mid-night (after nat-vent window closes or"
+        " 4h before wake, whichever is later). Nat-vent suppresses AC pre-cool when it already"
+        " achieved the target. A morning guard prevents the pre-cool target from dropping below"
+        " comfort_heat + 2°F. Status card and chart target band both show the pre-cool dip."
+        " Sign-convention bug fixed: warm-trend modifier now correctly lowers the sleep ceiling"
+        " (pre-cool) instead of raising it (energy setback).",
+    ],
     "0.4.18": [
         "Fix #321: HA restart no longer causes spurious manual overrides. A 5-minute startup"
         " coalescing window suppresses override detection; at the 5-minute mark CA evaluates"
@@ -1406,6 +1415,34 @@ KNOWN_FIXES: dict[int, dict] = {
             " not addressed by the confidence fix alone",
         ],
     },
+    258: {
+        "version_fixed": "0.4.19",
+        "title": "Trend-aware overnight pre-cool with nat-vent coordination",
+        "scope_covered": [
+            "automation.py compute_bedtime_setback(): sign-convention fix — warming trend now lowers"
+            " sleep ceiling (pre-cool) instead of raising it (energy setback)",
+            "automation.py handle_pre_cool(): new method applies cooler ceiling at pre-cool trigger"
+            " time; suppressed when nat-vent already achieved target; respects occupancy and override guards",
+            "coordinator.py _compute_pre_cool_trigger_time(): trigger = nat-vent close + 30min or"
+            " wake_time - 4h fallback; only fires when setback_modifier < 0",
+            "coordinator.py: pre-cool scheduled in _async_update_data() when classification becomes"
+            " available; cancelled and reset at end-of-day",
+            "coordinator.py _compute_target_band_schedule(): chart target band dips to pre_cool_target"
+            " from trigger_time to wake_time on warming-trend nights",
+            "coordinator.py _compute_automation_status() + _async_update_data(): pre_cool_status"
+            " field exposes scheduled/active/suppressed states",
+            "api.py + index.html: pre_cool_status wired into existing Automation Status card",
+            "briefing.py: warm-day section mentions pre-cool plan with target and time",
+            "CLAUDE.md: Observability Requirements (logging + status page + chart) codified as"
+            " universal standing standard for all future features",
+        ],
+        "scope_not_covered": [
+            "Adaptive trigger timing from thermal model (wake-4h fallback is fixed, not k_active_cool-derived)",
+            "Pre-cool depth does not account for forecast peak hour or solar gains",
+            "Cooling-trend nights (setback_modifier > 0): relaxed setback sign fix also corrects"
+            " those (higher ceiling = less cooling = energy savings) but no new timed phase added",
+        ],
+    },
     321: {
         "version_fixed": "0.4.18",
         "title": "Startup false override, stuck grace, nat-vent thermostat cycling",
@@ -2348,6 +2385,14 @@ DEFAULT_SLEEP_HEAT = 66.0  # comfort_heat(70) - DEFAULT_SETBACK_DEPTH_F(4)
 DEFAULT_SLEEP_COOL = 78.0  # comfort_cool(75) + DEFAULT_SETBACK_DEPTH_COOL_F(3)
 MAX_SETBACK_DEPTH_F = 8.0  # never set back more than this
 SETBACK_RECOVERY_BUFFER_MINUTES = 30  # pre-heat leads wake_time by this much
+
+# ---------------------------------------------------------------------------
+# Overnight Pre-Cool Phase (Issue #258)
+# On warming-trend nights, CA applies a cooler ceiling mid-night to bank thermal mass.
+# ---------------------------------------------------------------------------
+PRE_COOL_POST_NAT_VENT_DELAY_MINUTES: int = 30  # delay after nat-vent window closes before AC pre-cool fires
+PRE_COOL_WAKE_OFFSET_HOURS: float = 4.0  # fallback trigger: this many hours before wake_time
+PRE_COOL_MIN_HEADROOM_F: float = 2.0  # pre-cool target floor = comfort_heat + this (prevents morning heat firing)
 THERMAL_OBS_CAP = 200  # max observations in LearningState
 
 # ---------------------------------------------------------------------------

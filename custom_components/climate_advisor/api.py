@@ -134,6 +134,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "paused_by_door": ae.is_paused_by_door,
                 "ca_target_heat": coordinator.config.get("comfort_heat"),
                 "ca_target_cool": coordinator.config.get("comfort_cool"),
+                "pre_cool_status": data.get("pre_cool_status"),
             }
         )
 

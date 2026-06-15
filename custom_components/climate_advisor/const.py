@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.19"
+VERSION = "0.4.20"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.20": [
+        "Fix #258 CI: test infrastructure patches for pre-cool feature — isinstance guard in"
+        " _build_predicted_indoor_future prevents MagicMock comparison errors; pre-cool stub"
+        " attributes added to coordinator factory in test_hvac_session_detection and"
+        " test_temperature_sensors; test_target_band updated to document correct warming-trend"
+        " sign convention (modifier=-2.0 lowers cool ceiling, not raises it). All 50 golden"
+        " scenarios pass.",
+    ],
     "0.4.19": [
         "Feat #258: Trend-aware overnight pre-cool — on warming-trend nights CA now banks cold"
         " thermal mass by lowering the AC ceiling mid-night (after nat-vent window closes or"

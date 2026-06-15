@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.16"
+VERSION = "0.4.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.17": [
+        "Feat #320: Add step-by-step logging for contact sensor debounce and nat vent gate"
+        " evaluation. When a window opens, logs now show: sensor detected, debounce timer"
+        " start/expiry time, gate check values (outdoor/indoor temps, thresholds), and which"
+        " specific guard (forecast or thermal floor) blocked activation. The next_automation"
+        " sensor now shows 'Evaluating door/window sensors' with the expiry time during the"
+        " debounce window.",
+    ],
     "0.4.16": [
         "Docs #261: Documented that heat-only and cool-only HVAC systems are unsupported."
         " CA requires a system with both heating and cooling capability."
@@ -1382,6 +1390,22 @@ KNOWN_FIXES: dict[int, dict] = {
             "solar_gain abandonment rate (#184 context) — 99/100 rejections are 'abandoned' due to"
             " flat indoor temps; this is a data quality issue (HVAC prevents free-decay windows),"
             " not addressed by the confidence fix alone",
+        ],
+    },
+    320: {
+        "title": "Nat vent debounce visibility — step logging and next_automation surfacing",
+        "version_fixed": "0.4.17",
+        "scope_covered": [
+            "coordinator.py _async_door_window_changed — INFO log on sensor open with debounce expiry time",
+            "coordinator.py _do_debounce — INFO log on expiry with classification context",
+            "coordinator.py _compute_next_automation_action — returns 'Evaluating door/window sensors'"
+            " with expiry time when debounce is pending",
+            "automation.py handle_door_window_open — DEBUG log of gate values; INFO log when primary gates fail",
+        ],
+        "scope_not_covered": [
+            "Nat vent blocked by forecast/thermal guards still produces a 30-min retry window"
+            " (30-min coordinator cycle is the retry cadence)",
+            "HA restart with sensors open: clean-slate behavior preserved — no automatic re-evaluation on restart",
         ],
     },
 }

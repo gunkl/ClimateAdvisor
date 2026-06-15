@@ -1590,6 +1590,19 @@ class AutomationEngine:
         nat_vent_threshold = comfort_cool + nat_vent_delta
         indoor = self._get_indoor_temp_f()
         comfort_heat = float(self.config.get("comfort_heat", 70))
+        _LOGGER.debug(
+            "Nat vent gate check (%s): outdoor=%s indoor=%s comfort_heat=%.1f threshold=%.1f | "
+            "dir=%s floor=%s ceiling=%s",
+            entity_id,
+            f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+            f"{indoor:.1f}" if indoor is not None else "unavailable",
+            comfort_heat,
+            nat_vent_threshold,
+            outdoor is not None and indoor is not None and outdoor < indoor,
+            indoor is not None and indoor > comfort_heat,
+            outdoor is not None and outdoor < nat_vent_threshold,
+        )
+        _nat_vent_gate_entered = False
         if (
             outdoor is not None
             and indoor is not None
@@ -1597,6 +1610,7 @@ class AutomationEngine:
             and indoor > comfort_heat  # indoor must be above comfort floor
             and outdoor < nat_vent_threshold
         ):
+            _nat_vent_gate_entered = True
             _skip_nat_vent = False
 
             # Phase 2 Guard 1: rising outdoor forecast
@@ -1679,6 +1693,18 @@ class AutomationEngine:
                         },
                     )
                 return
+
+        if not _nat_vent_gate_entered:
+            _LOGGER.info(
+                "Nat vent not started (%s): outdoor=%s indoor=%s — "
+                "primary gates failed (dir=%s floor=%s ceiling=%s) — proceeding to HVAC pause check",
+                entity_id,
+                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                f"{indoor:.1f}" if indoor is not None else "unavailable",
+                outdoor is not None and indoor is not None and outdoor < indoor,
+                indoor is not None and indoor > comfort_heat,
+                outdoor is not None and outdoor < nat_vent_threshold,
+            )
 
         # Get current mode before pausing
         state = self.hass.states.get(self.climate_entity)

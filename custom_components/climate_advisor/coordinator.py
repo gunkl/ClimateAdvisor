@@ -289,6 +289,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_briefing_short: str = ""
         self._briefing_day_type: str | None = None
         self._door_open_timers: dict[str, Any] = {}
+        self._door_open_timer_expiry: dict[str, str] = {}
 
         # Startup retry state — gentle backoff when weather entity isn't ready
         self._startup_retries_remaining: int = 5
@@ -1025,6 +1026,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for cancel in self._door_open_timers.values():
                 cancel()
             self._door_open_timers.clear()
+            self._door_open_timer_expiry.clear()
 
     def _is_sensor_open(self, entity_id: str) -> bool:
         """Check if a door/window sensor is in the 'open' state, respecting polarity."""
@@ -2139,10 +2141,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return  # Timer already pending for this sensor
 
             debounce_sec = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS)
-            _LOGGER.debug(
-                "Door/window opened: %s — debounce started (%ds)",
+            _expiry_time = dt_util.now() + timedelta(seconds=debounce_sec)
+            _expiry_iso = _expiry_time.isoformat()
+            self._door_open_timer_expiry[entity_id] = _expiry_iso
+            _LOGGER.info(
+                "Contact sensor opened: %s — debounce started (%ds), nat vent eval at %s",
                 entity_id,
                 debounce_sec,
+                _expiry_time.strftime("%H:%M:%S"),
             )
 
             @callback
@@ -2151,19 +2157,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
                 async def _do_debounce() -> None:
                     self._door_open_timers.pop(eid, None)
+                    self._door_open_timer_expiry.pop(eid, None)
                     if self._is_sensor_open(eid):
                         c = self._current_classification
-                        _LOGGER.debug(
-                            "Debounce expired, sensor still open: %s "
-                            "(classification=%s, hvac_mode=%s, windows_recommended=%s, "
-                            "planned_window_active=%s)",
+                        _LOGGER.info(
+                            "Debounce expired for %s — evaluating nat vent conditions "
+                            "(classification=%s, hvac_mode=%s, windows_recommended=%s)",
                             eid,
                             c.day_type if c else "none",
                             c.hvac_mode if c else "none",
                             c.windows_recommended if c else False,
-                            self.automation_engine._is_within_planned_window_period(),
                         )
                         await self.automation_engine.handle_door_window_open(eid)
+                        # Trigger coordinator refresh so sensor entities reflect post-evaluation state
+                        self.hass.async_create_task(self.async_request_refresh())
                         if self._today_record:
                             self._today_record.door_window_pause_events += 1
                             sensor_key = eid.split(".")[-1]
@@ -2188,15 +2195,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             cancel = async_call_later(self.hass, debounce_sec, _debounce_expired)
             self._door_open_timers[entity_id] = cancel
+            # Trigger coordinator refresh so next_automation sensor shows debounce pending state
+            self.hass.async_create_task(self.async_request_refresh())
         else:
             # Sensor transitioned to closed — cancel any pending debounce timer
             cancel = self._door_open_timers.pop(entity_id, None)
+            self._door_open_timer_expiry.pop(entity_id, None)
             if cancel:
                 cancel()
-                _LOGGER.debug(
-                    "Door/window closed during debounce: %s — timer cancelled",
-                    entity_id,
-                )
+                _LOGGER.info("Contact sensor closed: %s — debounce cancelled", entity_id)
 
             # Check if ALL monitored sensors are now closed
             all_closed = all(not self._is_sensor_open(s) for s in self._resolved_sensors)
@@ -4747,6 +4754,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             source = self.automation_engine._last_resume_source or "automation"
             return (f"Grace period active ({source})", "")
 
+        # If a contact sensor debounce is pending, that is the soonest upcoming action
+        if self._door_open_timers and self._door_open_timer_expiry:
+            try:
+                earliest_iso = min(self._door_open_timer_expiry.values())
+                expiry_dt = dt_util.parse_datetime(earliest_iso)
+                if expiry_dt and expiry_dt > now:
+                    time_str = dt_util.as_local(expiry_dt).strftime("%I:%M:%S %p").lstrip("0")
+                    return ("Evaluating door/window sensors", time_str)
+            except (ValueError, AttributeError, TypeError):
+                pass
+
         # Build list of upcoming scheduled events
         wake_time = self.config.get("wake_time", "06:30:00")
         sleep_time = self.config.get("sleep_time", "22:30:00")
@@ -5179,6 +5197,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         for cancel in self._door_open_timers.values():
             cancel()
         self._door_open_timers.clear()
+        self._door_open_timer_expiry.clear()
 
         for unsub in self._unsub_listeners:
             unsub()

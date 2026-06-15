@@ -4958,7 +4958,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         # Bug 1 (Issue #321): Surface coalescing as the next imminent action
         if self._startup_coalesce_active and self._startup_coalesce_expiry:
-            return ("Startup coalescing", self._startup_coalesce_expiry)
+            # Format as a local-time label like the other branches below; the field's
+            # contract is a display-ready label, never a raw ISO timestamp (Issue #324).
+            coalesce_dt = dt_util.parse_datetime(self._startup_coalesce_expiry)
+            time_str = dt_util.as_local(coalesce_dt).strftime("%I:%M %p").lstrip("0") if coalesce_dt else ""
+            return ("Startup coalescing", time_str)
 
         if not c:
             return ("Waiting for classification...", "")

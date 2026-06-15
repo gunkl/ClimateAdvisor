@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 import sys
 import types
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── HA module stubs (must happen before importing climate_advisor) ──
 if "homeassistant" not in sys.modules:
@@ -291,10 +292,25 @@ class TestStartupCoalesceCompute:
             ClimateAdvisorCoordinator._compute_next_automation_action, coord
         )
 
-        result = coord._compute_next_automation_action(None)
+        # parse_datetime / as_local are bare MagicMocks in the stub env; give them real
+        # behavior so the branch produces a string (as_local is identity -> tz-stable).
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.parse_datetime",
+                side_effect=lambda s: datetime.fromisoformat(s),
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.as_local",
+                side_effect=lambda x: x,
+            ),
+        ):
+            result = coord._compute_next_automation_action(None)
         action, expiry = result
         assert action == "Startup coalescing"
-        assert expiry == "2026-06-12T14:05:00"
+        # Contract: a short local-time label, never the raw ISO timestamp. The previous
+        # assertion (`expiry == "2026-06-12T14:05:00"`) encoded the very ISO leak that was
+        # the #323 root cause and rendered as "Invalid Date" on the dashboard (#324).
+        assert "T" not in expiry and re.match(r"^\d{1,2}:\d{2} (AM|PM)$", expiry), expiry
 
     def test_next_automation_normal_after_coalesce(self):
         """After coalescing ends, _compute_next_automation_action returns normal result."""
@@ -330,6 +346,64 @@ class TestStartupCoalesceCompute:
         action, _ = result
         # Should NOT be the coalescing label
         assert action != "Startup coalescing"
+
+    def test_next_automation_time_is_label_never_iso(self):
+        """Contract guard (#324): a normal scheduled event yields a display-ready local
+        time label, never a raw ISO timestamp.
+
+        The dashboard prints next_automation_time verbatim, so a leaked ISO string renders
+        as "Invalid Date". now is module-stubbed to 14:00; with hvac_mode "" the 22:30
+        sleep event surfaces as "Bedtime check" at a "%I:%M %p" label.
+        """
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord.hass = MagicMock()
+        coord.config = {
+            "climate_entity": _THERMOSTAT_ID,
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "wake_time": "06:30:00",
+            "sleep_time": "22:30:00",
+            "briefing_time": "06:00:00",
+            "temp_unit": "fahrenheit",
+        }
+        coord._startup_coalesce_active = False
+        coord._startup_coalesce_expiry = None
+
+        ae = MagicMock()
+        ae._natural_vent_active = False
+        ae._fan_active = False
+        ae._fan_override_active = False
+        ae.is_paused_by_door = False
+        ae._grace_active = False
+        ae._is_within_planned_window_period = MagicMock(return_value=False)
+        coord.automation_engine = ae
+        coord._door_open_timers = {}
+        coord._door_open_timer_expiry = {}
+        coord._resolved_sensors = []
+        coord._is_sensor_open = MagicMock(return_value=False)
+        coord._any_sensor_open = MagicMock(return_value=False)
+
+        coord._compute_next_automation_action = types.MethodType(
+            ClimateAdvisorCoordinator._compute_next_automation_action, coord
+        )
+
+        c = DayClassification(
+            day_type="mild",
+            trend_direction="stable",
+            trend_magnitude=0.0,
+            today_high=72.0,
+            today_low=55.0,
+            tomorrow_high=72.0,
+            tomorrow_low=55.0,
+        )
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now",
+            return_value=datetime(2026, 6, 12, 14, 0, 0),
+        ):
+            action, time_str = coord._compute_next_automation_action(c)
+        assert action == "Bedtime check"
+        assert "T" not in time_str and re.match(r"^\d{1,2}:\d{2} (AM|PM)$", time_str), time_str
 
 
 # ---------------------------------------------------------------------------

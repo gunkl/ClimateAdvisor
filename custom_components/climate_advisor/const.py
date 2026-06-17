@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.24"
+VERSION = "0.4.25"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.25": [
+        "Fix #330: The Activity Report's per-event table is now built deterministically in Python"
+        " (no longer LLM-generated). The Settings column is always populated on band/setback rows"
+        " (e.g. 'setpoint: 72°F Cool (64°F Heat)') and on deduplicated ×N rows — ending the"
+        " recurring empty-Settings defect. A renderer registry covers every event type, with a"
+        " safe default for any new type and a coverage test that flags unhandled events.",
+        "Fix #331: The chart's Fan and Win Rec bars are merged into one Vent bar (blue = fan"
+        " physically running, green = nat-vent armed or windows recommended); the HVAC bar now"
+        " shows compressor-only states (heating/cooling). Fixes the fan appearing ON while"
+        " thermostatically off.",
+    ],
     "0.4.24": [
         "Fix #327: The HVAC/whole-house fan can no longer run indefinitely. A thermostatic fast"
         " loop now re-checks on every indoor OR outdoor temperature change and stops the fan the"
@@ -431,6 +442,41 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    330: {
+        "version_fixed": "0.4.25",
+        "title": "Activity Report — deterministic per-event table with populated Settings column",
+        "scope_covered": (
+            "build_event_timeline_table() in ai_skills_activity.py replaces the LLM-generated timeline. "
+            "EVENT_RENDERERS registry maps all emitted event types; _format_band_setpoint renders the "
+            "single-setpoint active/monitored edges (e.g. 'setpoint: 72F Cool (64F Heat)'). Dedup "
+            "collapses consecutive same-type rows to xN while PRESERVING the Settings cell. "
+            "_default_renderer renders any new/unregistered type safely (never blank/crash). A coverage "
+            "guardrail test introspects automation.py/coordinator.py emitters and fails if a new event "
+            "type lacks a renderer. parse_activity_response overrides the timeline section; the LLM still "
+            "writes summary/decisions/anomalies/diagnostics. Documented in docs/activity-report-table.md."
+        ),
+        "scope_not_covered": (
+            "LLM still authors summary/decisions/anomalies. Historical event-log entries already stored "
+            "are rendered by the new renderers (not retroactively rewritten). Non-English locale "
+            "formatting not specifically tested."
+        ),
+    },
+    331: {
+        "version_fixed": "0.4.25",
+        "title": "Chart — merged Vent bar (fan + nat-vent) and compressor-only HVAC bar",
+        "scope_covered": (
+            "coordinator.get_chart_data/poll and chart_log.append emit fan_running (physically on, via "
+            "_compute_fan_status) and nat_vent_active (_natural_vent_active); _bucket_hourly/_bucket_daily "
+            "OR-aggregate both. Frontend drawActivityTimeline merges Fan + Win Rec into one Vent bar "
+            "(blue=fan_running, green=nat_vent_active||windows_recommended); HVAC bar restricted to "
+            "heating/cooling. Back-compat: pre-#331 entries without the new fields fall back to legacy fan."
+        ),
+        "scope_not_covered": (
+            "Historical chart_log entries on disk carry only the legacy fan field; their Vent bar uses the "
+            "back-compat fallback (fan->blue, no armed/green distinction). No JS-level test harness for the "
+            "frontend; the Vent color decision is covered by the backend field-contract tests."
+        ),
+    },
     327: {
         "version_fixed": "0.4.24",
         "title": "Fan runs indefinitely — thermostatic fast loop, startup reconciliation, economizer direction guard",

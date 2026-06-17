@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock
+import datetime
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+import custom_components.climate_advisor.ai_skills_activity as _act_mod
 from custom_components.climate_advisor.ai_skills import AISkillRegistry
 from custom_components.climate_advisor.ai_skills_activity import (
     _event_source_label,
@@ -17,6 +21,21 @@ from custom_components.climate_advisor.ai_skills_activity import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_activity_parse_context():
+    """Isolate the module-global activity parse context between tests (Issue #330).
+
+    `parse_activity_response` overrides the timeline from `_activity_parse_context`
+    when populated. `async_build_activity_context` (called by other tests) leaves it
+    populated process-wide, which would otherwise leak into the parser tests below.
+    Production always pairs build→parse within one skill call, so this only affects
+    test isolation, not runtime behavior.
+    """
+    _act_mod._activity_parse_context.clear()
+    yield
+    _act_mod._activity_parse_context.clear()
 
 
 def _mock_coordinator(data_overrides: dict | None = None, config_overrides: dict | None = None) -> MagicMock:
@@ -200,22 +219,60 @@ class TestActivityFallback:
         assert "mild" in result["summary"]
 
     def test_fallback_timeline_includes_last_action(self):
-        """Timeline includes the last action time and reason from coordinator data."""
+        """Timeline is the deterministic markdown table, not last_action prose.
+
+        #330: fallback now calls build_event_timeline_table on coordinator._event_log.
+        The old test checked for last_action_time/reason strings from coordinator.data;
+        those are no longer in the timeline — the table header is the new contract.
+        """
+        # Seed a real event so the table has a row (not just the empty-window message).
+        # Patch dt_util.now so build_event_timeline_table gets a real tz-aware datetime.
+        now_utc = datetime.datetime.now(datetime.UTC)
         coord = _mock_coordinator()
+        coord._event_log = [
+            {
+                "time": (now_utc - datetime.timedelta(hours=1)).isoformat(),
+                "type": "classification_applied",
+                "day_type": "mild",
+                "hvac_mode": "heat",
+            }
+        ]
+        coord.config = dict(coord.config)  # ensure it's a plain dict
 
-        result = activity_fallback(coord)
+        with patch.object(_act_mod.dt_util, "now", return_value=now_utc):
+            result = activity_fallback(coord)
 
-        assert "2024-01-15T10:30:00" in result["timeline"]
-        assert "mild day" in result["timeline"]
+        # The deterministic table always starts with the markdown header row
+        assert "| Time | Event | Settings | Source |" in result["timeline"]
+        assert "Classification applied" in result["timeline"]
 
     def test_fallback_timeline_includes_next_action(self):
-        """Timeline notes the next scheduled automation action."""
+        """Timeline is the deterministic table; next_automation_action is not in the table.
+
+        #330: next_automation_action is coordinator state metadata, not an event log entry.
+        The old test expected it in the timeline prose; the new contract is a markdown table
+        whose rows come from _event_log.  Assert table structure instead.
+        """
         coord = _mock_coordinator()
+        # Seed a bedtime_setback event so the table has matching content
+        now_utc = datetime.datetime.now(datetime.UTC)
+        coord._event_log = [
+            {
+                "time": (now_utc - datetime.timedelta(hours=1)).isoformat(),
+                "type": "bedtime_setback",
+                "mode": "home",
+                "floor": 60,
+                "ceiling": 80,
+                "active": "floor",
+            }
+        ]
+        coord.config = dict(coord.config)
 
-        result = activity_fallback(coord)
+        with patch.object(_act_mod.dt_util, "now", return_value=now_utc):
+            result = activity_fallback(coord)
 
-        assert "bedtime setback" in result["timeline"]
-        assert "22:30" in result["timeline"]
+        assert "| Time | Event | Settings | Source |" in result["timeline"]
+        assert "Bedtime setback" in result["timeline"]
 
     def test_fallback_decisions_includes_last_reason(self):
         """Decisions section reports the last action reason."""
@@ -271,7 +328,13 @@ class TestActivityFallback:
         assert isinstance(result, dict)
 
     def test_fallback_timeline_graceful_when_no_actions(self):
-        """Timeline returns a sensible message when no actions have been recorded."""
+        """Timeline returns the deterministic table empty-window row when no events logged.
+
+        #330: the old fallback returned "No recent events recorded." prose when
+        last_action_time was "unknown".  The new fallback always calls
+        build_event_timeline_table; when _event_log is empty the table body reads
+        "(no events in window)" — still a non-empty, parseable markdown table.
+        """
         coord = _mock_coordinator(
             data_overrides={
                 "last_action_time": "unknown",
@@ -280,10 +343,16 @@ class TestActivityFallback:
                 "next_automation_time": "unknown",
             }
         )
+        coord._event_log = []  # no events
+        coord.config = dict(coord.config)
+        now_utc = datetime.datetime.now(datetime.UTC)
 
-        result = activity_fallback(coord)
+        with patch.object(_act_mod.dt_util, "now", return_value=now_utc):
+            result = activity_fallback(coord)
 
-        assert "No recent events recorded" in result["timeline"]
+        # Table header always present; body shows the empty-window sentinel row
+        assert "| Time | Event | Settings | Source |" in result["timeline"]
+        assert "no events in window" in result["timeline"]
 
 
 # ---------------------------------------------------------------------------

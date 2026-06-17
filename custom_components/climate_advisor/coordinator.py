@@ -1333,6 +1333,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         windows_open=self._any_sensor_open(),
                         windows_recommended=bool(self._current_classification.windows_recommended),
                         event="classification_change",
+                        fan_running=self._fan_physically_running() if self.automation_engine else False,
+                        nat_vent_active=bool(
+                            self.automation_engine._natural_vent_active if self.automation_engine else False
+                        ),
                     )
 
             # Startup safety: on first run, skip override detection — coalescing window handles it (Issue #321)
@@ -1738,6 +1742,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 pred_outdoor=_pred_outdoor_val,
                 pred_indoor=_pred_indoor_val,
                 setpoint=_setpoint_f,
+                fan_running=self._fan_physically_running(),
+                nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
             )
             self._chart_log.save()
             _LOGGER.debug(
@@ -2691,6 +2697,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         else False
                     ),
                     event="override",
+                    fan_running=self._fan_physically_running(),
+                    nat_vent_active=bool(
+                        self.automation_engine._natural_vent_active if self.automation_engine else False
+                    ),
                 )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
@@ -2799,6 +2809,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         else False
                     ),
                     event="hvac_action_change",
+                    fan_running=self._fan_physically_running(),
+                    nat_vent_active=bool(
+                        self.automation_engine._natural_vent_active if self.automation_engine else False
+                    ),
                 )
                 self._chart_log.save()
 
@@ -5009,6 +5023,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         return self._compute_fan_status() not in {"inactive", "disabled"}
 
+    def _fan_physically_running(self) -> bool:
+        """Return True iff the fan is physically spinning right now.
+
+        Differs from _fan_is_running() by excluding the
+        'nat-vent (session active, fan idle)' state — nat-vent armed but
+        between cycles means the session is active but the blower is not on.
+
+        Used for the chart_log ``fan_running`` field so the frontend can
+        distinguish a spinning fan from a merely armed nat-vent session.
+        """
+        return self._compute_fan_status() in {
+            "active",
+            "running (manual override)",
+            "running (untracked)",
+        }
+
     def _compute_fan_status(self) -> str:
         """Compute the current fan status string.
 
@@ -5312,6 +5342,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             for k in ("pred_outdoor", "pred_indoor", "pred_outdoor_avg", "pred_indoor_avg"):
                 if e.get(k) is not None:
                     e[k] = _conv(e[k])
+            # Back-compat: old entries written before Issue #331 lack these keys.
+            # Default to False so state_log always carries both fields.
+            e.setdefault("fan_running", False)
+            e.setdefault("nat_vent_active", False)
             return e
 
         log_entries = [_conv_log_entry(e) for e in log_entries]

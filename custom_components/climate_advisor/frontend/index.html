@@ -550,6 +550,8 @@
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px dashed rgba(33,150,243,0.85)"></span><span>Predicted Outdoor</span></div>
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(255,152,0,1)"></span><span>Actual Indoor</span></div>
       <div class="cl-item"><span class="cl-swatch" style="border-top:2px solid rgba(33,150,243,1)"></span><span>Actual Outdoor</span></div>
+      <div class="cl-item"><span class="cl-swatch" style="background:rgba(66,165,250,0.75);height:8px;border:none"></span><span>Vent: fan running</span></div>
+      <div class="cl-item"><span class="cl-swatch" style="background:rgba(102,187,106,0.70);height:8px;border:none"></span><span>Vent: armed / rec.</span></div>
     </div>
     <div class="chart-overlay-bar">
       <label><input type="checkbox" id="overlay-comfort" checked onchange="toggleOverlay('comfort_band')"> Target band</label>
@@ -1103,7 +1105,7 @@
     if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
     const W = canvas.parentElement.clientWidth;
-    const H = 86; // px: 4 rows × 14px + 3 × 10px gaps
+    const H = 66; // px: 3 rows × 14px + 2 × 10px gaps
     canvas.style.width = W + 'px';
     canvas.style.height = H + 'px';
     canvas.width = W * dpr;
@@ -1127,23 +1129,21 @@
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillText('HVAC',    plotLeft - 4, 7);
-    ctx.fillText('Fan',     plotLeft - 4, 31);
-    ctx.fillText('Win Rec', plotLeft - 4, 55);
-    ctx.fillText('Windows', plotLeft - 4, 79);
+    ctx.fillText('Vent',    plotLeft - 4, 31);
+    ctx.fillText('Windows', plotLeft - 4, 55);
 
     // Background track
     ctx.fillStyle = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)';
     ctx.fillRect(plotLeft, 0,  plotW, rowH);
     ctx.fillRect(plotLeft, 24, plotW, rowH);
     ctx.fillRect(plotLeft, 48, plotW, rowH);
-    ctx.fillRect(plotLeft, 72, plotW, rowH);
 
     // Draw segments — each log entry represents a ~30-min window
     const halfStep = 900000; // 15 min on each side of the timestamp
+    // HVAC compressor-only color map (fan-only mode excluded)
     const hvacColorMap = {
       heating: 'rgba(239,83,80,0.80)',
       cooling: 'rgba(66,165,250,0.75)',
-      fan:     'rgba(102,187,106,0.70)',
     };
 
     log.forEach((e, i) => {
@@ -1159,29 +1159,37 @@
       const x1 = xPx(segEnd);
       const w  = Math.max(1, x1 - x0);
 
-      // HVAC row
+      // HVAC row — compressor only (heating/cooling); fan-only and off draw nothing
       const hv = (e.hvac || '').toLowerCase();
       if (hvacColorMap[hv]) {
         ctx.fillStyle = hvacColorMap[hv];
         ctx.fillRect(x0, 0, w, rowH);
       }
 
-      // Fan row
-      if (e.fan) {
-        ctx.fillStyle = 'rgba(102,187,106,0.60)';
-        ctx.fillRect(x0, 24, w, rowH);
+      // Vent row — merged Fan + Win Rec into one bar
+      // New fields: fan_running (bool), nat_vent_active (bool)
+      // Back-compat: old entries lack fan_running/nat_vent_active — fall back to legacy e.fan
+      let ventColor = null;
+      if (e.fan_running !== undefined || e.nat_vent_active !== undefined) {
+        // New-format entry
+        if (e.fan_running) {
+          ventColor = 'rgba(66,165,250,0.75)';   // blue — actively cooling via fan
+        } else if (e.nat_vent_active || e.windows_recommended) {
+          ventColor = 'rgba(102,187,106,0.70)';  // green — armed / recommended
+        }
+      } else if (e.fan) {
+        // Legacy entry: fan bool only
+        ventColor = 'rgba(66,165,250,0.75)';
       }
-
-      // Win Rec row (amber)
-      if (e.windows_recommended) {
-        ctx.fillStyle = 'rgba(255,179,0,0.75)';
-        ctx.fillRect(x0, 48, w, rowH);
+      if (ventColor) {
+        ctx.fillStyle = ventColor;
+        ctx.fillRect(x0, 24, w, rowH);
       }
 
       // Windows Open row (green)
       if (e.windows_open) {
         ctx.fillStyle = 'rgba(76,175,80,0.70)';
-        ctx.fillRect(x0, 72, w, rowH);
+        ctx.fillRect(x0, 48, w, rowH);
       }
     });
 
@@ -1190,10 +1198,10 @@
     // Draw predicted future activity segments (40% opacity)
     const pred = (predictedActivity || []).slice().sort((a, b) => _parseTs(a.ts) - _parseTs(b.ts));
     if (pred.length > 0) {
+      // HVAC compressor-only future map (fan-only excluded)
       const hvacFutureMap = {
         heating: 'rgba(239,83,80,0.4)',
         cooling: 'rgba(66,165,245,0.4)',
-        fan:     'rgba(102,187,106,0.3)',
       };
       pred.forEach((e, i) => {
         const segStart = Math.max(rangeMin, _parseTs(e.ts));
@@ -1203,23 +1211,30 @@
         const x1 = xPx(segEnd);
         const w  = Math.max(1, x1 - x0);
 
-        // HVAC future row
+        // HVAC future row — compressor only
         const hv = (e.hvac_mode || '').toLowerCase();
         if (hvacFutureMap[hv]) {
           ctx.fillStyle = hvacFutureMap[hv];
           ctx.fillRect(x0, 0, w, rowH);
         }
 
-        // Fan future row
-        if (e.fan_active) {
-          ctx.fillStyle = 'rgba(102,187,106,0.3)';
-          ctx.fillRect(x0, 24, w, rowH);
+        // Vent future row — merged Fan + Win Rec (same logic as historical, 40% opacity)
+        let ventFutureColor = null;
+        if (e.fan_running !== undefined || e.nat_vent_active !== undefined) {
+          if (e.fan_running) {
+            ventFutureColor = 'rgba(66,165,250,0.4)';
+          } else if (e.nat_vent_active || e.windows_recommended) {
+            ventFutureColor = 'rgba(102,187,106,0.35)';
+          }
+        } else if (e.fan_active) {
+          // Legacy fallback (old predicted entries used fan_active)
+          ventFutureColor = 'rgba(66,165,250,0.4)';
+        } else if (e.windows_recommended) {
+          ventFutureColor = 'rgba(102,187,106,0.35)';
         }
-
-        // Win Rec future row
-        if (e.windows_recommended) {
-          ctx.fillStyle = 'rgba(255,179,0,0.4)';
-          ctx.fillRect(x0, 48, w, rowH);
+        if (ventFutureColor) {
+          ctx.fillStyle = ventFutureColor;
+          ctx.fillRect(x0, 24, w, rowH);
         }
       });
     }

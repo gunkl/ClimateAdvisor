@@ -27,6 +27,7 @@ if "homeassistant" not in sys.modules:
 # Patch dt_util.now before import (needed for isoformat() calls in start_override_confirmation)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime.datetime(2026, 6, 13, 14, 0, 0)
 
+import custom_components.climate_advisor.ai_skills_activity as _act_mod  # noqa: E402
 from custom_components.climate_advisor.ai_skills_activity import (  # noqa: E402
     async_build_activity_context,
 )
@@ -208,11 +209,28 @@ def _make_hass() -> MagicMock:
 
 
 class TestActivityAnnotationSetpointFields:
-    """async_build_activity_context annotates override_detected with setpoint data."""
+    """Setpoint data for override_detected is now surfaced via the deterministic table.
+
+    #330: the old inline [settings: setpoint: 72.0°F→75.0°F] annotation in the raw
+    EVENT LOG prose block has been replaced by the deterministic timeline table whose
+    Settings cell is filled by _render_override_detected.  Tests now assert the table
+    path, not the raw annotation string.
+    """
 
     def test_annotation_fires_with_setpoint_data(self):
-        """override_detected event with old_setpoint_f/new_setpoint_f produces
-        [settings: setpoint: 72.0°F→75.0°F] annotation in context."""
+        """override_detected with old_setpoint_f/new_setpoint_f → Settings cell in table.
+
+        #330: the old assertion looked for '[settings: setpoint: 72.0°F→75.0°F]' in the
+        raw context string (EVENT LOG plain-text section).  The new deterministic table
+        populates the Settings cell via _render_override_detected, which is verified by
+        calling parse_activity_response after async_build_activity_context populates
+        _activity_parse_context.  The timeline result must contain 'setpoint:' plus
+        the two temperature values.
+        """
+        from custom_components.climate_advisor.ai_skills_activity import (
+            parse_activity_response,
+        )
+
         coord = _make_coord_with_event(
             {
                 "old_setpoint_f": 72.0,
@@ -221,13 +239,25 @@ class TestActivityAnnotationSetpointFields:
             }
         )
         hass = _make_hass()
-        context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
+        # Patch dt_util.now so _activity_parse_context["now"] is a real tz-aware datetime,
+        # not a MagicMock (the ha_stubs dt_util.now() returns MagicMock via __getattr__).
+        now_utc = datetime.datetime.now(datetime.UTC)
+        with patch.object(_act_mod.dt_util, "now", return_value=now_utc):
+            asyncio.run(async_build_activity_context(hass, coord, hours=24))
 
-        assert "[settings: setpoint: 72.0°F→75.0°F]" in context, (
-            "Expected setpoint annotation in context. Relevant excerpt:\n"
-            + "\n".join(
-                line for line in context.splitlines() if "override" in line.lower() or "settings" in line.lower()
-            )
+        # parse_activity_response calls _override_timeline which uses _activity_parse_context
+        result = parse_activity_response("## SUMMARY\nTest.\n## DECISIONS\nNone.\n")
+        timeline = result["timeline"]
+
+        assert "setpoint:" in timeline, (
+            "#330: Settings cell for override_detected must contain 'setpoint:' "
+            f"(from _render_override_detected). Timeline:\n{timeline}"
+        )
+        assert "72" in timeline, (
+            f"#330: old_setpoint_f=72.0 must appear in the timeline Settings cell. Got:\n{timeline}"
+        )
+        assert "75" in timeline, (
+            f"#330: new_setpoint_f=75.0 must appear in the timeline Settings cell. Got:\n{timeline}"
         )
 
     def test_annotation_absent_when_setpoint_fields_none(self):

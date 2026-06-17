@@ -567,3 +567,171 @@ class TestPredFields:
         entry = log2._entries[0]
         assert entry["pred_outdoor"] == 40.5
         assert entry["pred_indoor"] == 69.0
+
+
+# ---------------------------------------------------------------------------
+# 11. fan_running / nat_vent_active fields (Issue #331)
+# ---------------------------------------------------------------------------
+
+
+class TestFanRunningNatVentFields:
+    """Tests for fan_running and nat_vent_active fields added in Issue #331.
+
+    These two booleans let the frontend draw one "Vent" bar that distinguishes:
+    - fan physically spinning (fan_running=True)
+    - nat-vent session armed but fan between cycles (nat_vent_active=True, fan_running=False)
+    - idle (both False)
+    """
+
+    # ---- append() persists both fields when explicitly passed ---------------
+
+    def test_append_stores_fan_running_true(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=True, indoor=70.0, outdoor=55.0, fan_running=True)
+        assert log._entries[0]["fan_running"] is True
+
+    def test_append_stores_nat_vent_active_true(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, nat_vent_active=True)
+        assert log._entries[0]["nat_vent_active"] is True
+
+    def test_append_stores_both_true(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=True, indoor=70.0, outdoor=55.0, fan_running=True, nat_vent_active=True)
+        entry = log._entries[0]
+        assert entry["fan_running"] is True
+        assert entry["nat_vent_active"] is True
+
+    # ---- back-compat: both default to False when omitted -------------------
+
+    def test_append_fan_running_defaults_false(self, tmp_path: Path) -> None:
+        """Caller omits fan_running → stored as False (back-compat with old callers)."""
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0)
+        assert log._entries[0]["fan_running"] is False
+
+    def test_append_nat_vent_active_defaults_false(self, tmp_path: Path) -> None:
+        """Caller omits nat_vent_active → stored as False (back-compat with old callers)."""
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0)
+        assert log._entries[0]["nat_vent_active"] is False
+
+    # ---- raw (24h) entries expose both fields -------------------------------
+
+    def test_get_entries_24h_exposes_fan_running(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(
+            hvac="off",
+            fan=True,
+            indoor=70.0,
+            outdoor=55.0,
+            fan_running=True,
+            nat_vent_active=True,
+            ts=_iso(_ago(hours=1)),
+        )
+        result = log.get_entries("24h")
+        assert len(result) == 1
+        assert result[0]["fan_running"] is True
+        assert result[0]["nat_vent_active"] is True
+
+    def test_get_entries_24h_both_false_when_omitted(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, ts=_iso(_ago(hours=1)))
+        result = log.get_entries("24h")
+        assert result[0]["fan_running"] is False
+        assert result[0]["nat_vent_active"] is False
+
+    # ---- hourly-bucketed (7d) entries: OR-aggregation ----------------------
+
+    def test_bucket_hourly_fan_running_or_aggregated(self, tmp_path: Path) -> None:
+        """fan_running is OR-aggregated across entries in a 7d hourly bucket (Issue #331)."""
+        log = _make_log(tmp_path)
+        base = _ago(hours=2).replace(minute=0, second=0, microsecond=0)
+        # One entry with fan_running=False, one with fan_running=True in the same hour
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, fan_running=False, ts=_iso(base))
+        log.append(
+            hvac="off",
+            fan=True,
+            indoor=71.0,
+            outdoor=55.0,
+            fan_running=True,
+            nat_vent_active=False,
+            ts=_iso(base.replace(minute=30)),
+        )
+        result = log.get_entries("7d")
+        assert len(result) == 1, "Two entries in same hour should produce one bucket"
+        # OR-aggregated: any True → True
+        assert result[0].get("fan_running") is True, (
+            "fan_running not OR-aggregated in hourly bucket — "
+            "flag: _bucket_hourly() missing fan_running propagation (Issue #331)"
+        )
+
+    def test_bucket_hourly_nat_vent_active_or_aggregated(self, tmp_path: Path) -> None:
+        """nat_vent_active is OR-aggregated across entries in a 7d hourly bucket (Issue #331)."""
+        log = _make_log(tmp_path)
+        base = _ago(hours=2).replace(minute=0, second=0, microsecond=0)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, nat_vent_active=False, ts=_iso(base))
+        log.append(
+            hvac="off",
+            fan=False,
+            indoor=71.0,
+            outdoor=55.0,
+            nat_vent_active=True,
+            ts=_iso(base.replace(minute=30)),
+        )
+        result = log.get_entries("7d")
+        assert len(result) == 1
+        assert result[0].get("nat_vent_active") is True, (
+            "nat_vent_active not OR-aggregated in hourly bucket — "
+            "flag: _bucket_hourly() missing nat_vent_active propagation (Issue #331)"
+        )
+
+    def test_bucket_hourly_fan_running_all_false_stays_false(self, tmp_path: Path) -> None:
+        """When all entries in a bucket have fan_running=False, OR → False."""
+        log = _make_log(tmp_path)
+        base = _ago(hours=2).replace(minute=0, second=0, microsecond=0)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, fan_running=False, ts=_iso(base))
+        log.append(
+            hvac="off",
+            fan=False,
+            indoor=71.0,
+            outdoor=55.0,
+            fan_running=False,
+            ts=_iso(base.replace(minute=30)),
+        )
+        result = log.get_entries("7d")
+        assert len(result) == 1
+        # Production gap: field may be absent. Use .get(k, False) so this sub-case
+        # passes even before the fix — the important failure is the True case above.
+        assert result[0].get("fan_running", False) is False
+
+    # ---- round-trip: both fields survive save/load -------------------------
+
+    def test_fan_running_nat_vent_survive_save_load(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(
+            hvac="off",
+            fan=True,
+            indoor=70.0,
+            outdoor=55.0,
+            fan_running=True,
+            nat_vent_active=True,
+            ts=_iso(_ago(hours=1)),
+        )
+        log.save()
+        log2 = _make_log(tmp_path)
+        log2.load()
+        assert log2.entry_count == 1
+        entry = log2._entries[0]
+        assert entry["fan_running"] is True
+        assert entry["nat_vent_active"] is True
+
+    def test_fan_running_false_survives_save_load(self, tmp_path: Path) -> None:
+        log = _make_log(tmp_path)
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, ts=_iso(_ago(hours=1)))
+        log.save()
+        log2 = _make_log(tmp_path)
+        log2.load()
+        entry = log2._entries[0]
+        assert entry["fan_running"] is False
+        assert entry["nat_vent_active"] is False

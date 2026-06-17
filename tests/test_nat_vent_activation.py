@@ -930,8 +930,11 @@ class TestPostFanVerify:
         ):
             asyncio.run(engine._activate_fan(reason="test"))
 
-        assert len(captured_callbacks) == 1
-        _delay, verify_cb = captured_callbacks[0]
+        # Issue #327: _activate_fan also schedules the 300s thermostatic backstop timer — select
+        # the 30s post-fan verify callback specifically rather than asserting a single total.
+        verify_calls = [(d, cb) for d, cb in captured_callbacks if d == 30.0]
+        assert len(verify_calls) == 1
+        _delay, verify_cb = verify_calls[0]
 
         # Wire async_create_task to capture and run the inner coroutine
         # (the @callback wrapper calls hass.async_create_task with the inner coro)

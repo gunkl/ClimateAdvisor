@@ -772,8 +772,11 @@ class TestFanSerialization:
 
         assert engine._fan_active is True
         assert engine._fan_on_since == "2026-03-20T10:00:00"
-        assert engine._fan_override_active is True
-        assert engine._fan_override_time == "2026-03-20T10:05:00"
+        # Issue #327: fan override is CLEARED on restart (clean slate, matching HVAC override).
+        # Restoring it perpetuated a stale override with no grace timer → permanent fan lockout.
+        # Restart now reclaims fan control; startup coalesce reconciles the real fan disposition.
+        assert engine._fan_override_active is False
+        assert engine._fan_override_time is None
 
     def test_restore_state_defaults_fan_fields(self):
         """restore_state defaults fan fields to inactive when not present."""
@@ -941,7 +944,11 @@ class TestMinFanRuntime:
             asyncio.run(engine._fan_cycle_on())
         engine.hass.services.async_call.assert_called()
         assert engine._fan_min_runtime_active is True
-        assert mock_later.call_count == 2  # 30s verify + runtime deactivation
+        # Issue #327: _activate_fan now also schedules the fan thermostatic backstop timer (300s)
+        # alongside the 30s post-fan verify; _fan_cycle_on adds the min_runtime deactivation (600s).
+        delays = [c.args[1] for c in mock_later.call_args_list]
+        assert 30.0 in delays  # post-fan setpoint verify
+        assert 10 * 60 in delays  # min-runtime deactivation
         assert engine._fan_min_cycle_cancel is cancel_mock
 
     def test_cycle_on_skips_when_zero(self):
@@ -1011,8 +1018,11 @@ class TestMinFanRuntime:
             asyncio.run(engine._fan_cycle_on())
         engine.hass.services.async_call.assert_called()
         assert engine._fan_min_runtime_active is True
-        assert mock_later.call_count == 1  # only 30s verify; no deactivation for always-on
-        assert mock_later.call_args[0][1] == 30.0
+        # Always-on (min_runtime>=60): _fan_cycle_on schedules NO deactivation timer, so
+        # _fan_min_cycle_cancel stays None. _activate_fan still schedules the 30s verify and the
+        # Issue #327 backstop timer (300s) — assert the verify is present, not a brittle total count.
+        delays = [c.args[1] for c in mock_later.call_args_list]
+        assert 30.0 in delays
         assert engine._fan_min_cycle_cancel is None
 
     def test_cycle_off_deactivates_fan_and_schedules_next_on(self):
@@ -1552,3 +1562,144 @@ class TestCheckNatVentGraceComfortCeiling:
 
         # Without grace the early-return fires normally (neither flag is True)
         assert engine._natural_vent_active is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #327: fan_thermostat_check + reconcile_fan_on_startup
+# ---------------------------------------------------------------------------
+
+
+class TestFanThermostatCheck:
+    """Thermostatic fast-loop that stops a running CA fan (Issue #327)."""
+
+    def _engine(self, **cfg):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, **cfg})
+        engine._deactivate_fan = AsyncMock()
+        engine._emit_event_callback = MagicMock()
+        engine._current_classification = None
+        return engine
+
+    def test_keeps_fan_when_outdoor_below_indoor(self):
+        """REGRESSION GUARD: outdoor 71 / indoor 72 (1°F favorable gradient) must KEEP the fan.
+
+        The original Check-1 used ``outdoor >= indoor - hysteresis`` (71 >= 71) and stopped here,
+        killing nat-vent the instant it activated. The stop must fire only at outdoor >= indoor.
+        """
+        engine = self._engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=71.0, trigger="test"))
+
+        engine._deactivate_fan.assert_not_awaited()
+        assert engine._natural_vent_active is True
+
+    def test_stops_natvent_and_emits_outdoor_rise_exit(self):
+        """outdoor >= indoor while nat-vent active → deactivate + nat_vent_outdoor_rise_exit."""
+        engine = self._engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=72.5, trigger="test"))
+
+        engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "nat_vent_outdoor_rise_exit" in events
+
+    def test_stops_non_natvent_fan_without_natvent_event(self):
+        """A non-nat-vent running fan stops on outdoor>=indoor with a generic reason (no nat-vent event)."""
+        engine = self._engine()
+        engine._natural_vent_active = False
+        engine._fan_active = True
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=73.0, trigger="test"))
+
+        engine._deactivate_fan.assert_awaited()
+        events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "nat_vent_outdoor_rise_exit" not in events
+
+    def test_noop_when_override_active(self):
+        """Manual fan override in effect → fast loop is a no-op (user has control)."""
+        engine = self._engine()
+        engine._fan_active = True
+        engine._natural_vent_active = True
+        engine._fan_override_active = True
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=80.0, trigger="test"))
+
+        engine._deactivate_fan.assert_not_awaited()
+
+    def test_noop_when_no_fan_active(self):
+        """No CA fan active → no-op even if outdoor is warm."""
+        engine = self._engine()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=80.0, trigger="test"))
+
+        engine._deactivate_fan.assert_not_awaited()
+
+
+class TestReconcileFanOnStartup:
+    """Startup fan reconciliation — no running fan is ever left in limbo (Issue #327)."""
+
+    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE):
+        engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
+        engine._deactivate_fan = AsyncMock()
+        return engine
+
+    def test_no_fan_when_thermostat_fan_not_running(self):
+        """thermostat fan off → decision no-fan; stale flags cleared, no deactivate call."""
+        engine = self._engine()
+        engine._fan_active = True  # stale
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=60.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._deactivate_fan.assert_not_awaited()
+        assert engine._fan_active is False
+        assert engine._natural_vent_active is False
+
+    def test_adopt_on_when_nat_vent_eligible(self):
+        """Fan running + window open + outdoor cooler → adopt as CA nat-vent."""
+        engine = self._engine()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+
+        assert engine._fan_active is True
+        assert engine._natural_vent_active is True
+        engine._deactivate_fan.assert_not_awaited()
+
+    def test_turn_off_when_not_eligible_hvac(self):
+        """Fan running, sensors closed (not nat-vent eligible), HVAC-fan archetype → turn off."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+            )
+        )
+
+        engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
+
+    def test_turn_off_when_outdoor_warmer_whole_house(self):
+        """Fan running, window open but outdoor warmer than indoor → not eligible → turn off."""
+        engine = self._engine(fan_mode=FAN_MODE_WHOLE_HOUSE)
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=80.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+
+        engine._deactivate_fan.assert_awaited()

@@ -458,6 +458,76 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             )
 
+        # Listeners: indoor and outdoor temp entities — re-evaluate fan on every temp change (Issue #327).
+        # Indoor temp: only register a dedicated listener when a separate sensor entity is configured;
+        # when indoor comes from the thermostat's current_temperature attribute the existing
+        # _async_thermostat_changed dispatch (below) already fires on attribute changes.
+        _indoor_temp_source = self.config.get("indoor_temp_source", TEMP_SOURCE_CLIMATE_FALLBACK)
+        _indoor_temp_entity = (
+            self.config.get("indoor_temp_entity")
+            if _indoor_temp_source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+            else None
+        )
+        if _indoor_temp_entity:
+
+            @callback
+            def _async_indoor_temp_changed(event: Any) -> None:
+                ae = self.automation_engine
+                if ae._fan_active or ae._natural_vent_active:
+                    self.hass.async_create_task(
+                        ae.fan_thermostat_check(
+                            indoor=self._get_indoor_temp(),
+                            outdoor=self._last_outdoor_temp,
+                            trigger="indoor",
+                        )
+                    )
+
+            self._unsub_listeners.append(
+                async_track_state_change_event(self.hass, _indoor_temp_entity, _async_indoor_temp_changed)
+            )
+
+        # Outdoor temp: register a listener on the configured outdoor sensor entity (Issue #327).
+        # The thermostat listener does NOT carry outdoor temp, so outdoor sensor changes are invisible
+        # until the 30-min cycle without this listener.
+        _outdoor_temp_source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
+        _outdoor_temp_entity = (
+            self.config.get("outdoor_temp_entity")
+            if _outdoor_temp_source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER)
+            else None
+        )
+        if _outdoor_temp_entity:
+
+            @callback
+            def _async_outdoor_temp_changed(event: Any) -> None:
+                ae = self.automation_engine
+                if ae._fan_active or ae._natural_vent_active:
+                    new_state = event.data.get("new_state")
+                    if new_state is not None:
+                        try:
+                            unit = self.config.get("temp_unit", "fahrenheit")
+                            new_outdoor = to_fahrenheit(float(new_state.state), unit)
+                            self._last_outdoor_temp = new_outdoor
+                        except (ValueError, TypeError):
+                            pass
+                    self.hass.async_create_task(
+                        ae.fan_thermostat_check(
+                            indoor=self._get_indoor_temp(),
+                            outdoor=self._last_outdoor_temp,
+                            trigger="outdoor",
+                        )
+                    )
+
+            self._unsub_listeners.append(
+                async_track_state_change_event(self.hass, _outdoor_temp_entity, _async_outdoor_temp_changed)
+            )
+
+        _LOGGER.info(
+            "Fan control: watching indoor=%s outdoor=%s thermostat=%s for thermostatic re-eval",
+            _indoor_temp_entity or "(thermostat attr)",
+            _outdoor_temp_entity or "(weather service / 30-min poll)",
+            self.config["climate_entity"],
+        )
+
         # Startup coalescing: suppress override detection for 5 minutes, then evaluate state (Issue #321)
         _coalesce_expiry = dt_util.now() + timedelta(seconds=300)
         self._startup_coalesce_expiry = _coalesce_expiry.isoformat()
@@ -1191,6 +1261,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 indoor_temp=indoor_temp,
             )
             hvac_commanded = True
+
+        # Issue #327: Startup fan reconciliation.
+        # Read the physical fan state from the thermostat and let the engine decide whether
+        # to adopt it (nat-vent eligible), turn it off (no longer eligible), or leave it alone.
+        # Runs AFTER nat-vent + classification so the engine has a settled HVAC state to reconcile
+        # against.  The 5-min coalescing window already suppresses override detection in
+        # _async_thermostat_changed, so the fan command here won't be misread as a manual override.
+        _climate_state_reconcile = self.hass.states.get(self.config.get("climate_entity", ""))
+        if _climate_state_reconcile:
+            _attrs_reconcile = _climate_state_reconcile.attributes
+            _fan_mode_reconcile = _attrs_reconcile.get("fan_mode", "")
+            _hvac_action_reconcile = _attrs_reconcile.get("hvac_action", "")
+            _thermostat_fan_running = _fan_mode_reconcile == "on" or _hvac_action_reconcile == "fan"
+        else:
+            _fan_mode_reconcile = "unknown"
+            _hvac_action_reconcile = "unknown"
+            _thermostat_fan_running = False
+        await self.automation_engine.reconcile_fan_on_startup(
+            indoor=indoor,
+            outdoor=outdoor,
+            thermostat_fan_running=_thermostat_fan_running,
+            any_sensor_open=self._any_sensor_open(),
+        )
 
         self._emit_event(
             "startup_coalesced",
@@ -2442,6 +2535,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and self.automation_engine._natural_vent_active
         ):
             await self.automation_engine.nat_vent_temperature_check(float(_new_temp_attr))
+
+        # Issue #327: Thermostatic fan re-evaluation on every indoor temp tick.
+        # Fires whenever the thermostat reports a new current_temperature and a CA fan is running
+        # (nat-vent OR regular fan-only).  The engine method is idempotent; calling it here when
+        # nat_vent_temperature_check already ran above is safe — they target different exit paths.
+        if (
+            _new_temp_attr is not None
+            and _new_temp_attr != _old_temp_attr
+            and (self.automation_engine._fan_active or self.automation_engine._natural_vent_active)
+        ):
+            await self.automation_engine.fan_thermostat_check(
+                indoor=self._get_indoor_temp(),
+                outdoor=self._last_outdoor_temp,
+                trigger="tick",
+            )
 
         # Expected-state confirmation suppression: if thermostat is confirming an automation
         # command (same mode, within 2 minutes), this is not a user override.

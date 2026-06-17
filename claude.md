@@ -211,7 +211,7 @@ Any automation phase that changes the thermostat setpoint (even temporarily) MUS
   ```
   Unset `MagicMock` attributes are truthy by default. If `_natural_vent_active` is left unset, the `_is_expected_fan` suppression guard silently passes for all scenarios — causing tests that expect `state_contradiction_warning` to fail only in the full suite, not in isolation. Reference: `test_hvac_session_detection.py` (`_make_update_data_coord`).
 
-- **`@callback` decorator** — Is a `MagicMock` in the test mock layer and swallows decorated functions. If a test needs to invoke a `@callback`-decorated inner function (e.g., timer callbacks), patch it: `patch("...coordinator.callback", side_effect=lambda fn: fn)`
+- **`@callback` decorator** — Is a `MagicMock` in the test mock layer and swallows decorated functions. If a test needs to invoke a `@callback`-decorated inner function (e.g., timer callbacks), patch it with `patch("<module>.callback", side_effect=lambda fn: fn)` where `<module>` is the importing module (e.g., `custom_components.climate_advisor.coordinator`, `custom_components.climate_advisor.automation`). This is required for any test that captures a callback from `async_call_later` and then invokes it directly — without the patch, the callback is a MagicMock and the inner function never runs. Reference: `test_automation_celsius.py` (`TestSetpointValidation`, `TestSetpointRetry`), `test_nat_vent_activation.py` (`TestPostFanVerify`).
 
 #### Testing `_build_predicted_indoor_future` directly
 
@@ -821,6 +821,17 @@ await hass.services.async_call("climate", "set_temperature", {...})
 # Notifications
 await hass.services.async_call("notify", service, {"message": "..."})
 ```
+
+#### async_call_later callback rule
+
+Any callback passed to `async_call_later` that calls `hass.async_create_task` MUST be decorated with `@callback`. Bare lambdas and undecorated `def` wrappers skip the decorator and cause HA to emit a thread-safety WARNING on every invocation (`"calls hass.async_create_task from a thread other than the event loop"`). The correct pattern:
+```python
+@callback
+def _schedule_work(_now: Any) -> None:
+    self.hass.async_create_task(_do_async_work())
+async_call_later(self.hass, delay, _schedule_work)
+```
+Never: `async_call_later(self.hass, delay, lambda _now: self.hass.async_create_task(_do_async_work()))`. `callback` is imported from `homeassistant.core` and is already present in `automation.py` and `coordinator.py`. Issue #325 fixed four violations of this rule.
 
 #### coordinator.config vs coordinator.config_entry
 

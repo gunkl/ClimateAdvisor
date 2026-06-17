@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.25"
+VERSION = "0.4.26"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.26": [
+        "Chart Vent bar: the forecast (right of 'Now') now renders green-only (ventilation"
+        " armed/planned) — blue is reserved for live/historical fan that is physically running,"
+        " removing the confusing green→blue flip at 'Now'. Removed the two Vent legend keys.",
+    ],
     "0.4.25": [
         "Fix #330: The Activity Report's per-event table is now built deterministically in Python"
         " (no longer LLM-generated). The Settings column is always populated on band/setback rows"

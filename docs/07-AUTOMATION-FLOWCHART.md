@@ -21,6 +21,7 @@ For temperature formulas and threshold values see [docs/08-COMPUTATION-REFERENCE
 | Where is the full Tier 3 spec for grace periods — state transitions, timer lifecycle, invariants, HA-restart behavior? | The Territory spec covers both grace types, the 12-row transition table, pre-pause mode storage/restoration, occupancy interaction, and error conditions including sensor-unavailable-during-pause. | [Grace Period State Machine — Territory Spec](grace-periods-spec.md) |
 | Where is the full Tier 3 spec for the occupancy dispatch state machine — priority, handlers, setback formulas, persistence? | The Territory spec covers priority resolution (GUEST > VACATION > HOME/AWAY), all four toggle-entity handlers, the 7-row state transition table, setback formula derivation, and the interaction with manual override and grace periods. | [Occupancy Dispatch State Machine — Territory Spec](occupancy-dispatch-spec.md) |
 | What is the decision sequence inside apply_classification() for a warm or mild day, and when does the ODE ceiling guard fire? | Two sequential guards run before the HVAC-off action: (1) comfort-floor guard fires if indoor < comfort_heat; (2) ODE ceiling guard fires if a predicted breach is within the computed lead time and outdoor > indoor. Stateless — re-evaluated every 30-min cycle. | [§13. Warm-Day apply_classification() Guard Sequence](07-AUTOMATION-FLOWCHART.md#13-warm-day-apply_classification-guard-sequence) |
+| What decision does the startup coalesce make for a physically running fan, and what triggers the thermostatic fast loop? | Coalesce reads live thermostat `fan_mode`/`hvac_action` and chooses adopt-on (nat-vent eligible), turn-off, or no-fan. The thermostatic loop fires on every indoor or outdoor temp change (two new listeners + backstop timer), not only on 30-min polls. | [§14. Fan Startup Reconciliation and Thermostatic Loop (Issue #327)](07-AUTOMATION-FLOWCHART.md#14-fan-startup-reconciliation-and-thermostatic-loop-issue-327) |
 
 ## 1. Main Decision Loop (30-Minute Poll)
 
@@ -491,4 +492,65 @@ For the complete guard condition table, lead-time formula derivation, and bridge
 
 ---
 
-*Last Updated: 2026-05-11*
+---
+
+## 14. Fan Startup Reconciliation and Thermostatic Loop (Issue #327)
+
+### 14a. Startup Coalesce Fan Reconcile (`reconcile_fan_on_startup`)
+
+After the existing nat-vent / `apply_classification` logic in `_do_startup_coalesce`, a fan reconcile step reads the thermostat's live `fan_mode` and `hvac_action` and decides the correct ownership state. `_fan_override_active` is always cleared before this step (clean slate — §9e Fix A).
+
+```mermaid
+flowchart TD
+    A[_do_startup_coalesce\nnat-vent + apply_classification done] --> B[reconcile_fan_on_startup\nRead live fan_mode / hvac_action]
+    B --> C{Fan physically running?}
+    C -->|No| D[decision = no-fan\nno action needed]
+    C -->|Yes| E{Nat-vent eligible?\noutdoor < indoor\nAND gate passes\nAND sensors open}
+    E -->|Yes| F[decision = adopt-on\n_fan_active = True\n_natural_vent_active = True\nStart thermostatic loop]
+    E -->|No| G{Fan archetype?}
+    G -->|FAN_MODE_HVAC| H[decision = turn-off\nset_fan_mode auto]
+    G -->|FAN_MODE_WHOLE_HOUSE or BOTH| I[decision = turn-off\nfan turn_off\nRestore HVAC from _pre_fan_hvac_mode]
+    D --> J[Log: Fan reconcile: ... decision=no-fan ...]
+    F --> J
+    H --> J
+    I --> J
+```
+
+**Key invariants:**
+- The coalesce window (`_first_run = True`, 5-minute settling) suppresses override detection — the turn-off command is not misread as a user manual action.
+- Log line `Fan reconcile: thermostat fan_mode=<x> hvac_action=<y> nat_vent_eligible=<bool> decision=<adopt-on|turn-off|no-fan> archetype=<mode>` is the post-deploy validation grep target.
+
+### 14b. Thermostatic Fan Loop Trigger Sources
+
+`fan_thermostat_check(indoor, outdoor, trigger)` fires on every temperature change from three independent sources simultaneously, whenever `_fan_active=True`.
+
+```mermaid
+flowchart TD
+    A1[Indoor temp change\nvia thermostat current_temperature\nexisting _async_thermostat_changed seam] -->|trigger=indoor| T
+    A2[Indoor temp change\nvia indoor_temp_entity sensor\nnew state listener on indoor_temp_entity] -->|trigger=indoor| T
+    A3[Outdoor temp change\nvia outdoor_temp_entity sensor\nnew state listener — did not exist before #327] -->|trigger=outdoor| T
+    A4[Backstop timer\nself-rescheduling, started in _activate_fan\ncancelled in _deactivate_fan + cleanup] -->|trigger=timer| T
+
+    T[fan_thermostat_check\nindoor, outdoor, trigger]
+    T --> E1{outdoor >= indoor\n1°F equality kills dead-spot}
+    E1 -->|Yes| X1[Fan off\nnat_vent_outdoor_rise_exit if nat-vent session\ndeactivate otherwise]
+    E1 -->|No| E2{indoor <= comfort_heat?}
+    E2 -->|Yes| X2[Comfort floor exit\nHVAC heat restored at comfort_heat]
+    E2 -->|No| E3{outdoor > comfort_cool + delta?}
+    E3 -->|Yes| X3[Ceiling exceeded\nFan off, enter paused state]
+    E3 -->|No| K[Keep running\nLog: Fan thermostat check: ... decision=keep]
+    X1 --> L[Log: Fan thermostat check: ... decision=stop:outdoor_rise]
+    X2 --> L2[Log: Fan thermostat check: ... decision=stop:comfort_floor]
+    X3 --> L3[Log: Fan thermostat check: ... decision=stop:ceiling]
+```
+
+**Contrast with pre-#327 behavior:** Before Issue #327, nat-vent used `nat_vent_temperature_check` which fired only on thermostat temperature ticks, checked comfort-floor and cycling but not `outdoor ≥ indoor`, and had no outdoor sensor listener. The outdoor temperature rise was invisible until the next 30-minute coordinator poll — a gap of up to 29 minutes during which the fan could run with warmer outdoor air entering the home.
+
+**Listener registration:** On coordinator setup, one INFO line confirms all three entity listeners are active:
+```
+Fan control: watching indoor=<entity> outdoor=<entity> thermostat=<entity> for thermostatic re-eval
+```
+
+---
+
+*Last Updated: 2026-06-16*

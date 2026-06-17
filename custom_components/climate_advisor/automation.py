@@ -444,6 +444,11 @@ class AutomationEngine:
         self._fan_min_runtime_active: bool = False  # True if THIS feature activated the fan
         self._fan_min_cycle_cancel: Any | None = None  # cancel token for pending on/off timer
 
+        # Thermostatic fan backstop timer (Issue #327): self-rescheduling timer started in
+        # _activate_fan, cancelled in _deactivate_fan + cleanup. Ensures fan_thermostat_check
+        # fires even when temperature sensors update slowly.
+        self._fan_thermo_cancel: Any | None = None
+
         # Event log callback — set by coordinator after construction
         self._emit_event_callback: Any | None = None
 
@@ -622,21 +627,30 @@ class AutomationEngine:
             return 0.0
 
     def handle_fan_manual_override(self) -> None:
-        """Handle a manual fan state change — sets fan override flag + grace."""
+        """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
+
+        Idempotent: safe to call even if an override is already active (re-stamps the
+        time and restarts the grace period so the timer is always fresh).
+        """
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_time = dt_util.now().isoformat()
-        _LOGGER.warning(
-            "Fan manual override activated at %s",
+        _LOGGER.info(
+            "Fan override: set — manual fan change detected, override active since %s, grace period starting",
             self._fan_override_time,
         )
         self._start_grace_period("manual", trigger="fan_manual_override")
 
     def clear_fan_override(self) -> None:
-        """Clear the fan override flag (called at transition points)."""
+        """Clear the fan override flag (called at transition points, Issue #327).
+
+        Idempotent: no-op if no override is currently active.
+        After clearing, restarts the min-runtime cycle that was suspended when the
+        override was set.
+        """
         if self._fan_override_active:
             _LOGGER.info(
-                "Clearing fan manual override (since %s)",
+                "Fan override: cleared — override active since %s, resuming CA fan control",
                 self._fan_override_time,
             )
             self._fan_override_active = False
@@ -2143,6 +2157,208 @@ class AutomationEngine:
                     },
                 )
 
+    async def fan_thermostat_check(
+        self,
+        *,
+        indoor: float | None,
+        outdoor: float | None,
+        trigger: str,
+    ) -> None:
+        """Thermostatic safety check for any CA-owned running fan (Issue #327).
+
+        Called on every indoor OR outdoor temperature change and by the 5-minute backstop
+        timer.  Deactivates the fan when free-cooling is gone (outdoor >= indoor with the
+        configured hysteresis margin) or when the comfort target has been reached.
+
+        Design: idempotent, cheap, safe to call at high frequency.  No-op when no CA fan
+        is active or when the user has a manual override in effect.
+
+        Args:
+            indoor:  Current indoor temperature in °F (None = unavailable).
+            outdoor: Current outdoor temperature in °F (None = unavailable).
+            trigger: Caller label for the DEBUG log ("indoor", "outdoor", "timer", etc.).
+        """
+        ca_fan_active = self._fan_active or self._natural_vent_active
+        if not ca_fan_active:
+            _LOGGER.debug(
+                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
+                trigger,
+                f"{indoor:.1f}" if indoor is not None else "unavailable",
+                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                False,
+            )
+            return
+
+        if self._fan_override_active:
+            _LOGGER.debug(
+                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
+                trigger,
+                f"{indoor:.1f}" if indoor is not None else "unavailable",
+                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                True,
+            )
+            return
+
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+
+        # --- Check 1: free-cooling direction guard ---
+        # Free cooling requires outdoor cooler than indoor. Once outdoor >= indoor the
+        # airflow no longer cools (neutral or reversed) — stop. NOTE: NO hysteresis on the
+        # STOP side; the anti-flap hysteresis lives on nat-vent RE-activation
+        # (check_natural_vent_conditions). Subtracting it here would kill free cooling ~1°F
+        # early — e.g. stop at outdoor 71 / indoor 72 while a favorable gradient remains.
+        if outdoor is not None and indoor is not None and outdoor >= indoor:
+            if self._natural_vent_active:
+                # Route through the canonical nat-vent outdoor-rise exit so the event
+                # taxonomy + pause bookkeeping match check_natural_vent_conditions (~line 2004).
+                stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F — airflow reversed"
+                _LOGGER.debug(
+                    "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
+                    trigger,
+                    f"{indoor:.1f}",
+                    f"{outdoor:.1f}",
+                    True,
+                    f"stop:{stop_reason}",
+                )
+                self._natural_vent_active = False
+                self._paused_by_door = True
+                self._nat_vent_outdoor_exit_time = dt_util.now()
+                await self._deactivate_fan(reason=f"nat vent exit (fast loop): {stop_reason}")
+                if self._emit_event_callback:
+                    self._emit_event_callback("nat_vent_outdoor_rise_exit", {"outdoor": outdoor, "indoor": indoor})
+                return
+            stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F (free cooling gone)"
+            _LOGGER.debug(
+                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
+                trigger,
+                f"{indoor:.1f}",
+                f"{outdoor:.1f}",
+                True,
+                f"stop:{stop_reason}",
+            )
+            await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
+            return
+
+        # --- Check 2: cooled to target ---
+        # A CA fan only runs while outdoor < indoor (Check 1 stops it otherwise), so it is ALWAYS
+        # cooling. Stop once indoor has cooled to the comfort floor, to avoid overcooling. Do NOT
+        # stop when indoor >= comfort_cool: for a cooling fan, being above the ceiling means "keep
+        # cooling" — the inverse would shut the fan off exactly when the home is too warm and needs
+        # it most (Issue #327 — caught by the fan_fast_stop_on_outdoor_rise scenario).
+        if indoor is not None and indoor <= comfort_heat:
+            stop_reason = f"indoor {indoor:.1f}°F ≤ comfort_heat {comfort_heat:.1f}°F (cooled to floor)"
+            _LOGGER.debug(
+                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
+                trigger,
+                f"{indoor:.1f}",
+                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                True,
+                f"stop:{stop_reason}",
+            )
+            if self._natural_vent_active:
+                self._natural_vent_active = False
+            await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
+            return
+
+        _LOGGER.debug(
+            "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
+            trigger,
+            f"{indoor:.1f}" if indoor is not None else "unavailable",
+            f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+            True,
+        )
+
+    async def reconcile_fan_on_startup(
+        self,
+        *,
+        indoor: float | None,
+        outdoor: float | None,
+        thermostat_fan_running: bool,
+        any_sensor_open: bool,
+    ) -> None:
+        """Reconcile fan state on HA startup / coalesce window (Issue #327).
+
+        Called by the coordinator's _do_startup_coalesce after classification runs.
+        Ensures a running fan always has an explicit owner — never silent limbo.
+
+        Decision logic:
+        - thermostat_fan_running False → ``no-fan``: ensure all fan flags are clean.
+        - nat-vent eligible (any_sensor_open AND outdoor < indoor AND nat-vent gate passes)
+          → ``adopt-on``: set _fan_active=True, _natural_vent_active=True, start backstop.
+        - else fan is running but not warranted → ``turn-off``: deactivate per archetype.
+
+        Args:
+            indoor:               Current indoor temperature in °F (None = unavailable).
+            outdoor:              Current outdoor temperature in °F (None = unavailable).
+            thermostat_fan_running: True when the thermostat reports the fan is on
+                                    (fan_mode=="on" or hvac_action=="fan").
+            any_sensor_open:      True when at least one door/window sensor is open.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        archetype = fan_mode
+
+        if not thermostat_fan_running:
+            # Fan is off — ensure CA flags are clean (defence in depth)
+            self._fan_active = False
+            self._fan_on_since = None
+            self._natural_vent_active = False
+            decision = "no-fan"
+            _LOGGER.info(
+                "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s",
+                thermostat_fan_running,
+                False,
+                decision,
+                archetype,
+            )
+            return
+
+        # Evaluate nat-vent eligibility
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+        comfort_cool = float(self.config.get("comfort_cool", 75))
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        nat_vent_threshold = comfort_cool + nat_vent_delta
+
+        nat_vent_eligible = (
+            fan_mode != FAN_MODE_DISABLED
+            and any_sensor_open
+            and outdoor is not None
+            and indoor is not None
+            and outdoor < indoor - hysteresis  # outdoor must be genuinely cooler
+            and indoor > comfort_heat  # indoor above comfort floor
+            and outdoor < nat_vent_threshold  # outdoor within acceptable ceiling
+        )
+
+        if nat_vent_eligible:
+            # Adopt the running fan as CA-owned nat-vent
+            decision = "adopt-on"
+            self._fan_active = True
+            self._fan_on_since = dt_util.now().isoformat()
+            self._natural_vent_active = True
+            # Start the thermostatic backstop now that CA owns this fan session
+            self._start_fan_thermo_backstop()
+            _LOGGER.info(
+                "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s",
+                thermostat_fan_running,
+                nat_vent_eligible,
+                decision,
+                archetype,
+            )
+        else:
+            # Fan running but nat-vent not warranted — turn it off
+            decision = "turn-off"
+            _LOGGER.info(
+                "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s",
+                thermostat_fan_running,
+                nat_vent_eligible,
+                decision,
+                archetype,
+            )
+            # Ensure flags are correct before deactivating so _deactivate_fan runs
+            self._fan_active = True  # let _deactivate_fan see an owned fan
+            self._natural_vent_active = False
+            await self._deactivate_fan(reason="startup reconcile — fan running without CA warrant")
+
     async def handle_manual_override_during_pause(
         self,
         *,
@@ -2915,8 +3131,46 @@ class AutomationEngine:
                 self.hass.async_create_task(_do_verify_after_fan_on())
 
             async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_on)
+
+            # Issue #327: thermostatic backstop timer — fires every 5 min while the fan
+            # is CA-owned; calls fan_thermostat_check so a slow-updating outdoor sensor
+            # cannot leave the fan running indefinitely between state-listener events.
+            self._start_fan_thermo_backstop()
         finally:
             self._fan_command_pending = False
+
+    def _start_fan_thermo_backstop(self) -> None:
+        """Start (or restart) the 5-minute thermostatic backstop timer (Issue #327).
+
+        The timer is self-rescheduling: each fire re-schedules the next tick before
+        calling fan_thermostat_check, so it runs continuously while the fan is active.
+        Cancelled by _deactivate_fan and cleanup.
+        """
+        if self._fan_thermo_cancel:
+            self._fan_thermo_cancel()
+            self._fan_thermo_cancel = None
+
+        @callback
+        def _thermo_tick(_now: Any) -> None:
+            self._fan_thermo_cancel = None
+            self.hass.async_create_task(self._thermo_backstop_task())
+
+        self._fan_thermo_cancel = async_call_later(self.hass, 5 * 60, _thermo_tick)
+
+    async def _thermo_backstop_task(self) -> None:
+        """Execute a thermostatic check and reschedule the backstop (Issue #327)."""
+        indoor = self._get_indoor_temp_f()
+        outdoor = self._last_outdoor_temp
+        await self.fan_thermostat_check(indoor=indoor, outdoor=outdoor, trigger="timer")
+        # Re-arm only if the fan is still active after the check
+        if self._fan_active or self._natural_vent_active:
+            self._start_fan_thermo_backstop()
+
+    def _cancel_fan_thermo_backstop(self) -> None:
+        """Cancel the thermostatic backstop timer (Issue #327)."""
+        if self._fan_thermo_cancel:
+            self._fan_thermo_cancel()
+            self._fan_thermo_cancel = None
 
     async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True) -> None:
         """Deactivate fan based on configured fan_mode.
@@ -2971,6 +3225,8 @@ class AutomationEngine:
 
             self._fan_active = False
             self._fan_on_since = None
+            # Issue #327: cancel the thermostatic backstop timer when fan deactivates.
+            self._cancel_fan_thermo_backstop()
             self._record_action("Fan deactivated", reason)
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
@@ -3063,8 +3319,20 @@ class AutomationEngine:
                 ECONOMIZER_EVENING_START_HOUR <= current_hour < ECONOMIZER_EVENING_END_HOUR
             )
 
-        # Conditions for economizer eligibility
-        eligible = windows_physically_open and outdoor_temp <= comfort_cool + delta and in_window
+        # Conditions for economizer eligibility.
+        # Issue #327: added outdoor_temp < indoor_temp free-cooling-direction guard, mirroring
+        # nat-vent's gate at check_natural_vent_conditions. Without this guard the economizer
+        # could start the fan while it is warmer outside than in (e.g. on a hot evening), pulling
+        # warmer outdoor air into the house and working against comfort.
+        direction_ok = indoor_temp is None or outdoor_temp < indoor_temp
+        if not direction_ok:
+            _LOGGER.debug(
+                "Economizer gate: direction rejected — outdoor %.1f°F >= indoor %.1f°F"
+                " (free-cooling direction required)",
+                outdoor_temp,
+                indoor_temp if indoor_temp is not None else 0.0,
+            )
+        eligible = windows_physically_open and outdoor_temp <= comfort_cool + delta and in_window and direction_ok
 
         if not eligible:
             if self._economizer_active:
@@ -3178,7 +3446,8 @@ class AutomationEngine:
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore automation state from persisted data.
 
-        Design decision: HA restart = clean slate for override, grace, AND pause state.
+        Design decision: HA restart = clean slate for override, grace, pause, AND fan
+        override state (Issue #327).
         - Manual overrides and grace periods are user-interactive; restoring them would
           silently suppress CA automation without the user knowing the system restarted.
         - Pause state (_paused_by_door / _pre_pause_mode) is also cleared: the
@@ -3187,7 +3456,16 @@ class AutomationEngine:
           (default 5 min). A brief HVAC re-arm is preferable to sitting paused
           indefinitely if cloud weather/thermostat services are slow to reconnect
           (Issue #263/#306).
-        - Fan state and pre-condition achievement ARE restored (see below).
+        - Fan override state (_fan_override_active / _fan_override_time) is NOW cleared
+          on restart (Issue #327): restoring it with no grace-timer reschedule left the
+          fan in indefinite limbo — both _activate_fan and _deactivate_fan skipped forever.
+          Restart reclaims fan control; reconcile_fan_on_startup() then decides whether to
+          adopt (nat-vent) or turn the fan off.
+        - _fan_active / _fan_on_since / _pre_fan_hvac_mode are still restored as hints
+          for reconcile_fan_on_startup(); the coordinator's startup coalesce makes the
+          final decision.
+        - _natural_vent_active is NOT persisted and resets to False on restart; the
+          reconcile step re-evaluates whether nat-vent conditions still hold.
         """
         # _paused_by_door and _pre_pause_mode are intentionally NOT restored here.
         # __init__ already sets both to their clean defaults (False / None).
@@ -3198,11 +3476,10 @@ class AutomationEngine:
         self._last_action_reason = state.get("last_action_reason")
         self._fan_active = state.get("fan_active", False)
         self._fan_on_since = state.get("fan_on_since")
-        self._fan_override_active = state.get("fan_override_active", False)
-        self._fan_override_time = state.get("fan_override_time")
         self._fan_min_runtime_active = state.get("fan_min_runtime_active", False)
         self._pre_fan_hvac_mode = state.get("pre_fan_hvac_mode")
-        # _fan_min_cycle_cancel is not serializable; cycle restarts fresh from coordinator startup
+        # _fan_min_cycle_cancel / _fan_thermo_cancel are not serializable; timers restart
+        # fresh from coordinator startup / reconcile_fan_on_startup().
         last_notified = state.get("last_welcome_home_notified")
         if last_notified:
             try:
@@ -3211,9 +3488,9 @@ class AutomationEngine:
                 self._last_welcome_home_notified = None
         else:
             self._last_welcome_home_notified = None
-        # Clean slate on restart: override and grace state are always cleared.
-        # The user is back in front of a fresh system — carry-over would mean
-        # CA silently blocks automation without any visible sign of an override.
+        # Clean slate on restart: override, grace, and fan-override state are all cleared.
+        # The user is back in front of a fresh system — carry-over would mean CA silently
+        # blocks automation without any visible sign of an override.
         self._manual_override_active = False
         self._manual_override_mode = None
         self._manual_override_time = None
@@ -3225,6 +3502,14 @@ class AutomationEngine:
         self._grace_end_time = None
         self._grace_duration_seconds = None
         self._last_resume_source = None
+        # Issue #327: fan override cleared on restart — no grace timer to reschedule.
+        # reconcile_fan_on_startup() runs shortly after and decides adopt-on / turn-off.
+        self._fan_override_active = False
+        self._fan_override_time = None
+        _LOGGER.info(
+            "Fan override: restart clean-slate — _fan_override_active and _fan_override_time "
+            "cleared (Issue #327); reconcile will decide fan disposition"
+        )
         # Issue #295: pre-cool achievement gate — restored so a restart mid-day after
         # the home reached the pre-cool target does not re-arm the lower ceiling offset.
         self._pre_condition_achieved = state.get("pre_condition_achieved", False)
@@ -3232,7 +3517,7 @@ class AutomationEngine:
         _LOGGER.info(
             "Restored automation state: last_action=%s, fan_active=%s, fan_override=%s, "
             "precool_achieved=%s "
-            "(override/grace/pause state cleared — clean slate on restart per Issue #263)",
+            "(override/grace/pause/fan-override state cleared — clean slate on restart per Issue #263/#327)",
             self._last_action_reason,
             self._fan_active,
             self._fan_override_active,
@@ -3282,6 +3567,7 @@ class AutomationEngine:
         """Remove all active listeners and cancel pending timers."""
         self._cancel_grace_timers()
         self._stop_fan_min_runtime_cycles()
+        self._cancel_fan_thermo_backstop()  # Issue #327
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None

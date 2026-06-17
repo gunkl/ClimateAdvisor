@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.23"
+VERSION = "0.4.24"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.24": [
+        "Fix #327: The HVAC/whole-house fan can no longer run indefinitely. A thermostatic fast"
+        " loop now re-checks on every indoor OR outdoor temperature change and stops the fan the"
+        " moment outdoor ≥ indoor (free cooling gone) or the home has cooled to the comfort floor —"
+        " no more waiting up to 30 minutes. On restart, startup coalescing reconciles a running fan"
+        " (adopt as nat-vent if eligible, otherwise turn it off), and a manual fan change is treated"
+        " as a timed override that is reclaimed on expiry or restart. The economizer also no longer"
+        " starts the fan when it is warmer outside than inside.",
+    ],
     "0.4.23": [
         "Fix #326: Pre-cool now surfaces in the Next Automation card (next to bedtime setback,"
         " morning wake-up, etc.) instead of as a footnote under Status. Removed the hardcoded"
@@ -422,6 +431,35 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    327: {
+        "version_fixed": "0.4.24",
+        "title": "Fan runs indefinitely — thermostatic fast loop, startup reconciliation, economizer direction guard",
+        "scope_covered": [
+            "restore_state clears _fan_override_active/_fan_override_time on restart (clean slate,"
+            " matching HVAC override) so a restart reclaims fan control instead of perpetuating a"
+            " stale override with no grace timer (permanent fan lockout)",
+            "_do_startup_coalesce calls reconcile_fan_on_startup: reads live thermostat"
+            " fan_mode/hvac_action and decides adopt-on (nat-vent eligible) / turn-off / no-fan;"
+            " logs 'Fan reconcile:' INFO",
+            "fan_thermostat_check(indoor, outdoor, trigger) re-evaluates a CA-owned running fan on"
+            " every indoor temp change (thermostat seam + indoor_temp_entity listener) and every"
+            " outdoor temp change (new outdoor_temp_entity listener) + 5-min backstop timer;"
+            " stops at outdoor >= indoor (routed through nat_vent_outdoor_rise_exit for a nat-vent"
+            " session) or when cooled to the comfort floor; logs 'Fan thermostat check:' DEBUG",
+            "check_window_cooling_opportunity gains an outdoor < indoor free-cooling-direction"
+            " guard, mirroring nat-vent",
+            "coordinator logs 'Fan control: watching indoor=… outdoor=… thermostat=…' at listener"
+            " registration (post-deploy validation signal)",
+        ],
+        "scope_not_covered": [
+            "No JS-level dashboard test for fan status rendering",
+            "Fast indoor path relies on the thermostat reporting current_temperature as an"
+            " attribute; thermostats that do not populate it fall back to the outdoor listener +"
+            " backstop timer",
+            "End-to-end restart/coalesce reconciliation is exercised via unit tests; the Tier-A"
+            " harness does not restart the engine",
+        ],
+    },
     147: {
         "version_fixed": "0.3.46",
         "title": "Learned solar phase offset + engine visibility",

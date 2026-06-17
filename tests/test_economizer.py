@@ -172,6 +172,51 @@ class TestEconomizerCoolDown:
 
 
 # ---------------------------------------------------------------------------
+# Issue #327: free-cooling-direction guard (outdoor < indoor required)
+# ---------------------------------------------------------------------------
+
+
+class TestEconomizerDirectionGuard:
+    """Issue #327: the economizer must not run the fan when outdoor is not cooler than
+    indoor — pulling in air that is not cooler gives no free cooling. Mirrors nat-vent's
+    outdoor<indoor gate. indoor/outdoor are both below comfort_cool here so the
+    comfort_cool+delta threshold is satisfied and only the direction guard can block."""
+
+    def test_direction_guard_blocks_when_outdoor_not_cooler(self):
+        engine = _make_automation_engine()
+        engine._current_classification = _make_hot_classification()
+
+        result = asyncio.run(
+            engine.check_window_cooling_opportunity(
+                outdoor_temp=74.5,  # >= indoor; still <= comfort_cool(75)+delta
+                indoor_temp=74.0,
+                windows_physically_open=True,
+                current_hour=18,  # evening window
+            )
+        )
+
+        assert result is False
+        assert engine._economizer_active is False
+
+    def test_direction_guard_allows_when_outdoor_cooler(self):
+        """Control: same setup but outdoor < indoor → economizer still eligible."""
+        engine = _make_automation_engine()
+        engine._current_classification = _make_hot_classification()
+
+        result = asyncio.run(
+            engine.check_window_cooling_opportunity(
+                outdoor_temp=72.0,
+                indoor_temp=74.0,
+                windows_physically_open=True,
+                current_hour=18,
+            )
+        )
+
+        assert result is True
+        assert engine._economizer_active is True
+
+
+# ---------------------------------------------------------------------------
 # Phase 2: Maintain (indoor at or below comfort → AC off)
 # ---------------------------------------------------------------------------
 

@@ -190,6 +190,9 @@ def _make_coalesce_coord_stub(**overrides):
     ae._fan_override_active = False
     ae.handle_door_window_open = AsyncMock()
     ae.apply_classification = AsyncMock()
+    # Issue #327: _do_startup_coalesce now awaits these — must be AsyncMock, not bare MagicMock.
+    ae.reconcile_fan_on_startup = AsyncMock()
+    ae.fan_thermostat_check = AsyncMock()
     coord.automation_engine = ae
 
     coord._current_classification = _make_classification()
@@ -503,6 +506,19 @@ class TestStartupCoalesceDoCoalesce:
         asyncio.run(coord._do_startup_coalesce())
 
         assert coord._startup_coalesce_active is False
+
+    def test_reconcile_fan_on_startup_called(self):
+        """Issue #327: coalesce awaits reconcile_fan_on_startup with thermostat-fan + sensor state."""
+        coord = _make_coalesce_coord_stub()
+
+        asyncio.run(coord._do_startup_coalesce())
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_awaited_once()
+        kwargs = coord.automation_engine.reconcile_fan_on_startup.await_args.kwargs
+        assert "thermostat_fan_running" in kwargs
+        assert "any_sensor_open" in kwargs
+        assert "indoor" in kwargs
+        assert "outdoor" in kwargs
 
     def test_sensors_open_count_in_event(self):
         """sensors_open_count reflects the number of open sensors at coalesce time."""

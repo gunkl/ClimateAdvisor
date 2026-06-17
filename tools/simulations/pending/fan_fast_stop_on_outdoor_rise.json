@@ -1,0 +1,87 @@
+{
+  "name": "fan_fast_stop_on_outdoor_rise",
+  "description": "Issue #327: the thermostatic fast loop keeps the fan running while outdoor stays below indoor (no premature stop), then stops it the moment outdoor crosses indoor on a temperature update — without waiting for the 30-minute cycle.",
+  "source": "synthetic",
+  "issue": 327,
+  "notes": [
+    "Occupant outcome: the fan provides free cooling for as long as outdoor is cooler, and shuts off promptly when it would otherwise pull warm air in.",
+    "Premature-stop guard: at 08:30 outdoor=73F is 2F below indoor=75F — the fan MUST keep running. The original buggy Check-1 (outdoor >= indoor - hysteresis) would have stopped it ~1F early.",
+    "Fast stop: at 09:00 outdoor=74.5F >= indoor=74F — nat_vent_outdoor_rise_exit fires on the temp_update, not on the next 30-min poll.",
+    "Would FAIL if #327 were reverted: the old code only re-checked outdoor>indoor on the 30-min cycle, so the exit would not fire at the 09:00 temp_update."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house",
+    "fan_min_runtime_per_hour": 0
+  },
+  "events": [
+    {
+      "time": "2026-06-12T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 66.0,
+      "note": "Morning: outdoor much cooler than indoor — free cooling available."
+    },
+    {
+      "time": "2026-06-12T06:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild classification: hvac_mode=off."
+    },
+    {
+      "time": "2026-06-12T08:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.kitchen_window",
+      "note": "Window opens; outdoor=66F < indoor=76F — nat-vent activates, whole-house fan on."
+    },
+    {
+      "time": "2026-06-12T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 73.0,
+      "note": "Outdoor warmed to 73F but is still 2F below indoor=75F — favorable gradient remains. Fan MUST keep running (premature-stop guard)."
+    },
+    {
+      "time": "2026-06-12T09:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 74.5,
+      "note": "Outdoor crosses indoor (74.5F >= 74F) — the fast loop exits nat-vent on this temp_update."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-12T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Mild classification applied with hvac_mode=off."
+    },
+    {
+      "at": "2026-06-12T08:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opened with outdoor=66F < indoor=76F — nat-vent activates and the whole-house fan turns on."
+    },
+    {
+      "at": "2026-06-12T08:30:00",
+      "expect": "natural_ventilation",
+      "reason": "outdoor=73F is still below indoor=75F — the thermostatic fast loop keeps the fan running (no premature stop). #327 stop fires only at outdoor >= indoor."
+    },
+    {
+      "at": "2026-06-12T09:00:00",
+      "expect": "nat_vent_outdoor_rise_exit",
+      "reason": "outdoor=74.5F >= indoor=74F on a temp_update — the fast loop exits nat-vent immediately, not waiting for the 30-min cycle."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Thermostatic fast loop keeps the fan while outdoor < indoor and stops it promptly when outdoor crosses indoor (Issue #327)",
+    "observed_behavior": "natural_ventilation on open → still venting at 08:30 (outdoor 73 < indoor 75) → nat_vent_outdoor_rise_exit at 09:00 (outdoor 74.5 >= indoor 74) on the temp_update",
+    "expected_behavior": "Fan runs while free cooling is available and exits the moment outdoor >= indoor, re-evaluated on every temperature change"
+  }
+}

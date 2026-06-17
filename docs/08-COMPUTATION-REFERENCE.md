@@ -47,6 +47,7 @@ The automation logic table and all threshold constants in this document are expr
 | What notification does the user receive when PATH B (transient thermostat adjustment) fires (Issue #200)? | "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." No grace period starts; automation resumes immediately. | [§11 PATH B Notification](08-COMPUTATION-REFERENCE.md#path-b-notification--transient-thermostat-adjustment-issue-200) |
 | What happens if the user changes to a different HVAC mode while a grace period is already active (Issue #201)? | The current override and grace are cleared, and a fresh 10-minute confirmation window starts for the new mode. Latest user action wins. | [§11 Second Override During Active Grace](08-COMPUTATION-REFERENCE.md#second-override-during-active-grace-issue-201) |
 | How does `_run_solar_phase_chart_log_fit()` stay current without re-scanning months of history on every cycle (Issue #310)? | Two-tier schedule: one-shot backfill (30-day lookback, `backfill_done` flag) runs once on fresh install; periodic daily re-fit (2-day lookback, `_last_solar_phase_fit_date` gate) runs at most once per calendar day thereafter. | [§5e-v Two-tier fit scheduling](08-COMPUTATION-REFERENCE.md#two-tier-fit-scheduling-issue-310) |
+| What guarantees that a running fan always has an owner after Issue #327? | Restart now clears `_fan_override_active` for a clean slate; `_do_startup_coalesce` reconciles the physical fan state (adopt-on / turn-off / no-fan); `fan_thermostat_check()` re-evaluates on every indoor or outdoor temp change; the economizer gains an `outdoor < indoor` direction guard. "Running (untracked)" remains only as a brief transient, not an indefinite limbo. | [§9e Thermostatic Fan Loop and Startup Reconciliation (Issue #327)](08-COMPUTATION-REFERENCE.md#9e-thermostatic-fan-loop-and-startup-reconciliation-issue-327) |
 
 ## 1. Day Classification
 
@@ -1100,8 +1101,11 @@ All of the following must be true simultaneously:
 |---|---|
 | Day type | `day_type == hot` |
 | Windows open | `windows_physically_open == True` |
-| Outdoor temp | `outdoor_temp <= comfort_cool + ECONOMIZER_TEMP_DELTA` = `outdoor_temp <= 78°F` (defaults) |
+| **Free-cooling direction** | **`outdoor_temp < indoor_temp`** (Issue #327) — outdoor air must be cooler than indoor; if outdoor ≥ indoor the fan would heat the house rather than cool it |
+| Outdoor temp ceiling | `outdoor_temp <= comfort_cool + ECONOMIZER_TEMP_DELTA` = `outdoor_temp <= 78°F` (defaults) |
 | Time window | 6:00–9:00 AM **or** 5:00 PM–midnight |
+
+The free-cooling-direction guard (Issue #327) mirrors the identical guard already required by nat-vent activation (§17). It prevents evening activation on hot days when outdoor temperatures remain above indoor well into the evening — a scenario where the economizer would work against comfort rather than assist it.
 
 ### Phase Behavior
 
@@ -1323,6 +1327,118 @@ The sensor also exposes these attributes:
 
 **HVAC-off + fan-on (fan-only circulation):** When the economizer enters the maintain phase, HVAC mode is set to `off` but `climate.set_fan_mode: on` is called separately. This is the intended "fan-only circulation" mode — most thermostats support running the fan for air circulation independently of heating or cooling. A `DEBUG`-level log entry is emitted whenever the integration activates the HVAC fan while the thermostat reports `hvac_mode = off`.
 
+**`running (untracked)` after Issue #327:** With the restart reconciliation and thermostatic loop in place (§9e), `"running (untracked)"` is expected only as a brief transient in the seconds between HA startup and the completion of the coalesce reconciliation step. Any fan that is still running after the reconcile window is either adopted as CA nat-vent or turned off. A persistently `"running (untracked)"` sensor state after the startup window has elapsed is a signal that the coalesce step did not run (e.g., coordinator setup failed). See `Fan reconcile:` log lines.
+
+### 9e. Thermostatic Fan Loop and Startup Reconciliation (Issue #327)
+
+#### The Principle: a Running Fan Always Has an Owner
+
+Prior to Issue #327, four code paths could leave a fan running indefinitely with no CA owner and no shutdown mechanism:
+
+1. `_compute_fan_status()` returned `"running (untracked)"` but no code path acted on it — the string was used only to suppress unrelated warnings.
+2. Every shutdown path was gated on ownership (`_deactivate_fan()` requires `_fan_active=True`; nat-vent exit requires `_natural_vent_active=True`), so an unowned fan could never be turned off.
+3. `restore_state()` on restart preserved `_fan_override_active=True` without rescheduling the grace-period expiry timer, leaving the override permanent and both `_activate_fan()` and `_deactivate_fan()` permanently skipped.
+4. The only fast-loop temperature check ran on nat-vent only; the outdoor sensor had no state listener, so an outdoor temperature rise was invisible until the next 30-minute coordinator poll.
+
+The occupant experienced this as: a fan running through the night while outdoor air was warmer than indoor — actively heating the house — with no automatic correction.
+
+**Issue #327 enforces the invariant:** while the fan feature is enabled, a running fan is always one of:
+- **CA nat-vent** — activated by `_activate_fan()`, held by the fast thermostatic loop (§9e below), exits the loop on `outdoor ≥ indoor`, comfort floor, or target reached.
+- **Timed manual override** — detected by `_async_fan_entity_changed()` or `_async_thermostat_changed()`, reclaimed when the grace timer expires **or** on the next HA restart.
+- **Off** — the default state when neither condition holds.
+
+There is no fourth state. Any post-coalesce fan-on that CA did not command is immediately detected as a manual override (§9b) → timed, not indefinite.
+
+#### A. Restart = Clean Fan Slate
+
+`restore_state()` now clears `_fan_override_active` and `_fan_override_time` on restart, matching the clean-slate treatment of HVAC override/grace state (§11). Fan ownership is fully reconsidered by the coalesce reconciliation step rather than reconstructed from stale persisted flags.
+
+`_fan_active` and `_pre_fan_hvac_mode` are still preserved as hints for reconciliation, but their values do not gate any action — the reconcile step re-derives the correct decision from the live thermostat state.
+
+#### B. Startup Coalesce: `reconcile_fan_on_startup`
+
+After the existing nat-vent / `apply_classification` logic in `_do_startup_coalesce`, a dedicated fan reconciliation step reads the thermostat's live `fan_mode` / `hvac_action` and decides:
+
+| Physical fan running? | Nat-vent eligible? | Decision | Action |
+|---|---|---|---|
+| No | — | **no-fan** | No action; state flags already cleared by (A) |
+| Yes | Yes (`outdoor < indoor`, gate passes, sensors open) | **adopt-on** | `_fan_active = True`, `_natural_vent_active = True`; fast thermostatic loop started |
+| Yes | No | **turn-off** | `_deactivate_fan()` or `set_fan_mode("auto")` (FAN_MODE_HVAC) / fan `turn_off` + HVAC restore (FAN_MODE_WHOLE_HOUSE) |
+
+The 5-minute `_first_run` coalesce window already suppresses override detection (coordinator's `_async_thermostat_changed` override guard), so the turn-off command is not misread as a user manual action.
+
+**Observability (startup validation):** the reconcile step emits one INFO line at the end of `_do_startup_coalesce`:
+
+```
+Fan reconcile: thermostat fan_mode=<x> hvac_action=<y> nat_vent_eligible=<bool> decision=<adopt-on|turn-off|no-fan> archetype=<mode>
+```
+
+This is the primary grep target for post-deploy validation: `python tools/ha_logs.py --filter "Fan reconcile"`. It confirms that the new behavior ran and what decision was made for the current physical state.
+
+**Listener registration observability:** at coordinator setup, one INFO line is emitted:
+
+```
+Fan control: watching indoor=<entity> outdoor=<entity> thermostat=<entity> for thermostatic re-eval
+```
+
+#### C. Thermostatic Fast Loop: `fan_thermostat_check`
+
+`fan_thermostat_check(indoor, outdoor, trigger)` on `AutomationEngine` is the fast decision point for any CA-owned running fan. It generalizes the existing `nat_vent_temperature_check` — which ran only for nat-vent sessions — to cover any fan that `_fan_active=True`.
+
+**Exit conditions evaluated on every call (priority order):**
+
+| Priority | Condition | Action |
+|---|---|---|
+| 1 | `outdoor >= indoor` (using existing 1°F hysteresis for re-activation, equality kills) | Fan off; emit `nat_vent_outdoor_rise_exit` if nat-vent session; otherwise deactivate cleanly |
+| 2 | `indoor <= comfort_heat` (comfort floor) | Exit nat-vent session; restore heat mode at `comfort_heat` |
+| 3 | `outdoor > comfort_cool + nat_vent_delta` (ceiling exceeded) | Fan off; enter paused state |
+
+If no exit condition fires, the fan continues running. The check is cheap and idempotent — frequent calls are safe.
+
+**Trigger sources (all three active whenever the fan is CA-owned and running):**
+
+| Source | Mechanism | Registered in |
+|---|---|---|
+| Indoor temperature change via thermostat | Existing `_async_thermostat_changed` dispatch → `fan_thermostat_check(trigger="indoor")` | coordinator.py (existing seam, extended) |
+| Indoor temperature change via dedicated sensor | New state listener on `indoor_temp_entity` → `fan_thermostat_check(trigger="indoor")` | coordinator.py (new listener added by Issue #327) |
+| Outdoor temperature change | New state listener on `outdoor_temp_entity` → `fan_thermostat_check(trigger="outdoor")` | coordinator.py (new listener — outdoor had no listener before Issue #327) |
+| Backstop timer | Self-rescheduling timer started in `_activate_fan()`, cancelled in `_deactivate_fan()` and `cleanup()`; reuses the `_fan_min_cycle_cancel` pattern | automation.py |
+
+The backstop timer catches sensors that update slowly or infrequently. The trigger name is passed through to observability logging.
+
+**Observability (per-check):** `DEBUG` on every call:
+
+```
+Fan thermostat check: trigger=<indoor|outdoor|tick|timer> indoor=<t> outdoor=<t> active=<bool> decision=<keep|stop:reason>
+```
+
+#### D. Economizer Free-Cooling-Direction Guard
+
+`check_window_cooling_opportunity()` (§8) now includes `outdoor < indoor` as an explicit eligibility condition, mirroring the guard already present in nat-vent activation (§17). This prevents the economizer from starting the fan on a hot evening when outdoor air is warmer than indoor — a condition that actively heats the house instead of cooling it.
+
+The guard is a strict precondition: if `outdoor >= indoor`, the fan is not activated regardless of whether the time-window and temperature-ceiling conditions are met.
+
+#### E. Manual Override = Timed, Not Indefinite
+
+With (A) restart clearing `_fan_override_active` and (B) coalesce reconciling the physical state, every post-restart fan-on that CA did not command is fresh — detected as a new manual override by `_async_fan_entity_changed()` or the `fan_mode` block of `_async_thermostat_changed()`, and reclaimed when the grace timer expires. There is no path from a user action to a permanent, unreclaimed override.
+
+**Override lifecycle observability (INFO):**
+- Override set: logged by `handle_fan_manual_override()` with `old_fan_mode`, `new_fan_mode`, `fan_cmd` age, `hvac_cmd` age, `expected_confirmation` (§9b Fan Override Detection Diagnostic Logging).
+- Grace expiry reclaim: logged by `_on_grace_expired` / `clear_fan_override`.
+- Restart clean-slate: logged by `restore_state()` — `"Fan override cleared on restart (clean slate)"` when `_fan_override_active` was `True` at restore time.
+
+#### Interaction with §11 Clean-Slate Restart Policy
+
+The fan clean-slate introduced in (A) is consistent with §11: `_fan_override_active` joins `_manual_override_active`, `_grace_active`, and `_override_confirm_pending` as fields that are always cleared on restart. The coalesce step (B) performs the same role for fan state that the `_first_run` startup override check (§11 Startup Override Logic) performs for HVAC state — it re-derives the correct ownership decision from live conditions rather than trusting stale persisted flags.
+
+| Field | Preserved across restart? | Notes |
+|---|---|---|
+| `_fan_active` | **Hint only** | Cleared or overwritten by coalesce reconciliation; does not gate any action on its own |
+| `_fan_override_active` | **No** (Issue #327) | Cleared on restart — clean slate; coalesce re-derives from live state |
+| `_fan_override_time` | **No** (Issue #327) | Cleared on restart |
+| `_pre_fan_hvac_mode` | Yes | Still preserved — needed if coalesce decides to turn off a whole-house fan and restore the HVAC mode |
+| `_natural_vent_active` | No | Cleared on restart (was already the case); coalesce adopt-on re-sets it |
+
 ---
 
 ## 10. Door/Window HVAC Pause
@@ -1362,8 +1478,10 @@ CA always starts in full clean-slate automation mode after an HA restart. `resto
 |---|---|---|
 | `_paused_by_door` | **No** | Cleared on restart (Issue #306). Open sensors are re-detected quickly via the state-change listener (entity transitions from `None` → `"on"` when HA reconnects); HVAC re-arms briefly and re-pauses after the configured debounce (default 5 min). |
 | `_pre_pause_mode` | **No** | Cleared on restart (Issue #306). Re-captured when the re-detected open sensor triggers a fresh pause. |
-| `_fan_active` | Yes | Fan session state |
-| `_pre_fan_hvac_mode` | Yes | HVAC mode captured before whole-house fan activation |
+| `_fan_active` | **Hint only** (Issue #327) | Preserved as a hint; overwritten or disregarded by the coalesce reconcile step (§9e) — does not gate any action on its own after restart |
+| `_fan_override_active` | **No** (Issue #327) | Cleared on restart — clean slate. Coalesce re-derives fan ownership from live state. Previously preserved, which caused permanent override lockout when no grace-expiry timer was rescheduled. |
+| `_fan_override_time` | **No** (Issue #327) | Cleared on restart |
+| `_pre_fan_hvac_mode` | Yes | HVAC mode captured before whole-house fan activation; still needed for HVAC restoration if coalesce decides to turn off a whole-house fan |
 | `_last_action_time` / `_last_action_reason` | Yes | Last automation action metadata |
 | `_occupancy_mode` | Yes | Current occupancy state |
 | `_manual_override_active` | **No** | Cleared on restart — clean slate |
@@ -1733,24 +1851,29 @@ This is the definitive reference for expected system behavior across all classif
 | E5 | Fan mode change |
 | E6 | Classification changes (e.g., warm→hot) |
 | E7 | User clicks "Resume HVAC (override pause)" |
+| E8 | HA restart — coalesce reconciliation fires (Issue #327) |
 
 ### Expected Outcomes
 
-| | E1: Sensor Open | E2: All Closed | E3: Grace+Open | E4: Override | E5: Fan Change | E6: Class Change | E7: Resume |
-|---|---|---|---|---|---|---|---|
-| C1 (hot/cool) | Pause HVAC→off, notify | Resume to cool, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace | Re-apply classification | Resume cool, manual grace |
-| **C2 (warm/band/win=T/in)** | **No pause** (planned window) | No-op (not paused) | **No re-pause** (planned) | N/A (not paused) | Fan on, band stays armed | Re-apply band `[comfort_heat, comfort_cool]`; §6b backstop fires if indoor < comfort_heat | N/A (not paused) |
-| C3 (warm/band/win=T/out) | No pause (band armed, not paused) | No-op | N/A | N/A | Fan on, band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A |
-| C4 (warm/band/win=F) | No pause (band armed, not paused) | No-op | N/A | N/A | Band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A |
-| **C5 (mild/band/win=T/in)** | **No pause** (planned window) | No-op | **No re-pause** (planned) | N/A | Fan on, band stays armed | Re-apply band `[comfort_heat, comfort_cool]` | N/A |
-| C6 (cool/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace | Re-apply | Resume heat, manual grace |
-| C7 (cold/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace | Re-apply | Resume heat, manual grace |
+| | E1: Sensor Open | E2: All Closed | E3: Grace+Open | E4: Override | E5: Fan Change | E6: Class Change | E7: Resume | E8: Restart Reconcile |
+|---|---|---|---|---|---|---|---|---|
+| C1 (hot/cool) | Pause HVAC→off, notify | Resume to cool, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` (§9e) | Re-apply classification | Resume cool, manual grace | Fan adopt-on (nat-vent eligible) or turn-off (not eligible); `Fan reconcile:` logged |
+| **C2 (warm/band/win=T/in)** | **No pause** (planned window) | No-op (not paused) | **No re-pause** (planned) | N/A (not paused) | Fan on, band stays armed; thermostatic loop monitors `outdoor vs indoor` | Re-apply band `[comfort_heat, comfort_cool]`; §6b backstop fires if indoor < comfort_heat | N/A (not paused) | Fan adopt-on (nat-vent eligible, sensors open) or turn-off; band re-armed by coalesce |
+| C3 (warm/band/win=T/out) | No pause (band armed, not paused) | No-op | N/A | N/A | Fan on, band stays armed; thermostatic loop monitors `outdoor vs indoor` | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off (outside window period → not nat-vent eligible) or no-fan |
+| C4 (warm/band/win=F) | No pause (band armed, not paused) | No-op | N/A | N/A | Band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off if physically running (no sensors open → not nat-vent eligible) |
+| **C5 (mild/band/win=T/in)** | **No pause** (planned window) | No-op | **No re-pause** (planned) | N/A | Fan on, band stays armed; thermostatic loop monitors `outdoor vs indoor` | Re-apply band `[comfort_heat, comfort_cool]` | N/A | Fan adopt-on (nat-vent eligible, sensors open) or turn-off; band re-armed |
+| C6 (cool/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` | Re-apply | Resume heat, manual grace | Fan turn-off (heat day → not nat-vent eligible) or no-fan |
+| C7 (cold/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` | Re-apply | Resume heat, manual grace | Fan turn-off (cold day → not nat-vent eligible) or no-fan |
 
 **Bolded cells** have corresponding test coverage in `tests/test_windows_recommended_integration.py`.
 
 **Comfort-band model (Issue #249, §6e):** In C2–C5 contexts (warm/mild days), `apply_classification()` now programs a comfort band rather than setting `hvac_mode=off`. The band arms the thermostat with both a floor and a ceiling; the thermostat self-arbitrates between them. Nat-vent and economizer activate the fan only — the band remains armed throughout, so free cooling stays free and the compressor engages only if the breeze can't hold the ceiling.
 
 **Comfort-floor guard (§6b — passive backstop):** In C2, C3, and C4 contexts, the band floor (`comfort_heat` while home + awake; `setback_heat` away/asleep) keeps the home from falling below the floor autonomously. The `warm_day_comfort_gap` event and §6b heat-up path remain as a safety backstop for situations where the band has lapsed (HA restart, thermostat reconnect). Test coverage: `tests/test_warm_day_comfort_gap.py`.
+
+**Thermostatic fan loop (Issue #327, §9e):** In all C1–C7 contexts, once the fan is CA-owned and running, `fan_thermostat_check()` re-evaluates on every indoor or outdoor temperature change. The fan is turned off immediately when `outdoor ≥ indoor` — it does not wait for the next 30-minute coordinator poll. See §9e for the full exit hierarchy and trigger-source table.
+
+**Restart reconciliation (E8, Issue #327, §9e):** `_fan_override_active` is always cleared on restart; `_do_startup_coalesce` decides adopt-on, turn-off, or no-fan based on live thermostat state. E8 applies uniformly to all contexts — the decision depends on current physical conditions, not the day classification.
 
 This logic table MUST be kept current for any changes to automation behavior.
 
@@ -1769,6 +1892,10 @@ This logic table MUST be kept current for any changes to automation behavior.
 | C4×E6 (band armed) | test_warm_day_setback.py | TestWarmDayBandArming::test_warm_day_dual_thermostat_sets_dual_setpoints |
 | C2×E5 / C3×E5 / C5×E5 (band stays armed on nat-vent) | test_window_hvac_interaction.py, test_door_window.py | Band remains armed when fan activates; no `hvac_mode=off` issued |
 | C2×E6 / C5×E6 (band applied on re-classification) | test_thermostat_program.py, test_production_harness.py | `apply_classification` arms band `[comfort_heat, comfort_cool]` (occupied+awake, any day type) |
+| All×E8 (coalesce: turn-off, no nat-vent) | _(test-ref pending)_ | restart clears `_fan_override_active`; coalesce turns off fan when nat-vent not eligible |
+| All×E8 (coalesce: adopt-on) | _(test-ref pending)_ | coalesce adopts running fan as CA nat-vent when conditions hold; `_natural_vent_active=True` |
+| C1×E5 / C6×E5 / C7×E5 (thermostatic exit: `outdoor ≥ indoor`) | _(test-ref pending)_ | `fan_thermostat_check` turns fan off on `outdoor ≥ indoor` before next 30-min poll |
+| D×E5 (economizer: `outdoor ≥ indoor` blocked) | _(test-ref pending)_ | economizer `check_window_cooling_opportunity` rejects activation when `outdoor ≥ indoor` |
 
 ---
 

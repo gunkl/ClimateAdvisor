@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.22"
+VERSION = "0.4.23"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.23": [
+        "Fix #326: Pre-cool now surfaces in the Next Automation card (next to bedtime setback,"
+        " morning wake-up, etc.) instead of as a footnote under Status. Removed the hardcoded"
+        " 'tonight' label — the trigger time itself conveys when. 'Next Action' renamed to"
+        " 'Next User Action' to distinguish occupant advice from scheduled automations.",
+    ],
     "0.4.22": [
         "Fix #325: Four async_call_later callbacks in automation.py were missing the @callback"
         " decorator — HA emitted a thread-safety WARNING on every setpoint verify and fan"
@@ -1459,6 +1465,23 @@ KNOWN_FIXES: dict[int, dict] = {
             "Pre-cool depth does not account for forecast peak hour or solar gains",
             "Cooling-trend nights (setback_modifier > 0): relaxed setback sign fix also corrects"
             " those (higher ceiling = less cooling = energy savings) but no new timed phase added",
+        ],
+    },
+    326: {
+        "version_fixed": "0.4.23",
+        "title": "Status tab: pre-cool in wrong card, 'tonight' hardcoded, 'Next Action' label ambiguous",
+        "scope_covered": [
+            "_maybe_schedule_pre_cool: stores _pre_cool_trigger_dt + _pre_cool_target; drops 'tonight'",
+            "_async_pre_cool_trigger: clears _pre_cool_trigger_dt when trigger fires",
+            "_async_end_of_day: resets _pre_cool_trigger_dt and _pre_cool_target",
+            "_compute_next_automation_action: refactored events list to full datetimes;"
+            " pre-cool injected as candidate — handles cross-midnight correctly",
+            "index.html: Status card no longer shows pre_cool_status secondary text",
+            "index.html: 'Next Action' label renamed to 'Next User Action'",
+        ],
+        "scope_not_covered": [
+            "pre_cool_status field still returned by API (used by briefing and debug tab)",
+            "pre-cool suppressed / active text remains in automation_status when relevant",
         ],
     },
     325: {

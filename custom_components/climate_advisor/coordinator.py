@@ -296,6 +296,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_trigger_scheduled: bool = False
         self._pre_cool_trigger_cancel: Any | None = None
         self._pre_cool_status: str | None = None  # surfaced in status API
+        self._pre_cool_trigger_dt: datetime | None = None  # full tz-aware trigger datetime
+        self._pre_cool_target: float | None = None  # pre-cool ceiling target temp
 
         # Startup coalescing (Issue #321): suppress override detection for 5 min after restart
         self._startup_coalesce_active: bool = True
@@ -2244,12 +2246,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, trigger_time)
         self._pre_cool_trigger_scheduled = True
+        self._pre_cool_trigger_dt = trigger_time
+        self._pre_cool_target = pre_cool_target
         self._pre_cool_status = (
-            f"pre-cool tonight ({pre_cool_target:.0f}°F @ {trigger_time.strftime('%I:%M %p').lstrip('0')})"
+            f"Pre-cool scheduled ({pre_cool_target:.0f}°F @ {trigger_time.strftime('%I:%M %p').lstrip('0')})"
         )
 
     async def _async_pre_cool_trigger(self, now: datetime) -> None:
         """Handle the overnight pre-cool trigger point."""
+        self._pre_cool_trigger_dt = None  # trigger has fired; no longer a future candidate
         nat_vent_just_closed = not self.automation_engine.natural_vent_active
         indoor_temp = self._get_indoor_temp()
         result = await self.automation_engine.handle_pre_cool(
@@ -2309,6 +2314,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._pre_cool_trigger_cancel = None
         self._pre_cool_trigger_scheduled = False
         self._pre_cool_status = None
+        self._pre_cool_trigger_dt = None
+        self._pre_cool_target = None
 
         await self._async_save_state()
 
@@ -4968,7 +4975,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return ("Waiting for classification...", "")
 
         now = dt_util.now()
-        now_time = now.time()
+        today = now.date()
 
         # Check if windows are open during planned window period
         if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():
@@ -4993,30 +5000,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except (ValueError, AttributeError, TypeError):
                 pass
 
-        # Build list of upcoming scheduled events
+        # Build list of upcoming scheduled events as (datetime, description).
+        # Using full datetimes (not time objects) so cross-midnight events like
+        # pre-cool (e.g. 2:30 AM tomorrow) compare correctly against now.
         wake_time = self.config.get("wake_time", "06:30:00")
         sleep_time = self.config.get("sleep_time", "22:30:00")
         briefing_time = self.config.get("briefing_time", "06:00:00")
 
-        # Parse time strings to time objects
         def _parse_time(t: str) -> time:
             parts = t.split(":")
             return time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
 
-        events: list[tuple[time, str]] = []
+        def _to_dt(t: time) -> datetime:
+            return datetime.combine(today, t, tzinfo=now.tzinfo)
 
-        bt = _parse_time(briefing_time)
-        wt = _parse_time(wake_time)
-        st = _parse_time(sleep_time)
+        candidates: list[tuple[datetime, str]] = []
 
-        if now_time < bt:
-            events.append((bt, "Send daily briefing"))
-        if now_time < wt:
+        bt_dt = _to_dt(_parse_time(briefing_time))
+        if bt_dt > now:
+            candidates.append((bt_dt, "Send daily briefing"))
+
+        wt_dt = _to_dt(_parse_time(wake_time))
+        if wt_dt > now:
             if c.hvac_mode in ("heat", "cool"):
-                events.append((wt, f"Morning wake-up — restore {c.hvac_mode} comfort"))
+                candidates.append((wt_dt, f"Morning wake-up — restore {c.hvac_mode} comfort"))
             else:
-                events.append((wt, "Morning wake-up check"))
-        if now_time < st:
+                candidates.append((wt_dt, "Morning wake-up check"))
+
+        st_dt = _to_dt(_parse_time(sleep_time))
+        if st_dt > now:
             unit = self.config.get("temp_unit", "fahrenheit")
             if c.hvac_mode in ("heat", "cool"):
                 thermal_model = getattr(self.automation_engine, "_thermal_model", None) or {}
@@ -5026,17 +5038,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     bedtime_target,
                 )
                 mode_label = "heat" if c.hvac_mode == "heat" else "cool"
-                events.append((st, f"Bedtime — {mode_label} setback to {format_temp(bedtime_target, unit)}"))
+                candidates.append((st_dt, f"Bedtime — {mode_label} setback to {format_temp(bedtime_target, unit)}"))
             else:
-                events.append((st, "Bedtime check"))
+                candidates.append((st_dt, "Bedtime check"))
 
-        if not events:
+        # Pre-cool is scheduled for early tomorrow morning — its trigger_dt crosses
+        # midnight, so only full-datetime comparison handles it correctly.
+        if self._pre_cool_trigger_dt and self._pre_cool_trigger_dt > now and self._pre_cool_target is not None:
+            unit = self.config.get("temp_unit", "fahrenheit")
+            pc_desc = f"Pre-cool ceiling ({format_temp(self._pre_cool_target, unit)})"
+            candidates.append((self._pre_cool_trigger_dt, pc_desc))
+
+        if not candidates:
             return ("No more actions today", "")
 
-        # Sort by time, return earliest
-        events.sort(key=lambda e: e[0])
-        next_time, next_desc = events[0]
-        time_str = next_time.strftime("%I:%M %p").lstrip("0")
+        candidates.sort(key=lambda e: e[0])
+        next_dt, next_desc = candidates[0]
+        time_str = dt_util.as_local(next_dt).strftime("%I:%M %p").lstrip("0")
         return (next_desc, time_str)
 
     @property

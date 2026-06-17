@@ -905,7 +905,7 @@
         </div>
         <div class="status-item">
           <div class="label">Status</div>
-          <div class="value">${data.automation_status || 'unknown'}${data.pre_cool_status ? `<br><span style="font-size:0.8rem;opacity:0.85">${escapeHtml(data.pre_cool_status)}</span>` : ''}</div>
+          <div class="value">${data.automation_status || 'unknown'}</div>
         </div>
         <div class="status-item">
           <div class="label">Indoor</div>
@@ -920,7 +920,7 @@
           <div class="value">${score}%</div>
         </div>
         <div class="status-item">
-          <div class="label">Next Action</div>
+          <div class="label">Next User Action</div>
           <div class="value" style="font-size:0.85rem">${data.next_action || 'None'}</div>
         </div>
         <div class="status-item">

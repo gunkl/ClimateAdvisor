@@ -383,6 +383,8 @@ class TestStartupCoalesceCompute:
         coord._resolved_sensors = []
         coord._is_sensor_open = MagicMock(return_value=False)
         coord._any_sensor_open = MagicMock(return_value=False)
+        coord._pre_cool_trigger_dt = None
+        coord._pre_cool_target = None
 
         coord._compute_next_automation_action = types.MethodType(
             ClimateAdvisorCoordinator._compute_next_automation_action, coord
@@ -397,9 +399,15 @@ class TestStartupCoalesceCompute:
             tomorrow_high=72.0,
             tomorrow_low=55.0,
         )
-        with patch(
-            "custom_components.climate_advisor.coordinator.dt_util.now",
-            return_value=datetime(2026, 6, 12, 14, 0, 0),
+        with (
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.now",
+                return_value=datetime(2026, 6, 12, 14, 0, 0),
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.as_local",
+                side_effect=lambda x: x,
+            ),
         ):
             action, time_str = coord._compute_next_automation_action(c)
         assert action == "Bedtime check"

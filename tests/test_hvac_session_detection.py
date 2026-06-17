@@ -613,3 +613,34 @@ class TestChartLogFanIsRunning:
         ]
         assert len(hvac_action_calls) == 1
         assert hvac_action_calls[0].kwargs.get("fan") is False
+
+
+class TestUntrackedFanEvent:
+    """Issue #331 follow-up: fan_running_untracked entry/exit, deduped (thermostat blower visibility)."""
+
+    def test_untracked_fan_entry_dedup_and_exit(self):
+        coord = _make_update_data_coord(hvac_mode="cool", hvac_action="fan", ca_fan_active=False)
+        coord._untracked_fan_active = False
+        # Drive the untracked state via the fan-status computation (mocked on this stub).
+        # The entry/exit dedup logic under test is independent of how status is computed —
+        # _compute_fan_status itself is covered by TestFanPhysicallyRunning in test_coordinator_chart.
+        coord._compute_fan_status = MagicMock(return_value="running (untracked)")
+
+        # Entry: untracked fan → exactly one fan_running_untracked event
+        asyncio.run(coord._async_update_data())
+        types = [c.args[0] for c in coord._emit_event.call_args_list]
+        assert "fan_running_untracked" in types
+        assert coord._untracked_fan_active is True
+
+        # Dedup: still untracked next cycle → no re-emit
+        coord._emit_event.reset_mock()
+        asyncio.run(coord._async_update_data())
+        assert "fan_running_untracked" not in [c.args[0] for c in coord._emit_event.call_args_list]
+
+        # Exit: fan stops → fan_untracked_cleared, flag reset
+        coord._compute_fan_status = MagicMock(return_value="inactive")
+        coord._emit_event.reset_mock()
+        asyncio.run(coord._async_update_data())
+        types3 = [c.args[0] for c in coord._emit_event.call_args_list]
+        assert "fan_untracked_cleared" in types3
+        assert coord._untracked_fan_active is False

@@ -12,6 +12,9 @@
 | How does `get_entries()` support historical navigation? | Pass `before: datetime` to anchor the query window to that point in time instead of the current clock. The window is then `[before − range_days, before)`. Used by `get_chart_data(before_ts=...)` to serve past data windows. | [Query Contract](#query-contract) |
 | What downsampling tier applies for each `range_str` value? | `6h`/`12h`/`24h`/`3d` → raw entries. `7d`/`30d` → hourly averages. `1y` → daily summaries. An unrecognised range string defaults to `24h` (1-day raw). | [Downsampling Rules](#downsampling-rules) |
 | What fields does a raw entry always carry, and which are optional? | Nine core fields always present: `ts`, `hvac`, `fan`, `indoor`, `outdoor`, `windows_open`, `windows_recommended`, `pred_outdoor`, `pred_indoor`. The `event` field is only present when the marker argument is non-None. | [Entry Schema](#entry-schema) |
+| What two fields were added for the Vent bar (Issue #331), and what do they mean? | `fan_running: bool` — fan is physically on (compressor-class running). `nat_vent_active: bool` — nat-vent session is armed (includes paused-between-cycles). Legacy `fan` field is still emitted for back-compat. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
+| How does the frontend decide the Vent bar color for each entry? | Blue if `fan_running`; green if `nat_vent_active || windows_recommended`; else off. Back-compat: if `fan_running` absent, fall back to legacy `fan` field → blue. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
+| What does the HVAC bar show after Issue #331? | Compressor-only: `heating` (red) / `cooling` (blue). `fan_only` and `off` produce no bar. | [Vent Bar Fields (Issue #331)](#vent-bar-fields-issue-331) |
 | How is `pred_outdoor` populated in each chart log entry? | Raw hourly forecast temperature for the current local hour, extracted by `_extract_current_hour_forecast_temp()` — no normalisation. `null` when hourly forecast has no entry for the current hour. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
 | How is `pred_indoor` populated in each chart log entry? | Read from `_pred_archive` (first-write-wins prediction archive): the value for time T was written ~4 hours before T arrived, producing a genuine advance prediction. Falls back to `_last_predicted_indoor[0]["temp"]` only during the warmup period (first 4h after HA restart). `null` if both archive and cache are empty, or `pred_outdoor` is null. | [First-Write-Wins Prediction Archive](#first-write-wins-prediction-archive) |
 | What fallback does `_build_future_forecast_outdoor()` use when hourly forecast is empty? | When hourly forecast is empty or yields no future entries and a `classification` is provided, generates a cosine curve using `classification.today_high`/`classification.today_low`. Returns `[]` only if no classification is provided. | [Coordinator Chart Log Wiring](#coordinator-chart-log-wiring) |
@@ -118,7 +121,9 @@ Entries with unparseable `ts` fields are treated differently in the two prune co
 |---|---|---|---|
 | `ts` | `str` (ISO-8601) | Always | Timestamp; defaults to `dt_util.now().isoformat()` |
 | `hvac` | `str` | Always | HVAC mode string (e.g., `"heat"`, `"cool"`, `"off"`, `"fan_only"`) |
-| `fan` | `bool` | Always | Whether the fan is active |
+| `fan` | `bool` | Always | Whether the fan is active (legacy field — still emitted for back-compat with historical entries; see `fan_running` below) |
+| `fan_running` | `bool` | Always (Issue #331+) | Fan is **physically running** — `_compute_fan_status()` ∈ `{"active", "running (manual override)", "running (untracked)"}`. Absent on entries written before Issue #331; frontend falls back to legacy `fan` field when absent. |
+| `nat_vent_active` | `bool` | Always (Issue #331+) | Nat-vent session is **armed** — `automation_engine._natural_vent_active` is `True`. True even when the fan is paused between cycles (session alive, compressor not running). Absent on pre-#331 entries; frontend treats absent as `False`. |
 | `indoor` | `float \| null` | Always | Indoor temperature in the user's configured unit; `null` if unavailable |
 | `outdoor` | `float \| null` | Always | Outdoor temperature; `null` if unavailable |
 | `windows_open` | `bool` | Always | Whether any window/door sensor reports open |
@@ -128,6 +133,65 @@ Entries with unparseable `ts` fields are treated differently in the two prune co
 | `event` | `str` | Optional | Event marker label (e.g., `"hvac_mode_changed"`, `"windows_opened"`). Present only when `event` argument was non-None. |
 
 **Invariant:** `ts` is always present and always a string. Monotonic non-decrease of `ts` values is the caller's responsibility — the class does not enforce it.
+
+## Vent Bar Fields (Issue #331)
+
+_Added in Issue #331 (chart Vent bar + compressor-only HVAC bar)._
+
+Prior to Issue #331 the chart had four status rows: HVAC, Fan, Win Rec, Windows. The
+`fan` field conflated "fan physically on" with "nat-vent session armed (fan may be
+paused between cycles)", and the HVAC bar lit green for `hvac_action=fan`, double-showing
+the fan state. Issue #331 collapsed Fan + Win Rec into one **Vent** bar and restricted
+the HVAC bar to compressor-only states.
+
+### New fields added to every `state_log` entry
+
+| Field | Source | Semantics |
+|---|---|---|
+| `fan_running` | `_compute_fan_status() in {"active", "running (manual override)", "running (untracked)"}` | Fan is **physically running**. False when nat-vent is armed but the fan is paused between cycles (#327 thermostatic control). |
+| `nat_vent_active` | `automation_engine._natural_vent_active` | Nat-vent session is **armed**. True even when the fan is cycling off (session alive). |
+
+The legacy `fan` field is still written at every tick to preserve backward compatibility
+with historical chart log entries. New code should read `fan_running` and `nat_vent_active`.
+
+### Frontend Vent bar rendering contract
+
+The dashboard (`frontend/index.html` `drawActivityTimeline`) renders **one** Vent row
+(replacing the prior Fan and Win Rec rows):
+
+| Condition (evaluated in priority order) | Bar color | Label |
+|---|---|---|
+| `fan_running === true` | Blue (`rgba(66,165,250,0.75)`) | "Fan running" |
+| `nat_vent_active === true \|\| windows_recommended === true` | Green (`rgba(102,187,106,0.70)`) | "Vent armed" |
+| none of the above | Off (no bar drawn) | — |
+
+**Back-compat for pre-#331 entries** (no `fan_running`/`nat_vent_active` fields):
+- If `fan_running` is absent, fall back to legacy `fan` field → blue.
+- If `nat_vent_active` is absent, treat as `false` and evaluate `windows_recommended` only.
+
+### Frontend HVAC bar rendering contract
+
+The HVAC bar draws **compressor-only** states:
+
+| `hvac` value | Bar color |
+|---|---|
+| `"heating"` | Red |
+| `"cooling"` | Blue |
+| `"fan_only"`, `"off"`, any other | No bar |
+
+The prior behavior — drawing a green bar for `hvac_action=fan` — is removed. Fan state
+is now represented exclusively by the Vent bar.
+
+### Net bar layout change
+
+| Before Issue #331 | After Issue #331 |
+|---|---|
+| HVAC (heating/cooling/fan) | HVAC (compressor only) |
+| Fan | Vent (fan running or nat-vent armed) |
+| Win Rec | _(merged into Vent)_ |
+| Windows (contact sensors) | Windows (contact sensors, unchanged) |
+
+Legend labels updated accordingly in `drawActivityTimeline`.
 
 ## Append Contract
 

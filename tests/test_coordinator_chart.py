@@ -34,6 +34,7 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+import types as _types  # noqa: E402  (used by fan_physically_running tests)
 from datetime import UTC
 
 from custom_components.climate_advisor.const import (  # noqa: E402
@@ -388,3 +389,307 @@ class TestPredIndoorIntegration:
             f"pred_indoor ({_pred_indoor_val}) must differ from indoor_temp ({indoor_temp})"
         )
         assert _pred_archive == {}, "archive must remain empty — warmup fallback does not populate it"
+
+
+# ---------------------------------------------------------------------------
+# TestFanPhysicallyRunning  (Issue #331)
+# ---------------------------------------------------------------------------
+
+
+class TestFanPhysicallyRunning:
+    """Truth-table tests for _fan_physically_running().
+
+    Locks the armed-vs-running distinction the Vent bar depends on:
+    - Physically spinning: "active", "running (manual override)", "running (untracked)"
+    - Armed but idle:      "nat-vent (session active, fan idle)"
+    - Off:                 "inactive", "disabled"
+    """
+
+    def _make_coord_with_fan_status(self, fan_status: str):
+        """Build a minimal coordinator stub with _compute_fan_status stubbed."""
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        # Stub _compute_fan_status to return the given value
+        coord._compute_fan_status = lambda: fan_status
+        # Bind _fan_physically_running as a real method
+        coord._fan_physically_running = _types.MethodType(ClimateAdvisorCoordinator._fan_physically_running, coord)
+        return coord
+
+    # --- returns True for spinning states ---
+
+    def test_active_returns_true(self):
+        """fan_status='active' → _fan_physically_running() is True."""
+        coord = self._make_coord_with_fan_status("active")
+        assert coord._fan_physically_running() is True, "'active' must return True — CA commanded the fan on"
+
+    def test_running_manual_override_returns_true(self):
+        """fan_status='running (manual override)' → True."""
+        coord = self._make_coord_with_fan_status("running (manual override)")
+        assert coord._fan_physically_running() is True, (
+            "'running (manual override)' must return True — fan is physically spinning"
+        )
+
+    def test_running_untracked_returns_true(self):
+        """fan_status='running (untracked)' → True (Issue #91 state)."""
+        coord = self._make_coord_with_fan_status("running (untracked)")
+        assert coord._fan_physically_running() is True, (
+            "'running (untracked)' must return True — thermostat reports fan on, CA's flag is False"
+        )
+
+    # --- returns False for non-spinning states ---
+
+    def test_nat_vent_armed_idle_returns_false(self):
+        """fan_status='nat-vent (session active, fan idle)' → False.
+
+        This is the armed-but-not-spinning case: nat-vent session is active but
+        the fan is between cycles.  The Vent bar must show green-armed (nat_vent_active)
+        without the spinning indicator.  If this returned True, the old conflated
+        ``fan`` bool bug would be reproduced.
+        """
+        coord = self._make_coord_with_fan_status("nat-vent (session active, fan idle)")
+        assert coord._fan_physically_running() is False, (
+            "'nat-vent (session active, fan idle)' must return False — "
+            "session armed but blower is not on; confusing this with spinning is the bug #331 fixes"
+        )
+
+    def test_inactive_returns_false(self):
+        """fan_status='inactive' → False."""
+        coord = self._make_coord_with_fan_status("inactive")
+        assert coord._fan_physically_running() is False, "'inactive' must return False"
+
+    def test_disabled_returns_false(self):
+        """fan_status='disabled' → False (fan control feature is off)."""
+        coord = self._make_coord_with_fan_status("disabled")
+        assert coord._fan_physically_running() is False, "'disabled' must return False"
+
+    def test_off_manual_override_returns_false(self):
+        """fan_status='off (manual override)' → False.
+
+        Override flag is set but fan is physically off (user turned it off before
+        grace period expired).  _fan_physically_running() must return False.
+        """
+        coord = self._make_coord_with_fan_status("off (manual override)")
+        assert coord._fan_physically_running() is False, (
+            "'off (manual override)' must return False — override active but fan is not spinning"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestConvLogEntryBackcompat  (Issue #331)
+# ---------------------------------------------------------------------------
+
+
+class TestConvLogEntryBackcompat:
+    """get_chart_data / _conv_log_entry: historical entries lacking fan_running /
+    nat_vent_active must come back with both fields present and False.
+
+    Tests the ``e.setdefault("fan_running", False)`` / ``e.setdefault("nat_vent_active", False)``
+    back-compat in _conv_log_entry().  Because _conv_log_entry is a nested function
+    inside get_chart_data(), we test its contract by replicating the exact setdefault
+    logic directly — the same pattern used by TestChartLogSpikeSuppression for the
+    inline guard in _async_update_data().
+    """
+
+    def _apply_conv_log_entry_backcompat(self, entry: dict) -> dict:
+        """Replicate the back-compat logic from coordinator.py _conv_log_entry().
+
+        Production code (coordinator.py ~5346):
+            e.setdefault("fan_running", False)
+            e.setdefault("nat_vent_active", False)
+        """
+        e = dict(entry)
+        e.setdefault("fan_running", False)
+        e.setdefault("nat_vent_active", False)
+        return e
+
+    def test_historical_entry_missing_both_keys_gets_defaults(self):
+        """Old entry written before Issue #331 has no fan_running/nat_vent_active.
+
+        After _conv_log_entry, both must be present and False.
+        """
+        old_entry = {
+            "ts": "2026-01-01T12:00:00+00:00",
+            "hvac": "off",
+            "fan": False,
+            "indoor": 70.0,
+            "outdoor": 50.0,
+        }
+        result = self._apply_conv_log_entry_backcompat(old_entry)
+        assert "fan_running" in result, "fan_running must be present after back-compat transform"
+        assert "nat_vent_active" in result, "nat_vent_active must be present after back-compat transform"
+        assert result["fan_running"] is False, f"Expected False, got {result['fan_running']!r}"
+        assert result["nat_vent_active"] is False, f"Expected False, got {result['nat_vent_active']!r}"
+
+    def test_entry_with_fan_running_true_is_preserved(self):
+        """Entry that already has fan_running=True must not be overwritten."""
+        entry = {
+            "ts": "2026-01-01T12:00:00+00:00",
+            "hvac": "off",
+            "fan": True,
+            "indoor": 70.0,
+            "outdoor": 50.0,
+            "fan_running": True,
+            "nat_vent_active": False,
+        }
+        result = self._apply_conv_log_entry_backcompat(entry)
+        assert result["fan_running"] is True, "setdefault must not overwrite existing True value"
+
+    def test_entry_with_nat_vent_active_true_is_preserved(self):
+        """Entry that already has nat_vent_active=True must not be overwritten."""
+        entry = {
+            "ts": "2026-01-01T12:00:00+00:00",
+            "hvac": "off",
+            "fan": False,
+            "indoor": 70.0,
+            "outdoor": 50.0,
+            "fan_running": False,
+            "nat_vent_active": True,
+        }
+        result = self._apply_conv_log_entry_backcompat(entry)
+        assert result["nat_vent_active"] is True, "setdefault must not overwrite existing True value"
+
+    def test_entry_missing_only_fan_running(self):
+        """Entry has nat_vent_active but not fan_running → fan_running defaulted to False."""
+        entry = {
+            "ts": "2026-01-01T12:00:00+00:00",
+            "hvac": "off",
+            "fan": False,
+            "indoor": 70.0,
+            "outdoor": 50.0,
+            "nat_vent_active": True,
+        }
+        result = self._apply_conv_log_entry_backcompat(entry)
+        assert result["fan_running"] is False
+        assert result["nat_vent_active"] is True  # unchanged
+
+    def test_empty_entry_gets_both_defaults(self):
+        """Pathological empty entry — both fields default to False without raising."""
+        result = self._apply_conv_log_entry_backcompat({})
+        assert result["fan_running"] is False
+        assert result["nat_vent_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# TestVentBarStateContract  (Issue #331)
+# ---------------------------------------------------------------------------
+
+
+class TestVentBarStateContract:
+    """State-coverage tests for the three Vent-bar states the frontend needs.
+
+    The chart_log ``fan_running`` and ``nat_vent_active`` fields must distinguish:
+    (a) fan physically on  — fan_running=True
+    (b) nat-vent armed but fan between cycles — fan_running=False, nat_vent_active=True
+    (c) idle                — both False
+
+    These tests verify the truth table as stored in the chart log (via append),
+    independent of coordinator wiring — that wiring is exercised by integration
+    tests in the production harness.
+    """
+
+    def _make_log(self, tmp_path):
+
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        return ChartStateLog(tmp_path, max_days=365)
+
+    def test_state_a_fan_physically_on(self, tmp_path):
+        """State (a): fan physically spinning → fan_running=True, nat_vent_active may be True."""
+
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        log = ChartStateLog(tmp_path, max_days=365)
+        log.append(
+            hvac="off",
+            fan=True,
+            indoor=70.0,
+            outdoor=55.0,
+            fan_running=True,
+            nat_vent_active=True,
+        )
+        entry = log._entries[0]
+        assert entry["fan_running"] is True, (
+            "State (a): fan is spinning — fan_running must be True. Occupant: fan is circulating air through the home."
+        )
+
+    def test_state_b_nat_vent_armed_fan_idle(self, tmp_path):
+        """State (b): nat-vent session active, fan between cycles.
+
+        fan_running=False, nat_vent_active=True — this is the green-armed case
+        the old conflated ``fan`` bool got wrong.
+
+        Occupant experience: nat-vent session has started (outdoor is cool enough,
+        windows are open) but the fan is currently in the idle phase of its cycle —
+        not blowing right now, but will resume.  The Vent bar should show green
+        (armed) without the spinning indicator.
+        """
+
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        log = ChartStateLog(tmp_path, max_days=365)
+        log.append(
+            hvac="off",
+            fan=False,
+            indoor=70.0,
+            outdoor=55.0,
+            fan_running=False,
+            nat_vent_active=True,
+        )
+        entry = log._entries[0]
+        assert entry["fan_running"] is False, (
+            "State (b): fan is NOT physically spinning — fan_running must be False. "
+            "If True, the Vent bar would wrongly show the fan as running."
+        )
+        assert entry["nat_vent_active"] is True, (
+            "State (b): nat-vent session IS armed — nat_vent_active must be True. "
+            "If False, the Vent bar would miss the green-armed indicator."
+        )
+
+    def test_state_c_idle(self, tmp_path):
+        """State (c): completely idle — both False.
+
+        Occupant experience: no nat-vent session, fan is off.
+        """
+
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        log = ChartStateLog(tmp_path, max_days=365)
+        log.append(
+            hvac="off",
+            fan=False,
+            indoor=70.0,
+            outdoor=55.0,
+            fan_running=False,
+            nat_vent_active=False,
+        )
+        entry = log._entries[0]
+        assert entry["fan_running"] is False, "State (c): idle — fan_running must be False"
+        assert entry["nat_vent_active"] is False, "State (c): idle — nat_vent_active must be False"
+
+    def test_state_b_distinct_from_state_a(self, tmp_path):
+        """State (b) is distinguishable from state (a) — armed-vs-running distinction.
+
+        This is the core correctness test: the old ``fan`` bool could not represent
+        state (b) — it was False for both (b) and (c), making armed nat-vent invisible
+        on the chart.  The new ``nat_vent_active`` field resolves this ambiguity.
+        """
+
+        from custom_components.climate_advisor.chart_log import ChartStateLog
+
+        log = ChartStateLog(tmp_path, max_days=365)
+
+        # State (a): fan physically on
+        log.append(hvac="off", fan=True, indoor=70.0, outdoor=55.0, fan_running=True, nat_vent_active=True)
+        # State (b): armed but idle
+        log.append(hvac="off", fan=False, indoor=70.0, outdoor=55.0, fan_running=False, nat_vent_active=True)
+
+        entry_a = log._entries[0]
+        entry_b = log._entries[1]
+
+        # States must differ on fan_running
+        assert entry_a["fan_running"] != entry_b["fan_running"], (
+            "State (a) and (b) must differ on fan_running — if they match, the old conflated-bool bug is reproduced"
+        )
+        # Both have nat_vent_active=True
+        assert entry_a["nat_vent_active"] is True
+        assert entry_b["nat_vent_active"] is True

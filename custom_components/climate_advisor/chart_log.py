@@ -130,8 +130,17 @@ class ChartStateLog:
         setpoint: float | None = None,
         event: str | None = None,
         ts: str | None = None,
+        fan_running: bool = False,
+        nat_vent_active: bool = False,
     ) -> None:
-        """Append one entry. ts defaults to now (via dt_util)."""
+        """Append one entry. ts defaults to now (via dt_util).
+
+        fan_running: fan is physically on right now (active, manual override, or
+            untracked).  False when nat-vent is armed but the fan is between cycles,
+            or when the fan is inactive/disabled.
+        nat_vent_active: automation_engine._natural_vent_active — the nat-vent
+            session is armed (fan may or may not be spinning).
+        """
         if ts is None:
             ts = dt_util.now().isoformat()
 
@@ -146,6 +155,8 @@ class ChartStateLog:
             "pred_outdoor": pred_outdoor,
             "pred_indoor": pred_indoor,
             "setpoint": setpoint,
+            "fan_running": fan_running,
+            "nat_vent_active": nat_vent_active,
         }
         if event is not None:
             entry["event"] = event
@@ -272,6 +283,8 @@ class ChartStateLog:
                 "ts": bucket_key,
                 "hvac": self._dominant_hvac([e.get("hvac", "") for e in group]),
                 "fan": any(e.get("fan", False) for e in group),
+                "fan_running": any(e.get("fan_running", False) for e in group),
+                "nat_vent_active": any(e.get("nat_vent_active", False) for e in group),
                 "indoor": round(sum(indoor_vals) / len(indoor_vals), 1) if indoor_vals else None,
                 "outdoor": (round(sum(outdoor_vals) / len(outdoor_vals), 1) if outdoor_vals else None),
                 "windows_open": any(e.get("windows_open", False) for e in group),
@@ -314,6 +327,8 @@ class ChartStateLog:
                 "ts": f"{day_key}T00:00:00+00:00",
                 "hvac": self._dominant_hvac([e.get("hvac", "") for e in group]),
                 "fan_minutes": fan_count * 30,
+                "fan_running": any(e.get("fan_running", False) for e in group),
+                "nat_vent_active": any(e.get("nat_vent_active", False) for e in group),
                 "indoor_avg": round(sum(indoor_vals) / len(indoor_vals), 1) if indoor_vals else None,
                 "indoor_min": min(indoor_vals) if indoor_vals else None,
                 "indoor_max": max(indoor_vals) if indoor_vals else None,

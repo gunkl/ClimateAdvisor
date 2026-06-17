@@ -753,21 +753,35 @@ class TestSetpointEventFieldClarity:
         )
 
     def test_system_prompt_instructs_settings_column_for_setpoint_source(self):
-        """_SYSTEM_PROMPT must contain guidance about setpoint→Settings column routing.
+        """The Settings column for setpoint events is now filled deterministically, not by LLM.
 
-        MUST FAIL before fix: current prompt has no 'source=setpoint' routing guidance.
-        After fix: prompt must mention that setpoint values go in Settings, not Event.
+        #330: the prompt no longer instructs the LLM about the Settings column because
+        the entire timeline table — including its Settings cells — is built by
+        EVENT_RENDERERS in Python before the response is parsed.  The previous assertion
+        tested that the PROMPT contained 'source=setpoint' / Settings routing guidance;
+        that guidance is now irrelevant (and absent by design).
+
+        This test now verifies the deterministic renderer path: _render_override_detected
+        produces a non-empty Settings cell with setpoint data when old/new setpoint fields
+        are present, so the LLM never needs to route them.
         """
-        assert "source=setpoint" in _SYSTEM_PROMPT or "setpoint" in _SYSTEM_PROMPT.lower(), (
-            "Fix F: _SYSTEM_PROMPT must contain guidance about routing setpoint "
-            "temperature values to the Settings column, not embedding them in Event.\n"
-            f"Current _SYSTEM_PROMPT (first 500 chars):\n{_SYSTEM_PROMPT[:500]}"
+        from custom_components.climate_advisor.ai_skills_activity import (
+            EVENT_RENDERERS,
         )
-        # Specifically, it must have guidance about settings column for setpoint overrides
-        assert "Settings" in _SYSTEM_PROMPT and ("old_temp" in _SYSTEM_PROMPT or "setpoint:" in _SYSTEM_PROMPT), (
-            "Fix F: _SYSTEM_PROMPT must instruct the AI to put old_temp/new_temp "
-            "values in the Settings column for override_detected events.\n"
-            f"Current _SYSTEM_PROMPT:\n{_SYSTEM_PROMPT}"
+
+        renderer = EVENT_RENDERERS["override_detected"]
+        payload = {
+            "old_setpoint_f": 74,
+            "new_setpoint_f": 76,
+            "source": "setpoint",
+        }
+        _ev_text, settings = renderer(payload, "fahrenheit")
+        # The Settings cell must contain the setpoint transition — this is what #330 locks
+        assert "setpoint:" in settings, (
+            f"#330: _render_override_detected must put setpoint values in the Settings cell. Got settings={settings!r}"
+        )
+        assert "74" in settings and "76" in settings, (
+            f"#330: Settings cell must contain both old and new setpoint values. Got: {settings!r}"
         )
 
 

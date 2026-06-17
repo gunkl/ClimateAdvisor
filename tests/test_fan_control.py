@@ -1703,3 +1703,31 @@ class TestReconcileFanOnStartup:
         )
 
         engine._deactivate_fan.assert_awaited()
+
+
+class TestFanEventEmission:
+    """Issue #331 follow-up: _activate_fan/_deactivate_fan emit fan_activated/fan_deactivated."""
+
+    def test_activate_emits_fan_activated_with_reason(self):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._emit_event_callback = MagicMock()
+        asyncio.run(engine._activate_fan(reason="min_runtime_cycle"))
+        calls = {c.args[0]: c.args[1] for c in engine._emit_event_callback.call_args_list}
+        assert "fan_activated" in calls
+        assert calls["fan_activated"]["reason"] == "min_runtime_cycle"
+
+    def test_deactivate_emits_fan_deactivated(self):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        engine._emit_event_callback = MagicMock()
+        asyncio.run(engine._deactivate_fan(reason="economizer off -- fan no longer needed"))
+        types = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "fan_deactivated" in types
+
+    def test_emit_event_false_suppresses_event(self):
+        """nat-vent cycler passes emit_event=False so it does not double with nat_vent_fan_on."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._emit_event_callback = MagicMock()
+        asyncio.run(engine._activate_fan(reason="nat_vent_cycling_on", emit_event=False))
+        types = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "fan_activated" not in types

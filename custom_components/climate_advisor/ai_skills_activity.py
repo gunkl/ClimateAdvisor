@@ -505,6 +505,30 @@ def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
     return label, "fan: on->auto"
 
 
+def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
+    reason = str(p.get("reason", "")).strip()
+    label = f"Fan activated -- {reason}" if reason else "Fan activated"
+    return label, "fan: off->on"
+
+
+def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
+    reason = str(p.get("reason", "")).strip()
+    label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
+    return label, "fan: on->off"
+
+
+def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
+    source = str(p.get("source", "")).strip() or "thermostat-initiated"
+    action = str(p.get("hvac_action", "")).strip()
+    label = f"Fan running (untracked) -- {source}"
+    settings = f"fan: on (untracked; hvac_action={action})" if action else "fan: on (untracked)"
+    return label, settings
+
+
+def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
+    return "Fan stopped (untracked fan ended)", "fan: off"
+
+
 def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[str, str]:
     outdoor = p.get("outdoor")
     indoor = p.get("indoor")
@@ -756,6 +780,10 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "grace_expired": _render_grace_expired,
     "nat_vent_fan_on": _render_nat_vent_fan_on,
     "nat_vent_fan_off": _render_nat_vent_fan_off,
+    "fan_activated": _render_fan_activated,
+    "fan_deactivated": _render_fan_deactivated,
+    "fan_running_untracked": _render_fan_running_untracked,
+    "fan_untracked_cleared": _render_fan_untracked_cleared,
     "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,
     "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,

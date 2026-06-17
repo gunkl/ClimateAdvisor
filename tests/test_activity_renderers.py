@@ -492,3 +492,33 @@ class TestEventRenderersCoverage:
             + "\n".join(f"  - {t}" for t in sorted(dead))
             + "\nEither remove them from EVENT_RENDERERS or add them to _LEGACY_TYPES."
         )
+
+
+class TestFanEventRenderers:
+    """Issue #331 follow-up: fan_activated / fan_deactivated / fan_running_untracked / cleared."""
+
+    def test_fan_activated_shows_trigger(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_activated"](
+            {"reason": "min_runtime_cycle", "fan_mode": "hvac_fan"}, "fahrenheit"
+        )
+        assert "Fan activated" in ev and "min_runtime_cycle" in ev
+        assert st == "fan: off->on"
+
+    def test_fan_deactivated_shows_trigger(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_deactivated"](
+            {"reason": "economizer off -- fan no longer needed"}, "fahrenheit"
+        )
+        assert "Fan deactivated" in ev and "economizer off" in ev
+        assert st == "fan: on->off"
+
+    def test_fan_running_untracked_shows_source(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_running_untracked"](
+            {"source": "thermostat blower during cool cycle", "hvac_action": "fan"}, "fahrenheit"
+        )
+        assert "untracked" in ev.lower() and "thermostat blower during cool cycle" in ev
+        assert "untracked" in st
+
+    def test_fan_untracked_cleared(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_untracked_cleared"]({}, "fahrenheit")
+        assert "untracked" in ev.lower()
+        assert st == "fan: off"

@@ -332,6 +332,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_heat_sample_buffer: list[dict] = []  # rolling pre-heat window, max 15
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
         self._last_state_contradiction_time: datetime | None = None  # dedup for state_contradiction_warning events
+        self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -1637,6 +1638,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         {"hvac_mode": hvac_mode, "hvac_action": hvac_action},
                     )
                     self._last_state_contradiction_time = _now
+
+        # Issue #331 follow-up: surface an UNTRACKED fan (the thermostat running its own
+        # blower/fan that CA did not command) in the event log so it is not invisible.
+        # Deduped entry/exit: emit once when the fan enters the untracked-running state and
+        # once when it clears — never per cooling-cycle. Classify the inferred source.
+        _is_untracked = self._compute_fan_status() == "running (untracked)"
+        _untracked_logged = getattr(self, "_untracked_fan_active", False)
+        if _is_untracked and not _untracked_logged:
+            _cs2 = self.hass.states.get(self.config.get("climate_entity", ""))
+            _t_mode = _cs2.state if _cs2 else "unknown"
+            _t_action = str(_cs2.attributes.get("hvac_action", "")) if _cs2 else ""
+            _t_fan = str(_cs2.attributes.get("fan_mode", "")) if _cs2 else ""
+            _source = (
+                f"thermostat blower during {_t_mode} cycle"
+                if _t_mode in ("cool", "heat", "heat_cool")
+                else "thermostat fan schedule/circulation"
+            )
+            self._emit_event(
+                "fan_running_untracked",
+                {"hvac_action": _t_action, "fan_mode": _t_fan, "thermostat_mode": _t_mode, "source": _source},
+            )
+            self._untracked_fan_active = True
+        elif not _is_untracked and _untracked_logged:
+            self._emit_event("fan_untracked_cleared", {})
+            self._untracked_fan_active = False
 
         _base_runtime = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
         _session_elapsed = (dt_util.now() - self._hvac_on_since).total_seconds() / 60 if self._hvac_on_since else 0.0

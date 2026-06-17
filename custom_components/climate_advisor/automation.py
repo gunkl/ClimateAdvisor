@@ -1766,7 +1766,8 @@ class AutomationEngine:
         # Handle natural ventilation mode cleanup (sensors closed while in nat vent)
         if self._natural_vent_active:
             self._natural_vent_active = False
-            await self._deactivate_fan(reason="door/window closed — ending natural ventilation mode")
+            # emit_event=False: this transition is reported via sensor_all_closed above.
+            await self._deactivate_fan(reason="door/window closed — ending natural ventilation mode", emit_event=False)
             # Resume normal classification if we have one
             if self._current_classification:
                 c = self._current_classification
@@ -1788,7 +1789,8 @@ class AutomationEngine:
         _fan_cfg_d = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if self._fan_active and _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._natural_vent_active:
             _LOGGER.info("All sensors closed — stopping whole-house fan (was running outside nat-vent)")
-            await self._deactivate_fan(reason="all sensors closed — stopping whole-house fan")
+            # emit_event=False: this transition is reported via sensor_all_closed above.
+            await self._deactivate_fan(reason="all sensors closed — stopping whole-house fan", emit_event=False)
 
         if not self._paused_by_door:
             return
@@ -2113,8 +2115,9 @@ class AutomationEngine:
                 off_threshold,
                 nat_vent_target,
             )
-            # Deactivate the fan without restoring HVAC — session stays alive
-            await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False)
+            # Deactivate the fan without restoring HVAC — session stays alive.
+            # emit_event=False: this transition is reported via nat_vent_fan_off below.
+            await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False)
             # _natural_vent_active intentionally left True — session continues
             if self._emit_event_callback:
                 self._emit_event_callback(
@@ -2146,7 +2149,8 @@ class AutomationEngine:
                 nat_vent_target,
                 outdoor if outdoor is not None else 0.0,
             )
-            await self._activate_fan(reason="nat_vent_cycling_on")
+            # emit_event=False: this transition is reported via nat_vent_fan_on below.
+            await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "nat_vent_fan_on",
@@ -3036,8 +3040,16 @@ class AutomationEngine:
             reason=f"morning wake-up — comfort band [{_wakeup_band.floor:.0f}/{_wakeup_band.ceiling:.0f}]",
         )
 
-    async def _activate_fan(self, *, reason: str) -> None:
-        """Activate fan based on configured fan_mode."""
+    async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
+        """Activate fan based on configured fan_mode.
+
+        Args:
+            reason: Human-readable trigger source (logged + surfaced in the Activity Report).
+            emit_event: When True (default), emit a ``fan_activated`` event to the event log
+                so the Activity Report shows every CA fan command with its source. Callers
+                that already emit a more specific event for the same transition (the nat-vent
+                cycler / exit paths) pass False to avoid a duplicate row (Issue #331 follow-up).
+        """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return
@@ -3089,6 +3101,8 @@ class AutomationEngine:
             self._fan_active = True
             self._fan_on_since = dt_util.now().isoformat()
             self._record_action("Fan activated", reason)
+            if emit_event and self._emit_event_callback:
+                self._emit_event_callback("fan_activated", {"reason": reason, "fan_mode": fan_mode})
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
             # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
@@ -3172,15 +3186,19 @@ class AutomationEngine:
             self._fan_thermo_cancel()
             self._fan_thermo_cancel = None
 
-    async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True) -> None:
+    async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:
         """Deactivate fan based on configured fan_mode.
 
         Args:
-            reason: Human-readable reason for deactivation (logged).
+            reason: Human-readable reason for deactivation (logged + surfaced in the report).
             restore_hvac: When True (default), restores the HVAC mode that was suppressed
                 when the whole-house fan activated. Pass False during nat-vent cycling
                 (Bug 3 / Issue #321) so the session can continue without re-engaging HVAC
                 between cycles — the fan turns off temporarily, but HVAC stays suppressed.
+            emit_event: When True (default), emit a ``fan_deactivated`` event so the Activity
+                Report shows every CA fan-off with its source. Callers that already emit a
+                more specific event for the same transition (nat-vent cycler / exit paths)
+                pass False to avoid a duplicate row (Issue #331 follow-up).
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
@@ -3228,6 +3246,8 @@ class AutomationEngine:
             # Issue #327: cancel the thermostatic backstop timer when fan deactivates.
             self._cancel_fan_thermo_backstop()
             self._record_action("Fan deactivated", reason)
+            if emit_event and self._emit_event_callback:
+                self._emit_event_callback("fan_deactivated", {"reason": reason, "fan_mode": fan_mode})
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
             # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard

@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.26"
+VERSION = "0.4.27"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.27": [
+        "Fan activity now appears in the Activity Report with its trigger source. CA-commanded"
+        " fan changes (min-runtime, economizer, whole-house, reconcile, thermostatic, nat-vent)"
+        " emit fan_activated/fan_deactivated, and the thermostat's own blower running uncommanded"
+        " (e.g. between AC cooling cycles) now logs a deduped 'Fan running (untracked)' event with"
+        " the inferred source — so fan activity is no longer invisible in the report.",
+    ],
     "0.4.26": [
         "Chart Vent bar: the forecast (right of 'Now') now renders green-only (ventilation"
         " armed/planned) — blue is reserved for live/historical fan that is physically running,"

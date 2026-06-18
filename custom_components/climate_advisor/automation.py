@@ -275,7 +275,6 @@ def compute_bedtime_setback(
     )
 
     hvac_mode = c.hvac_mode
-    setback_modifier = c.setback_modifier
 
     if hvac_mode == "heat":
         comfort = config.get("comfort_heat", 70)
@@ -285,18 +284,18 @@ def compute_bedtime_setback(
         # Explicit sleep temp takes priority over adaptive calculation
         _explicit = config.get(CONF_SLEEP_HEAT)
         if _explicit is not None:
-            return max(float(_explicit) + setback_modifier, floor)
+            return max(float(_explicit), floor)
     elif hvac_mode == "cool":
         comfort = config.get("comfort_cool", 75)
         floor = config.get("setback_cool", 80)
         rate = (thermal_model or {}).get("cooling_rate_f_per_hour")
         default_depth = DEFAULT_SETBACK_DEPTH_COOL_F
-        # Note: warming trend (setback_modifier < 0) intentionally lowers the cool ceiling
-        # to bank cold thermal mass before a hot day. No sign flip needed.
         # Explicit sleep temp takes priority over adaptive calculation
+        # Note: warming-trend mid-night adjustment is handled separately by handle_pre_cool(),
+        # not here. compute_bedtime_setback() always returns the raw configured sleep temp.
         _explicit = config.get(CONF_SLEEP_COOL)
         if _explicit is not None:
-            return min(float(_explicit) + setback_modifier, floor)
+            return min(float(_explicit), floor)
     else:
         return config.get("comfort_heat", 70)
 
@@ -328,10 +327,7 @@ def compute_bedtime_setback(
         max_depth = config.get(CONF_MAX_SETBACK_DEPTH, MAX_SETBACK_DEPTH_F)
         _LOGGER.debug("Max setback depth: %.1f°F (config=%s)", max_depth, CONF_MAX_SETBACK_DEPTH in config)
         depth = min(max(max_recoverable, 0.0), max_depth)
-        if hvac_mode == "heat":
-            _adaptive_target = max(comfort - depth + setback_modifier, floor)
-        else:
-            _adaptive_target = min(comfort + depth + setback_modifier, floor)
+        _adaptive_target = max(comfort - depth, floor) if hvac_mode == "heat" else min(comfort + depth, floor)
         _LOGGER.debug(
             "Adaptive setback: rate=%.2f°F/hr overnight=%.0fmin → depth=%.1f°F target=%.1f°F (%s mode)",
             rate,
@@ -342,10 +338,10 @@ def compute_bedtime_setback(
         )
 
     if hvac_mode == "heat":
-        raw = comfort - depth + setback_modifier
+        raw = comfort - depth
         return max(raw, floor)
     else:  # cool
-        raw = comfort + depth + setback_modifier
+        raw = comfort + depth
         return min(raw, floor)
 
 

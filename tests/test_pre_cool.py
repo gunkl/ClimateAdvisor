@@ -122,11 +122,13 @@ def _make_classification(
 
 
 class TestComputeBedtimeSetbackCoolSignConvention:
-    """Warming trend (setback_modifier < 0) must LOWER the cool ceiling, not raise it.
+    """setback_modifier must NOT affect compute_bedtime_setback() output (Fix #333).
 
-    Issue #258 root cause: the original code had `setback_modifier = -setback_modifier`
-    for cool mode, causing warming trend to produce a HIGHER ceiling (more energy setback),
-    the opposite of the thermal mass banking intent.
+    Issue #258 introduced modifier application here to bank cold thermal mass before
+    hot days. Issue #333 identified that handle_bedtime() uses select_comfort_band()
+    (raw sleep temp, no modifier) — so compute_bedtime_setback() was only corrupting
+    display/chart, not the thermostat. The modifier is now applied exclusively by
+    handle_pre_cool() as a separate mid-night event.
     """
 
     _BASE_CONFIG = {
@@ -136,45 +138,44 @@ class TestComputeBedtimeSetbackCoolSignConvention:
         "setback_heat": 62.0,
     }
 
-    def test_warming_trend_lowers_cool_ceiling(self):
-        """setback_modifier=-3 on a cool-mode night must produce a ceiling < baseline."""
+    def test_warming_trend_does_not_change_cool_ceiling(self):
+        """setback_modifier=-3 must NOT lower the compute_bedtime_setback() ceiling."""
+        config = {**self._BASE_CONFIG, "sleep_cool": 78.0}
         c_baseline = _make_classification(hvac_mode="cool", setback_modifier=0.0)
         c_warming = _make_classification(hvac_mode="cool", setback_modifier=-3.0)
 
-        baseline = compute_bedtime_setback(self._BASE_CONFIG, {}, c_baseline)
-        warming = compute_bedtime_setback(self._BASE_CONFIG, {}, c_warming)
+        baseline = compute_bedtime_setback(config, {}, c_baseline)
+        warming = compute_bedtime_setback(config, {}, c_warming)
 
-        assert warming < baseline, (
-            f"Warming trend should produce a LOWER cool ceiling for thermal mass banking, "
-            f"got baseline={baseline}, warming={warming} (warming should be < baseline)"
+        assert warming == pytest.approx(baseline), (
+            f"compute_bedtime_setback() must ignore setback_modifier (pre-cool handles it); "
+            f"got baseline={baseline}, warming={warming}"
         )
 
-    def test_warming_trend_cool_ceiling_correct_value(self):
-        """sleep_cool(78) + modifier(-3) = 75 when explicit sleep_cool is configured."""
+    def test_warming_trend_cool_ceiling_is_raw_sleep_cool(self):
+        """With warming trend and explicit sleep_cool, result must equal sleep_cool (no modifier)."""
         config = {**self._BASE_CONFIG, "sleep_cool": 78.0}
         c = _make_classification(hvac_mode="cool", setback_modifier=-3.0)
 
         result = compute_bedtime_setback(config, {}, c)
 
-        assert result == pytest.approx(75.0), (
-            f"Expected 78 + (-3) = 75°F cool ceiling for thermal mass banking, got {result}"
-        )
+        assert result == pytest.approx(78.0), f"Expected raw sleep_cool=78°F (modifier ignored), got {result}"
 
-    def test_cooling_trend_raises_cool_ceiling(self):
-        """setback_modifier=+2 on a cooling-trend night must raise the cool ceiling (relaxed setback)."""
+    def test_cooling_trend_does_not_change_cool_ceiling(self):
+        """setback_modifier=+2 must NOT raise the compute_bedtime_setback() ceiling."""
+        config = {**self._BASE_CONFIG, "sleep_cool": 78.0}
         c_baseline = _make_classification(hvac_mode="cool", setback_modifier=0.0)
         c_cooling = _make_classification(hvac_mode="cool", setback_modifier=2.0)
 
-        baseline = compute_bedtime_setback(self._BASE_CONFIG, {}, c_baseline)
-        cooling = compute_bedtime_setback(self._BASE_CONFIG, {}, c_cooling)
+        baseline = compute_bedtime_setback(config, {}, c_baseline)
+        cooling = compute_bedtime_setback(config, {}, c_cooling)
 
-        assert cooling > baseline, (
-            f"Cooling trend should produce a HIGHER cool ceiling (relaxed setback), "
-            f"got baseline={baseline}, cooling={cooling}"
+        assert cooling == pytest.approx(baseline), (
+            f"compute_bedtime_setback() must ignore setback_modifier; got baseline={baseline}, cooling={cooling}"
         )
 
-    def test_heat_mode_warming_trend_still_lowers_heat_floor(self):
-        """In heat mode, warming trend (modifier > 0) raises the heat floor (deeper setback allowed)."""
+    def test_heat_mode_warming_trend_does_not_change_heat_floor(self):
+        """In heat mode, setback_modifier must not affect compute_bedtime_setback() output."""
         config = {**self._BASE_CONFIG, "sleep_heat": 66.0}
         c_baseline = _make_classification(hvac_mode="heat", setback_modifier=0.0)
         c_warming = _make_classification(hvac_mode="heat", setback_modifier=2.0)
@@ -182,10 +183,8 @@ class TestComputeBedtimeSetbackCoolSignConvention:
         baseline = compute_bedtime_setback(config, {}, c_baseline)
         warming = compute_bedtime_setback(config, {}, c_warming)
 
-        # For heat mode: modifier > 0 raises the target (warmer overnight, less setback)
-        assert warming > baseline, (
-            f"Heat mode: positive modifier should raise the heat floor "
-            f"(less setback depth), got baseline={baseline}, warming={warming}"
+        assert warming == pytest.approx(baseline), (
+            f"compute_bedtime_setback() must ignore setback_modifier; got baseline={baseline}, warming={warming}"
         )
 
 

@@ -127,13 +127,18 @@ class TestComputeBedtimeSetback:
         result = compute_bedtime_setback(_BASE_CONFIG, {}, c)
         assert result <= _BASE_CONFIG["comfort_heat"]
 
-    def test_setback_modifier_applied(self):
-        """Nonzero setback_modifier shifts the target."""
+    def test_setback_modifier_not_applied(self):
+        """setback_modifier has no effect on compute_bedtime_setback().
+
+        Fix #333: the modifier was incorrectly applied here, producing display/chart
+        values that diverged from what handle_bedtime() actually sends the thermostat.
+        The warming-trend modifier is handled by handle_pre_cool() directly.
+        """
         c_default = _make_classification(hvac_mode="heat", setback_modifier=0.0)
         c_modified = _make_classification(hvac_mode="heat", setback_modifier=2.0)
         result_default = compute_bedtime_setback(_BASE_CONFIG, {}, c_default)
         result_modified = compute_bedtime_setback(_BASE_CONFIG, {}, c_modified)
-        assert result_modified == pytest.approx(result_default + 2.0)
+        assert result_modified == pytest.approx(result_default)
 
     def test_cool_setback_uses_cooling_rate(self):
         """Cool mode uses cooling_rate_f_per_hour, not heating_rate_f_per_hour."""

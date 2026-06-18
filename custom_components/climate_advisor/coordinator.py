@@ -5195,11 +5195,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if st_dt > now:
             unit = self.config.get("temp_unit", "fahrenheit")
             if c.hvac_mode in ("heat", "cool"):
-                thermal_model = getattr(self.automation_engine, "_thermal_model", None) or {}
-                bedtime_target = compute_bedtime_setback(self.config, thermal_model, c)
-                _LOGGER.debug(
-                    "Bedtime setback: %.1f°F (via compute_bedtime_setback)",
-                    bedtime_target,
+                # Use the raw configured sleep temp — matches what handle_bedtime() actually
+                # sends to the thermostat via select_comfort_band(in_sleep_window=True).
+                # The warming-trend modifier surfaces separately as the Pre-cool candidate below.
+                from .const import CONF_SLEEP_COOL, CONF_SLEEP_HEAT, DEFAULT_SLEEP_COOL, DEFAULT_SLEEP_HEAT
+
+                bedtime_target = float(
+                    self.config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT)
+                    if c.hvac_mode == "heat"
+                    else self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL)
                 )
                 mode_label = "heat" if c.hvac_mode == "heat" else "cool"
                 candidates.append((st_dt, f"Bedtime — {mode_label} setback to {format_temp(bedtime_target, unit)}"))

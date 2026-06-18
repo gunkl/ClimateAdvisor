@@ -265,10 +265,11 @@ class TestSetbackModifier:
 # ---------------------------------------------------------------------------
 class TestComputeBedtimeSetbackIntegration:
     def test_compute_bedtime_setback_used_when_model_available(self):
-        """With thermal_model + classification, sleep lower = compute_bedtime_setback() output.
+        """With thermal_model + classification, sleep lower = raw configured sleep_heat (Fix #333).
 
-        Config has explicit sleep_heat=66. compute_bedtime_setback returns
-        max(sleep_heat + setback_modifier, setback_heat) = max(66+2, 60) = 68.0.
+        Config has explicit sleep_heat=66. compute_bedtime_setback now ignores setback_modifier,
+        returning max(sleep_heat, setback_heat) = max(66, 60) = 66.0.
+        The modifier is applied by handle_pre_cool() as a separate mid-night event.
         """
         ts_sleep = _ts(2)  # 02:00 — deep sleep window
         thermal_model = {
@@ -290,14 +291,17 @@ class TestComputeBedtimeSetbackIntegration:
         )
         assert len(result) == 1
         entry = result[0]
-        assert entry["lower"] == 68.0, f"With thermal_model+classification: expected lower=68.0, got {entry['lower']}"
+        assert entry["lower"] == 66.0, (
+            f"With thermal_model+classification: expected lower=66.0 "
+            f"(raw sleep_heat, no modifier), got {entry['lower']}"
+        )
 
     def test_compute_bedtime_setback_cool_used_when_model_available(self):
-        """With thermal_model + cool classification, sleep upper = compute_bedtime_setback() output.
+        """With thermal_model + cool classification, sleep upper = raw configured sleep_cool (Fix #333).
 
-        Warming trend (modifier=-2.0) lowers the cool ceiling for thermal mass banking
-        (Issue #258 sign fix): min(sleep_cool + modifier, setback_cool)
-        = min(78 + (-2), 80) = 76.0 — lower than raw sleep_cool=78.
+        Warming trend (modifier=-2.0) is no longer applied in compute_bedtime_setback().
+        Result = min(sleep_cool, setback_cool) = min(78, 80) = 78.0.
+        The pre-cool mid-night event (handle_pre_cool) applies the modifier separately.
         """
         ts_sleep = _ts(2)  # 02:00 — deep sleep window
         thermal_model = {
@@ -319,8 +323,9 @@ class TestComputeBedtimeSetbackIntegration:
         )
         assert len(result) == 1
         entry = result[0]
-        assert entry["upper"] == 76.0, (
-            f"With cool thermal_model+classification: expected upper=76.0, got {entry['upper']}"
+        assert entry["upper"] == 78.0, (
+            f"With cool thermal_model+classification: expected upper=78.0 "
+            f"(raw sleep_cool, no modifier), got {entry['upper']}"
         )
 
     # ---------------------------------------------------------------------------

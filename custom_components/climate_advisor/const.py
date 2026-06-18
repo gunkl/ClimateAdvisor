@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.27"
+VERSION = "0.4.28"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.28": [
+        "Fix #333: Bedtime 'Next Automation' label and chart sleep band now show the configured"
+        " sleep temp (e.g. 73°F), not the trend-adjusted value. The warming-trend modifier was"
+        " never applied to the thermostat at bedtime — only the mid-night pre-cool event uses it."
+        " Cool + cooling-trend and heat + warming-trend users no longer see a phantom ±2°F offset.",
+    ],
     "0.4.27": [
         "Fan activity now appears in the Activity Report with its trigger source. CA-commanded"
         " fan changes (min-runtime, economizer, whole-house, reconcile, thermostatic, nat-vent)"
@@ -1561,6 +1567,25 @@ KNOWN_FIXES: dict[int, dict] = {
             "Pre-cool depth does not account for forecast peak hour or solar gains",
             "Cooling-trend nights (setback_modifier > 0): relaxed setback sign fix also corrects"
             " those (higher ceiling = less cooling = energy savings) but no new timed phase added",
+        ],
+    },
+    333: {
+        "version_fixed": "0.4.28",
+        "title": "Bedtime 'Next Automation' label and chart sleep band show wrong temperature",
+        "scope_covered": [
+            "automation.py compute_bedtime_setback(): removed setback_modifier from all 6 return"
+            " paths — explicit heat, explicit cool, adaptive heat, adaptive cool,"
+            " non-adaptive heat, non-adaptive cool",
+            "_compute_next_automation_action(): bedtime label now reads raw CONF_SLEEP_HEAT/"
+            "CONF_SLEEP_COOL from config instead of calling compute_bedtime_setback()",
+            "chart sleep band: _compute_target_band_schedule() calls compute_bedtime_setback()"
+            " for the band bounds — now returns configured temp, not trend-shifted temp",
+        ],
+        "scope_not_covered": [
+            "handle_pre_cool() warming-trend path is intentionally unchanged"
+            " — pre-cool still adjusts the mid-night ceiling via sleep_cool + setback_modifier",
+            "future pre-heat feature (heat + cooling trend) not implemented — documented as"
+            " design intent in issue #333 comment",
         ],
     },
     326: {

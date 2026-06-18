@@ -2,7 +2,7 @@
 
 An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
 
-**Current version: 0.4.18**
+**Current version: 0.4.28**
 
 ## Dashboard
 
@@ -453,6 +453,15 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Fan command suppression of false overrides; 30s post-fan setpoint verify (#313)
 - [x] Sleep setpoint ordering fix — sleep temps independent of daytime comfort bounds (#318)
 - [x] Pause state not persisted across restarts — clean-slate after HA restart (#263)
+- [x] Startup coalescing, stuck grace self-heal, nat-vent thermostatic cycling (#321)
+- [x] Nat-vent debounce step logging and next_automation surfacing (#320)
+- [x] Trend-aware overnight pre-cool banks cold thermal mass on warming-trend nights (#258)
+- [x] Automation Time card shows local HH:MM; Next User Action rename (#323, #326)
+- [x] Thread-safety fix — @callback on all async_call_later handlers (#325)
+- [x] Thermostatic fan fast loop — fan stops on temp change, not next 30-min cycle (#327)
+- [x] Deterministic Activity Report table; merged Vent bar (fan + nat-vent) in chart (#330, #331)
+- [x] Fan activity with trigger source visible in Activity Report (#332)
+- [x] Bedtime setback display fix — Next Automation and chart now show configured sleep temp, not trend-adjusted (#333)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)

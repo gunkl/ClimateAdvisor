@@ -2719,6 +2719,17 @@ class AutomationEngine:
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        if self._paused_by_door:
+            _LOGGER.info(
+                "Occupancy away — door/window open (_paused_by_door=True), "
+                "skipping setback band; occupancy recorded, HVAC remains off"
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_setback_suppressed_paused",
+                    {"occupancy": "away", "reason": "paused_by_door"},
+                )
+            return
         if self._manual_override_active:
             _LOGGER.info(
                 "Occupancy transition to away — clearing manual override (mode=%s since %s)",
@@ -2806,6 +2817,17 @@ class AutomationEngine:
     async def handle_occupancy_vacation(self) -> None:
         """Handle vacation mode — apply deeper setback for extended away."""
         self._occupancy_mode = OCCUPANCY_VACATION
+        if self._paused_by_door:
+            _LOGGER.info(
+                "Occupancy vacation — door/window open (_paused_by_door=True), "
+                "skipping setback band; occupancy recorded, HVAC remains off"
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_setback_suppressed_paused",
+                    {"occupancy": "vacation", "reason": "paused_by_door"},
+                )
+            return
         if self._manual_override_active:
             _LOGGER.info(
                 "Occupancy transition to vacation — clearing manual override (mode=%s since %s)",

@@ -28,6 +28,8 @@ from custom_components.climate_advisor.const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    OCCUPANCY_AWAY,
+    OCCUPANCY_VACATION,
 )
 
 # ---------------------------------------------------------------------------
@@ -879,6 +881,157 @@ class TestGracePeriodExpiry:
 
         assert engine._paused_by_door is True
         engine.hass.services.async_call.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #339 — occupancy setback suppressed while paused by door/window
+# ---------------------------------------------------------------------------
+
+
+class TestOccupancyAwayWhilePaused:
+    """handle_occupancy_away() must not send setback when _paused_by_door=True."""
+
+    def test_occupancy_away_while_paused_no_thermostat_call(self):
+        """No thermostat service call is made when occupancy goes away while paused."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+
+        asyncio.run(engine.handle_occupancy_away())
+
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_occupancy_away_while_paused_records_occupancy(self):
+        """Occupancy mode is updated to away even when setback is suppressed."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+
+        asyncio.run(engine.handle_occupancy_away())
+
+        assert engine._occupancy_mode == OCCUPANCY_AWAY
+
+    def test_occupancy_away_while_paused_emits_suppressed_event(self):
+        """occupancy_setback_suppressed_paused event is emitted with correct payload."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        asyncio.run(engine.handle_occupancy_away())
+
+        suppressed = [e for e in events if e[0] == "occupancy_setback_suppressed_paused"]
+        assert len(suppressed) == 1
+        assert suppressed[0][1] == {"occupancy": "away", "reason": "paused_by_door"}
+
+
+class TestOccupancyVacationWhilePaused:
+    """handle_occupancy_vacation() must not send setback when _paused_by_door=True."""
+
+    def test_occupancy_vacation_while_paused_no_thermostat_call(self):
+        """No thermostat service call is made when occupancy goes vacation while paused."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+
+        asyncio.run(engine.handle_occupancy_vacation())
+
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_occupancy_vacation_while_paused_records_occupancy(self):
+        """Occupancy mode is updated to vacation even when setback is suppressed."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+
+        asyncio.run(engine.handle_occupancy_vacation())
+
+        assert engine._occupancy_mode == OCCUPANCY_VACATION
+
+    def test_occupancy_vacation_while_paused_emits_suppressed_event(self):
+        """occupancy_setback_suppressed_paused event is emitted with correct payload."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        asyncio.run(engine.handle_occupancy_vacation())
+
+        suppressed = [e for e in events if e[0] == "occupancy_setback_suppressed_paused"]
+        assert len(suppressed) == 1
+        assert suppressed[0][1] == {"occupancy": "vacation", "reason": "paused_by_door"}
+
+
+class TestAutomationStatusPausedWithOccupancy:
+    """_compute_automation_status() returns occupancy-aware strings when paused."""
+
+    def _compute_automation_status(
+        self,
+        is_paused_by_door: bool,
+        occupancy_mode: str = "home",
+        automation_enabled: bool = True,
+        natural_vent_active: bool = False,
+        startup_coalesce_active: bool = False,
+        within_planned_window: bool = False,
+        any_sensor_open: bool = False,
+        override_confirm_pending: bool = False,
+        grace_active: bool = False,
+        resumed_from_pause: bool = False,
+        last_resume_source: str | None = None,
+    ) -> str:
+        """Inline replication of ClimateAdvisorCoordinator._compute_automation_status()
+        including the Issue #339 occupancy-aware paused strings.
+        """
+        if not automation_enabled:
+            return "disabled"
+        if startup_coalesce_active:
+            return "starting — initializing"
+        if within_planned_window and any_sensor_open:
+            return "windows open (as planned)"
+        if natural_vent_active:
+            return "windows open · nat-vent (target 73°F)"
+        if is_paused_by_door:
+            if occupancy_mode == OCCUPANCY_AWAY:
+                return "paused — away (setback deferred: windows open)"
+            if occupancy_mode == OCCUPANCY_VACATION:
+                return "paused — vacation (setback deferred: windows open)"
+            return "paused — door/window open"
+        if override_confirm_pending:
+            return "override pending (confirming...)"
+        if grace_active:
+            if resumed_from_pause:
+                return "resumed — door/window override"
+            source = last_resume_source or "automation"
+            return f"grace period ({source})"
+        if occupancy_mode == "vacation":
+            return "active (vacation)"
+        if occupancy_mode == "away":
+            return "active (away)"
+        if occupancy_mode == "guest":
+            return "active (guest)"
+        return "active"
+
+    def test_status_paused_away(self):
+        """When paused and occupancy=away, status shows deferred setback message."""
+        status = self._compute_automation_status(
+            is_paused_by_door=True,
+            occupancy_mode=OCCUPANCY_AWAY,
+        )
+        assert status == "paused — away (setback deferred: windows open)"
+
+    def test_status_paused_vacation(self):
+        """When paused and occupancy=vacation, status shows deferred setback message."""
+        status = self._compute_automation_status(
+            is_paused_by_door=True,
+            occupancy_mode=OCCUPANCY_VACATION,
+        )
+        assert status == "paused — vacation (setback deferred: windows open)"
+
+    def test_status_paused_home_still_shows_generic(self):
+        """When paused and occupancy=home, status is the original generic string."""
+        status = self._compute_automation_status(
+            is_paused_by_door=True,
+            occupancy_mode="home",
+        )
+        assert status == "paused — door/window open"
 
 
 # ---------------------------------------------------------------------------

@@ -694,6 +694,8 @@ The automation engine tracks `_occupancy_mode` internally (synced by the coordin
 
 The `_set_temperature_for_mode()` safety net catches all indirect callers (door/window resume, grace expiry, economizer deactivation) so comfort temps are never applied while away/vacation.
 
+**Paused-by-door guard (Fix #339):** When `_paused_by_door=True`, `handle_occupancy_away()` and `handle_occupancy_vacation()` record `_occupancy_mode` but skip the setback band call and return early. HVAC stays off. The setback is applied when sensors close and the resume path runs `_set_temperature_for_mode()`, which the safety net above redirects to the appropriate occupancy handler. Event emitted: `occupancy_setback_suppressed_paused` with payload `{occupancy: "away"|"vacation", reason: "paused_by_door"}`.
+
 **`handle_bedtime()` skip paths — HVAC mode off (mild/warm nights):** When the current day classification has `hvac_mode = "off"` (mild or warm day, no heating/cooling required), `handle_bedtime()` logs a skip and emits a `bedtime_setback_skipped` event. No setpoint change is made — the comfort floor for the following morning is protected by the 30-min `apply_classification()` guard in §6b rather than a bedtime setpoint.
 
 **Structured skip events (Issue #151):** All skip paths emit `bedtime_setback_skipped` to the event log with a `reason` field:

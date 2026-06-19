@@ -4982,6 +4982,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _nt = (_nh + _nc) / 2.0
             return f"windows open · nat-vent (target {_nt:.0f}°F)"
         if self.automation_engine.is_paused_by_door:
+            if self._occupancy_mode == OCCUPANCY_AWAY:
+                return "paused — away (setback deferred: windows open)"
+            if self._occupancy_mode == OCCUPANCY_VACATION:
+                return "paused — vacation (setback deferred: windows open)"
             return "paused — door/window open"
         if self.automation_engine._override_confirm_pending:
             return "override pending (confirming...)"

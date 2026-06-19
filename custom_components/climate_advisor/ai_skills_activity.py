@@ -771,6 +771,11 @@ def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[str, s
     return "Classification suppressed (windows open)", ""
 
 
+def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
+    occupancy = p.get("occupancy", "away")
+    return f"Occupancy setback suppressed (windows open, {occupancy})", ""
+
+
 # Registry: event_type -> renderer
 EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_band_applied": _render_comfort_band_applied,
@@ -783,6 +788,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "ceiling_guard_fired": _render_ceiling_guard_fired,
     "classification_applied": _render_classification_applied,
     "classification_suppressed_paused": _render_classification_suppressed_paused,
+    "occupancy_setback_suppressed_paused": _render_occupancy_setback_suppressed_paused,
     "setpoint_rejected": _render_setpoint_rejected,
     "override_cleared": _render_override_cleared,
     "override_confirmed": _render_override_confirmed,

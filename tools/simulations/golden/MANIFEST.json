@@ -69,8 +69,8 @@
     "issue": 136
   },
   "warm_day_ceiling_breach_ac_defense": {
-    "sha256": "7a166987eaf61b18be1a5b01b36ad003c19740d9a26542bc81ed1e26097fac7e",
-    "signed": "2026-06-13",
+    "sha256": "31d131e30fbedb245ed4c9dfec4154a8a5e115d153d97d527ef89b76f0ef80b1",
+    "signed": "2026-06-18",
     "issue": 136
   },
   "warm_day_forecast_improves_guard_dormant": {

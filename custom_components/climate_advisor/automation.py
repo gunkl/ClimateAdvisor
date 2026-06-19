@@ -948,6 +948,31 @@ class AutomationEngine:
             await self.handle_occupancy_away()
             return
 
+        if self._paused_by_door:
+            _LOGGER.warning(
+                "apply_classification: door/window open (_paused_by_door=True) — "
+                "suppressing band, ensuring HVAC off; day_type=%s",
+                classification.day_type,
+            )
+            _cs_paused = self.hass.states.get(self.climate_entity)
+            if _cs_paused is not None and _cs_paused.state != "off":
+                _LOGGER.info(
+                    "apply_classification: thermostat in state=%r — forcing off (windows open)",
+                    _cs_paused.state,
+                )
+                await self._set_hvac_mode(
+                    "off",
+                    reason="classification cycle: door/window open — HVAC suppressed while paused",
+                )
+            else:
+                _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "classification_suppressed_paused",
+                    {"day_type": classification.day_type, "hvac_mode": classification.hvac_mode},
+                )
+            return
+
         _cs = self.hass.states.get(self.climate_entity)
         _LOGGER.debug(
             "apply_classification: wants=%r, thermostat=%r",

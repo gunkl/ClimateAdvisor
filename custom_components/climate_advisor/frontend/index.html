@@ -906,6 +906,7 @@
         <div class="status-item">
           <div class="label">Status</div>
           <div class="value">${data.automation_status || 'unknown'}</div>
+          ${data.pause_suppressed_classification ? `<div class="value">Classification suppressed — HVAC held off until windows close</div>` : ''}
         </div>
         <div class="status-item">
           <div class="label">Indoor</div>

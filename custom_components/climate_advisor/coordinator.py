@@ -4886,6 +4886,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         override_events = [e for e in recent_events if e.get("type") == "override_detected"]
         automation_event_types = {
             "classification_applied",
+            "classification_suppressed_paused",
             "warm_day_setback_applied",
             "warm_day_state_confirmed",
             "ceiling_guard_fired",
@@ -5557,6 +5558,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
             "paused_by_door": ae.is_paused_by_door,
+            "pause_suppressed_classification": (
+                bool(ae.is_paused_by_door) and ae._last_classification_applied is not None
+            ),
             "pre_pause_mode": ae._pre_pause_mode,
             "grace_active": ae._grace_active,
             "last_resume_source": ae._last_resume_source,

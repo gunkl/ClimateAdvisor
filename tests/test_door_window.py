@@ -882,6 +882,159 @@ class TestGracePeriodExpiry:
 
 
 # ---------------------------------------------------------------------------
+# Issue #337 — apply_classification _paused_by_door guard
+# ---------------------------------------------------------------------------
+
+
+def _make_classification_for_guard(
+    day_type: str = "hot",
+    hvac_mode: str = "cool",
+) -> DayClassification:
+    """Create a minimal DayClassification for _paused_by_door guard tests."""
+    obj = object.__new__(DayClassification)
+    obj.day_type = day_type
+    obj.trend_direction = "stable"
+    obj.trend_magnitude = 2.0
+    obj.today_high = 90.0
+    obj.today_low = 65.0
+    obj.tomorrow_high = 91.0
+    obj.tomorrow_low = 66.0
+    obj.hvac_mode = hvac_mode
+    obj.pre_condition = False
+    obj.pre_condition_target = None
+    obj.windows_recommended = False
+    obj.window_open_time = None
+    obj.window_close_time = None
+    obj.setback_modifier = 0.0
+    return obj
+
+
+class TestApplyClassificationPausedGuard:
+    """Tests for the _paused_by_door guard inside apply_classification (Issue #337).
+
+    When _paused_by_door is True the guard must:
+    1. Force HVAC off if thermostat is not already off.
+    2. Skip the _set_hvac_mode call if thermostat is already off.
+    3. Always emit 'classification_suppressed_paused' and return before
+       _apply_comfort_band or any further classification logic runs.
+    """
+
+    def _make_engine_paused(self, thermostat_state: str) -> AutomationEngine:
+        """Return an engine with _paused_by_door=True and a mocked thermostat state."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = True
+        # Explicitly set other boolean flags to avoid MagicMock truthiness traps.
+        engine._manual_override_active = False
+        engine._override_confirm_pending = False
+        engine._natural_vent_active = False
+        engine._fan_override_active = False
+
+        state = MagicMock()
+        state.state = thermostat_state
+        engine.hass.states.get.return_value = state
+
+        # Spy on _set_hvac_mode and _apply_comfort_band
+        engine._set_hvac_mode = AsyncMock()
+        engine._apply_comfort_band = AsyncMock()
+
+        # Capture events
+        engine._emit_event_callback = MagicMock()
+
+        return engine
+
+    def test_guard_forces_hvac_off_when_armed(self):
+        """_paused_by_door=True + thermostat running → _set_hvac_mode('off') called, band suppressed."""
+        engine = self._make_engine_paused(thermostat_state="heat_cool")
+        c = _make_classification_for_guard(day_type="hot", hvac_mode="cool")
+
+        asyncio.run(engine.apply_classification(c))
+
+        # Must have called _set_hvac_mode("off", reason=...)
+        engine._set_hvac_mode.assert_called_once()
+        call_args = engine._set_hvac_mode.call_args
+        assert call_args[0][0] == "off", f"Expected _set_hvac_mode('off'), got {call_args[0][0]!r}"
+
+        # Must have emitted classification_suppressed_paused
+        engine._emit_event_callback.assert_called_once_with(
+            "classification_suppressed_paused",
+            {"day_type": "hot", "hvac_mode": "cool"},
+        )
+
+        # Must NOT have called _apply_comfort_band
+        engine._apply_comfort_band.assert_not_called()
+
+    def test_guard_no_mode_change_when_already_off(self):
+        """_paused_by_door=True + thermostat already off → no _set_hvac_mode call, event still emitted."""
+        engine = self._make_engine_paused(thermostat_state="off")
+        c = _make_classification_for_guard(day_type="hot", hvac_mode="cool")
+
+        asyncio.run(engine.apply_classification(c))
+
+        # Must NOT have called _set_hvac_mode (thermostat already off)
+        engine._set_hvac_mode.assert_not_called()
+
+        # Must still emit classification_suppressed_paused
+        engine._emit_event_callback.assert_called_once_with(
+            "classification_suppressed_paused",
+            {"day_type": "hot", "hvac_mode": "cool"},
+        )
+
+        # Must NOT have called _apply_comfort_band
+        engine._apply_comfort_band.assert_not_called()
+
+    def test_guard_not_triggered_when_not_paused(self):
+        """_paused_by_door=False → guard does not fire; classification proceeds normally."""
+        engine = _make_automation_engine()
+        engine._paused_by_door = False
+        engine._manual_override_active = False
+        engine._override_confirm_pending = False
+        engine._natural_vent_active = False
+        engine._fan_override_active = False
+
+        # Thermostat in heat_cool with capabilities so _apply_comfort_band can run
+        state = MagicMock()
+        state.state = "heat_cool"
+        state.attributes = {"hvac_modes": ["off", "heat", "cool", "heat_cool"], "supported_features": 1}
+        engine.hass.states.get.return_value = state
+
+        engine._apply_comfort_band = AsyncMock()
+        engine._emit_event_callback = MagicMock()
+
+        c = _make_classification_for_guard(day_type="mild", hvac_mode="heat_cool")
+
+        asyncio.run(engine.apply_classification(c))
+
+        # classification_suppressed_paused must NOT have been emitted
+        suppressed_calls = [
+            call
+            for call in engine._emit_event_callback.call_args_list
+            if call[0][0] == "classification_suppressed_paused"
+        ]
+        assert suppressed_calls == [], f"Guard must not fire when _paused_by_door=False; got: {suppressed_calls}"
+
+        # _apply_comfort_band should have been called (classification proceeded)
+        engine._apply_comfort_band.assert_called()
+
+    def test_guard_forces_hvac_off_on_cold_day(self):
+        """_paused_by_door=True on a cold/heat day → same guard fires, forcing HVAC off."""
+        engine = self._make_engine_paused(thermostat_state="heat")
+        c = _make_classification_for_guard(day_type="cold", hvac_mode="heat")
+
+        asyncio.run(engine.apply_classification(c))
+
+        engine._set_hvac_mode.assert_called_once()
+        call_args = engine._set_hvac_mode.call_args
+        assert call_args[0][0] == "off", f"Expected _set_hvac_mode('off') on cold day, got {call_args[0][0]!r}"
+
+        engine._emit_event_callback.assert_called_once_with(
+            "classification_suppressed_paused",
+            {"day_type": "cold", "hvac_mode": "heat"},
+        )
+
+        engine._apply_comfort_band.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Config migration v3 → v4 tests
 # ---------------------------------------------------------------------------
 

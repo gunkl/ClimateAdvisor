@@ -188,6 +188,7 @@ _AUTO_EVENT_TYPES = frozenset(
     {
         "ceiling_guard_fired",
         "classification_applied",
+        "classification_suppressed_paused",
         "warm_day_state_confirmed",
         "warm_day_setback_applied",
         "warm_day_comfort_gap",
@@ -761,6 +762,10 @@ def _render_warm_day_comfort_gap(p: dict, unit: str) -> tuple[str, str]:
     return "Warm-day comfort gap -- heating before shutoff", ""
 
 
+def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
+    return "Classification suppressed (windows open)", ""
+
+
 # Registry: event_type -> renderer
 EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "comfort_band_applied": _render_comfort_band_applied,
@@ -772,6 +777,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "override_detected": _render_override_detected,
     "ceiling_guard_fired": _render_ceiling_guard_fired,
     "classification_applied": _render_classification_applied,
+    "classification_suppressed_paused": _render_classification_suppressed_paused,
     "setpoint_rejected": _render_setpoint_rejected,
     "override_cleared": _render_override_cleared,
     "override_confirmed": _render_override_confirmed,

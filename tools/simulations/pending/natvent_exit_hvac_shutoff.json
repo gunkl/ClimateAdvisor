@@ -1,0 +1,64 @@
+{
+  "name": "natvent_exit_hvac_shutoff",
+  "description": "Issue #337: When a door/window is open (_paused_by_door=True) and a hot-day classification cycle fires, apply_classification must suppress the comfort band and keep HVAC off — not re-arm cool mode through open windows.",
+  "source": "synthetic",
+  "issue": 337,
+  "simulator_support": true,
+  "track": "unit",
+  "notes": [
+    "Occupant outcome: User left windows open on a hot morning. CA paused the AC when the window opened. On the next 30-min classification cycle, CA must NOT turn AC back on through open windows — that would waste energy and push unconditioned outdoor air through the home.",
+    "Scenario effectiveness: If the _paused_by_door guard is deleted from apply_classification(), the classification event would emit 'classification_applied' and call _set_hvac_mode('cool'). The second assertion would fail because the last decision at 08:30 would be 'classification_applied' instead of 'classification_suppressed_paused'. The scenario WILL fail without the guard.",
+    "Two-way alignment: production apply_classification() checks _paused_by_door before applying any band. If thermostat is already off it emits classification_suppressed_paused and returns. This scenario exercises exactly that code path.",
+    "Setup: thermostat must be in a non-off mode before the sensor opens, otherwise handle_door_window_open() does not set _paused_by_door (the guard requires pre_pause_mode != 'off'). We start in cool mode (initial_thermostat_mode=cool) on a hot day.",
+    "Harness note: 'classification_suppressed_paused' is mapped in outcomes.py _map_event_to_outcome() to the canonical decision 'classification_suppressed_paused' (Issue #337 closed this gap). The expect value below matches that canonical string."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 78,
+    "setback_heat": 60,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0,
+    "initial_thermostat_mode": "cool"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 78.0,
+      "note": "Hot morning: outdoor 78F already warm; AC was running (initial_thermostat_mode=cool) keeping indoor at 72F."
+    },
+    {
+      "time": "2026-07-10T08:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "User opens window. Thermostat is in cool mode — handle_door_window_open detects pre_pause_mode='cool' != 'off', sets _paused_by_door=True, turns HVAC off, emits sensor_opened result=paused."
+    },
+    {
+      "time": "2026-07-10T08:30:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "30-min classification cycle fires on a hot day, requesting hvac_mode=cool. apply_classification must detect _paused_by_door=True, keep HVAC off, and emit classification_suppressed_paused — NOT classification_applied."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T08:05:00",
+      "expect": "paused",
+      "reason": "Window opened while AC was running — handle_door_window_open sets _paused_by_door=True, emits sensor_opened result=paused, and turns HVAC off. This establishes the paused state the #337 guard depends on."
+    },
+    {
+      "at": "2026-07-10T08:30:00",
+      "expect": "classification_suppressed_paused",
+      "reason": "apply_classification fires on a hot day requesting cool mode, but _paused_by_door=True. The guard suppresses the band, confirms HVAC stays off, and emits classification_suppressed_paused. outcomes.py maps this event to the canonical 'classification_suppressed_paused' decision (Issue #337). Without the #337 guard, apply_classification would emit 'classification_applied' instead — making this assertion fail."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "apply_classification respects _paused_by_door — suppresses hot-day cool band when window is open (Issue #337)",
+    "observed_behavior": "sensor_open → paused (HVAC off, _paused_by_door=True) → classification hot/cool → classification_suppressed_paused (HVAC stays off)",
+    "expected_behavior": "Classification cycle on a hot day does NOT re-arm AC while windows are open — occupant avoids AC running against open windows"
+  }
+}

@@ -22,6 +22,7 @@ For temperature formulas and threshold values see [docs/08-COMPUTATION-REFERENCE
 | Where is the full Tier 3 spec for grace periods — state transitions, timer lifecycle, invariants, HA-restart behavior? | The Territory spec covers both grace types, the 12-row transition table, pre-pause mode storage/restoration, occupancy interaction, and error conditions including sensor-unavailable-during-pause. | [Grace Period State Machine — Territory Spec](grace-periods-spec.md) |
 | Where is the full Tier 3 spec for the occupancy dispatch state machine — priority, handlers, setback formulas, persistence? | The Territory spec covers priority resolution (GUEST > VACATION > HOME/AWAY), all four toggle-entity handlers, the 7-row state transition table, setback formula derivation, and the interaction with manual override and grace periods. | [Occupancy Dispatch State Machine — Territory Spec](occupancy-dispatch-spec.md) |
 | What is the decision sequence inside apply_classification() for a warm or mild day, and when does the ODE ceiling guard fire? | Two sequential guards run before the HVAC-off action: (1) comfort-floor guard fires if indoor < comfort_heat; (2) ODE ceiling guard fires if a predicted breach is within the computed lead time and outdoor > indoor. Stateless — re-evaluated every 30-min cycle. | [§13. Warm-Day apply_classification() Guard Sequence](07-AUTOMATION-FLOWCHART.md#13-warm-day-apply_classification-guard-sequence) |
+| What are the early-return gates inside apply_classification() and in what order do they run? | Five gates run before comfort-band logic: (1) manual_override_active, (2) override_confirm_pending, (3) first-run HVAC running, (4) occupancy AWAY/VACATION redirect, (5) _paused_by_door — forces HVAC off and returns without applying the comfort band. | [§4c. apply_classification() Gate Sequence](07-AUTOMATION-FLOWCHART.md#4c-apply_classification-gate-sequence) |
 | What decision does the startup coalesce make for a physically running fan, and what triggers the thermostatic fast loop? | Coalesce reads live thermostat `fan_mode`/`hvac_action` and chooses adopt-on (nat-vent eligible), turn-off, or no-fan. The thermostatic loop fires on every indoor or outdoor temp change (two new listeners + backstop timer), not only on 30-min polls. | [§14. Fan Startup Reconciliation and Thermostatic Loop (Issue #327)](07-AUTOMATION-FLOWCHART.md#14-fan-startup-reconciliation-and-thermostatic-loop-issue-327) |
 | How does `_apply_nat_vent_hvac_state()` decide whether to arm the full comfort band or floor-only when nat-vent activates? | `FAN_MODE_WHOLE_HOUSE`/`DISABLED` → no-op; `FAN_MODE_HVAC` + `aggressive_savings=False` → full band `[comfort_heat, comfort_cool]` (AC assists if breeze fails); `FAN_MODE_HVAC` + `aggressive_savings=True` → floor-only (heat @ `comfort_heat`, ceiling disarmed — no compressor through open windows). | [§12c. Nat-Vent HVAC State — `_apply_nat_vent_hvac_state()`](07-AUTOMATION-FLOWCHART.md#12c-nat-vent-hvac-state--_apply_nat_vent_hvac_state) |
 
@@ -204,6 +205,21 @@ graph TD
 - Starts a full manual override grace period (default 30 min). During this window, new contact sensor open events cannot re-pause HVAC.
 - IS recorded as a manual override — `apply_classification` will skip HVAC mode changes until the grace expires or a schedule boundary clears it.
 - Status string `"resumed — door/window override"` is surfaced in the Current Status pane and sensor entity.
+
+### 4c. apply_classification() Gate Sequence
+
+`apply_classification()` evaluates five early-return gates before it touches the thermostat. Gates 1–4 existed before fix #337; Gate 5 was added by fix #337.
+
+| Gate | Condition | Action |
+|---|---|---|
+| 1 | `_manual_override_active` | Skip all HVAC changes — return |
+| 2 | `_override_confirm_pending` | Skip — waiting for user confirmation |
+| 3 | First-run AND HVAC already running | Treat as manual override — return |
+| 4 | Occupancy is AWAY or VACATION | Redirect to setback handler — return |
+| **5** | **`_paused_by_door` is True** | **Force HVAC off (if not already off), emit `classification_suppressed_paused`, return — no comfort band applied** |
+| — | All gates pass | Apply comfort band and day-type HVAC mode |
+
+**Gate 5 detail (fix #337):** When windows or doors are open and the system is paused, the 30-minute classification cycle previously did nothing — meaning a classification scheduled while the system was already paused could restore comfort temps or change HVAC mode on the next cycle. Gate 5 closes this gap: every 30-minute poll enforces the off state while `_paused_by_door=True`, regardless of day type (hot, cold, mild, warm) and regardless of which path set the flag (direct door sensor open vs. nat-vent exit). If the thermostat is already off, no service call is made. The `classification_suppressed_paused` event is emitted so the coordinator can log and surface the suppression reason.
 
 ---
 

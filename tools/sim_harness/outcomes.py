@@ -276,6 +276,9 @@ def _map_event_to_outcome(
     if event_type == "classification_applied":
         return ProductionDecision(ts_str, event_type, "classification_applied")
 
+    if event_type == "classification_suppressed_paused":
+        return ProductionDecision(ts_str, event_type, "classification_suppressed_paused")
+
     if event_type == "warm_day_comfort_gap":
         target = payload.get("target_f") or payload.get("comfort_heat")
         return ProductionDecision(ts_str, event_type, "warm_day_comfort_gap", target)

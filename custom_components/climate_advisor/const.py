@@ -12,6 +12,10 @@ RELEASE_NOTES: dict[str, list[str]] = {
         "aggressive_savings gate prevents compressor through open windows; "
         "comfort band re-armed immediately when windows close on warm/mild days.",
     ],
+    "0.4.30": [
+        "Fix #337: HVAC no longer runs with windows/doors open — apply_classification now"
+        " enforces HVAC off whenever paused, on both hot and cold days.",
+    ],
     "0.4.29": [
         "Fix #335: Sleep setback was overridden every 30 minutes after bedtime on installations"
         " configured via the HA UI (time selector). The HA time selector stores times as"
@@ -483,6 +487,20 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_not_covered": (
             "FAN_MODE_BOTH archetype not separately tested; "
             "Tier B integration tests for coordinator state-listener timing not covered."
+        ),
+    },
+    337: {
+        "version_fixed": "0.4.30",
+        "title": "apply_classification enforces HVAC off when _paused_by_door=True",
+        "scope_covered": (
+            "apply_classification() _paused_by_door guard — enforces HVAC off on every 30-min "
+            "classification cycle when windows/doors are open, regardless of whether pause was "
+            "entered via direct door-sensor path or nat-vent exit path. Applies to both hot days "
+            "(AC suppression) and cold days (heat suppression). Emits classification_suppressed_paused event."
+        ),
+        "scope_not_covered": (
+            "Immediate shutoff at nat-vent exit moment — up to 30-min delay between nat-vent exit "
+            "and next classification cycle remains possible. Tracked as a separate improvement."
         ),
     },
     335: {

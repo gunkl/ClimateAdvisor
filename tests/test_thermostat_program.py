@@ -236,6 +236,20 @@ class TestInSleepWindow:
     def test_malformed_time_returns_false(self):
         assert _in_sleep_window(datetime(2026, 6, 10, 23, 0), {"sleep_time": "bad", "wake_time": "07:00"}) is False
 
+    def test_hhmmss_format_in_window(self):
+        # HA time selector stores values as "HH:MM:SS" — must parse correctly (Issue #336)
+        cfg = {"sleep_time": "22:30:00", "wake_time": "07:00:00"}
+        assert _in_sleep_window(datetime(2026, 6, 10, 23, 0), cfg) is True
+
+    def test_hhmmss_format_after_sleep_time_in_window(self):
+        # 5 min after sleep — the exact scenario from Issue #335
+        cfg = {"sleep_time": "21:00:00", "wake_time": "07:00:00"}
+        assert _in_sleep_window(datetime(2026, 6, 18, 21, 5), cfg) is True
+
+    def test_hhmmss_format_out_of_window(self):
+        cfg = {"sleep_time": "22:30:00", "wake_time": "07:00:00"}
+        assert _in_sleep_window(datetime(2026, 6, 10, 12, 0), cfg) is False
+
 
 # ---------------------------------------------------------------------------
 # _apply_comfort_band — actuation primitive (requires capability stub)

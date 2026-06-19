@@ -231,8 +231,10 @@ def _in_sleep_window(now: datetime, config: dict) -> bool:
     if not sleep_time or not wake_time:
         return False
     try:
-        sleep_h, sleep_m = map(int, str(sleep_time).split(":"))
-        wake_h, wake_m = map(int, str(wake_time).split(":"))
+        _sp = str(sleep_time).split(":")
+        sleep_h, sleep_m = int(_sp[0]), int(_sp[1])
+        _wp = str(wake_time).split(":")
+        wake_h, wake_m = int(_wp[0]), int(_wp[1])
         now_time = now.time().replace(second=0, microsecond=0)
         sleep_t = dt_time(sleep_h, sleep_m)
         wake_t = dt_time(wake_h, wake_m)

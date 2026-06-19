@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.28"
+VERSION = "0.4.29"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.29": [
+        "Fix #335: Sleep setback was overridden every 30 minutes after bedtime on installations"
+        " configured via the HA UI (time selector). The HA time selector stores times as"
+        " 'HH:MM:SS' but _in_sleep_window() only handled 'HH:MM', causing a silent parse"
+        " failure and falling back to the daytime comfort band on every 30-min cycle.",
+    ],
     "0.4.28": [
         "Fix #333: Bedtime 'Next Automation' label and chart sleep band now show the configured"
         " sleep temp (e.g. 73°F), not the trend-adjusted value. The warming-trend modifier was"
@@ -460,6 +466,24 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    335: {
+        "version_fixed": "0.4.29",
+        "title": "_in_sleep_window() silent parse failure for HH:MM:SS config format",
+        "scope_covered": (
+            "_in_sleep_window() in automation.py now uses index-based split (split(':')[0], split(':')[1]) "
+            "instead of tuple unpacking, handling both 'HH:MM' and 'HH:MM:SS' formats. "
+            "Affects: apply_classification() 30-min cycle — the only caller of _in_sleep_window() "
+            "that was re-evaluating the sleep window. handle_bedtime() was unaffected (passes "
+            "in_sleep_window=True explicitly). Regression tests added to test_thermostat_program.py "
+            "TestInSleepWindow: hhmmss_format_in_window, hhmmss_format_after_sleep_time_in_window, "
+            "hhmmss_format_out_of_window."
+        ),
+        "scope_not_covered": (
+            "Config entries with 'HH:MM' format (existing users) were never broken and continue to work. "
+            "wake_time receives the same fix but wake_time parse failure was not the reported symptom "
+            "(sleep_time is evaluated first in the or-chain). No migration to normalize stored format."
+        ),
+    },
     330: {
         "version_fixed": "0.4.25",
         "title": "Activity Report — deterministic per-event table with populated Settings column",

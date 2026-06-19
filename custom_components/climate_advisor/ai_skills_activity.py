@@ -193,6 +193,7 @@ _AUTO_EVENT_TYPES = frozenset(
         "warm_day_comfort_gap",
         "nat_vent_ceiling_escalation",
         "nat_vent_away_ceiling_exit",
+        "nat_vent_ac_assist_armed",
         "occupancy_setback",
         "occupancy_comfort_restored",
         "morning_wakeup",
@@ -603,6 +604,10 @@ def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
     return label, "mode: off->cool"
 
 
+def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
+    return "Nat-vent + AC assist armed (full band)", ""
+
+
 def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
     entity = p.get("entity", "")
     result = p.get("result", "")
@@ -789,6 +794,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
     "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,
     "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
+    "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,
     "sensor_opened": _render_sensor_opened,
     "sensor_all_closed": _render_sensor_all_closed,
     "nat_vent_forecast_skip": _render_nat_vent_forecast_skip,

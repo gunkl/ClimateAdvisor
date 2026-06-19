@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.29"
+VERSION = "0.4.31"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.31": [
+        "Fix #338: nat-vent + AC assist — band re-armed when nat-vent activates from pause; "
+        "aggressive_savings gate prevents compressor through open windows; "
+        "comfort band re-armed immediately when windows close on warm/mild days.",
+    ],
     "0.4.29": [
         "Fix #335: Sleep setback was overridden every 30 minutes after bedtime on installations"
         " configured via the HA UI (time selector). The HA time selector stores times as"
@@ -466,6 +471,20 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    338: {
+        "version_fixed": "0.4.31",
+        "title": "Nat-vent + AC assist: band re-arm and aggressive_savings ceiling gate",
+        "scope_covered": (
+            "apply_classification() enforces nat-vent band on 30-min cycle; "
+            "_apply_nat_vent_hvac_state() re-arms full band (aggressive_savings=off) or "
+            "floor-only (aggressive_savings=on) at all activation sites; "
+            "handle_all_doors_windows_closed() re-arms comfort band immediately for warm/mild days."
+        ),
+        "scope_not_covered": (
+            "FAN_MODE_BOTH archetype not separately tested; "
+            "Tier B integration tests for coordinator state-listener timing not covered."
+        ),
+    },
     335: {
         "version_fixed": "0.4.29",
         "title": "_in_sleep_window() silent parse failure for HH:MM:SS config format",

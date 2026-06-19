@@ -22,6 +22,7 @@ For temperature formulas and threshold values see [docs/08-COMPUTATION-REFERENCE
 | Where is the full Tier 3 spec for the occupancy dispatch state machine — priority, handlers, setback formulas, persistence? | The Territory spec covers priority resolution (GUEST > VACATION > HOME/AWAY), all four toggle-entity handlers, the 7-row state transition table, setback formula derivation, and the interaction with manual override and grace periods. | [Occupancy Dispatch State Machine — Territory Spec](occupancy-dispatch-spec.md) |
 | What is the decision sequence inside apply_classification() for a warm or mild day, and when does the ODE ceiling guard fire? | Two sequential guards run before the HVAC-off action: (1) comfort-floor guard fires if indoor < comfort_heat; (2) ODE ceiling guard fires if a predicted breach is within the computed lead time and outdoor > indoor. Stateless — re-evaluated every 30-min cycle. | [§13. Warm-Day apply_classification() Guard Sequence](07-AUTOMATION-FLOWCHART.md#13-warm-day-apply_classification-guard-sequence) |
 | What decision does the startup coalesce make for a physically running fan, and what triggers the thermostatic fast loop? | Coalesce reads live thermostat `fan_mode`/`hvac_action` and chooses adopt-on (nat-vent eligible), turn-off, or no-fan. The thermostatic loop fires on every indoor or outdoor temp change (two new listeners + backstop timer), not only on 30-min polls. | [§14. Fan Startup Reconciliation and Thermostatic Loop (Issue #327)](07-AUTOMATION-FLOWCHART.md#14-fan-startup-reconciliation-and-thermostatic-loop-issue-327) |
+| How does `_apply_nat_vent_hvac_state()` decide whether to arm the full comfort band or floor-only when nat-vent activates? | `FAN_MODE_WHOLE_HOUSE`/`DISABLED` → no-op; `FAN_MODE_HVAC` + `aggressive_savings=False` → full band `[comfort_heat, comfort_cool]` (AC assists if breeze fails); `FAN_MODE_HVAC` + `aggressive_savings=True` → floor-only (heat @ `comfort_heat`, ceiling disarmed — no compressor through open windows). | [§12c. Nat-Vent HVAC State — `_apply_nat_vent_hvac_state()`](07-AUTOMATION-FLOWCHART.md#12c-nat-vent-hvac-state--_apply_nat_vent_hvac_state) |
 
 ## 1. Main Decision Loop (30-Minute Poll)
 
@@ -429,7 +430,8 @@ flowchart TD
     B -->|No| D{Planned window period\nactive for this classification?}
     D -->|Yes| E[Skip — sensor open is expected\nno HVAC action]
     D -->|No| F{outdoor < indoor\nAND indoor > comfort_heat\nAND outdoor < comfort_cool + delta?}
-    F -->|Yes| G[Activate natural ventilation\nHVAC off · fan on\n_natural_vent_active = True]
+    F -->|Yes| G[Activate natural ventilation\nFan on · _natural_vent_active = True]
+    G --> G2[_apply_nat_vent_hvac_state\nSee §12c]
     F -->|No| H[Enter paused state\nHVAC off · fan off\nWait for conditions to improve]
 ```
 
@@ -453,10 +455,35 @@ flowchart TD
     K -->|Yes| L[Exit paused state\nResume HVAC from classification]
     K -->|No| M{300s lockout elapsed?\nAND outdoor < indoor - 1°F?\nAND outdoor < comfort_cool + delta?}
     M -->|All yes| N[Re-activate natural ventilation\nFan on · _natural_vent_active = True]
+    N --> N2[_apply_nat_vent_hvac_state\nSee §12c]
     M -->|Any no| O[Stay paused\nRe-check next coordinator update]
 ```
 
 **Hysteresis note:** The 1°F gap in the re-activation check (`outdoor < indoor - 1°F`) and the 300-second lockout timer together prevent rapid oscillation when outdoor and indoor temperatures are near equilibrium. Without both guards, a small thermal fluctuation could toggle nat vent on and off multiple times within a single hour.
+
+**Sensor-close on warm/mild day (Fix #338):** When all sensors close while nat-vent is active on a warm or mild day (nodes `B → C`), `handle_all_doors_windows_closed()` now re-arms the comfort band immediately via `_apply_nat_vent_hvac_state()`'s inverse — restoring the full `[comfort_heat, comfort_cool]` comfort band at the moment of close. Previously the warm/mild path skipped the re-arm (the `if c.hvac_mode in ("heat", "cool")` check failed for the `"off"` classifier label), leaving the thermostat without an armed ceiling until the next 30-minute `apply_classification()` cycle — a gap of up to 30 minutes.
+
+---
+
+### 12c. Nat-Vent HVAC State — `_apply_nat_vent_hvac_state()`
+
+`_apply_nat_vent_hvac_state()` is called at every nat-vent activation site (initial sensor-open activation in §12a and re-activation from paused state in §12b) and is enforced in `apply_classification()`. It decides what HVAC band to arm alongside the running fan, based on the configured fan archetype and `aggressive_savings` setting.
+
+```mermaid
+flowchart TD
+    A[_apply_nat_vent_hvac_state called] --> B{Fan archetype?}
+    B -->|WHOLE_HOUSE, BOTH, or DISABLED| C[No-op\nHVAC already suppressed by _activate_fan or disabled]
+    B -->|HVAC only| D{aggressive_savings?}
+    D -->|False| E[Cool setpoint at comfort_cool ceiling\nsingle-setpoint cool mode\nAC can assist if breeze can't hold ceiling]
+    D -->|True| F[Floor-only guard\nheat mode at comfort_heat\nCeiling disarmed — no compressor through open windows]
+```
+
+**Why this matters for the occupant:**
+- `FAN_MODE_WHOLE_HOUSE`/`DISABLED`: the HVAC is already suppressed by the fan activation path; no further band arming is needed.
+- `FAN_MODE_HVAC` + `aggressive_savings=False`: a single cool setpoint at `comfort_cool` is programmed immediately on nat-vent activate (or re-activate). The thermostat can run the compressor if the breeze cannot hold the ceiling. The floor (`comfort_heat`) is not re-armed by this call — it remains enforced by the existing 30-min `apply_classification()` warm-day band cycle.
+- `FAN_MODE_HVAC` + `aggressive_savings=True`: only the heat floor is armed (heat mode @ `comfort_heat`); the cool ceiling is intentionally disarmed. Running the compressor through open windows defeats the energy savings the user asked for — if the breeze cannot hold the ceiling, the occupant accepts it.
+
+**Call sites:** `handle_door_window_open()` (§12a activation), `check_natural_vent_conditions()` (§12b re-activate from paused state), and `apply_classification()` (30-minute cycle — enforces band state every cycle while nat-vent is active).
 
 ---
 
@@ -553,4 +580,4 @@ Fan control: watching indoor=<entity> outdoor=<entity> thermostat=<entity> for t
 
 ---
 
-*Last Updated: 2026-06-16*
+*Last Updated: 2026-06-19*

@@ -948,6 +948,22 @@ class AutomationEngine:
             await self.handle_occupancy_away()
             return
 
+        # Issue #338: while nat-vent is active with savings mode, enforce floor-only HVAC so the
+        # 30-minute cycle cannot re-arm the ceiling (compressor) through open windows.
+        # With savings off, call the helper to keep the full band current, then continue so the
+        # ODE ceiling guard can still fire as a safety backstop if a breach is predicted.
+        if self._natural_vent_active:
+            _aggressive = bool(self.config.get("aggressive_savings", False))
+            _LOGGER.info(
+                "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s day_type=%s",
+                not _aggressive,
+                classification.day_type,
+            )
+            await self._apply_nat_vent_hvac_state()
+            if _aggressive:
+                # Savings mode: no compressor through open windows — skip ceiling guard
+                return
+
         _cs = self.hass.states.get(self.climate_entity)
         _LOGGER.debug(
             "apply_classification: wants=%r, thermostat=%r",
@@ -1690,11 +1706,12 @@ class AutomationEngine:
                 self._natural_vent_active = True
                 _LOGGER.info(
                     "Natural ventilation mode: outdoor %.1f°F < indoor %.1f°F,"
-                    " outdoor ≤ target %.1f°F — fan on, band stays armed",
+                    " outdoor ≤ target %.1f°F — fan on, applying nat-vent HVAC state",
                     outdoor,
                     indoor,
                     nat_vent_threshold,
                 )
+                await self._apply_nat_vent_hvac_state()
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "sensor_opened",
@@ -1769,7 +1786,13 @@ class AutomationEngine:
             # Resume normal classification if we have one
             if self._current_classification:
                 c = self._current_classification
+                _LOGGER.info(
+                    "sensor_all_closed: nat-vent ended — re-arming HVAC immediately day_type=%s hvac_mode=%s",
+                    c.day_type,
+                    c.hvac_mode,
+                )
                 if c.hvac_mode in ("heat", "cool"):
+                    # Hot/cool/cold day: restore the classification mode + setpoint directly.
                     await self._set_hvac_mode(
                         c.hvac_mode,
                         reason="door/window closed — restoring mode after natural ventilation",
@@ -1778,7 +1801,21 @@ class AutomationEngine:
                         c,
                         reason="door/window closed — restoring comfort after natural ventilation",
                     )
-                    self._start_grace_period("automation", trigger="sensor_closed_resume")
+                else:
+                    # Warm/mild day: classifier says "off" but actual control is the comfort band
+                    # (Issue #249). Re-arm immediately — don't wait up to 30 min for
+                    # apply_classification() to fire.
+                    _rearm_band = ComfortBand(
+                        floor=float(self.config.get("comfort_heat", 70)),
+                        ceiling=float(self.config.get("comfort_cool", 75)),
+                        active="ceiling",
+                        reason="nat-vent ended (warm/mild day) — immediate comfort band re-arm",
+                    )
+                    await self._apply_comfort_band(
+                        _rearm_band,
+                        reason="door/window closed — re-arming comfort band after nat-vent (warm/mild day)",
+                    )
+                self._start_grace_period("automation", trigger="sensor_closed_resume")
             return
 
         # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
@@ -1856,6 +1893,7 @@ class AutomationEngine:
                     )
                 )
                 self._natural_vent_active = True
+                await self._apply_nat_vent_hvac_state()
                 # Issue #244: emit so the re-evaluation activation is visible in the
                 # event log / timeline / AI report (previously this path was silent).
                 if self._emit_event_callback:
@@ -2067,6 +2105,7 @@ class AutomationEngine:
                     hysteresis,
                     threshold,
                 )
+                await self._apply_nat_vent_hvac_state()
 
     async def nat_vent_temperature_check(self, current_temp: float) -> None:
         """Thermostat-style cycling: keep indoor near the comfort midpoint during a nat-vent session.
@@ -3037,6 +3076,69 @@ class AutomationEngine:
             _wakeup_band,
             reason=f"morning wake-up — comfort band [{_wakeup_band.floor:.0f}/{_wakeup_band.ceiling:.0f}]",
         )
+
+    async def _apply_nat_vent_hvac_state(self) -> None:
+        """Apply the correct HVAC state when nat-vent is active.
+
+        Called immediately after nat-vent activates (all paths) and on every
+        30-minute apply_classification() cycle while nat-vent is active.
+
+        FAN_MODE_WHOLE_HOUSE: no-op — HVAC is already suppressed by _activate_fan().
+        FAN_MODE_HVAC + aggressive_savings=False: re-arm the full comfort band so the
+            thermostat self-arbitrates and the compressor can assist if the breeze alone
+            cannot hold the comfort ceiling.
+        FAN_MODE_HVAC + aggressive_savings=True: arm the floor only (heat @ comfort_heat)
+            so the compressor cannot run for cooling through open windows.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode in (FAN_MODE_DISABLED, FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            # WHOLE_HOUSE and BOTH: _activate_fan() already called _set_hvac_mode("off") to prevent
+            # fighting the exhaust fan — re-arming a band here would immediately contradict that.
+            _LOGGER.info(
+                "_apply_nat_vent_hvac_state: no-op (fan_mode=%s — HVAC suppressed by _activate_fan or disabled)",
+                fan_mode,
+            )
+            return
+
+        aggressive_savings = bool(self.config.get("aggressive_savings", False))
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_cool = float(self.config.get("comfort_cool", 75))
+
+        if not aggressive_savings:
+            # Full comfort band — compressor may assist if breeze cannot hold the ceiling.
+            _LOGGER.info(
+                "_apply_nat_vent_hvac_state: AC assist armed — full band comfort_heat=%.1f comfort_cool=%.1f"
+                " (aggressive_savings=off)",
+                comfort_heat,
+                comfort_cool,
+            )
+            _nat_vent_band = ComfortBand(
+                floor=comfort_heat,
+                ceiling=comfort_cool,
+                active="ceiling",
+                reason="nat-vent AC assist — full comfort band",
+            )
+            await self._apply_comfort_band(
+                _nat_vent_band,
+                reason="nat-vent AC assist: full band armed (aggressive_savings=off)",
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_ac_assist_armed",
+                    {"comfort_heat": comfort_heat, "comfort_cool": comfort_cool},
+                )
+        else:
+            # Savings mode — floor guard only; ceiling disarmed so compressor cannot run
+            # for cooling through open windows.
+            _LOGGER.info(
+                "_apply_nat_vent_hvac_state: savings mode — floor-only at comfort_heat=%.1f"
+                " (aggressive_savings=on — ceiling disarmed)",
+                comfort_heat,
+            )
+            await self._set_hvac_mode("heat", reason="nat-vent savings mode — floor guard only, ceiling disarmed")
+            await self._set_temperature(
+                comfort_heat, reason="nat-vent savings mode — protecting comfort floor", mode="heat"
+            )
 
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
         """Activate fan based on configured fan_mode.

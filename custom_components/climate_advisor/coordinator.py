@@ -4890,6 +4890,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "warm_day_state_confirmed",
             "ceiling_guard_fired",
             "nat_vent_ceiling_escalation",
+            "nat_vent_ac_assist_armed",
         }
         for ov_event in override_events:
             ov_time_str = ov_event.get("time", "")
@@ -5637,6 +5638,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ),
             # Bug 3 (Issue #321): nat-vent cycling visibility in debug pane
             "nat_vent_active": ae._natural_vent_active,
+            # Issue #338: AC assist status — true when nat-vent is active with FAN_MODE_HVAC
+            # and aggressive_savings is off (full comfort band armed, compressor may assist).
+            # FAN_MODE_BOTH excluded: _activate_fan() suppresses HVAC for BOTH (same as WHOLE_HOUSE).
+            "nat_vent_ac_assist": (
+                bool(ae._natural_vent_active)
+                and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
+                and not self.config.get("aggressive_savings", False)
+            ),
             "nat_vent_target": (
                 (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0
                 if ae._natural_vent_active

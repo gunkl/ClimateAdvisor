@@ -1031,3 +1031,244 @@ class TestPostFanVerify:
         captured_callbacks[0][1](None)  # sync wrapper; inner coro closed by _consume_coroutine
 
         engine._set_temperature.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #338 -- nat-vent AC assist HVAC state routing
+# ---------------------------------------------------------------------------
+
+
+def _make_hvac_engine(
+    fan_mode: str = "hvac_fan",
+    aggressive_savings: bool = False,
+    comfort_heat: float = 70.0,
+    comfort_cool: float = 75.0,
+    indoor_f: float = 76.0,
+) -> AutomationEngine:
+    """Engine pre-wired for AC-assist tests: FAN_MODE_HVAC by default."""
+    engine = _make_engine(
+        comfort_heat=comfort_heat,
+        comfort_cool=comfort_cool,
+        nat_vent_delta=3.0,
+        indoor_f=indoor_f,
+    )
+    engine.config["fan_mode"] = fan_mode
+    engine.config["aggressive_savings"] = aggressive_savings
+    return engine
+
+
+class TestNatVentAcAssist:
+    """Issue #338: _apply_nat_vent_hvac_state routes correctly based on fan_mode + aggressive_savings."""
+
+    # ------------------------------------------------------------------
+    # Test 1: pause -> re-activate path (check_natural_vent_conditions)
+    # with savings OFF -> full comfort band re-armed
+    # ------------------------------------------------------------------
+    def test_path_b_rearm_full_band_savings_off(self):
+        """Engine in paused state, FAN_MODE_HVAC, savings=False.
+
+        check_natural_vent_conditions() re-activates -> _apply_nat_vent_hvac_state
+        -> _apply_comfort_band with ceiling band armed (cool at comfort_cool).
+
+        Occupant experience: windows open, breeze plus AC compressor together hold
+        the comfort ceiling -- occupant stays comfortable without choosing between
+        free cooling and AC.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=76.0)
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        # outdoor 68F: below indoor(76) - hysteresis(1) = 75; below threshold(75+3=78)
+        engine._last_outdoor_temp = 68.0
+        engine._nat_vent_outdoor_exit_time = None
+
+        # Stub _apply_comfort_band so we can assert it is called
+        engine._apply_comfort_band = AsyncMock()
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        engine._apply_comfort_band.assert_called_once()
+        call_band = engine._apply_comfort_band.call_args[0][0]
+        assert call_band.active == "ceiling"
+        assert call_band.floor == 70.0
+        assert call_band.ceiling == 75.0
+
+    # ------------------------------------------------------------------
+    # Test 2: pause -> re-activate, savings ON -> floor-only (heat at comfort_heat)
+    # ------------------------------------------------------------------
+    def test_path_b_floor_only_savings_on(self):
+        """Engine in paused state, FAN_MODE_HVAC, savings=True.
+
+        check_natural_vent_conditions() re-activates -> _apply_nat_vent_hvac_state
+        -> heat mode at comfort_heat (ceiling disarmed, no compressor).
+
+        Occupant experience: free cooling via breeze only; AC compressor stays off
+        (savings mode). Comfort floor is protected by heat mode.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=True, indoor_f=76.0)
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+        engine._nat_vent_outdoor_exit_time = None
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        hvac_calls = [
+            c
+            for c in engine.hass.services.async_call.call_args_list
+            if c[0][0] == "climate" and c[0][1] == "set_hvac_mode"
+        ]
+        heat_calls = [c for c in hvac_calls if c[0][2].get("hvac_mode") == "heat"]
+        assert len(heat_calls) >= 1, "savings mode must arm heat at comfort floor"
+
+    # ------------------------------------------------------------------
+    # Test 3: door-open path (handle_door_window_open), savings ON ->
+    # ceiling disarmed (no cool service call)
+    # ------------------------------------------------------------------
+    def test_path_a_savings_on_disarms_ceiling(self):
+        """Sensor opens with conditions met, savings=True.
+
+        handle_door_window_open() activates nat-vent -> _apply_nat_vent_hvac_state
+        -> heat mode only; no cool/heat_cool service call (ceiling disarmed).
+
+        Occupant experience: compressor stays off while windows are open even if
+        indoor approaches comfort_cool -- only floor is guarded.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=True, indoor_f=76.0)
+        engine._last_outdoor_temp = 68.0
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._natural_vent_active is True
+        # Savings mode: ceiling disarmed -- verify set_temperature is called at comfort_heat
+        # (floor only), NOT at comfort_cool (which would arm the compressor for cooling).
+        temp_calls = [
+            c
+            for c in engine.hass.services.async_call.call_args_list
+            if c[0][0] == "climate" and c[0][1] == "set_temperature"
+        ]
+        assert len(temp_calls) >= 1, "savings mode must set a setpoint"
+        # All setpoint calls must be at the floor (comfort_heat=70), not ceiling (comfort_cool=75)
+        for call in temp_calls:
+            assert call[0][2].get("temperature") == 70.0, (
+                "savings mode must only arm the floor setpoint (comfort_heat), not comfort_cool"
+            )
+
+    # ------------------------------------------------------------------
+    # Test 4: FAN_MODE_WHOLE_HOUSE -> _apply_nat_vent_hvac_state is a no-op
+    # ------------------------------------------------------------------
+    def test_whole_house_fan_no_band_change(self):
+        """FAN_MODE_WHOLE_HOUSE nat-vent activation must NOT call _apply_comfort_band.
+
+        Whole-house fan handles airflow directly; HVAC is suppressed to 'off' by
+        _activate_fan(). Arming a comfort band on top would fight the fan.
+
+        Occupant experience: whole-house fan exchanges outdoor air at full flow;
+        the thermostat stays off so no compressor runs against the airflow.
+        """
+        from custom_components.climate_advisor.const import FAN_MODE_WHOLE_HOUSE
+
+        engine = _make_hvac_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, aggressive_savings=False, indoor_f=76.0)
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+        engine._nat_vent_outdoor_exit_time = None
+
+        # Stub _apply_comfort_band -- must NOT be called by the whole-house fan path
+        engine._apply_comfort_band = AsyncMock()
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        engine._apply_comfort_band.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Test 5: apply_classification() with _natural_vent_active=True must
+    # call _apply_nat_vent_hvac_state and return early
+    # ------------------------------------------------------------------
+    def test_apply_classification_nat_vent_active_enforces_band(self):
+        """apply_classification() with nat-vent active must enforce the nat-vent band
+        and return early without applying the classification's own HVAC mode.
+
+        Occupant experience: on a warm day with windows open, classification would
+        set HVAC off -- but the nat-vent band guard keeps the comfort floor armed
+        so the home doesn't drop below comfort_heat.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=76.0)
+        engine._natural_vent_active = True
+
+        # Stub _apply_nat_vent_hvac_state to assert it is called
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+        # Stub _apply_comfort_band to catch any leaked classification call
+        engine._apply_comfort_band = AsyncMock()
+
+        classification = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(classification))
+
+        engine._apply_nat_vent_hvac_state.assert_called_once()
+
+    # ------------------------------------------------------------------
+    # Test 6: handle_all_doors_windows_closed, warm/mild day (hvac_mode="off")
+    # -> comfort band re-armed immediately
+    # ------------------------------------------------------------------
+    def test_sensor_close_warm_day_rearmed_immediately(self):
+        """All sensors close while nat-vent active, day_type='warm' (hvac_mode='off').
+
+        handle_all_doors_windows_closed() must re-arm the comfort band immediately,
+        not wait for the next apply_classification() cycle (up to 30 min away).
+
+        Occupant experience: closing windows on a warm day immediately re-arms the
+        AC so the indoor temp does not drift above comfort_cool before the next
+        30-min automation cycle.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=76.0)
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        # Classification with hvac_mode="off" = warm/mild day
+        engine._current_classification = _make_classification(day_type="warm", hvac_mode="off")
+
+        # Stub _apply_comfort_band to assert immediate re-arm
+        engine._apply_comfort_band = AsyncMock()
+        # Stub _deactivate_fan so it doesn't call real fan service
+        engine._deactivate_fan = AsyncMock()
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._natural_vent_active is False
+        engine._apply_comfort_band.assert_called_once()
+        call_band = engine._apply_comfort_band.call_args[0][0]
+        assert call_band.active == "ceiling"
+
+    # ------------------------------------------------------------------
+    # Test 7: handle_all_doors_windows_closed, hot day (hvac_mode="cool")
+    # -> HVAC set to "cool" (not comfort band)
+    # ------------------------------------------------------------------
+    def test_sensor_close_hot_day_mode_restored(self):
+        """All sensors close while nat-vent active, day_type='hot' (hvac_mode='cool').
+
+        handle_all_doors_windows_closed() must restore 'cool' mode (not re-arm a band),
+        because the classifier explicitly wants compressor cooling.
+
+        Occupant experience: on a hot day the AC compressor comes back on immediately
+        when windows close -- the occupant does not experience a comfort gap while
+        waiting for the next automation cycle.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=76.0)
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
+
+        # Stub _deactivate_fan so it doesn't call real fan service
+        engine._deactivate_fan = AsyncMock()
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._natural_vent_active is False
+        hvac_calls = [
+            c
+            for c in engine.hass.services.async_call.call_args_list
+            if c[0][0] == "climate" and c[0][1] == "set_hvac_mode"
+        ]
+        cool_calls = [c for c in hvac_calls if c[0][2].get("hvac_mode") == "cool"]
+        assert len(cool_calls) >= 1, "hot-day close must restore 'cool' HVAC mode"

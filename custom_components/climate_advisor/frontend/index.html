@@ -935,6 +935,14 @@
           <div class="label">Fan</div>
           <div class="value">${data.fan_status || 'disabled'}</div>
         </div>
+        ${data.nat_vent_active ? `
+        <div class="status-item">
+          <div class="label">Natural Vent</div>
+          <div class="value">${escapeHtml(data.nat_vent_ac_assist
+            ? 'Natural ventilation + AC assist'
+            : 'Natural ventilation (savings mode — fan only)')}</div>
+        </div>
+        ` : ''}
         ${data.contact_sensors && data.contact_sensors.length > 0 ? `
         <div class="status-item">
           <div class="label">Doors/Windows</div>

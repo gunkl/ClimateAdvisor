@@ -221,6 +221,18 @@ graph TD
 
 **Gate 5 detail (fix #337):** When windows or doors are open and the system is paused, the 30-minute classification cycle previously did nothing — meaning a classification scheduled while the system was already paused could restore comfort temps or change HVAC mode on the next cycle. Gate 5 closes this gap: every 30-minute poll enforces the off state while `_paused_by_door=True`, regardless of day type (hot, cold, mild, warm) and regardless of which path set the flag (direct door sensor open vs. nat-vent exit). If the thermostat is already off, no service call is made. The `classification_suppressed_paused` event is emitted so the coordinator can log and surface the suppression reason.
 
+### 4d. Occupancy Change While Paused (Fix #339)
+
+When occupancy switches to `away` or `vacation` while `_paused_by_door=True` (a door or window is open), the setback band is suppressed. The handlers behave as follows:
+
+- `_occupancy_mode` **is** updated immediately — the new occupancy state is recorded.
+- No setback band service call is made — the thermostat is left at HVAC off (the existing paused state).
+- Event `occupancy_setback_suppressed_paused` is emitted with payload `{occupancy: "away"|"vacation", reason: "paused_by_door"}`.
+- The coordinator status string reflects both states: `"paused — away (setback deferred: windows open)"` or `"paused — vacation (setback deferred: windows open)"`.
+- When sensors eventually close, the resume path calls `_set_temperature_for_mode()`, whose §6a safety net redirects to `handle_occupancy_away()` or `handle_occupancy_vacation()` as appropriate — the deferred setback is applied at that point.
+
+**Why:** Applying a setback band while HVAC is paused for open sensors would re-arm the thermostat in a mode that conflicts with the pause reason. The occupancy state is captured so the correct setback is applied the moment the sensors close and the system resumes.
+
 ---
 
 ## 5. Manual Override Protection

@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.31"
+VERSION = "0.4.32"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.32": [
+        "Fix #339: Occupancy→away/vacation no longer arms HVAC setback while windows/doors are open. "
+        "HVAC stays off; occupancy mode is recorded for correct setback on resume. "
+        "Status now shows 'paused — away (setback deferred: windows open)' when both conditions are active.",
+    ],
     "0.4.31": [
         "Fix #338: nat-vent + AC assist — band re-armed when nat-vent activates from pause; "
         "aggressive_savings gate prevents compressor through open windows; "
@@ -475,6 +480,21 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    339: {
+        "version_fixed": "0.4.32",
+        "title": "Occupancy→away/vacation bypasses HVAC pause guard while windows open",
+        "scope_covered": (
+            "handle_occupancy_away() and handle_occupancy_vacation() — _paused_by_door guard added "
+            "after _occupancy_mode is recorded; skips _apply_comfort_band() call; emits "
+            "occupancy_setback_suppressed_paused event. _compute_automation_status() returns combined "
+            "paused+occupancy string when both conditions are active."
+        ),
+        "scope_not_covered": (
+            "handle_occupancy_home() on hot/cool days while paused — if day classification is 'cool' "
+            "or 'heat', _set_temperature_for_mode() may set comfort temps while windows open. "
+            "Separate issue tracked."
+        ),
+    },
     338: {
         "version_fixed": "0.4.31",
         "title": "Nat-vent + AC assist: band re-arm and aggressive_savings ceiling gate",

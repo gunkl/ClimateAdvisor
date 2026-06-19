@@ -13,10 +13,11 @@ For temperature formulas and threshold values see [docs/08-COMPUTATION-REFERENCE
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What gate conditions can block the 30-minute poll from applying a classification? | Two gates: `_manual_override_active` (user changed thermostat) and `_first_run` with HVAC already running (treated as manual override). Both cause `apply_classification()` to skip the HVAC mode change. | [§1. Main Decision Loop](07-AUTOMATION-FLOWCHART.md#1-main-decision-loop-30-minute-poll) |
-| How does the door/window pause flow work from sensor open to HVAC off? | Sensor open → debounce timer (default 5 min) → verify still open → check grace, planned window period, existing pause → set `_hvac_command_pending` → HVAC off + notification. | [§4. Door/Window Pause Flow](07-AUTOMATION-FLOWCHART.md#4-doorwindow-pause-flow) |
+| How does the door/window pause flow work from sensor open to HVAC off? | Sensor open → debounce timer (default 5 min) → verify still open → check grace, planned window period → **check nat-vent first** (if outdoor cooler than indoor, fan on, band stays armed, no shutoff) → if nat-vent gates fail: set `_hvac_command_pending` → HVAC off + notification. | [§4. Door/Window Pause Flow](07-AUTOMATION-FLOWCHART.md#4-doorwindow-pause-flow) |
 | When a grace period expires, what prevents it from blindly restoring HVAC? | `_grace_expired()` calls `_re_pause_for_open_sensor()`, which checks `_is_within_planned_window_period()` before re-pausing — sensors open in a recommended window period are not re-paused. | [§4b. Grace Expiry with Planned Window Period Check](07-AUTOMATION-FLOWCHART.md#4b-grace-expiry-with-planned-window-period-check) |
-| How does manual override protection work — what sets it and what clears it? | `_async_thermostat_changed()` detects mode changes not preceded by `_hvac_command_pending`; sets `_manual_override_active = True`. Cleared at next wakeup or bedtime schedule boundary. | [§5. Manual Override Protection](07-AUTOMATION-FLOWCHART.md#5-manual-override-protection) |
+| How does manual override protection work — what sets it and what clears it? | `_async_thermostat_changed()` detects mode changes not preceded by `_hvac_command_pending`; starts a **10-min confirmation window** (`_override_confirm_pending = True`). If thermostat is still divergent after the window (PATH A), sets `_manual_override_active = True` and starts grace. If it self-reverted (PATH B), no grace. Cleared at wakeup or bedtime schedule boundary. | [§5. Manual Override Protection](07-AUTOMATION-FLOWCHART.md#5-manual-override-protection) |
 | What are the natural ventilation exit conditions and in what order are they checked? | Priority order: all sensors closed → comfort floor exit (indoor ≤ comfort_heat) → outdoor-rise exit (outdoor ≥ indoor) → ceiling threshold exit (outdoor > comfort_cool + delta). First match wins. | [§12b. Continuous Monitoring](07-AUTOMATION-FLOWCHART.md#12b-continuous-monitoring-check_natural_vent_conditions) |
+| What HVAC state does `_apply_nat_vent_hvac_state()` arm when nat-vent activates, and how does `aggressive_savings` change it? | `FAN_MODE_HVAC` + `aggressive_savings=False` → full comfort band `[comfort_heat, comfort_cool]` (compressor can assist if breeze can't hold ceiling). `FAN_MODE_HVAC` + `aggressive_savings=True` → heat-only at `comfort_heat` (floor protected, ceiling disarmed — no compressor through open windows). `WHOLE_HOUSE` or `DISABLED` → no-op. | [§12c. Nat-Vent HVAC State](07-AUTOMATION-FLOWCHART.md#12c-nat-vent-hvac-state--_apply_nat_vent_hvac_state) |
 | How does occupancy priority resolve when multiple toggles are active? | Guest > Vacation > Home/Away > default (home). `_compute_occupancy_mode()` in the coordinator reads all three toggle states and dispatches to the matching handler. | [§9. Occupancy State Machine](07-AUTOMATION-FLOWCHART.md#9-occupancy-state-machine) |
 | Where is the full Tier 3 spec for grace periods — state transitions, timer lifecycle, invariants, HA-restart behavior? | The Territory spec covers both grace types, the 12-row transition table, pre-pause mode storage/restoration, occupancy interaction, and error conditions including sensor-unavailable-during-pause. | [Grace Period State Machine — Territory Spec](grace-periods-spec.md) |
 | Where is the full Tier 3 spec for the occupancy dispatch state machine — priority, handlers, setback formulas, persistence? | The Territory spec covers priority resolution (GUEST > VACATION > HOME/AWAY), all four toggle-entity handlers, the 7-row state transition table, setback formula derivation, and the interaction with manual override and grace periods. | [Occupancy Dispatch State Machine — Territory Spec](occupancy-dispatch-spec.md) |
@@ -137,6 +138,8 @@ Sensor state changes are handled by `_async_door_window_changed()` in the coordi
 
 When the system sets HVAC to `off` as part of a pause, it sets `_hvac_command_pending = True` and records `_hvac_command_time` before issuing the service call. This tells the thermostat state change handler (Section 5) that the mode change is system-initiated, not a user action, preventing false manual override detection.
 
+**Nat-vent runs before pause.** After the debounce expires, `handle_door_window_open()` checks natural ventilation conditions first (`outdoor < indoor AND indoor > comfort_heat AND outdoor < comfort_cool + delta`). If met, the fan turns on and the comfort band stays armed (Issue #249) — HVAC is NOT set to off and `_paused_by_door` is NOT set. The HVAC-off pause is only the fallback when nat-vent gates fail.
+
 ```mermaid
 graph TD
     A[Sensor state change] --> B{Sensor is open?}
@@ -150,7 +153,9 @@ graph TD
     I -->|Yes| J[Skip pause - grace active]
     I -->|No| K{_is_within_planned_window_period?}
     K -->|Yes| L[Skip pause\nlog 'not pausing - windows recommended']
-    K -->|No| M{_paused_by_door\nalready True?}
+    K -->|No| NV{Nat-vent conditions met?\noutdoor < indoor\nAND indoor > comfort_heat\nAND outdoor < threshold}
+    NV -->|Yes| NVA[Fan on · band stays armed\n_natural_vent_active = True\nHVAC NOT set off]
+    NV -->|No| M{_paused_by_door\nalready True?}
     M -->|Yes| N[Already paused - skip]
     M -->|No| O[Store _pre_pause_mode]
     O --> P{pre_pause_mode != off?}
@@ -215,17 +220,25 @@ graph TD
     AA -->|No| B{is_paused_by_door\nAND new_state != off?}
     B -->|Yes| C[handle_manual_override_during_pause]
     C --> D[_paused_by_door = False\n_pre_pause_mode = None]
-    D --> E[_manual_override_active = True]
-    E --> F[Start manual grace period]
-    F --> G[Cancel all debounce timers]
+    D --> E[start_override_confirmation source=pause\n_override_confirm_pending = True\napply_classification blocked]
+    E --> F{After confirm window\nthermostat still divergent?}
+    F -->|PATH A — Yes| G[_manual_override_active = True\nStart manual grace period\nCancel debounce timers]
+    F -->|PATH B — No| PB[Self-resolved — no grace\nTransient notification sent]
     B -->|No| H{Mode changed AND\nnot already in override AND\nmode != classification hvac_mode?}
     H -->|No| I[No override - track runtime only]
     H -->|Yes| J[handle_manual_override]
-    J --> K[_manual_override_active = True\nRecord mode and time]
-    K --> L[Start manual grace period]
-    L --> M[apply_classification skips\nHVAC mode change until cleared]
+    J --> K[start_override_confirmation source=normal\n_override_confirm_pending = True\napply_classification blocked]
+    K --> L{After confirm window\nthermostat still divergent?}
+    L -->|PATH A — Yes| LA[_manual_override_active = True\nStart manual grace period]
+    L -->|PATH B — No| LB[Self-resolved — transient notification]
+    LA --> M[apply_classification skips\nHVAC mode change until grace expires]
     M --> N[Override cleared at:\nWakeup or Bedtime schedule boundary]
 ```
+
+**Key behaviors:**
+- `apply_classification()` is blocked during the confirmation window via `_override_confirm_pending`, not `_manual_override_active` — so HVAC is protected even before the grace formally starts.
+- The 90-minute grace (configurable via "Pause after manual thermostat change") only starts after PATH A confirms — not immediately when the thermostat changes.
+- PATH B fires when the thermostat reverts to the classification mode within the confirmation window — treated as a transient adjustment, no grace started.
 
 ---
 

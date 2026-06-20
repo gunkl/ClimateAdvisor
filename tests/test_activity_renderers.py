@@ -271,31 +271,30 @@ class TestBuildEventTimelineTable:
 
         assert "Sensor opened" in table
 
-    def test_grace_started_settings_blank(self):
-        """grace_started → Event cell shows humanized type, Settings cell is empty.
+    def test_grace_started_settings_blank_for_unknown_trigger(self):
+        """grace_started with unknown trigger → Event cell 'Grace started', Settings empty.
 
         grace_started is not in _NO_DEDUP, so the dedup flush path uses
         _humanize_type('grace_started') → 'Grace started' for the Event cell
         (the renderer ev_text is discarded for dedup-eligible types).
-        The renderer returns Settings='', confirmed here.
+        For triggers not in _GRACE_TRIGGER_LABELS the renderer returns Settings=''
+        so the Settings cell stays blank.
         """
         event = _make_event(
             "grace_started",
-            trigger="door_opened",
+            trigger="door_opened",  # not a known trigger — Settings stays blank
             duration_seconds=5400,
         )
         table = _build_table([event])
 
-        # Row present (humanized type name from the dedup flush path)
         assert "Grace started" in table, f"grace_started row must appear. Table:\n{table}"
-        # Settings column is blank for grace_started (renderer returns Settings='')
         rows = [line for line in table.splitlines() if "Grace started" in line]
         assert rows, "No grace_started row found"
-        # The row format is: | Time | Event | Settings | Source |
-        # cells[0]='' cells[1]=time cells[2]=event cells[3]=settings cells[4]=source
         cells = rows[0].split("|")
         if len(cells) >= 4:
-            assert cells[3].strip() == "", f"grace_started Settings cell should be empty. Got: {cells[3]!r}"
+            assert cells[3].strip() == "", (
+                f"grace_started Settings cell should be empty for unknown trigger. Got: {cells[3]!r}"
+            )
 
     def test_empty_event_log_returns_header_and_sentinel(self):
         """Empty event log → table has header + '(no events in window)' sentinel row."""
@@ -522,3 +521,97 @@ class TestFanEventRenderers:
         ev, st = _act_mod.EVENT_RENDERERS["fan_untracked_cleared"]({}, "fahrenheit")
         assert "untracked" in ev.lower()
         assert st == "fan: off"
+
+
+class TestGraceStartedRendering:
+    """Issue #341: grace_started trigger field renders as human-readable Settings cell."""
+
+    def test_fan_manual_override_trigger_shows_in_settings(self):
+        """grace_started with trigger=fan_manual_override → Settings shows readable label.
+
+        The occupant sees 'Grace started | fan override (manual fan change)' rather than
+        the raw internal code 'fan_manual_override' — making the reason for the pause clear.
+        """
+        ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
+            {"source": "manual", "duration_seconds": 5400, "trigger": "fan_manual_override"},
+            "fahrenheit",
+        )
+        assert "fan override" in st, f"Settings must show readable trigger label. Got: {st!r}"
+        assert "manual fan change" in st
+
+    def test_hvac_override_trigger(self):
+        ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
+            {"source": "manual", "duration_seconds": 5400, "trigger": "override_confirmed"},
+            "fahrenheit",
+        )
+        assert "HVAC mode override" in st
+
+    def test_sensor_closed_resume_trigger(self):
+        ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
+            {"source": "automation", "duration_seconds": 300, "trigger": "sensor_closed_resume"},
+            "fahrenheit",
+        )
+        assert "all sensors closed" in st
+
+    def test_unknown_trigger_settings_blank(self):
+        """Unknown trigger codes do not appear in Settings (no junk internal codes shown)."""
+        ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
+            {"source": "manual", "duration_seconds": 5400, "trigger": "some_future_trigger"},
+            "fahrenheit",
+        )
+        assert st == "", f"Unknown trigger must leave Settings empty. Got: {st!r}"
+
+    def test_no_trigger_field_settings_blank(self):
+        """Legacy events without a trigger key render without error; Settings stays empty."""
+        ev, st = _act_mod.EVENT_RENDERERS["grace_started"](
+            {"source": "manual", "duration_seconds": 5400},
+            "fahrenheit",
+        )
+        assert st == ""
+
+    def test_fan_manual_override_trigger_in_table(self):
+        """End-to-end: fan_manual_override trigger appears in Settings column of timeline table."""
+        event = _make_event(
+            "grace_started",
+            trigger="fan_manual_override",
+            duration_seconds=5400,
+            source="manual",
+        )
+        table = _build_table([event])
+        assert "Grace started" in table
+        rows = [line for line in table.splitlines() if "Grace started" in line]
+        assert rows, "No grace_started row found"
+        cells = rows[0].split("|")
+        if len(cells) >= 4:
+            assert "fan override" in cells[3], f"Settings cell must contain 'fan override'. Got: {cells[3]!r}"
+
+
+class TestFanManualOverrideRenderer:
+    """Issue #341: fan_manual_override event renders fan state change in Settings."""
+
+    def test_fan_state_change_shows_in_settings(self):
+        """fan_manual_override with fan_before/fan_after → Settings shows 'fan: on->auto'."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"fan_before": "on", "fan_after": "auto", "override_active_since": "2026-06-20T06:48:00"},
+            "fahrenheit",
+        )
+        assert ev == "Fan manual override"
+        assert st == "fan: on->auto"
+
+    def test_fan_state_change_off_to_on(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"fan_before": "off", "fan_after": "on"},
+            "fahrenheit",
+        )
+        assert st == "fan: off->on"
+
+    def test_missing_fan_states_settings_blank(self):
+        """No fan_before/fan_after → Settings stays blank (graceful fallback)."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"]({}, "fahrenheit")
+        assert ev == "Fan manual override"
+        assert st == ""
+
+    def test_fan_manual_override_source_is_manual(self):
+        """fan_manual_override source resolves to 'manual' for timeline Source column."""
+        source = _act_mod._event_source_label("fan_manual_override", {"source": ""})
+        assert source == "manual"

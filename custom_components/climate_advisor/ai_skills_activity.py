@@ -207,6 +207,7 @@ _MANUAL_EVENT_TYPES = frozenset(
         "override_confirmed",
         "override_cleared",
         "override_self_resolved",
+        "fan_manual_override",
     }
 )
 
@@ -461,17 +462,27 @@ def _render_override_self_resolved(p: dict, unit: str) -> tuple[str, str]:
     return "Override self-resolved (transient)", ""
 
 
+_GRACE_TRIGGER_LABELS: dict[str, str] = {
+    "fan_manual_override": "fan override (manual fan change)",
+    "override_confirmed": "HVAC mode override",
+    "dashboard_resume": "user resumed from dashboard",
+    "sensor_closed_resume": "all sensors closed",
+    "nat_vent_exit_resume": "natural ventilation ended",
+}
+
+
 def _render_grace_started(p: dict, unit: str) -> tuple[str, str]:
     trigger = p.get("trigger", "")
     source = p.get("source", "")
     duration = p.get("duration_seconds")
     dur_str = f" ({duration // 60} min)" if isinstance(duration, int) else ""
     label = f"Grace period started{dur_str}"
-    if trigger:
-        label = f"{label} -- trigger: {trigger}"
-    elif source:
+    if source:
         label = f"{label} ({source})"
-    return label, ""
+    # Settings cell: human-readable trigger label for known triggers; empty otherwise.
+    # (The Event cell for this dedup-eligible type always shows _humanize_type → "Grace started".)
+    trigger_label = _GRACE_TRIGGER_LABELS.get(trigger, "")
+    return label, trigger_label
 
 
 def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
@@ -517,6 +528,14 @@ def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
     label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
     return label, "fan: on->off"
+
+
+def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
+    fan_before = str(p.get("fan_before", "")).strip()
+    fan_after = str(p.get("fan_after", "")).strip()
+    change = f"{fan_before}->{fan_after}" if fan_before and fan_after else ""
+    settings = f"fan: {change}" if change else ""
+    return "Fan manual override", settings
 
 
 def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
@@ -799,6 +818,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_fan_off": _render_nat_vent_fan_off,
     "fan_activated": _render_fan_activated,
     "fan_deactivated": _render_fan_deactivated,
+    "fan_manual_override": _render_fan_manual_override,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,
     "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,

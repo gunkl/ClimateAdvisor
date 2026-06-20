@@ -1045,11 +1045,14 @@ Natural ventilation and the economizer **no longer set `hvac_mode=off`** when th
 
 `_apply_nat_vent_hvac_state()` is called at every nat-vent activation site — initial activation, re-activation from paused state, and on every 30-minute `apply_classification()` cycle while nat-vent is active — to ensure the correct band is armed alongside the running fan.
 
-| Fan archetype | `aggressive_savings` | Band armed | Rationale |
-|---|---|---|---|
-| `FAN_MODE_WHOLE_HOUSE` or `DISABLED` | any | No-op | HVAC already suppressed by fan activation path; no band to arm |
-| `FAN_MODE_HVAC` only | `False` | Cool setpoint at `comfort_cool` ceiling (`cool` mode, single-setpoint) | AC assists if the breeze cannot hold the ceiling; floor is re-armed on the next 30-min `apply_classification()` cycle |
-| `FAN_MODE_HVAC` only | `True` | Floor-only: `heat` mode @ `comfort_heat`; ceiling disarmed | Running the compressor through open windows defeats the savings the user configured; occupant accepts ceiling drift if breeze fails |
+| Fan archetype | `aggressive_savings` | Sleep window? | Band armed | Rationale |
+|---|---|---|---|---|
+| `FAN_MODE_WHOLE_HOUSE` or `DISABLED` | any | any | No-op | HVAC already suppressed by fan activation path; no band to arm |
+| `FAN_MODE_HVAC` only | `False` | **Yes** | No setpoint call — emits `nat_vent_ac_assist_armed` only | Sleep band applied by the subsequent `select_comfort_band(in_sleep_window=True)` call in `apply_classification()`; avoids redundant thermostat write at daytime comfort ceiling immediately overwritten by sleep ceiling (Issue #341) |
+| `FAN_MODE_HVAC` only | `False` | No | Full comfort band at `[comfort_heat, comfort_cool]` ceiling | AC assists if the breeze cannot hold the ceiling; floor is re-armed on the next 30-min `apply_classification()` cycle |
+| `FAN_MODE_HVAC` only | `True` | any | Floor-only: `heat` mode @ `comfort_heat`; ceiling disarmed | Running the compressor through open windows defeats the savings the user configured; occupant accepts ceiling drift if breeze fails |
+
+**Sleep window deference (Issue #341):** When nat-vent is active during the sleep window and `aggressive_savings=False`, `_apply_nat_vent_hvac_state()` emits `nat_vent_ac_assist_armed` (so the status card and activity report show nat-vent active) but skips `_apply_comfort_band()`. The `select_comfort_band(in_sleep_window=True)` call immediately following in `apply_classification()` programs the thermostat with the sleep band (`sleep_heat`/`sleep_cool`). Without this guard, two conflicting setpoints were written every 30-min cycle all night: the daytime comfort ceiling first, then the sleep ceiling immediately after. The sleep ceiling won (applied last), but the thermostat received redundant writes and the activity report showed confusing dual entries.
 
 **Path B fix (re-activation from paused state):** Before Fix #338, when nat-vent re-activated from a paused state (all conditions met again after the 300 s lockout), `_apply_nat_vent_hvac_state()` was not called on that path. The band was not re-armed until the next 30-minute `apply_classification()` cycle — a window of up to 30 minutes during which the thermostat ran with no CA-programmed ceiling. Fix #338 calls `_apply_nat_vent_hvac_state()` in `check_natural_vent_conditions()` at the re-activate node (§12b in the flowchart).
 

@@ -224,7 +224,7 @@ _TIMING_MANUAL_EVENT_TYPES: frozenset[str] = frozenset(
         "override_self_resolved",
         "manual_override_cleared",
         "handle_manual_override",
-        "handle_fan_manual_override",
+        "fan_manual_override",
     }
 )
 

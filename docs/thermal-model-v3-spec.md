@@ -16,7 +16,7 @@
 | How does the dual-estimator framework select between endpoint and block-averaged OLS per overnight window? | Both estimators always run; an 8-row decision table selects based on R²_B and 30% relative agreement. On disagreement, Estimator A (endpoint) wins. On R²_B ≥ 0.50 and agreement, B wins with medium grade (α=0.15). | [§Dual Estimator Framework](#dual-estimator-framework) |
 | Where is the solar factor formula defined and what does `phase_offset_h` do? | `_solar_factor(local_hour, phase_offset_h)` shifts the sinusoidal solar input peak by `phase_offset_h` hours. With the default offset=2 the peak falls at local hour 15 (3pm) instead of 13 (1pm). | [§Solar Factor](#solar-factor) |
 | How is `solar_phase_offset_h` learned from chart_log? | Daytime passive windows (HVAC off, fan off, windows closed) are scanned for the indoor temperature peak hour. `phase_obs = peak_hour − 13` is accumulated via EWMA (α=0.10), clamped to [0, 4]. | [§Solar Phase Offset Learning](#solar-phase-offset-learning) |
-| What is engine visibility and where is it exposed? | `get_engine_status()` returns per-engine `active`, `value`, and `since` fields; `k_passive` and `k_solar` additionally include `confidence` and `obs_count`. Exposed at REST `/api/climate_advisor/engines`, dashboard Debug tab, AI investigator context, and `tools/engine_status.py`. | [§Engine Visibility](#engine-visibility) |
+| What is engine visibility and where is it exposed? | `get_engine_status()` returns per-engine `active`, `value`, and (for `k_passive`/`k_solar`) `confidence` fields. Exposed at REST `/api/climate_advisor/engines`, dashboard Debug tab, AI investigator context, and `tools/engine_status.py`. | [§Engine Visibility](#engine-visibility) |
 | Why does `k_active_cool` stay `None` despite AC cycling normally? | Two v0.3.50 bugs can cause this: (1) the `"samples": []` key shadow — `_start_hvac_observation` created a `"samples"` key that was always returned instead of `"active_samples"`; (2) startup recovery discarded all HVAC pending obs by reading the wrong key. Both fixed in v0.3.50. Check `--rejections --type hvac_cool` for `n=0` entries with elapsed > 0. | [§Observation Pipeline Failure Modes](#observation-pipeline-failure-modes) |
 | What rejection codes indicate normal operation vs. pipeline failure for HVAC obs types? | `new_session_started` (short-cycling), `plateau_guard` (insufficient post-heat decay), and `n=0 delta_t=0.00°F` (sensor quantization) are expected on some homes. `n=0` with elapsed > 0 in pre-v0.3.50 coordinators indicates the key-shadow bug. | [§Known Rejection Patterns](#known-rejection-patterns) |
 
@@ -647,7 +647,6 @@ A chart_log window is eligible for a phase observation only when all six conditi
 
 - Applies EWMA update to `thermal_model_cache["solar_phase_offset_h"]`
 - On first call (value is `None`), initialises directly: `solar_phase_offset_h = clamp(observed_h, MIN, MAX)`
-- Sets `first_active_date_phase_offset` to today's ISO date string on the first call
 - Thread-safe: called only from the coordinator's async context
 
 ### `_build_learning_health` update
@@ -658,21 +657,7 @@ A chart_log window is eligible for a phase observation only when all six conditi
 
 ## Engine Visibility
 
-**Scope:** `get_engine_status()` in `learning.py`; `first_active_date_*` fields in `thermal_model_cache`; REST endpoint in `api.py`; dashboard card in `index.html`; AI context in `ai_skills_activity.py`; CLI tool `tools/engine_status.py`.
-
-### Per-Parameter Activation Tracking
-
-When `_update_thermal_model_cache` writes a parameter for the first time (transition from `None` → first real value), it also sets the corresponding `first_active_date_*` field to today's ISO date string (e.g., `"2026-04-01"`). The field is never overwritten on subsequent updates.
-
-| Cache field | Tracks first activation of |
-|---|---|
-| `first_active_date_passive` | `k_passive` |
-| `first_active_date_solar` | `k_solar` |
-| `first_active_date_phase_offset` | `solar_phase_offset_h` |
-| `first_active_date_vent_window` | `k_vent_window` |
-| `first_active_date_hvac` | `k_active_heat` or `k_active_cool` (whichever is first) |
-
-All five fields are initialised to `None` in `thermal_model_cache` and included in the learning JSON on every persist cycle.
+**Scope:** `get_engine_status()` in `learning.py`; REST endpoint in `api.py`; dashboard card in `index.html`; AI context in `ai_skills_activity.py`; CLI tool `tools/engine_status.py`.
 
 ### `get_engine_status()` Return Shape
 
@@ -684,30 +669,23 @@ All five fields are initialised to `None` in `thermal_model_cache` and included 
     "active": bool,          # True when k_passive is not None
     "value": float | None,   # current thermal_model_cache["k_passive"]
     "confidence": str,       # "none" | "low" | "medium" | "high"
-    "obs_count": int,        # observation_count_passive + observation_count_fan_only + observation_count_heat + observation_count_cool
-    "since": str | None,     # first_active_date_passive (ISO date) or None
   },
   "k_solar": {
     "active": bool,
     "value": float | None,
     "confidence": str,       # derived from observation_count_solar (same grade thresholds as k_passive)
-    "obs_count": int,        # observation_count_solar
-    "since": str | None,     # first_active_date_solar
   },
   "solar_phase_offset_h": {
     "active": bool,          # True when solar_phase_offset_h is not None
     "value": float | None,
-    "since": str | None,     # first_active_date_phase_offset
   },
   "k_vent_window": {
     "active": bool,
     "value": float | None,
-    "since": str | None,     # first_active_date_vent_window
   },
   "k_active_hvac": {
     "active": bool,                                  # True when k_active_heat or k_active_cool is not None
     "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool
-    "since": str | None,                             # first_active_date_hvac
   },
   "ode_version": str,        # "v3" when k_solar or k_vent present; "basic" otherwise
   "physics_eligible": bool,  # True when the ODE prediction path is currently active
@@ -729,13 +707,13 @@ All five fields are initialised to `None` in `thermal_model_cache` and included 
 | Consumer | Mechanism |
 |---|---|
 | REST API | `GET /api/climate_advisor/engines` returns `get_engine_status()` JSON directly |
-| Dashboard Debug tab | "Prediction Engines" card in `index.html`; table: engine \| active \| value \| confidence \| since; auto-refreshes with status panel |
+| Dashboard Debug tab | "Prediction Engines" card in `index.html`; table: engine \| active \| value \| confidence; auto-refreshes with status panel |
 | AI investigator | `ACTIVE_PREDICTION_ENGINES` section prepended to activity context in `ai_skills_activity.py`; plain-text table for LLM consumption |
 | CLI tool | `tools/engine_status.py` reads learning DB via SSH (same pattern as `tools/learning_db.py`), prints formatted table; `--history` flag also tails `ha_logs.py --thermal` and greps for engine activation events |
 
 ### `get_thermal_model()` additions
 
-`solar_phase_offset_h` and all five `first_active_date_*` fields are included in the `get_thermal_model()` return dict. Downstream consumers (`coordinator.py`, `api.py`, `ai_skills_activity.py`) read from this output, not from `thermal_model_cache` directly.
+`solar_phase_offset_h` is included in the `get_thermal_model()` return dict. Downstream consumers (`coordinator.py`, `api.py`, `ai_skills_activity.py`) read from this output, not from `thermal_model_cache` directly.
 
 ---
 

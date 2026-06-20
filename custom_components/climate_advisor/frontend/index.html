@@ -2222,10 +2222,7 @@
         }
         const value = info.value != null ? Number(info.value).toFixed(4) + (unit || '') : '—';
         const conf = info.confidence ? escapeHtml(info.confidence) + ' confidence' : '';
-        const obs = info.obs_count != null ? escapeHtml(String(info.obs_count)) + ' obs' : '';
-        const since = info.since ? 'since ' + escapeHtml(info.since) : '';
-        const detail = [conf, obs, since].filter(Boolean).join(' · ');
-        return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}${detail ? '<span class="kv-desc">' + detail + '</span>' : ''}</td></tr>`;
+        return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}${conf ? '<span class="kv-desc">' + conf + '</span>' : ''}</td></tr>`;
       }
 
       function hvacRow() {
@@ -2235,8 +2232,7 @@
         }
         const heat = info.value?.heat != null ? Number(info.value.heat).toFixed(4) : '—';
         const cool = info.value?.cool != null ? Number(info.value.cool).toFixed(4) : '—';
-        const since = info.since ? 'since ' + escapeHtml(info.since) : '';
-        return `<tr><td>k_active_hvac</td><td>heat=${escapeHtml(heat)} cool=${escapeHtml(cool)} ${unitSym}/hr${since ? '<span class="kv-desc">' + since + '</span>' : ''}</td></tr>`;
+        return `<tr><td>k_active_hvac</td><td>heat=${escapeHtml(heat)} cool=${escapeHtml(cool)} ${unitSym}/hr</td></tr>`;
       }
 
       const odeVer = escapeHtml(data.ode_version || 'unknown');

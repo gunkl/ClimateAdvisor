@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.33"
+VERSION = "0.4.34"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.34": [
+        "Fix #343: Prediction Engines debug panel now shows only confidence level per parameter — "
+        "stale 'since' dates (which were frozen at first observation and never updated on EWMA changes) "
+        "and redundant observation counts have been removed.",
+    ],
     "0.4.33": [
         "Fix #341: nat-vent active during sleep window no longer sets two conflicting thermostat "
         "setpoints every 30 minutes all night — one write per cycle (sleep band) instead of two.",
@@ -489,6 +494,28 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    343: {
+        "version_fixed": "0.4.34",
+        "title": "Remove stale 'since' dates and obs_count from Prediction Engines debug panel",
+        "scope_covered": (
+            "learning.py get_engine_status(): removed _PRE_TRACKING sentinel, _since() helper, "
+            "'since' key from all parameter dicts, 'obs_count' key from parameter dicts; "
+            "_update_thermal_model_cache() and _update_solar_phase_offset(): removed all "
+            "first_active_date_* write blocks and cache default-init keys; "
+            "get_thermal_model(): removed first_active_date_* from return dict; "
+            "index.html: removed obs and since from engineRow() and hvacRow() rendering; "
+            "tools/engine_status.py: removed date_key param from _engine(), removed since column; "
+            "tools/learning_db.py: removed first_active_date display from --model output; "
+            "tests/test_solar_phase.py: removed test_first_active_date_set_on_first_update, "
+            "removed since assertions from test_inactive_before_observations, "
+            "test_active_after_first_observation, and test_engine_status_response_shape."
+        ),
+        "scope_not_covered": (
+            "Existing first_active_date_* values in persisted learning DB JSON files are left in "
+            "place — they become orphaned fields that are no longer read or written. No migration "
+            "removes them; they harmlessly persist until the cache is reset."
+        ),
+    },
     341: {
         "version_fixed": "0.4.33",
         "title": "Dual setpoint thrash + 'Grace started' missing context in activity report",

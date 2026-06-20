@@ -59,46 +59,22 @@ def build_engine_status(cache: dict) -> dict:
     tool falls back to inferring 'active' from whether the value is non-None.
     """
 
-    def _engine(key: str, date_key: str, conf_key: str | None, obs_key: str | None) -> dict:
+    def _engine(key: str, conf_key: str | None) -> dict:
         value = cache.get(key)
         active = value is not None
-        since = cache.get(date_key)
         confidence = cache.get(conf_key) if conf_key else None
-        obs_count = cache.get(obs_key) if obs_key else None
         return {
             "active": active,
             "value": value,
             "confidence": confidence,
-            "obs_count": obs_count,
-            "since": since,
         }
 
-    k_passive = _engine(
-        "k_passive",
-        "first_active_date_passive",
-        "confidence_k_passive",
-        "n_passive",
-    )
-    k_solar = _engine(
-        "k_solar",
-        "first_active_date_solar",
-        None,
-        "n_solar",
-    )
-    solar_phase = _engine(
-        "solar_phase_offset_h",
-        "first_active_date_phase_offset",
-        None,
-        "n_solar_phase",
-    )
-    k_vent_window = _engine(
-        "k_vent_window",
-        "first_active_date_vent_window",
-        None,
-        "n_vent_window",
-    )
+    k_passive = _engine("k_passive", "confidence_k_passive")
+    k_solar = _engine("k_solar", None)
+    solar_phase = _engine("solar_phase_offset_h", None)
+    k_vent_window = _engine("k_vent_window", None)
 
-    # HVAC engines (heat + cool share one activation date)
+    # HVAC engines (heat + cool)
     k_heat = cache.get("k_active_heat")
     k_cool = cache.get("k_active_cool")
     hvac_active = k_heat is not None or k_cool is not None
@@ -107,9 +83,6 @@ def build_engine_status(cache: dict) -> dict:
         "k_active_heat": k_heat,
         "k_active_cool": k_cool,
         "confidence": cache.get("confidence_k_hvac"),
-        "obs_count_heat": cache.get("n_hvac_heat"),
-        "obs_count_cool": cache.get("n_hvac_cool"),
-        "since": cache.get("first_active_date_hvac"),
     }
 
     # ODE version: v3 if any extended params are present
@@ -145,7 +118,6 @@ def build_engine_status(cache: dict) -> dict:
 COL_NAME = 22
 COL_VALUE = 16
 COL_CONF = 12
-COL_OBS = 8
 
 
 def print_engine_status(status: dict) -> None:
@@ -159,13 +131,9 @@ def print_engine_status(status: dict) -> None:
             return
         val = value_override if value_override is not None else _fmt_value(info.get("value"), unit)
         conf = _conf_str(info.get("confidence"))
-        obs = str(info.get("obs_count") or "")
-        since = info.get("since") or "?"
         conf_col = f"{conf} confidence" if conf and conf != "none" else ""
-        obs_col = f"{obs} obs" if obs else ""
-        parts = " | ".join(p for p in [conf_col, obs_col] if p)
-        detail = f" | {parts}" if parts else ""
-        print(f"{_pad(label + ':', COL_NAME)} {_pad(val, COL_VALUE)}{detail} | active since {since}")
+        detail = f" | {conf_col}" if conf_col else ""
+        print(f"{_pad(label + ':', COL_NAME)} {_pad(val, COL_VALUE)}{detail}")
 
     _row("k_passive", status["k_passive"], " hr⁻¹")
     _row("k_solar", status["k_solar"], " °F/hr")
@@ -176,8 +144,7 @@ def print_engine_status(status: dict) -> None:
     if hvac.get("active"):
         heat = _fmt_value(hvac.get("k_active_heat"), " °F/hr")
         cool = _fmt_value(hvac.get("k_active_cool"), " °F/hr")
-        since = hvac.get("since") or "?"
-        print(f"{'k_active (HVAC):':{COL_NAME}} heat={heat} cool={cool} | active since {since}")
+        print(f"{'k_active (HVAC):':{COL_NAME}} heat={heat} cool={cool}")
     else:
         print(f"{'k_active (HVAC):':{COL_NAME}} (not active)")
 

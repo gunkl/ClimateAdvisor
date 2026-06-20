@@ -839,11 +839,6 @@ class LearningEngine:
                 "avg_r_squared_passive": None,
                 "confidence_k_passive": "none",
                 "confidence_k_hvac": "none",
-                "first_active_date_passive": None,
-                "first_active_date_solar": None,
-                "first_active_date_phase_offset": None,
-                "first_active_date_vent_window": None,
-                "first_active_date_hvac": None,
             }
 
         k_p = obs.get("k_passive")
@@ -857,10 +852,6 @@ class LearningEngine:
         if k_p is not None and _envelope_modes:
             if cache["k_passive"] is None:
                 cache["k_passive"] = k_p
-                if cache.get("first_active_date_passive") is None:
-                    from datetime import date as _date
-
-                    cache["first_active_date_passive"] = _date.today().isoformat()
             else:
                 cache["k_passive"] = (1.0 - alpha) * cache["k_passive"] + alpha * k_p
 
@@ -877,20 +868,12 @@ class LearningEngine:
         if mode == "heat" and k_a is not None:
             if cache["k_active_heat"] is None:
                 cache["k_active_heat"] = k_a
-                if cache.get("first_active_date_hvac") is None:
-                    from datetime import date as _date
-
-                    cache["first_active_date_hvac"] = _date.today().isoformat()
             else:
                 cache["k_active_heat"] = (1.0 - alpha) * cache["k_active_heat"] + alpha * k_a
             cache["observation_count_heat"] = cache.get("observation_count_heat", 0) + 1
         elif mode == "cool" and k_a is not None:
             if cache["k_active_cool"] is None:
                 cache["k_active_cool"] = k_a
-                if cache.get("first_active_date_hvac") is None:
-                    from datetime import date as _date
-
-                    cache["first_active_date_hvac"] = _date.today().isoformat()
             else:
                 cache["k_active_cool"] = (1.0 - alpha) * cache["k_active_cool"] + alpha * k_a
             cache["observation_count_cool"] = cache.get("observation_count_cool", 0) + 1
@@ -907,10 +890,6 @@ class LearningEngine:
             if k_p is not None:
                 if cache.get("k_vent_window") is None:
                     cache["k_vent_window"] = k_p
-                    if cache.get("first_active_date_vent_window") is None:
-                        from datetime import date as _date
-
-                        cache["first_active_date_vent_window"] = _date.today().isoformat()
                 else:
                     cache["k_vent_window"] = (1.0 - alpha) * cache["k_vent_window"] + alpha * k_p
             # If this was a 2-param commit, also update k_solar from the separated solar term.
@@ -919,10 +898,6 @@ class LearningEngine:
                 alpha_sol = {"high": 0.3, "medium": 0.15, "low": 0.05}.get(grade, 0.05)
                 if cache["k_solar"] is None:
                     cache["k_solar"] = k_sol
-                    if cache.get("first_active_date_solar") is None:
-                        from datetime import date as _date
-
-                        cache["first_active_date_solar"] = _date.today().isoformat()
                 else:
                     cache["k_solar"] = (1.0 - alpha_sol) * cache["k_solar"] + alpha_sol * k_sol
             cache["observation_count_vent"] = cache.get("observation_count_vent", 0) + 1
@@ -931,10 +906,6 @@ class LearningEngine:
             if k_solar is not None:
                 if cache.get("k_solar") is None:
                     cache["k_solar"] = k_solar
-                    if cache.get("first_active_date_solar") is None:
-                        from datetime import date as _date
-
-                        cache["first_active_date_solar"] = _date.today().isoformat()
                 else:
                     cache["k_solar"] = (1.0 - alpha) * cache["k_solar"] + alpha * k_solar
             cache["observation_count_solar"] = cache.get("observation_count_solar", 0) + 1
@@ -1001,11 +972,6 @@ class LearningEngine:
                 "avg_r_squared_passive": None,
                 "confidence_k_passive": "none",
                 "confidence_k_hvac": "none",
-                "first_active_date_passive": None,
-                "first_active_date_solar": None,
-                "first_active_date_phase_offset": None,
-                "first_active_date_vent_window": None,
-                "first_active_date_hvac": None,
             }
 
         current = cache.get("solar_phase_offset_h")
@@ -1013,10 +979,6 @@ class LearningEngine:
 
         cache["solar_phase_offset_h"] = new_val
         cache["solar_phase_offset_last_obs_date"] = _date.today().isoformat()
-
-        if cache.get("first_active_date_phase_offset") is None:
-            cache["first_active_date_phase_offset"] = _date.today().isoformat()
-
         self._state.thermal_model_cache = cache
 
     def update_ac_duty_solar_phase_offset(self, observed_offset_h: float, today_str: str) -> None:
@@ -1047,7 +1009,7 @@ class LearningEngine:
         """Return structured engine status for each thermal parameter.
 
         Returns a dict with one entry per learnable parameter plus meta keys.
-        Each parameter entry has at minimum: active (bool), since (str|None).
+        Each parameter entry has at minimum: active (bool), confidence (str|None).
         """
         cache = self._state.thermal_model_cache or {}
 
@@ -1059,54 +1021,28 @@ class LearningEngine:
         phase_offset_val = cache.get("solar_phase_offset_h")
         conf_k_passive = _grade_passive_confidence(cache)
 
-        _PRE_TRACKING = "pre-v0.3.46"
-
-        def _since(date_key: str, value) -> str | None:
-            """Return the first_active date, or a retroactive label for pre-existing values."""
-            d = cache.get(date_key)
-            if d is not None:
-                return d
-            if value is not None:
-                # Value exists but date was never recorded — predates first_active tracking.
-                # Retroactively write the date so future calls have it persisted.
-                cache[date_key] = _PRE_TRACKING
-                return _PRE_TRACKING
-            return None
-
         status: dict = {
             "k_passive": {
                 "active": k_passive_val is not None,
                 "value": k_passive_val,
-                "since": _since("first_active_date_passive", k_passive_val),
                 "confidence": conf_k_passive,
-                "obs_count": (
-                    cache.get("observation_count_passive", 0)
-                    + cache.get("observation_count_fan_only", 0)
-                    + cache.get("observation_count_heat", 0)
-                    + cache.get("observation_count_cool", 0)
-                ),
             },
             "k_solar": {
                 "active": k_solar_val is not None,
                 "value": k_solar_val,
-                "since": _since("first_active_date_solar", k_solar_val),
                 "confidence": "none",
-                "obs_count": cache.get("observation_count_solar", 0),
             },
             "solar_phase_offset_h": {
                 "active": phase_offset_val is not None,
                 "value": phase_offset_val,
-                "since": _since("first_active_date_phase_offset", phase_offset_val),
             },
             "k_vent_window": {
                 "active": k_vent_window_val is not None,
                 "value": k_vent_window_val,
-                "since": _since("first_active_date_vent_window", k_vent_window_val),
             },
             "k_active_hvac": {
                 "active": k_active_heat is not None or k_active_cool is not None,
                 "value": {"heat": k_active_heat, "cool": k_active_cool},
-                "since": _since("first_active_date_hvac", k_active_heat or k_active_cool),
             },
         }
 
@@ -1229,11 +1165,6 @@ class LearningEngine:
             "observation_count_swing_cool": cache.get("observation_count_swing_cool", 0),
             "confidence_swing_heat": _grade_swing_confidence(cache.get("observation_count_swing_heat", 0)),
             "confidence_swing_cool": _grade_swing_confidence(cache.get("observation_count_swing_cool", 0)),
-            "first_active_date_passive": cache.get("first_active_date_passive"),
-            "first_active_date_solar": cache.get("first_active_date_solar"),
-            "first_active_date_phase_offset": cache.get("first_active_date_phase_offset"),
-            "first_active_date_vent_window": cache.get("first_active_date_vent_window"),
-            "first_active_date_hvac": cache.get("first_active_date_hvac"),
             "learning_health": learning_health or {},
         }
 

@@ -220,17 +220,13 @@ def _print_solar_model_section(db: dict) -> None:
 
     # --- Phase offset ---
     phase_offset = cache.get("solar_phase_offset_h")
-    first_offset_date = cache.get("first_active_date_phase_offset")
     if phase_offset is None:
         print("solar_phase_offset_h:    None  (no phase observations yet)")
     else:
-        since_str = f"  (since {first_offset_date})" if first_offset_date else ""
-        print(f"solar_phase_offset_h:    {phase_offset:.3f} h{since_str}")
+        print(f"solar_phase_offset_h:    {phase_offset:.3f} h")
 
     # --- Committed solar observations + confidence ---
     n_solar = cache.get("observation_count_solar", 0)
-    first_solar_date = cache.get("first_active_date_solar")
-    since_solar = f"  (since {first_solar_date})" if first_solar_date else ""
 
     # Derive confidence_k_solar directly (mirrors learning.py logic)
     if n_solar >= 100:
@@ -242,7 +238,7 @@ def _print_solar_model_section(db: dict) -> None:
     else:
         conf_solar = "none"
 
-    print(f"observation_count_solar: {n_solar}{since_solar}")
+    print(f"observation_count_solar: {n_solar}")
     print(f"confidence_k_solar:      {conf_solar}")
 
     # --- Solar rejection summary ---

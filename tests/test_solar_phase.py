@@ -546,24 +546,6 @@ class TestLearningConvergence:
             "Negative observations must be clamped before EWMA."
         )
 
-    def test_first_active_date_set_on_first_update(self):
-        """first_active_date_phase_offset is set after first update_solar_phase_offset() call."""
-        learning = _make_learning()
-        model_before = learning.get_thermal_model()
-        assert model_before.get("first_active_date_phase_offset") is None, (
-            "first_active_date_phase_offset should be None before any observation"
-        )
-        self._update(learning, 2.0)
-        model_after = learning.get_thermal_model()
-        date_after = model_after.get("first_active_date_phase_offset")
-        assert date_after is not None, (
-            "first_active_date_phase_offset should be set after first update_solar_phase_offset() call"
-        )
-        # Should be an ISO date string (YYYY-MM-DD)
-        assert isinstance(date_after, str) and len(date_after) == 10, (
-            f"Expected ISO date string (YYYY-MM-DD), got {date_after!r}"
-        )
-
 
 # ── TestEngineStatus ─────────────────────────────────────────────────────────
 
@@ -579,7 +561,7 @@ class TestEngineStatus:
         return learning.get_engine_status()
 
     def test_inactive_before_observations(self):
-        """Fresh learning state → all engines inactive, all first_active_date_* = None."""
+        """Fresh learning state → all engines inactive."""
         learning = _make_learning()
         status = self._call_engine_status(learning)
 
@@ -589,8 +571,6 @@ class TestEngineStatus:
             assert not engine.get("active", True), (
                 f"Engine {engine_key!r} should be inactive on fresh learning, got active={engine.get('active')}"
             )
-            since = engine.get("since")
-            assert since is None, f"Engine {engine_key!r} since should be None on fresh learning, got {since!r}"
 
     def test_active_after_first_observation(self):
         """After one k_passive obs via update_solar_phase_offset, phase_offset engine is active.
@@ -607,9 +587,6 @@ class TestEngineStatus:
         phase_engine = status.get("solar_phase_offset_h", {})
         assert phase_engine.get("active") is True, (
             f"solar_phase_offset_h engine should be active after first update, got active={phase_engine.get('active')}"
-        )
-        assert phase_engine.get("since") is not None, (
-            "solar_phase_offset_h engine 'since' should be set after first update"
         )
 
     def test_engine_status_response_shape(self):
@@ -634,7 +611,6 @@ class TestEngineStatus:
             assert key in status, f"Missing engine key {key!r} in get_engine_status() response"
             engine = status[key]
             assert "active" in engine, f"Engine {key!r} missing 'active' field"
-            assert "since" in engine, f"Engine {key!r} missing 'since' field"
 
         for key in required_meta_keys:
             assert key in status, f"Missing meta key {key!r} in get_engine_status() response"

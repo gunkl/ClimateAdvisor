@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.34"
+VERSION = "0.4.35"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.35": [
+        "Fix #345: Prediction Engines debug panel now shows correct confidence for k_solar "
+        "(was always 'none' regardless of observation count) and k_active_hvac "
+        "(confidence was previously absent from the panel entirely).",
+    ],
     "0.4.34": [
         "Fix #343: Prediction Engines debug panel now shows only confidence level per parameter — "
         "stale 'since' dates (which were frozen at first observation and never updated on EWMA changes) "
@@ -494,6 +499,22 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    345: {
+        "version_fixed": "0.4.35",
+        "title": "Fix k_solar and k_active_hvac confidence display in Prediction Engines debug panel",
+        "scope_covered": (
+            "learning.py get_engine_status(): k_solar confidence now computed from "
+            "observation_count_solar using the same ladder as get_thermal_model() "
+            "(none/<20, low/20-49, medium/50-99, high/100+); "
+            "k_active_hvac entry now includes a 'confidence' key computed from total "
+            "heat+cool observation count (none/<5, low/5-9, medium/10-19, high/20+); "
+            "index.html hvacRow(): appends confidence string after heat/cool values."
+        ),
+        "scope_not_covered": (
+            "solar_phase_offset_h and k_vent_window have no confidence grade in "
+            "get_thermal_model() either — no change needed for those parameters."
+        ),
+    },
     343: {
         "version_fixed": "0.4.34",
         "title": "Remove stale 'since' dates and obs_count from Prediction Engines debug panel",

@@ -1021,6 +1021,24 @@ class LearningEngine:
         phase_offset_val = cache.get("solar_phase_offset_h")
         conf_k_passive = _grade_passive_confidence(cache)
 
+        _solar_obs = cache.get("observation_count_solar", 0)
+        _conf_solar = "none"
+        if _solar_obs >= 100:
+            _conf_solar = "high"
+        elif _solar_obs >= 50:
+            _conf_solar = "medium"
+        elif _solar_obs >= 20:
+            _conf_solar = "low"
+
+        _hvac_total = cache.get("observation_count_heat", 0) + cache.get("observation_count_cool", 0)
+        _conf_hvac = "none"
+        if _hvac_total >= 20:
+            _conf_hvac = "high"
+        elif _hvac_total >= 10:
+            _conf_hvac = "medium"
+        elif _hvac_total >= 5:
+            _conf_hvac = "low"
+
         status: dict = {
             "k_passive": {
                 "active": k_passive_val is not None,
@@ -1030,7 +1048,7 @@ class LearningEngine:
             "k_solar": {
                 "active": k_solar_val is not None,
                 "value": k_solar_val,
-                "confidence": "none",
+                "confidence": _conf_solar,
             },
             "solar_phase_offset_h": {
                 "active": phase_offset_val is not None,
@@ -1043,6 +1061,7 @@ class LearningEngine:
             "k_active_hvac": {
                 "active": k_active_heat is not None or k_active_cool is not None,
                 "value": {"heat": k_active_heat, "cool": k_active_cool},
+                "confidence": _conf_hvac,
             },
         }
 

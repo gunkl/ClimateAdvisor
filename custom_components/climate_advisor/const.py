@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.32"
+VERSION = "0.4.33"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.33": [
+        "Fix #341: nat-vent active during sleep window no longer sets two conflicting thermostat "
+        "setpoints every 30 minutes all night — one write per cycle (sleep band) instead of two.",
+        "Fix #341: 'Grace started' activity report entry now shows what triggered it "
+        "(e.g. 'fan override (manual fan change)') in the Settings column instead of a blank.",
+        "Fix #341: fan manual override now emits its own timeline event showing the fan state "
+        "change (e.g. 'fan: on->auto') so the reason for the 90-min grace period is visible "
+        "without reading the Decisions section.",
+    ],
     "0.4.32": [
         "Fix #339: Occupancy→away/vacation no longer arms HVAC setback while windows/doors are open. "
         "HVAC stays off; occupancy mode is recorded for correct setback on resume. "
@@ -480,6 +489,26 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    341: {
+        "version_fixed": "0.4.33",
+        "title": "Dual setpoint thrash + 'Grace started' missing context in activity report",
+        "scope_covered": (
+            "_apply_nat_vent_hvac_state(): sleep window guard skips _apply_comfort_band() call "
+            "when in_sleep_window=True, emits nat_vent_ac_assist_armed event only; "
+            "handle_fan_manual_override(): fan_before/fan_after params added, emits fan_manual_override event; "
+            "coordinator call sites updated to pass fan state; "
+            "_render_grace_started(): trigger codes mapped to human-readable Settings labels; "
+            "_render_fan_manual_override(): dedicated renderer added to EVENT_RENDERERS; "
+            "fan_manual_override added to _MANUAL_EVENT_TYPES and _TIMING_MANUAL_EVENT_TYPES."
+        ),
+        "scope_not_covered": (
+            "activity report timeline Event cell still shows 'Grace started' (humanized type) "
+            "rather than the full rendered label — dedup-eligible events use _humanize_type for "
+            "the Event cell; trigger info now in Settings column as the practical fix. "
+            "Grace started triggered by chat_log or direct API call without fan state available "
+            "will show empty fan state fields."
+        ),
+    },
     339: {
         "version_fixed": "0.4.32",
         "title": "Occupancy→away/vacation bypasses HVAC pause guard while windows open",

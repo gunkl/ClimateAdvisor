@@ -1272,3 +1272,111 @@ class TestNatVentAcAssist:
         ]
         cool_calls = [c for c in hvac_calls if c[0][2].get("hvac_mode") == "cool"]
         assert len(cool_calls) >= 1, "hot-day close must restore 'cool' HVAC mode"
+
+
+# ---------------------------------------------------------------------------
+# Issue #341 — nat-vent active during sleep window: single setpoint per cycle
+# ---------------------------------------------------------------------------
+
+
+class TestNatVentSleepWindowBand:
+    """Issue #341: during sleep window, _apply_nat_vent_hvac_state() skips setpoint call.
+
+    Before the fix: apply_classification() called _apply_nat_vent_hvac_state() (which wrote
+    comfort_cool=75°F to the thermostat) and then immediately called select_comfort_band()
+    (which wrote sleep_cool=78°F), generating two conflicting thermostat writes every 30 minutes
+    all night.
+
+    After the fix: _apply_nat_vent_hvac_state() emits nat_vent_ac_assist_armed but skips
+    the _apply_comfort_band() call during the sleep window. Only one setpoint write occurs per
+    cycle — the sleep band from select_comfort_band().
+    """
+
+    # dt_util.now() inside automation.py is a child MagicMock; patch it so _in_sleep_window
+    # gets a real datetime and .time() comparisons work.
+    _NOW = datetime(2026, 4, 20, 22, 30, 0)  # 22:30 — within a 22:00–07:00 sleep window
+
+    def _make_sleep_engine(self) -> AutomationEngine:
+        """Engine with sleep window covering the patched 'now' (22:30)."""
+        engine = _make_hvac_engine(
+            fan_mode="hvac_fan",
+            aggressive_savings=False,
+            comfort_heat=70.0,
+            comfort_cool=75.0,
+            indoor_f=74.0,
+        )
+        # 22:00–07:00 window includes _NOW (22:30)
+        engine.config["sleep_time"] = "22:00"
+        engine.config["wake_time"] = "07:00"
+        return engine
+
+    def test_sleep_window_single_comfort_band_call(self):
+        """Nat-vent active + sleep window → _apply_comfort_band called once (sleep band only).
+
+        Occupant experience: after the fix, the thermostat receives one setpoint write per
+        30-minute cycle overnight — the sleep ceiling (78°F by default) — not two competing
+        writes at 75°F and 78°F that make the thermostat history look like the integration
+        is malfunctioning.
+        """
+        engine = self._make_sleep_engine()
+        engine._natural_vent_active = True
+
+        engine._apply_comfort_band = AsyncMock()
+        classification = _make_classification(day_type="warm", hvac_mode="off")
+        with patch(_DT_NOW_PATH, return_value=self._NOW):
+            asyncio.run(engine.apply_classification(classification))
+
+        assert engine._apply_comfort_band.call_count == 1, (
+            f"Expected 1 _apply_comfort_band call during sleep window; got {engine._apply_comfort_band.call_count}"
+        )
+        band = engine._apply_comfort_band.call_args[0][0]
+        # Sleep band uses DEFAULT_SLEEP_HEAT=66 / DEFAULT_SLEEP_COOL=78, not comfort band 70/75
+        assert band.floor == 66.0, f"Sleep band floor must be sleep_heat=66. Got: {band.floor}"
+        assert band.ceiling == 78.0, f"Sleep band ceiling must be sleep_cool=78. Got: {band.ceiling}"
+
+    def test_sleep_window_nat_vent_ac_assist_event_still_emitted(self):
+        """nat_vent_ac_assist_armed event fires during sleep window despite skipped setpoint.
+
+        The activity report and status card must still show nat-vent as active while the
+        fan is running overnight. Without the event, the occupant sees the fan on but the
+        report shows no nat-vent activity — a confusing gap.
+        """
+        engine = self._make_sleep_engine()
+        engine._natural_vent_active = True
+
+        emitted: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda et, pl: emitted.append((et, pl))
+        engine._apply_comfort_band = AsyncMock()
+
+        classification = _make_classification(day_type="warm", hvac_mode="off")
+        with patch(_DT_NOW_PATH, return_value=self._NOW):
+            asyncio.run(engine.apply_classification(classification))
+
+        event_types = [e[0] for e in emitted]
+        assert "nat_vent_ac_assist_armed" in event_types, (
+            f"nat_vent_ac_assist_armed must still fire during sleep window. Got events: {event_types}"
+        )
+
+    def test_awake_window_two_comfort_band_calls(self):
+        """Nat-vent active + awake hours → two _apply_comfort_band calls (regression guard).
+
+        During awake hours, _apply_nat_vent_hvac_state() still writes the full comfort band
+        so the thermostat's own deadband can let the compressor assist if the breeze alone
+        cannot hold the comfort ceiling.
+        """
+        engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=74.0)
+        # No sleep_time/wake_time in config → _in_sleep_window() returns False
+        engine._natural_vent_active = True
+
+        engine._apply_comfort_band = AsyncMock()
+        classification = _make_classification(day_type="warm", hvac_mode="off")
+        asyncio.run(engine.apply_classification(classification))
+
+        # Two calls: (1) nat-vent full comfort band, (2) apply_classification() comfort band
+        assert engine._apply_comfort_band.call_count == 2, (
+            f"Expected 2 _apply_comfort_band calls during awake hours; got {engine._apply_comfort_band.call_count}"
+        )
+        for call in engine._apply_comfort_band.call_args_list:
+            band = call[0][0]
+            assert band.floor == 70.0, f"Awake band floor must be comfort_heat=70. Got: {band.floor}"
+            assert band.ceiling == 75.0, f"Awake band ceiling must be comfort_cool=75. Got: {band.ceiling}"

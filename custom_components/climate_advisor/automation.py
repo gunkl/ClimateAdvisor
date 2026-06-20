@@ -624,19 +624,34 @@ class AutomationEngine:
         except Exception:
             return 0.0
 
-    def handle_fan_manual_override(self) -> None:
+    def handle_fan_manual_override(self, fan_before: str = "", fan_after: str = "") -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
         Idempotent: safe to call even if an override is already active (re-stamps the
         time and restarts the grace period so the timer is always fresh).
+
+        Args:
+            fan_before: Fan state before the manual change (e.g. "on", "auto").
+            fan_after: Fan state after the manual change.
         """
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_time = dt_util.now().isoformat()
         _LOGGER.info(
-            "Fan override: set — manual fan change detected, override active since %s, grace period starting",
+            "Fan override: set — manual fan change detected %s->%s, override active since %s, grace period starting",
+            fan_before or "?",
+            fan_after or "?",
             self._fan_override_time,
         )
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "fan_manual_override",
+                {
+                    "fan_before": fan_before,
+                    "fan_after": fan_after,
+                    "override_active_since": self._fan_override_time,
+                },
+            )
         self._start_grace_period("manual", trigger="fan_manual_override")
 
     def clear_fan_override(self) -> None:
@@ -3153,6 +3168,25 @@ class AutomationEngine:
         comfort_cool = float(self.config.get("comfort_cool", 75))
 
         if not aggressive_savings:
+            # Sleep window: skip the full-band setpoint call — apply_classification() will arm
+            # the sleep band immediately after, so a prior full-band write would be overwritten
+            # and would cause redundant thermostat calls all night.  Emit the status event so
+            # the status card and activity report still show nat-vent as active.
+            _in_sleep = _in_sleep_window(dt_util.now(), self.config)
+            if _in_sleep:
+                _LOGGER.info(
+                    "_apply_nat_vent_hvac_state: sleep window in effect — skipping full-band setpoint"
+                    " (deferring to sleep band); nat_vent_ac_assist_armed emitted comfort_heat=%.1f comfort_cool=%.1f",
+                    comfort_heat,
+                    comfort_cool,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_ac_assist_armed",
+                        {"comfort_heat": comfort_heat, "comfort_cool": comfort_cool},
+                    )
+                return
+
             # Full comfort band — compressor may assist if breeze cannot hold the ceiling.
             _LOGGER.info(
                 "_apply_nat_vent_hvac_state: AC assist armed — full band comfort_heat=%.1f comfort_cool=%.1f"

@@ -3014,7 +3014,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _hvac_cmd_age,
                 _is_expected_confirmation,
             )
-            self.automation_engine.handle_fan_manual_override()
+            self.automation_engine.handle_fan_manual_override(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
 
     async def _async_fan_entity_changed(self, event: Event) -> None:
         """Detect manual fan entity state changes (Issue #37)."""
@@ -3048,7 +3048,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 old_state.state,
                 new_state.state,
             )
-            self.automation_engine.handle_fan_manual_override()
+            self.automation_engine.handle_fan_manual_override(
+                fan_before=str(old_state.state), fan_after=str(new_state.state)
+            )
         elif not is_on and self.automation_engine._fan_active:
             # Fan turned off externally — manual override
             _LOGGER.info(
@@ -3056,7 +3058,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 old_state.state,
                 new_state.state,
             )
-            self.automation_engine.handle_fan_manual_override()
+            self.automation_engine.handle_fan_manual_override(
+                fan_before=str(old_state.state), fan_after=str(new_state.state)
+            )
 
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:
         """Late-start HVAC session when HA restarted mid-session (Issue #96).

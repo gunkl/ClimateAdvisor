@@ -121,6 +121,7 @@ def _make_coord(*, fan_command_time=None):
     ae.handle_manual_override_during_pause = AsyncMock()
     ae.handle_manual_override = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
+    ae.reconcile_fan_on_startup = AsyncMock()
     coord.automation_engine = ae
 
     from custom_components.climate_advisor.classifier import DayClassification
@@ -162,6 +163,7 @@ def _make_coord(*, fan_command_time=None):
     coord._abandon_observation = AsyncMock()
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
+    coord._last_outdoor_temp = 65.0
     coord._any_sensor_open = MagicMock(return_value=False)
     coord._cancel_all_debounce_timers = MagicMock()
     coord._chart_log = MagicMock()
@@ -290,3 +292,92 @@ class TestFanEntityChangedGuard:
             asyncio.run(coord._async_fan_entity_changed(event))
 
         coord.automation_engine.handle_fan_manual_override.assert_called_once()
+
+
+class TestPostStartupUntrackedFanReconcile:
+    """Post-startup untracked fan reconcile (Issue #347).
+
+    When hvac_action transitions to 'fan' while CA does not own the fan,
+    reconcile_fan_on_startup is called to enforce the invariant: a running
+    fan always has an explicit owner — adopt as nat-vent or turn off.
+    """
+
+    def _make_fan_action_event(self, old_action: str, new_action: str, hvac_mode: str = "cool") -> MagicMock:
+        old_s = MagicMock()
+        old_s.state = hvac_mode
+        old_s.attributes = {"hvac_action": old_action, "temperature": 70.0, "fan_mode": "auto"}
+        new_s = MagicMock()
+        new_s.state = hvac_mode
+        new_s.attributes = {"hvac_action": new_action, "temperature": 70.0, "fan_mode": "auto"}
+        event = MagicMock()
+        event.data = {"old_state": old_s, "new_state": new_s}
+        return event
+
+    def test_fan_action_start_unowned_triggers_reconcile(self):
+        """hvac_action idle→fan while CA does not own fan → reconcile_fan_on_startup called.
+
+        Occupant effect: thermostat starts fan autonomously (e.g. fan-circulation between
+        AC cycles). CA must immediately decide to adopt it as nat-vent or turn it off —
+        not leave the fan running untracked overnight.
+        """
+        coord = _make_coord()
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_awaited_once_with(
+            indoor=72.0,
+            outdoor=65.0,
+            thermostat_fan_running=True,
+            any_sensor_open=False,
+        )
+
+    def test_fan_action_start_ca_owned_skips_reconcile(self):
+        """hvac_action idle→fan while CA already owns the fan → no reconcile triggered.
+
+        Occupant effect: CA activated the fan for nat-vent; the thermostat then reports
+        hvac_action='fan' as expected. Must not double-reconcile and accidentally turn
+        the fan off.
+        """
+        coord = _make_coord()
+        coord.automation_engine._fan_active = True
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_not_awaited()
+
+    def test_fan_action_already_fan_no_retriggering(self):
+        """hvac_action fan→fan (steady-state) → no reconcile triggered.
+
+        Occupant effect: once the fan has been reconciled (adopted or turned off), the
+        steady-state thermostat events must not keep calling reconcile on every tick.
+        """
+        coord = _make_coord()
+        event = self._make_fan_action_event(old_action="fan", new_action="fan")
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_not_awaited()
+
+    def test_fan_action_with_fan_mode_change_skips_reconcile(self):
+        """hvac_action idle→fan AND fan_mode auto→on in same event → no reconcile.
+
+        Occupant effect: user manually presses "fan on" at the thermostat — some
+        thermostats couple fan_mode and hvac_action in a single state event. This is
+        a manual override, not a thermostat-autonomous fan start. The §9b manual
+        override detection path must handle it, not the post-startup reconcile.
+        """
+        coord = _make_coord()
+        old_s = MagicMock()
+        old_s.state = "cool"
+        old_s.attributes = {"hvac_action": "idle", "temperature": 70.0, "fan_mode": "auto"}
+        new_s = MagicMock()
+        new_s.state = "cool"
+        new_s.attributes = {"hvac_action": "fan", "temperature": 70.0, "fan_mode": "on"}
+        event = MagicMock()
+        event.data = {"old_state": old_s, "new_state": new_s}
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_not_awaited()

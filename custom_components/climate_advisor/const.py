@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.35"
+VERSION = "0.4.36"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.36": [
+        "Fix #347: Fan no longer stays running (untracked) indefinitely after thermostat "
+        "starts it autonomously between AC cycles. CA now reconciles on every hvac_action "
+        "transition to 'fan' — adopts as nat-vent if conditions allow, or turns it off.",
+    ],
     "0.4.35": [
         "Fix #345: Prediction Engines debug panel now shows correct confidence for k_solar "
         "(was always 'none' regardless of observation count) and k_active_hvac "
@@ -499,6 +504,26 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    347: {
+        "version_fixed": "0.4.36",
+        "title": "Post-startup thermostat-autonomous fan stays running (untracked) indefinitely",
+        "scope_covered": (
+            "coordinator.py _async_thermostat_changed: added detection block for "
+            "old_action != 'fan' -> new_action == 'fan' transition when CA does not own "
+            "the fan (_fan_active=False, _natural_vent_active=False, _fan_override_active=False); "
+            "calls reconcile_fan_on_startup with current indoor/outdoor/any_sensor_open; "
+            "test_fan_command_guard.py: TestPostStartupUntrackedFanReconcile (3 tests); "
+            "docs/08-COMPUTATION-REFERENCE.md: Anchors row 28 and section 9e updated."
+        ),
+        "scope_not_covered": (
+            "Fan running from fan_mode='on' attribute change (not hvac_action='fan') is "
+            "handled by the §9b fan_mode override detection block in _async_thermostat_changed "
+            "(Issue #37) — no change needed there. The #347 block skips events where fan_mode "
+            "also changed, routing them to the existing override path. "
+            "Post-startup hvac_action='fan' while _fan_override_active=True is intentionally "
+            "skipped (override is timed; it resolves when grace expires)."
+        ),
+    },
     345: {
         "version_fixed": "0.4.35",
         "title": "Fix k_solar and k_active_hvac confidence display in Prediction Engines debug panel",

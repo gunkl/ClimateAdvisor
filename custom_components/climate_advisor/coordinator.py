@@ -2800,6 +2800,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_session_mode = "heat" if new_action == "heating" else "cool"
                 await self._start_hvac_observation(new_session_mode)
 
+        # Issue #347: Post-startup reconcile for thermostat-autonomous fan-on.
+        # When hvac_action transitions to "fan" (e.g. thermostat fan-circulation between
+        # AC cycles) outside the startup coalesce window, and CA does not own the fan,
+        # enforce the invariant: a running fan always has an explicit owner — adopt as
+        # nat-vent or turn off, never indefinite limbo.
+        # Guard: skip if fan_mode also changed in this same event — that signals a
+        # user action whose override detection runs in the §9b block below (line ~3004).
+        _old_fan_mode_347 = old_state.attributes.get("fan_mode", "")
+        _new_fan_mode_347 = new_state.attributes.get("fan_mode", "")
+        _ae_347 = self.automation_engine
+        if (
+            old_action != "fan"
+            and new_action == "fan"
+            and _old_fan_mode_347 == _new_fan_mode_347
+            and not _ae_347._fan_active
+            and not _ae_347._natural_vent_active
+            and not _ae_347._fan_override_active
+        ):
+            _LOGGER.info(
+                "hvac_action transitioned to fan while CA does not own fan — "
+                "trigger=post_startup_reconcile old_action=%s",
+                old_action,
+            )
+            await _ae_347.reconcile_fan_on_startup(
+                indoor=self._get_indoor_temp(),
+                outdoor=self._last_outdoor_temp,
+                thermostat_fan_running=True,
+                any_sensor_open=self._any_sensor_open(),
+            )
+
         # If thermostat is now fully off, clear any stale HVAC-based fan active flag.
         # Only applies to HVAC/Both fan modes — whole-house fans run independently.
         # Natural ventilation is intentionally hvac_mode=off + fan active — do not clear.

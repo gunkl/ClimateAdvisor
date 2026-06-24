@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.37"
+VERSION = "0.4.38"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.38": [
+        "Feat #352: Analysis tab — single dropdown card replaces three-section layout; "
+        "report type selector (Activity Record / AI Activity Report / AI Investigative Analysis) "
+        "with adaptive time window and controls. Download .md and Submit GitHub Issue available "
+        "for all three types. Debug and Analysis tabs swapped in tab bar order.",
+    ],
     "0.4.37": [
         "Feat #352: Activity Record — new deterministic event timeline (no AI required) "
         "with indoor/outdoor temperature columns. Available on the Analysis tab with "

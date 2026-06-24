@@ -9,7 +9,7 @@ _Introduced: Issue #330 (deterministic table) · Chart Vent bar: Issue #331_
 | Question | Short answer | → Full answer |
 |---|---|---|
 | How is the per-event table built — LLM or Python? | Deterministically in Python by `build_event_timeline_table()` in `ai_skills_activity.py`. Not LLM-generated. The AI still writes the summary, decisions, and anomalies sections. | [Overview](#overview) |
-| What do the Event and Settings columns mean? | Event = what happened (trigger or action label). Settings = the concrete HVAC action performed (setpoint, mode, fan state). | [Overview](#overview) |
+| What do the Event, Settings, Indoor, and Outdoor columns mean? | Event = what happened. Settings = the concrete HVAC action (setpoint, mode, fan state). Indoor/Outdoor = ambient temperatures at event emit time, sourced from coordinator.data; `—` for events recorded before Issue #352. | [Overview](#overview) |
 | How does `_format_band_setpoint` render a setpoint? | Active edge first (the live thermostat setpoint), other edge in parens as the monitored bound: `setpoint: 72°F Cool (64°F Heat)`. | [Setpoint Convention](#setpoint-convention) |
 | What is the full set of event types the table must handle? | 38 registered types across 6 groups: band/setpoint-program, setpoint/mode delta, override lifecycle, nat-vent/fan, skip/advisory, system/diagnostic. | [Event Catalog](#event-catalog) |
 | What happens when an unrecognised event type appears? | `_default_renderer` fires: humanized type name + `reason` field as Event; generic field extraction as Settings. Never blank, never crashes. | [Default Renderer](#default-renderer) |
@@ -40,9 +40,13 @@ rendering applies even when Claude is unavailable.
 | **Time** | Local HH:MM of the event |
 | **Event** | What happened — a human-readable label for the trigger or action type |
 | **Settings** | The concrete HVAC action performed — setpoint, mode change, fan state, or skip reason |
+| **Indoor** | Indoor temperature at the moment the event was emitted, from `coordinator._get_indoor_temp()`. Displays `—` for events recorded before Issue #352 enrichment. |
+| **Outdoor** | Outdoor temperature at the moment the event was emitted, from `coordinator._last_outdoor_temp`. Same availability caveat. |
 
 The split between Event and Settings lets users scan the Settings column to understand
-_what the thermostat was told to do_ independently from the event labels.
+_what the thermostat was told to do_ independently from the event labels. Indoor and
+Outdoor make the ambient conditions visible alongside each decision, eliminating the
+need to cross-reference chart data to understand why a setpoint was applied.
 
 ---
 
@@ -194,6 +198,9 @@ Consecutive rows with the **same event type** are collapsed into a single row:
 **The Settings cell is preserved** — all collapsed rows share the same band parameters
 (they represent the same comfort state being re-armed), so the Settings text from the
 first (or last) instance is used verbatim.
+
+**Indoor and Outdoor cells use the first event in the collapsed run.** Temperature
+conditions at the start of a repeated band cycle are more informative than the last.
 
 This fixes the historical defect where `Sleep comfort band applied ×18` showed an empty
 Settings column (Issue #330): the collapse preserves the `_format_band_setpoint` output

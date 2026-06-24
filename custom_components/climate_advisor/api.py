@@ -10,6 +10,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
+from .ai_skills_activity import build_event_timeline_table
 from .const import (
     API_AI_ACTIVITY,
     API_AI_INVESTIGATE,
@@ -627,6 +628,42 @@ class ClimateAdvisorAIActivityView(HomeAssistantView):
         return self.json(result)
 
 
+class ClimateAdvisorActivityRecordView(HomeAssistantView):
+    """Deterministic activity record endpoint — no AI required."""
+
+    url = "/api/climate_advisor/activity_record"
+    name = "api:climate_advisor:activity_record"
+    requires_auth = True
+
+    async def get(self, request: web.Request) -> web.Response:
+        hass = request.app["hass"]
+        coordinator = _get_coordinator(hass)
+        if not coordinator:
+            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
+
+        try:
+            hours = float(request.query.get("hours", 24))
+        except (TypeError, ValueError):
+            hours = 24.0
+        hours = max(1.0, min(hours, 168.0))
+
+        from homeassistant.util import dt as dt_util
+
+        table = build_event_timeline_table(
+            list(getattr(coordinator, "_event_log", []) or []),
+            coordinator.config or {},
+            hours,
+            dt_util.now(),
+        )
+        return self.json(
+            {
+                "table": table,
+                "hours": hours,
+                "generated_at": dt_util.now().isoformat(),
+            }
+        )
+
+
 class ClimateAdvisorAIReportsView(HomeAssistantView):
     """API endpoint for persisted AI report history."""
 
@@ -894,6 +931,7 @@ API_VIEWS = [
     ClimateAdvisorToggleAutomationView,
     ClimateAdvisorAIStatusView,
     ClimateAdvisorAIActivityView,
+    ClimateAdvisorActivityRecordView,
     ClimateAdvisorAIReportsView,
     ClimateAdvisorInvestigateView,
     ClimateAdvisorInvestigationReportsView,

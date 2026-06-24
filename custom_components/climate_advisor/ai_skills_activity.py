@@ -37,6 +37,15 @@ _LOGGER = logging.getLogger(__name__)
 
 _SKILL_NAME = "activity_report"
 
+
+def _fmt_temp_cell(val: Any, unit: str) -> str:
+    """Format a temperature value for a timeline table cell; em-dash when unavailable."""
+    try:
+        return format_temp(float(val), unit)
+    except (TypeError, ValueError):
+        return "—"
+
+
 _SYSTEM_PROMPT = """You are an HVAC automation diagnostic assistant for Climate Advisor, a Home Assistant integration.
 Analyze the provided system state and sensor data.
 Return your analysis with these exact section headers (use ## for headers):
@@ -951,10 +960,12 @@ def build_event_timeline_table(
         filtered.append(entry)
 
     if not filtered:
-        return "| Time | Event | Settings | Source |\n|---|---|---|---|\n| -- | (no events in window) | | |"
+        return "| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| -- | (no events in window) | | | | |"
 
     # ---- render & deduplicate ----
-    rows: list[tuple[str, str, str, str]] = []  # (time_str, event_text, settings_text, source)
+    rows: list[
+        tuple[str, str, str, str, str, str]
+    ] = []  # (time_str, event_text, settings_text, source, indoor, outdoor)
 
     # Dedup state
     run_type: str | None = None
@@ -963,17 +974,19 @@ def build_event_timeline_table(
     run_last_time: str = ""
     run_settings: str = ""
     run_source: str = ""
+    run_indoor: str = ""
+    run_outdoor: str = ""
 
     def _flush_run() -> None:
-        nonlocal run_type, run_count, run_first_time, run_last_time, run_settings, run_source
+        nonlocal run_type, run_count, run_first_time, run_last_time, run_settings, run_source, run_indoor, run_outdoor
         if run_type is None or run_count == 0:
             return
         if run_count == 1:
-            rows.append((run_first_time, _humanize_type(run_type), run_settings, run_source))
+            rows.append((run_first_time, _humanize_type(run_type), run_settings, run_source, run_indoor, run_outdoor))
         else:
             time_range = f"{run_first_time}-{run_last_time}" if run_first_time != run_last_time else run_first_time
             event_text = f"{_humanize_type(run_type)} x{run_count} ({time_range})"
-            rows.append((run_first_time, event_text, run_settings, run_source))
+            rows.append((run_first_time, event_text, run_settings, run_source, run_indoor, run_outdoor))
         run_type = None
         run_count = 0
 
@@ -994,22 +1007,26 @@ def build_event_timeline_table(
             settings_text = ""
 
         source = _event_source_label(event_type, payload) or "sensor"
+        indoor_cell = _fmt_temp_cell(entry.get("indoor_f"), unit)
+        outdoor_cell = _fmt_temp_cell(entry.get("outdoor_f"), unit)
 
         # Flush run when type changes or type is not deduplicated
         if event_type in _NO_DEDUP or event_type != run_type:
             _flush_run()
             if event_type in _NO_DEDUP:
-                rows.append((time_str, ev_text, settings_text, source))
+                rows.append((time_str, ev_text, settings_text, source, indoor_cell, outdoor_cell))
             else:
-                # Start a new run
+                # Start a new run; temps are from the first event in the run
                 run_type = event_type
                 run_count = 1
                 run_first_time = time_str
                 run_last_time = time_str
                 run_settings = settings_text
                 run_source = source
+                run_indoor = indoor_cell
+                run_outdoor = outdoor_cell
         else:
-            # Continue run -- update last time and settings (last setpoint wins)
+            # Continue run -- update last time and settings (last setpoint wins); temps stay from first event
             run_count += 1
             run_last_time = time_str
             if settings_text:
@@ -1018,12 +1035,12 @@ def build_event_timeline_table(
     _flush_run()
 
     if not rows:
-        return "| Time | Event | Settings | Source |\n|---|---|---|---|\n| -- | (no events in window) | | |"
+        return "| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| -- | (no events in window) | | | | |"
 
     # ---- format as markdown ----
-    header = "| Time | Event | Settings | Source |"
-    sep = "|---|---|---|---|"
-    row_lines = [f"| {t} | {ev} | {st} | {src} |" for t, ev, st, src in rows]
+    header = "| Time | Event | Settings | Source | Indoor | Outdoor |"
+    sep = "|---|---|---|---|---|---|"
+    row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in rows]
     return "\n".join([header, sep, *row_lines])
 
 

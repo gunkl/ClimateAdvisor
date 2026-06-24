@@ -502,7 +502,7 @@
   <button class="tab-btn active" data-tab="status">Status</button>
   <button class="tab-btn" data-tab="debug">Debug</button>
   <button class="tab-btn" data-tab="settings">Settings</button>
-  <button class="tab-btn" data-tab="ai">AI</button>
+  <button class="tab-btn" data-tab="ai">Analysis</button>
 </div>
 
 <div id="tab-status" class="tab-content active">
@@ -654,62 +654,94 @@
     </div>
   </div>
 
-  <!-- Panel A — Controls -->
+  <!-- Section 1 — Activity Record (no AI required) -->
   <div class="card">
-    <h2>Generate Report</h2>
-    <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
-      <label style="font-size:0.85rem;color:var(--text-secondary);">Report type:</label>
-      <select id="report-type" onchange="updateReportTypeUI()" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
-        <option value="activity">Activity Report</option>
-        <option value="investigation">Investigative Analysis</option>
-      </select>
-    </div>
+    <h2>Activity Record</h2>
     <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
       <label style="font-size:0.85rem;color:var(--text-secondary);">Time window:</label>
-      <select id="report-time-window" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
+      <select id="activity-record-hours" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
         <option value="6">Last 6 hours</option>
         <option value="12">Last 12 hours</option>
         <option value="24" selected>Last 24 hours</option>
         <option value="48">Last 48 hours</option>
         <option value="168">Last 7 days</option>
       </select>
-      <span id="activity-detail-controls" style="display:flex;gap:8px;align-items:center;">
-        <label style="font-size:0.85rem;color:var(--text-secondary);">Detail:</label>
-        <select id="ai-detail" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
-          <option value="full" selected>Full</option>
-          <option value="brief">Brief</option>
-        </select>
-      </span>
+      <button class="btn" onclick="_runActivityRecord()" id="activity-record-btn">Generate</button>
+      <span id="activity-record-status" style="font-size:0.8rem;color:var(--text-secondary);"></span>
     </div>
-    <div id="investigation-focus-controls" style="display:none;margin-bottom:10px;">
+    <div id="activity-record-loading" class="loading" style="display:none;">Building event table&#x2026;</div>
+    <div id="activity-record-content" style="overflow-x:auto;">
+      <p style="color:var(--text-secondary);font-size:0.85rem;">Click Generate to build the event timeline.</p>
+    </div>
+    <div id="activity-record-actions" style="display:none;margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn secondary" onclick="_copyActivityRecord()" style="font-size:0.8rem;">Copy</button>
+      <button class="btn secondary" onclick="_downloadActivityRecord()" style="font-size:0.8rem;">&#x2B07; Download .md</button>
+      <button class="btn secondary" onclick="downloadFullLogs()" style="font-size:0.8rem;">Download Full Logs</button>
+      <button class="btn secondary" onclick="_githubActivityRecord()" style="font-size:0.8rem;">&#x1F41B; Submit GitHub Issue</button>
+    </div>
+  </div>
+
+  <!-- Section 2 — AI Activity Report -->
+  <div class="card">
+    <h2>AI Activity Report <span style="background:var(--primary);color:#fff;font-size:0.65rem;padding:1px 7px;border-radius:10px;vertical-align:middle;margin-left:4px;">AI</span></h2>
+    <div id="ai-activity-disabled-notice" style="display:none;color:var(--text-secondary);font-size:0.85rem;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:4px;">
+      AI features are not configured. Enable in Settings &#x2192; AI Configuration.
+    </div>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+      <label style="font-size:0.85rem;color:var(--text-secondary);">Time window:</label>
+      <select id="ai-activity-hours" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
+        <option value="6">Last 6 hours</option>
+        <option value="12">Last 12 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="48">Last 48 hours</option>
+      </select>
+      <button class="btn" id="ai-activity-btn" onclick="_runAIActivityReport()">Generate with AI</button>
+      <span id="ai-activity-status" style="font-size:0.8rem;color:var(--text-secondary);"></span>
+    </div>
+    <div id="ai-activity-loading" class="loading" style="display:none;">Generating report&#x2026; this may take 15&#x2013;30 seconds.</div>
+    <div id="ai-activity-content">
+      <p style="color:var(--text-secondary);font-size:0.85rem;">Click Generate with AI to produce a narrative report.</p>
+    </div>
+    <div id="ai-activity-actions" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap;">
+      <button class="btn secondary" onclick="_copyAIActivity()" style="font-size:0.8rem;">Copy</button>
+      <button class="btn secondary" onclick="_downloadAIActivity()" style="font-size:0.8rem;">&#x2B07; Download .md</button>
+      <button class="btn secondary" onclick="_githubAIActivity()" style="font-size:0.8rem;">&#x1F41B; Submit GitHub Issue</button>
+    </div>
+  </div>
+
+  <!-- Section 3 — AI Investigative Analysis -->
+  <div class="card">
+    <h2>AI Investigative Analysis <span style="background:var(--primary);color:#fff;font-size:0.65rem;padding:1px 7px;border-radius:10px;vertical-align:middle;margin-left:4px;">AI</span></h2>
+    <div id="ai-invest-disabled-notice" style="display:none;color:var(--text-secondary);font-size:0.85rem;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:4px;">
+      AI features are not configured. Enable in Settings &#x2192; AI Configuration.
+    </div>
+    <div style="margin-bottom:10px;">
       <textarea id="investigation-focus"
         placeholder="Optional: describe what you'd like investigated (e.g. 'why is window compliance 0%')..."
         style="width:100%;min-height:60px;padding:0.5rem;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem;resize:vertical;box-sizing:border-box;"></textarea>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button class="btn" id="run-report-btn" onclick="runReport()">Run Report</button>
-      <span id="report-run-status" style="font-size:0.8rem;color:var(--text-secondary);"></span>
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+      <label style="font-size:0.85rem;color:var(--text-secondary);">Time window:</label>
+      <select id="ai-invest-hours" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
+        <option value="24">Last 1 day</option>
+        <option value="168" selected>Last 7 days</option>
+        <option value="720">Last 30 days</option>
+      </select>
+      <button class="btn" id="ai-invest-btn" onclick="_runAIInvestigation()">Investigate</button>
+      <span id="ai-invest-status" style="font-size:0.8rem;color:var(--text-secondary);"></span>
     </div>
-    <div id="report-run-loading" class="loading" style="display:none;">Generating report&#x2026; this may take 15&#x2013;30 seconds.</div>
-  </div>
-
-  <!-- Panel B — Preview Pane -->
-  <div class="card" id="report-preview-card">
-    <div id="report-preview-header" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
-      <h2 style="margin:0;">Report Preview</h2>
+    <div id="ai-invest-loading" class="loading" style="display:none;">Investigating&#x2026; this may take up to a minute.</div>
+    <div id="ai-invest-content">
+      <p style="color:var(--text-secondary);font-size:0.85rem;">Click Investigate to run a deep AI analysis.</p>
     </div>
-    <div id="report-preview-content">
-      <p style="color:var(--text-secondary);font-size:0.85rem;">No report loaded. Select a type above and click Run Report.</p>
-    </div>
-    <div id="report-preview-actions" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap;">
-      <button class="btn secondary" onclick="copyCurrentReport()" style="font-size:0.8rem;">Copy for Bug Report</button>
-      <button class="btn secondary" onclick="downloadCurrentReport()" style="font-size:0.8rem;">&#x2B07; Download Report</button>
-      <button class="btn secondary" onclick="downloadFullLogs()" style="font-size:0.8rem;">Download Full Logs</button>
-      <button class="btn secondary" id="github-issue-btn" onclick="window.openGithubIssueModal()" style="font-size:0.8rem;">&#x1F41B; Submit GitHub Issue</button>
+    <div id="ai-invest-actions" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap;">
+      <button class="btn secondary" onclick="_copyAIInvestigation()" style="font-size:0.8rem;">Copy</button>
+      <button class="btn secondary" onclick="_downloadAIInvestigation()" style="font-size:0.8rem;">&#x2B07; Download .md</button>
+      <button class="btn secondary" onclick="_githubAIInvestigation()" style="font-size:0.8rem;">&#x1F41B; Submit GitHub Issue</button>
     </div>
   </div>
 
-  <!-- GitHub Issue Modal -->
+  <!-- GitHub Issue Modal (shared) -->
   <div id="github-issue-modal" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.5);align-items:center;justify-content:center;">
     <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:8px;padding:20px;width:min(560px,90vw);max-height:80vh;overflow-y:auto;box-shadow:0 4px 20px rgba(0,0,0,0.4);">
       <h3 style="margin:0 0 12px;">Submit GitHub Issue</h3>
@@ -730,9 +762,9 @@
     </div>
   </div>
 
-  <!-- Panel C — History -->
+  <!-- Report History (AI reports only) -->
   <div class="card">
-    <h2>Report History</h2>
+    <h2>AI Report History</h2>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
       <button class="btn secondary" id="hist-filter-all" onclick="setHistoryFilter('all')" style="font-size:0.8rem;">All</button>
       <button class="btn secondary" id="hist-filter-activity" onclick="setHistoryFilter('activity')" style="font-size:0.8rem;opacity:0.55;">Activity</button>
@@ -2487,54 +2519,82 @@
         <div class="status-item"><div class="label">Auto Today</div><div class="value">${s.auto_requests_today || 0}</div></div>
         <div class="status-item"><div class="label">Manual Today</div><div class="value">${s.manual_requests_today || 0}</div></div>
       `;
+      const aiDisabled = s.status === 'disabled' || !s.status;
+      ['ai-activity-disabled-notice', 'ai-invest-disabled-notice'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = aiDisabled ? 'block' : 'none';
+      });
+      ['ai-activity-btn', 'ai-invest-btn'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.disabled = aiDisabled; el.style.opacity = aiDisabled ? '0.45' : ''; }
+      });
     } catch (e) {
       document.getElementById('ai-status-loading').textContent = 'Failed to load AI status: ' + e.message;
     }
   }
 
-  function updateReportTypeUI() {
-    const type = document.getElementById('report-type').value;
-    const twSelect = document.getElementById('report-time-window');
-    const detailControls = document.getElementById('activity-detail-controls');
-    const focusControls = document.getElementById('investigation-focus-controls');
-    if (type === 'activity') {
-      twSelect.innerHTML = '<option value="6">Last 6 hours</option>'
-        + '<option value="12">Last 12 hours</option>'
-        + '<option value="24" selected>Last 24 hours</option>'
-        + '<option value="48">Last 48 hours</option>'
-        + '<option value="168">Last 7 days</option>';
-      detailControls.style.display = 'flex';
-      focusControls.style.display = 'none';
-    } else {
-      twSelect.innerHTML = '<option value="24">Last 1 day</option>'
-        + '<option value="168" selected>Last 7 days</option>'
-        + '<option value="720">Last 30 days</option>';
-      detailControls.style.display = 'none';
-      focusControls.style.display = 'block';
+  // ---- Activity Record (deterministic, no AI) ----
+
+  let _activityRecordTable = null;
+
+  async function _runActivityRecord() {
+    const hours = parseInt(document.getElementById('activity-record-hours').value, 10) || 24;
+    const btn = document.getElementById('activity-record-btn');
+    const loading = document.getElementById('activity-record-loading');
+    const status = document.getElementById('activity-record-status');
+    const content = document.getElementById('activity-record-content');
+    const actions = document.getElementById('activity-record-actions');
+    btn.disabled = true;
+    btn.textContent = 'Generating\u2026';
+    loading.style.display = 'block';
+    status.textContent = '';
+    try {
+      const resp = await apiFetch('activity_record?hours=' + hours, { method: 'GET' });
+      _activityRecordTable = resp.table || '';
+      content.innerHTML = _activityRecordTable
+        ? '<div class="report-section" style="overflow-x:auto;">' + renderMarkdown(_activityRecordTable) + '</div>'
+        : '<p style="color:var(--text-secondary);font-size:0.85rem;">No events in the selected window.</p>';
+      actions.style.display = 'flex';
+    } catch (e) {
+      status.textContent = 'Error: ' + e.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Generate';
+      loading.style.display = 'none';
     }
   }
 
-  async function runReport() {
-    const type = document.getElementById('report-type').value;
-    if (type === 'activity') {
-      await _runActivityReport();
-    } else {
-      await _runInvestigation();
-    }
+  function _copyActivityRecord() {
+    if (!_activityRecordTable) return;
+    _copyText(_activityRecordTable);
   }
 
-  async function _runActivityReport() {
-    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 24;
-    const detail = document.getElementById('ai-detail').value;
-    const btn = document.getElementById('run-report-btn');
-    const loading = document.getElementById('report-run-loading');
-    const status = document.getElementById('report-run-status');
+  function _downloadActivityRecord() {
+    if (!_activityRecordTable) return;
+    const date = new Date().toISOString().slice(0, 10);
+    downloadMarkdown(_activityRecordTable, 'climate-advisor-activity-record-' + date + '.md');
+  }
+
+  function _githubActivityRecord() {
+    if (!_activityRecordTable) return;
+    document.getElementById('github-issue-title').value = 'Activity Record \u2014 ' + new Date().toLocaleDateString();
+    document.getElementById('github-issue-body').value = '## Activity Record\n\n' + _activityRecordTable + '\n\n---\n*Generated by Climate Advisor*';
+    window.openGithubIssueModal({ skipCurrentReport: true });
+  }
+
+  // ---- AI Activity Report ----
+
+  async function _runAIActivityReport() {
+    const hours = parseInt(document.getElementById('ai-activity-hours').value, 10) || 24;
+    const btn = document.getElementById('ai-activity-btn');
+    const loading = document.getElementById('ai-activity-loading');
+    const status = document.getElementById('ai-activity-status');
     btn.disabled = true;
     btn.textContent = 'Running\u2026';
     loading.style.display = 'block';
     status.textContent = '';
     try {
-      const result = await apiPost('ai_activity', { hours, detail_level: detail });
+      const result = await apiPost('ai_activity', { hours });
       _currentReport = { reportType: 'activity', timestamp: new Date().toISOString(), result };
       renderReportInPreview(_currentReport);
       loadUnifiedHistory();
@@ -2542,17 +2602,35 @@
       status.textContent = 'Error: ' + e.message;
     } finally {
       btn.disabled = false;
-      btn.textContent = 'Run Report';
+      btn.textContent = 'Generate with AI';
       loading.style.display = 'none';
     }
   }
 
-  async function _runInvestigation() {
-    const btn = document.getElementById('run-report-btn');
-    const loading = document.getElementById('report-run-loading');
-    const status = document.getElementById('report-run-status');
+  function _copyAIActivity() {
+    if (!_currentReport || _currentReport.reportType !== 'activity') return;
+    _copyText(_formatCurrentReport());
+  }
+
+  function _downloadAIActivity() {
+    if (!_currentReport || _currentReport.reportType !== 'activity') return;
+    const date = new Date(_currentReport.timestamp).toISOString().slice(0, 10);
+    downloadMarkdown(_formatCurrentReport(), 'climate-advisor-ai-report-' + date + '.md');
+  }
+
+  function _githubAIActivity() {
+    if (!_currentReport || _currentReport.reportType !== 'activity') return;
+    window.openGithubIssueModal();
+  }
+
+  // ---- AI Investigative Analysis ----
+
+  async function _runAIInvestigation() {
+    const btn = document.getElementById('ai-invest-btn');
+    const loading = document.getElementById('ai-invest-loading');
+    const status = document.getElementById('ai-invest-status');
     const focus = document.getElementById('investigation-focus').value.trim();
-    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 168;
+    const hours = parseInt(document.getElementById('ai-invest-hours').value, 10) || 168;
     btn.disabled = true;
     btn.textContent = 'Running\u2026';
     loading.style.display = 'block';
@@ -2593,37 +2671,80 @@
     } finally {
       clearInterval(_stageTimer);
       btn.disabled = false;
-      btn.textContent = 'Run Report';
+      btn.textContent = 'Investigate';
       loading.style.display = 'none';
     }
   }
 
+  function _copyAIInvestigation() {
+    if (!_currentReport || _currentReport.reportType !== 'investigation') return;
+    _copyText(_formatCurrentReport());
+  }
+
+  function _downloadAIInvestigation() {
+    if (!_currentReport || _currentReport.reportType !== 'investigation') return;
+    const date = new Date(_currentReport.timestamp).toISOString().slice(0, 10);
+    downloadMarkdown(_formatCurrentReport(), 'climate-advisor-investigation-' + date + '.md');
+  }
+
+  function _githubAIInvestigation() {
+    if (!_currentReport || _currentReport.reportType !== 'investigation') return;
+    window.openGithubIssueModal();
+  }
+
+  // ---- Shared helpers ----
+
+  function downloadMarkdown(content, filename) {
+    const blob = new Blob([content], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function _copyText(text) {
+    try {
+      navigator.clipboard.writeText(text);
+    } catch (_e) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+  }
+
   function renderReportInPreview(entry) {
-    const header = document.getElementById('report-preview-header');
-    const content = document.getElementById('report-preview-content');
-    const actions = document.getElementById('report-preview-actions');
-    const typeLabel = entry.reportType === 'investigation' ? '\ud83d\udd2c Investigative Analysis' : 'Activity Report';
+    const isInvestigation = entry.reportType === 'investigation';
+    const contentId = isInvestigation ? 'ai-invest-content' : 'ai-activity-content';
+    const actionsId = isInvestigation ? 'ai-invest-actions' : 'ai-activity-actions';
+    const content = document.getElementById(contentId);
+    const actions = document.getElementById(actionsId);
+    if (!content) return;
     const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
-    const isRefined = entry.result && entry.result.is_refined;
-    const refinedBadge = isRefined
-      ? ' <span style="background:var(--primary);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;vertical-align:middle;">refined</span>'
-      : '';
-    header.innerHTML = '<h2 style="margin:0;">' + escapeHtml(typeLabel) + '</h2>'
-      + (ts ? '<span style="color:var(--text-secondary);font-size:0.85rem;">' + escapeHtml(ts) + '</span>' : '')
-      + refinedBadge;
     const result = entry.result || {};
     if (!result.success) {
       const err = result.error || 'Unknown error';
       const src = result.source || 'error';
       content.innerHTML = '<p style="color:var(--danger)">Report failed (' + escapeHtml(src) + '): ' + escapeHtml(err) + '</p>';
-      actions.style.display = 'none';
+      if (actions) actions.style.display = 'none';
       return;
     }
+    const isRefined = result.is_refined;
+    const refinedBadge = isRefined
+      ? ' <span style="background:var(--primary);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;vertical-align:middle;">refined</span>'
+      : '';
+    const tsSpan = ts ? '<div style="color:var(--text-secondary);font-size:0.82rem;margin-bottom:8px;">' + escapeHtml(ts) + refinedBadge + '</div>' : '';
     const data = result.data || {};
     const sourceLabel = result.source === 'fallback'
       ? '<span style="color:var(--warning);font-size:0.8rem">(fallback \u2014 AI unavailable)</span>'
       : '<span style="color:var(--success);font-size:0.8rem">(AI-generated)</span>';
-    let html = '<div style="margin-bottom:8px">' + sourceLabel + '</div>';
+    let html = tsSpan + '<div style="margin-bottom:8px">' + sourceLabel + '</div>';
     if (entry.reportType === 'activity') {
       const sections = ['summary', 'timeline', 'decisions', 'anomalies', 'diagnostics'];
       const sectionLabels = { summary: 'Summary', timeline: 'Timeline', decisions: 'Decisions', anomalies: 'Anomalies', diagnostics: 'Diagnostics' };
@@ -2659,7 +2780,7 @@
       }
     }
     content.innerHTML = html;
-    actions.style.display = 'flex';
+    if (actions) actions.style.display = 'flex';
   }
 
   function escapeHtml(text) {
@@ -2713,18 +2834,7 @@
 
   function copyCurrentReport() {
     if (!_currentReport) return;
-    const text = _formatCurrentReport();
-    const btn = document.querySelector('#report-preview-actions .btn');
-    const orig = btn ? btn.textContent : 'Copy for Bug Report';
-    function showCopied() {
-      if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = orig; }, 2000); }
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(showCopied).catch(() => { fallbackCopy(text); showCopied(); });
-    } else {
-      fallbackCopy(text);
-      showCopied();
-    }
+    _copyText(_formatCurrentReport());
   }
 
   function fallbackCopy(text) {
@@ -2739,11 +2849,8 @@
   }
 
   async function downloadFullLogs() {
-    const hoursEl = document.getElementById('report-time-window');
+    const hoursEl = document.getElementById('activity-record-hours');
     const hours = hoursEl ? parseInt(hoursEl.value, 10) || 24 : 24;
-    const btn = document.querySelector('#report-preview-actions .btn:last-child');
-    const orig = btn ? btn.textContent : '';
-    if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
     try {
       const [logData, investigationData] = await Promise.allSettled([
         apiFetch('event_log?hours=' + hours),
@@ -2767,8 +2874,6 @@
     } catch (e) {
       console.error('Failed to download full logs:', e);
       alert('Failed to download logs: ' + e.message);
-    } finally {
-      if (btn) { btn.textContent = orig; btn.disabled = false; }
     }
   }
 
@@ -2912,8 +3017,10 @@
     };
     renderReportInPreview(_currentReport);
     renderHistory();
-    const card = document.getElementById('report-preview-card');
-    if (card) card.scrollIntoView({ behavior: 'smooth' });
+    const isInvestigation = _currentReport.reportType === 'investigation';
+    const targetId = isInvestigation ? 'ai-invest-content' : 'ai-activity-content';
+    const target = document.getElementById(targetId);
+    if (target) target.scrollIntoView({ behavior: 'smooth' });
   }
 
   function _formatInvestigationReport(entry) {
@@ -2973,9 +3080,14 @@
       // If the deleted report is currently displayed, clear the preview
       if (_currentReport && _currentReport.timestamp === entry.timestamp) {
         _currentReport = null;
-        document.getElementById('report-preview-header').innerHTML = '<h2 style="margin:0;">Report Preview</h2>';
-        document.getElementById('report-preview-content').innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem;">No report loaded. Select a type above and click Run Report.</p>';
-        document.getElementById('report-preview-actions').style.display = 'none';
+        ['ai-activity-content', 'ai-invest-content'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem;">Report deleted.</p>';
+        });
+        ['ai-activity-actions', 'ai-invest-actions'].forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.style.display = 'none';
+        });
       }
       await loadUnifiedHistory();
     } catch (e) {
@@ -2988,7 +3100,7 @@
     const date = new Date(_currentReport.timestamp).toISOString().slice(0, 10);
     const rType = _currentReport.reportType;
     const filename = 'climate-advisor-' + (rType === 'investigation' ? 'investigation' : 'activity') + '-' + date + '.md';
-    _triggerTextDownload(_formatCurrentReport(), filename);
+    downloadMarkdown(_formatCurrentReport(), filename);
   }
 
   function _formatCurrentReport() {
@@ -3020,19 +3132,21 @@
 
   // ---- GitHub Issue Modal ----
 
-  function openGithubIssueModal() {
-    if (!_currentReport) return;
+  function openGithubIssueModal(opts) {
     const modal = document.getElementById('github-issue-modal');
-    const result = _currentReport.result || {};
-    const data = result.data || {};
-    const rType = _currentReport.reportType === 'investigation' ? 'Investigative Analysis' : 'Activity Report';
-    const ts = _currentReport.timestamp ? new Date(_currentReport.timestamp).toLocaleString() : '';
-    const summary = (data.summary || '').replace(/\s+/g, ' ').trim().substring(0, 120);
-    document.getElementById('github-issue-title').value = summary
-      ? summary.substring(0, 100)
-      : rType + ' — ' + ts;
-    document.getElementById('github-issue-body').value = _formatCurrentReport();
-    document.getElementById('github-issue-labels').value = 'bug';
+    if (!opts || !opts.skipCurrentReport) {
+      if (!_currentReport) return;
+      const result = _currentReport.result || {};
+      const data = result.data || {};
+      const rType = _currentReport.reportType === 'investigation' ? 'Investigative Analysis' : 'Activity Report';
+      const ts = _currentReport.timestamp ? new Date(_currentReport.timestamp).toLocaleString() : '';
+      const summary = (data.summary || '').replace(/\s+/g, ' ').trim().substring(0, 120);
+      document.getElementById('github-issue-title').value = summary
+        ? summary.substring(0, 100)
+        : rType + ' — ' + ts;
+      document.getElementById('github-issue-body').value = _formatCurrentReport();
+      document.getElementById('github-issue-labels').value = 'bug';
+    }
     document.getElementById('github-issue-status').textContent = '';
     document.getElementById('github-modal-not-configured').style.display = 'none';
     document.getElementById('github-submit-btn').disabled = false;
@@ -3100,9 +3214,7 @@
     if (evt.target === this) closeGithubIssueModal();
   });
 
-  // Expose AI tab functions to window for onclick handlers
-  window.runReport = runReport;
-  window.updateReportTypeUI = updateReportTypeUI;
+  // Expose Analysis tab functions to window for onclick handlers
   window.renderHistory = renderHistory;
   window.setHistoryFilter = setHistoryFilter;
   window.showMoreHistory = showMoreHistory;

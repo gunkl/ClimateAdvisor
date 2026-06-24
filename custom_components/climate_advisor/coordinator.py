@@ -4865,6 +4865,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
         entry: dict[str, Any] = {"time": dt_util.now().isoformat(), "type": event_type, **data}
+        if getattr(self, "config", None):
+            entry.setdefault("indoor_f", self._get_indoor_temp())
+            entry.setdefault("outdoor_f", getattr(self, "_last_outdoor_temp", None))
         self._event_log.append(entry)
         if len(self._event_log) > EVENT_LOG_CAP:
             self._event_log.pop(0)

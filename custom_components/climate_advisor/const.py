@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.36"
+VERSION = "0.4.37"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.37": [
+        "Feat #352: Activity Record — new deterministic event timeline (no AI required) "
+        "with indoor/outdoor temperature columns. Available on the Analysis tab with "
+        "Copy, Download .md, and Submit GitHub Issue actions. AI Activity Report and "
+        "AI Investigative Analysis now have their own dedicated sections with separate "
+        "generate buttons; AI sections show a disabled notice when AI is not configured. "
+        "Tab renamed from 'AI' to 'Analysis'.",
+    ],
     "0.4.36": [
         "Fix #347: Fan no longer stays running (untracked) indefinitely after thermostat "
         "starts it autonomously between AC cycles. CA now reconciles on every hvac_action "
@@ -504,6 +512,25 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    352: {
+        "version_fixed": "0.4.37",
+        "title": "Activity Report: temp columns, Activity Record endpoint, Analysis tab restructure",
+        "scope_covered": (
+            "coordinator.py _emit_event: enriches every event with indoor_f/outdoor_f at emit time "
+            "using setdefault(); ai_skills_activity.py build_event_timeline_table: adds Indoor/Outdoor "
+            "columns, _fmt_temp_cell() helper; api.py ClimateAdvisorActivityRecordView: new GET endpoint "
+            "/api/climate_advisor/activity_record?hours=N; frontend/index.html: 'AI' tab renamed to "
+            "'Analysis', three-section layout (Activity Record / AI Activity Report / AI Investigative "
+            "Analysis), Download .md buttons on all sections, Full/Brief stub removed, AI disabled state "
+            "wired to loadAIStatus(); tests/test_activity_renderers.py: TestTempColumns (3 tests)."
+        ),
+        "scope_not_covered": (
+            "Activity Record has no server-side pagination — all events in the window are returned. "
+            "Download .md uses Blob/URL.createObjectURL which is unavailable in some non-browser contexts. "
+            "The AI disabled state only reflects the ai_status endpoint response — it does not prevent "
+            "the API call if a user manipulates the DOM directly."
+        ),
+    },
     347: {
         "version_fixed": "0.4.36",
         "title": "Post-startup thermostat-autonomous fan stays running (untracked) indefinitely",

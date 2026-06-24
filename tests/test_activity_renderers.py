@@ -300,7 +300,7 @@ class TestBuildEventTimelineTable:
         """Empty event log → table has header + '(no events in window)' sentinel row."""
         table = _build_table([])
 
-        assert "| Time | Event | Settings | Source |" in table
+        assert "| Time | Event | Settings | Source | Indoor | Outdoor |" in table
         assert "no events in window" in table
 
     def test_table_always_starts_with_header(self):
@@ -309,7 +309,7 @@ class TestBuildEventTimelineTable:
         table = _build_table([event])
 
         first_line = table.splitlines()[0]
-        assert first_line == "| Time | Event | Settings | Source |", (
+        assert first_line == "| Time | Event | Settings | Source | Indoor | Outdoor |", (
             f"Table must start with header row. Got: {first_line!r}"
         )
 
@@ -615,3 +615,63 @@ class TestFanManualOverrideRenderer:
         """fan_manual_override source resolves to 'manual' for timeline Source column."""
         source = _act_mod._event_source_label("fan_manual_override", {"source": ""})
         assert source == "manual"
+
+
+# ---------------------------------------------------------------------------
+# TestTempColumns (Issue #352)
+# ---------------------------------------------------------------------------
+
+
+class TestTempColumns:
+    """Indoor/Outdoor temperature columns in the timeline table (Issue #352)."""
+
+    def test_temp_columns_populated_from_event(self):
+        """Events carrying indoor_f/outdoor_f render temperatures in the table."""
+        events = [
+            _make_event(
+                "comfort_band_applied",
+                hours_ago=1.0,
+                floor=68.0,
+                ceiling=74.0,
+                active="ceiling",
+                mode="cool",
+                reason="day",
+                indoor_f=73.5,
+                outdoor_f=68.0,
+            )
+        ]
+        table = _build_table(events)
+        assert "Indoor" in table
+        assert "Outdoor" in table
+        # 73.5°F rounds to 74°F in format_temp; 68°F is both setpoint floor and outdoor temp
+        assert "74" in table
+
+    def test_temp_columns_absent_renders_emdash(self):
+        """Events without indoor_f/outdoor_f render em-dash; no crash."""
+        events = [
+            _make_event(
+                "comfort_band_applied",
+                hours_ago=1.0,
+                floor=68.0,
+                ceiling=74.0,
+                active="ceiling",
+                mode="cool",
+                reason="day",
+            )
+        ]
+        table = _build_table(events)
+        assert "Indoor" in table
+        assert "Outdoor" in table
+        assert "—" in table  # em-dash
+
+    def test_dedup_row_preserves_first_event_temps(self):
+        """Consecutive same-type events collapsed to one row keep the first event's temps."""
+        events = [
+            _make_event("nat_vent_ac_assist_armed", hours_ago=3.0, indoor_f=75.0, outdoor_f=70.0),
+            _make_event("nat_vent_ac_assist_armed", hours_ago=2.5, indoor_f=76.0, outdoor_f=71.0),
+            _make_event("nat_vent_ac_assist_armed", hours_ago=2.0, indoor_f=77.0, outdoor_f=72.0),
+        ]
+        table = _build_table(events)
+        assert "x3" in table
+        assert "75" in table
+        assert "70" in table

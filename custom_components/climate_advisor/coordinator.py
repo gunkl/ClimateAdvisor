@@ -4865,6 +4865,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
         entry: dict[str, Any] = {"time": dt_util.now().isoformat(), "type": event_type, **data}
+        # Normalize alternate temp field names used by automation events
+        for _src in ("indoor_temp", "indoor"):
+            if _src in entry:
+                entry.setdefault("indoor_f", entry[_src])
+                break
+        for _src in ("outdoor_temp", "outdoor"):
+            if _src in entry:
+                entry.setdefault("outdoor_f", entry[_src])
+                break
         if getattr(self, "config", None):
             entry.setdefault("indoor_f", self._get_indoor_temp())
             entry.setdefault("outdoor_f", getattr(self, "_last_outdoor_temp", None))

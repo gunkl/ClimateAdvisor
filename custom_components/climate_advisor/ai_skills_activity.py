@@ -38,6 +38,15 @@ _LOGGER = logging.getLogger(__name__)
 _SKILL_NAME = "activity_report"
 
 
+def _first_temp(entry: dict, *keys: str) -> Any:
+    """Return first non-None temp value from the given keys in an event dict."""
+    for k in keys:
+        v = entry.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def _fmt_temp_cell(val: Any, unit: str) -> str:
     """Format a temperature value for a timeline table cell; em-dash when unavailable."""
     try:
@@ -1007,8 +1016,8 @@ def build_event_timeline_table(
             settings_text = ""
 
         source = _event_source_label(event_type, payload) or "sensor"
-        indoor_cell = _fmt_temp_cell(entry.get("indoor_f"), unit)
-        outdoor_cell = _fmt_temp_cell(entry.get("outdoor_f"), unit)
+        indoor_cell = _fmt_temp_cell(_first_temp(entry, "indoor_f", "indoor_temp", "indoor"), unit)
+        outdoor_cell = _fmt_temp_cell(_first_temp(entry, "outdoor_f", "outdoor_temp", "outdoor"), unit)
 
         # Flush run when type changes or type is not deduplicated
         if event_type in _NO_DEDUP or event_type != run_type:

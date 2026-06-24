@@ -675,3 +675,55 @@ class TestTempColumns:
         assert "x3" in table
         assert "75" in table
         assert "70" in table
+
+
+# ---------------------------------------------------------------------------
+# TestAltKeyTempFallback
+# ---------------------------------------------------------------------------
+
+
+class TestAltKeyTempFallback:
+    """Verify _first_temp fallback reads alt key names from existing ring buffer events."""
+
+    def test_indoor_temp_key_populates_column(self):
+        """nat_vent_fan_on stores indoor_temp — table must show it."""
+        events = [
+            _make_event(
+                "nat_vent_fan_on",
+                hours_ago=1.0,
+                indoor_temp=71.0,
+                on_threshold=68.0,
+                target=72.0,
+            )
+        ]
+        table = _build_table(events)
+        assert "71" in table  # 71.0°F formatted
+
+    def test_indoor_outdoor_keys_populate_columns(self):
+        """nat_vent_ceiling_escalation stores indoor/outdoor — both columns must show."""
+        events = [
+            _make_event(
+                "nat_vent_ceiling_escalation",
+                hours_ago=1.0,
+                indoor=78.0,
+                outdoor=62.0,
+                comfort_cool=75.0,
+            )
+        ]
+        table = _build_table(events)
+        assert "78" in table
+        assert "62" in table
+
+    def test_indoor_f_takes_priority_over_alt_keys(self):
+        """If indoor_f is already present, it wins over indoor_temp."""
+        events = [
+            _make_event(
+                "some_event",
+                hours_ago=1.0,
+                indoor_f=75.0,
+                indoor_temp=99.0,  # should be ignored
+            )
+        ]
+        table = _build_table(events)
+        assert "75" in table
+        assert "99" not in table

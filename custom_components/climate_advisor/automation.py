@@ -838,6 +838,7 @@ class AutomationEngine:
                         "classification_mode": classification_mode,
                         "old_setpoint_f": old_setpoint_f,
                         "new_setpoint_f": new_setpoint_f,
+                        "indoor_f": self._indoor_f_for_event(),
                     },
                 )
         else:
@@ -1031,6 +1032,7 @@ class AutomationEngine:
                         "hvac_mode": classification.hvac_mode,
                         "trend": classification.trend_direction,
                         "old_hvac_mode": _old_mode_cls,
+                        "indoor_f": indoor_temp,
                     },
                 )
         else:
@@ -1301,6 +1303,7 @@ class AutomationEngine:
                     "active": band.active,
                     "mode": _cmd_shape,
                     "reason": band.reason,
+                    "indoor_f": self._indoor_f_for_event(),
                 },
             )
 
@@ -2773,6 +2776,7 @@ class AutomationEngine:
                     "floor": _away_band.floor,
                     "ceiling": _away_band.ceiling,
                     "occupancy": "away",
+                    "indoor_f": self._indoor_f_for_event(),
                 },
             )
         await self._apply_comfort_band(_away_band, reason="occupancy away — setback band")
@@ -2790,7 +2794,7 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "occupancy_comfort_restored",
-                    {"mode": c.hvac_mode, "target_f": comfort},
+                    {"mode": c.hvac_mode, "target_f": comfort, "indoor_f": self._indoor_f_for_event()},
                 )
 
         # Check 1: Temperature proximity — skip notification if house already near comfort.
@@ -2870,6 +2874,7 @@ class AutomationEngine:
                     "floor": _vac_band.floor,
                     "ceiling": _vac_band.ceiling,
                     "occupancy": "vacation",
+                    "indoor_f": self._indoor_f_for_event(),
                 },
             )
         await self._apply_comfort_band(_vac_band, reason="vacation mode — deep setback band")
@@ -3629,6 +3634,16 @@ class AutomationEngine:
         if climate_state:
             temp = climate_state.attributes.get("current_temperature")
             return to_fahrenheit(float(temp), unit) if temp is not None else None
+        return None
+
+    def _indoor_f_for_event(self) -> float | None:
+        """Read current indoor temp from climate entity for event enrichment."""
+        try:
+            state = self.hass.states.get(self.climate_entity)
+            if state is not None:
+                return float(state.attributes["current_temperature"])
+        except (TypeError, ValueError, KeyError, AttributeError):
+            pass
         return None
 
     def _get_thermostat_capabilities(self) -> ThermostatCapabilities:

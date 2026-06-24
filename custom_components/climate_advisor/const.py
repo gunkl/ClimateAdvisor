@@ -4,9 +4,12 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.38"
+VERSION = "0.4.39"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.39": [
+        "Fix #354: Activity Record now shows indoor/outdoor temp at thermostat decision events.",
+    ],
     "0.4.38": [
         "Feat #352: Analysis tab — single dropdown card replaces three-section layout; "
         "report type selector (Activity Record / AI Activity Report / AI Investigative Analysis) "
@@ -518,6 +521,32 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    354: {
+        "version_fixed": "0.4.39",
+        "title": "Activity Record temp columns — alt-key fallback + explicit injection at 5 call sites",
+        "scope_covered": (
+            "ai_skills_activity.py: added _first_temp() helper that resolves indoor_f/outdoor_f from "
+            "alt key names (indoor_temp, indoor, outdoor_temp, outdoor); build_event_timeline_table "
+            "now calls _first_temp() instead of entry.get('indoor_f') for both columns. "
+            "coordinator.py _emit_event: normalizes indoor_temp/indoor -> indoor_f and "
+            "outdoor_temp/outdoor -> outdoor_f before the setdefault block so any event carrying "
+            "alt-named temps gets canonical indoor_f/outdoor_f keys. "
+            "automation.py: added _indoor_f_for_event() helper reading current_temperature from the "
+            "climate entity; injected indoor_f into 6 emit call sites: classification_applied, "
+            "occupancy_comfort_restored, comfort_band_applied, occupancy_setback (away), "
+            "occupancy_setback (vacation), override_detected. "
+            "tests/test_activity_renderers.py: TestAltKeyTempFallback (3 tests)."
+        ),
+        "scope_not_covered": (
+            "Events emitted by coordinator.py directly (e.g. startup_coalesced, fan_running_untracked) "
+            "already receive indoor_f/outdoor_f from the setdefault block in _emit_event — no change needed. "
+            "Events emitted by automation.py that do not have a meaningful indoor temp "
+            "(e.g. grace_started, nat_vent_fan_off) rely on coordinator's setdefault enrichment. "
+            "_indoor_f_for_event() reads climate entity attributes only (not the configured "
+            "indoor_temp_entity sensor) — temperature may differ slightly from what _get_indoor_temp_f() "
+            "would return if a dedicated sensor is configured."
+        ),
+    },
     352: {
         "version_fixed": "0.4.37",
         "title": "Activity Report: temp columns, Activity Record endpoint, Analysis tab restructure",

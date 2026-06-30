@@ -258,6 +258,7 @@ def _make_update_data_coord(
     coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
     coord._startup_timer_fired = False  # Bug 1 (Issue #321)
     coord._startup_coalesce_expiry = None  # Bug 1 (Issue #321)
+    coord._last_commanded_fan_state = None
     coord._async_update_data = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)
     return coord
 

@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.40"
+VERSION = "0.4.41"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.41": [
+        "Feat #361: Added fan_state_feedback config flag. When OFF (default),"
+        " CA operates in command-only mode — asserting desired fan state idempotently"
+        " without reading back entity state. Prevents false override detection from"
+        " command-echo entities. When ON, enables physical state feedback for WHF"
+        " installations with a dedicated state sensor.",
+    ],
     "0.4.40": [
         "Fix #359: Fan cancel now correctly re-asserts setpoint after ecobee comfort-program echo.",
         "Fix #359: Fan running untracked after grace expires now reconciled via"
@@ -532,6 +539,20 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    361: {
+        "version_fixed": "0.4.41",
+        "title": "WHF command-only mode: fan_state_feedback config flag",
+        "scope_covered": (
+            "fan_state_feedback=False suppresses _async_fan_entity_changed() echo detection; "
+            "command-only reconcile loop asserts desired fan state idempotently; "
+            "post-grace reconcile uses command assertion not state-read; "
+            "whf_mode/whf_last_commanded/whf_desired exposed in coordinator data"
+        ),
+        "scope_not_covered": (
+            "Physical wall-switch overrides remain undetectable in command-only mode; "
+            "fan_entity relay failures cannot be confirmed without a state sensor"
+        ),
+    },
     359: {
         "version_fixed": "0.4.40",
         "title": (
@@ -2091,6 +2112,7 @@ VACATION_SETBACK_EXTRA = 3
 # Fan control configuration
 CONF_FAN_ENTITY = "fan_entity"
 CONF_FAN_STATE_ENTITY = "fan_state_entity"  # Issue #359: WHF Type 2 dual-entity support
+CONF_FAN_STATE_FEEDBACK = "fan_state_feedback"  # Issue #361: command-only vs feedback mode
 CONF_FAN_MODE = "fan_mode"
 FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
@@ -2385,6 +2407,18 @@ CONFIG_METADATA = {
         ),
         "sensitive": False,
         "category": "fan",
+    },
+    "fan_state_feedback": {
+        "label": "Fan state feedback reliable",
+        "description": (
+            "Turn ON if your fan entity or state sensor reports actual motor state "
+            "(not just the last command sent). Leave OFF if you're not sure — CA will "
+            "command the fan to the desired state on every cycle without reading back "
+            "the entity state. Physical wall-switch overrides are undetectable when OFF."
+        ),
+        "category": "fan",
+        "sensitive": False,
+        "default": False,
     },
     "fan_min_runtime_per_hour": {
         "label": "Fan Minimum Runtime Per Hour",

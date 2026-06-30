@@ -73,6 +73,7 @@ from .const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
     CONF_FAN_STATE_ENTITY,
+    CONF_FAN_STATE_FEEDBACK,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
     CONF_HOME_TOGGLE,
@@ -338,6 +339,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._last_state_contradiction_time: datetime | None = None  # dedup for state_contradiction_warning events
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
+        self._last_commanded_fan_state: bool | None = None  # Issue #361: command-only mode — last on/off commanded
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -475,6 +477,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _fan_state_entity,
                     self._async_fan_entity_changed,
                 )
+            )
+
+        # Issue #361: log fan control mode (state-feedback vs command-only) at startup
+        _fan_mode_cfg = self.config.get(CONF_FAN_MODE, "")
+        if _fan_mode_cfg not in ("", "none", None, FAN_MODE_DISABLED):
+            _feedback_mode = "state-feedback" if self._fan_state_feedback_enabled() else "command-only"
+            _LOGGER.info(
+                "Fan control mode: %s (fan_entity=%s, fan_state_entity=%s, fan_state_feedback=%s)",
+                _feedback_mode,
+                self.config.get(CONF_FAN_ENTITY, ""),
+                self.config.get(CONF_FAN_STATE_ENTITY, ""),
+                self._fan_state_feedback_enabled(),
             )
 
         # Listeners: indoor and outdoor temp entities — re-evaluate fan on every temp change (Issue #327).
@@ -1707,6 +1721,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _bst_hvac_action,
                 )
 
+        # Issue #361: command-only fan reconciliation (fan_state_feedback=False).
+        # When the fan entity only echoes the last command, we cannot detect physical overrides
+        # via state changes.  Instead, assert the desired state idempotently each 30-min cycle.
+        _ae_cmd = self.automation_engine
+        if not self._fan_state_feedback_enabled() and _ae_cmd is not None:
+            _fan_mode_cmd = self.config.get(CONF_FAN_MODE, "")
+            if _fan_mode_cmd not in ("", "none", None, FAN_MODE_DISABLED):
+                _desired_on = bool(_ae_cmd._fan_active)
+                _grace_on = bool(_ae_cmd._grace_active)
+                _override_on = bool(_ae_cmd._fan_override_active)
+                _last_cmd = self._last_commanded_fan_state
+                if _desired_on and _last_cmd is not True and not _grace_on and not _override_on:
+                    _LOGGER.info(
+                        "Fan command-only assert: desired=on last_commanded=%s → issuing on command (fan_entity=%s)",
+                        _last_cmd,
+                        self.config.get(CONF_FAN_ENTITY, ""),
+                    )
+                    await self._async_command_fan_entity(on=True)
+                    self._last_commanded_fan_state = True
+                elif not _desired_on and _last_cmd is not False and not _grace_on and not _override_on:
+                    _LOGGER.info(
+                        "Fan command-only assert: desired=off last_commanded=%s → issuing off command (fan_entity=%s)",
+                        _last_cmd,
+                        self.config.get(CONF_FAN_ENTITY, ""),
+                    )
+                    await self._async_command_fan_entity(on=False)
+                    self._last_commanded_fan_state = False
+                else:
+                    _LOGGER.debug(
+                        "Fan command-only assert: desired=%s last_commanded=%s — no command needed",
+                        "on" if _desired_on else "off",
+                        _last_cmd,
+                    )
+
         _base_runtime = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
         _session_elapsed = (dt_util.now() - self._hvac_on_since).total_seconds() / 60 if self._hvac_on_since else 0.0
         hvac_runtime_today = round(_base_runtime + _session_elapsed, 1)
@@ -1762,6 +1810,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FORECAST_HIGH_TOMORROW: c.tomorrow_high if c else None,
             ATTR_FORECAST_LOW_TOMORROW: c.tomorrow_low if c else None,
             "pre_cool_status": self._pre_cool_status,
+            # Issue #361: WHF command-only mode status fields
+            "whf_mode": (
+                "disabled"
+                if self.config.get(CONF_FAN_MODE, "") in ("", "none", None, FAN_MODE_DISABLED)
+                else ("state-feedback" if self._fan_state_feedback_enabled() else "command-only")
+            ),
+            "whf_last_commanded": (
+                "on"
+                if self._last_commanded_fan_state is True
+                else "off"
+                if self._last_commanded_fan_state is False
+                else None
+            ),
+            "whf_desired": bool(self.automation_engine._fan_active) if self.automation_engine else None,
         }
 
         # Append chart log entry (every coordinator tick — 30-min cadence)
@@ -3122,8 +3184,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
                 )
 
+    async def _async_command_fan_entity(self, *, on: bool) -> None:
+        """Issue a turn_on or turn_off service call to the configured WHF fan entity (Issue #361).
+
+        Used by command-only reconciliation; reuses the same domain-split pattern as
+        automation.py ``_activate_fan()`` / ``_deactivate_fan()``.
+        """
+        fan_entity_id = self.config.get(CONF_FAN_ENTITY)
+        if not fan_entity_id:
+            _LOGGER.debug("_async_command_fan_entity: no fan_entity configured — skipping")
+            return
+        domain = fan_entity_id.split(".")[0]  # "fan" or "switch"
+        service = "turn_on" if on else "turn_off"
+        _LOGGER.debug(
+            "_async_command_fan_entity: %s.%s entity_id=%s",
+            domain,
+            service,
+            fan_entity_id,
+        )
+        await self.hass.services.async_call(domain, service, {"entity_id": fan_entity_id})
+
     async def _async_fan_entity_changed(self, event: Event) -> None:
         """Detect manual fan entity state changes (Issue #37)."""
+        # Issue #361: command-only mode — entity state changes are command echoes, not physical signals.
+        if not self._fan_state_feedback_enabled():
+            _LOGGER.debug(
+                "fan_entity state change ignored — fan_state_feedback=False"
+                " (command echo only, not a physical override signal)"
+            )
+            return
+
         new_state = event.data.get("new_state")
         old_state = event.data.get("old_state")
         if not new_state or not old_state:
@@ -3208,6 +3298,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def _async_post_grace_fan_reconcile(self) -> None:
         """After grace expires, check if fan is still running and reconcile if needed (Issue #359 Fix D)."""
+        # Issue #361: command-only mode — no physical-state entity to read.
+        # Reset last_commanded so the next _async_update_data() cycle re-asserts the desired state.
+        if not self._fan_state_feedback_enabled():
+            ae = self.automation_engine
+            if ae is not None:
+                desired = bool(ae._fan_active)
+                _LOGGER.info(
+                    "Post-grace fan reconcile (command-only): asserting desired_state=%s"
+                    " (feedback unavailable — will re-assert on next cycle)",
+                    "on" if desired else "off",
+                )
+                self._last_commanded_fan_state = None
+            return
+
         ae = self.automation_engine
         if ae is None:
             return
@@ -3231,16 +3335,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 any_sensor_open=self._any_sensor_open(),
             )
 
-    def _get_fan_physical_state(self) -> bool:
-        """Return whether the fan is physically running (Issue #359 Fix E: WHF Type 2 support).
+    def _fan_state_feedback_enabled(self) -> bool:
+        """Return True if the fan entity provides reliable physical-state feedback (Issue #361)."""
+        return bool(self.config.get(CONF_FAN_STATE_FEEDBACK, False))
 
-        When ``CONF_FAN_STATE_ENTITY`` is configured, reads that entity's state for physical
-        on/off detection.  Falls back to ``CONF_FAN_ENTITY`` state if the state entity is
-        unavailable or not configured.  Logs a WARNING (once per unavailability) when falling back.
+    def _get_fan_physical_state(self) -> bool | None:
+        """Return whether the fan is physically running, or None if feedback is disabled (Issue #361).
+
+        When ``fan_state_feedback`` is False (command-only mode), returns None — the entity
+        state only echoes the last command and cannot be used for override detection.
+
+        When ``CONF_FAN_STATE_ENTITY`` is configured and feedback is enabled, reads that entity's
+        state for physical on/off detection.  Falls back to ``CONF_FAN_ENTITY`` state if the
+        state entity is unavailable or not configured.  Logs a WARNING (once per unavailability)
+        when falling back.
 
         Returns:
-            True if the fan is physically running, False otherwise.
+            True/False if the fan is physically running (feedback mode), None if command-only.
         """
+        if not self._fan_state_feedback_enabled():
+            _LOGGER.debug("_get_fan_physical_state: returning None — fan_state_feedback=False (command-only mode)")
+            return None
         fan_state_entity_id = self.config.get(CONF_FAN_STATE_ENTITY)
         if fan_state_entity_id:
             state = self.hass.states.get(fan_state_entity_id)

@@ -1343,6 +1343,36 @@ This table enumerates the six key fan lifecycle scenarios, including the new `on
 **Key semantic distinction for fan-off grace vs fan-manual-override grace:**
 The `fan_off` grace (started by `on_fan_turned_off()`) gates nat-vent **re-activation** — CA backs off from immediately restarting the fan the user just stopped. The `fan_manual_override` grace (started when the user turns a fan on) gates CA **interference** with a fan the user is actively running. The two grace types have inverted blocking semantics. See `docs/grace-periods-spec.md` for the full grace period state machine.
 
+### 9c-ii. WHF Feedback Mode (Issue #361)
+
+`fan_state_feedback` (bool, default `False`) controls whether CA reads physical fan state or operates
+in command-only mode.
+
+| fan_state_feedback | _fan_active (CA wants ON) | grace active | Action |
+|---|---|---|---|
+| True | True | No | Read physical state via `_get_fan_physical_state()`; command ON if off |
+| True | False | No | Read physical state; command OFF if unexpectedly on |
+| False | True | No | Command ON idempotently (skip state read); update `_last_commanded_fan_state` |
+| False | False | No | Command OFF idempotently (skip state read); update `_last_commanded_fan_state` |
+| False | True | Yes | No command — grace gates re-activation even without feedback |
+| False | False | Yes | No command — grace prevents turn-on |
+
+**Idempotency**: Commands are only re-issued when `_fan_active` (desired) diverges from
+`_last_commanded_fan_state` (last issued command). This prevents command churn on every 30-min cycle.
+
+**Override detection**: `_async_fan_entity_changed()` is suppressed when `fan_state_feedback=False`
+(it only fires on CA's own command echo, not on physical user overrides). Wall-switch overrides are
+undetectable without a state sensor.
+
+**`_compute_fan_status()`** reads thermostat climate entity attributes (HVAC fan) — NOT the WHF entity.
+WHF operational status is tracked separately via coordinator data fields:
+- `whf_mode`: `"command-only"` | `"state-feedback"` | `"disabled"`
+- `whf_last_commanded`: `"on"` | `"off"` | `None`
+- `whf_desired`: `True` | `False` | `None`
+
+**Auto-flip**: When `fan_state_entity` is configured in the options flow, `fan_state_feedback`
+is auto-suggested as `True` (user can override).
+
 ### 9d. Fan Status Sensor Values
 
 The `sensor.climate_advisor_fan_status` entity exposes one of six state strings:

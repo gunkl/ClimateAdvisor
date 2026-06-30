@@ -239,6 +239,41 @@ See `docs/08-COMPUTATION-REFERENCE.md` §19 for the full invariant table governi
 
 ---
 
+### WHF (Whole-House Fan) Troubleshooting (Issue #361)
+
+**Symptom: WHF appears unresponsive to CA commands**
+
+1. Check `whf_mode` in the debug pane of the Climate Advisor dashboard:
+   - `"command-only"`: CA is issuing commands but cannot confirm the fan received them.
+     The `fan_entity` is treated as command-only (relay/switch that echoes last command).
+   - `"state-feedback"`: CA reads actual motor state. If fan is still unresponsive,
+     check whether `fan_state_entity` is correctly reporting the motor state.
+   - `"disabled"`: Fan control is disabled in config.
+
+2. If `whf_mode = "command-only"`:
+   - Inspect `fan_entity` in HA Developer Tools → States. If its state only changes when
+     CA issues a command (not when you flip the physical wall switch), it's a command-echo
+     entity. This is normal — CA will still command it, it just can't confirm reception.
+   - To enable physical override detection and state confirmation: configure
+     `fan_state_entity` with a binary_sensor or switch that reads actual motor state,
+     then set `fan_state_feedback = True` in options.
+
+3. `whf_last_commanded` in the debug pane shows what CA last commanded (`"on"`, `"off"`, or
+   `null` after restart). If it shows `"on"` but the fan isn't running, the relay may be faulty.
+
+**Symptom: CA keeps re-commanding the fan unexpectedly**
+
+In command-only mode, CA re-issues a command only when `_fan_active` (desired) diverges from
+`_last_commanded_fan_state` (last issued command). This can happen after HA restart
+(`_last_commanded_fan_state` resets to `None`) or after a post-grace reconciliation.
+Check HA logs for: `"Fan command-only assert: desired=..."` log lines.
+
+**Known limitation**: In command-only mode (`fan_state_feedback=False`), physical wall-switch
+user overrides are undetectable. CA will re-assert its desired state on the next cycle.
+Install a `fan_state_entity` sensor to enable override detection.
+
+---
+
 ## Debugging Thermal Model Learning
 
 ### "Thermal model confidence is 'none' after weeks of use"

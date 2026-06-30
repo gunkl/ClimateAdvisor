@@ -32,7 +32,10 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
     CONF_FAN_STATE_FEEDBACK,
+    FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
+    FAN_MODE_HVAC,
+    FAN_MODE_WHOLE_HOUSE,
 )
 
 # ---------------------------------------------------------------------------
@@ -396,3 +399,70 @@ class TestWHFModeInData:
         """fan_mode=disabled → whf_mode='disabled' regardless of fan_state_feedback."""
         config = {CONF_FAN_ENTITY: "switch.whf", CONF_FAN_STATE_FEEDBACK: False}
         assert self._whf_mode(config, fan_mode_val=FAN_MODE_DISABLED) == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# TestWarningBannerScope
+# ---------------------------------------------------------------------------
+
+
+class TestWarningBannerScope:
+    """Warning banner in build_event_timeline_table must only appear for WHF modes."""
+
+    def _build_table(self, config: dict) -> str:
+        import datetime as _dt
+
+        from custom_components.climate_advisor.ai_skills_activity import (
+            build_event_timeline_table,
+        )
+
+        return build_event_timeline_table([], config, hours=12, now=_dt.datetime(2026, 6, 30, 12, 0, 0))
+
+    def test_warning_shown_for_whole_house_fan_with_entity_and_no_feedback(self):
+        """fan_mode=whole_house_fan + fan_entity set + fan_state_feedback=False → warning shown."""
+        config = {
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_ENTITY: "switch.whf",
+            CONF_FAN_STATE_FEEDBACK: False,
+        }
+        table = self._build_table(config)
+        assert "Whole house fan state feedback disabled" in table
+
+    def test_warning_shown_for_both_mode_with_entity(self):
+        """fan_mode=both + fan_entity set + fan_state_feedback=False → warning shown."""
+        config = {
+            CONF_FAN_MODE: FAN_MODE_BOTH,
+            CONF_FAN_ENTITY: "switch.whf",
+            CONF_FAN_STATE_FEEDBACK: False,
+        }
+        table = self._build_table(config)
+        assert "Whole house fan state feedback disabled" in table
+
+    def test_warning_not_shown_for_hvac_fan_mode(self):
+        """fan_mode=hvac_fan → warning must NOT appear (fan_state_feedback is irrelevant)."""
+        config = {
+            CONF_FAN_MODE: FAN_MODE_HVAC,
+            CONF_FAN_STATE_FEEDBACK: False,
+        }
+        table = self._build_table(config)
+        assert "disabled" not in table
+
+    def test_warning_not_shown_when_fan_entity_missing(self):
+        """fan_mode=whole_house_fan but no fan_entity → warning must NOT appear."""
+        config = {
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_ENTITY: "",
+            CONF_FAN_STATE_FEEDBACK: False,
+        }
+        table = self._build_table(config)
+        assert "disabled" not in table
+
+    def test_warning_not_shown_when_feedback_enabled(self):
+        """fan_state_feedback=True → warning must NOT appear even with WHF entity."""
+        config = {
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_ENTITY: "switch.whf",
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        table = self._build_table(config)
+        assert "disabled" not in table

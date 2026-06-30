@@ -1345,8 +1345,12 @@ The `fan_off` grace (started by `on_fan_turned_off()`) gates nat-vent **re-activ
 
 ### 9c-ii. WHF Feedback Mode (Issue #361)
 
-`fan_state_feedback` (bool, default `False`) controls whether CA reads physical fan state or operates
-in command-only mode.
+`fan_state_feedback` (bool, default `False`) applies **only to the whole house fan** (`fan_entity`).
+It has no effect when `fan_mode=hvac_fan` — the HVAC fan is controlled via the thermostat's own
+`fan_mode` attribute; there is no separate entity to observe. The Activity Record warning banner and
+AI context note only appear when `fan_mode` is `whole_house_fan` or `both` AND `fan_entity` is set.
+
+`fan_state_feedback` controls whether CA reads physical WHF motor state or operates in command-only mode.
 
 | fan_state_feedback | _fan_active (CA wants ON) | grace active | Action |
 |---|---|---|---|

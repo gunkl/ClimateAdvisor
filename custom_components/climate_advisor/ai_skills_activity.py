@@ -29,6 +29,8 @@ from .const import (
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
     ATTR_TREND,
+    FAN_MODE_BOTH,
+    FAN_MODE_WHOLE_HOUSE,
     THERMAL_SWING_DEFAULT_F,
 )
 from .temperature import format_temp
@@ -934,6 +936,19 @@ _NO_DEDUP: frozenset[str] = frozenset(
 )
 
 
+def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
+    """Prepend a WHF command-only warning banner when fan_state_feedback is disabled."""
+    _fsf = config.get("fan_state_feedback", False)
+    _fmode = config.get("fan_mode", "disabled")
+    _fentity = config.get("fan_entity", "")
+    if _fmode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and bool(_fentity) and not _fsf:
+        return (
+            "⚠ Whole house fan state feedback disabled (command-only mode) "
+            "-- physical fan state is unverifiable; events below reflect CA commands.\n\n" + table
+        )
+    return table
+
+
 def build_event_timeline_table(
     raw_event_log: list[Any],
     config: dict[str, Any],
@@ -977,7 +992,8 @@ def build_event_timeline_table(
         filtered.append(entry)
 
     if not filtered:
-        return "| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| -- | (no events in window) | | | | |"
+        table = "| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| -- | (no events in window) | | | | |"
+        return _maybe_prepend_whf_warning(table, config)
 
     # ---- render & deduplicate ----
     rows: list[
@@ -1073,7 +1089,8 @@ def build_event_timeline_table(
     _flush_run()
 
     if not rows:
-        return "| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| -- | (no events in window) | | | | |"
+        table = "| Time | Event | Settings | Source | Indoor | Outdoor |\n|---|---|---|---|---|---|\n| -- | (no events in window) | | | | |"
+        return _maybe_prepend_whf_warning(table, config)
 
     # ---- format as markdown ----
     header = "| Time | Event | Settings | Source | Indoor | Outdoor |"
@@ -1081,15 +1098,7 @@ def build_event_timeline_table(
     row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in rows]
     table = "\n".join([header, sep, *row_lines])
 
-    # Prepend a command-only mode note so the AI knows fan events reflect commands not motor state
-    _fsf = config.get("fan_state_feedback", False)
-    _fmode = config.get("fan_mode", "disabled")
-    if _fmode not in ("", "none", None, "disabled") and not _fsf:
-        table = (
-            "⚠ Fan state feedback disabled (command-only mode) "
-            "-- physical fan state is unverifiable; events below reflect CA commands.\n\n" + table
-        )
-    return table
+    return _maybe_prepend_whf_warning(table, config)
 
 
 async def async_build_activity_context(
@@ -1367,16 +1376,18 @@ async def async_build_activity_context(
         *override_detail_lines,
     ]
 
-    # --- Fan state feedback mode note ---
+    # --- Whole house fan state feedback note (only when WHF entity is configured) ---
     fan_state_feedback = options.get("fan_state_feedback", False)
-    if fan_mode not in ("", "none", None, "disabled") and not fan_state_feedback:
+    fan_entity = options.get("fan_entity", "")
+    whf_active = fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and bool(fan_entity)
+    if whf_active and not fan_state_feedback:
         lines += [
             "",
-            "## FAN STATE NOTE",
-            "fan_state_feedback=False (command-only mode). "
-            "Physical fan state is unverifiable — CA issues commands but cannot confirm motor state. "
-            "Reported fan states in the event log reflect CA commands, not actual motor feedback. "
-            "Wall-switch user overrides are undetectable in this mode.",
+            "## WHOLE HOUSE FAN STATE NOTE",
+            "fan_state_feedback=False (command-only mode — whole house fan only). "
+            "Physical whole house fan motor state is unverifiable — CA issues commands but cannot "
+            "confirm motor state. Reported fan states in the event log reflect CA commands, not "
+            "actual motor feedback. Wall-switch user overrides are undetectable in this mode.",
         ]
 
     # --- Event log (hours-based window, one line per event with source_label) ---

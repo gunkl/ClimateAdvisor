@@ -73,6 +73,7 @@ def _minimal_engine() -> AutomationEngine:
             "_sensor_check_callback": None,
             "_emit_event_callback": None,
             "_request_refresh_callback": None,
+            "_post_grace_fan_check_callback": None,
             "_revisit_callback": None,
             "_revisit_cancel": None,
             "_fan_active": False,

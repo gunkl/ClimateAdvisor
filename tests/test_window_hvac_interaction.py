@@ -105,6 +105,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._sensor_check_callback = None
     ae._emit_event_callback = None
     ae._request_refresh_callback = None
+    ae._post_grace_fan_check_callback = None
     ae.dry_run = False
 
     # Mock async service calls

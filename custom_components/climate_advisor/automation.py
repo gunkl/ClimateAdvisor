@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -455,6 +456,12 @@ class AutomationEngine:
         # (Issue #290 Fix 1).  Set by coordinator after construction.
         self._request_refresh_callback: Any | None = None
 
+        # Post-grace fan-check callback — called at every exit path of _on_grace_expired()
+        # after clear_manual_override() so coordinator can re-evaluate whether nat-vent
+        # should be adopted from the current fan state (Issue #359).
+        # Set by coordinator after construction.
+        self._post_grace_fan_check_callback: Callable[[], None] | None = None
+
         # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
         self._today_record: Any | None = None
 
@@ -653,6 +660,63 @@ class AutomationEngine:
                 },
             )
         self._start_grace_period("manual", trigger="fan_manual_override")
+
+    def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "") -> None:
+        """Handle the user turning the fan OFF — clears fan state and gates nat-vent re-activation (Issue #359).
+
+        Unlike ``handle_fan_manual_override`` (which is for fan-ON and sets ``_fan_override_active``),
+        this method DOES NOT set ``_fan_override_active``: that flag means "user turned fan on, CA backs
+        off".  Fan-off instead starts a grace period so nat-vent is not immediately re-activated before
+        conditions are verified.
+
+        Args:
+            fan_before: Fan state before the change (e.g. "on", "auto").
+            fan_after: Fan state after the change (e.g. "off", "auto").
+        """
+        _LOGGER.info(
+            "Fan turned off by user: fan=%s->%s, trigger=fan_off",
+            fan_before or "?",
+            fan_after or "?",
+        )
+
+        # _fan_override_active must NOT be set here (it is the "user turned fan ON" flag).
+        # If it is somehow already True at this point that indicates a missed transition
+        # elsewhere — clear it and warn so the inconsistency is visible in logs.
+        if self._fan_override_active:
+            _LOGGER.warning(
+                "Fan turned off but _fan_override_active was True (stale override) — clearing. "
+                "fan_before=%s fan_after=%s",
+                fan_before or "?",
+                fan_after or "?",
+            )
+            self._fan_override_active = False
+            self._fan_override_time = None
+
+        # Clear all fan tracking state — fan is physically off.
+        self._fan_active = False
+        self._fan_on_since = None
+        self._natural_vent_active = False
+
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "fan_cancel",
+                {
+                    "fan_before": fan_before,
+                    "fan_after": fan_after,
+                    "trigger": "fan_off",
+                },
+            )
+
+        _LOGGER.info(
+            "Fan turned off: cleared _fan_active, _fan_on_since, _natural_vent_active; starting fan_off grace period",
+        )
+
+        # Restart min-runtime cycle scheduling (same as clear_fan_override does)
+        self.hass.async_create_task(self.start_min_fan_runtime_cycles())
+
+        # Start grace period to gate nat-vent re-activation — same duration as manual grace
+        # but with a distinct trigger string so logs/events are distinguishable.
+        self._start_grace_period("manual", trigger="fan_off")
 
     def clear_fan_override(self) -> None:
         """Clear the fan override flag (called at transition points, Issue #327).
@@ -2567,6 +2631,8 @@ class AutomationEngine:
             self.clear_manual_override(reason="grace_expired")
             if self._request_refresh_callback:
                 self._request_refresh_callback()
+            if self._post_grace_fan_check_callback:
+                self._post_grace_fan_check_callback()
             return
 
         # If any contact sensor is still open, re-pause instead of clearing
@@ -2583,6 +2649,8 @@ class AutomationEngine:
             self.clear_manual_override(reason="grace_expired")
             if self._request_refresh_callback:
                 self._request_refresh_callback()
+            if self._post_grace_fan_check_callback:
+                self._post_grace_fan_check_callback()
             if self._emit_event_callback:
                 self._emit_event_callback("grace_expired", {"source": source, "re_paused": True})
             self.hass.async_create_task(self._re_pause_for_open_sensor())
@@ -2596,6 +2664,8 @@ class AutomationEngine:
         self.clear_manual_override(reason="grace_expired")
         if self._request_refresh_callback:
             self._request_refresh_callback()
+        if self._post_grace_fan_check_callback:
+            self._post_grace_fan_check_callback()
         _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
         if self._emit_event_callback:
             self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})

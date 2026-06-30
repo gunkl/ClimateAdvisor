@@ -53,6 +53,24 @@
 
 ## Grace Period Types
 
+### Fan-Off Grace (Issue #359)
+
+**Trigger:** User physically turns the fan off (fan_mode attribute → auto, or fan entity → off) while `_fan_active = True` or `_fan_override_active = True`. Detected by `_async_thermostat_changed()` / `_async_fan_entity_changed()`; dispatches to `on_fan_turned_off()`.
+
+**Duration:** `DEFAULT_FAN_OFF_GRACE_SECONDS` (implementation-defined; tracked in `automation.py`).
+
+**What it suppresses:** During active fan-off grace, `_activate_fan()` does not fire even if nat-vent conditions are met. The gate guards nat-vent **re-activation** — CA backs off from immediately restarting the fan the user just stopped.
+
+**Semantics are INVERTED vs `fan_manual_override` grace:** `fan_manual_override` grace gates CA from **stopping** a fan the user is running. `fan_off` grace gates CA from **starting** a fan the user just stopped. Both protect the user's deliberate action from being immediately undone by automation, in opposite physical directions.
+
+**Event emitted on trigger:** `fan_cancel` (payload: `fan_before`, `fan_after`). This event is distinct from `nat_vent_fan_off` (HVAC arming-state change — the physical fan may still be running under user control when `nat_vent_fan_off` fires) and from `fan_deactivated` (CA-initiated stop).
+
+**Flags cleared:** `_fan_active = False`, `_natural_vent_active = False`. Critically, `_fan_override_active` is NOT set — this is not a manual override (the user stopped the fan, not started one against CA's intent).
+
+**End condition:** Grace timer fires → `reconcile_fan_on_startup()` is called to re-evaluate the physical fan state. If the fan is still running (edge case), the reconcile step either adopts it as nat-vent or turns it off. If the fan is off (normal case), no action is taken.
+
+---
+
 ### Manual Grace
 
 **Trigger:** Any of three user-initiated events:

@@ -619,6 +619,40 @@ flowchart TD
 Fan control: watching indoor=<entity> outdoor=<entity> thermostat=<entity> for thermostatic re-eval
 ```
 
+### 14c. Fan-ON Eligibility Check (Issue #359)
+
+When the user turns the fan on manually, `_async_thermostat_changed()` / `_async_fan_entity_changed()` evaluates nat-vent eligibility before deciding whether to adopt the session or record a manual override.
+
+```mermaid
+flowchart TD
+    A[User turns fan on\nfan_mode -> on OR fan entity -> on] --> B{_fan_command_pending\nOR _is_recent_fan_command?}
+    B -->|Yes| Z[CA-commanded echo\nIgnore — no override]
+    B -->|No| C{Nat-vent eligible?\noutdoor < indoor\nAND gate passes\nAND sensors open}
+    C -->|Yes| D[Adopt as nat-vent\n_fan_active = True\n_natural_vent_active = True\n_fan_override_active stays False\nEmit: fan_activated]
+    C -->|No| E[Manual override\n_fan_override_active = True\n_fan_override_time = now\nStart grace timer\nEmit: fan_manual_override]
+```
+
+### 14d. Fan-OFF by User: `on_fan_turned_off()` (Issue #359)
+
+When the user physically turns the fan off (thermostat or fan entity reports fan_mode → auto while CA owns the fan OR `_fan_override_active` is set), `on_fan_turned_off()` handles the transition. This is distinct from `_deactivate_fan()` (CA-initiated) and from `nat_vent_fan_off` (which is an HVAC arming-state change, not a physical fan stop).
+
+```mermaid
+flowchart TD
+    A[User turns fan off\nfan_mode -> auto OR fan entity -> off\nwhile _fan_active OR _fan_override_active] --> B[on_fan_turned_off\nClear _fan_active\nClear _natural_vent_active\n_fan_override_active stays False\nEmit: fan_cancel]
+    B --> C{Ecobee setpoint echo?\nSetpoint attr changed\nwithin 5 s of fan-off}
+    C -->|Yes| D[Suppress setpoint\n_setpoint_reassert_pending = True\nSchedule 5 s re-assert callback]
+    C -->|No| E[Normal flow continues]
+    B --> F[Start fan-off grace timer\nGates nat-vent RE-ACTIVATION\nnot CA interference]
+    F --> G{Grace expires}
+    G --> H[reconcile_fan_on_startup\nRe-evaluate physical state]
+    H --> I{Fan still physically running?}
+    I -->|No| J[Confirm fan is off\nno action]
+    I -->|Yes, eligible| K[Adopt-on\nnat-vent resumes]
+    I -->|Yes, ineligible| L[Turn off\n_deactivate_fan]
+```
+
+**Key semantic distinction:** The `fan_off` grace gates nat-vent **re-activation** (CA backs off from restarting the fan the user just stopped). The `fan_manual_override` grace (§9b) gates CA **interference** with a fan the user is running. See `docs/grace-periods-spec.md` for the full state machine.
+
 ---
 
-*Last Updated: 2026-06-19*
+*Last Updated: 2026-06-29*

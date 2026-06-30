@@ -1327,6 +1327,22 @@ At bedtime, both the fan and the economizer are explicitly shut down before the 
 
 Clearing the override flag at these transitions means the integration will not skip fan activation during the next economizer cycle just because the user had manually adjusted the fan during the previous day.
 
+### 9c-i. Fan-ON and Fan-OFF Decision Table (Issue #359)
+
+This table enumerates the six key fan lifecycle scenarios, including the new `on_fan_turned_off()` handler and `fan_cancel` event type introduced in Issue #359.
+
+| Scenario | Trigger | CA decision | Flags / state change | Event emitted | Test ref |
+|---|---|---|---|---|---|
+| Fan-ON + nat-vent eligible | User turns fan on; `outdoor < indoor`, sensors open, gate passes | Adopt as nat-vent — do NOT set override | `_fan_active = True`, `_natural_vent_active = True`, `_fan_override_active` stays `False` | `fan_activated` (nat-vent adoption) | `test_fan_control.py` |
+| Fan-ON + nat-vent ineligible | User turns fan on; conditions gate does not pass | Manual override — start grace timer | `_fan_override_active = True`, `_fan_override_time = now()` | `fan_manual_override` | `test_fan_control.py` |
+| Fan-OFF (user) | User physically turns the fan off (fan_mode → auto) | `on_fan_turned_off()`: clear fan flags, start fan-off grace — **no** `_fan_override_active` set | `_fan_active = False`, `_natural_vent_active = False`, `_fan_override_active = False`; fan-off grace timer starts | `fan_cancel` | `test_fan_cancel.py` |
+| Fan-OFF + ecobee setpoint echo | Ecobee or cloud thermostat echoes setpoint change within 5 s of fan-off | Setpoint suppressed; re-assertion fires after 5 s delay | `_setpoint_reassert_pending = True`; scheduled callback re-applies commanded setpoint | _(none — suppression is silent)_ | `test_fan_cancel.py` |
+| Post-grace reconciliation | Fan-off grace period expires | `reconcile_fan_on_startup()` called; re-evaluate physical state | Adopt fan as nat-vent (eligible) or confirm fan is off (ineligible) | `fan_activated` or _(no event if off)_ | `test_fan_cancel.py` |
+| Periodic backstop (`_async_update_data()`) | 30-min coordinator poll fires while fan is `"running (untracked)"` and no override or grace active | Same reconciliation path — adopt-on or turn-off | `_fan_active` and `_natural_vent_active` updated accordingly | `fan_activated` or `fan_deactivated` | `test_fan_cancel.py` |
+
+**Key semantic distinction for fan-off grace vs fan-manual-override grace:**
+The `fan_off` grace (started by `on_fan_turned_off()`) gates nat-vent **re-activation** — CA backs off from immediately restarting the fan the user just stopped. The `fan_manual_override` grace (started when the user turns a fan on) gates CA **interference** with a fan the user is actively running. The two grace types have inverted blocking semantics. See `docs/grace-periods-spec.md` for the full grace period state machine.
+
 ### 9d. Fan Status Sensor Values
 
 The `sensor.climate_advisor_fan_status` entity exposes one of six state strings:

@@ -7,6 +7,7 @@ data to the learning engine.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import math
@@ -71,6 +72,7 @@ from .const import (
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
+    CONF_FAN_STATE_ENTITY,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
     CONF_HOME_TOGGLE,
@@ -245,6 +247,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.automation_engine._request_refresh_callback = lambda: self.hass.async_create_task(
             self.async_request_refresh()
         )
+        # Issue #359: post-grace fan check callback — called by engine when any grace period expires
+        self.automation_engine._post_grace_fan_check_callback = self._on_post_grace_fan_check
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -333,6 +337,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
         self._last_state_contradiction_time: datetime | None = None  # dedup for state_contradiction_warning events
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
+        self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -455,6 +460,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 async_track_state_change_event(
                     self.hass,
                     fan_entity,
+                    self._async_fan_entity_changed,
+                )
+            )
+
+        # Listeners: fan state entity (Issue #359: WHF Type 2 dual-entity support)
+        # When a separate physical-state entity is configured and differs from the command entity,
+        # register an additional listener so physical on/off transitions are detected.
+        _fan_state_entity = self.config.get(CONF_FAN_STATE_ENTITY)
+        if _fan_state_entity and _fan_state_entity != fan_entity:
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    _fan_state_entity,
                     self._async_fan_entity_changed,
                 )
             )
@@ -1663,6 +1681,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         elif not _is_untracked and _untracked_logged:
             self._emit_event("fan_untracked_cleared", {})
             self._untracked_fan_active = False
+
+        # Issue #359 Fix D: periodic backstop — reconcile an untracked fan at each 30-min cycle.
+        # The one-shot trigger in _async_thermostat_changed (~line 2826) is guarded by
+        # not _fan_override_active, but that flag may already be True from Block 3 in the same
+        # event, leaving the untracked fan permanently unresolved.  This backstop catches it.
+        if (
+            _is_untracked
+            and not self.automation_engine._fan_override_active
+            and not self.automation_engine._grace_active
+        ):
+            _LOGGER.info("Fan running untracked with no active override/grace — triggering periodic reconciliation")
+            _cs_bst = self.hass.states.get(self.config.get("climate_entity", ""))
+            _bst_hvac_action = str(_cs_bst.attributes.get("hvac_action", "")).lower() if _cs_bst else ""
+            if _bst_hvac_action not in ("heating", "cooling"):
+                await self.automation_engine.reconcile_fan_on_startup(
+                    indoor=self._get_indoor_temp(),
+                    outdoor=self._last_outdoor_temp,
+                    thermostat_fan_running=True,
+                    any_sensor_open=self._any_sensor_open(),
+                )
+            else:
+                _LOGGER.warning(
+                    "Periodic reconciliation skipped: HVAC actively %s — fan is thermostat blower",
+                    _bst_hvac_action,
+                )
 
         _base_runtime = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
         _session_elapsed = (dt_util.now() - self._hvac_on_since).total_seconds() / 60 if self._hvac_on_since else 0.0
@@ -2930,6 +2973,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # In heat_cool mode the thermostat exposes target_temp_high/target_temp_low, not temperature.
         # _setpoint_override_detected gates Block 3 (fan_mode): a single thermostat event that
         # includes BOTH a setpoint change AND a fan_mode change must only fire the setpoint path.
+
+        # Issue #359 Fix A: compute fan-cancel flag BEFORE Block 2 so it can guard setpoint
+        # override detection.  When an ecobee user turns the fan off, the thermostat simultaneously
+        # restores its comfort-program setpoint — Block 2 would otherwise misread that as a manual
+        # setpoint override and start a grace period that blocks CA's intended setpoint.
+        _b2_old_fan_mode = old_state.attributes.get("fan_mode")
+        _b2_new_fan_mode = new_state.attributes.get("fan_mode")
+        _fan_cancel_in_this_event = (
+            _b2_old_fan_mode is not None
+            and _b2_old_fan_mode == "on"
+            and _b2_new_fan_mode is not None
+            and _b2_new_fan_mode != "on"
+        )
+
         _setpoint_override_detected = False
         if new_state.state == "heat_cool":
             _new_high = new_state.attributes.get("target_temp_high")
@@ -2953,6 +3010,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command(threshold_seconds=30.0)
             and not self._is_recent_temp_command(threshold_seconds=30.0)
             and not self._is_recent_fan_command(threshold_seconds=30.0)
+            and not _fan_cancel_in_this_event  # Issue #359 Fix A: fan-off echo suppresses grace
         ):
             # Mark setpoint detection as fired so Block 3 (fan_mode) is suppressed for this event.
             # A single event that changes both setpoint and fan_mode has one root cause; two
@@ -3005,6 +3063,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     old_setpoint_f=old_temp,
                     new_setpoint_f=new_temp,
                 )
+        elif _fan_cancel_in_this_event and _setpoint_changed:
+            # Issue #359 Fix A: fan-off echo branch — the thermostat restored its comfort-program
+            # setpoint as a side-effect of the fan being turned off (ecobee behavior).  Do NOT start
+            # a grace period.  Instead, schedule a re-assertion so CA's intended setpoint wins after
+            # the thermostat settles.
+            _LOGGER.info(
+                "Setpoint override suppressed: fan-off echo detected, scheduling re-assertion (thermostat=%s)",
+                new_temp,
+            )
+            self.hass.async_create_task(self._async_reassert_setpoint_after_fan_off())
 
         # Detect manual fan_mode attribute changes on thermostat (Issue #37)
         new_fan_mode = new_state.attributes.get("fan_mode")
@@ -3044,7 +3112,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _hvac_cmd_age,
                 _is_expected_confirmation,
             )
-            self.automation_engine.handle_fan_manual_override(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
+            # Issue #359 Fix B: direction-aware dispatch — fan-off routes to on_fan_turned_off()
+            # (clears fan state, gates nat-vent re-activation) instead of handle_fan_manual_override()
+            # (which sets the "user turned fan ON" override flag).
+            if _fan_cancel_in_this_event:
+                self.automation_engine.on_fan_turned_off(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
+            else:
+                self.automation_engine.handle_fan_manual_override(
+                    fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
+                )
 
     async def _async_fan_entity_changed(self, event: Event) -> None:
         """Detect manual fan entity state changes (Issue #37)."""
@@ -3082,15 +3158,109 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fan_before=str(old_state.state), fan_after=str(new_state.state)
             )
         elif not is_on and self.automation_engine._fan_active:
-            # Fan turned off externally — manual override
+            # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
+            # gate nat-vent re-activation (Issue #359 Fix C).  handle_fan_manual_override() is
+            # the "user turned fan ON" path and must NOT be called here.
             _LOGGER.info(
-                "Manual fan override detected: %s -> %s (integration expected fan on)",
+                "Fan turned off externally: %s -> %s (integration expected fan on)",
                 old_state.state,
                 new_state.state,
             )
-            self.automation_engine.handle_fan_manual_override(
-                fan_before=str(old_state.state), fan_after=str(new_state.state)
+            self.automation_engine.on_fan_turned_off(fan_before=str(old_state.state), fan_after=str(new_state.state))
+
+    async def _async_reassert_setpoint_after_fan_off(self) -> None:
+        """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).
+
+        Ecobee simultaneously restores its comfort-program setpoint when the user turns the fan
+        off.  We wait 5 s for the thermostat to settle, then push CA's current classification
+        back so the comfort-program setpoint does not win.
+        """
+        await asyncio.sleep(5)
+        try:
+            classification = self._current_classification
+            if classification is None:
+                _LOGGER.warning("Setpoint re-assertion after fan-off: no current classification — skipping")
+                return
+            await self.automation_engine.apply_classification(
+                classification,
+                predicted_indoor=self._last_predicted_indoor,
+                indoor_temp=self._get_indoor_temp(),
             )
+            _LOGGER.info(
+                "Setpoint re-asserted after fan-off echo: reasserted day_type=%s hvac_mode=%s",
+                classification.day_type,
+                classification.hvac_mode,
+            )
+        except Exception:
+            _LOGGER.warning(
+                "Setpoint re-assertion after fan-off failed — thermostat left as-is",
+                exc_info=True,
+            )
+
+    @callback
+    def _on_post_grace_fan_check(self) -> None:
+        """Called by automation engine after any grace period expires (Issue #359 Fix D).
+
+        Schedules a fan-reconciliation check so an untracked fan is caught as soon as
+        grace clears rather than waiting for the next 30-min coordinator cycle.
+        """
+        self.hass.async_create_task(self._async_post_grace_fan_reconcile())
+
+    async def _async_post_grace_fan_reconcile(self) -> None:
+        """After grace expires, check if fan is still running and reconcile if needed (Issue #359 Fix D)."""
+        ae = self.automation_engine
+        if ae is None:
+            return
+        _cs_pg = self.hass.states.get(self.config.get("climate_entity", ""))
+        if _cs_pg is None:
+            return
+        fan_mode = str(_cs_pg.attributes.get("fan_mode", ""))
+        hvac_action = str(_cs_pg.attributes.get("hvac_action", "")).lower()
+        thermostat_fan_running = fan_mode == "on" or hvac_action == "fan"
+        _LOGGER.info(
+            "Post-grace fan check: fan_mode=%s hvac_action=%s fan_running=%s",
+            fan_mode,
+            hvac_action,
+            thermostat_fan_running,
+        )
+        if thermostat_fan_running and hvac_action not in ("heating", "cooling"):
+            await ae.reconcile_fan_on_startup(
+                indoor=self._get_indoor_temp(),
+                outdoor=self._last_outdoor_temp,
+                thermostat_fan_running=True,
+                any_sensor_open=self._any_sensor_open(),
+            )
+
+    def _get_fan_physical_state(self) -> bool:
+        """Return whether the fan is physically running (Issue #359 Fix E: WHF Type 2 support).
+
+        When ``CONF_FAN_STATE_ENTITY`` is configured, reads that entity's state for physical
+        on/off detection.  Falls back to ``CONF_FAN_ENTITY`` state if the state entity is
+        unavailable or not configured.  Logs a WARNING (once per unavailability) when falling back.
+
+        Returns:
+            True if the fan is physically running, False otherwise.
+        """
+        fan_state_entity_id = self.config.get(CONF_FAN_STATE_ENTITY)
+        if fan_state_entity_id:
+            state = self.hass.states.get(fan_state_entity_id)
+            if state is not None and state.state not in ("unavailable", "unknown"):
+                self._fan_state_entity_unavailable_warned = False  # reset on success
+                return state.state.lower() in ("on", "true")
+            # Unavailable or missing — warn once then fall back
+            if not self._fan_state_entity_unavailable_warned:
+                _LOGGER.warning(
+                    "Fan state entity %s is unavailable — falling back to fan command entity for physical state",
+                    fan_state_entity_id,
+                )
+                self._fan_state_entity_unavailable_warned = True
+        # Fallback: read the fan command entity
+        fan_entity_id = self.config.get(CONF_FAN_ENTITY)
+        if fan_entity_id:
+            fan_state = self.hass.states.get(fan_entity_id)
+            if fan_state is not None:
+                return fan_state.state.lower() in ("on", "true")
+        return False
 
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:
         """Late-start HVAC session when HA restarted mid-session (Issue #96).

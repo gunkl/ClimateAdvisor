@@ -71,6 +71,7 @@
           "override_confirm_seconds": "Override confirmation delay (minutes)",
           "fan_mode": "Fan Control Mode",
           "fan_entity": "Fan Entity",
+          "fan_state_entity": "Fan State Entity",
           "fan_min_runtime_per_hour": "Fan Minimum Runtime Per Hour"
         },
         "data_description": {
@@ -82,6 +83,7 @@
           "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode. 'Both' uses both.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
+          "fan_state_entity": "Optional separate sensor to read the physical fan state (for dual-entity whole-house fans). Leave blank to use the Fan Entity for state as well.",
           "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned \u00e2\u20ac\u201d it offsets naturally based on when HA started."
         }
       },
@@ -209,6 +211,7 @@
           "override_confirm_seconds": "Override confirmation delay (minutes)",
           "fan_mode": "Fan Control Mode",
           "fan_entity": "Fan Entity",
+          "fan_state_entity": "Fan State Entity",
           "fan_min_runtime_per_hour": "Fan Minimum Runtime Per Hour",
           "natural_vent_delta": "Natural ventilation window (\u00c2\u00b0F above comfort)"
         },
@@ -221,6 +224,7 @@
           "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
           "fan_mode": "How to control fans for ventilation. 'Whole house fan' controls a dedicated fan entity. 'HVAC fan' uses the thermostat fan mode. 'Both' uses both.",
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
+          "fan_state_entity": "Optional separate sensor to read the physical fan state (for dual-entity whole-house fans). Leave blank to use the Fan Entity for state as well.",
           "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned \u00e2\u20ac\u201d it offsets naturally based on when HA started.",
           "natural_vent_delta": "When a door or window opens and outdoor temperature is within this many degrees above your cooling comfort setpoint, Climate Advisor uses the fan for natural ventilation instead of pausing HVAC. Default is 3\u00c2\u00b0F."
         }

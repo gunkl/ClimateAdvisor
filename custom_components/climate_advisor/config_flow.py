@@ -38,6 +38,7 @@ from .const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
+    CONF_FAN_STATE_ENTITY,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
     CONF_GUEST_TOGGLE,
@@ -438,6 +439,12 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_FAN_ENTITY,
                         description={"suggested_value": None},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["fan", "switch"])),
+                    vol.Optional(
+                        CONF_FAN_STATE_ENTITY,
+                        description={"suggested_value": None},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain=["fan", "binary_sensor", "input_boolean", "switch"])
+                    ),
                     vol.Optional(
                         CONF_FAN_MIN_RUNTIME_PER_HOUR,
                         default=DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
@@ -882,6 +889,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         CONF_FAN_ENTITY,
                         description={"suggested_value": current.get(CONF_FAN_ENTITY)},
                     ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["fan", "switch"])),
+                    vol.Optional(
+                        CONF_FAN_STATE_ENTITY,
+                        description={"suggested_value": current.get(CONF_FAN_STATE_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain=["fan", "binary_sensor", "input_boolean", "switch"])
+                    ),
                     vol.Optional(
                         CONF_FAN_MIN_RUNTIME_PER_HOUR,
                         default=current.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR),

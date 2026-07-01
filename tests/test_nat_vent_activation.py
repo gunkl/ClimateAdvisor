@@ -477,6 +477,76 @@ class TestReactivationHysteresis:
 
 
 # ---------------------------------------------------------------------------
+# Issue #359: on_fan_turned_off clears natural_vent_active
+# ---------------------------------------------------------------------------
+
+
+class TestFanTurnedOffClearsNatVent:
+    """Issue #359: on_fan_turned_off() must clear _natural_vent_active.
+
+    Occupant impact: when the user turns the fan off, CA previously left
+    _natural_vent_active=True, causing subsequent coordinator cycles to treat
+    the home as if nat-vent were still running. This blocked correct HVAC
+    re-application and produced stale status readings.
+    """
+
+    def test_on_fan_turned_off_clears_natural_vent_active(self):
+        """Engine with nat-vent active: on_fan_turned_off() clears _natural_vent_active.
+
+        Without Issue #359 Fix B, on_fan_turned_off() was not a separate method —
+        the engine called handle_fan_manual_override() instead, which sets
+        _fan_override_active but does NOT clear _natural_vent_active.
+        """
+
+        _PATCH_CALL_LATER = "custom_components.climate_advisor.automation.async_call_later"
+
+        hass = MagicMock()
+        hass.services = MagicMock()
+        hass.services.async_call = AsyncMock()
+
+        def _consume_coroutine(coro):
+            coro.close()
+
+        hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+        hass.states = MagicMock()
+
+        config = {
+            "comfort_heat": 70.0,
+            "comfort_cool": 72.0,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "natural_vent_delta": 3.0,
+            "notify_service": "notify.notify",
+        }
+
+        engine = AutomationEngine(
+            hass=hass,
+            climate_entity="climate.thermostat",
+            weather_entity="weather.forecast_home",
+            door_window_sensors=["binary_sensor.front_door"],
+            notify_service="notify.notify",
+            config=config,
+        )
+
+        # Simulate a nat-vent session that was running
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_on_since = "2026-06-28T07:39:00"
+        engine._fan_override_active = False
+
+        # User turns fan off (thermostat fan_mode: on → auto)
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        # Both nat-vent and fan tracking must be cleared
+        assert engine._natural_vent_active is False, (
+            "on_fan_turned_off must clear _natural_vent_active so coordinator "
+            "does not treat the session as still running after the fan stops"
+        )
+        assert engine._fan_active is False, "on_fan_turned_off must clear _fan_active"
+
+
+# ---------------------------------------------------------------------------
 # Integration: full cycle — activate, outdoor rises, re-activate after lockout
 # ---------------------------------------------------------------------------
 

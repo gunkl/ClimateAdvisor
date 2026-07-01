@@ -1731,3 +1731,115 @@ class TestFanEventEmission:
         asyncio.run(engine._activate_fan(reason="nat_vent_cycling_on", emit_event=False))
         types = [c.args[0] for c in engine._emit_event_callback.call_args_list]
         assert "fan_activated" not in types
+
+
+# ---------------------------------------------------------------------------
+# Issue #359: on_fan_turned_off() — fan-OFF dispatch (new method)
+# ---------------------------------------------------------------------------
+
+
+class TestFanTurnedOff:
+    """Tests for on_fan_turned_off() — the fan-OFF path added by Issue #359.
+
+    on_fan_turned_off() is called when the thermostat reports fan_mode on→auto.
+    It must:
+      - Clear _fan_active (fan is physically off)
+      - Clear _natural_vent_active (nat-vent session ends with the fan)
+      - NOT set _fan_override_active (that flag means "user turned fan ON")
+      - Clear stale _fan_override_active if it was somehow True (log + clear)
+      - Emit a fan_cancel event
+      - Start a grace period (trigger="fan_off") to gate nat-vent re-activation
+
+    Occupant impact: without on_fan_turned_off(), CA previously called
+    handle_fan_manual_override() on a fan-off event — setting _fan_override_active=True,
+    which blocked CA from re-activating nat-vent the next morning. The occupant woke
+    to a warming home (71°F) with no automatic nat-vent despite ideal outdoor conditions.
+    """
+
+    def test_on_fan_turned_off_clears_fan_active(self):
+        """on_fan_turned_off clears _fan_active — fan is physically off."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        engine._fan_on_since = "2026-06-28T07:00:00"
+        engine._natural_vent_active = False
+
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        assert engine._fan_active is False
+
+    def test_on_fan_turned_off_clears_natural_vent_active(self):
+        """on_fan_turned_off clears _natural_vent_active — nat-vent session ends."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        engine._natural_vent_active = True
+
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        assert engine._natural_vent_active is False
+
+    def test_on_fan_turned_off_does_not_set_override(self):
+        """on_fan_turned_off does NOT set _fan_override_active — that is the fan-ON path."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        engine._fan_override_active = False
+
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        assert engine._fan_override_active is False
+
+    def test_on_fan_turned_off_clears_stale_override(self):
+        """on_fan_turned_off clears _fan_override_active when it is stale-True."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._fan_override_active = True  # stale state
+        engine._fan_override_time = "2026-06-28T06:00:00"
+
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        assert engine._fan_override_active is False
+        assert engine._fan_override_time is None
+
+    def test_on_fan_turned_off_emits_fan_cancel_event(self):
+        """on_fan_turned_off emits a fan_cancel event with fan_before/fan_after."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        engine._natural_vent_active = False
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        cancel_events = [e for e in events if e[0] == "fan_cancel"]
+        assert len(cancel_events) == 1, f"Expected fan_cancel event; got events: {events}"
+        assert cancel_events[0][1]["fan_before"] == "on"
+        assert cancel_events[0][1]["fan_after"] == "auto"
+
+    def test_on_fan_turned_off_starts_grace_with_fan_off_trigger(self):
+        """on_fan_turned_off starts a grace period with trigger='fan_off'."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        engine._fan_active = True
+        engine._natural_vent_active = False
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_PATCH_CALL_LATER):
+            engine.on_fan_turned_off(fan_before="on", fan_after="auto")
+
+        assert engine._grace_active is True
+        grace_events = [e for e in events if e[0] == "grace_started"]
+        assert len(grace_events) >= 1, f"Expected grace_started event; got events: {events}"
+        assert grace_events[0][1]["trigger"] == "fan_off"
+
+    def test_post_grace_callback_attribute_exists_and_is_none_initially(self):
+        """_post_grace_fan_check_callback is initialized to None on a fresh engine."""
+        engine = _make_automation_engine()
+        assert hasattr(engine, "_post_grace_fan_check_callback")
+        assert engine._post_grace_fan_check_callback is None

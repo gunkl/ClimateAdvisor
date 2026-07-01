@@ -568,6 +568,13 @@ def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
     return "Fan stopped (untracked fan ended)", "fan: off"
 
 
+def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
+    fan_before = str(p.get("fan_before", "?")).strip()
+    fan_after = str(p.get("fan_after", "?")).strip()
+    settings = f"fan: {fan_before}->{fan_after}" if fan_before and fan_after else ""
+    return "Fan cancel (user turned off)", settings
+
+
 def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[str, str]:
     outdoor = p.get("outdoor")
     indoor = p.get("indoor")
@@ -839,6 +846,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_manual_override": _render_fan_manual_override,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,
+    "fan_cancel": _render_fan_cancel,
     "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,
     "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
@@ -999,10 +1007,27 @@ def build_event_timeline_table(
         run_type = None
         run_count = 0
 
+    # Fan ownership tracker: updated per-event to detect when nat_vent_fan_off fires
+    # while the user is still running the fan manually (misleading if shown as CA fan-off).
+    _fan_ca_owns = False
+    _fan_user_owns = False
+
     for entry in filtered:
         event_type = str(entry.get("type", "unknown"))
         payload = {k: v for k, v in entry.items() if k not in ("time", "type")}
         time_str = _fmt_time(entry.get("time"))
+
+        # Update fan ownership state before rendering
+        if event_type in ("nat_vent_fan_on", "fan_activated"):
+            _fan_ca_owns = True
+            _fan_user_owns = False
+        elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
+            _fan_user_owns = True
+            _fan_ca_owns = False
+        elif event_type == "fan_cancel":
+            _fan_user_owns = False
+        elif event_type in ("nat_vent_fan_off", "fan_deactivated"):
+            _fan_ca_owns = False
 
         renderer = EVENT_RENDERERS.get(event_type)
         try:
@@ -1010,6 +1035,10 @@ def build_event_timeline_table(
                 ev_text, settings_text = renderer(payload, unit)
             else:
                 ev_text, settings_text = _default_renderer(event_type, payload, unit)
+            # When nat_vent_fan_off fires while the user owns the fan, annotate the label
+            # so the developer knows the physical fan may still be running under user control.
+            if event_type == "nat_vent_fan_off" and _fan_user_owns:
+                ev_text = ev_text + " [NOTE: fan may still be running -- user-controlled]"
         except Exception:
             _LOGGER.warning("activity_report: renderer raised for event type %r -- using fallback", event_type)
             ev_text = _humanize_type(event_type)
@@ -1391,6 +1420,62 @@ async def async_build_activity_context(
             f"## EVENT LOG (last {_fmt_hours(hours)}, {len(event_lines)} events)",
             *(event_lines if event_lines else [f"  (no events in last {_fmt_hours(hours)})"]),
         ]
+
+        # --- Fan ownership history ---
+        # Run the same ownership state machine over the event log and emit a concise
+        # section that lets the AI reason about who controlled the fan at each moment.
+        try:
+            _own_ca = False
+            _own_user = False
+            fan_ownership_lines: list[str] = []
+            for entry in raw_event_log[-200:]:
+                if not isinstance(entry, dict):
+                    continue
+                raw_time = entry.get("time")
+                if raw_time is not None:
+                    if isinstance(raw_time, datetime.datetime):
+                        _odt = raw_time
+                        if _odt.tzinfo is None:
+                            _odt = _odt.replace(tzinfo=datetime.UTC)
+                    else:
+                        try:
+                            _odt = datetime.datetime.fromisoformat(str(raw_time))
+                            if _odt.tzinfo is None:
+                                _odt = _odt.replace(tzinfo=datetime.UTC)
+                        except ValueError:
+                            _odt = None
+                    if _odt is not None and _odt < cutoff:
+                        continue
+
+                _etype = str(entry.get("type", "unknown"))
+                _edata = {k: v for k, v in entry.items() if k not in ("time", "type")}
+                _ts_str = _fmt_time(entry.get("time"))
+
+                if _etype in ("nat_vent_fan_on", "fan_activated"):
+                    if not _own_ca:
+                        _own_ca = True
+                        _own_user = False
+                        fan_ownership_lines.append(f"  {_ts_str}: CA owns fan ({_etype})")
+                elif _etype == "fan_manual_override" and str(_edata.get("fan_after", "")).strip() == "on":
+                    if not _own_user:
+                        _own_user = True
+                        _own_ca = False
+                        fan_ownership_lines.append(f"  {_ts_str}: User owns fan (fan_manual_override, fan->on)")
+                elif _etype == "fan_cancel":
+                    if _own_user:
+                        _own_user = False
+                        fan_ownership_lines.append(f"  {_ts_str}: Fan ownership cleared (fan_cancel)")
+                elif _etype in ("nat_vent_fan_off", "fan_deactivated") and _own_ca:
+                    _own_ca = False
+                    fan_ownership_lines.append(f"  {_ts_str}: CA released fan ({_etype})")
+
+            lines += [
+                "",
+                "## FAN OWNERSHIP HISTORY",
+                *(fan_ownership_lines if fan_ownership_lines else ["  (no fan ownership transitions in window)"]),
+            ]
+        except Exception:
+            _LOGGER.warning("activity_report: failed to build fan ownership history -- skipping")
     except Exception:
         _LOGGER.warning("activity_report: failed to read event log -- skipping")
         lines += ["", "## EVENT LOG", "  (unavailable)"]

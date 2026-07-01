@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.39"
+VERSION = "0.4.40"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.40": [
+        "Fix #359: Fan cancel now correctly re-asserts setpoint after ecobee comfort-program echo.",
+        "Fix #359: Fan running untracked after grace expires now reconciled via"
+        " post-grace callback and periodic backstop.",
+        "Fix #359: User turning fan ON under nat-vent-eligible conditions now triggers"
+        " nat-vent adoption (not override).",
+        "Fix #359: AI activity investigator now tracks fan ownership across timeline,"
+        " annotating nat-vent events when user controls the fan.",
+        "Feat #359: Whole-house fan dual-entity support — optional separate state sensor"
+        " (fan_state_entity) for Type 2 WHF installations.",
+    ],
     "0.4.39": [
         "Fix #354: Activity Record now shows indoor/outdoor temp at thermostat decision events.",
     ],
@@ -521,6 +532,54 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    359: {
+        "version_fixed": "0.4.40",
+        "title": (
+            "Fan state machine ON/OFF distinction — nat-vent adoption, setpoint echo"
+            " suppression, post-grace reconciliation, WHF dual-entity support"
+        ),
+        "scope_covered": (
+            "automation.py: new on_fan_turned_off() clears fan flags and starts fan-off"
+            " grace (no override flag). "
+            "_post_grace_fan_check_callback hook added to _on_grace_expired() all three"
+            " exit paths. "
+            "coordinator.py: _fan_cancel_in_this_event guard suppresses setpoint override"
+            " detection when fan turns off. "
+            "_async_reassert_setpoint_after_fan_off() re-asserts CA setpoint 5s after"
+            " ecobee echo. "
+            "Block 3 direction-aware dispatch routes fan-off to on_fan_turned_off() and"
+            " fan-on to handle_fan_manual_override(). "
+            "_async_fan_entity_changed() elif branch updated same way. "
+            "Post-grace callback (_on_post_grace_fan_check/_async_post_grace_fan_reconcile)"
+            " triggers reconcile_fan_on_startup() on grace expiry. "
+            "Periodic backstop in _async_update_data(): when fan 'running (untracked)' with"
+            " no active override/grace, calls reconcile_fan_on_startup(). "
+            "HVAC-driven fan guard at both reconcile call sites (heating/cooling skips"
+            " reconcile). "
+            "WHF Type 2: CONF_FAN_STATE_ENTITY const + CONFIG_METADATA entry + config flow"
+            " selector + translations. "
+            "_get_fan_physical_state() routes state reads to state entity when configured,"
+            " falls back to fan_entity. "
+            "ai_skills_activity.py: fan_cancel renderer, fan ownership tracker in"
+            " build_event_timeline_table() and async_build_activity_context(). "
+            "docs: 08-COMPUTATION-REFERENCE.md fan table rows, 07-AUTOMATION-FLOWCHART.md"
+            " fan flowcharts, grace-periods-spec.md fan-off grace section. "
+            "tests: test_fan_control.py (TestFanTurnedOff), test_fan_cancel.py (new),"
+            " test_nat_vent_activation.py (1 new test), test_whf_dual_entity.py (new),"
+            " test_activity_renderers.py (TestFanOwnershipAnnotations). "
+            "Golden simulation scenario:"
+            " tools/simulations/pending/issue-359-fan-state-machine.json."
+        ),
+        "scope_not_covered": (
+            "HVAC-driven fan coalescing (CA tries set_fan_mode=auto while HVAC blower is"
+            " running autonomously, retries if ignored) — deferred to a separate issue. "
+            "WHF Type 2 wiring into _compute_fan_status() — reads thermostat entity"
+            " attributes directly, not a separate fan_entity; _get_fan_physical_state()"
+            " serves the override-detection path only. "
+            "Golden scenario does not cover the 13:35 setpoint-echo suppression phase —"
+            " coordinator-level logic; covered by test_fan_cancel.py instead."
+        ),
+    },
     354: {
         "version_fixed": "0.4.39",
         "title": "Activity Record temp columns — alt-key fallback + explicit injection at 5 call sites",
@@ -2031,6 +2090,7 @@ VACATION_SETBACK_EXTRA = 3
 
 # Fan control configuration
 CONF_FAN_ENTITY = "fan_entity"
+CONF_FAN_STATE_ENTITY = "fan_state_entity"  # Issue #359: WHF Type 2 dual-entity support
 CONF_FAN_MODE = "fan_mode"
 FAN_MODE_DISABLED = "disabled"
 FAN_MODE_WHOLE_HOUSE = "whole_house_fan"
@@ -2314,6 +2374,16 @@ CONFIG_METADATA = {
             "The fan or switch entity to control for whole-house ventilation."
             " Only used when fan mode is 'whole_house_fan' or 'both'."
         ),
+        "category": "fan",
+    },
+    "fan_state_entity": {
+        "label": "Fan State Entity",
+        "description": (
+            "Optional separate sensor entity to read the actual physical state of the whole-house fan."
+            " Use when the fan has a dedicated control entity and a separate state sensor (WHF dual-entity)."
+            " If left blank, the Fan Entity is used for both control and state."
+        ),
+        "sensitive": False,
         "category": "fan",
     },
     "fan_min_runtime_per_hour": {

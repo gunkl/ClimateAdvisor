@@ -1,0 +1,82 @@
+{
+  "name": "issue-359-fan-state-machine",
+  "description": "Fan ON then OFF — nat-vent adoption, comfort-floor exit, setpoint echo suppression (Issue #359)",
+  "source": "synthetic",
+  "issue": 359,
+  "simulator_support": true,
+  "track": "unit",
+  "notes": [
+    "Occupant outcome: User woke up (2026-06-28 ~07:39) to a 71°F home with outdoor 57°F.",
+    "Fan turned on (manually or by thermostat program). CA should adopt it as nat-vent free cooling.",
+    "Around 08:11 indoor reached the comfort floor — CA exits nat-vent, fan stops.",
+    "This scenario validates the full nat-vent session lifecycle: activation → comfort-floor exit.",
+    "The setpoint echo suppression (Fix A) and direction-aware dispatch (Fix B/C) are coordinator-level",
+    "and not exercisable in the Tier-A headless harness (requires _async_thermostat_changed event loop).",
+    "Those paths are covered by test_fan_cancel.py unit tests.",
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: if _natural_vent_active is never set on sensor_open with eligible",
+    "    conditions, the second assertion (nat_vent_comfort_floor_exit) would not fire.",
+    "    The first assertion (natural_ventilation) would also fail — both fail without the feature.",
+    "(b) Docs↔production alignment: docs/08-COMPUTATION-REFERENCE.md §3 nat-vent section",
+    "    documents comfort-floor exit. This scenario exercises that exact path.",
+    "(c) Occupant experience: without nat-vent activation CA would run AC on a cool morning,",
+    "    wasting energy and potentially overcooling. With correct adoption the occupant gets",
+    "    free cooling until the comfort floor (70°F) is reached — zero energy cost."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-06-28T07:35:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 57.0,
+      "note": "Morning: indoor=71°F (above comfort_heat=70°F), outdoor=57°F. outdoor < indoor by 14°F — well beyond hysteresis. outdoor=57°F < threshold (75+3=78°F). Nat-vent conditions met when window/sensor opens."
+    },
+    {
+      "time": "2026-06-28T07:36:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild morning classification: hvac_mode=off. Nat-vent eligible if sensor opens and conditions met."
+    },
+    {
+      "time": "2026-06-28T07:39:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Door/window opens. outdoor=57°F < indoor=71°F (directional OK); indoor=71°F > comfort_heat=70°F (floor OK); outdoor=57°F < threshold=78°F. Nat-vent activates, fan turns on."
+    },
+    {
+      "time": "2026-06-28T08:11:00",
+      "type": "nat_vent_temperature_check",
+      "indoor_f": 70.0,
+      "note": "Indoor cooled to comfort_heat floor=70°F. Nat-vent comfort-floor exit fires: session ends, fan deactivated, HVAC may resume per classification (hvac_mode=off means no HVAC restore)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-28T07:39:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opened with outdoor=57°F < indoor=71°F (14°F differential exceeds hysteresis); outdoor=57°F < threshold=78°F; indoor=71°F > comfort_heat=70°F. All three nat-vent conditions met — engine activates nat-vent and turns on HVAC fan. Issue #359 validates this adoption path works after the on_fan_turned_off() refactor."
+    },
+    {
+      "at": "2026-06-28T08:11:00",
+      "expect": "nat_vent_comfort_floor_exit",
+      "reason": "nat_vent_temperature_check called with indoor=70°F = comfort_heat floor. Comfort-floor exit fires: _natural_vent_active cleared, fan deactivated, grace period started. Occupant: free cooling ran ~32 min bringing home from 71°F to 70°F at zero energy cost."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent activates on sensor open with eligible conditions, exits cleanly at comfort floor (Issue #359)",
+    "observed_behavior": "sensor_open → natural_ventilation (fan on) → nat_vent_comfort_floor_exit at comfort floor",
+    "expected_behavior": "CA adopts fan as nat-vent when outdoor is sufficiently cooler than indoor; exits when indoor reaches comfort floor — occupant gets free cooling with no AC energy cost"
+  }
+}

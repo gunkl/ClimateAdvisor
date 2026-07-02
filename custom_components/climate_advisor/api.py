@@ -754,6 +754,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             await stream_resp.prepare(request)
 
             final_result: dict | None = None
+            chunk_count = 0
             async for event in coordinator.ai_skills.async_execute_streaming(
                 "investigator",
                 hass,
@@ -763,7 +764,13 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 hours=hours,
             ):
                 await stream_resp.write(("data: " + json.dumps(event) + "\n\n").encode())
-                if event.get("type") == "done":
+                await stream_resp.drain()
+                if event.get("type") == "chunk":
+                    chunk_count += 1
+                    if chunk_count == 1:
+                        _LOGGER.debug("SSE first chunk flushed to client")
+                elif event.get("type") == "done":
+                    _LOGGER.info("SSE stream complete: chunks=%d", chunk_count)
                     final_result = {
                         "success": event.get("success", True),
                         "source": event.get("source", "ai"),
@@ -776,7 +783,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             if final_result and final_result.get("success"):
                 coordinator.claude_client.increment_investigator_counter()
                 await coordinator.async_store_investigation_report(final_result)
-                _LOGGER.info("Investigation (streaming) complete")
+                _LOGGER.info("Investigation (streaming) stored")
 
             await stream_resp.write_eof()
             return stream_resp

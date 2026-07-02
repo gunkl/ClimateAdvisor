@@ -2675,6 +2675,7 @@
         streamPre = document.getElementById('stream-output');
       }
 
+      console.log('[CA] SSE stream opened');
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = '';
@@ -2699,6 +2700,7 @@
             if (accumulated.length === event.text.length) {
               // First chunk \u2014 hide loading overlay so streaming pre is the visual focus
               loading.style.display = 'none';
+              console.log('[CA] First chunk received, len=' + event.text.length);
             }
             status.textContent = 'Receiving response\u2026 (' + accumulated.length + ' chars)';
 
@@ -2718,6 +2720,7 @@
               result,
               focus,
             };
+            console.log('[CA] Done event received, total=' + accumulated.length + ' chars');
             renderReportInPreview(_currentReport);
             status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();

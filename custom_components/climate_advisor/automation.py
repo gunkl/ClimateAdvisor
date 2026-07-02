@@ -2188,32 +2188,49 @@ class AutomationEngine:
             if self._nat_vent_outdoor_exit_time is not None:
                 elapsed = (dt_util.now() - self._nat_vent_outdoor_exit_time).total_seconds()
                 if elapsed < lockout_s:
-                    return  # still within lockout window
+                    _LOGGER.debug(
+                        "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
+                        elapsed,
+                        lockout_s,
+                        lockout_s - elapsed,
+                    )
+                    return
 
-            if (
-                outdoor < indoor - hysteresis  # outdoor must be at least 1°F below indoor
-                and indoor > comfort_heat  # indoor above comfort floor
-                and outdoor < threshold  # within acceptable ceiling
-            ):
+            _delta_ok = outdoor < indoor - hysteresis
+            _floor_ok = indoor > comfort_heat
+            _ceiling_ok = outdoor < threshold
+            if _delta_ok and _floor_ok and _ceiling_ok:
                 # Outdoor cooled down — activate natural vent
                 await self._activate_fan(
                     reason=(
-                        f"natural vent activated: outdoor {outdoor:.1f}\u00b0F"
-                        f" < indoor {indoor:.1f}\u00b0F \u2212 {hysteresis:.1f}\u00b0F hysteresis,"
-                        f" outdoor \u2264 threshold {threshold:.1f}\u00b0F"
+                        f"natural vent activated: outdoor {outdoor:.1f}°F"
+                        f" < indoor {indoor:.1f}°F − {hysteresis:.1f}°F hysteresis,"
+                        f" outdoor ≤ threshold {threshold:.1f}°F"
                     )
                 )
                 self._natural_vent_active = True
                 self._paused_by_door = False
                 _LOGGER.info(
-                    "Natural vent activated: outdoor %.1f\u00b0F < indoor %.1f\u00b0F \u2212 %.1f\u00b0F hysteresis,"
-                    " outdoor \u2264 threshold %.1f\u00b0F while paused",
+                    "Natural vent activated: outdoor %.1f°F < indoor %.1f°F − %.1f°F hysteresis,"
+                    " outdoor ≤ threshold %.1f°F while paused",
                     outdoor,
                     indoor,
                     hysteresis,
                     threshold,
                 )
                 await self._apply_nat_vent_hvac_state()
+            else:
+                _LOGGER.debug(
+                    "Nat vent paused-by-door: conditions not met — "
+                    "outdoor=%.1f°F indoor=%.1f°F delta=%.1f°F (need>%.1f°F) "
+                    "floor_ok=%s ceiling_ok=%s",
+                    outdoor,
+                    indoor,
+                    indoor - outdoor,
+                    hysteresis,
+                    _floor_ok,
+                    _ceiling_ok,
+                )
 
     async def nat_vent_temperature_check(self, current_temp: float) -> None:
         """Thermostat-style cycling: keep indoor near the comfort midpoint during a nat-vent session.

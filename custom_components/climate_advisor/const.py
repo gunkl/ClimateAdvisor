@@ -4,9 +4,12 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.44"
+VERSION = "0.4.45"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.45": [
+        "Fix #369: add diagnostic logging to nat-vent paused-by-door reactivation gate.",
+    ],
     "0.4.44": [
         "Feat #367: Status pane Conditions card combines day type badge, trend direction/magnitude,"
         " and current outdoor temperature into a single card. HVAC Mode card now shows indoor"
@@ -554,6 +557,19 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    369: {
+        "version_fixed": "0.4.45",
+        "title": "Nat-vent paused-by-door reactivation — diagnostic logging",
+        "scope_covered": (
+            "Adds DEBUG logging at lockout check and temperature gate failure paths"
+            " in check_natural_vent_conditions() paused-by-door block (automation.py ~line 2182)."
+            " Each gate condition (delta, floor, ceiling) now logs its value and pass/fail status."
+        ),
+        "scope_not_covered": (
+            "Behavioral root cause of 15-min activation delay not yet confirmed."
+            " Monitoring issue filed to review logs at next occurrence."
+        ),
+    },
     367: {
         "version_fixed": "0.4.44",
         "title": "Status pane: combined Conditions card + HVAC+indoor card",

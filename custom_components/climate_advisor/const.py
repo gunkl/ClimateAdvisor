@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.41"
+VERSION = "0.4.42"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.42": [
+        "Fix #363: WHF fan status sensor now shows 'running (untracked)' when the whole-house fan is"
+        " physically on but CA's flags are clear — reads fan_state_entity (Type 2) or fan_entity"
+        " (Type 1) via _get_fan_physical_state().",
+    ],
     "0.4.41": [
         "Feat #361: Added fan_state_feedback config flag. When OFF (default),"
         " CA operates in command-only mode — asserting desired fan state idempotently"
@@ -539,6 +544,25 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    363: {
+        "version_fixed": "0.4.42",
+        "title": "WHF _compute_fan_status() ground-truth fallback for fan_state_entity (Type 2)",
+        "scope_covered": (
+            "coordinator.py _compute_fan_status(): after _natural_vent_active check, new block"
+            " for FAN_MODE_WHOLE_HOUSE and FAN_MODE_BOTH calls _get_fan_physical_state() —"
+            " returns 'running (untracked)' when physical_on is True. "
+            "Handles Type 1 (fan_entity) and Type 2 (fan_state_entity) via existing helper. "
+            "Returns None (command-only mode, fan_state_feedback=False) falls through to 'inactive'. "
+            "tests/test_whf_dual_entity.py: TestComputeFanStatusWHF — 4 new tests. "
+            "docs/08-COMPUTATION-REFERENCE.md §9d updated."
+        ),
+        "scope_not_covered": (
+            "_compute_fan_status() HVAC-fan untracked path still reads thermostat attributes"
+            " directly (no change). "
+            "fan_state_entity not yet surfaced in _compute_fan_status() for the 'running (manual override)'"
+            " display — that path still relies on CA's internal _fan_active/_fan_override_active flags."
+        ),
+    },
     361: {
         "version_fixed": "0.4.41",
         "title": "WHF command-only mode: fan_state_feedback config flag",

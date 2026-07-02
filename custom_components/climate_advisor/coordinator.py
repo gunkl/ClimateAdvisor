@@ -99,6 +99,7 @@ from .const import (
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
+    FAN_MODE_WHOLE_HOUSE,
     INVESTIGATION_REPORT_HISTORY_CAP,
     INVESTIGATION_REPORTS_FILE,
     MAX_WEATHER_BIAS_APPLY_F,
@@ -5423,6 +5424,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Bug 3 (Issue #321): nat-vent session active but fan is idle between cycles
         if ae._natural_vent_active:
             return "nat-vent (session active, fan idle)"
+        # WHF ground-truth fallback: reads fan_state_entity (Type 2) or fan_entity (Type 1).
+        # Catches post-restart and externally-run WHF when CA's internal flags are all clear.
+        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            physical_on = self._get_fan_physical_state()
+            if physical_on is True:
+                return "running (untracked)"
         # Ground-truth fallback: CA's flag says inactive, but check what the
         # thermostat is actually doing. Catches post-restart and externally-run fan.
         if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):

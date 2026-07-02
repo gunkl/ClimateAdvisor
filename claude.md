@@ -215,6 +215,46 @@ result = await self.hass.async_add_executor_job(
 
 **Violation protocol**: Same as HA Boundary Rule — stop, flag, and ask before proceeding if a proposed change would violate any of these rules.
 
+### HACS Compliance Requirements (CRITICAL)
+
+**Decision**: Climate Advisor is published in the HACS default store (PR #8117). These requirements
+must be maintained in every PR to prevent HACS compliance regressions.
+
+Full spec: `docs/hacs-compliance.md`
+
+#### Invariants — Never Break These
+
+1. **`integration_type: "helper"`** must remain in `manifest.json`. CA is an automation helper that
+   assists users with HVAC control — not a hardware hub or cloud service. See `docs/hacs-compliance.md`
+   for the full rationale.
+
+2. **`brand/icon.png`** must remain at the repo root. It is required by HACS (not HA core) and
+   provides the store icon. Never delete or move it.
+
+3. **README version is a dynamic badge** — do not replace with a hardcoded string. The badge:
+   `[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=version&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)`
+   reads from GitHub Releases API at render time. Hardcoded strings drift (was 18 versions stale
+   when this rule was added).
+
+4. **Every production version bump needs a GitHub Release**, not just a git tag. HACS reads from
+   the Releases API.
+
+#### Merge Conflict Strategy (hacs/default PR)
+
+If the hacs/default PR #8117 shows "out of date" (another `c*` integration landed at the same
+alphabetical position):
+- Rebase the PR branch on `hacs/default` main — do NOT merge
+- Push rebased branch — CI re-runs automatically
+- No code changes needed
+
+#### Review Process Summary
+
+HACS review is FIFO. Human reviewer Frenck approves without substantive feedback when automated
+checks pass. The 6-item checklist and CI (HACS action + hassfest) are the only real gates.
+
+**Violation protocol**: Flag any change that would remove `integration_type`, delete `brand/icon.png`,
+replace the README badge with a hardcoded string, or skip a GitHub Release on a production bump.
+
 ### Testing Requirements (CRITICAL)
 
 **Decision**: All tests in this project MUST handle Python's async mock infrastructure correctly. Unawaited coroutine warnings are test bugs, not cosmetic noise.

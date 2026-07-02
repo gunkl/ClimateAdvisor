@@ -224,9 +224,14 @@ Full spec: `docs/hacs-compliance.md`
 
 #### Invariants — Never Break These
 
-1. **`integration_type: "helper"`** must remain in `manifest.json`. CA is an automation helper that
-   assists users with HVAC control — not a hardware hub or cloud service. See `docs/hacs-compliance.md`
-   for the full rationale.
+1. **`integration_type: "service"`** must remain in `manifest.json`. CA is a full custom integration
+   with its own config entry, coordinator, devices, sensors, and API — matching HA's `service`
+   taxonomy ("provides a single service, like DuckDNS or AdGuard"), not the lightweight `helper`
+   category (input_boolean, derivative, group). **Do not set this to `"helper"`** — HA's frontend
+   excludes `helper`-typed config entries from the Settings → Devices & Services → Integrations
+   dashboard (`type_filter: ["device","hub","service","hardware"]`) and routes them to the
+   separate Helpers tab instead, which made CA disappear from Integrations in v0.4.53 (Issue #388).
+   See `docs/hacs-compliance.md` for the full rationale.
 
 2. **`brand/icon.png`** must remain at the repo root. It is required by HACS (not HA core) and
    provides the store icon. Never delete or move it.

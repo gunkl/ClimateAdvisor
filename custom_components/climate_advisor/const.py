@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.50"
+VERSION = "0.4.51"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.51": [
+        "Fix #380: AI investigator streaming — 'Generating…' loading overlay now hides when the"
+        " first chunk arrives so live text is visible. Button and spinner restore immediately on"
+        " completion instead of waiting for TCP close.",
+    ],
     "0.4.50": [
         "Feat #376: Day-type classification thresholds (Hot/Warm/Mild/Cool) are now configurable"
         " in Settings → Day-Type Thresholds. Defaults remain 85/75/60/45°F so existing users see"
@@ -605,6 +610,19 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    380: {
+        "version_fixed": "0.4.51",
+        "title": "AI investigator streaming — no visible progress + stuck 'Generating…' after report renders",
+        "scope_covered": (
+            "index.html: break added after done event so finally block runs immediately;"
+            " loading overlay hidden on first chunk so streaming pre is visible."
+            " api.py: write_eof() called before return so TCP connection closes promptly."
+        ),
+        "scope_not_covered": (
+            "Buffering between Claude API and HA server is not addressed — if all chunks arrive"
+            " in a single burst, the pre goes from empty to full with no visible intermediate state."
+        ),
+    },
     376: {
         "version_fixed": "0.4.50",
         "title": (

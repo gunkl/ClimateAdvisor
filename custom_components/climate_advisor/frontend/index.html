@@ -2696,6 +2696,10 @@
           if (event.type === 'chunk') {
             accumulated += event.text;
             if (streamPre) streamPre.textContent = accumulated;
+            if (accumulated.length === event.text.length) {
+              // First chunk \u2014 hide loading overlay so streaming pre is the visual focus
+              loading.style.display = 'none';
+            }
             status.textContent = 'Receiving response\u2026 (' + accumulated.length + ' chars)';
 
           } else if (event.type === 'done') {
@@ -2717,6 +2721,7 @@
             renderReportInPreview(_currentReport);
             status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
+            break;
 
           } else if (event.type === 'error') {
             throw new Error(event.message || 'Investigation failed');

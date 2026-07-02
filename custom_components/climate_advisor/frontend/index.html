@@ -2659,6 +2659,8 @@
 
     let accumulated = '';
     let streamPre = null;
+    let waitTimer = null;
+    const waitStart = Date.now();
 
     try {
       const body = { hours };
@@ -2698,12 +2700,19 @@
 
           if (event.type === 'status') {
             loading.textContent = event.text;
+            // Restart elapsed-time timer on each status event so it counts from the last status
+            if (waitTimer) clearInterval(waitTimer);
+            waitTimer = setInterval(() => {
+              const s = Math.round((Date.now() - waitStart) / 1000);
+              if (loading.style.display !== 'none') loading.textContent = event.text + ' (' + s + 's)';
+            }, 1000);
 
           } else if (event.type === 'chunk') {
             accumulated += event.text;
             if (streamPre) streamPre.textContent = accumulated;
             if (accumulated.length === event.text.length) {
-              // First chunk \u2014 hide loading overlay so streaming pre is the visual focus
+              // First chunk \u2014 stop timer, hide loading overlay so streaming pre is the visual focus
+              if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
               loading.style.display = 'none';
               console.log('[CA] First chunk received, len=' + event.text.length);
             }
@@ -2750,6 +2759,7 @@
       status.textContent = 'Error: ' + err.message + hint;
       if (content) content.innerHTML = '';
     } finally {
+      if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
       btn.disabled = false;
       btn.textContent = 'Investigate';
       loading.textContent = 'Generating…';

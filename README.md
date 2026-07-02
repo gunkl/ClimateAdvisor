@@ -95,6 +95,8 @@ Supports whole-house fan and/or HVAC fan mode integration:
 - **Whole-house fan**: Controls a dedicated fan entity (switch or fan domain) during economizer maintain phase. While the whole-house fan is active, CA sets the thermostat off so AC and the fan do not run simultaneously; prior mode is restored when the fan stops.
 - **HVAC fan mode**: Activates your thermostat's fan-only mode for ventilation
 - **Both**: Coordinates both fan types together
+- **Dual-entity WHF support**: An optional separate `fan_state_entity` lets CA read ground-truth physical state independently of the command entity (Type 2 installations)
+- **Command-only mode** (`fan_state_feedback` off, default): CA asserts the desired fan state idempotently without reading back entity state, avoiding false override detection on command-echo entities. Turn on `fan_state_feedback` for installations with a dedicated state sensor.
 - Integrated with the economizer two-phase cooling strategy (cool-down with AC, maintain with ventilation)
 
 ### Learning Engine
@@ -112,9 +114,11 @@ After 14+ days of data, the learning engine starts analyzing patterns:
 
 Climate Advisor includes two Claude-powered AI capabilities, each requiring a Claude API key in settings:
 
-**Activity Report** (`ai_enabled`) — analyzes recent system activity and returns a structured report with a timeline, HVAC decision rationale, anomalies, and thermal performance diagnostics. Triggered on demand from the AI tab or via the `climate_advisor.ai_activity_report` service.
+**Activity Report** (`ai_enabled`) — analyzes recent system activity and returns a structured report with a timeline, HVAC decision rationale, anomalies, and thermal performance diagnostics. Triggered on demand from the Analysis tab or via the `climate_advisor.ai_activity_report` service.
 
-**AI Investigator** (`ai_investigator_enabled`) — performs deep cross-source analysis to detect incongruities between the thermal model, pipeline statistics, compliance data, and event log. Returns hypotheses with confidence levels and recommended actions. Results appear in the Investigation panel on the AI tab, where findings can be submitted directly as GitHub issues (requires GitHub token configured under Settings → GitHub Integration).
+**AI Investigator** (`ai_investigator_enabled`) — performs deep cross-source analysis to detect incongruities between the thermal model, pipeline statistics, compliance data, and event log. Returns hypotheses with confidence levels and recommended actions. Context is assembled from independently-testable provider functions with focus-aware selection — specifying a focus keyword (thermal, fan, nat-vent, etc.) skips irrelevant providers and reduces token usage. Both the Investigator and Activity Report stream results over SSE, so text appears within a few seconds instead of waiting for the full report. GitHub issue history used for known-fix matching is cached (24h open / 30d closed) to avoid a live API call on every run. Results appear in the Investigation panel on the Analysis tab, where findings can be submitted directly as GitHub issues (requires GitHub token configured under Settings → GitHub Integration).
+
+**Activity Record** — a deterministic (non-AI) event timeline with indoor/outdoor temperature at each decision point. Available alongside the two AI reports on the Analysis tab; no API key required.
 
 ### Sleep Temperature Configuration
 
@@ -123,6 +127,8 @@ Separate `sleep_heat` and `sleep_cool` setpoints can be configured to define bed
 ### Natural Ventilation Directional Guard
 
 The natural ventilation directional guard prevents counterproductive ventilation: nat vent activation is blocked when outdoor temperature would move indoor temperature in the wrong direction. A hysteresis band and reactivation lockout prevent rapid cycling. The guard also preserves an active nat vent session through HVAC-off classification events so natural cooling is not prematurely cancelled.
+
+Nat-vent can continue past bedtime when outdoor air is still below the sleep target — free cooling closes the gap before handing off to the compressor, cycling off at `sleep_heat` and back on at `sleep_heat + 2×hysteresis` to avoid over-cooling. Fan status is tracked as a distinct ON/OFF state machine so nat-vent adoption, setpoint-echo suppression, and post-grace reconciliation are all handled without false override detection.
 
 ### Thermal Observation Architecture (v3)
 
@@ -216,6 +222,7 @@ All settings are editable after setup, plus advanced options:
 - **Aggressive savings**: More aggressive energy-saving strategies
 - **AI Investigator**: Enable Claude-powered activity analysis; requires a Claude API key
 - **GitHub Integration**: Configure a GitHub personal access token and repository for submitting investigation reports as GitHub issues directly from the dashboard
+- **Day-Type Thresholds**: Customize the Hot/Warm/Mild/Cool temperature cutoffs (default 85/75/60/45°F); displayed in your configured unit
 
 ## Entities Created
 
@@ -234,7 +241,7 @@ All settings are editable after setup, plus advanced options:
 | `sensor.climate_advisor_occupancy` | Current occupancy mode (home/away/vacation/guest) |
 | `sensor.climate_advisor_last_action_time` | Timestamp of last HVAC action |
 | `sensor.climate_advisor_last_action_reason` | Why the last HVAC action was taken |
-| `sensor.climate_advisor_fan_status` | Fan status: `active`, `running (manual override)`, `running (untracked)`, `inactive`, `off (manual override)`, `disabled`; attributes include `fan_override_since` and `fan_running` |
+| `sensor.climate_advisor_fan_status` | Fan status: `active`, `active (unconfirmed)`, `running (manual override)`, `running (untracked)`, `inactive`, `off (manual override)`, `disabled`; attributes include `fan_override_since` and `fan_running` |
 | `sensor.climate_advisor_contact_status` | Door/window sensor summary with per-sensor details |
 | `sensor.climate_advisor_ai_status` | AI feature status (enabled/disabled, model, request counts, monthly cost) |
 | `sensor.climate_advisor_indoor_temperature` | Current indoor temperature (mirrors climate entity) |
@@ -293,37 +300,31 @@ Trigger an on-demand AI activity report analysis. Requires AI Investigator to be
 service: climate_advisor.ai_activity_report
 ```
 
-### `climate_advisor.get_ai_report`
+### `climate_advisor.reset_learning_data`
 
-Retrieve the most recent AI activity report.
-
-```yaml
-service: climate_advisor.get_ai_report
-```
-
-### `climate_advisor.clear_ai_reports`
-
-Clear persisted AI report history.
+Reset some or all learned data — useful after changing HVAC equipment or moving to a new location.
 
 ```yaml
-service: climate_advisor.clear_ai_reports
+service: climate_advisor.reset_learning_data
+data:
+  scope: all  # or "thermal_model", "weather_bias", "suggestions"
 ```
 
 ## Dashboard
 
 Climate Advisor includes a built-in dashboard panel accessible from the HA sidebar. The panel provides:
 
-- **Current Status** — Day type, HVAC mode, setpoint, indoor temp, automation status, contact sensor states, fan status
+- **Current Status** — Conditions card (day type, trend, outdoor temp), HVAC mode with inline indoor temp, setpoint, automation status, contact sensor states, separate WHF/HVAC fan status
 - **Daily Briefing** — Full briefing with TLDR summary table, verbosity control (tldr_only/normal/verbose)
 - **Classification Details** — Forecast data, window schedules, trend analysis
 - **Learning** — Today's record, suggestions, compliance tracking
-- **AI Investigator** — Claude-powered activity report with timeline, HVAC decisions, anomalies, and diagnostics (requires API key)
+- **Analysis** (renamed from "AI") — Single report-type dropdown covering the deterministic Activity Record, the Claude-powered Activity Report, and the AI Investigator's deep analysis; all three support Copy, Download .md, and Submit GitHub Issue
 - **Settings** — Read-only view of all configuration grouped by category
-- **Debug** — Automation state, force reclassify, resend briefing, diagnostics dump
+- **Debug** — Automation state, force reclassify, resend briefing, diagnostics dump, prediction engine confidence levels
 
 ### REST API Endpoints
 
-The dashboard is powered by 22 REST API endpoints under `/api/climate_advisor/`:
+The dashboard is powered by 23 REST API endpoints under `/api/climate_advisor/`:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -334,9 +335,10 @@ The dashboard is powered by 22 REST API endpoints under `/api/climate_advisor/`:
 | `/learning` | GET | Learning records and suggestions |
 | `/config` | GET | All settings with metadata |
 | `/ai_status` | GET | AI feature status, model, request counts, and cost |
-| `/ai_activity` | GET/POST | Trigger or retrieve activity report |
+| `/ai_activity` | GET/POST | Trigger or retrieve activity report (SSE streaming) |
+| `/activity_record` | GET | Deterministic (non-AI) event timeline with indoor/outdoor temps |
 | `/ai_reports` | GET | Persisted activity report history |
-| `/ai_investigate` | POST | Trigger deep investigator analysis |
+| `/ai_investigate` | POST | Trigger deep investigator analysis (SSE streaming) |
 | `/investigation_reports` | GET | Persisted investigation report history |
 | `/engines` | GET | Prediction engine status and thermal model parameters |
 | `/event_log` | GET | Recent automation events ring buffer |
@@ -462,6 +464,25 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Deterministic Activity Report table; merged Vent bar (fan + nat-vent) in chart (#330, #331)
 - [x] Fan activity with trigger source visible in Activity Report (#332)
 - [x] Bedtime setback display fix — Next Automation and chart now show configured sleep temp, not trend-adjusted (#333)
+- [x] HA time-selector `HH:MM:SS` parse fix for sleep window — sleep setback no longer reverted every 30 min (#335)
+- [x] `apply_classification` enforces HVAC off whenever paused by an open door/window, hot or cold day (#337)
+- [x] Nat-vent + AC assist band re-arm and `aggressive_savings` gate against compressor use through open windows (#338)
+- [x] Occupancy away/vacation no longer arms setback while windows/doors are open — setback deferred until resume (#339)
+- [x] One thermostat write per sleep-band cycle instead of two conflicting setpoints; grace-started context visible in Activity Report (#341)
+- [x] Prediction Engines debug panel: stale "since" dates removed, k_solar/k_active_hvac confidence display fixed (#343, #345)
+- [x] Reconcile fan running (untracked) after thermostat starts it autonomously between AC cycles (#347)
+- [x] Analysis tab redesign — Activity Record (deterministic, non-AI) with indoor/outdoor temp columns; unified report-type dropdown (#352)
+- [x] Activity Record shows indoor/outdoor temp at thermostat decision events (#354)
+- [x] Fan ON/OFF state machine — nat-vent adoption, setpoint-echo suppression, post-grace reconciliation, WHF dual-entity support (#359, #360)
+- [x] WHF command-only mode (`fan_state_feedback` flag) to prevent false overrides from command-echo entities (#361)
+- [x] WHF ground-truth physical-state fallback and correct "running (manual override)" status (#363, #365)
+- [x] Status pane Conditions card (day type + trend + outdoor temp); HVAC card shows indoor temp inline (#367)
+- [x] Nat-vent bedtime continuation — fan runs to sleep target past bedtime, stops at `sleep_cool`; dual WHF/HVAC fan status rows (#370, #374)
+- [x] Day-type classification thresholds configurable in Settings, config entry migrated v15→v16 (#376)
+- [x] `_build_predicted_indoor_future` and chart data ODE computation offloaded to executor — eliminates event-loop blocking (#376)
+- [x] AI Investigator redesign — context registry of 11 independently-testable providers, focus-aware selection (~40% token reduction), 24h/30d GitHub issue cache, SSE streaming (#377)
+- [x] AI Investigator and Activity Report streaming UX — live text as chunks arrive instead of buffered-to-EOF (#380, #382)
+- [x] HACS compliance — `integration_type: helper` in manifest, dynamic README version badge, state file permissions hardened (0o600) (#384)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)
@@ -507,7 +528,10 @@ custom_components/climate_advisor/
 ├── repairs.py           # HA repairs flow for config issues
 ├── claude_api.py        # Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking
 ├── ai_skills.py         # Lightweight skill registry framework for pluggable AI capabilities
-├── ai_skills_activity.py  # Activity Report skill (AI Investigator): timeline, decisions, anomalies, diagnostics
+├── ai_skills_activity.py  # Activity Report skill: timeline, decisions, anomalies, diagnostics
+├── ai_skills_investigator.py  # AI Investigator skill: deep cross-source analysis, hypothesis generation
+├── ai_skills_context.py # Context providers for AI skills — focus-aware, independently testable
+├── temperature.py       # Fahrenheit/Celsius conversion and formatting helpers
 ├── chart_log.py         # Persistent 1-year ring buffer of HVAC/fan/temperature data + event markers
 ├── services.yaml        # Service definitions
 ├── frontend/

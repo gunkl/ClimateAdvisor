@@ -180,6 +180,7 @@ class TestTomorrowPlan:
     def test_returns_valid_dict_with_classification(self):
         """A classification with tomorrow data → dict with expected keys."""
         coord = MagicMock()
+        coord.config = {}
         coord._current_classification = _make_classification(
             tomorrow_high=78,
             tomorrow_low=60,
@@ -204,6 +205,7 @@ class TestTomorrowPlan:
     def test_tomorrow_plan_hot_day(self):
         """tomorrow_high=95 should yield day_type='hot'."""
         coord = MagicMock()
+        coord.config = {}
         coord._current_classification = _make_classification(
             tomorrow_high=95,
             tomorrow_low=75,
@@ -220,6 +222,7 @@ class TestTomorrowPlan:
     def test_tomorrow_plan_cool_day(self):
         """tomorrow_high=50 should yield day_type='cool'."""
         coord = MagicMock()
+        coord.config = {}
         coord._current_classification = _make_classification(
             tomorrow_high=50,
             tomorrow_low=35,
@@ -236,6 +239,7 @@ class TestTomorrowPlan:
     def test_tomorrow_plan_trend_stable(self):
         """Tomorrow plan should show stable trend (same hi/lo for today and tomorrow)."""
         coord = MagicMock()
+        coord.config = {}
         coord._current_classification = _make_classification(
             tomorrow_high=72,
             tomorrow_low=55,

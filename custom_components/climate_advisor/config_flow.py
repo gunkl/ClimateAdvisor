@@ -55,6 +55,10 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_TEMP_UNIT,
+    CONF_THRESHOLD_COOL,
+    CONF_THRESHOLD_HOT,
+    CONF_THRESHOLD_MILD,
+    CONF_THRESHOLD_WARM,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WELCOME_HOME_DEBOUNCE,
@@ -84,6 +88,10 @@ from .const import (
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
     DEFAULT_TEMP_UNIT,
+    DEFAULT_THRESHOLD_COOL,
+    DEFAULT_THRESHOLD_HOT,
+    DEFAULT_THRESHOLD_MILD,
+    DEFAULT_THRESHOLD_WARM,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
     FAN_MODE_BOTH,
@@ -130,6 +138,7 @@ OPTIONS_MENU_OPTIONS = [
     "schedule",
     "notifications",
     "advanced",
+    "classification_thresholds",
     "ai_settings",
     "github_settings",
     "save",
@@ -157,7 +166,7 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 15
+    VERSION = 16
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -1149,6 +1158,104 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                         "aggressive_savings",
                         default=current.get("aggressive_savings", False),
                     ): selector.BooleanSelector(),
+                }
+            ),
+            errors=errors,
+        )
+
+    # ---- Classification Thresholds ----
+
+    async def async_step_classification_thresholds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Day-type classification threshold temperatures."""
+        errors: dict[str, str] = {}
+
+        current = self.config_entry.data
+        unit = current.get(CONF_TEMP_UNIT, FAHRENHEIT)
+        is_celsius = unit == CELSIUS
+
+        if user_input is not None:
+            # Validate ordering: cool < mild < warm < hot
+            t_cool = user_input.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL)
+            t_mild = user_input.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD)
+            t_warm = user_input.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM)
+            t_hot = user_input.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT)
+            if not (t_cool < t_mild < t_warm < t_hot):
+                errors[CONF_THRESHOLD_COOL] = "thresholds_must_be_ascending"
+            if not errors:
+                converted = {}
+                for key in (CONF_THRESHOLD_HOT, CONF_THRESHOLD_WARM, CONF_THRESHOLD_MILD, CONF_THRESHOLD_COOL):
+                    if key in user_input:
+                        converted[key] = to_fahrenheit(user_input[key], unit)
+                self._updates.update(converted)
+                return await self.async_step_init()
+
+        if is_celsius:
+            ranges = {
+                CONF_THRESHOLD_HOT: (24, 43, 0.5),
+                CONF_THRESHOLD_WARM: (15, 35, 0.5),
+                CONF_THRESHOLD_MILD: (7, 26, 0.5),
+                CONF_THRESHOLD_COOL: (-2, 18, 0.5),
+            }
+            unit_label = "°C"
+            hot_disp = from_fahrenheit(current.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT), unit)
+            warm_disp = from_fahrenheit(current.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM), unit)
+            mild_disp = from_fahrenheit(current.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD), unit)
+            cool_disp = from_fahrenheit(current.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL), unit)
+        else:
+            ranges = {
+                CONF_THRESHOLD_HOT: (75, 110, 1),
+                CONF_THRESHOLD_WARM: (60, 95, 1),
+                CONF_THRESHOLD_MILD: (45, 80, 1),
+                CONF_THRESHOLD_COOL: (30, 65, 1),
+            }
+            unit_label = "°F"
+            hot_disp = current.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT)
+            warm_disp = current.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM)
+            mild_disp = current.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD)
+            cool_disp = current.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL)
+
+        return self.async_show_form(
+            step_id="classification_thresholds",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_THRESHOLD_HOT, default=hot_disp): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ranges[CONF_THRESHOLD_HOT][0],
+                            max=ranges[CONF_THRESHOLD_HOT][1],
+                            step=ranges[CONF_THRESHOLD_HOT][2],
+                            unit_of_measurement=unit_label,
+                            mode="slider",
+                        )
+                    ),
+                    vol.Required(CONF_THRESHOLD_WARM, default=warm_disp): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ranges[CONF_THRESHOLD_WARM][0],
+                            max=ranges[CONF_THRESHOLD_WARM][1],
+                            step=ranges[CONF_THRESHOLD_WARM][2],
+                            unit_of_measurement=unit_label,
+                            mode="slider",
+                        )
+                    ),
+                    vol.Required(CONF_THRESHOLD_MILD, default=mild_disp): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ranges[CONF_THRESHOLD_MILD][0],
+                            max=ranges[CONF_THRESHOLD_MILD][1],
+                            step=ranges[CONF_THRESHOLD_MILD][2],
+                            unit_of_measurement=unit_label,
+                            mode="slider",
+                        )
+                    ),
+                    vol.Required(CONF_THRESHOLD_COOL, default=cool_disp): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=ranges[CONF_THRESHOLD_COOL][0],
+                            max=ranges[CONF_THRESHOLD_COOL][1],
+                            step=ranges[CONF_THRESHOLD_COOL][2],
+                            unit_of_measurement=unit_label,
+                            mode="slider",
+                        )
+                    ),
                 }
             ),
             errors=errors,

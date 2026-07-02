@@ -124,6 +124,7 @@ def _make_update_data_coord(
     climate_state = _make_state(hvac_mode, hvac_action)
     hass.states.get = MagicMock(return_value=climate_state)
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
     coord.hass = hass
 
     coord.config = {

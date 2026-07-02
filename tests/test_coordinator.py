@@ -366,6 +366,10 @@ class TestBriefingNotificationSplit:
         coord._apply_outdoor_windows_gate = MagicMock()
         coord._last_predicted_indoor = []
 
+        # async_add_executor_job is now awaited by _async_send_briefing for ODE offload.
+        # Execute the partial synchronously so patched _build_predicted_indoor_future is used.
+        coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
+
         # Bind the real methods to our mock
         coord._async_send_briefing = types.MethodType(ClimateAdvisorCoordinator._async_send_briefing, coord)
         coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
@@ -753,6 +757,9 @@ class TestBriefingRegeneration:
         coord._apply_outdoor_windows_gate = MagicMock()
         coord._last_predicted_indoor = []
         coord._current_classification = None
+
+        # async_add_executor_job is now awaited by _async_update_data/_async_send_briefing for ODE offload.
+        coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
 
         coord._build_briefing_text = types.MethodType(ClimateAdvisorCoordinator._build_briefing_text, coord)
 

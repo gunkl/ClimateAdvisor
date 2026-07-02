@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.52"
+VERSION = "0.4.53"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.53": [
+        "Feat #384: HACS compliance — integration_type field added to manifest, dynamic README version"
+        " badge replaces hardcoded string, state file permissions hardened (0o600), HACS knowledge"
+        " base added to docs.",
+    ],
     "0.4.52": [
         "Fix #382: AI investigator streaming now shows live text as the LLM responds — chunks are"
         " flushed to the browser immediately via aiohttp drain(). Previously all chunks buffered"
@@ -615,6 +620,18 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    384: {
+        "version_fixed": "0.4.53",
+        "title": "HACS compliance — integration_type, dynamic README badge, state permissions, knowledge base",
+        "scope_covered": (
+            "manifest.json integration_type field, README dynamic version badge, "
+            "state.py file permissions (chmod 0o600), docs/hacs-compliance.md, CLAUDE.md HACS section"
+        ),
+        "scope_not_covered": (
+            "PR merge conflict monitoring (manual rebase needed if hacs/default advances), "
+            "HACS PR #8117 human review (pending Frenck FIFO queue)"
+        ),
+    },
     382: {
         "version_fixed": "0.4.52",
         "title": "AI investigator streaming — no visible progress, all chunks buffered until EOF",

@@ -66,6 +66,8 @@ class StatePersistence:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 f.write(serialized)
             os.replace(tmp_path_str, str(self._path))
+            if hasattr(os, "chmod"):
+                os.chmod(str(self._path), 0o600)
         except OSError as err:
             _LOGGER.error("Failed to save state file: %s", err)
             with contextlib.suppress(OSError):

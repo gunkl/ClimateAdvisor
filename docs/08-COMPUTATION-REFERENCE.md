@@ -1808,17 +1808,14 @@ Exit conditions are evaluated in priority order on every continuous-monitoring c
 
 | Priority | Trigger | Condition | Action | Event emitted | Notes |
 |---|---|---|---|---|---|
-| 0 | Sleep ceiling reached (sleep window only) | `_in_sleep_window AND indoor_temp ≤ sleep_cool` | `_deactivate_fan(restore_hvac=False)`; `_natural_vent_active = False` | `nat_vent_sleep_ceiling_reached` | No HVAC restore — sleep band already programmed; nat-vent ran through bedtime and has reached its sleep target (Issue #370) |
 | 1 | All monitored sensors close | — | Exit nat vent; resume HVAC from current classification | — | — |
-| 2 | `indoor_temp ≤ comfort_heat` | — | Exit; restore heat mode at `comfort_heat` (Issue #99 comfort floor exit) | `nat_vent_comfort_floor_exit` | — |
+| 2 | `indoor_temp ≤ comfort_heat` (daytime) or `indoor_temp ≤ sleep_heat − hysteresis` (sleep window) | — | Exit; restore heat mode at the applicable floor temperature | `nat_vent_comfort_floor_exit` | Sleep-window variant: `sleep_heat − hysteresis` is one step below the cycling-off threshold, so the session ends only after the fan has already paused — see Fan Cycling section below |
 | 3 | `outdoor_temp ≥ indoor_temp` | — | Exit to paused state; fan off; start hysteresis lockout timer | `nat_vent_outdoor_rise_exit` | — |
 | 4 | `outdoor_temp > comfort_cool + nat_vent_delta` | — | Exit to paused state; fan off | — | — |
 
-**Priority 0 (sleep ceiling reached)** fires only during the sleep window and only when nat-vent continued past bedtime via the `nat_vent_bedtime_continue` gate (§5a). `_deactivate_fan(restore_hvac=False)` is used so the sleep band that bedtime already programmed is preserved — a full HVAC restore would overwrite the sleep setpoints with the classification's daytime band.
+**Priority 1 (sensor closes)** always wins. When the physical path for airflow is closed, nat vent ends immediately regardless of outdoor temperature comparisons.
 
-**Priority 1 (sensor closes)** always wins outside the sleep-ceiling context. When the physical path for airflow is closed, nat vent ends immediately regardless of outdoor temperature comparisons.
-
-**Priority 2 (comfort floor)** restores heat rather than simply pausing. Once indoor temperature has dropped to `comfort_heat`, the right action is to heat the space back up, not to wait for outdoor conditions to change.
+**Priority 2 (comfort floor)** restores heat rather than simply pausing. During the daytime, the exit fires at `comfort_heat`; during the sleep window it fires at `sleep_heat − hysteresis` (one step below the cycling-off threshold). In both cases the right action is to restore heat, not wait for outdoor conditions to change. The sleep-window threshold is deliberately set below the cycling-off point so the fan can complete a graceful pause at `sleep_heat` before the session ends.
 
 **Priority 3 (outdoor warms above indoor)** starts a hysteresis lockout timer (see Re-activation section below). Without this lockout, the system would oscillate at thermal equilibrium: outdoor rises above indoor → exit → cooling resumes → outdoor drops below indoor → re-activate → repeat.
 
@@ -1851,24 +1848,18 @@ If outdoor were 76°F instead, the ceiling check would fail (`76 ≥ 75`) and na
 
 Default value: `NAT_VENT_DELTA_DEFAULT = 3°F` (see §15 Defaults Reference).
 
-### Fan Cycling Within an Active Session (Issue #321)
+### Fan Cycling Within an Active Session (Issues #321, #374)
 
-Once `_natural_vent_active = True`, the fan does not simply stay on until the session ends. Instead, the engine targets the midpoint of the comfort band and cycles the fan on and off using a hysteresis band to prevent rapid toggling.
+Once `_natural_vent_active = True`, the fan does not simply stay on until the session ends. Instead, the engine targets a context-dependent temperature and cycles the fan on and off using a hysteresis band to prevent rapid toggling. The target and thresholds differ between the daytime and sleep windows.
 
-**Midpoint target:**
+**Target and threshold table** (constant `NAT_VENT_HYSTERESIS_F = 1.0°F`):
 
-```
-nat_vent_target = (comfort_heat + comfort_cool) / 2.0
-```
+| Context | `nat_vent_target` | Fan cycles OFF (`off_threshold`) | Fan cycles ON (`on_threshold`) | Hard-exit floor |
+|---|---|---|---|---|
+| Daytime | `(comfort_heat + comfort_cool) / 2` | `target − hysteresis` | `target + hysteresis` | `comfort_heat` |
+| Sleep window | `sleep_heat + hysteresis` | `sleep_heat` (= `target − hysteresis`) | `sleep_heat + 2 × hysteresis` (= `target + hysteresis`) | `sleep_heat − hysteresis` |
 
-Example: `comfort_heat = 68°F`, `comfort_cool = 74°F` → `nat_vent_target = 71°F`.
-
-**Hysteresis thresholds** (constant `NAT_VENT_HYSTERESIS_F = 1.0°F`):
-
-| Threshold | Formula | Action when crossed |
-|---|---|---|
-| `off_threshold = nat_vent_target - NAT_VENT_HYSTERESIS_F` | e.g. 70°F | Fan cycles **off** — indoor has cooled enough |
-| `on_threshold = nat_vent_target + NAT_VENT_HYSTERESIS_F` | e.g. 72°F | Fan cycles **on** again (if outdoor < indoor) |
+*Sleep-window note:* The sleep target is the sleep floor plus one hysteresis step, so the fan cools the home to `sleep_heat` (cycling off there) and then maintains it by re-activating at `sleep_heat + 2 × hysteresis`. The hard-exit threshold (`sleep_heat − hysteresis`) sits one step below the cycling-off point, so the session ends only if indoor temperature falls past `sleep_heat` — i.e., after the fan has already paused.
 
 **Fan cycles off (indoor ≤ off_threshold):**
 - `_fan_active` is set to `False`; fan deactivated.
@@ -1881,16 +1872,38 @@ Example: `comfort_heat = 68°F`, `comfort_cool = 74°F` → `nat_vent_target = 7
 - The on_threshold guard prevents re-activation the moment the fan turns off (1°F dead band).
 
 **Hard exit (session ends) — takes priority over cycling:**
-The exit hierarchy (§17 Exit Hierarchy above) is evaluated before the cycling logic. In particular:
-- Priority 2 — `indoor_temp ≤ comfort_heat` — fires first if indoor drops to the comfort floor, ending the session (`_natural_vent_active = False`) and restoring heat mode. Fan cycling cannot keep the session alive past the comfort floor.
+The exit hierarchy (§17 Exit Hierarchy above) is evaluated before the cycling logic. Priority 2 fires first if indoor drops to the applicable floor, ending the session (`_natural_vent_active = False`) and restoring heat mode. Fan cycling cannot keep the session alive past the hard-exit floor.
 
-**Example sequence** (comfort band [68°F, 74°F], target = 71°F):
+**Daytime example** (comfort band [68°F, 74°F], target = 71°F):
 1. Indoor = 73°F → fan on, session active.
-2. Indoor falls to 70°F (≤ off_threshold) → fan cycles off, session stays active.
-3. Indoor drifts back to 72°F (≥ on_threshold) → fan cycles on again.
-4. Indoor falls to 68°F (≤ comfort_heat) → hard exit; heat mode restored.
+2. Indoor falls to 70°F (= off_threshold) → fan cycles off, session stays active.
+3. Indoor drifts back to 72°F (= on_threshold) → fan cycles on again.
+4. Indoor falls to 68°F (= comfort_heat = hard-exit floor) → hard exit; heat mode restored.
 
-**Test coverage:** `tests/test_nat_vent_thermostat.py`; golden scenario `nat_vent_thermostat_cycling` (Issue #321).
+**Sleep-window example** (sleep band [65°F, 72°F], `sleep_heat=65`, `hysteresis=1°F`):
+1. Indoor = 73°F (above on_threshold 67°F) → fan on, session active.
+2. Indoor falls to 65°F (= off_threshold = sleep_heat) → fan cycles off, session stays active.
+3. Indoor drifts back to 67°F (= on_threshold) → fan cycles on again.
+4. Indoor falls to 64°F (= sleep_heat − hysteresis = hard-exit floor) → hard exit; heat mode restored.
+
+**Fan event `fan_device` field (Issue #374):** All fan-related events — `nat_vent_fan_on`, `nat_vent_fan_off`, `fan_activated`, `fan_deactivated`, `nat_vent_bedtime_continue` — carry a `fan_device` field indicating which hardware was activated: `"whf"`, `"hvac_fan"`, `"both"`, or `"none"`.
+
+**Removed event:** `nat_vent_sleep_ceiling_reached` is no longer emitted. The Priority 0 exit that fired when `indoor_temp ≤ sleep_cool` during the sleep window has been removed. The session now persists through the sleep window, cycling the fan to maintain the sleep floor.
+
+**`fan_status` sensor values** (complete list, including the value added in Issue #374):
+
+| Value | Meaning |
+|---|---|
+| `"active"` | CA commanded the fan on (nat vent or HVAC fan-only mode); physical state confirmed for WHF |
+| `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged |
+| `"nat-vent (session active, fan idle)"` | Nat-vent session alive but fan has cycled off (indoor at or below off_threshold) |
+| `"running (manual override)"` | Fan is running; CA's `_fan_override_active` flag is set |
+| `"running (untracked)"` | Thermostat reports fan running but CA's `_fan_active=False` — typical after HA restart or user-initiated fan run |
+| `"inactive"` | Fan is off and CA has no record of activating it |
+| `"off (manual override)"` | Override still in effect but physical fan is off (`_fan_override_active=True AND _fan_active=False`) |
+| `"disabled"` | Fan control feature is turned off in configuration |
+
+**Test coverage:** `tests/test_nat_vent_thermostat.py`; golden scenario `nat_vent_thermostat_cycling` (Issue #321). Sleep-window cycling behavior added in Issue #374.
 
 ### Phase 2 Note
 

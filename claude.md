@@ -349,18 +349,19 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 
 ### Fan Status Values
 
-`_compute_fan_status()` returns one of six string values. All non-inactive values must be accounted for in cross-validation suppression logic in `ai_skills_activity.py`:
+`_compute_fan_status()` returns one of seven string values. All non-inactive values must be accounted for in cross-validation suppression logic in `ai_skills_activity.py`:
 
 | Value | Meaning |
 |---|---|
-| `"active"` | CA commanded the fan on (natural ventilation or HVAC fan-only mode) |
+| `"active"` | CA commanded the fan on (nat vent or HVAC fan-only mode); physical state confirmed for WHF |
+| `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged (added Issue #374) |
 | `"running (manual override)"` | Fan is running; CA's `_fan_override_active` flag is set |
 | `"running (untracked)"` | Thermostat reports fan running (`fan_mode=on` or `hvac_action=fan`) but CA's `_fan_active=False` — typical after HA restart or when user ran fan from thermostat app |
 | `"inactive"` | Fan is off and CA has no record of activating it |
 | `"off (manual override)"` | User turned fan on at the thermostat (setting `_fan_override_active=True`), then turned fan off before the grace period expired. Override still in effect, physical fan is off. Condition: `_fan_override_active=True AND _fan_active=False`. |
 | `"disabled"` | Fan control feature is turned off in configuration |
 
-`"running (untracked)"` was added in Issue #91. Any code that checks `ca_fan_running` for suppression purposes must include all three non-inactive, non-disabled values (`"active"`, `"running (manual override)"`, `"running (untracked)"`).
+`"running (untracked)"` was added in Issue #91. `"active (unconfirmed)"` was added in Issue #374 to distinguish WHF state disagreements from the confirmed-active case. Any code that checks `ca_fan_running` for suppression purposes must include all four non-inactive, non-disabled active values (`"active"`, `"active (unconfirmed)"`, `"running (manual override)"`, `"running (untracked)"`).
 
 ### Project Memory
 

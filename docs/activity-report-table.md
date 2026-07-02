@@ -11,7 +11,7 @@ _Introduced: Issue #330 (deterministic table) · Chart Vent bar: Issue #331_
 | How is the per-event table built — LLM or Python? | Deterministically in Python by `build_event_timeline_table()` in `ai_skills_activity.py`. Not LLM-generated. The AI still writes the summary, decisions, and anomalies sections. | [Overview](#overview) |
 | What do the Event, Settings, Indoor, and Outdoor columns mean? | Event = what happened. Settings = the concrete HVAC action (setpoint, mode, fan state). Indoor/Outdoor = ambient temperatures at event emit time, sourced from coordinator.data; `—` for events recorded before Issue #352. | [Overview](#overview) |
 | How does `_format_band_setpoint` render a setpoint? | Active edge first (the live thermostat setpoint), other edge in parens as the monitored bound: `setpoint: 72°F Cool (64°F Heat)`. | [Setpoint Convention](#setpoint-convention) |
-| What is the full set of event types the table must handle? | 38 registered types across 6 groups: band/setpoint-program, setpoint/mode delta, override lifecycle, nat-vent/fan, skip/advisory, system/diagnostic. | [Event Catalog](#event-catalog) |
+| What is the full set of event types the table must handle? | 40 registered types across 6 groups: band/setpoint-program, setpoint/mode delta, override lifecycle, nat-vent/fan, skip/advisory, system/diagnostic. | [Event Catalog](#event-catalog) |
 | What happens when an unrecognised event type appears? | `_default_renderer` fires: humanized type name + `reason` field as Event; generic field extraction as Settings. Never blank, never crashes. | [Default Renderer](#default-renderer) |
 | How does the table handle many consecutive band rows of the same type? | Consecutive same-type rows collapse to `{name} ×N ({start}–{end})` while preserving the shared Settings cell. | [Dedup Contract](#dedup-contract) |
 | How do I add or change an event renderer? | Four steps: emit with structured fields, add/update `EVENT_RENDERERS` entry, add catalog row here, add unit test. | [Runbook: Adding or Changing a Renderer](#runbook-adding-or-changing-a-renderer) |
@@ -85,7 +85,7 @@ the user's configured unit (°F or °C).
 One row per emitted event type. Emitters are `automation.py` (via
 `_emit_event_callback`) and `coordinator.py` (via `_emit_event`).
 
-Grouped by functional area. 34 registered types total.
+Grouped by functional area. 36 registered types total.
 
 ### Band / Setpoint-Program
 
@@ -136,6 +136,8 @@ These events signal a mode or setpoint change triggered by automation logic.
 | `nat_vent_comfort_floor_exit` | `automation.py` `_check_nat_vent_conditions` / `_check_nat_vent_cycling` | `indoor_temp`, `comfort_heat` | "Nat-vent exit — comfort floor reached" | `indoor: {indoor_temp}°F ≤ floor: {comfort_heat}°F; fan: off, heat restored` |
 | `nat_vent_away_ceiling_exit` | `automation.py` `_check_nat_vent_conditions` | `indoor`, `comfort_cool` | "Nat-vent exit — away ceiling" | `indoor: {indoor}°F ≥ ceiling: {comfort_cool}°F` |
 | `nat_vent_predicted_floor_exit` | `automation.py` `_check_nat_vent_conditions` | `time_to_floor_hr`, `fan_mode_change`, `hvac_mode_restored` | "Nat-vent proactive exit — floor predicted" | `floor in {time_to_floor_hr:.1f} hr; fan: {fan_mode_change}` |
+| `nat_vent_bedtime_continue` | `automation.py` `handle_bedtime` | `outdoor_temp`, `sleep_cool` | "Nat-vent continues at bedtime" | `outdoor: {outdoor_temp}°F < sleep target: {sleep_cool}°F; fan continues to sleep ceiling` |
+| `nat_vent_sleep_ceiling_reached` | `automation.py` `check_natural_vent_conditions` | `indoor_temp`, `sleep_cool` | "Nat-vent sleep ceiling reached" | `indoor: {indoor_temp}°F ≤ sleep target: {sleep_cool}°F; fan deactivated, sleep band retained` |
 | `nat_vent_ceiling_escalation` | `automation.py` `apply_classification` | `indoor`, `outdoor`, `comfort_cool` | "Nat-vent escalated to AC — ceiling breached" | `indoor: {indoor}°F > ceiling: {comfort_cool}°F; nat-vent ended, AC armed` |
 | `sensor_opened` | `automation.py` `handle_door_window_opened` | `entity`, `result` (natural_ventilation / paused), `hvac_mode_change`, optionally `fan_mode_change` | "Sensor opened — {entity}" with result label | `result: {result}; mode: {hvac_mode_change}` (+ `fan: {fan_mode_change}` if present) |
 | `sensor_all_closed` | `automation.py` `handle_all_doors_windows_closed` | `was_paused`, `was_nat_vent` | "All sensors closed" | `was paused: {was_paused}, was nat-vent: {was_nat_vent}` |

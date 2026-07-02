@@ -37,8 +37,10 @@ Mapped (production → legacy):
   sensor_all_closed  neither flag            → resumed
     (production always calls resumed; if nothing was happening this is still
      a resumed decision — mirrors simulate.py _handle_all_closed)
-  nat_vent_comfort_floor_exit   → nat_vent_comfort_floor_exit
-  nat_vent_outdoor_rise_exit    → nat_vent_outdoor_rise_exit
+  nat_vent_comfort_floor_exit      → nat_vent_comfort_floor_exit
+  nat_vent_outdoor_rise_exit       → nat_vent_outdoor_rise_exit
+  nat_vent_bedtime_continue        → nat_vent_bedtime_continue        (Issue #370 — gate passed, fan continues)
+  nat_vent_sleep_ceiling_reached   → nat_vent_sleep_ceiling_reached   (Issue #370 — indoor ≤ sleep_cool in window)
   bedtime_setback               → setback_applied
     (P3 payload changed: was {target_f}; now {mode, floor, ceiling, active,
      modifier}.  target_temp = floor when active="floor"; ceiling when
@@ -312,6 +314,13 @@ def _map_event_to_outcome(
 
     if event_type == "nat_vent_outdoor_rise_exit":
         return ProductionDecision(ts_str, event_type, "nat_vent_outdoor_rise_exit")
+
+    # Issue #370: bedtime continuation and sleep-ceiling exit events
+    if event_type == "nat_vent_bedtime_continue":
+        return ProductionDecision(ts_str, event_type, "nat_vent_bedtime_continue")
+
+    if event_type == "nat_vent_sleep_ceiling_reached":
+        return ProductionDecision(ts_str, event_type, "nat_vent_sleep_ceiling_reached")
 
     # --- Nat-vent thermostat cycling events (Issue #321 Bug 3) ---
     if event_type == "nat_vent_fan_off":

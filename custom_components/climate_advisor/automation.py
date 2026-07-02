@@ -2015,6 +2015,46 @@ class AutomationEngine:
                     )
             return
 
+        # Issue #370: Priority 0 — Sleep-ceiling exit. If nat-vent was allowed to continue
+        # past bedtime (via the continuation gate in handle_bedtime), stop the fan when
+        # indoor reaches the sleep target. Use restore_hvac=False — the sleep band is
+        # already programmed by handle_bedtime() and must not be overwritten.
+        if self._natural_vent_active and _in_sleep_window(dt_util.now(), self.config):
+            _c_sleep = self._current_classification
+            if _c_sleep is not None:
+                _sleep_band_exit = select_comfort_band(
+                    _c_sleep,
+                    self.config,
+                    occupancy_mode=self._occupancy_mode,
+                    in_sleep_window=True,
+                    aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+                )
+                _indoor_sleep = self._get_indoor_temp_f()
+                if _indoor_sleep is not None and _indoor_sleep <= _sleep_band_exit.ceiling:
+                    self._natural_vent_active = False
+                    await self._deactivate_fan(
+                        reason=(
+                            f"nat-vent sleep ceiling reached: indoor {_indoor_sleep:.1f}°F"
+                            f" ≤ sleep_cool {_sleep_band_exit.ceiling:.1f}°F"
+                        ),
+                        restore_hvac=False,
+                    )
+                    _LOGGER.info(
+                        "Nat-vent sleep ceiling reached: indoor=%.1f°F ≤ sleep_cool=%.1f°F"
+                        " — fan deactivated, sleep band retained",
+                        _indoor_sleep,
+                        _sleep_band_exit.ceiling,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_sleep_ceiling_reached",
+                            {
+                                "indoor_temp": _indoor_sleep,
+                                "sleep_cool": _sleep_band_exit.ceiling,
+                            },
+                        )
+                    return
+
         # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting
         # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
         # Do NOT enter pause — the house needs to warm up, not wait for nat vent re-evaluation.
@@ -3002,21 +3042,19 @@ class AutomationEngine:
         _LOGGER.warning("Bedtime setback: clearing any pending override state before applying sleep setback")
         self.clear_manual_override(reason="bedtime")
 
-        # Deactivate fan at bedtime (fan running overnight is noisy/wasteful)
-        if self._fan_active and not self._fan_override_active:
-            await self._deactivate_fan(reason="bedtime — fan off for night")
-        if self._economizer_active:
-            await self._deactivate_economizer(outdoor_temp=0)
-
         c = self._current_classification
         if not c:
             if self._today_record is not None:
                 self._today_record.setback_skipped_reason = "no_classification"
+            # No sleep target available — deactivate fan unconditionally
+            if self._fan_active and not self._fan_override_active:
+                await self._deactivate_fan(reason="bedtime — no classification")
+                self._natural_vent_active = False
+            if self._economizer_active:
+                await self._deactivate_economizer(outdoor_temp=0)
             return
 
-        # Arm the sleep band — the thermostat holds both edges through the night.
-        # Note: adaptive compute_bedtime_setback depth is a follow-up (P3 follow-up documented);
-        # for now the band uses configured sleep_heat/sleep_cool which are the standard sleep setpoints.
+        # Compute sleep band first — needed for the nat-vent continuation gate below.
         _sleep_band = select_comfort_band(
             c,
             self.config,
@@ -3024,6 +3062,31 @@ class AutomationEngine:
             in_sleep_window=True,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
+
+        # Issue #370: Nat-vent continuation gate — if nat-vent is actively running and
+        # outdoor air is below the sleep ceiling, allow free cooling to continue to the
+        # sleep target instead of deactivating the fan and handing off to the compressor.
+        # Applies to all fan archetypes (WHF, HVAC fan, BOTH).
+        _outdoor_370 = self._last_outdoor_temp
+        _nat_vent_can_reach = (
+            self._natural_vent_active
+            and self._fan_active
+            and not self._fan_override_active
+            and _outdoor_370 is not None
+            and _outdoor_370 < _sleep_band.ceiling
+        )
+        if _nat_vent_can_reach:
+            _LOGGER.info(
+                "Nat-vent continues at bedtime: outdoor=%.1f°F below sleep_cool=%.1f°F — fan runs to sleep target",
+                _outdoor_370,
+                _sleep_band.ceiling,
+            )
+        else:
+            if self._fan_active and not self._fan_override_active:
+                await self._deactivate_fan(reason="bedtime — nat-vent not favorable for continuation")
+                self._natural_vent_active = False
+        if self._economizer_active:
+            await self._deactivate_economizer(outdoor_temp=0)
         if self._emit_event_callback:
             self._emit_event_callback(
                 "bedtime_setback",
@@ -3033,6 +3096,14 @@ class AutomationEngine:
                     "ceiling": _sleep_band.ceiling,
                     "active": _sleep_band.active,
                     "modifier": c.setback_modifier,
+                },
+            )
+        if _nat_vent_can_reach and self._emit_event_callback:
+            self._emit_event_callback(
+                "nat_vent_bedtime_continue",
+                {
+                    "outdoor_temp": _outdoor_370,
+                    "sleep_cool": _sleep_band.ceiling,
                 },
             )
         if self._today_record is not None:

@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
+    FAN_MODE_HVAC,
+    FAN_MODE_WHOLE_HOUSE,
     OCCUPANCY_AWAY,
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
@@ -488,3 +490,202 @@ class TestHandleBedtimeEventCallbackGuard:
         engine.set_occupancy_mode(OCCUPANCY_AWAY)
 
         asyncio.run(engine.handle_bedtime())
+
+
+# ── Issue #370: Nat-vent bedtime continuation gate ────────────────────────────
+
+
+def _make_nat_vent_engine(config_overrides: dict | None = None) -> AutomationEngine:
+    """Engine pre-wired for nat-vent bedtime continuation tests.
+
+    Sets up a warm-day classification (hvac_mode='off') so that
+    select_comfort_band() returns the sleep band with sleep_cool as ceiling.
+    """
+    hass = MagicMock()
+    hass.services = MagicMock()
+    hass.services.async_call = AsyncMock()
+    hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+    hass.states = MagicMock()
+
+    # Climate entity reports 73°F indoors by default
+    climate_state = MagicMock()
+    climate_state.state = "off"
+    climate_state.attributes = {"current_temperature": 73.0}
+    hass.states.get = MagicMock(return_value=climate_state)
+
+    config = {
+        "comfort_heat": 68.0,
+        "comfort_cool": 74.0,
+        "sleep_heat": 66.0,
+        "sleep_cool": 72.0,
+        "setback_heat": 60,
+        "setback_cool": 80,
+        "notify_service": "notify.notify",
+        "temp_unit": "fahrenheit",
+        "fan_mode": FAN_MODE_WHOLE_HOUSE,
+    }
+    if config_overrides:
+        config.update(config_overrides)
+
+    engine = AutomationEngine(
+        hass=hass,
+        climate_entity="climate.thermostat",
+        weather_entity="weather.forecast_home",
+        door_window_sensors=["binary_sensor.front_door"],
+        notify_service=config["notify_service"],
+        config=config,
+    )
+
+    # Attach a warm-day classification so sleep band resolves sleep_cool as ceiling
+    classification = _make_classification(hvac_mode="off", day_type="warm")
+    engine._current_classification = classification
+
+    return engine
+
+
+class TestNatVentBedtimeContinuation:
+    """Issue #370: nat-vent continuation gate in handle_bedtime().
+
+    When nat-vent is actively running and outdoor air is below the sleep ceiling,
+    handle_bedtime() must NOT deactivate the fan — free cooling should run until
+    indoor reaches the sleep target. The check_natural_vent_conditions() sleep-ceiling
+    exit (Priority 0) then handles the fan deactivation.
+
+    Occupant experience: on a mild evening, the fan keeps running quietly to cool the
+    house to the sleep temperature instead of shutting off and handing off to the
+    compressor — saving energy and reducing HVAC cycling noise.
+    """
+
+    def test_nat_vent_continues_when_outdoor_below_sleep_cool(self):
+        """Gate passes: outdoor 69°F < sleep_cool 72°F → fan preserved, event emitted.
+
+        Occupant experience: the whole-house fan stays on at bedtime because outdoor
+        air is cool enough to reach the sleep target — no compressor needed.
+        """
+        engine = _make_nat_vent_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 69.0
+        engine._last_indoor_temp = 73.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        # Fan must NOT have been deactivated
+        engine._deactivate_fan.assert_not_called()
+
+        # nat_vent_bedtime_continue event must be present
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_bedtime_continue" in event_names, (
+            f"Expected 'nat_vent_bedtime_continue' event; got: {event_names}"
+        )
+
+        # Fan state preserved
+        assert engine._fan_active is True
+
+    def test_fan_deactivated_when_outdoor_above_sleep_cool(self):
+        """Gate fails: outdoor 74°F >= sleep_cool 72°F → fan deactivated.
+
+        Occupant experience: at bedtime, outdoor air is too warm to cool the house
+        further — the fan shuts off and the thermostat takes over with the sleep band.
+        """
+        engine = _make_nat_vent_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 74.0  # >= sleep_cool=72
+        engine._last_indoor_temp = 73.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        # Fan MUST have been deactivated
+        engine._deactivate_fan.assert_called_once()
+
+        # _natural_vent_active must be cleared (state consistency fix)
+        assert engine._natural_vent_active is False
+
+    def test_fan_deactivated_when_nat_vent_not_active(self):
+        """Gate fails: nat-vent flag False → fan deactivated at bedtime as before.
+
+        Occupant experience: fan was running for some other reason (e.g., manual
+        override already ended), so bedtime correctly deactivates it.
+        """
+        engine = _make_nat_vent_engine()
+        engine._natural_vent_active = False
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 65.0  # outdoor is cool, but nat-vent not active
+
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        # Without nat-vent active, the gate cannot pass — fan is deactivated
+        engine._deactivate_fan.assert_called_once()
+
+    def test_nat_vent_active_flag_cleared_on_bedtime_deactivation(self):
+        """State consistency: _natural_vent_active=False after gate-fails deactivation.
+
+        Before Issue #370, the fan was deactivated but _natural_vent_active was left
+        True — causing the engine to believe nat-vent was still running after bedtime.
+
+        Occupant experience: without this fix, the next classification cycle would
+        incorrectly suppress HVAC as if nat-vent was providing free cooling.
+        """
+        engine = _make_nat_vent_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 74.0  # gate fails: outdoor >= sleep_cool=72
+        engine._last_indoor_temp = 73.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        # State must be cleared — not left True after fan deactivation
+        assert engine._natural_vent_active is False
+
+    def test_hvac_fan_archetype_also_continues(self):
+        """Gate works for FAN_MODE_HVAC too — all archetypes are eligible.
+
+        Occupant experience: whether the fan is a whole-house fan or the HVAC
+        blower, bedtime continuation applies equally when outdoor is cool enough.
+        """
+        engine = _make_nat_vent_engine(config_overrides={"fan_mode": FAN_MODE_HVAC})
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._last_outdoor_temp = 69.0  # < sleep_cool=72 → gate passes
+        engine._last_indoor_temp = 73.0
+
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+
+        asyncio.run(engine.handle_bedtime())
+
+        # HVAC fan archetype: gate still passes, fan preserved
+        engine._deactivate_fan.assert_not_called()
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_bedtime_continue" in event_names, (
+            f"FAN_MODE_HVAC: expected 'nat_vent_bedtime_continue'; got: {event_names}"
+        )

@@ -1,0 +1,85 @@
+{
+  "name": "bedtime_natvent_continuation",
+  "description": "Nat-vent active at bedtime with outdoor below sleep target — fan continues past bedtime, stops when indoor reaches sleep ceiling",
+  "source": "synthetic",
+  "issue": 370,
+  "simulator_support": true,
+  "track": "unit",
+  "notes": [
+    "Occupant outcome: On a warm evening the occupant opens windows; outdoor air (69°F) is cooler than indoors (73°F) and below the sleep target (72°F). At bedtime CA normally deactivates the fan — but with nat-vent continuation (Issue #370), the fan keeps running through the night. The occupant's home cools naturally to 72°F while they sleep, without the AC ever turning on.",
+    "Scenario effectiveness: If the nat-vent continuation gate is deleted from handle_bedtime(), bedtime unconditionally calls _deactivate_fan() and nat_vent_bedtime_continue is never emitted — the assertion at 22:30 fails. If the Priority 0 sleep-ceiling exit is deleted from check_natural_vent_conditions(), nat_vent_sleep_ceiling_reached is never emitted and the assertion at 01:00 fails.",
+    "Two-way alignment: handle_bedtime() evaluates sleep band before fan deactivation; gate condition is _natural_vent_active AND _fan_active AND NOT _fan_override_active AND outdoor < sleep_band.ceiling. check_natural_vent_conditions() Priority 0 fires when _in_sleep_window AND indoor <= sleep_cool, calls _deactivate_fan(restore_hvac=False), sets _natural_vent_active=False, emits nat_vent_sleep_ceiling_reached.",
+    "User outcome if test fails: Occupant loses free cooling past bedtime — CA shuts the fan off exactly at 22:30, running the AC unnecessarily to bring indoor to sleep temp instead of letting natural ventilation do the work for free.",
+    "Config note: sleep_cool=72 is explicitly set below. sleep_heat=64 provides the floor. comfort_cool=74 gives headroom so the outdoor temp (69°F) is below both comfort_cool and sleep_cool, satisfying the nat-vent continuation gate. sleep_time and wake_time are required — _in_sleep_window() returns False without them, so the Priority 0 sleep-ceiling exit would never fire. fan_mode=hvac is required — _activate_fan() returns early when fan_mode==disabled and never sets _fan_active=True, so the bedtime gate (which requires _fan_active) would always fail. The HVAC fan archetype uses set_fan_mode on the climate entity, which the headless harness supports without a separate fan_entity."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "07:00",
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "hvac",
+    "initial_thermostat_mode": "cool"
+  },
+  "events": [
+    {
+      "time": "2026-07-20T20:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Evening classification — warm day, comfort band armed at [68/74]."
+    },
+    {
+      "time": "2026-07-20T20:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 69.0,
+      "note": "Evening: indoor 73°F above comfort_cool 74°F? No — 73 < 74, just below ceiling. Outdoor 69°F is 4°F cooler than indoor, well below sleep target 72°F. Nat-vent conditions met."
+    },
+    {
+      "time": "2026-07-20T20:30:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens. Nat-vent activates: outdoor 69°F < indoor 73°F, indoor 73°F > comfort_heat 68°F, outdoor 69°F < comfort_cool+delta 77°F."
+    },
+    {
+      "time": "2026-07-20T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime fires. sleep band = [64/72]. Nat-vent continuation gate: _natural_vent_active=True, _fan_active=True, NOT _fan_override_active, outdoor 69°F < sleep_cool 72°F → gate passes. Fan stays running; emit nat_vent_bedtime_continue instead of deactivating. Sleep band still programmed."
+    },
+    {
+      "time": "2026-07-21T01:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 67.0,
+      "note": "Indoor has cooled to 72°F — exactly at sleep_cool. Priority 0 exit fires: _in_sleep_window AND indoor(72) <= sleep_cool(72). _deactivate_fan(restore_hvac=False) called. nat_vent_sleep_ceiling_reached emitted. Sleep band retained."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-20T20:30:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opens with outdoor 69°F < indoor 73°F and outdoor below threshold 77°F — nat-vent activates, fan on, _natural_vent_active=True."
+    },
+    {
+      "at": "2026-07-20T22:30:00",
+      "expect": "nat_vent_bedtime_continue",
+      "reason": "Bedtime fires with outdoor 69°F < sleep_cool 72°F — continuation gate passes, nat_vent_bedtime_continue event emitted, fan preserved. If gate is deleted, bedtime calls _deactivate_fan() instead and this event is never emitted."
+    },
+    {
+      "at": "2026-07-21T01:00:00",
+      "expect": "nat_vent_sleep_ceiling_reached",
+      "reason": "Indoor reaches sleep_cool 72°F in the sleep window — Priority 0 exit fires, _deactivate_fan(restore_hvac=False) called. If Priority 0 exit is deleted, this event is never emitted."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Nat-vent continues past bedtime (Issue #370) when outdoor is below sleep target; stops automatically when indoor reaches sleep ceiling",
+    "observed_behavior": "sensor_open → natural_ventilation (20:30) → bedtime fires → nat_vent_bedtime_continue (22:30, fan stays running) → indoor reaches 72°F → nat_vent_sleep_ceiling_reached (01:00, fan off, sleep band retained)",
+    "expected_behavior": "Occupant opens windows at 20:30; CA activates nat-vent. At 22:30 bedtime, CA checks outdoor (69°F) vs sleep target (72°F) — outdoor is cooler, so fan keeps running. At 01:00 the home has cooled to the sleep target naturally; CA stops the fan without touching the sleep band. AC never ran overnight — maximum free cooling, minimum energy use."
+  }
+}

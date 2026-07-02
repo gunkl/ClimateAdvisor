@@ -24,6 +24,7 @@ The automation logic table and all threshold constants in this document are expr
 | What temperature thresholds map to each day type? | HOT ≥ 85°F, WARM ≥ 75°F, MILD ≥ 60°F, COOL ≥ 45°F, COLD < 45°F; all thresholds are °F constants in `const.py`. | [§1. Day Classification](08-COMPUTATION-REFERENCE.md#1-day-classification) |
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
+| When does nat-vent continue past bedtime instead of stopping, and what stops it afterward? | When nat-vent is active, the fan is CA-owned, and `outdoor < sleep_cool`, bedtime emits `nat_vent_bedtime_continue` and keeps the fan running. The fan stops when `check_natural_vent_conditions()` detects `indoor ≤ sleep_cool` in the sleep window (Priority 0 exit, event `nat_vent_sleep_ceiling_reached`). | [§5a nat-vent continuation gate](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) · [Exit Hierarchy Priority 0](08-COMPUTATION-REFERENCE.md#exit-hierarchy) |
 | When and how does CA pre-cool the home on warming-trend nights? | Mid-night trigger (nat-vent close + 30 min, or wake − 4 h fallback); target = `sleep_cool + setback_modifier` floored at `comfort_heat + 2°F`. AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258) |
 | How does the physics ODE predict future indoor temperature? | `T(t+dt) = T_outdoor + (T − T_outdoor) × exp(k_p × dt) + (Q/k_p) × (exp(k_p × dt) − 1)`, where Q switches between k_active_heat, k_active_cool, and 0 per schedule period. | [§5c. Predicted Temperature Graph — Physics Path](08-COMPUTATION-REFERENCE.md#5c-predicted-temperature-graph--physics-path) |
 | What is the dynamic target band and how does occupancy mode change it? | `_compute_target_band_schedule()` returns `[{ts, lower, upper}]` per forecast hour; away = setback today only, vacation = deep setback all days, home/guest = comfort with sleep/wake ramps. | [§5d. Dynamic Target Band](08-COMPUTATION-REFERENCE.md#5d-dynamic-target-band--_compute_target_band_schedule) |
@@ -162,6 +163,8 @@ Bedtime setback depth is computed from the thermal model HVAC rates and the over
 `setback_modifier` is always added to the heat setback result regardless of whether the model or the fallback was used.
 
 **Cool-mode sign convention (Issue #258):** For cool-mode nights, `setback_modifier < 0` means a warming trend — the next day will be hotter. The modifier is applied as `sleep_cool + setback_modifier`, which _lowers_ the cool ceiling (more aggressive cooling, thermal mass banking). A _positive_ modifier (cooling trend) _raises_ the ceiling (relaxed setback, AC cycles less). No sign flip is applied in cool mode.
+
+**Nat-vent continuation gate at bedtime (Issue #370):** `handle_bedtime()` evaluates the sleep band before deciding whether to deactivate the fan. When nat-vent is active (`_natural_vent_active=True`), the fan is running under CA control (`_fan_active=True`), no manual override is in effect, and `outdoor_temp < sleep_band.ceiling` (outdoor air is still cooler than the sleep target), bedtime skips fan deactivation and emits `nat_vent_bedtime_continue`. The fan continues until `check_natural_vent_conditions()` detects the sleep ceiling has been reached (see Priority 0 exit in §check_natural_vent_conditions below). If any gate fails, `_deactivate_fan()` is called and `_natural_vent_active` is cleared to `False`. This applies to all fan archetypes (WHF, HVAC fan, BOTH).
 
 ### 5a-i. Overnight Pre-Cool Phase (Issue #258)
 
@@ -1803,14 +1806,17 @@ When all conditions are met: the comfort band **stays armed** (HVAC is **not** s
 
 Exit conditions are evaluated in priority order on every continuous-monitoring check (`check_natural_vent_conditions()`). The highest-priority matching condition wins.
 
-| Priority | Trigger | Action | Event emitted |
-|---|---|---|---|
-| 1 | All monitored sensors close | Exit nat vent; resume HVAC from current classification | — |
-| 2 | `indoor_temp ≤ comfort_heat` | Exit; restore heat mode at `comfort_heat` (Issue #99 comfort floor exit) | `nat_vent_comfort_floor_exit` |
-| 3 | `outdoor_temp ≥ indoor_temp` | Exit to paused state; fan off; start hysteresis lockout timer | `nat_vent_outdoor_rise_exit` |
-| 4 | `outdoor_temp > comfort_cool + nat_vent_delta` | Exit to paused state; fan off | — |
+| Priority | Trigger | Condition | Action | Event emitted | Notes |
+|---|---|---|---|---|---|
+| 0 | Sleep ceiling reached (sleep window only) | `_in_sleep_window AND indoor_temp ≤ sleep_cool` | `_deactivate_fan(restore_hvac=False)`; `_natural_vent_active = False` | `nat_vent_sleep_ceiling_reached` | No HVAC restore — sleep band already programmed; nat-vent ran through bedtime and has reached its sleep target (Issue #370) |
+| 1 | All monitored sensors close | — | Exit nat vent; resume HVAC from current classification | — | — |
+| 2 | `indoor_temp ≤ comfort_heat` | — | Exit; restore heat mode at `comfort_heat` (Issue #99 comfort floor exit) | `nat_vent_comfort_floor_exit` | — |
+| 3 | `outdoor_temp ≥ indoor_temp` | — | Exit to paused state; fan off; start hysteresis lockout timer | `nat_vent_outdoor_rise_exit` | — |
+| 4 | `outdoor_temp > comfort_cool + nat_vent_delta` | — | Exit to paused state; fan off | — | — |
 
-**Priority 1 (sensor closes)** always wins. When the physical path for airflow is closed, nat vent ends immediately regardless of outdoor temperature comparisons.
+**Priority 0 (sleep ceiling reached)** fires only during the sleep window and only when nat-vent continued past bedtime via the `nat_vent_bedtime_continue` gate (§5a). `_deactivate_fan(restore_hvac=False)` is used so the sleep band that bedtime already programmed is preserved — a full HVAC restore would overwrite the sleep setpoints with the classification's daytime band.
+
+**Priority 1 (sensor closes)** always wins outside the sleep-ceiling context. When the physical path for airflow is closed, nat vent ends immediately regardless of outdoor temperature comparisons.
 
 **Priority 2 (comfort floor)** restores heat rather than simply pausing. Once indoor temperature has dropped to `comfort_heat`, the right action is to heat the space back up, not to wait for outdoor conditions to change.
 

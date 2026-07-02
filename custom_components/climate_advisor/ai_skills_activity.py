@@ -655,6 +655,32 @@ def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
     return "Nat-vent + AC assist armed (full band)", ""
 
 
+def _render_nat_vent_sleep_ceiling_reached(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor_temp")
+    cool = p.get("sleep_cool")
+    label = "Nat-vent exit -- sleep ceiling reached"
+    if indoor is not None and cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent exit (sleep) -- indoor {format_temp(float(indoor), unit)}"
+                f" <= sleep ceiling {format_temp(float(cool), unit)}"
+            )
+    return label, ""
+
+
+def _render_nat_vent_bedtime_continue(p: dict, unit: str) -> tuple[str, str]:
+    outdoor = p.get("outdoor_temp")
+    cool = p.get("sleep_cool")
+    label = "Nat-vent continues through bedtime"
+    if outdoor is not None and cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent continues at bedtime -- outdoor {format_temp(float(outdoor), unit)}"
+                f" < sleep ceiling {format_temp(float(cool), unit)}"
+            )
+    return label, ""
+
+
 def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
     entity = p.get("entity", "")
     result = p.get("result", "")
@@ -855,6 +881,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,
     "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
     "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,
+    "nat_vent_sleep_ceiling_reached": _render_nat_vent_sleep_ceiling_reached,
+    "nat_vent_bedtime_continue": _render_nat_vent_bedtime_continue,
     "sensor_opened": _render_sensor_opened,
     "sensor_all_closed": _render_sensor_all_closed,
     "nat_vent_forecast_skip": _render_nat_vent_forecast_skip,

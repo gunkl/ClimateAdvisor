@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.45"
+VERSION = "0.4.46"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.46": [
+        "Feat #370: Nat-vent (WHF/HVAC fan) now continues past bedtime when outdoor air"
+        " is below the sleep target — free cooling closes the gap before handing off to"
+        " the compressor. Fan stops automatically when indoor reaches sleep_cool."
+        " Fixes stale _natural_vent_active flag after bedtime fan deactivation.",
+    ],
     "0.4.45": [
         "Fix #369: add diagnostic logging to nat-vent paused-by-door reactivation gate.",
     ],
@@ -557,6 +563,27 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    370: {
+        "version_fixed": "0.4.46",
+        "title": "Bedtime setback + WHF/nat-vent: fan blindly deactivated even when outdoor below sleep target",
+        "scope_covered": (
+            "automation.py handle_bedtime(): compute sleep band before fan block; gate preserves"
+            " nat-vent (all archetypes) when _natural_vent_active AND outdoor < sleep_cool."
+            " automation.py check_natural_vent_conditions(): Priority 0 sleep-ceiling exit fires"
+            " when in_sleep_window AND indoor <= sleep_cool; calls _deactivate_fan(restore_hvac=False)"
+            " and clears _natural_vent_active. State inconsistency fix: _natural_vent_active cleared"
+            " on bedtime fan deactivation (was left True when _deactivate_fan ran)."
+            " New activity-log events: nat_vent_bedtime_continue, nat_vent_sleep_ceiling_reached."
+        ),
+        "scope_not_covered": (
+            "Nat-vent activation at bedtime when not already active (separate activation question)."
+            " outdoor == sleep_cool exactly: gate uses strict <, fan deactivates (conservative)."
+            " Priority 0 sleep-ceiling exit requires sleep_time/wake_time to be configured —"
+            " _in_sleep_window() returns False without them; fan runs to comfort_heat instead of"
+            " sleep_cool for users with sleep_cool set but no sleep schedule."
+            " Multi-zone scope not covered."
+        ),
+    },
     369: {
         "version_fixed": "0.4.45",
         "title": "Nat-vent paused-by-door reactivation — diagnostic logging",

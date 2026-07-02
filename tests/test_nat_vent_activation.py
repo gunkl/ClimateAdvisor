@@ -1450,3 +1450,128 @@ class TestNatVentSleepWindowBand:
             band = call[0][0]
             assert band.floor == 70.0, f"Awake band floor must be comfort_heat=70. Got: {band.floor}"
             assert band.ceiling == 75.0, f"Awake band ceiling must be comfort_cool=75. Got: {band.ceiling}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #370 — Priority 0 sleep-ceiling exit in check_natural_vent_conditions
+# ---------------------------------------------------------------------------
+
+# Patched 'now' values for sleep-window tests
+_SLEEP_NOW = datetime(2026, 4, 20, 23, 15, 0)  # 23:15 — inside 22:00–07:00 window
+_AWAKE_NOW = datetime(2026, 4, 20, 14, 0, 0)  # 14:00 — outside sleep window
+
+
+def _make_sleep_ceiling_engine(
+    indoor_f: float = 71.0,
+    comfort_heat: float = 68.0,
+    comfort_cool: float = 76.0,
+    sleep_cool: float = 72.0,
+    sleep_heat: float = 66.0,
+    in_sleep_window: bool = True,
+) -> AutomationEngine:
+    """Engine pre-wired for Issue #370 sleep-ceiling exit tests.
+
+    Sets nat-vent active and positions indoor below sleep_cool so Priority 0
+    fires on the first check_natural_vent_conditions() call (when in sleep window).
+    """
+    engine = _make_engine(
+        comfort_heat=comfort_heat,
+        comfort_cool=comfort_cool,
+        indoor_f=indoor_f,
+    )
+    engine.config["sleep_cool"] = sleep_cool
+    engine.config["sleep_heat"] = sleep_heat
+
+    if in_sleep_window:
+        # 22:00–07:00 window encloses _SLEEP_NOW (23:15)
+        engine.config["sleep_time"] = "22:00"
+        engine.config["wake_time"] = "07:00"
+    # else: no sleep_time/wake_time → _in_sleep_window() returns False
+
+    # Nat-vent is active and running at entry
+    engine._natural_vent_active = True
+    engine._fan_active = True
+    engine._fan_override_active = False
+
+    # Attach a warm-day classification so select_comfort_band resolves the sleep band
+    engine._current_classification = _make_classification(day_type="warm", hvac_mode="off")
+
+    return engine
+
+
+class TestNatVentSleepCeilingExit:
+    """Issue #370: Priority 0 sleep-ceiling exit in check_natural_vent_conditions().
+
+    After handle_bedtime() allows nat-vent to continue past bedtime, the fan should
+    stop once indoor reaches (or is already at) the sleep ceiling. This is a NEW exit
+    path that fires BEFORE the existing comfort-floor exit (Priority 1).
+
+    Occupant experience: the fan runs quietly overnight until the room cools to the
+    sleep temperature, then stops on its own — no compressor needed, minimal noise.
+    """
+
+    def test_sleep_ceiling_exit_stops_fan_in_sleep_window(self):
+        """Priority 0 fires: indoor 71°F ≤ sleep_cool 72°F, in sleep window → fan off.
+
+        Occupant experience: the room has reached the sleep target — the fan stops
+        so the occupant sleeps without fan noise, and the thermostat sleep band
+        (already programmed by bedtime) guards against further cooling.
+        """
+        engine = _make_sleep_ceiling_engine(indoor_f=71.0, sleep_cool=72.0, in_sleep_window=True)
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=_SLEEP_NOW):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        # _deactivate_fan must be called with restore_hvac=False
+        engine._deactivate_fan.assert_called_once()
+        call_kwargs = engine._deactivate_fan.call_args[1]
+        assert call_kwargs.get("restore_hvac") is False, (
+            f"sleep-ceiling exit must pass restore_hvac=False; got: {call_kwargs}"
+        )
+
+        # _natural_vent_active must be cleared
+        assert engine._natural_vent_active is False, "_natural_vent_active must be False after sleep-ceiling exit"
+
+        # nat_vent_sleep_ceiling_reached event must be emitted
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_sleep_ceiling_reached" in event_names, (
+            f"Expected 'nat_vent_sleep_ceiling_reached'; got: {event_names}"
+        )
+
+    def test_sleep_ceiling_exit_not_fire_outside_sleep_window(self):
+        """Priority 0 skipped: same temps but outside sleep window → fan NOT deactivated.
+
+        Occupant experience: during daytime, nat-vent uses the normal comfort-floor
+        exit — if indoor is between comfort_heat and comfort_cool the fan stays on.
+        """
+        # indoor=71 > comfort_heat=68 and 71 < comfort_cool=76 → comfort-floor exit won't fire
+        # sleep-ceiling exit also won't fire (not in sleep window)
+        engine = _make_sleep_ceiling_engine(
+            indoor_f=71.0,
+            comfort_heat=68.0,
+            comfort_cool=76.0,
+            sleep_cool=72.0,
+            in_sleep_window=False,  # no sleep_time/wake_time → not in sleep window
+        )
+        engine._deactivate_fan = AsyncMock()
+        engine._async_save_state = AsyncMock()
+        # outdoor must satisfy the outdoor-rise guard too; set it well below indoor
+        engine._last_outdoor_temp = 62.0
+        engine._nat_vent_outdoor_exit_time = None
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        # Sleep-ceiling exit is NOT applicable outside sleep window
+        # Comfort-floor exit also does not fire (indoor=71 > comfort_heat=68)
+        engine._deactivate_fan.assert_not_called()
+
+        # _natural_vent_active must remain True (fan still running)
+        assert engine._natural_vent_active is True, (
+            "_natural_vent_active must remain True outside sleep window when comfort is maintained"
+        )

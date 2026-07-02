@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 from datetime import timedelta
@@ -734,6 +735,45 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
             len(focus),
             hours,
         )
+
+        accept = request.headers.get("Accept", "")
+        if "text/event-stream" in accept:
+            stream_resp = web.StreamResponse(
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "Access-Control-Allow-Origin": "*",
+                }
+            )
+            stream_resp.content_type = "text/event-stream"
+            await stream_resp.prepare(request)
+
+            final_result: dict | None = None
+            async for event in coordinator.ai_skills.async_execute_streaming(
+                "investigator",
+                hass,
+                coordinator,
+                coordinator.claude_client,
+                focus=focus,
+                hours=hours,
+            ):
+                await stream_resp.write(("data: " + json.dumps(event) + "\n\n").encode())
+                if event.get("type") == "done":
+                    final_result = {
+                        "success": event.get("success", True),
+                        "source": event.get("source", "ai"),
+                        "data": event.get("data", {}),
+                        "error": None,
+                        "input_context": event.get("input_context", ""),
+                        "raw_response": event.get("raw_response", ""),
+                    }
+
+            if final_result and final_result.get("success"):
+                coordinator.claude_client.increment_investigator_counter()
+                await coordinator.async_store_investigation_report(final_result)
+                _LOGGER.info("Investigation (streaming) complete")
+
+            return stream_resp
 
         result = await coordinator.ai_skills.async_execute(
             "investigator",

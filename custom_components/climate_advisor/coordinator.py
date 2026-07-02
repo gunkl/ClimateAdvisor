@@ -357,6 +357,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Periodic daily re-fit tracker (Issue #310): date of last incremental fit
         self._last_solar_phase_fit_date: date | None = None
 
+        # GitHub issues cache — separate TTL for open vs closed issues
+        self._github_open_cache: list[dict] | None = None
+        self._github_open_cache_ts: float = 0.0
+        self._github_closed_cache: list[dict] | None = None
+        self._github_closed_cache_ts: float = 0.0
+
         # Occupancy state machine
         self._occupancy_mode: str = OCCUPANCY_HOME
         self._occupancy_away_since: datetime | None = None

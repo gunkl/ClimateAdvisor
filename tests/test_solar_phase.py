@@ -653,7 +653,9 @@ class TestEngineStatus:
         import tempfile
         from pathlib import Path
 
-        from custom_components.climate_advisor.ai_skills_activity import _format_engine_status_for_ai
+        from custom_components.climate_advisor.ai_skills_context import (
+            format_engine_status_for_ai as _format_engine_status_for_ai,
+        )
 
         tmp = Path(tempfile.mkdtemp())
         learning = LearningEngine(storage_path=tmp)

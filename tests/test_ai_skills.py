@@ -343,3 +343,104 @@ class TestAISkillRegistryExecute:
         result = asyncio.run(registry.async_execute("ctx_fb_skill", hass, coordinator, client))
 
         assert result["input_context"] == "context before failure"
+
+
+# ---------------------------------------------------------------------------
+# TestAISkillRegistryStreaming
+# ---------------------------------------------------------------------------
+
+
+def _make_streaming_client(chunks: list[str], raise_on_stream: Exception | None = None) -> MagicMock:
+    """Build a mock client whose async_request_streaming yields given chunks."""
+
+    async def _streaming_gen(*_args, **_kwargs):
+        if raise_on_stream is not None:
+            raise raise_on_stream
+        for chunk in chunks:
+            yield chunk
+
+    client = MagicMock()
+    client.async_request_streaming = _streaming_gen
+    return client
+
+
+class TestAISkillRegistryStreaming:
+    """Tests for async_execute_streaming() — the SSE streaming path."""
+
+    def test_streaming_yields_chunks_then_done(self):
+        """Streaming a successful response yields chunk events then a done event."""
+        registry = AISkillRegistry()
+
+        def parser(raw: str) -> dict:
+            return {"summary": raw}
+
+        skill = _make_skill(name="stream_skill", response_parser=parser)
+        registry.register(skill)
+
+        client = _make_streaming_client(["Hello, ", "world!"])
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        async def _collect():
+            events = []
+            async for ev in registry.async_execute_streaming("stream_skill", hass, coordinator, client):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_collect())
+
+        chunk_events = [e for e in events if e.get("type") == "chunk"]
+        done_events = [e for e in events if e.get("type") == "done"]
+        error_events = [e for e in events if e.get("type") == "error"]
+
+        assert len(chunk_events) == 2, f"Expected 2 chunk events, got: {chunk_events}"
+        assert chunk_events[0]["text"] == "Hello, "
+        assert chunk_events[1]["text"] == "world!"
+        assert len(done_events) == 1, f"Expected 1 done event, got: {done_events}"
+        assert done_events[0]["success"] is True
+        assert done_events[0]["source"] == "ai"
+        assert done_events[0]["data"] == {"summary": "Hello, world!"}
+        assert done_events[0]["raw_response"] == "Hello, world!"
+        assert not error_events
+
+    def test_streaming_unknown_skill_yields_error(self):
+        """async_execute_streaming with an unknown skill name yields a single error event."""
+        registry = AISkillRegistry()
+        client = _make_streaming_client([])
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        async def _collect():
+            events = []
+            async for ev in registry.async_execute_streaming("no_such_skill", hass, coordinator, client):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_collect())
+
+        assert len(events) == 1
+        assert events[0]["type"] == "error"
+        assert "no_such_skill" in events[0]["message"] or "Unknown" in events[0]["message"]
+
+    def test_streaming_api_error_yields_error_event(self):
+        """If async_request_streaming raises, the generator yields an error event."""
+        registry = AISkillRegistry()
+        skill = _make_skill(name="err_skill")
+        registry.register(skill)
+
+        client = _make_streaming_client([], raise_on_stream=RuntimeError("Circuit breaker open"))
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        async def _collect():
+            events = []
+            async for ev in registry.async_execute_streaming("err_skill", hass, coordinator, client):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_collect())
+
+        error_events = [e for e in events if e.get("type") == "error"]
+        done_events = [e for e in events if e.get("type") == "done"]
+        assert error_events, f"Expected error event, got: {events}"
+        assert not done_events

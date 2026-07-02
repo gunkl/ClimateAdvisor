@@ -846,6 +846,39 @@
     });
   }
 
+  async function apiFetchStream(path, opts = {}) {
+    const token = await getAuthToken();
+    const headers = {
+      'Accept': 'text/event-stream',
+      'Content-Type': 'application/json',
+      ...(opts.headers || {}),
+    };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const resp = await fetch('/api/climate_advisor/' + path, {
+      credentials: 'same-origin',
+      ...opts,
+      headers,
+    });
+    if (resp.status === 401) {
+      const freshToken = await forceTokenRefresh();
+      if (freshToken && freshToken !== token) {
+        headers['Authorization'] = 'Bearer ' + freshToken;
+        return fetch('/api/climate_advisor/' + path, {
+          credentials: 'same-origin',
+          ...opts,
+          headers,
+        });
+      }
+      throw new Error('HTTP 401');
+    }
+    if (!resp.ok) {
+      let msg = 'HTTP ' + resp.status;
+      try { const b = await resp.json(); if (b && b.message) msg = b.message; } catch (_) {}
+      throw new Error(msg);
+    }
+    return resp;
+  }
+
   // --- Status tab ---
   async function loadStatus() {
     try {
@@ -2610,47 +2643,97 @@
     const btn = document.getElementById('run-report-btn');
     const loading = document.getElementById('report-loading');
     const status = document.getElementById('report-status');
+    const content = document.getElementById('report-content');
+    const actions = document.getElementById('report-actions');
     const focus = document.getElementById('investigation-focus').value.trim();
     const hours = parseInt(document.getElementById('report-time-window').value, 10) || 168;
+
     btn.disabled = true;
     btn.textContent = 'Running\u2026';
     loading.style.display = 'block';
-    status.textContent = '';
-    const _stages = [
-      'Collecting HVAC state and sensor readings\u2026',
-      'Reading thermal model and weather patterns\u2026',
-      'Scanning event log for anomalies\u2026',
-      'Reviewing recent AI report history\u2026',
-      'Fetching release notes and GitHub issues\u2026',
-      'Applying scientific method to data\u2026',
-      'Formulating hypotheses (this may take a moment)\u2026',
-      'Writing investigation report\u2026',
-    ];
-    let _stageIdx = 0;
-    status.textContent = _stages[0];
-    const _stageTimer = setInterval(() => {
-      _stageIdx = (_stageIdx + 1) % _stages.length;
-      status.textContent = _stages[_stageIdx];
-    }, 2500);
+    status.textContent = 'Connecting\u2026';
+    if (actions) actions.style.display = 'none';
+
+    let accumulated = '';
+    let streamPre = null;
+
     try {
       const body = { hours };
       if (focus) body.focus = focus;
-      const result = await apiFetch('ai_investigate', {
+
+      const resp = await apiFetchStream('ai_investigate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      _currentReport = { reportType: 'investigation', timestamp: new Date().toISOString(), result, focus };
-      renderReportInPreview(_currentReport);
-      status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'unknown') + ')';
-      loadUnifiedHistory();
+
+      // Show live streaming area
+      if (content) {
+        content.innerHTML = '<pre id="stream-output" style="white-space:pre-wrap;font-size:0.8rem;padding:0.5rem;background:var(--bg);border-radius:4px;min-height:4rem;"></pre>';
+        streamPre = document.getElementById('stream-output');
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE events (delimited by \n\n)
+        const events = sseBuffer.split('\n\n');
+        sseBuffer = events.pop(); // keep incomplete trailing fragment
+
+        for (const raw of events) {
+          if (!raw.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
+
+          if (event.type === 'chunk') {
+            accumulated += event.text;
+            if (streamPre) streamPre.textContent = accumulated;
+            status.textContent = 'Receiving response\u2026 (' + accumulated.length + ' chars)';
+
+          } else if (event.type === 'done') {
+            // Replace streaming pre with structured report
+            const result = {
+              success: event.success !== false,
+              source: event.source || 'ai',
+              data: event.data || {},
+              error: event.error || null,
+              raw_response: event.raw_response || accumulated,
+              input_context: event.input_context || '',
+            };
+            _currentReport = {
+              reportType: 'investigation',
+              timestamp: new Date().toISOString(),
+              result,
+              focus,
+            };
+            renderReportInPreview(_currentReport);
+            status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
+            loadUnifiedHistory();
+
+          } else if (event.type === 'error') {
+            throw new Error(event.message || 'Investigation failed');
+          }
+        }
+      }
+
+      // If we got chunks but no done event (shouldn't happen), show what we have
+      if (!_currentReport && accumulated) {
+        if (content) content.innerHTML = '<pre style="white-space:pre-wrap;font-size:0.8rem;">' + escapeHtml(accumulated) + '</pre>';
+        status.textContent = 'Stream ended (no structured response)';
+      }
+
     } catch (err) {
       const hint = err.message.toLowerCase().includes('not enabled')
         ? ' \u2014 enable it in Home Assistant \u2192 Settings \u2192 Integrations \u2192 Climate Advisor \u2192 Configure \u2192 AI Settings'
         : '';
       status.textContent = 'Error: ' + err.message + hint;
+      if (content) content.innerHTML = '';
     } finally {
-      clearInterval(_stageTimer);
       btn.disabled = false;
       btn.textContent = 'Investigate';
       loading.style.display = 'none';

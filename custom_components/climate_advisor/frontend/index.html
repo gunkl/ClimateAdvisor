@@ -2659,6 +2659,8 @@
 
     let accumulated = '';
     let streamPre = null;
+    let waitTimer = null;
+    const waitStart = Date.now();
 
     try {
       const body = { hours };
@@ -2675,6 +2677,7 @@
         streamPre = document.getElementById('stream-output');
       }
 
+      console.log('[CA] SSE stream opened');
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let sseBuffer = '';
@@ -2693,12 +2696,29 @@
           let event;
           try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
 
-          if (event.type === 'chunk') {
+          if (event.type === 'thinking') {
+            // Show tail of Claude's reasoning chain so user sees it's actively working
+            if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+            const tail = event.text.replace(/\n+/g, ' ').trim().slice(-180);
+            loading.textContent = 'Thinking… ' + tail;
+
+          } else if (event.type === 'status') {
+            loading.textContent = event.text;
+            // Restart elapsed-time timer on each status event so it counts from the last status
+            if (waitTimer) clearInterval(waitTimer);
+            waitTimer = setInterval(() => {
+              const s = Math.round((Date.now() - waitStart) / 1000);
+              if (loading.style.display !== 'none') loading.textContent = event.text + ' (' + s + 's)';
+            }, 1000);
+
+          } else if (event.type === 'chunk') {
             accumulated += event.text;
             if (streamPre) streamPre.textContent = accumulated;
             if (accumulated.length === event.text.length) {
-              // First chunk \u2014 hide loading overlay so streaming pre is the visual focus
+              // First chunk \u2014 stop timer, hide loading overlay so streaming pre is the visual focus
+              if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
               loading.style.display = 'none';
+              console.log('[CA] First chunk received, len=' + event.text.length);
             }
             status.textContent = 'Receiving response\u2026 (' + accumulated.length + ' chars)';
 
@@ -2718,6 +2738,7 @@
               result,
               focus,
             };
+            console.log('[CA] Done event received, total=' + accumulated.length + ' chars');
             renderReportInPreview(_currentReport);
             status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
@@ -2742,8 +2763,10 @@
       status.textContent = 'Error: ' + err.message + hint;
       if (content) content.innerHTML = '';
     } finally {
+      if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
       btn.disabled = false;
       btn.textContent = 'Investigate';
+      loading.textContent = 'Generating…';
       loading.style.display = 'none';
     }
   }

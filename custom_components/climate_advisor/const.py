@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.49"
+VERSION = "0.4.50"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.50": [
+        "Feat #376: Day-type classification thresholds (Hot/Warm/Mild/Cool) are now configurable"
+        " in Settings → Day-Type Thresholds. Defaults remain 85/75/60/45°F so existing users see"
+        " no change until they opt to adjust.",
+        "Feat #376: Thresholds display in the user's chosen temperature unit (°F or °C) with"
+        " slider inputs and ascending-order validation.",
+        "Feat #376: Config entry migrated from version 15 → 16; existing installations receive"
+        " the default threshold values automatically on upgrade.",
+    ],
     "0.4.49": [
         "Fix #376: ODE/OLS prediction math (_build_predicted_indoor_future) now runs in a thread-pool"
         " executor instead of directly on the HA event loop — eliminates periodic event-loop blocking"
@@ -597,8 +606,10 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     376: {
-        "version_fixed": "0.4.49",
-        "title": "HACS compliance: ODE executor offload + SDK attribution + JS library attribution",
+        "version_fixed": "0.4.50",
+        "title": (
+            "HACS compliance: ODE executor offload + SDK/JS attribution + classification threshold configurability"
+        ),
         "scope_covered": (
             "coordinator.py _async_update_data() and _async_send_briefing(): "
             "_build_predicted_indoor_future() wrapped in await hass.async_add_executor_job(functools.partial(...))."
@@ -607,12 +618,17 @@ KNOWN_FIXES: dict[int, dict] = {
             " frontend/index.html: Chart.js, Hammer.js, chartjs-plugin-zoom attributed with upstream URLs."
             " CLAUDE.md: Thread-Safety Requirements section added documenting the executor offload rule."
             " tests/test_executor_offload.py: AST regression tests for all three offload callsites."
+            " classifier.py classify_day(): threshold keyword args (threshold_hot/warm/mild/cool) with"
+            " module-constant defaults — fully backward-compatible."
+            " config_flow.py: Day-Type Thresholds step with slider inputs, Celsius/Fahrenheit conversion,"
+            " ascending-order validation, config entry migration v15→v16."
+            " const.py: CONF_THRESHOLD_* + DEFAULT_THRESHOLD_* + 4 CONFIG_METADATA entries (category=advanced)."
         ),
         "scope_not_covered": (
-            "Stage 3 (classification threshold configurability) is a separate PR (v0.4.50)."
-            " get_chart_data() still calls self.learning.get_thermal_model() + chart_log.get_entries()"
+            "get_chart_data() still calls self.learning.get_thermal_model() + chart_log.get_entries()"
             " synchronously inside the executor — these are I/O and could be further optimized,"
             " but are already off the event loop after this fix."
+            " HACS Issue #5 (repo description phrasing) is a manual gh repo edit — not tracked in code."
         ),
     },
     377: {
@@ -2224,12 +2240,24 @@ DAY_TYPE_MILD = "mild"
 DAY_TYPE_COOL = "cool"
 DAY_TYPE_COLD = "cold"
 
-# Day type thresholds (°F)
+# Day type thresholds (°F) — used as defaults when user has not customised them.
 THRESHOLD_HOT = 85
 THRESHOLD_WARM = 75
 THRESHOLD_MILD = 60
 THRESHOLD_COOL = 45
 CLASSIFICATION_HYSTERESIS_F = 2  # °F dead zone to prevent threshold bouncing
+
+# Configurable day-type threshold keys and defaults.
+# These mirror the THRESHOLD_* constants above; existing installs receive the
+# same values via the v15→v16 migration default, so behaviour is unchanged.
+CONF_THRESHOLD_HOT = "threshold_hot"
+CONF_THRESHOLD_WARM = "threshold_warm"
+CONF_THRESHOLD_MILD = "threshold_mild"
+CONF_THRESHOLD_COOL = "threshold_cool"
+DEFAULT_THRESHOLD_HOT = THRESHOLD_HOT
+DEFAULT_THRESHOLD_WARM = THRESHOLD_WARM
+DEFAULT_THRESHOLD_MILD = THRESHOLD_MILD
+DEFAULT_THRESHOLD_COOL = THRESHOLD_COOL
 
 # Trend thresholds (°F difference to trigger predictive behavior)
 TREND_THRESHOLD_SIGNIFICANT = 10
@@ -2794,6 +2822,37 @@ CONFIG_METADATA = {
             "When enabled, favors energy savings: the economizer skips AC-assisted cooling"
             " (ventilation only when windows open), and setbacks may be more aggressive."
             " When disabled, AC actively cools to comfort when outdoor temps drop."
+        ),
+        "category": "advanced",
+    },
+    "threshold_hot": {
+        "label": "Hot Day Threshold",
+        "description": (
+            "Days whose forecast high is at or above this temperature are classified as Hot. Default: 85°F / 29°C."
+        ),
+        "category": "advanced",
+    },
+    "threshold_warm": {
+        "label": "Warm Day Threshold",
+        "description": (
+            "Days whose forecast high is at or above this temperature (but below Hot) are"
+            " classified as Warm. Default: 75°F / 24°C."
+        ),
+        "category": "advanced",
+    },
+    "threshold_mild": {
+        "label": "Mild Day Threshold",
+        "description": (
+            "Days whose forecast high is at or above this temperature (but below Warm) are"
+            " classified as Mild. Default: 60°F / 16°C."
+        ),
+        "category": "advanced",
+    },
+    "threshold_cool": {
+        "label": "Cool Day Threshold",
+        "description": (
+            "Days whose forecast high is at or above this temperature (but below Mild) are"
+            " classified as Cool; below is Cold. Default: 45°F / 7°C."
         ),
         "category": "advanced",
     },

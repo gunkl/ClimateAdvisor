@@ -59,6 +59,10 @@ from .const import (
     CONF_SLEEP_COOL,
     CONF_SLEEP_HEAT,
     CONF_TEMP_UNIT,
+    CONF_THRESHOLD_COOL,
+    CONF_THRESHOLD_HOT,
+    CONF_THRESHOLD_MILD,
+    CONF_THRESHOLD_WARM,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WELCOME_HOME_DEBOUNCE,
@@ -80,6 +84,10 @@ from .const import (
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
+    DEFAULT_THRESHOLD_COOL,
+    DEFAULT_THRESHOLD_HOT,
+    DEFAULT_THRESHOLD_MILD,
+    DEFAULT_THRESHOLD_WARM,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
     PANEL_FRONTEND_PATH,
@@ -314,6 +322,16 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=15)
         _LOGGER.info("Migration to version 15 complete")
+
+    if config_entry.version == 15:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 15 to 16")
+        new_data = {**config_entry.data}
+        new_data.setdefault(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT)
+        new_data.setdefault(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM)
+        new_data.setdefault(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD)
+        new_data.setdefault(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL)
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=16)
+        _LOGGER.info("Migration to version 16 complete")
 
     return True
 

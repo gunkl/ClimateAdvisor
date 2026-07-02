@@ -73,6 +73,10 @@ EXPECTED_KEYS = {
     "ai_investigator_max_tokens",
     "ai_investigator_requests_per_day",
     "override_confirm_seconds",
+    "threshold_hot",
+    "threshold_warm",
+    "threshold_mild",
+    "threshold_cool",
 }
 
 VALID_CATEGORIES = {

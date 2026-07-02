@@ -84,6 +84,10 @@ from .const import (
     CONF_MANUAL_GRACE_PERIOD,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_THRESHOLD_COOL,
+    CONF_THRESHOLD_HOT,
+    CONF_THRESHOLD_MILD,
+    CONF_THRESHOLD_WARM,
     CONF_VACATION_TOGGLE,
     CONF_VACATION_TOGGLE_INVERT,
     CONF_WEATHER_BIAS,
@@ -94,6 +98,10 @@ from .const import (
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
+    DEFAULT_THRESHOLD_COOL,
+    DEFAULT_THRESHOLD_HOT,
+    DEFAULT_THRESHOLD_MILD,
+    DEFAULT_THRESHOLD_WARM,
     DOMAIN,
     ECONOMIZER_EVENING_START_HOUR,
     ECONOMIZER_MORNING_END_HOUR,
@@ -1355,7 +1363,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
         if forecast:
             prev_type = self._current_classification.day_type if self._current_classification else None
-            self._current_classification = classify_day(forecast, previous_day_type=prev_type)
+            _thresh = {
+                "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
+                "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
+                "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
+                "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
+            }
+            self._current_classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
             self._last_outdoor_temp = forecast.current_outdoor_temp
             self._apply_outdoor_windows_gate()
 
@@ -2300,7 +2314,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         prev_type = self._current_classification.day_type if self._current_classification else None
-        classification = classify_day(forecast, previous_day_type=prev_type)
+        _thresh = {
+            "threshold_hot": self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
+            "threshold_warm": self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
+            "threshold_mild": self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
+            "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
+        }
+        classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
         self._current_classification = classification
         self._last_outdoor_temp = forecast.current_outdoor_temp
         self._apply_outdoor_windows_gate()
@@ -5711,7 +5731,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             tomorrow_low=c.tomorrow_low,
             current_outdoor_temp=c.today_low,
         )
-        tomorrow_class = classify_day(tomorrow_forecast)
+        tomorrow_class = classify_day(
+            tomorrow_forecast,
+            threshold_hot=self.config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT),
+            threshold_warm=self.config.get(CONF_THRESHOLD_WARM, DEFAULT_THRESHOLD_WARM),
+            threshold_mild=self.config.get(CONF_THRESHOLD_MILD, DEFAULT_THRESHOLD_MILD),
+            threshold_cool=self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
+        )
 
         return {
             "date": tomorrow_str,

@@ -778,6 +778,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 await coordinator.async_store_investigation_report(final_result)
                 _LOGGER.info("Investigation (streaming) complete")
 
+            await stream_resp.write_eof()
             return stream_resp
 
         result = await coordinator.ai_skills.async_execute(

@@ -880,27 +880,28 @@
         hvacTemps = data.current_setpoint + unitSym;
       }
 
+      const outdoorDisplay = data.outdoor_temp != null ? data.outdoor_temp.toFixed(1) + unitSym : '—';
+      const indoorDisplay = data.indoor_temp != null ? data.indoor_temp.toFixed(1) + unitSym : '—';
+      const trendLabel = data.trend_direction === 'warming' ? 'warming'
+        : data.trend_direction === 'cooling' ? 'cooling' : 'stable';
+
       grid.innerHTML = `
         <div class="status-item">
-          <div class="label">Day Type</div>
-          <div class="value"><span class="badge ${dayType}">${dayType}</span></div>
+          <div class="label">Conditions</div>
+          <div class="value">
+            <span class="badge ${dayType}">${dayType}</span>
+            <span style="margin-left:0.5rem"><span class="trend-arrow">${trendArrow}</span> ${trendLabel} ${(data.trend_magnitude || 0).toFixed(1)}${unitSym}</span>
+            <br><span style="font-size:0.85rem;opacity:0.75">${outdoorDisplay} outdoors</span>
+          </div>
         </div>
         <div class="status-item">
-          <div class="label">Trend</div>
-          <div class="value"><span class="trend-arrow">${trendArrow}</span> ${(data.trend_magnitude || 0).toFixed(1)}${unitSym}</div>
-        </div>
-        <div class="status-item">
-          <div class="label">HVAC Mode</div>
-          <div class="value">${data.hvac_mode || 'unknown'}${hvacTemps ? `<br><span style="font-size:0.8rem;opacity:0.85">${hvacTemps}</span>` : ''}</div>
+          <div class="label">HVAC</div>
+          <div class="value">${data.hvac_mode || 'unknown'}${hvacTemps ? `<br><span style="font-size:0.8rem;opacity:0.85">${hvacTemps}</span>` : ''}<br><span style="font-size:0.85rem;opacity:0.75">${indoorDisplay} indoors</span></div>
         </div>
         <div class="status-item">
           <div class="label">Status</div>
           <div class="value">${data.automation_status || 'unknown'}</div>
           ${data.pause_suppressed_classification ? `<div class="value">Classification suppressed — HVAC held off until windows close</div>` : ''}
-        </div>
-        <div class="status-item">
-          <div class="label">Indoor</div>
-          <div class="value">${data.indoor_temp != null ? data.indoor_temp.toFixed(1) + unitSym : '—'}</div>
         </div>
         <div class="status-item">
           <div class="label">Occupancy</div>

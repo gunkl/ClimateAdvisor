@@ -39,7 +39,7 @@ All 19 view classes set `requires_auth = True`. HA handles token validation befo
 
 | URL | Purpose | Key response fields |
 |---|---|---|
-| `/api/climate_advisor/status` | Current system snapshot | `day_type`, `hvac_mode`, `hvac_action`, `indoor_temp`, `unit`, `automation_status`, `occupancy_mode`, `fan_status`, `contact_status`, `manual_override_active`, `next_action`, `compliance_score` |
+| `/api/climate_advisor/status` | Current system snapshot | `day_type`, `trend_direction`, `trend_magnitude`, `hvac_mode`, `hvac_action`, `indoor_temp`, `outdoor_temp`, `unit`, `automation_status`, `occupancy_mode`, `fan_status`, `contact_status`, `manual_override_active`, `next_action`, `compliance_score` |
 | `/api/climate_advisor/briefing` | Today's daily briefing text | `briefing`, `briefing_sent_today`, `verbosity` |
 | `/api/climate_advisor/chart_data` | Temperature forecast chart data | Delegated to `coordinator.get_chart_data(range_str=..., before_ts=...)`. Query params: `range` (string, default `24h`) and `before_ts` (Unix ms, optional). When `before_ts` is absent the window ends at now (live mode); when present the window is anchored at that point for historical navigation. Response includes `target_band` time-series array, `historical_setpoint`, and `predicted_setpoint` arrays (Issue #151, #160). |
 | `/api/climate_advisor/automation_state` | Full automation engine debug state | Delegated to `coordinator.get_debug_state()` |
@@ -100,7 +100,7 @@ Before returning config values, `ClimateAdvisorConfigView` applies these transfo
 
 - **Primary**: `coordinator.data.get(key, default)` — reads from the last 30-minute update cycle snapshot.
 - **Freshness bypass**: `hass.states.get(climate_entity_id)` is called directly for live HVAC state to avoid serving stale data between update cycles.
-- **Private attribute access**: `api.py` reads these coordinator attributes directly by name: `coordinator._last_briefing`, `coordinator._briefing_sent_today`, `coordinator._occupancy_mode`, `coordinator._event_log`, `coordinator._current_classification`, `coordinator.automation_engine` (and the engine's private fields).
+- **Private attribute access**: `api.py` reads these coordinator attributes directly by name: `coordinator._last_briefing`, `coordinator._briefing_sent_today`, `coordinator._occupancy_mode`, `coordinator._event_log`, `coordinator._current_classification`, `coordinator._last_outdoor_temp`, `coordinator.automation_engine` (and the engine's private fields).
 
 ## Security Notes
 

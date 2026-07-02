@@ -269,7 +269,9 @@ def _simulate_status_get(coordinator):
     data = coordinator.data or {}
     unit = coordinator.config.get("temp_unit", "fahrenheit")
     indoor_temp = coordinator._get_indoor_temp()
+    outdoor_temp = coordinator._last_outdoor_temp
     indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
+    outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
     trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
     return {
         "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
@@ -277,6 +279,7 @@ def _simulate_status_get(coordinator):
         "trend_magnitude": trend_magnitude_display,
         "hvac_mode": "off",
         "indoor_temp": indoor_temp_display,
+        "outdoor_temp": outdoor_temp_display,
         "current_setpoint": None,
         "target_temp_low": None,
         "target_temp_high": None,
@@ -356,7 +359,7 @@ class TestStatusSetpointExtraction:
 class TestStatusViewCelsiusUnit:
     """Status API must convert temperatures and include 'unit' when temp_unit=celsius."""
 
-    def _make_coordinator(self, temp_unit="celsius", indoor_temp=68.0, trend_magnitude=9.0):
+    def _make_coordinator(self, temp_unit="celsius", indoor_temp=68.0, outdoor_temp=86.0, trend_magnitude=9.0):
         coord = MagicMock()
         coord.config = {"temp_unit": temp_unit, "climate_entity": "climate.test"}
         coord.data = {
@@ -367,6 +370,7 @@ class TestStatusViewCelsiusUnit:
             "compliance_score": 1.0,
         }
         coord._get_indoor_temp.return_value = indoor_temp
+        coord._last_outdoor_temp = outdoor_temp
         coord.automation_enabled = True
         coord._occupancy_mode = "home"
         ae = MagicMock()
@@ -403,6 +407,28 @@ class TestStatusViewCelsiusUnit:
         response = _simulate_status_get(coord)
         assert "unit" in response  # KeyError before fix
         assert response["unit"] == "fahrenheit"
+
+    def test_status_celsius_converts_outdoor_temp(self):
+        """outdoor_temp must be in Celsius when unit=celsius configured (Issue #367)."""
+        import pytest
+
+        coord = self._make_coordinator(temp_unit="celsius", outdoor_temp=86.0)
+        response = _simulate_status_get(coord)
+        assert "outdoor_temp" in response
+        assert response["outdoor_temp"] == pytest.approx(30.0, abs=0.1)  # 86°F → 30°C
+
+    def test_status_outdoor_temp_none_when_unavailable(self):
+        """outdoor_temp must be None when coordinator has no outdoor reading (Issue #367)."""
+        coord = self._make_coordinator(temp_unit="fahrenheit", outdoor_temp=None)
+        coord._last_outdoor_temp = None
+        response = _simulate_status_get(coord)
+        assert response["outdoor_temp"] is None
+
+    def test_status_fahrenheit_outdoor_temp_passthrough(self):
+        """outdoor_temp passes through unconverted when unit=fahrenheit (Issue #367)."""
+        coord = self._make_coordinator(temp_unit="fahrenheit", outdoor_temp=92.0)
+        response = _simulate_status_get(coord)
+        assert response["outdoor_temp"] == 92.0
 
 
 class TestLearningViewCelsiusUnit:

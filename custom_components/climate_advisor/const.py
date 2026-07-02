@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.43"
+VERSION = "0.4.44"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.44": [
+        "Feat #367: Status pane Conditions card combines day type badge, trend direction/magnitude,"
+        " and current outdoor temperature into a single card. HVAC Mode card now shows indoor"
+        " temperature inline. Standalone Day Type, Trend, and Indoor cards removed.",
+    ],
     "0.4.43": [
         "Fix #365: Fan status now correctly shows 'running (manual override)' when the user"
         " manually turns on a WHF and CA records it as an override (not adopted as nat-vent)."
@@ -549,6 +554,26 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    367: {
+        "version_fixed": "0.4.44",
+        "title": "Status pane: combined Conditions card + HVAC+indoor card",
+        "scope_covered": (
+            "api.py: outdoor_temp added to status response (from coordinator._last_outdoor_temp,"
+            " converted via from_fahrenheit to display unit, same pattern as indoor_temp). "
+            "frontend/index.html loadStatus(): Day Type + Trend cards replaced by Conditions card"
+            " showing badge, trend arrow/magnitude, and outdoor temp; HVAC Mode card renamed 'HVAC'"
+            " and shows indoor temp inline; standalone Indoor card removed. "
+            "tests/test_api.py: _simulate_status_get helper gains outdoor_temp field;"
+            " _make_coordinator gains outdoor_temp param; 3 new tests for outdoor_temp conversion,"
+            " None handling, and Fahrenheit passthrough. "
+            "docs/rest-api.md: status endpoint field list updated."
+        ),
+        "scope_not_covered": (
+            "nat_vent_active and pause_suppressed_classification remain absent from the status API"
+            " response (pre-existing gap — those fields exist in coordinator.data but were not"
+            " wired into api.py before this PR and are not part of this scope)."
+        ),
+    },
     365: {
         "version_fixed": "0.4.43",
         "title": "_compute_fan_status() showed 'off (manual override)' when fan physically running under override",

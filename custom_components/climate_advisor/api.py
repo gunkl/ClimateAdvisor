@@ -102,8 +102,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             target_temp_high = climate_state.attributes.get("target_temp_high")
 
         indoor_temp = coordinator._get_indoor_temp()
+        outdoor_temp = coordinator._last_outdoor_temp
         unit = coordinator.config.get("temp_unit", "fahrenheit")
         indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
+        outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
         trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
 
         return self.json(
@@ -119,6 +121,7 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "target_temp_low": target_temp_low,
                 "target_temp_high": target_temp_high,
                 ATTR_INDOOR_TEMP: indoor_temp_display,
+                "outdoor_temp": outdoor_temp_display,
                 "unit": unit,
                 "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
                 "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),

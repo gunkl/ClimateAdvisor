@@ -490,8 +490,11 @@
 .tm-health-row-label { color: var(--text-primary, inherit); }
 .tm-health-row-value { color: var(--text-secondary, #666); text-align: right; }
 </style>
+<!-- Hammer.js (MIT) — https://github.com/hammerjs/hammer.js -->
 <script src="hammer.min.js"></script>
+<!-- Chart.js v4 (MIT) — https://github.com/chartjs/Chart.js -->
 <script src="chart.umd.min.js"></script>
+<!-- chartjs-plugin-zoom (MIT) — https://github.com/chartjs/chartjs-plugin-zoom -->
 <script src="chartjs-plugin-zoom.min.js"></script>
 </head>
 <body>
@@ -2693,6 +2696,10 @@
           if (event.type === 'chunk') {
             accumulated += event.text;
             if (streamPre) streamPre.textContent = accumulated;
+            if (accumulated.length === event.text.length) {
+              // First chunk \u2014 hide loading overlay so streaming pre is the visual focus
+              loading.style.display = 'none';
+            }
             status.textContent = 'Receiving response\u2026 (' + accumulated.length + ' chars)';
 
           } else if (event.type === 'done') {
@@ -2714,6 +2721,7 @@
             renderReportInPreview(_currentReport);
             status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
+            break;
 
           } else if (event.type === 'error') {
             throw new Error(event.message || 'Investigation failed');

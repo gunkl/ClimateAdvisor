@@ -163,25 +163,34 @@ _BAND_LOWER_THRESHOLD = {
 }
 
 
-def _should_stick(today_high: float, previous_day_type: str, margin: float) -> bool:
+def _should_stick(
+    today_high: float,
+    previous_day_type: str,
+    margin: float,
+    band_thresholds: dict[str, float] | None = None,
+) -> bool:
     """Return True if the temperature is in the dead zone around a threshold.
 
     When a prior classification exists, the temperature must move beyond
     the threshold by *margin* degrees to justify switching.  This prevents
     bouncing when the forecast fluctuates near a boundary.
+
+    band_thresholds: optional dict mapping day-type → lower threshold (°F).
+    Defaults to the module-level _BAND_LOWER_THRESHOLD when not supplied.
     """
+    thresholds = band_thresholds if band_thresholds is not None else _BAND_LOWER_THRESHOLD
     prev_idx = _DAY_TYPE_ORDER.index(previous_day_type)
 
     # Upper boundary: to move UP, temp must reach next band's threshold + margin
     if prev_idx < len(_DAY_TYPE_ORDER) - 1:
         upper_type = _DAY_TYPE_ORDER[prev_idx + 1]
-        upper_threshold = _BAND_LOWER_THRESHOLD[upper_type]
+        upper_threshold = thresholds[upper_type]
         if today_high >= upper_threshold and today_high < upper_threshold + margin:
             return True
 
     # Lower boundary: to move DOWN, temp must drop below own threshold - margin
     if prev_idx > 0:
-        own_threshold = _BAND_LOWER_THRESHOLD[previous_day_type]
+        own_threshold = thresholds[previous_day_type]
         if today_high < own_threshold and today_high >= own_threshold - margin:
             return True
 
@@ -191,6 +200,11 @@ def _should_stick(today_high: float, previous_day_type: str, margin: float) -> b
 def classify_day(
     forecast: ForecastSnapshot,
     previous_day_type: str | None = None,
+    *,
+    threshold_hot: float = THRESHOLD_HOT,
+    threshold_warm: float = THRESHOLD_WARM,
+    threshold_mild: float = THRESHOLD_MILD,
+    threshold_cool: float = THRESHOLD_COOL,
 ) -> DayClassification:
     """Classify the day type and trend from forecast data.
 
@@ -198,6 +212,10 @@ def classify_day(
         forecast: Current forecast snapshot with today/tomorrow temps.
         previous_day_type: If set, apply hysteresis to prevent threshold
             bouncing when the forecast fluctuates near a boundary.
+        threshold_hot: Forecast high at/above which the day is "hot" (°F).
+        threshold_warm: Forecast high at/above which the day is "warm" (°F).
+        threshold_mild: Forecast high at/above which the day is "mild" (°F).
+        threshold_cool: Forecast high at/above which the day is "cool" (°F).
 
     Returns:
         DayClassification with day type, trend, and recommendations.
@@ -205,14 +223,22 @@ def classify_day(
     today_high = forecast.today_high
     tomorrow_high = forecast.tomorrow_high
 
+    # Per-call band threshold dict for hysteresis (uses caller-supplied values).
+    _band = {
+        DAY_TYPE_COOL: threshold_cool,
+        DAY_TYPE_MILD: threshold_mild,
+        DAY_TYPE_WARM: threshold_warm,
+        DAY_TYPE_HOT: threshold_hot,
+    }
+
     # Classify day type based on today's high
-    if today_high >= THRESHOLD_HOT:
+    if today_high >= threshold_hot:
         day_type = DAY_TYPE_HOT
-    elif today_high >= THRESHOLD_WARM:
+    elif today_high >= threshold_warm:
         day_type = DAY_TYPE_WARM
-    elif today_high >= THRESHOLD_MILD:
+    elif today_high >= threshold_mild:
         day_type = DAY_TYPE_MILD
-    elif today_high >= THRESHOLD_COOL:
+    elif today_high >= threshold_cool:
         day_type = DAY_TYPE_COOL
     else:
         day_type = DAY_TYPE_COLD
@@ -222,7 +248,7 @@ def classify_day(
     if (
         previous_day_type is not None
         and day_type != previous_day_type
-        and _should_stick(today_high, previous_day_type, CLASSIFICATION_HYSTERESIS_F)
+        and _should_stick(today_high, previous_day_type, CLASSIFICATION_HYSTERESIS_F, _band)
     ):
         _LOGGER.debug(
             "Hysteresis — today_high=%.0f°F would be %s but sticking with %s",

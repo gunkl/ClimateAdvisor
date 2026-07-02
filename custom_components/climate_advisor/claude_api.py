@@ -109,7 +109,11 @@ class _BudgetTracker:
 
 
 class ClaudeAPIClient:
-    """Centralized Anthropic Claude API client with rate limiting, circuit breaking, and budget tracking."""
+    """Centralized Anthropic Claude API client with rate limiting, circuit breaking, and budget tracking.
+
+    Networking: uses the official Anthropic Python SDK (AsyncAnthropic) declared as
+    ``anthropic>=0.49.0`` in manifest.json requirements — no raw HTTP client is used.
+    """
 
     def __init__(
         self,

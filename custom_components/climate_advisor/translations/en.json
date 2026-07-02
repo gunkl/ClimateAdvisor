@@ -146,6 +146,7 @@
           "schedule": "Schedule",
           "notifications": "Notifications",
           "advanced": "Learning & Behavior",
+          "classification_thresholds": "Day-Type Thresholds",
           "ai_settings": "AI Settings (Claude)",
           "github_settings": "GitHub Integration",
           "save": "Save & Close"
@@ -323,6 +324,22 @@
           "preheat_safety_margin": "Multiplier applied to model-computed pre-heat time as a buffer (e.g. 1.2 = 20% extra).",
           "max_setback_depth_f": "Largest overnight setback the adaptive engine may compute.",
           "aggressive_savings": "When enabled, Climate Advisor favors energy savings over comfort \u2014 for example, using wider temperature swings and earlier setbacks."
+        }
+      },
+      "classification_thresholds": {
+        "title": "Day-Type Thresholds",
+        "description": "Temperature thresholds Climate Advisor uses to classify each day. Days at or above the Hot threshold run AC; below Cool threshold use heating. Defaults: Hot 85°F (29°C), Warm 75°F (24°C), Mild 60°F (16°C), Cool 45°F (7°C).",
+        "data": {
+          "threshold_hot": "Hot day threshold",
+          "threshold_warm": "Warm day threshold",
+          "threshold_mild": "Mild day threshold",
+          "threshold_cool": "Cool day threshold"
+        },
+        "data_description": {
+          "threshold_hot": "Days with a forecast high at or above this temperature are classified as Hot (AC mode). Default: 85°F / 29°C.",
+          "threshold_warm": "Days with a forecast high at or above this temperature are classified as Warm (windows recommended, no AC). Default: 75°F / 24°C.",
+          "threshold_mild": "Days with a forecast high at or above this temperature are classified as Mild (comfortable, windows open). Default: 60°F / 16°C.",
+          "threshold_cool": "Days with a forecast high at or above this temperature are classified as Cool (heating light). Below this is Cold (full heating). Default: 45°F / 7°C."
         }
       },
       "ai_settings": {

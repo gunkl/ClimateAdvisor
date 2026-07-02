@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from dataclasses import asdict
@@ -225,7 +226,11 @@ class ClimateAdvisorChartDataView(HomeAssistantView):
             except (ValueError, TypeError):
                 before_ts = None
 
-        return self.json(coordinator.get_chart_data(range_str=range_str, before_ts=before_ts))
+        # get_chart_data runs ODE prediction inline — offload to executor to avoid blocking event loop.
+        chart_data = await hass.async_add_executor_job(
+            functools.partial(coordinator.get_chart_data, range_str=range_str, before_ts=before_ts)
+        )
+        return self.json(chart_data)
 
 
 class ClimateAdvisorAutomationStateView(HomeAssistantView):
@@ -773,6 +778,7 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                 await coordinator.async_store_investigation_report(final_result)
                 _LOGGER.info("Investigation (streaming) complete")
 
+            await stream_resp.write_eof()
             return stream_resp
 
         result = await coordinator.ai_skills.async_execute(

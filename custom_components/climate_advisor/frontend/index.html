@@ -2696,7 +2696,10 @@
           try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
           console.log('[CA] SSE event:', event.type, event.type === 'chunk' ? event.text?.length + 'ch' : '');
 
-          if (event.type === 'chunk') {
+          if (event.type === 'status') {
+            loading.textContent = event.text;
+
+          } else if (event.type === 'chunk') {
             accumulated += event.text;
             if (streamPre) streamPre.textContent = accumulated;
             if (accumulated.length === event.text.length) {
@@ -2749,6 +2752,7 @@
     } finally {
       btn.disabled = false;
       btn.textContent = 'Investigate';
+      loading.textContent = 'Generating…';
       loading.style.display = 'none';
     }
   }

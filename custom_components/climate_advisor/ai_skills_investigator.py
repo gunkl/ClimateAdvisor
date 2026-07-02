@@ -190,7 +190,10 @@ async def async_build_investigator_context(
             "",
         ]
 
+    status_callback = kwargs.get("status_callback")
     for provider in providers:
+        if status_callback:
+            await status_callback(f"Loading {provider.name}…")
         try:
             section = await provider.builder(hass, coordinator, **kwargs)
             if section:

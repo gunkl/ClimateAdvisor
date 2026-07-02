@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -173,12 +174,35 @@ class AISkillRegistry:
             yield {"type": "error", "message": f"Unknown skill: {name}"}
             return
 
+        # Run context builder concurrently, streaming status events as providers complete.
+        status_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def _push_status(msg: str) -> None:
+            await status_queue.put(msg)
+
+        context_task = asyncio.create_task(
+            skill.context_builder(hass, coordinator, status_callback=_push_status, **kwargs)
+        )
+        yield {"type": "status", "text": "Gathering system data…"}
+        while not context_task.done():
+            try:
+                msg = await asyncio.wait_for(status_queue.get(), timeout=1.0)
+                yield {"type": "status", "text": msg}
+            except TimeoutError:
+                pass
+
+        # Drain any remaining status messages before the Claude call.
+        while not status_queue.empty():
+            yield {"type": "status", "text": status_queue.get_nowait()}
+
         try:
-            context = await skill.context_builder(hass, coordinator, **kwargs)
+            context = context_task.result()
         except Exception:
             _LOGGER.exception("Failed to build context for skill '%s'", name)
             yield {"type": "error", "message": "Context builder failed"}
             return
+
+        yield {"type": "status", "text": "Sending context to Claude AI…"}
 
         cfg: dict[str, Any] = getattr(coordinator, "config", {}) or {}
         override_model = cfg.get(skill.config_key_model) if skill.config_key_model else None

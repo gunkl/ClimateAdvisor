@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -143,6 +143,81 @@ class AISkillRegistry:
             response.error or "AI request failed and no fallback available",
             input_context=context,
         )
+
+    async def async_execute_streaming(
+        self,
+        name: str,
+        hass: HomeAssistant,
+        coordinator: Any,
+        claude_client: ClaudeAPIClient,
+        **kwargs: Any,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Execute a skill by name, streaming results as SSE-ready dicts.
+
+        Yields dicts with ``type`` key:
+        - ``{"type": "chunk", "text": str}`` — incremental text from the model
+        - ``{"type": "error", "message": str}`` — terminal failure
+        - ``{"type": "done", ...}`` — final structured result (same shape as async_execute)
+
+        Args:
+            name: Registered skill name.
+            hass: Home Assistant instance.
+            coordinator: ClimateAdvisorCoordinator.
+            claude_client: Initialized ClaudeAPIClient.
+            **kwargs: Forwarded to the skill's context_builder.
+
+        """
+        skill = self._skills.get(name)
+        if skill is None:
+            _LOGGER.error("AI skill '%s' not found in registry", name)
+            yield {"type": "error", "message": f"Unknown skill: {name}"}
+            return
+
+        try:
+            context = await skill.context_builder(hass, coordinator, **kwargs)
+        except Exception:
+            _LOGGER.exception("Failed to build context for skill '%s'", name)
+            yield {"type": "error", "message": "Context builder failed"}
+            return
+
+        cfg: dict[str, Any] = getattr(coordinator, "config", {}) or {}
+        override_model = cfg.get(skill.config_key_model) if skill.config_key_model else None
+        override_max_tokens_raw = cfg.get(skill.config_key_max_tokens) if skill.config_key_max_tokens else None
+        override_max_tokens = int(override_max_tokens_raw) if override_max_tokens_raw is not None else None
+        override_reasoning = cfg.get(skill.config_key_reasoning) if skill.config_key_reasoning else None
+
+        full_text = ""
+        try:
+            async for chunk in claude_client.async_request_streaming(
+                system_prompt=skill.system_prompt,
+                user_message=context,
+                triggered_by=skill.triggered_by,
+                model=override_model,
+                max_tokens=override_max_tokens,
+                reasoning_effort=override_reasoning,
+            ):
+                full_text += chunk
+                yield {"type": "chunk", "text": chunk}
+        except Exception as exc:
+            _LOGGER.error("Streaming request failed for skill '%s': %s", name, exc)
+            yield {"type": "error", "message": str(exc)}
+            return
+
+        try:
+            parsed = skill.response_parser(full_text)
+        except Exception:
+            _LOGGER.exception("Failed to parse streaming response for skill '%s'", name)
+            parsed = {}
+
+        yield {
+            "type": "done",
+            "success": True,
+            "source": "ai",
+            "data": parsed,
+            "error": None,
+            "input_context": context,
+            "raw_response": full_text,
+        }
 
 
 def _run_fallback(

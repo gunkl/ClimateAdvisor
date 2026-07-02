@@ -7,6 +7,7 @@ import datetime
 import logging
 import time
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
@@ -293,6 +294,137 @@ class ClaudeAPIClient:
         )
 
         return response
+
+    async def async_request_streaming(
+        self,
+        system_prompt: str,
+        user_message: str,
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        triggered_by: str = "manual",
+    ) -> AsyncIterator[str]:
+        """Stream a Claude API response as text chunks.
+
+        This is an async generator that yields str chunks as they arrive.
+        Pre-flight guards (circuit breaker, rate limit, budget, client) raise
+        RuntimeError on failure — callers should wrap in try/except.
+
+        After all chunks are yielded the method records the request in history,
+        updates budget/rate counters, and resets the circuit breaker on success.
+        Streaming does not retry on error — a single failure increments the
+        circuit-breaker counter and re-raises.
+
+        Args:
+            system_prompt: System-level instructions for the model.
+            user_message: The user turn content.
+            max_tokens: Override the configured max_tokens for this request.
+            temperature: Override the configured temperature for this request.
+            model: Override the configured model for this request.
+            reasoning_effort: Override the configured reasoning effort for this request.
+            triggered_by: "manual" or "auto" — determines rate limit counter.
+
+        Yields:
+            str text chunks from the Claude API stream.
+
+        Raises:
+            RuntimeError: When any pre-flight guard blocks the request.
+
+        """
+        self._reset_daily_counters_if_needed()
+
+        if not self._check_circuit_breaker():
+            raise RuntimeError("Circuit breaker open")
+
+        if not self._check_rate_limit(triggered_by):
+            raise RuntimeError("Rate limit exceeded")
+
+        if not self._check_budget():
+            raise RuntimeError("Monthly budget exceeded")
+
+        if self._client is None:
+            raise RuntimeError("Anthropic client not initialized (missing package or API key)")
+
+        resolved_max_tokens = (
+            max_tokens if max_tokens is not None else self._config.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS)
+        )
+        resolved_temperature = (
+            temperature if temperature is not None else self._config.get(CONF_AI_TEMPERATURE, DEFAULT_AI_TEMPERATURE)
+        )
+        resolved_model = model if model is not None else self._config.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)
+        resolved_reasoning = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else self._config.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT)
+        )
+
+        kwargs: dict[str, Any] = {
+            "model": resolved_model,
+            "max_tokens": resolved_max_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+            "temperature": resolved_temperature,
+        }
+
+        if resolved_reasoning == AI_REASONING_HIGH:
+            budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
+            kwargs["temperature"] = 1
+            if kwargs["max_tokens"] <= budget:
+                kwargs["max_tokens"] = budget + 4096
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+        start_time = time.monotonic()
+        try:
+            async with self._client.messages.stream(**kwargs) as stream:
+                async for chunk in stream.text_stream:
+                    yield chunk
+                final_msg = await stream.get_final_message()
+
+            latency_ms = (time.monotonic() - start_time) * 1000.0
+            input_tokens: int = getattr(final_msg.usage, "input_tokens", 0)
+            output_tokens: int = getattr(final_msg.usage, "output_tokens", 0)
+            estimated_cost = self._estimate_cost(resolved_model, input_tokens, output_tokens)
+
+            # Update counters on success
+            self._circuit_breaker.consecutive_failures = 0
+            if self._circuit_breaker.state != _CB_CLOSED:
+                _LOGGER.info("Circuit breaker reset to closed after successful streaming request")
+            self._circuit_breaker.state = _CB_CLOSED
+            self._budget.monthly_cost += estimated_cost
+            if triggered_by == "auto":
+                self._rate_counters.auto_requests_today += 1
+            else:
+                self._rate_counters.manual_requests_today += 1
+
+            self._total_requests += 1
+            self._last_request_time = time.time()
+
+            self.request_history.append(
+                {
+                    "timestamp": self._last_request_time,
+                    "skill_name": self._extract_skill_name(system_prompt),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "estimated_cost": estimated_cost,
+                    "latency_ms": latency_ms,
+                    "success": True,
+                    "error": None,
+                }
+            )
+
+        except (RateLimitError, APITimeoutError, APIError, Exception):
+            self._circuit_breaker.consecutive_failures += 1
+            self._error_count += 1
+            if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
+                self._circuit_breaker.state = _CB_OPEN
+                self._circuit_breaker.opened_at = time.monotonic()
+                _LOGGER.error(
+                    "Circuit breaker opened after %d consecutive failures",
+                    self._circuit_breaker.consecutive_failures,
+                )
+            raise
 
     async def async_test_connection(self) -> tuple[bool, str]:
         """Validate the configured API key with a minimal API call.

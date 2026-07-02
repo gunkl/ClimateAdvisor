@@ -32,7 +32,9 @@ import pytest  # noqa: E402
 
 from custom_components.climate_advisor.ai_skills_activity import (  # noqa: E402
     _SYSTEM_PROMPT,
-    _format_engine_status_for_ai,
+)
+from custom_components.climate_advisor.ai_skills_context import (  # noqa: E402
+    format_engine_status_for_ai as _format_engine_status_for_ai,
 )
 from custom_components.climate_advisor.const import (  # noqa: E402
     OBS_TYPE_HVAC_HEAT,

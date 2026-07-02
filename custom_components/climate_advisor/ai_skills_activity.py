@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 from .ai_skills import AISkillDefinition, AISkillRegistry
+from .ai_skills_context import format_engine_status_for_ai
 from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_CONTACT_STATUS,
@@ -145,63 +146,6 @@ def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
     except Exception:
         _LOGGER.warning("activity_report: failed to build daily summaries -- skipping")
         return []
-
-
-def _format_engine_status_for_ai(engine_status: dict) -> str:
-    """Format get_engine_status() output as a plain-text table for AI context.
-
-    Returns a multi-line string ready to embed in an AI context block.
-    Each engine appears on one line with activation date, value, confidence,
-    and obs count.  Inactive engines show "(not yet active)".
-    The ODE version and physics_eligible flag appear on the last line.
-    """
-    lines: list[str] = []
-
-    def _engine_line(key: str, label: str, unit: str = "") -> str:
-        info = engine_status.get(key, {})
-        if not isinstance(info, dict) or not info.get("active"):
-            return f"  {label}: (not yet active)"
-        value = info.get("value")
-        conf = info.get("confidence", "")
-        obs = info.get("obs_count", "")
-        since = info.get("since", "")
-        val_str = f"{value:.4f}{unit}" if isinstance(value, float) else str(value)
-        parts = [val_str]
-        if conf:
-            parts.append(conf)
-        if obs:
-            parts.append(f"{obs} obs")
-        if since:
-            parts.append(f"since {since}")
-        detail = ", ".join(str(p) for p in parts)
-        return f"  {label}: ({detail}) [ACTIVE]"
-
-    lines.append(_engine_line("k_passive", "k_passive", " hr^-1"))
-    lines.append(_engine_line("k_solar", "k_solar", " F/hr"))
-    lines.append(_engine_line("solar_phase_offset_h", "solar_phase_offset_h", "h"))
-    lines.append(_engine_line("k_vent_window", "k_vent_window", " hr^-1"))
-
-    # k_active_hvac has a different shape -- values nested under "value": {"heat": ..., "cool": ...}
-    hvac_info = engine_status.get("k_active_hvac", {})
-    if isinstance(hvac_info, dict) and hvac_info.get("active"):
-        _hvac_value = hvac_info.get("value") or {}
-        heat = _hvac_value.get("heat")
-        cool = _hvac_value.get("cool")
-        since = hvac_info.get("since", "")
-        heat_str = f"{heat:.4f}" if isinstance(heat, float) else str(heat)
-        cool_str = f"{cool:.4f}" if isinstance(cool, float) else str(cool)
-        since_str = f", since {since}" if since else ""
-        lines.append(f"  k_active_hvac: heat={heat_str} cool={cool_str} F/hr{since_str} [ACTIVE]")
-    else:
-        lines.append("  k_active_hvac: (not yet active)")
-
-    ode_ver = engine_status.get("ode_version", "unknown")
-    eligible = "YES" if engine_status.get("physics_eligible") else "NO"
-    eligible_reason = engine_status.get("physics_eligible_reason", "")
-    reason_str = f" ({eligible_reason})" if eligible_reason else ""
-    lines.append(f"  ODE: {ode_ver}, eligible: {eligible}{reason_str}")
-
-    return "\n".join(lines)
 
 
 _AUTO_EVENT_TYPES = frozenset(
@@ -1214,7 +1158,7 @@ async def async_build_activity_context(
     engine_status_block = ""
     if hasattr(coordinator, "learning") and hasattr(coordinator.learning, "get_engine_status"):
         try:
-            engine_status_block = _format_engine_status_for_ai(coordinator.learning.get_engine_status())
+            engine_status_block = format_engine_status_for_ai(coordinator.learning.get_engine_status())
         except Exception:
             engine_status_block = "  (unavailable)"
 

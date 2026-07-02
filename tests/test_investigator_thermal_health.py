@@ -215,7 +215,7 @@ class TestThermalPipelineSection:
         hass = _make_hass()
 
         with patch(
-            "custom_components.climate_advisor.ai_skills_investigator.async_build_github_context",
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
             return_value="",
         ):
             ctx = _run(async_build_investigator_context(hass, coord))
@@ -233,7 +233,7 @@ class TestThermalPipelineSection:
         hass = _make_hass()
 
         with patch(
-            "custom_components.climate_advisor.ai_skills_investigator.async_build_github_context",
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
             return_value="",
         ):
             ctx = _run(async_build_investigator_context(hass, coord))
@@ -255,7 +255,7 @@ class TestThermalPipelineSection:
         hass = _make_hass()
 
         with patch(
-            "custom_components.climate_advisor.ai_skills_investigator.async_build_github_context",
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
             return_value="",
         ):
             ctx = _run(async_build_investigator_context(hass, coord))
@@ -284,7 +284,7 @@ class TestThermalPipelineSection:
         hass = _make_hass()
 
         with patch(
-            "custom_components.climate_advisor.ai_skills_investigator.async_build_github_context",
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
             return_value="",
         ):
             ctx = _run(async_build_investigator_context(hass, coord))
@@ -327,7 +327,7 @@ class TestThermalPipelineSection:
         hass = _make_hass()
 
         with patch(
-            "custom_components.climate_advisor.ai_skills_investigator.async_build_github_context",
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
             return_value="",
         ):
             ctx = _run(async_build_investigator_context(hass, coord))
@@ -352,7 +352,7 @@ class TestThermalPipelineSection:
         hass = _make_hass()
 
         with patch(
-            "custom_components.climate_advisor.ai_skills_investigator.async_build_github_context",
+            "custom_components.climate_advisor.ai_skills_context._fetch_github_issues",
             return_value="",
         ):
             ctx = _run(async_build_investigator_context(hass, coord))

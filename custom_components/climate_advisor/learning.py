@@ -2002,3 +2002,13 @@ class LearningEngine:
             "total_manual_overrides": sum(r.get("manual_overrides", 0) for r in recent),
             "pending_suggestions": len(self.generate_suggestions()),
         }
+
+    def get_recent_records(self, n: int) -> list[Any]:
+        """Return the last n daily records. Returns [] if unavailable."""
+        try:
+            records = getattr(self._state, "records", None)
+            if isinstance(records, list):
+                return records[-n:]
+        except Exception:
+            pass
+        return []

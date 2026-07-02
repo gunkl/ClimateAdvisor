@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.47"
+VERSION = "0.4.48"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.48": [
+        "Feat #377: AI investigator context is now built from 11 independently-testable provider"
+        " functions in a new ai_skills_context module — replaces the 773-line monolith with a"
+        " thin orchestrator.",
+        "Feat #377: Focus-aware provider selection — specifying a focus keyword (thermal, fan,"
+        " nat-vent, etc.) skips irrelevant providers, reducing token usage ~40% on focused runs.",
+        "Feat #377: KNOWN_FIXES injected into AI context are now version-scoped — only entries"
+        " that are partially unfixed, just deployed, or not yet deployed are included, eliminating"
+        " stale bug history from mature installations.",
+        "Feat #377: GitHub issues are now cached (24h open, 30d closed) — no live API fetch on"
+        " every investigation; stale cache returned on network error.",
+        "Feat #377: AI investigator now streams — first content visible in ~3–5 seconds via SSE;"
+        " structured sections rendered on completion. Non-streaming callers unchanged.",
+    ],
     "0.4.47": [
         "Feat #374: Nat-vent nighttime cycling now targets sleep_heat (the sleep floor) instead of"
         " stopping at sleep_cool. Fan cycles off at sleep_heat, back on at sleep_heat + 2×hysteresis,"
@@ -572,6 +586,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    377: {
+        "version_fixed": "0.4.48",
+        "title": (
+            "AI investigator redesign — context provider registry, focus filtering, GitHub TTL cache, SSE streaming"
+        ),
+        "scope_covered": (
+            "ai_skills_context.py: 11 provider functions, ContextProviderRegistry, FOCUS_TAG_MAP,"
+            " version-semantic KNOWN_FIXES scoping, two-tier GitHub cache (24h open / 30d closed)."
+            " ai_skills_investigator.py: thin orchestrator replaces 600-line monolith."
+            " ai_skills_activity.py: format_engine_status_for_ai moved to ai_skills_context."
+            " learning.py: get_recent_records() public API."
+            " coordinator.py: GitHub TTL cache fields."
+            " claude_api.py: async_request_streaming() async generator."
+            " ai_skills.py: async_execute_streaming() SSE event generator."
+            " api.py: SSE branch in ClimateAdvisorInvestigateView."
+            " index.html: apiFetchStream() + streaming _runAIInvestigation()."
+        ),
+        "scope_not_covered": (
+            "No tests for the SSE path in api.py (aiohttp StreamResponse requires integration"
+            " environment). Streaming does not support extended thinking (AI_REASONING_HIGH)."
+            " Focus keyword matching is keyword-based substring search, not NLP."
+        ),
+    },
     374: {
         "version_fixed": "0.4.47",
         "title": (

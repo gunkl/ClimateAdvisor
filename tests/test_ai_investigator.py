@@ -977,9 +977,9 @@ class TestFreshHvacRuntime:
         coord._today_record.hvac_runtime_minutes = 5.0
         coord._hvac_on_since = on_since
 
-        import custom_components.climate_advisor.ai_skills_investigator as _inv_mod
+        import custom_components.climate_advisor.ai_skills_context as _ctx_mod
 
-        with patch.object(_inv_mod.dt_util, "now", return_value=now):
+        with patch.object(_ctx_mod.dt_util, "now", return_value=now):
             context = asyncio.run(async_build_investigator_context(hass, coord))
 
         # Expected: 5.0 + 20.0 = 25.0 min
@@ -995,9 +995,9 @@ class TestFreshHvacRuntime:
         coord._today_record.hvac_runtime_minutes = 42.0
         coord._hvac_on_since = None
 
-        import custom_components.climate_advisor.ai_skills_investigator as _inv_mod
+        import custom_components.climate_advisor.ai_skills_context as _ctx_mod
 
-        with patch.object(_inv_mod.dt_util, "now", return_value=now):
+        with patch.object(_ctx_mod.dt_util, "now", return_value=now):
             context = asyncio.run(async_build_investigator_context(hass, coord))
 
         assert "42.0" in context
@@ -1011,9 +1011,9 @@ class TestFreshHvacRuntime:
         coord._today_record = None
         coord._hvac_on_since = None
 
-        import custom_components.climate_advisor.ai_skills_investigator as _inv_mod
+        import custom_components.climate_advisor.ai_skills_context as _ctx_mod
 
-        with patch.object(_inv_mod.dt_util, "now", return_value=now):
+        with patch.object(_ctx_mod.dt_util, "now", return_value=now):
             context = asyncio.run(async_build_investigator_context(hass, coord))
 
         # Stale coordinator.data value (99) must NOT appear; fresh value (0.0) must appear

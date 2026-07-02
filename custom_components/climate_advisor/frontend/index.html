@@ -2698,7 +2698,13 @@
           try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
           console.log('[CA] SSE event:', event.type, event.type === 'chunk' ? event.text?.length + 'ch' : '');
 
-          if (event.type === 'status') {
+          if (event.type === 'thinking') {
+            // Show tail of Claude's reasoning chain so user sees it's actively working
+            if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+            const tail = event.text.replace(/\n+/g, ' ').trim().slice(-180);
+            loading.textContent = 'Thinking… ' + tail;
+
+          } else if (event.type === 'status') {
             loading.textContent = event.text;
             // Restart elapsed-time timer on each status event so it counts from the last status
             if (waitTimer) clearInterval(waitTimer);

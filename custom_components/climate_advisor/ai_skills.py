@@ -212,7 +212,7 @@ class AISkillRegistry:
 
         full_text = ""
         try:
-            async for chunk in claude_client.async_request_streaming(
+            async for event in claude_client.async_request_streaming(
                 system_prompt=skill.system_prompt,
                 user_message=context,
                 triggered_by=skill.triggered_by,
@@ -220,8 +220,13 @@ class AISkillRegistry:
                 max_tokens=override_max_tokens,
                 reasoning_effort=override_reasoning,
             ):
-                full_text += chunk
-                yield {"type": "chunk", "text": chunk}
+                event_type = event.get("type")
+                event_text = event.get("text", "")
+                if event_type == "thinking":
+                    yield {"type": "thinking", "text": event_text}
+                elif event_type == "text":
+                    full_text += event_text
+                    yield {"type": "chunk", "text": event_text}
         except Exception as exc:
             _LOGGER.error("Streaming request failed for skill '%s': %s", name, exc)
             yield {"type": "error", "message": str(exc)}

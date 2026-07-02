@@ -350,14 +350,24 @@ class TestAISkillRegistryExecute:
 # ---------------------------------------------------------------------------
 
 
-def _make_streaming_client(chunks: list[str], raise_on_stream: Exception | None = None) -> MagicMock:
-    """Build a mock client whose async_request_streaming yields given chunks."""
+def _make_streaming_client(
+    chunks: list[str],
+    raise_on_stream: Exception | None = None,
+    thinking_chunks: list[str] | None = None,
+) -> MagicMock:
+    """Build a mock client whose async_request_streaming yields typed event dicts.
+
+    Yields ``{"type": "thinking", ...}`` events for each entry in *thinking_chunks*
+    (if provided) before yielding ``{"type": "text", ...}`` events for *chunks*.
+    """
 
     async def _streaming_gen(*_args, **_kwargs):
         if raise_on_stream is not None:
             raise raise_on_stream
+        for t in thinking_chunks or []:
+            yield {"type": "thinking", "text": t}
         for chunk in chunks:
-            yield chunk
+            yield {"type": "text", "text": chunk}
 
     client = MagicMock()
     client.async_request_streaming = _streaming_gen
@@ -444,3 +454,37 @@ class TestAISkillRegistryStreaming:
         done_events = [e for e in events if e.get("type") == "done"]
         assert error_events, f"Expected error event, got: {events}"
         assert not done_events
+
+    def test_streaming_thinking_events_forwarded(self):
+        """thinking events from the API are forwarded as type='thinking' before chunk events."""
+        registry = AISkillRegistry()
+
+        def parser(raw: str) -> dict:
+            return {"summary": raw}
+
+        skill = _make_skill(name="think_skill", response_parser=parser)
+        registry.register(skill)
+
+        client = _make_streaming_client(["Result"], thinking_chunks=["Step 1", "Step 2"])
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        async def _collect():
+            events = []
+            async for ev in registry.async_execute_streaming("think_skill", hass, coordinator, client):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_collect())
+
+        thinking_events = [e for e in events if e.get("type") == "thinking"]
+        chunk_events = [e for e in events if e.get("type") == "chunk"]
+        done_events = [e for e in events if e.get("type") == "done"]
+
+        assert len(thinking_events) == 2
+        assert thinking_events[0]["text"] == "Step 1"
+        assert thinking_events[1]["text"] == "Step 2"
+        assert len(chunk_events) == 1
+        assert chunk_events[0]["text"] == "Result"
+        # Thinking content must NOT appear in raw_response (only text tokens)
+        assert done_events[0]["raw_response"] == "Result"

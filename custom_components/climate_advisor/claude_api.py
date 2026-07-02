@@ -309,14 +309,17 @@ class ClaudeAPIClient:
         model: str | None = None,
         reasoning_effort: str | None = None,
         triggered_by: str = "manual",
-    ) -> AsyncIterator[str]:
-        """Stream a Claude API response as text chunks.
+    ) -> AsyncIterator[dict[str, str]]:
+        """Stream a Claude API response as typed event dicts.
 
-        This is an async generator that yields str chunks as they arrive.
+        This is an async generator that yields dicts as they arrive:
+        - ``{"type": "text", "text": str}`` — visible response text
+        - ``{"type": "thinking", "text": str}`` — extended-thinking content (if enabled)
+
         Pre-flight guards (circuit breaker, rate limit, budget, client) raise
         RuntimeError on failure — callers should wrap in try/except.
 
-        After all chunks are yielded the method records the request in history,
+        After all events are yielded the method records the request in history,
         updates budget/rate counters, and resets the circuit breaker on success.
         Streaming does not retry on error — a single failure increments the
         circuit-breaker counter and re-raises.
@@ -331,7 +334,7 @@ class ClaudeAPIClient:
             triggered_by: "manual" or "auto" — determines rate limit counter.
 
         Yields:
-            str text chunks from the Claude API stream.
+            ``{"type": "text"|"thinking", "text": str}`` dicts from the Claude API stream.
 
         Raises:
             RuntimeError: When any pre-flight guard blocks the request.
@@ -382,8 +385,17 @@ class ClaudeAPIClient:
         start_time = time.monotonic()
         try:
             async with self._client.messages.stream(**kwargs) as stream:
-                async for chunk in stream.text_stream:
-                    yield chunk
+                async for event in stream:
+                    if getattr(event, "type", None) != "content_block_delta":
+                        continue
+                    delta = getattr(event, "delta", None)
+                    if delta is None:
+                        continue
+                    delta_type = getattr(delta, "type", None)
+                    if delta_type == "thinking_delta":
+                        yield {"type": "thinking", "text": getattr(delta, "thinking", "")}
+                    elif delta_type == "text_delta":
+                        yield {"type": "text", "text": getattr(delta, "text", "")}
                 final_msg = await stream.get_final_message()
 
             latency_ms = (time.monotonic() - start_time) * 1000.0

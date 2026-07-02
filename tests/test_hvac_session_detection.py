@@ -281,6 +281,7 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._pre_cool_trigger_cancel = None
     coord._pre_cool_status = None
     coord._event_log = []
+    coord._last_commanded_fan_state = None
     coord.data = None  # Required by _detect_and_emit_incidents (called from _async_update_data)
     coord._async_update_data = types.MethodType(ClimateAdvisorCoordinator._async_update_data, coord)
     return coord

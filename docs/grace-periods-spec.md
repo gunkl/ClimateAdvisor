@@ -69,6 +69,20 @@
 
 **End condition:** Grace timer fires → `reconcile_fan_on_startup()` is called to re-evaluate the physical fan state. If the fan is still running (edge case), the reconcile step either adopts it as nat-vent or turns it off. If the fan is off (normal case), no action is taken.
 
+#### Fan-Off Grace and Command-Only Mode (Issue #361)
+
+Grace periods apply regardless of `fan_state_feedback` setting. When `fan_state_feedback=False`
+(command-only mode):
+- A fan-off grace period still gates nat-vent re-activation (CA will not re-command the fan
+  ON while grace is active, even without state feedback)
+- A fan-on grace period still prevents CA interference while the user controls the fan
+- The post-grace reconciliation callback fires normally; in command-only mode it resets
+  `_last_commanded_fan_state` to `None` and lets the next `_async_update_data()` cycle
+  assert the desired state
+
+`fan_state_feedback=False` does NOT bypass grace logic — it only changes HOW CA determines
+the fan's current state (command tracking vs. physical state read).
+
 ---
 
 ### Manual Grace

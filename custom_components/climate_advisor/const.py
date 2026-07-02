@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.51"
+VERSION = "0.4.52"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.52": [
+        "Fix #382: AI investigator streaming now shows live text as the LLM responds — chunks are"
+        " flushed to the browser immediately via aiohttp drain(). Previously all chunks buffered"
+        " until EOF, so the user saw no progress until the full report arrived at once.",
+    ],
     "0.4.51": [
         "Fix #380: AI investigator streaming — 'Generating…' loading overlay now hides when the"
         " first chunk arrives so live text is visible. Button and spinner restore immediately on"
@@ -610,6 +615,22 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    382: {
+        "version_fixed": "0.4.52",
+        "title": "AI investigator streaming — no visible progress, all chunks buffered until EOF",
+        "scope_covered": (
+            "api.py: await stream_resp.drain() added after each stream_resp.write() call in the"
+            " SSE write loop — forces aiohttp to flush each chunk to TCP immediately rather than"
+            " accumulating in the protocol write buffer until write_eof()."
+            " api.py: chunk_count DEBUG logging added (first chunk, stream complete)."
+            " index.html: console.log at stream open / first chunk / done for browser DevTools visibility."
+        ),
+        "scope_not_covered": (
+            "Reverse proxy buffering (nginx/HAOS ingress) is not addressed — drain() flushes"
+            " to the HA aiohttp layer; proxies between HA and the browser may still buffer."
+            " The X-Accel-Buffering: no response header is already set to mitigate nginx buffering."
+        ),
+    },
     380: {
         "version_fixed": "0.4.51",
         "title": "AI investigator streaming — no visible progress + stuck 'Generating…' after report renders",

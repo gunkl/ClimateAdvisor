@@ -401,3 +401,114 @@ class TestComputeFanStatusWHF:
 
         result = compute()
         assert result == "inactive"
+
+
+# ---------------------------------------------------------------------------
+# TestComputeFanStatusOverride
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFanStatusOverride:
+    """Tests for _compute_fan_status() override branch fix (Issue #365).
+
+    When _fan_override_active=True and _fan_active=False, the fan may still be
+    physically running (user manually turned it on but CA didn't adopt it as
+    nat-vent). The fix checks physical state to return "running (manual override)"
+    instead of the incorrect "off (manual override)".
+    """
+
+    def _make_override_coord(
+        self,
+        fan_mode: str,
+        fan_active: bool,
+        fan_override_active: bool,
+        physical_on: bool | None,
+        fan_state_entity: str | None = None,
+    ) -> MagicMock:
+        """Build a coord stub wired for _compute_fan_status tests."""
+        config: dict = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_MODE: fan_mode,
+        }
+        if fan_state_entity:
+            config[CONF_FAN_STATE_ENTITY] = fan_state_entity
+
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae.config = {CONF_FAN_MODE: fan_mode}
+        ae._fan_active = fan_active
+        ae._fan_override_active = fan_override_active
+        ae._natural_vent_active = False
+
+        # Stub _get_fan_physical_state to return the desired physical result
+        coord._get_fan_physical_state = MagicMock(return_value=physical_on)
+
+        return coord
+
+    def test_override_active_fan_physically_on_returns_running(self):
+        """_fan_override_active=True, _fan_active=False, physical=on → 'running (manual override)'.
+
+        Scenario: user manually turned on WHF; CA recorded it as a manual override
+        (not adopted as nat-vent). Fan is physically running. Without the fix this
+        returned 'off (manual override)', misleading the occupant.
+        """
+        coord = self._make_override_coord(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            fan_override_active=True,
+            physical_on=True,
+            fan_state_entity="binary_sensor.whf_running",
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+
+        result = method()
+        assert result == "running (manual override)", (
+            f"Expected 'running (manual override)' when fan is physically on under override, got {result!r}"
+        )
+        coord._get_fan_physical_state.assert_called_once()
+
+    def test_override_active_fan_physically_off_returns_off_override(self):
+        """_fan_override_active=True, _fan_active=False, physical=off → 'off (manual override)'.
+
+        Scenario: user turned the WHF on (triggering override), then turned it off
+        before the grace period expired. Override flag is still set, fan is physically off.
+        """
+        coord = self._make_override_coord(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            fan_override_active=True,
+            physical_on=False,
+            fan_state_entity="binary_sensor.whf_running",
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+
+        result = method()
+        assert result == "off (manual override)", (
+            f"Expected 'off (manual override)' when fan is physically off under override, got {result!r}"
+        )
+
+    def test_override_active_fan_active_returns_running_regardless_of_physical(self):
+        """_fan_override_active=True, _fan_active=True → 'running (manual override)'.
+
+        CA owns the fan activation (_fan_active=True); physical state check is
+        not needed and must not be called.
+        """
+        coord = self._make_override_coord(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            fan_override_active=True,
+            physical_on=None,  # should not be consulted
+        )
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+
+        result = method()
+        assert result == "running (manual override)", (
+            f"Expected 'running (manual override)' when _fan_active=True under override, got {result!r}"
+        )
+        coord._get_fan_physical_state.assert_not_called()

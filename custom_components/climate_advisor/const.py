@@ -4,9 +4,14 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.42"
+VERSION = "0.4.43"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.43": [
+        "Fix #365: Fan status now correctly shows 'running (manual override)' when the user"
+        " manually turns on a WHF and CA records it as an override (not adopted as nat-vent)."
+        " Previously showed 'off (manual override)' even though the fan was physically running.",
+    ],
     "0.4.42": [
         "Fix #363: WHF fan status sensor now shows 'running (untracked)' when the whole-house fan is"
         " physically on but CA's flags are clear — reads fan_state_entity (Type 2) or fan_entity"
@@ -544,6 +549,25 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    365: {
+        "version_fixed": "0.4.43",
+        "title": "_compute_fan_status() showed 'off (manual override)' when fan physically running under override",
+        "scope_covered": (
+            "coordinator.py _compute_fan_status() override branch: when _fan_override_active=True"
+            " and _fan_active=False, calls _get_fan_physical_state() for FAN_MODE_WHOLE_HOUSE"
+            " and FAN_MODE_BOTH; returns 'running (manual override)' if physically on,"
+            " 'off (manual override)' if physically off. "
+            "tests/test_whf_dual_entity.py: TestComputeFanStatusOverride — 3 new tests. "
+            "docs/08-COMPUTATION-REFERENCE.md §9d updated."
+        ),
+        "scope_not_covered": (
+            "FAN_MODE_HVAC: no physical-state check added (HVAC fan physical state is read"
+            " from thermostat attributes, not a separate entity; existing ground-truth fallback"
+            " at priority 6 covers the untracked case for HVAC fans). "
+            "Command-only mode (fan_state_feedback=False): _get_fan_physical_state() returns"
+            " None; 'off (manual override)' remains the result."
+        ),
+    },
     363: {
         "version_fixed": "0.4.42",
         "title": "WHF _compute_fan_status() ground-truth fallback for fan_state_entity (Type 2)",

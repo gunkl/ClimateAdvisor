@@ -66,18 +66,21 @@ sufficient — HACS reads from the GitHub Releases API.
 **Rule:** Every version bump that goes to production must have a corresponding GitHub Release
 created via `gh release create` or the GitHub UI.
 
-## README Version Badge
+## README Version Badges
 
-The README version display is a **dynamic shields.io badge** — do not replace it with a
+The README shows two **dynamic shields.io badges** side by side — do not replace either with a
 hardcoded string:
 
 ```markdown
-[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=version&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
+[![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
 ```
 
-This reads the GitHub Releases API at render time and always reflects the latest published
-release without any manual updates. Hardcoded version strings drift (CA was at v0.4.28 in the
-README when the integration was at v0.4.51 — an 18-version gap).
+`Released` reads the GitHub Releases API at render time and reflects the latest published
+release. `Development` reads the `version` field out of `manifest.json` on the default branch,
+so it tracks the bleeding-edge version merged to `main` even before a GitHub Release is cut.
+Hardcoded version strings drift (CA was at v0.4.28 in the README when the integration was at
+v0.4.51 — an 18-version gap).
 
 ## GitHub Actions (CI)
 

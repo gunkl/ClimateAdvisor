@@ -231,10 +231,12 @@ Full spec: `docs/hacs-compliance.md`
 2. **`brand/icon.png`** must remain at the repo root. It is required by HACS (not HA core) and
    provides the store icon. Never delete or move it.
 
-3. **README version is a dynamic badge** — do not replace with a hardcoded string. The badge:
-   `[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=version&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)`
-   reads from GitHub Releases API at render time. Hardcoded strings drift (was 18 versions stale
-   when this rule was added).
+3. **README version is a pair of dynamic badges** — do not replace with a hardcoded string.
+   `Released` reads the GitHub Releases API; `Development` reads `version` from `manifest.json`
+   on `main` (bleeding edge, ahead of the last cut release):
+   `[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)`
+   `[![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)`
+   Hardcoded strings drift (was 18 versions stale when this rule was added).
 
 4. **Every production version bump needs a GitHub Release**, not just a git tag. HACS reads from
    the Releases API.

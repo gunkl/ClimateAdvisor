@@ -2,7 +2,8 @@
 
 An intelligent HVAC management integration that uses weather forecasts, occupancy, and door/window sensors to minimize energy waste while keeping your home comfortable — and learns from your household's behavior over time.
 
-[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=version&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
+[![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
 
 ## Dashboard
 

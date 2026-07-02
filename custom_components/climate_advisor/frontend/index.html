@@ -923,10 +923,24 @@
           <div class="label">Automation Time</div>
           <div class="value">${data.next_automation_time || '\u2014'}</div>
         </div>
+        ${data.whf_status != null ? `
+        <div class="status-item">
+          <div class="label">Fan (WHF)</div>
+          <div class="value">${escapeHtml(String(data.whf_status))}</div>
+        </div>
+        ` : ''}
+        ${data.hvac_fan_status != null ? `
+        <div class="status-item">
+          <div class="label">Fan (HVAC)</div>
+          <div class="value">${escapeHtml(String(data.hvac_fan_status))}</div>
+        </div>
+        ` : ''}
+        ${data.whf_status == null && data.hvac_fan_status == null ? `
         <div class="status-item">
           <div class="label">Fan</div>
-          <div class="value">${data.fan_status || 'disabled'}</div>
+          <div class="value">${escapeHtml(data.fan_status || 'disabled')}</div>
         </div>
+        ` : ''}
         ${data.nat_vent_active ? `
         <div class="status-item">
           <div class="label">Natural Vent</div>

@@ -1500,26 +1500,31 @@ def _make_sleep_ceiling_engine(
 
 
 class TestNatVentSleepCeilingExit:
-    """Issue #370: Priority 0 sleep-ceiling exit in check_natural_vent_conditions().
+    """Issue #371: Priority 0 sleep-ceiling exit REMOVED from check_natural_vent_conditions().
 
-    After handle_bedtime() allows nat-vent to continue past bedtime, the fan should
-    stop once indoor reaches (or is already at) the sleep ceiling. This is a NEW exit
-    path that fires BEFORE the existing comfort-floor exit (Priority 1).
+    Previously (Issue #370) nat-vent stopped when indoor reached sleep_cool during the
+    sleep window. This was wrong — the fan should continue cycling down to sleep_heat
+    (the sleep floor). Priority 0 has been deleted; cycling is now handled entirely by
+    nat_vent_temperature_check() using the sleep-window branch (sleep_heat + hysteresis
+    as the target).
 
-    Occupant experience: the fan runs quietly overnight until the room cools to the
-    sleep temperature, then stops on its own — no compressor needed, minimal noise.
+    Occupant experience: the fan cycles quietly through the night, holding indoor near
+    sleep_heat rather than stopping at sleep_cool — the occupant gets deeper cooling
+    without the AC ever turning on.
     """
 
-    def test_sleep_ceiling_exit_stops_fan_in_sleep_window(self):
-        """Priority 0 fires: indoor 71°F ≤ sleep_cool 72°F, in sleep window → fan off.
+    def test_sleep_ceiling_NOT_exit_at_sleep_cool_in_sleep_window(self):
+        """Priority 0 REMOVED: indoor 71°F ≤ sleep_cool 72°F in sleep window → fan NOT deactivated.
 
-        Occupant experience: the room has reached the sleep target — the fan stops
-        so the occupant sleeps without fan noise, and the thermostat sleep band
-        (already programmed by bedtime) guards against further cooling.
+        Occupant experience: the fan continues cycling to cool the home toward sleep_heat,
+        not just to sleep_cool — free cooling goes further, AC not needed.
         """
         engine = _make_sleep_ceiling_engine(indoor_f=71.0, sleep_cool=72.0, in_sleep_window=True)
         engine._deactivate_fan = AsyncMock()
         engine._async_save_state = AsyncMock()
+        # outdoor must satisfy the outdoor-rise guard too; set it well below indoor
+        engine._last_outdoor_temp = 62.0
+        engine._nat_vent_outdoor_exit_time = None
 
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
@@ -1527,20 +1532,18 @@ class TestNatVentSleepCeilingExit:
         with patch(_DT_NOW_PATH, return_value=_SLEEP_NOW):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        # _deactivate_fan must be called with restore_hvac=False
-        engine._deactivate_fan.assert_called_once()
-        call_kwargs = engine._deactivate_fan.call_args[1]
-        assert call_kwargs.get("restore_hvac") is False, (
-            f"sleep-ceiling exit must pass restore_hvac=False; got: {call_kwargs}"
+        # _deactivate_fan must NOT be called — Priority 0 is gone
+        engine._deactivate_fan.assert_not_called()
+
+        # _natural_vent_active must remain True — session continues cycling
+        assert engine._natural_vent_active is True, (
+            "_natural_vent_active must remain True; Priority 0 exit has been removed"
         )
 
-        # _natural_vent_active must be cleared
-        assert engine._natural_vent_active is False, "_natural_vent_active must be False after sleep-ceiling exit"
-
-        # nat_vent_sleep_ceiling_reached event must be emitted
+        # nat_vent_sleep_ceiling_reached must NOT be emitted
         event_names = [e[0] for e in emitted]
-        assert "nat_vent_sleep_ceiling_reached" in event_names, (
-            f"Expected 'nat_vent_sleep_ceiling_reached'; got: {event_names}"
+        assert "nat_vent_sleep_ceiling_reached" not in event_names, (
+            f"nat_vent_sleep_ceiling_reached must not be emitted (Priority 0 removed); got: {event_names}"
         )
 
     def test_sleep_ceiling_exit_not_fire_outside_sleep_window(self):

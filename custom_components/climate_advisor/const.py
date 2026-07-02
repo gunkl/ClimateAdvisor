@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.46"
+VERSION = "0.4.47"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.47": [
+        "Feat #374: Nat-vent nighttime cycling now targets sleep_heat (the sleep floor) instead of"
+        " stopping at sleep_cool. Fan cycles off at sleep_heat, back on at sleep_heat + 2×hysteresis,"
+        " keeping the home just above the sleep floor without over-cooling.",
+        "Feat #374: Fan events now carry a fan_device field (whf/hvac_fan/both) so logs and the"
+        " activity report distinguish WHF from HVAC fan blower activity.",
+        "Feat #374: Status card now shows separate Fan (WHF) and Fan (HVAC) rows. WHF status"
+        " cross-checks physical state and warns when CA's internal flag disagrees with the device.",
+    ],
     "0.4.46": [
         "Feat #370: Nat-vent (WHF/HVAC fan) now continues past bedtime when outdoor air"
         " is below the sleep target — free cooling closes the gap before handing off to"
@@ -563,6 +572,31 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    374: {
+        "version_fixed": "0.4.47",
+        "title": (
+            "Nat-vent sleep target wrong (stopped at sleep_cool instead of sleep_heat);"
+            " no fan device distinction in events/status"
+        ),
+        "scope_covered": (
+            "automation.py nat_vent_temperature_check(): sleep window now uses sleep_heat+hysteresis as"
+            " cycling target; daytime unchanged (midpoint of comfort band). Priority 0 sleep-ceiling exit"
+            " (nat_vent_sleep_ceiling_reached) removed — session persists through sleep window."
+            " _fan_device_label() helper added; fan_device field injected into nat_vent_fan_on,"
+            " nat_vent_fan_off, fan_activated, fan_deactivated, nat_vent_bedtime_continue events."
+            " coordinator.py _compute_whf_status() and _compute_hvac_fan_status() added as separate"
+            " per-device status methods; _compute_fan_status() cross-checks physical WHF state when"
+            " _fan_active=True and logs WARNING on stale-flag detection."
+            " whf_status and hvac_fan_status added to coordinator data dict and API response."
+            " frontend: dual Fan (WHF) / Fan (HVAC) rows in status card."
+        ),
+        "scope_not_covered": (
+            "Stale _fan_active flag is only detected via physical state cross-check — auto-clearing"
+            " the flag is not implemented (would require a second callback). Multi-zone not covered."
+            " nat_vent_sleep_ceiling_reached event no longer emitted — callers relying on it must"
+            " migrate to nat_vent_fan_off with fan_device field."
+        ),
+    },
     370: {
         "version_fixed": "0.4.46",
         "title": "Bedtime setback + WHF/nat-vent: fan blindly deactivated even when outdoor below sleep target",
@@ -2305,6 +2339,8 @@ ATTR_OCCUPANCY_MODE = "occupancy_mode"
 ATTR_LAST_ACTION_TIME = "last_action_time"
 ATTR_LAST_ACTION_REASON = "last_action_reason"
 ATTR_FAN_STATUS = "fan_status"
+ATTR_WHF_STATUS = "whf_status"
+ATTR_HVAC_FAN_STATUS = "hvac_fan_status"
 ATTR_FAN_RUNTIME = "fan_runtime_minutes"
 ATTR_FAN_OVERRIDE_SINCE = "fan_override_since"
 ATTR_FAN_RUNNING = "fan_running"

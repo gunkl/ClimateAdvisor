@@ -1843,3 +1843,219 @@ class TestFanTurnedOff:
         engine = _make_automation_engine()
         assert hasattr(engine, "_post_grace_fan_check_callback")
         assert engine._post_grace_fan_check_callback is None
+
+
+# ---------------------------------------------------------------------------
+# Dual fan status tests (Issue #374)
+# ---------------------------------------------------------------------------
+
+
+def _make_coordinator_for_fan_status(
+    fan_mode: str,
+    fan_active: bool = False,
+    fan_override_active: bool = False,
+    natural_vent_active: bool = False,
+    physical_state: bool | None = None,
+    climate_fan_mode: str = "auto",
+    climate_hvac_action: str = "",
+):
+    """Build a minimal coordinator stub for testing _compute_whf_status / _compute_hvac_fan_status.
+
+    Uses object.__new__ to bypass DataUpdateCoordinator.__init__, then attaches only the
+    attributes required by the two status methods and _compute_fan_status.
+    """
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord = object.__new__(ClimateAdvisorCoordinator)
+
+    hass = MagicMock()
+    cs = MagicMock()
+    cs.attributes = {"fan_mode": climate_fan_mode, "hvac_action": climate_hvac_action}
+    hass.states.get.return_value = cs
+    coord.hass = hass
+
+    coord.config = {"climate_entity": "climate.thermostat"}
+
+    ae = MagicMock()
+    ae.config = {CONF_FAN_MODE: fan_mode}
+    ae._fan_active = fan_active
+    ae._fan_override_active = fan_override_active
+    ae._natural_vent_active = natural_vent_active
+    coord.automation_engine = ae
+
+    # Wire _get_fan_physical_state to return the supplied physical_state value
+    coord._get_fan_physical_state = MagicMock(return_value=physical_state)
+
+    return coord
+
+
+class TestDualFanStatus:
+    """Tests for _compute_whf_status() and _compute_hvac_fan_status() (Issue #374).
+
+    Both methods are on the coordinator. Tests use a minimal coordinator stub built via
+    object.__new__ to avoid DataUpdateCoordinator.__init__ requirements.
+    """
+
+    def test_whf_status_returns_none_when_not_configured(self):
+        """_compute_whf_status returns None when fan_mode is FAN_MODE_HVAC."""
+        coord = _make_coordinator_for_fan_status(fan_mode=FAN_MODE_HVAC)
+        assert coord._compute_whf_status() is None
+
+    def test_whf_status_returns_none_when_disabled(self):
+        """_compute_whf_status returns None when fan_mode is FAN_MODE_DISABLED."""
+        coord = _make_coordinator_for_fan_status(fan_mode=FAN_MODE_DISABLED)
+        assert coord._compute_whf_status() is None
+
+    def test_hvac_fan_status_returns_none_when_not_configured(self):
+        """_compute_hvac_fan_status returns None when fan_mode is FAN_MODE_WHOLE_HOUSE."""
+        coord = _make_coordinator_for_fan_status(fan_mode=FAN_MODE_WHOLE_HOUSE)
+        assert coord._compute_hvac_fan_status() is None
+
+    def test_hvac_fan_status_returns_none_when_disabled(self):
+        """_compute_hvac_fan_status returns None when fan_mode is FAN_MODE_DISABLED."""
+        coord = _make_coordinator_for_fan_status(fan_mode=FAN_MODE_DISABLED)
+        assert coord._compute_hvac_fan_status() is None
+
+    def test_whf_status_active_when_fan_active_and_physical_on(self):
+        """_compute_whf_status returns 'active' when _fan_active=True and physical state=True."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            physical_state=True,
+        )
+        assert coord._compute_whf_status() == "active"
+
+    def test_whf_status_active_unconfirmed_when_physical_off(self):
+        """_compute_whf_status returns 'active (unconfirmed)' when _fan_active=True but physical=False."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            physical_state=False,
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_whf_status()
+        assert result == "active (unconfirmed)"
+        mock_logger.warning.assert_called_once()
+
+    def test_hvac_fan_status_active_when_fan_active(self):
+        """_compute_hvac_fan_status returns 'active' when _fan_active=True."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=True,
+        )
+        assert coord._compute_hvac_fan_status() == "active"
+
+    def test_both_mode_returns_whf_active_and_hvac_active(self):
+        """FAN_MODE_BOTH: both _compute_whf_status and _compute_hvac_fan_status return 'active'."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_BOTH,
+            fan_active=True,
+            physical_state=True,
+        )
+        assert coord._compute_whf_status() == "active"
+        assert coord._compute_hvac_fan_status() == "active"
+
+    def test_compute_fan_status_warns_on_stale_flag(self):
+        """_compute_fan_status returns 'active (unconfirmed)' + WARNING when _fan_active=True but physical=False."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            physical_state=False,
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_fan_status()
+        assert result == "active (unconfirmed)"
+        mock_logger.warning.assert_called_once()
+
+    def test_whf_status_nat_vent_idle(self):
+        """_compute_whf_status returns 'nat-vent (session active, fan idle)' when nat-vent active, fan idle."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            natural_vent_active=True,
+            physical_state=False,
+        )
+        assert coord._compute_whf_status() == "nat-vent (session active, fan idle)"
+
+    def test_hvac_fan_status_nat_vent_idle(self):
+        """_compute_hvac_fan_status returns 'nat-vent (session active, fan idle)' when nat-vent active, fan idle."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            natural_vent_active=True,
+        )
+        assert coord._compute_hvac_fan_status() == "nat-vent (session active, fan idle)"
+
+    def test_whf_status_running_untracked_when_physical_on(self):
+        """_compute_whf_status returns 'running (untracked)' when physical state=True but CA flags clear."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=True,
+        )
+        assert coord._compute_whf_status() == "running (untracked)"
+
+    def test_hvac_fan_status_running_untracked_via_thermostat(self):
+        """_compute_hvac_fan_status returns 'running (untracked)' when thermostat fan_mode='on'."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            climate_fan_mode="on",
+        )
+        assert coord._compute_hvac_fan_status() == "running (untracked)"
+
+    def test_whf_status_override_running(self):
+        """_compute_whf_status returns 'running (manual override)' when override active and physical on."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_override_active=True,
+            fan_active=False,
+            physical_state=True,
+        )
+        assert coord._compute_whf_status() == "running (manual override)"
+
+    def test_whf_status_override_off(self):
+        """_compute_whf_status returns 'off (manual override)' when override active but physical off."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_override_active=True,
+            fan_active=False,
+            physical_state=False,
+        )
+        assert coord._compute_whf_status() == "off (manual override)"
+
+    def test_hvac_fan_status_override_running(self):
+        """_compute_hvac_fan_status returns 'running (manual override)' when override active and fan active."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_override_active=True,
+            fan_active=True,
+        )
+        assert coord._compute_hvac_fan_status() == "running (manual override)"
+
+    def test_hvac_fan_status_override_off(self):
+        """_compute_hvac_fan_status returns 'off (manual override)' when override active but fan inactive."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_override_active=True,
+            fan_active=False,
+        )
+        assert coord._compute_hvac_fan_status() == "off (manual override)"
+
+    def test_whf_status_inactive(self):
+        """_compute_whf_status returns 'inactive' when all flags clear and physical off."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=False,
+        )
+        assert coord._compute_whf_status() == "inactive"
+
+    def test_hvac_fan_status_inactive(self):
+        """_compute_hvac_fan_status returns 'inactive' when all flags clear and thermostat fan=auto."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            climate_fan_mode="auto",
+        )
+        assert coord._compute_hvac_fan_status() == "inactive"

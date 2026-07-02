@@ -53,6 +53,7 @@ from .const import (
     ATTR_FORECAST_LOW,
     ATTR_FORECAST_LOW_TOMORROW,
     ATTR_HVAC_ACTION,
+    ATTR_HVAC_FAN_STATUS,
     ATTR_HVAC_RUNTIME_TODAY,
     ATTR_INDOOR_TEMP,
     ATTR_LAST_ACTION_REASON,
@@ -65,6 +66,7 @@ from .const import (
     ATTR_OUTDOOR_TEMP,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
+    ATTR_WHF_STATUS,
     CHART_LOG_MAX_DAYS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
@@ -1688,13 +1690,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if _t_mode in ("cool", "heat", "heat_cool")
                 else "thermostat fan schedule/circulation"
             )
+            _fan_mode_val = self.automation_engine.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+            _fan_device = (
+                "whf"
+                if _fan_mode_val == FAN_MODE_WHOLE_HOUSE
+                else "hvac_fan"
+                if _fan_mode_val == FAN_MODE_HVAC
+                else "both"
+                if _fan_mode_val == FAN_MODE_BOTH
+                else "none"
+            )
             self._emit_event(
                 "fan_running_untracked",
-                {"hvac_action": _t_action, "fan_mode": _t_fan, "thermostat_mode": _t_mode, "source": _source},
+                {
+                    "hvac_action": _t_action,
+                    "fan_mode": _t_fan,
+                    "thermostat_mode": _t_mode,
+                    "source": _source,
+                    "fan_device": _fan_device,
+                },
             )
             self._untracked_fan_active = True
         elif not _is_untracked and _untracked_logged:
-            self._emit_event("fan_untracked_cleared", {})
+            _fan_mode_clr = self.automation_engine.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+            _fan_device_clr = (
+                "whf"
+                if _fan_mode_clr == FAN_MODE_WHOLE_HOUSE
+                else "hvac_fan"
+                if _fan_mode_clr == FAN_MODE_HVAC
+                else "both"
+                if _fan_mode_clr == FAN_MODE_BOTH
+                else "none"
+            )
+            self._emit_event("fan_untracked_cleared", {"fan_device": _fan_device_clr})
             self._untracked_fan_active = False
 
         # Issue #359 Fix D: periodic backstop — reconcile an untracked fan at each 30-min cycle.
@@ -1796,6 +1824,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_LAST_ACTION_TIME: self.automation_engine._last_action_time,
             ATTR_LAST_ACTION_REASON: self.automation_engine._last_action_reason,
             ATTR_FAN_STATUS: self._compute_fan_status(),
+            ATTR_WHF_STATUS: self._compute_whf_status(),
+            ATTR_HVAC_FAN_STATUS: self._compute_hvac_fan_status(),
             ATTR_FAN_RUNTIME: self.automation_engine._get_fan_runtime_minutes(),
             ATTR_FAN_OVERRIDE_SINCE: self.automation_engine._fan_override_time,
             ATTR_FAN_RUNNING: fan_running,
@@ -5428,6 +5458,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     return "running (manual override)"
             return "off (manual override)"
         if ae._fan_active:
+            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                physical_on = self._get_fan_physical_state()
+                if physical_on is False:
+                    _LOGGER.warning(
+                        "WHF _fan_active=True but physical state=off — possible stale flag after manual stop"
+                    )
+                    return "active (unconfirmed)"
             return "active"
         # Bug 3 (Issue #321): nat-vent session active but fan is idle between cycles
         if ae._natural_vent_active:
@@ -5448,6 +5485,54 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
                 if thermostat_fan_mode == "on" or thermostat_hvac_action == "fan":
                     return "running (untracked)"
+        return "inactive"
+
+    def _compute_whf_status(self) -> str | None:
+        """Return WHF-specific status, or None when WHF is not configured."""
+        ae = self.automation_engine
+        fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return None
+        if ae._fan_override_active:
+            physical_on = self._get_fan_physical_state()
+            if ae._fan_active or physical_on is True:
+                return "running (manual override)"
+            return "off (manual override)"
+        if ae._fan_active:
+            physical_on = self._get_fan_physical_state()
+            if physical_on is False:
+                _LOGGER.warning("WHF _fan_active=True but physical state=off — possible stale flag after manual stop")
+                return "active (unconfirmed)"
+            return "active"
+        if ae._natural_vent_active:
+            return "nat-vent (session active, fan idle)"
+        physical_on = self._get_fan_physical_state()
+        if physical_on is True:
+            return "running (untracked)"
+        return "inactive"
+
+    def _compute_hvac_fan_status(self) -> str | None:
+        """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured."""
+        ae = self.automation_engine
+        fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_HVAC, FAN_MODE_BOTH):
+            return None
+        if ae._fan_override_active:
+            if ae._fan_active:
+                return "running (manual override)"
+            return "off (manual override)"
+        if ae._fan_active:
+            return "active"
+        if ae._natural_vent_active:
+            return "nat-vent (session active, fan idle)"
+        # Ground-truth fallback via thermostat
+        climate_entity_id = self.config.get("climate_entity", "")
+        cs = self.hass.states.get(climate_entity_id) if climate_entity_id else None
+        if cs is not None:
+            thermostat_fan_mode = cs.attributes.get("fan_mode", "")
+            thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
+            if thermostat_fan_mode == "on" or thermostat_hvac_action == "fan":
+                return "running (untracked)"
         return "inactive"
 
     def _compute_contact_status(self) -> str:

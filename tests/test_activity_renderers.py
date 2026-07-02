@@ -474,6 +474,9 @@ class TestEventRenderersCoverage:
                 "warm_day_setback_applied",
                 "warm_day_state_confirmed",
                 "warm_day_comfort_gap",
+                # Removed in v0.4.47 (Issue #374 — Priority 0 exit deleted).
+                # Kept to render historical events in persisted logs from v0.4.46.
+                "nat_vent_sleep_ceiling_reached",
             }
         )
 

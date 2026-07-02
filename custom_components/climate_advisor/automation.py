@@ -244,6 +244,18 @@ def _in_sleep_window(now: datetime, config: dict) -> bool:
     return now_time >= sleep_t or now_time < wake_t
 
 
+def _fan_device_label(config: dict) -> str:
+    """Return a human-readable device label for the active fan type."""
+    mode = config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+    if mode == FAN_MODE_WHOLE_HOUSE:
+        return "whf"
+    if mode == FAN_MODE_HVAC:
+        return "hvac_fan"
+    if mode == FAN_MODE_BOTH:
+        return "both"
+    return "none"
+
+
 def _parse_forecast_dt(dt_str: str | None) -> datetime | None:
     """Parse an ISO 8601 forecast datetime string; return None on failure."""
     if not dt_str:
@@ -2015,46 +2027,6 @@ class AutomationEngine:
                     )
             return
 
-        # Issue #370: Priority 0 — Sleep-ceiling exit. If nat-vent was allowed to continue
-        # past bedtime (via the continuation gate in handle_bedtime), stop the fan when
-        # indoor reaches the sleep target. Use restore_hvac=False — the sleep band is
-        # already programmed by handle_bedtime() and must not be overwritten.
-        if self._natural_vent_active and _in_sleep_window(dt_util.now(), self.config):
-            _c_sleep = self._current_classification
-            if _c_sleep is not None:
-                _sleep_band_exit = select_comfort_band(
-                    _c_sleep,
-                    self.config,
-                    occupancy_mode=self._occupancy_mode,
-                    in_sleep_window=True,
-                    aggressive_savings=bool(self.config.get("aggressive_savings", False)),
-                )
-                _indoor_sleep = self._get_indoor_temp_f()
-                if _indoor_sleep is not None and _indoor_sleep <= _sleep_band_exit.ceiling:
-                    self._natural_vent_active = False
-                    await self._deactivate_fan(
-                        reason=(
-                            f"nat-vent sleep ceiling reached: indoor {_indoor_sleep:.1f}°F"
-                            f" ≤ sleep_cool {_sleep_band_exit.ceiling:.1f}°F"
-                        ),
-                        restore_hvac=False,
-                    )
-                    _LOGGER.info(
-                        "Nat-vent sleep ceiling reached: indoor=%.1f°F ≤ sleep_cool=%.1f°F"
-                        " — fan deactivated, sleep band retained",
-                        _indoor_sleep,
-                        _sleep_band_exit.ceiling,
-                    )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_sleep_ceiling_reached",
-                            {
-                                "indoor_temp": _indoor_sleep,
-                                "sleep_cool": _sleep_band_exit.ceiling,
-                            },
-                        )
-                    return
-
         # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting
         # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
         # Do NOT enter pause — the house needs to warm up, not wait for nat vent re-evaluation.
@@ -2071,7 +2043,15 @@ class AutomationEngine:
                     indoor,
                     comfort_cool,
                 )
-            if indoor is not None and indoor <= comfort_heat:
+            # During sleep window, lower the hard exit floor to sleep_heat - hysteresis so the
+            # cycling logic can gracefully pause the fan at sleep_heat before the session terminates.
+            _hysteresis_cv = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+            if _in_sleep_window(dt_util.now(), self.config):
+                _sleep_heat_cv = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+                _vent_floor = _sleep_heat_cv - _hysteresis_cv
+            else:
+                _vent_floor = comfort_heat
+            if indoor is not None and indoor <= _vent_floor:
                 self._natural_vent_active = False
                 await self._deactivate_fan(
                     reason=(
@@ -2289,33 +2269,50 @@ class AutomationEngine:
         comfort_heat = float(self.config.get("comfort_heat", 70))
         comfort_cool = float(self.config.get("comfort_cool", 75))
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+        if _in_sleep_window(dt_util.now(), self.config):
+            sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+            nat_vent_target = sleep_heat + hysteresis  # e.g. 65+1=66; off at 65, on at 67
+            # Hard exit floor is one hysteresis step below the cycling-off threshold so the
+            # fan can cycle off gracefully at sleep_heat before the session ends.
+            _hard_floor = sleep_heat - hysteresis  # e.g. 64°F
+            _context = "sleep"
+        else:
+            nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+            _hard_floor = comfort_heat
+            _context = "daytime"
         off_threshold = nat_vent_target - hysteresis
         on_threshold = nat_vent_target + hysteresis
 
-        # Hard floor exit takes priority over cycling — same threshold as check_natural_vent_conditions
-        if current_temp <= comfort_heat:
+        # Hard floor exit takes priority over cycling.
+        # Sleep window: _hard_floor = sleep_heat - hysteresis (one step below cycling-off threshold),
+        # allowing the fan to cycle off gracefully at sleep_heat before the session terminates.
+        # Daytime: _hard_floor = comfort_heat (unchanged behaviour).
+        if current_temp <= _hard_floor:
             _LOGGER.info(
-                "Nat-vent hard exit via temp-check: indoor %.1f°F ≤ comfort_heat %.1f°F — ending session",
+                "Nat-vent hard exit [%s] via temp-check: indoor %.1f°F ≤ floor %.1f°F — ending session",
+                _context,
                 current_temp,
-                comfort_heat,
+                _hard_floor,
             )
             await self._deactivate_fan(reason="nat_vent_floor_exit", restore_hvac=True)
             self._natural_vent_active = False
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "nat_vent_comfort_floor_exit",
-                    {"indoor_temp": current_temp, "comfort_heat": comfort_heat, "source": "temp_check"},
+                    {"indoor_temp": current_temp, "comfort_heat": _hard_floor, "source": "temp_check"},
                 )
             return
 
         if self._fan_active and current_temp <= off_threshold:
             _LOGGER.info(
-                "Nat-vent cycling: indoor %.1f°F ≤ off_threshold %.1f°F"
-                " (target=%.1f) — cycling fan off, session remains active",
-                current_temp,
-                off_threshold,
+                "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
+                " — indoor %.1f°F ≤ off_threshold, cycling fan off, session remains active",
+                _context,
                 nat_vent_target,
+                off_threshold,
+                on_threshold,
+                _fan_device_label(self.config),
+                current_temp,
             )
             # Deactivate the fan without restoring HVAC — session stays alive.
             # emit_event=False: this transition is reported via nat_vent_fan_off below.
@@ -2328,6 +2325,7 @@ class AutomationEngine:
                         "indoor_temp": current_temp,
                         "off_threshold": off_threshold,
                         "target": nat_vent_target,
+                        "fan_device": _fan_device_label(self.config),
                     },
                 )
             return
@@ -2345,10 +2343,14 @@ class AutomationEngine:
                 )
                 return
             _LOGGER.info(
-                "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F (target=%.1f, outdoor=%.1f°F) — cycling fan on",
-                current_temp,
-                on_threshold,
+                "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
+                " — indoor %.1f°F ≥ on_threshold, outdoor=%.1f°F, cycling fan on",
+                _context,
                 nat_vent_target,
+                off_threshold,
+                on_threshold,
+                _fan_device_label(self.config),
+                current_temp,
                 outdoor if outdoor is not None else 0.0,
             )
             # emit_event=False: this transition is reported via nat_vent_fan_on below.
@@ -2360,6 +2362,7 @@ class AutomationEngine:
                         "indoor_temp": current_temp,
                         "on_threshold": on_threshold,
                         "target": nat_vent_target,
+                        "fan_device": _fan_device_label(self.config),
                     },
                 )
 
@@ -3104,6 +3107,7 @@ class AutomationEngine:
                 {
                     "outdoor_temp": _outdoor_370,
                     "sleep_cool": _sleep_band.ceiling,
+                    "fan_device": _fan_device_label(self.config),
                 },
             )
         if self._today_record is not None:
@@ -3447,7 +3451,10 @@ class AutomationEngine:
             self._fan_on_since = dt_util.now().isoformat()
             self._record_action("Fan activated", reason)
             if emit_event and self._emit_event_callback:
-                self._emit_event_callback("fan_activated", {"reason": reason, "fan_mode": fan_mode})
+                self._emit_event_callback(
+                    "fan_activated",
+                    {"reason": reason, "fan_mode": fan_mode, "fan_device": _fan_device_label(self.config)},
+                )
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
             # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard
@@ -3592,7 +3599,10 @@ class AutomationEngine:
             self._cancel_fan_thermo_backstop()
             self._record_action("Fan deactivated", reason)
             if emit_event and self._emit_event_callback:
-                self._emit_event_callback("fan_deactivated", {"reason": reason, "fan_mode": fan_mode})
+                self._emit_event_callback(
+                    "fan_deactivated",
+                    {"reason": reason, "fan_mode": fan_mode, "fan_device": _fan_device_label(self.config)},
+                )
 
             # Post-fan setpoint verify: Ecobee may revert to comfort program after a fan command.
             # Re-assert our setpoint within 30s so the coordinator's _is_recent_temp_command guard

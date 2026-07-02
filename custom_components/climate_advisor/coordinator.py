@@ -5418,7 +5418,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if fan_mode == FAN_MODE_DISABLED:
             return "disabled"
         if ae._fan_override_active:
-            return "running (manual override)" if ae._fan_active else "off (manual override)"
+            if ae._fan_active:
+                return "running (manual override)"
+            # _fan_active=False: check physical state to distinguish
+            # "user is running it" from "user turned it on then off"
+            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                physical_on = self._get_fan_physical_state()
+                if physical_on is True:
+                    return "running (manual override)"
+            return "off (manual override)"
         if ae._fan_active:
             return "active"
         # Bug 3 (Issue #321): nat-vent session active but fan is idle between cycles

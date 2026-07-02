@@ -1386,8 +1386,8 @@ The `sensor.climate_advisor_fan_status` entity exposes one of six state strings:
 | `disabled` | Fan control is not configured (`fan_mode = disabled`) |
 | `inactive` | Fan is off; integration is in control |
 | `active` | Fan is on; integration activated it (nat-vent or economizer) |
-| `running (manual override)` | Fan is on; user turned it on manually — `_fan_override_active=True` |
-| `off (manual override)` | Fan is off; manual override still in effect (user turned off before grace expired) |
+| `running (manual override)` | Fan is physically on under manual override. Two sub-cases: (a) `_fan_active=True` (CA-owned flag set) — CA has a record of activating it; (b) `_fan_active=False` but physical state is on — user-owned run, CA recorded the override but did not adopt it as nat-vent. Both sub-cases report the same sensor value. *(Issue #365)* |
+| `off (manual override)` | `_fan_override_active=True` and `_fan_active=False` and physical state is off (or fan_mode is not WHF/BOTH). Override still in effect but the fan has been turned off before grace expired. *(Issue #365)* |
 | `running (untracked)` | Fan is physically running but `_fan_active=False`. Detection path depends on fan mode: **HVAC/Both** — thermostat reports `fan_mode=on` or `hvac_action=fan`; **WHF/Both** — `_get_fan_physical_state()` reads `fan_state_entity` (Type 2) or `fan_entity` (Type 1). Typical after HA restart or user-initiated run from thermostat/wall switch. Returns `"inactive"` instead when `fan_state_feedback=False` (command-only mode, no physical feedback sensor). *(WHF fallback added Issue #363.)* |
 
 The sensor also exposes these attributes:

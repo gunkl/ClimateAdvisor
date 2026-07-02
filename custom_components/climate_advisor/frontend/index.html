@@ -2682,6 +2682,7 @@
 
       while (true) {
         const { done, value } = await reader.read();
+        console.log('[CA] read():', done ? 'DONE' : (value?.length + ' bytes'));
         if (done) break;
         sseBuffer += decoder.decode(value, { stream: true });
 
@@ -2693,6 +2694,7 @@
           if (!raw.startsWith('data: ')) continue;
           let event;
           try { event = JSON.parse(raw.slice(6)); } catch (_) { continue; }
+          console.log('[CA] SSE event:', event.type, event.type === 'chunk' ? event.text?.length + 'ch' : '');
 
           if (event.type === 'chunk') {
             accumulated += event.text;

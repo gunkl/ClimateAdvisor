@@ -30,7 +30,13 @@ if "homeassistant" not in sys.modules:
 
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 28, 8, 0, 0)
 
-from custom_components.climate_advisor.const import CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY  # noqa: E402
+from custom_components.climate_advisor.const import (  # noqa: E402
+    CONF_FAN_ENTITY,
+    CONF_FAN_MODE,
+    CONF_FAN_STATE_ENTITY,
+    CONF_FAN_STATE_FEEDBACK,
+    FAN_MODE_WHOLE_HOUSE,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -273,3 +279,125 @@ class TestWHFDualEntity:
 
         ae.on_fan_turned_off.assert_called_once()
         ae.handle_fan_manual_override.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestComputeFanStatusWHF
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFanStatusWHF:
+    """Tests for WHF ground-truth fallback in _compute_fan_status() (Issue #363)."""
+
+    def _make_whf_coord(self, config: dict) -> MagicMock:
+        """Build a coord stub for _compute_fan_status tests with CA flags all clear."""
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_active = False
+        ae._fan_override_active = False
+        ae._natural_vent_active = False
+        ae.config = config
+        return coord
+
+    def test_type2_status_running_untracked_when_state_entity_on(self):
+        """Type 2: binary_sensor on + CA flags clear → 'running (untracked)'."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = self._make_whf_coord(config)
+
+        def _states_get(entity_id):
+            if entity_id == "binary_sensor.whf_running":
+                return _make_fake_state("on")
+            if entity_id == "switch.whf_command":
+                return _make_fake_state("off")
+            return None
+
+        coord.hass.states.get = MagicMock(side_effect=_states_get)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        compute = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+        get_physical = types.MethodType(mod.ClimateAdvisorCoordinator._get_fan_physical_state, coord)
+        feedback_enabled = types.MethodType(mod.ClimateAdvisorCoordinator._fan_state_feedback_enabled, coord)
+        coord._compute_fan_status = compute
+        coord._get_fan_physical_state = get_physical
+        coord._fan_state_feedback_enabled = feedback_enabled
+
+        result = compute()
+        assert result == "running (untracked)"
+
+    def test_type2_status_inactive_when_state_entity_off(self):
+        """Type 2: binary_sensor off + CA flags clear → 'inactive'."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = self._make_whf_coord(config)
+
+        def _states_get(entity_id):
+            if entity_id == "binary_sensor.whf_running":
+                return _make_fake_state("off")
+            return _make_fake_state("off")
+
+        coord.hass.states.get = MagicMock(side_effect=_states_get)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        compute = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+        get_physical = types.MethodType(mod.ClimateAdvisorCoordinator._get_fan_physical_state, coord)
+        feedback_enabled = types.MethodType(mod.ClimateAdvisorCoordinator._fan_state_feedback_enabled, coord)
+        coord._compute_fan_status = compute
+        coord._get_fan_physical_state = get_physical
+        coord._fan_state_feedback_enabled = feedback_enabled
+
+        result = compute()
+        assert result == "inactive"
+
+    def test_type1_status_running_untracked_when_fan_entity_on(self):
+        """Type 1 (no fan_state_entity): fan_entity on + CA flags clear → 'running (untracked)'."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_STATE_FEEDBACK: True,
+        }
+        coord = self._make_whf_coord(config)
+
+        coord.hass.states.get = MagicMock(return_value=_make_fake_state("on"))
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        compute = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+        get_physical = types.MethodType(mod.ClimateAdvisorCoordinator._get_fan_physical_state, coord)
+        feedback_enabled = types.MethodType(mod.ClimateAdvisorCoordinator._fan_state_feedback_enabled, coord)
+        coord._compute_fan_status = compute
+        coord._get_fan_physical_state = get_physical
+        coord._fan_state_feedback_enabled = feedback_enabled
+
+        result = compute()
+        assert result == "running (untracked)"
+
+    def test_command_only_mode_returns_inactive(self):
+        """command-only mode (fan_state_feedback=False): _get_fan_physical_state returns None → 'inactive'."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            CONF_FAN_STATE_FEEDBACK: False,
+        }
+        coord = self._make_whf_coord(config)
+
+        # fan_entity appears on, but feedback is disabled — should not count as running
+        coord.hass.states.get = MagicMock(return_value=_make_fake_state("on"))
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        compute = types.MethodType(mod.ClimateAdvisorCoordinator._compute_fan_status, coord)
+        get_physical = types.MethodType(mod.ClimateAdvisorCoordinator._get_fan_physical_state, coord)
+        feedback_enabled = types.MethodType(mod.ClimateAdvisorCoordinator._fan_state_feedback_enabled, coord)
+        coord._compute_fan_status = compute
+        coord._get_fan_physical_state = get_physical
+        coord._fan_state_feedback_enabled = feedback_enabled
+
+        result = compute()
+        assert result == "inactive"

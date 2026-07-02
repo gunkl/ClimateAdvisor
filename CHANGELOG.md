@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.4.54] — 2026-07-02
+
+- Fix #388: Climate Advisor was missing from the Integrations page in Settings → Devices & Services — v0.4.53 set manifest.json integration_type to 'helper', which Home Assistant's frontend excludes from the Integrations dashboard and routes to the Helpers tab instead. Corrected to 'service', the accurate HA taxonomy value for a full custom integration.
+
 ## [0.4.53] — 2026-07-02
 
 - Feat #384: HACS compliance — integration_type field added to manifest, dynamic README version badge replaces hardcoded string, state file permissions hardened (0o600), HACS knowledge base added to docs.

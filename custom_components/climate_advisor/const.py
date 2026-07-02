@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.53"
+VERSION = "0.4.54"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.54": [
+        "Fix #388: Climate Advisor was missing from the Integrations page in Settings → Devices &"
+        " Services — v0.4.53 set manifest.json integration_type to 'helper', which Home Assistant's"
+        " frontend excludes from the Integrations dashboard and routes to the Helpers tab instead."
+        " Corrected to 'service', the accurate HA taxonomy value for a full custom integration.",
+    ],
     "0.4.53": [
         "Feat #384: HACS compliance — integration_type field added to manifest, dynamic README version"
         " badge replaces hardcoded string, state file permissions hardened (0o600), HACS knowledge"
@@ -620,6 +626,22 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    388: {
+        "version_fixed": "0.4.54",
+        "title": "Integration missing from Settings → Devices & Services → Integrations page",
+        "scope_covered": (
+            "manifest.json integration_type corrected from 'helper' to 'service'. HA's frontend"
+            " (ha-config-integrations.ts) subscribes to config entries with"
+            " type_filter=['device','hub','service','hardware'] for the Integrations dashboard —"
+            " 'helper' is excluded from that query and routed to the separate Helpers tab instead."
+            " docs/hacs-compliance.md and CLAUDE.md HACS Compliance Requirements updated to match."
+        ),
+        "scope_not_covered": (
+            "Users who already have the v0.4.53 entry showing under the Helpers tab may need to"
+            " restart Home Assistant after updating for the entry to reappear under Integrations;"
+            " no automatic migration moves it back without a restart."
+        ),
+    },
     384: {
         "version_fixed": "0.4.53",
         "title": "HACS compliance — integration_type, dynamic README badge, state permissions, knowledge base",

@@ -7,15 +7,23 @@ This document captures all requirements for ClimateAdvisor to remain compliant w
 
 ## Integration Type
 
-`manifest.json` must contain `"integration_type": "helper"`.
+`manifest.json` must contain `"integration_type": "service"`.
 
-**Why `helper`:**
-- HA docs define `helper` as "provides an entity to help the user with automations like input
-  boolean, derivative or group"
-- Climate Advisor assists users with HVAC automation — it is an automation helper that sits above
-  the thermostat and climate entities rather than a hardware hub or cloud service in its own right.
+**Why `service`, not `helper` (Issue #388):**
+- HA docs define `service` as "provides a single service, like DuckDNS or AdGuard" and `helper` as
+  "provides an entity to help the user with automations like input_boolean, derivative or group."
+  Climate Advisor is a full custom integration with its own config entry, coordinator, devices,
+  sensors, and API — it matches `service`, not the lightweight helper-entity category.
+- v0.4.53 briefly set this to `"helper"` on the theory that CA "helps" the user with HVAC
+  automation — a category mistake conflating the plain-English word with HA's specific taxonomy.
+  HA's frontend (`ha-config-integrations.ts`) subscribes to config entries for the Settings →
+  Devices & Services → **Integrations** dashboard with
+  `type_filter: ["device", "hub", "service", "hardware"]` — `"helper"` is excluded from that
+  query entirely and routed instead to the separate **Helpers** tab
+  (`ha-config-helpers.ts` dynamically includes any manifest with `integration_type === "helper"`).
+  This made CA disappear from the Integrations page for every installed user. Fixed in v0.4.54.
 
-**Rule:** Never change `integration_type` away from `"helper"` without updating this doc.
+**Rule:** Never change `integration_type` away from `"service"` without updating this doc.
 
 ## manifest.json Required Fields
 
@@ -30,7 +38,7 @@ any human reviewer sees the PR.
 | `config_flow` | Yes | `true` | All CA config is via config flow |
 | `dependencies` | Yes | `["weather", "climate", "http"]` | Required HA integrations |
 | `documentation` | Yes | GitHub repo URL | Must resolve to a real page |
-| `integration_type` | Yes | `"helper"` | See section above — do not change |
+| `integration_type` | Yes | `"service"` | See section above — do not change |
 | `iot_class` | Yes | `"local_polling"` | CA polls local HA entities |
 | `issue_tracker` | Yes | GitHub issues URL | Must resolve to real issues page |
 | `requirements` | Yes | `["anthropic>=0.49.0"]` | pip packages |

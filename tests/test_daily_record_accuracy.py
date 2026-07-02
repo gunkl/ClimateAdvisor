@@ -445,6 +445,7 @@ class TestDailyRecordBriefingPreservation:
         hass.services = MagicMock()
         hass.services.async_call = AsyncMock()
         hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+        hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
         coord.hass = hass
 
         # Pre-restart accumulated record — date matches patched dt_util.now() "2026-04-05"
@@ -521,6 +522,7 @@ class TestDailyRecordBriefingPreservation:
         hass.services = MagicMock()
         hass.services.async_call = AsyncMock()
         hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+        hass.async_add_executor_job = AsyncMock(side_effect=lambda fn: fn())
         coord.hass = hass
 
         # Yesterday's record — different date

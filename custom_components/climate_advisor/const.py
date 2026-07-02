@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.48"
+VERSION = "0.4.49"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.49": [
+        "Fix #376: ODE/OLS prediction math (_build_predicted_indoor_future) now runs in a thread-pool"
+        " executor instead of directly on the HA event loop — eliminates periodic event-loop blocking"
+        " on every coordinator refresh cycle and morning briefing.",
+        "Fix #376: Chart data API endpoint (get_chart_data) also offloaded to executor — same ODE"
+        " computation ran inline on every chart panel load.",
+        "Fix #376: HACS compliance — official Anthropic SDK usage documented in ClaudeAPIClient"
+        " docstring; bundled JS libraries (Chart.js, Hammer.js, chartjs-plugin-zoom) attributed"
+        " with upstream URLs in index.html.",
+    ],
     "0.4.48": [
         "Feat #377: AI investigator context is now built from 11 independently-testable provider"
         " functions in a new ai_skills_context module — replaces the 773-line monolith with a"
@@ -586,6 +596,25 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    376: {
+        "version_fixed": "0.4.49",
+        "title": "HACS compliance: ODE executor offload + SDK attribution + JS library attribution",
+        "scope_covered": (
+            "coordinator.py _async_update_data() and _async_send_briefing(): "
+            "_build_predicted_indoor_future() wrapped in await hass.async_add_executor_job(functools.partial(...))."
+            " api.py ClimateAdvisorChartDataView.get(): coordinator.get_chart_data() offloaded via executor."
+            " claude_api.py ClaudeAPIClient docstring: official Anthropic SDK (AsyncAnthropic) use documented."
+            " frontend/index.html: Chart.js, Hammer.js, chartjs-plugin-zoom attributed with upstream URLs."
+            " CLAUDE.md: Thread-Safety Requirements section added documenting the executor offload rule."
+            " tests/test_executor_offload.py: AST regression tests for all three offload callsites."
+        ),
+        "scope_not_covered": (
+            "Stage 3 (classification threshold configurability) is a separate PR (v0.4.50)."
+            " get_chart_data() still calls self.learning.get_thermal_model() + chart_log.get_entries()"
+            " synchronously inside the executor — these are I/O and could be further optimized,"
+            " but are already off the event loop after this fix."
+        ),
+    },
     377: {
         "version_fixed": "0.4.48",
         "title": (

@@ -148,6 +148,37 @@ Any automation phase that changes the thermostat setpoint (even temporarily) MUS
 
 **Violation protocol**: Same as Security — stop, flag, and ask before shipping if a proposed feature lacks logging, status page wiring, or chart coverage.
 
+### Thread-Safety Requirements (CRITICAL)
+
+**Decision**: Any heavy synchronous computation called from an `async` method MUST be offloaded to a thread-pool executor via `await hass.async_add_executor_job()`. Blocking the HA event loop with CPU-bound work causes event loop jitter and can trigger HA watchdog restarts.
+
+#### Rule
+
+Before calling a function from inside an `async def` method, ask: **"Does this run more than ~10 ms of synchronous Python?"** If yes, offload it:
+
+```python
+import functools
+
+result = await self.hass.async_add_executor_job(
+    functools.partial(heavy_sync_function, arg1, arg2, keyword=value)
+)
+```
+
+**Capture all arguments in the event loop thread** (i.e., evaluate `self.*` attributes and helper calls like `self._get_indoor_temp()` before `functools.partial`, not inside the executor). The executor runs the partial with no additional arguments.
+
+#### Canonical Examples
+
+- `_build_predicted_indoor_future()` in `coordinator.py` — ODE integration + OLS math (~400 lines). Called from `_async_update_data()` and `_async_send_briefing()` via executor. Fixed in Issue #376.
+- OLS regression functions in `learning.py` (`compute_k_passive`, `compute_k_active`, etc.) — called from synchronous commit helpers that are themselves invoked via `async_add_executor_job`. Already correct.
+
+#### What Does NOT Need Offloading
+
+- Simple dict lookups, attribute reads, string formatting — these complete in microseconds.
+- Coroutine calls (`await some_async_fn()`) — already non-blocking by definition.
+- I/O already wrapped in `async_add_executor_job` (file reads, DB writes) — do not double-wrap.
+
+**Violation protocol**: Same as Security — stop, flag, and ask before shipping new CPU-heavy code that runs synchronously inside an `async` method.
+
 ### Security Requirements (CRITICAL)
 
 **Decision**: All code written for Climate Advisor MUST follow these security rules. They apply to the integration, deployment tools, and tests.

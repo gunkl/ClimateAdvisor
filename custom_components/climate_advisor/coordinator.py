@@ -5402,6 +5402,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return "disabled"
         # Bug 1 (Issue #321): Surface startup coalescing window in status
         if self._startup_coalesce_active:
+            # Issue #396: the coalesce check only runs once weather data is available
+            # (it lives inside `if forecast:` in _async_update_data()) — if the 5-min
+            # timer has already fired but classification still isn't set, the real
+            # blocker is the weather entity, not coalescing itself. Without this
+            # distinction the status card says "waiting for coalescing" indefinitely
+            # with no clue that the actual cause is a weather integration that hasn't
+            # come back after restart.
+            if self._startup_timer_fired and self._current_classification is None:
+                return "starting — waiting for weather data"
             return "starting — initializing"
         # Check if windows are open during a planned window period (not a pause)
         if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():

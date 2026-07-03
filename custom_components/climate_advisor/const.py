@@ -4,18 +4,26 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.57"
+VERSION = "0.4.58"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.58": [
+        "Fix #396: The status card could show 'waiting for coalescing' indefinitely after an HA"
+        " restart with no clue why. Diagnostics deployed to confirm the cause ruled out the #392"
+        " decision lock (confirmed live: nothing was holding it) — the real blocker is that the"
+        " coalesce check only runs once the weather entity is available, and that entity can stay"
+        " 'unavailable' for a long time after restart before the weather integration reports back"
+        " in. The status card now says 'starting — waiting for weather data' in that specific case"
+        " instead of the misleading generic 'waiting for coalescing', so this is diagnosable from"
+        " the dashboard alone going forward.",
+    ],
     "0.4.57": [
-        "Fix #396: Added diagnostics to pinpoint a startup-coalescing regression introduced by"
-        " #392's automation decision lock — after that fix, the status card could show 'waiting"
-        " for coalescing' indefinitely after a restart, with no way to tell what was stuck. The"
-        " decision lock now tracks and logs which method holds it and for how long, with"
-        " checkpoint logging through the coalesce call chain and a new decision_lock_holder /"
-        " decision_lock_held_seconds status field — the next occurrence will name the exact stuck"
-        " step in the logs and dashboard instead of another blind investigation. This is"
-        " diagnostics only; the underlying hang itself is not yet confirmed fixed.",
+        "Fix #396: Added diagnostics to pinpoint a startup-coalescing regression — after #392's"
+        " automation decision lock shipped, the status card could show 'waiting for coalescing'"
+        " indefinitely after a restart, with no way to tell what was stuck. The decision lock now"
+        " tracks and logs which method holds it and for how long, with checkpoint logging through"
+        " the coalesce call chain and a new decision_lock_holder / decision_lock_held_seconds"
+        " status field.",
     ],
     "0.4.56": [
         "Fix #392: Whole-house fan (WHF) and AC could fight each other — the ODE ceiling guard"
@@ -658,31 +666,34 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     396: {
-        "version_fixed": "0.4.57",
+        "version_fixed": "0.4.58",
         "title": (
-            "Startup coalescing hangs indefinitely after #392's decision lock"
-            " — diagnostics only, root cause not yet confirmed"
+            "Startup coalescing hangs indefinitely after restart — status card gave no clue"
+            " it was actually waiting on the weather entity, not stuck on #392's decision lock"
         ),
         "scope_covered": (
-            "automation.py: added _decision_pass(), an async context manager wrapping all 6"
-            " decision-lock entry points (apply_classification, handle_door_window_open,"
-            " handle_all_doors_windows_closed, check_natural_vent_conditions,"
-            " _re_pause_for_open_sensor, nat_vent_temperature_check). Tracks"
-            " _decision_lock_holder (method name) and _decision_lock_held_since (timestamp),"
-            " logs DEBUG on wait-start/acquire/release with wait and hold durations."
-            " coordinator.py: added '[coalesce-diag]' DEBUG checkpoint logging through the full"
-            " suspect call chain in _async_update_data() and _do_startup_coalesce() — before/after"
-            " every automation_engine call and the coalesce condition check's actual boolean"
-            " values — plus new decision_lock_holder / decision_lock_held_seconds fields on the"
-            " status API alongside startup_coalesce_active, so a stuck lock is visible on the"
-            " dashboard, not just in backend logs."
+            "Diagnostics (0.4.57): automation.py added _decision_pass(), an async context manager"
+            " wrapping all 6 decision-lock entry points, tracking _decision_lock_holder /"
+            " _decision_lock_held_since with DEBUG logging on wait/acquire/release."
+            " coordinator.py added '[coalesce-diag]' checkpoint logging through the coalesce call"
+            " chain, plus decision_lock_holder / decision_lock_held_seconds status API fields."
+            " Root cause confirmed (0.4.58): querying decision_lock_holder live on a stuck instance"
+            " showed null — the #392 lock was never the cause. The real mechanism: the coalesce"
+            " check in _async_update_data() lives entirely inside `if forecast:`, so it never runs"
+            " while weather.home stays 'unavailable' after restart (a pre-existing conditional"
+            " structure, not something #392 introduced). _compute_automation_status() now returns"
+            " 'starting — waiting for weather data' instead of the generic 'starting —"
+            " initializing' when the 5-minute timer has fired but classification is still unset,"
+            " so this specific case is diagnosable from the status card alone."
         ),
         "scope_not_covered": (
-            "This is diagnostics only — no behavior change, and the actual root cause of the"
-            " coalescing hang is NOT yet confirmed or fixed. The next occurrence (deliberately"
-            " reproduced by restarting HA after this deploys) will show, via the new checkpoint"
-            " logs and decision_lock_holder status field, exactly which await never returns. The"
-            " real fix is a follow-up once that evidence is in hand — see Issue #396."
+            "This does not change how long CA waits for weather data or add a hard fallback if the"
+            " weather entity never recovers (existing retry-then-30-min-poll behavior is"
+            " unchanged) — it only makes the wait accurately labeled instead of silently generic."
+            " Whether the user's weather integration itself needs investigation (why it didn't"
+            " report back in after restart) is a separate, not-yet-investigated question — this"
+            " fix addresses the misleading status message CA showed while that was happening, not"
+            " the weather integration's own recovery time."
         ),
     },
     392: {

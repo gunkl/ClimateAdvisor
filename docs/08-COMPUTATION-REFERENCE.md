@@ -1671,6 +1671,17 @@ API (`coordinator.py`, alongside `startup_coalesce_active`) as `decision_lock_ho
 further detail. This is purely additive observability; it does not change which method acquires the
 lock or when.
 
+**Root cause confirmed NOT the lock (Issue #396 resolution):** deploying this instrumentation and
+querying `decision_lock_holder` live on a stuck instance showed it was `null` — nothing was holding
+the lock. The actual cause: the coalesce check in `_async_update_data()` lives entirely inside `if
+forecast:`, so it never runs at all while the weather entity is `unavailable` after a restart
+(`_get_forecast()` returns falsy, `_current_classification` stays `None`). `_compute_automation_status()`
+now distinguishes this: if `_startup_timer_fired` is `True` (the 5-minute suppression window has
+elapsed) but `_current_classification` is still `None`, the status returns `"starting — waiting for
+weather data"` instead of the generic `"starting — initializing"` — so this specific failure mode is
+diagnosable from the status card alone next time, without needing the lock instrumentation at all.
+See `_compute_automation_status()` in `coordinator.py`.
+
 **Test coverage:** `tests/test_nat_vent_activation.py::TestDecisionLockHolderTracking` — holder set
 during a pass and cleared after, cleared even when the pass body raises, and a second (waiting) pass
 can see the first pass's holder name while blocked.

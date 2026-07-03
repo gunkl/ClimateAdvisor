@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.4.58] — 2026-07-02
+
+- Fix #396: The status card could show "waiting for coalescing" indefinitely after an HA restart with no clue why. Live diagnostics confirmed the #392 decision lock was never the cause (nothing was holding it) — the real blocker is that the coalesce check only runs once weather data is available, and the weather entity can stay unavailable for a long time after restart. The status card now says "starting — waiting for weather data" in that specific case instead of the misleading generic "waiting for coalescing".
+
 ## [0.4.57] — 2026-07-02
 
 - Fix #396: Added diagnostics to pinpoint a startup-coalescing regression introduced by #392's automation decision lock — after that fix, the status card could show "waiting for coalescing" indefinitely after a restart, with no way to tell what was stuck. The decision lock now tracks and logs which method holds it and for how long, with checkpoint logging through the coalesce call chain and a new `decision_lock_holder` / `decision_lock_held_seconds` status field. This is diagnostics only — the underlying hang itself is not yet confirmed fixed; the next occurrence will name the exact stuck step.

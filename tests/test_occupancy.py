@@ -540,6 +540,50 @@ class TestAutomationStatusWithOccupancy:
 
 
 # ══════════════════════════════════════════════════════════════════
+# Test Class: Startup Coalescing Status (Issue #396)
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestStartupCoalesceStatus:
+    """_compute_automation_status() must distinguish "still within the normal
+    5-minute startup window" from "the 5-minute timer fired but coalescing is
+    blocked on weather data" — the coalesce check in _async_update_data() lives
+    inside `if forecast:`, so it never runs at all while classification is
+    unset. Without this distinction the status card said "waiting for
+    coalescing" indefinitely with no clue that the real blocker was a weather
+    integration that hadn't come back after restart (Issue #396).
+    """
+
+    def test_within_normal_window_before_timer_fires(self):
+        """Still in the initial 5-min suppression window — expected, not stuck."""
+        coord = _make_coordinator()
+        coord._startup_coalesce_active = True
+        coord._startup_timer_fired = False
+        coord._current_classification = None
+        assert coord._compute_automation_status() == "starting — initializing"
+
+    def test_timer_fired_but_no_classification_blames_weather(self):
+        """Timer fired, coalesce check never ran because classification never
+        got set — the real blocker is weather data, not coalescing itself.
+        """
+        coord = _make_coordinator()
+        coord._startup_coalesce_active = True
+        coord._startup_timer_fired = True
+        coord._current_classification = None
+        assert coord._compute_automation_status() == "starting — waiting for weather data"
+
+    def test_timer_fired_with_classification_still_generic(self):
+        """Timer fired and classification exists (weather is fine) — coalescing
+        just hasn't finished yet for some other reason; generic message stands.
+        """
+        coord = _make_coordinator()
+        coord._startup_coalesce_active = True
+        coord._startup_timer_fired = True
+        coord._current_classification = MagicMock()
+        assert coord._compute_automation_status() == "starting — initializing"
+
+
+# ══════════════════════════════════════════════════════════════════
 # Test Class: Next Action with Occupancy
 # ══════════════════════════════════════════════════════════════════
 

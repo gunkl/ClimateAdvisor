@@ -995,7 +995,11 @@
           <div class="label">Natural Vent</div>
           <div class="value">${escapeHtml(data.nat_vent_ac_assist
             ? 'Natural ventilation + AC assist'
-            : 'Natural ventilation (savings mode — fan only)')}</div>
+            : 'Natural ventilation (savings mode — fan only)')}${
+            data.nat_vent_off_threshold != null && data.nat_vent_on_threshold != null
+              ? `<br><span style="font-size:0.8rem;opacity:0.85">cycling ${Math.round(data.nat_vent_off_threshold)}${unitSym}–${Math.round(data.nat_vent_on_threshold)}${unitSym}${data.nat_vent_target != null ? ` (target ${Math.round(data.nat_vent_target)}${unitSym})` : ''}</span>`
+              : ''
+          }</div>
         </div>
         ` : ''}
         ${data.contact_sensors && data.contact_sensors.length > 0 ? `

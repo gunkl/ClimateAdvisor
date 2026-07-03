@@ -2174,11 +2174,21 @@ class AutomationEngine:
                     and _ceiling_ok_gr
                 ):
                     # Band stays armed — just activate the fan; the compressor self-arbitrates.
+                    #
+                    # Issue #402 follow-up: this reason text used to always claim
+                    # "indoor > comfort_cool" regardless of which of the two conditions in
+                    # the outer guard actually let execution reach here — grace_active with
+                    # indoor above the ceiling (the original Issue #134 case), OR idle_open
+                    # (a contact sensor open + HVAC not actively calling, widened in #402)
+                    # — the latter has nothing to do with comfort_cool. The condition
+                    # actually evaluated just above (outdoor cooler than indoor by more than
+                    # hysteresis, indoor above the comfort floor, outdoor below the ceiling
+                    # threshold) is what the message must describe instead.
                     await self._activate_fan(
                         reason=(
-                            f"nat vent grace re-entry: indoor {_indoor:.1f}°F"
-                            f" > comfort_cool {comfort_cool:.1f}°F,"
-                            f" outdoor {outdoor:.1f}°F cool"
+                            f"nat-vent re-engaged: outdoor {outdoor:.1f}°F < indoor {_indoor:.1f}°F"
+                            f" − {_hysteresis:.1f}°F hysteresis, indoor > comfort_heat {_comfort_heat:.1f}°F,"
+                            f" outdoor ≤ threshold {threshold:.1f}°F — free cooling still favorable"
                         )
                     )
                     self._natural_vent_active = True
@@ -2781,6 +2791,24 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
+            # Issue #402 follow-up: this branch previously left zero activity-log trace of
+            # the fan being adopted as CA-owned at startup — the fan silently starts being
+            # managed with no record of why, unlike the turn-off branch below which does
+            # emit a fan_deactivated event. Record the adoption the same way.
+            _adopt_reason = (
+                f"startup reconcile — fan already running, indoor {indoor:.1f}°F,"
+                f" outdoor {outdoor:.1f}°F, nat-vent conditions met — adopting as CA-owned"
+            )
+            self._record_action("Fan activated", _adopt_reason)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_activated",
+                    {
+                        "reason": _adopt_reason,
+                        "fan_mode": fan_mode,
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
         else:
             # Fan running but nat-vent not warranted — turn it off
             decision = "turn-off"
@@ -3816,6 +3844,16 @@ class AutomationEngine:
         indoor = self._get_indoor_temp_f()
         outdoor = self._last_outdoor_temp
         await self.fan_thermostat_check(indoor=indoor, outdoor=outdoor, trigger="timer")
+        # Issue #402 follow-up: nat_vent_temperature_check() (the function that owns the
+        # cycling on/off-threshold decision) is otherwise invoked ONLY when the coordinator
+        # detects the thermostat's current_temperature attribute change — it has no timer
+        # of its own. fan_thermostat_check()'s backstop above only protects the coarser
+        # hard floor (comfort_heat), not the cycling off-threshold, so indoor could sit
+        # below the cycling off-threshold for minutes with nothing re-checking until a
+        # genuine new temperature-changed event arrived. Piggyback the existing 5-minute
+        # timer to also re-evaluate cycling while nat-vent is active.
+        if self._natural_vent_active and indoor is not None:
+            await self.nat_vent_temperature_check(indoor)
         # Re-arm only if the fan is still active after the check
         if self._fan_running:
             self._start_fan_thermo_backstop()
@@ -3850,8 +3888,28 @@ class AutomationEngine:
 
         # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
         # multiple gate sites into a single real state transition.
+        #
+        # Issue #402 follow-up: the fan can already be physically off from a nat-vent
+        # cycling-off (nat_vent_temperature_check calls _deactivate_fan(restore_hvac=False),
+        # which intentionally leaves _pre_fan_hvac_mode set so the session survives the
+        # cycle). If a later caller asks to restore_hvac=True while the fan is already
+        # inactive, a bare early-return here would skip the HVAC-suppression release too —
+        # permanently stranding _pre_fan_hvac_mode set and blocking all future HVAC writes
+        # via _whf_owns_hvac(). Only skip the physical "turn fan off" step; still honor a
+        # pending HVAC restore.
         if not self._fan_active:
-            _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
+            if restore_hvac and self._pre_fan_hvac_mode is not None:
+                _restore_mode = self._pre_fan_hvac_mode
+                self._pre_fan_hvac_mode = None
+                _LOGGER.debug(
+                    "_deactivate_fan: fan already inactive but restoring stranded HVAC suppression (%s)", reason
+                )
+                await self._set_hvac_mode(
+                    _restore_mode,
+                    reason=f"whole-house fan already stopped — restoring HVAC mode ({_restore_mode})",
+                )
+            else:
+                _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
             return
 
         if self.dry_run:

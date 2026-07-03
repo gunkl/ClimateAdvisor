@@ -444,7 +444,6 @@ def _render_grace_started(p: dict, unit: str) -> tuple[str, str]:
     if source:
         label = f"{label} ({source})"
     # Settings cell: human-readable trigger label for known triggers; empty otherwise.
-    # (The Event cell for this dedup-eligible type always shows _humanize_type → "Grace started".)
     trigger_label = _GRACE_TRIGGER_LABELS.get(trigger, "")
     return label, trigger_label
 
@@ -1015,17 +1014,32 @@ def build_event_timeline_table(
     run_count = 0
     run_first_time: str = ""
     run_last_time: str = ""
+    run_ev_text: str = ""
     run_settings: str = ""
     run_source: str = ""
     run_indoor: str = ""
     run_outdoor: str = ""
 
     def _flush_run() -> None:
-        nonlocal run_type, run_count, run_first_time, run_last_time, run_settings, run_source, run_indoor, run_outdoor
+        nonlocal \
+            run_type, \
+            run_count, \
+            run_first_time, \
+            run_last_time, \
+            run_ev_text, \
+            run_settings, \
+            run_source, \
+            run_indoor, \
+            run_outdoor
         if run_type is None or run_count == 0:
             return
         if run_count == 1:
-            rows.append((run_first_time, _humanize_type(run_type), run_settings, run_source, run_indoor, run_outdoor))
+            # A run of exactly one event was never actually deduplicated with anything —
+            # this is the common case, not a collapsed group. Use the renderer's real
+            # event text (which carries the descriptive reason) instead of the bare
+            # _humanize_type(run_type) fallback, which silently discarded it for every
+            # event type not on the small _NO_DEDUP allowlist.
+            rows.append((run_first_time, run_ev_text, run_settings, run_source, run_indoor, run_outdoor))
         else:
             time_range = f"{run_first_time}-{run_last_time}" if run_first_time != run_last_time else run_first_time
             event_text = f"{_humanize_type(run_type)} x{run_count} ({time_range})"
@@ -1085,6 +1099,7 @@ def build_event_timeline_table(
                 run_count = 1
                 run_first_time = time_str
                 run_last_time = time_str
+                run_ev_text = ev_text
                 run_settings = settings_text
                 run_source = source
                 run_indoor = indoor_cell

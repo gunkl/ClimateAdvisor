@@ -1773,6 +1773,46 @@ class TestCeilingGateArchetypeAllFourSites:
             "FAN_MODE_WHOLE_HOUSE: ceiling must not block grace re-entry as long as outdoor < indoor"
         )
 
+    def test_site2_reactivation_reason_does_not_falsely_claim_indoor_above_ceiling(self):
+        """Issue #402 follow-up: the reactivation reason text must not claim
+
+        "indoor > comfort_cool" when that's not the actual trigger condition.
+
+        This is the idle_open trigger path (contact sensor open, HVAC not actively
+        calling) rather than the original grace-active-ceiling-breach case — indoor here
+        (70) is well BELOW comfort_cool (74), so the old hardcoded message
+        ("indoor {X} > comfort_cool {Y}") was factually false, confirmed against live
+        production data showing exactly this combination (indoor=70, comfort_cool=74).
+        The message must instead describe the real condition: outdoor cooler than indoor,
+        indoor above the comfort floor, outdoor below the ceiling threshold.
+        """
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=70.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        engine._paused_by_door = False
+        engine._natural_vent_active = False
+        engine._grace_active = False
+        engine._sensor_check_callback = lambda: True
+        engine._last_outdoor_temp = 65.0
+        engine.hass.states.get.return_value.state = "off"
+        engine._activate_fan = AsyncMock()
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        fan_events = [e for e in events if e[0] == "sensor_opened" and e[1].get("entity") == "natural_vent_reeval"]
+        assert fan_events, f"expected natural_vent_reeval re-evaluation event; got: {events}"
+        # The reason lives on the fan_activated call, not this event's payload — inspect
+        # the mocked _activate_fan call directly since that's where the string is built.
+        engine._activate_fan.assert_awaited()
+        reason = engine._activate_fan.call_args.kwargs.get("reason", "")
+        assert "indoor 70.0" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
+        assert "> comfort_cool 74.0" not in reason, (
+            f"reason must not falsely claim indoor > comfort_cool; got: {reason!r}"
+        )
+        assert "comfort_heat" in reason, f"reason must describe the actual trigger condition; got: {reason!r}"
+
     # -- Site 3: handle_door_window_open() --------------------------------------
 
     def test_site3_door_open_hvac_fan_blocked_past_ceiling(self):

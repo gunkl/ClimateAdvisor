@@ -6107,6 +6107,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "rejection_log_counts": {ot: len(evts) for ot, evts in getattr(self, "_rejection_log", {}).items()},
         }
 
+    def compute_nat_vent_cycling_band(self) -> dict[str, float | None]:
+        """Return the WHF fan's on/off cycling band (Issue #400/#402).
+
+        Mirrors automation.py's nat_vent_temperature_check() sleep-window branch exactly,
+        so the dashboard always matches the fan's actual cycling behavior. This is the
+        single source of truth for the cycling target/on_threshold/off_threshold — extracted
+        (Issue #402 follow-up) so get_debug_state() and the main status endpoint both call
+        this instead of each recomputing the formula, which is exactly the "fix one
+        duplicate implementation, miss the sibling" pattern that caused #400 and part of
+        #402 in the first place.
+
+        NOTE: despite the "target" name, these describe the WHF fan's on/off CYCLING
+        midpoint — the range the fan hunts within while a nat-vent session is active. This
+        is NOT a thermostat setpoint and is never written to the climate entity; do not
+        confuse it with comfort_heat/comfort_cool or the armed comfort-band ceiling/floor.
+        """
+        ae = self.automation_engine
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        if not ae._natural_vent_active:
+            return {"nat_vent_target": None, "nat_vent_on_threshold": None, "nat_vent_off_threshold": None}
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_cool = float(self.config.get("comfort_cool", 75))
+        if _in_sleep_window(dt_util.now(), self.config):
+            sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+            target = sleep_heat + hysteresis
+        else:
+            target = (comfort_heat + comfort_cool) / 2.0
+        return {
+            "nat_vent_target": target,
+            "nat_vent_on_threshold": target + hysteresis,
+            "nat_vent_off_threshold": target - hysteresis,
+        }
+
     def get_debug_state(self) -> dict[str, Any]:
         """Return serializable debug state for the dashboard."""
         ae = self.automation_engine
@@ -6121,26 +6154,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "friendly_name": sensor_id.split(".")[-1].replace("_", " ").title(),
             }
 
-        # Issue #400: mirror automation.py's nat_vent_temperature_check() sleep-window branch
-        # so the dashboard target matches the actual cycling target, not always the daytime
-        # comfort-band midpoint.
-        #
-        # NOTE (Issue #402): despite the "target" name, nat_vent_target/on_threshold/
-        # off_threshold below describe the WHF fan's on/off CYCLING midpoint — the range the
-        # fan hunts within while a nat-vent session is active. It is NOT a thermostat setpoint
-        # and is never written to the climate entity; do not confuse it with comfort_heat/
-        # comfort_cool or the armed comfort-band ceiling/floor.
-        _nat_vent_hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        if ae._natural_vent_active:
-            _comfort_heat = float(self.config.get("comfort_heat", 70))
-            _comfort_cool = float(self.config.get("comfort_cool", 75))
-            if _in_sleep_window(dt_util.now(), self.config):
-                _sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, _comfort_heat))
-                _nat_vent_target = _sleep_heat + _nat_vent_hysteresis
-            else:
-                _nat_vent_target = (_comfort_heat + _comfort_cool) / 2.0
-        else:
-            _nat_vent_target = None
+        _nat_vent_band = self.compute_nat_vent_cycling_band()
 
         return {
             "automation_enabled": self._automation_enabled,
@@ -6246,13 +6260,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
                 and not self.config.get("aggressive_savings", False)
             ),
-            "nat_vent_target": _nat_vent_target,
-            "nat_vent_on_threshold": (
-                _nat_vent_target + _nat_vent_hysteresis if _nat_vent_target is not None else None
-            ),
-            "nat_vent_off_threshold": (
-                _nat_vent_target - _nat_vent_hysteresis if _nat_vent_target is not None else None
-            ),
+            "nat_vent_target": _nat_vent_band["nat_vent_target"],
+            "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
+            "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
             "nat_vent_cycling_paused": ae._natural_vent_active and not ae._fan_active,
         }
 

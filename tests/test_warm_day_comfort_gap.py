@@ -24,7 +24,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
-from custom_components.climate_advisor.const import CLIMATE_FEATURE_TARGET_TEMP_RANGE
+from custom_components.climate_advisor.const import (
+    CLIMATE_FEATURE_TARGET_TEMP_RANGE,
+    CONF_FAN_MODE,
+    FAN_MODE_WHOLE_HOUSE,
+)
 
 AUTOMATION_LOGGER = "custom_components.climate_advisor.automation"
 
@@ -398,6 +402,71 @@ class TestCeilingGuardFires:
 
         fired = [e for e in events if e[0] == "ceiling_guard_fired"]
         assert len(fired) == 1
+
+
+class TestCeilingGuardWholeHouseFanNeverEscalates:
+    """Issue #402: FAN_MODE_WHOLE_HOUSE/BOTH must never escalate to AC here, not just stay
+
+    dormant while nat-vent happens to be active. Before this fix, a brief transient where
+    _natural_vent_active flipped False (e.g. mid pause/reactivate cycle) let dormancy lift
+    and this guard arm 'cool' mode + a setpoint — which the reactivation gate then
+    immediately undid (it also has no ceiling threshold for this archetype), producing a
+    rapid escalate/reactivate oscillation with redundant thermostat writes every time this
+    function re-evaluated, observed in production as two escalate/reactivate bursts five
+    minutes apart the same evening.
+    """
+
+    def _make_whf_cg_engine(self, comfort_cool: float = 74.0, indoor_temp: float = 75.0) -> AutomationEngine:
+        return _make_engine(
+            config_overrides={"comfort_cool": comfort_cool, CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE},
+            indoor_temp=indoor_temp,
+            current_mode="off",
+        )
+
+    def test_never_escalates_even_when_natural_vent_inactive_and_breach_imminent(self):
+        """indoor already above comfort_cool, nat-vent inactive, breach imminent — for any
+
+        other archetype this fires the guard (see TestCeilingGuardFires). For WHOLE_HOUSE
+        it must stay dormant: this archetype has no compressor-assist model at all.
+        """
+        engine = self._make_whf_cg_engine(comfort_cool=74.0, indoor_temp=75.0)
+        engine._last_outdoor_temp = 78.0
+        engine._natural_vent_active = False
+        _set_thermal_model(engine, k_passive=-0.05, conf="medium", k_active_cool=None)
+
+        now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        curve = _make_predicted_indoor(start_hour_utc=10, temps=[75.0, 76.5, 78.0])
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(engine.apply_classification(_make_warm_off_classification(), predicted_indoor=curve))
+
+        calls = engine.hass.services.async_call.call_args_list
+        hvac_calls = [c for c in calls if c.args[1] == "set_hvac_mode"]
+        assert not any(c.args[2].get("hvac_mode") == "cool" for c in hvac_calls), (
+            "WHOLE_HOUSE_FAN archetype must never escalate to AC via the ODE ceiling guard"
+        )
+
+    def test_no_ceiling_guard_fired_event(self):
+        """No ceiling_guard_fired / nat_vent_ceiling_escalation events for WHOLE_HOUSE_FAN."""
+        engine = self._make_whf_cg_engine(comfort_cool=74.0, indoor_temp=75.0)
+        engine._last_outdoor_temp = 78.0
+        engine._natural_vent_active = True
+        _set_thermal_model(engine, k_passive=-0.05, conf="medium", k_active_cool=None)
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda n, d: events.append((n, d))
+
+        now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        curve = _make_predicted_indoor(start_hour_utc=10, temps=[75.0, 76.5, 78.0])
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(engine.apply_classification(_make_warm_off_classification(), predicted_indoor=curve))
+
+        event_types = [e[0] for e in events]
+        assert "ceiling_guard_fired" not in event_types
+        assert "nat_vent_ceiling_escalation" not in event_types
 
 
 class TestCeilingGuardSkips:

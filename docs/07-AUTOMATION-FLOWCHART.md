@@ -16,7 +16,7 @@ For temperature formulas and threshold values see [docs/08-COMPUTATION-REFERENCE
 | How does the door/window pause flow work from sensor open to HVAC off? | Sensor open → debounce timer (default 5 min) → verify still open → check grace, planned window period → **check nat-vent first** (if outdoor cooler than indoor, fan on, band stays armed, no shutoff) → if nat-vent gates fail: set `_hvac_command_pending` → HVAC off + notification. | [§4. Door/Window Pause Flow](07-AUTOMATION-FLOWCHART.md#4-doorwindow-pause-flow) |
 | When a grace period expires, what prevents it from blindly restoring HVAC? | `_grace_expired()` calls `_re_pause_for_open_sensor()`, which checks `_is_within_planned_window_period()` before re-pausing — sensors open in a recommended window period are not re-paused. | [§4b. Grace Expiry with Planned Window Period Check](07-AUTOMATION-FLOWCHART.md#4b-grace-expiry-with-planned-window-period-check) |
 | How does manual override protection work — what sets it and what clears it? | `_async_thermostat_changed()` detects mode changes not preceded by `_hvac_command_pending`; starts a **10-min confirmation window** (`_override_confirm_pending = True`). If thermostat is still divergent after the window (PATH A), sets `_manual_override_active = True` and starts grace. If it self-reverted (PATH B), no grace. Cleared at wakeup or bedtime schedule boundary. | [§5. Manual Override Protection](07-AUTOMATION-FLOWCHART.md#5-manual-override-protection) |
-| What are the natural ventilation exit conditions and in what order are they checked? | Priority order: **0** sleep-ceiling reached (sleep window + indoor ≤ sleep_cool) → **1** all sensors closed → **2** comfort floor exit (indoor ≤ comfort_heat) → **3** outdoor-rise exit (outdoor ≥ indoor) → **4** ceiling threshold exit (outdoor > comfort_cool + delta). First match wins. | [§12b. Continuous Monitoring](07-AUTOMATION-FLOWCHART.md#12b-continuous-monitoring-check_natural_vent_conditions) |
+| What are the natural ventilation exit conditions and in what order are they checked? | Priority order: **1** all sensors closed → **2** comfort floor exit (sleep-aware: `sleep_heat - hysteresis` during the sleep window, `comfort_heat` otherwise, Issue #402) → **3** away-mode ceiling exit → **4** proactive floor exit (thermal-model prediction) → **5** outdoor-rise exit (outdoor ≥ indoor) → **6** ceiling threshold exit (outdoor > comfort_cool + delta). First match wins. During the sleep window, session-continuation cycling is handled separately by `nat_vent_temperature_check()` (fan off at `sleep_heat`, on at `sleep_heat + 2×hysteresis`) — the old "Priority 0 sleep-ceiling reached" exit was removed in Issue #371 and is not part of the current design. | [§12b. Continuous Monitoring](07-AUTOMATION-FLOWCHART.md#12b-continuous-monitoring-check_natural_vent_conditions) |
 | What HVAC state does `_apply_nat_vent_hvac_state()` arm when nat-vent activates, and how does `aggressive_savings` change it? | `FAN_MODE_HVAC` + `aggressive_savings=False` → full comfort band `[comfort_heat, comfort_cool]` (compressor can assist if breeze can't hold ceiling). `FAN_MODE_HVAC` + `aggressive_savings=True` → heat-only at `comfort_heat` (floor protected, ceiling disarmed — no compressor through open windows). `WHOLE_HOUSE` or `DISABLED` → no-op. | [§12c. Nat-Vent HVAC State](07-AUTOMATION-FLOWCHART.md#12c-nat-vent-hvac-state--_apply_nat_vent_hvac_state) |
 | How does occupancy priority resolve when multiple toggles are active? | Guest > Vacation > Home/Away > default (home). `_compute_occupancy_mode()` in the coordinator reads all three toggle states and dispatches to the matching handler. | [§9. Occupancy State Machine](07-AUTOMATION-FLOWCHART.md#9-occupancy-state-machine) |
 | Where is the full Tier 3 spec for grace periods — state transitions, timer lifecycle, invariants, HA-restart behavior? | The Territory spec covers both grace types, the 12-row transition table, pre-pause mode storage/restoration, occupancy interaction, and error conditions including sensor-unavailable-during-pause. | [Grace Period State Machine — Territory Spec](grace-periods-spec.md) |
@@ -301,7 +301,7 @@ graph TD
 
 Fan and economizer state are explicitly managed at the two main daily schedule boundaries: bedtime and morning wakeup. `clear_manual_override()` calls `clear_fan_override()` internally, so both override flags are cleared together at each boundary.
 
-**Nat-vent continuation gate (Issue #370):** At bedtime, if nat-vent is active and outdoor air is still cooler than the sleep target, the fan is allowed to continue past bedtime rather than being stopped unconditionally. The fan stops when `check_natural_vent_conditions()` detects the sleep ceiling has been reached (Priority 0 exit — see §12b).
+**Nat-vent continuation gate (Issue #370):** At bedtime, if nat-vent is active and outdoor air is still cooler than the sleep target, the fan is allowed to continue past bedtime rather than being stopped unconditionally. Through the sleep window, `nat_vent_temperature_check()` cycles the fan on/off around the sleep-aware midpoint (`sleep_heat + hysteresis`) — this is not a session-ending exit, just normal cycling. The session only ends via `check_natural_vent_conditions()`'s comfort-floor exit (§12b), which is itself sleep-aware as of Issue #402 (floor = `sleep_heat - hysteresis` during the sleep window). The older "Priority 0 sleep-ceiling reached" exit referenced here in earlier docs was removed in Issue #371 and does not exist in current code.
 
 ```mermaid
 graph TD
@@ -487,18 +487,18 @@ This check runs on every coordinator update while nat vent is active or paused. 
 
 ```mermaid
 flowchart TD
-    A{State?} -->|Neither active nor paused| Z[Return — no action]
-    A -->|Natural vent active| P0{Priority 0: sleep window\nAND indoor ≤ sleep_cool?}
-    P0 -->|Yes| P0A[nat_vent_sleep_ceiling_reached\n_deactivate_fan restore_hvac=False\n_natural_vent_active = False\nSleep band retained]
-    P0 -->|No| B{All sensors closed?}
-    B -->|Yes| C[Exit nat vent\nResume HVAC from classification]
-    B -->|No| D{indoor ≤ comfort_heat?}
-    D -->|Yes| E[nat_vent_comfort_floor_exit\nRestore heat at comfort_heat]
-    D -->|No| F{outdoor ≥ indoor?}
+    A{State?} -->|Neither active nor paused| A2{Idle re-eval:\ncontact sensor open\nAND HVAC not actively\ncalling for heat/cool?}
+    A2 -->|Yes| A3[Re-check nat-vent activation\nconditions directly]
+    A2 -->|No| Z[Return — no action]
+    A -->|Natural vent active| D{indoor ≤ sleep-aware floor?\nsleep_heat-hysteresis in sleep window,\ncomfort_heat otherwise}
+    D -->|Yes| E[nat_vent_comfort_floor_exit\nRestore heat at floor value]
+    D -->|No| B2{Away mode AND\nindoor ≥ comfort_cool?}
+    B2 -->|Yes| C2[nat_vent_away_ceiling_exit]
+    B2 -->|No| F{outdoor ≥ indoor?}
     F -->|Yes| G[nat_vent_outdoor_rise_exit\nFan off · enter paused state\nStart 300s lockout timer]
     F -->|No| H{outdoor > comfort_cool + delta?}
     H -->|Yes| I[Fan off · enter paused state]
-    H -->|No| J[Continue natural ventilation]
+    H -->|No| J[Continue natural ventilation\nnat_vent_temperature_check\ncycles fan on/off around\nsleep- or day-aware midpoint]
     A -->|Paused| K{All sensors closed?}
     K -->|Yes| L[Exit paused state\nResume HVAC from classification]
     K -->|No| M{300s lockout elapsed?\nAND outdoor < indoor - 1°F?\nAND outdoor < comfort_cool + delta?}
@@ -507,7 +507,9 @@ flowchart TD
     M -->|Any no| O[Stay paused\nRe-check next coordinator update]
 ```
 
-**Priority 0 note (Issue #370):** The sleep-ceiling exit fires only when nat-vent continued past bedtime via the `nat_vent_bedtime_continue` gate (§7). `_deactivate_fan(restore_hvac=False)` is used — the sleep band bedtime already programmed must not be overwritten by an HVAC restore.
+**Comfort-floor exit note (Issue #402):** The floor is sleep-aware — `sleep_heat - hysteresis` during the sleep window, `comfort_heat` otherwise — mirroring `nat_vent_temperature_check()`'s cycling thresholds so the two don't fight each other. `fan_thermostat_check()` (the separate, more frequent tick-level safety check called on every thermostat temperature change) implements the same sleep-aware floor as of Issue #402; previously it hardcoded `comfort_heat` unconditionally and — because it fires far more often than this 30-min-cycle function — always preempted the sleep-window cycling before it could ever run, permanently ending nat-vent sessions at `comfort_heat` instead of letting them cycle through the night.
+
+**Idle re-eval note (Issue #244, gate widened in #402):** When neither active nor paused, a contact sensor left open with the thermostat not actively calling for heat/cool re-triggers a direct nat-vent activation check — this is what lets the occupant catch free evening/overnight cooling without waiting for a sensor state-change event. Originally this required the thermostat's armed *mode* to be literally `"off"`; as of Issue #402 it checks `hvac_action` (idle/off) instead, because `_apply_comfort_band()` legitimately arms `cool` mode as a ceiling backstop once nat-vent releases HVAC ownership, and that backstop was permanently blocking this re-evaluation path even when the compressor was never actually running.
 
 **Hysteresis note:** The 1°F gap in the re-activation check (`outdoor < indoor - 1°F`) and the 300-second lockout timer together prevent rapid oscillation when outdoor and indoor temperatures are near equilibrium. Without both guards, a small thermal fluctuation could toggle nat vent on and off multiple times within a single hour.
 

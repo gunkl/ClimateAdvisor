@@ -1,0 +1,101 @@
+{
+  "name": "whf_reactivates_after_sleep_floor_exit",
+  "description": "Issue #402: after nat-vent exits at the sleep-window comfort floor and apply_classification() arms a cool-mode ceiling backstop, WHF must still be able to resume free cooling as indoor drifts back up while outdoor stays favorable — the idle-reactivation gate must not be permanently blocked just because the thermostat's armed MODE is 'cool' when the compressor was never actually running.",
+  "source": "production incident 2026-07-02/03",
+  "issue": 402,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting the Issue #402 fix in check_natural_vent_conditions() (the hvac_action-based idle check) causes the final assertion (nat_vent_still_active at 03:30) to FAIL — the fan stays off for the rest of the scenario despite outdoor remaining favorable, reproducing the reported incident exactly.",
+    "(b) Docs<->production alignment: docs/07-AUTOMATION-FLOWCHART.md §12b and docs/08-COMPUTATION-REFERENCE.md 'Exit Hierarchy'/'Idle re-eval note' now document this hvac_action-based gate (updated alongside this fix).",
+    "(c) Occupant experience: without this fix, the whole-house fan silently stops managing the home's temperature for the rest of the night the moment it first reaches the comfort floor, even though outdoor air remains ideal for free cooling and indoor drifts back up — the occupant gets neither free WHF cooling nor compressor assist for hours. With the fix, WHF correctly resumes.",
+    "Note: fan_thermostat_check() (Issue #402 Part 1 — the more-frequent tick-level floor check that was the proximate cause of the premature exit in production) has no harness dispatch event and cannot be exercised here; it is covered directly by tests/test_fan_control.py::TestFanThermostatCheck's sleep-window tests. This scenario validates Part 2 (the idle-reactivation gate fix in check_natural_vent_conditions(), which the harness's temp_update event does exercise) and the correct comfort-floor-exit threshold that Part 1 also uses."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "07:00",
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "fan_mode": "whole_house_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-02T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 65.0,
+      "note": "Evening: indoor=72°F, outdoor=65°F — outdoor cooler than indoor, favorable for nat-vent."
+    },
+    {
+      "time": "2026-07-02T20:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm day classification: hvac_mode=off, windows recommended."
+    },
+    {
+      "time": "2026-07-02T20:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "note": "Window opens. outdoor=65°F < indoor=72°F, indoor > comfort_heat=68°F, outdoor < threshold=77°F — nat-vent activates, WHF turns on."
+    },
+    {
+      "time": "2026-07-02T23:00:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 58.0,
+      "note": "Sleep window active (past 22:30). Indoor cooling steadily, outdoor still favorable."
+    },
+    {
+      "time": "2026-07-03T02:20:00",
+      "type": "temp_update",
+      "indoor_f": 63.0,
+      "outdoor_f": 57.0,
+      "note": "Indoor reaches the sleep-aware comfort floor (sleep_heat 64 - hysteresis 1 = 63°F). This is the corrected Issue #402 threshold — check_natural_vent_conditions() ends the nat-vent session here (not at the flat comfort_heat=68 floor that fan_thermostat_check() incorrectly used pre-fix)."
+    },
+    {
+      "time": "2026-07-03T02:24:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "30-min classification cycle after the floor exit. Nat-vent is no longer active, so apply_classification() arms the current (sleep) band — active edge is the ceiling, so this legitimately commands cool mode at sleep_cool=72°F as an AC-assist backstop. This is the exact state that used to permanently block WHF reactivation."
+    },
+    {
+      "time": "2026-07-03T03:30:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 57.0,
+      "note": "Indoor has drifted back up to 70°F (still well below the 72°F ceiling, so the compressor never actually engages — hvac_action stays idle) while outdoor remains at 57°F, an ideal free-cooling gradient. This is the moment the Issue #402 fix matters: the idle-reactivation gate must permit WHF to resume even though the thermostat's armed MODE is 'cool', because the compressor isn't actively calling."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-02T20:05:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opened with outdoor=65°F < indoor=72°F, outdoor < comfort_cool+delta=77°F — nat-vent activates."
+    },
+    {
+      "at": "2026-07-03T02:20:00",
+      "expect": "nat_vent_comfort_floor_exit",
+      "reason": "Indoor=63°F reaches the sleep-aware floor (sleep_heat-hysteresis=64-1=63) — session ends correctly at the sleep-aware threshold, and this event's firing (rather than a silent no-op) also confirms _natural_vent_active transitioned to False."
+    },
+    {
+      "at": "2026-07-03T03:30:00",
+      "expect": "nat_vent_still_active",
+      "reason": "THE FIX: WHF must resume as indoor drifts back up to 70°F with outdoor still favorable (57°F), even though apply_classification() armed 'cool' mode as a ceiling backstop at 02:24 — the idle-reactivation gate must key off hvac_action (idle, compressor not actually running), not the literal armed mode. Before the fix, this assertion fails: the fan stays off for the rest of the night because the gate incorrectly required the thermostat's mode to be literally 'off'."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "WHF correctly resumes free cooling after a sleep-window floor-exit, even though a cool-mode ceiling backstop is armed and the compressor never actually runs",
+    "observed_behavior": "natural_ventilation on window open -> nat_vent_comfort_floor_exit + nat_vent_not_active at the sleep-aware floor (63°F) -> nat_vent_still_active once indoor drifts back up to 70°F with outdoor still favorable",
+    "expected_behavior": "The occupant gets continuous free cooling through the night whenever outdoor conditions remain favorable, instead of the WHF silently going dormant for hours after its first floor-touch"
+  }
+}

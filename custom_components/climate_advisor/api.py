@@ -112,6 +112,22 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
         trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
 
+        # Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep
+        # window, not always the flat daytime comfort_heat/comfort_cool — otherwise the
+        # single-setpoint divergence check below (and any heat_cool-mode consumer of these
+        # fields) compares the real thermostat setpoint against the wrong intended value
+        # all night, masking exactly the kind of stuck/frozen-target bug this issue covers.
+        from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+        from .automation import _in_sleep_window  # noqa: PLC0415
+
+        if _in_sleep_window(dt_util.now(), coordinator.config):
+            _ca_target_heat = coordinator.config.get("sleep_heat", coordinator.config.get("comfort_heat"))
+            _ca_target_cool = coordinator.config.get("sleep_cool", coordinator.config.get("comfort_cool"))
+        else:
+            _ca_target_heat = coordinator.config.get("comfort_heat")
+            _ca_target_cool = coordinator.config.get("comfort_cool")
+
         return self.json(
             {
                 "version": VERSION,
@@ -142,8 +158,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
                 "fan_override_active": ae._fan_override_active,
                 "paused_by_door": ae.is_paused_by_door,
-                "ca_target_heat": coordinator.config.get("comfort_heat"),
-                "ca_target_cool": coordinator.config.get("comfort_cool"),
+                "ca_target_heat": _ca_target_heat,
+                "ca_target_cool": _ca_target_cool,
                 "pre_cool_status": data.get("pre_cool_status"),
             }
         )

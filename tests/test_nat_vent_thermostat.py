@@ -653,3 +653,6 @@ class TestNatVentSleepWindowCycling:
             f"Hard floor exit must pass restore_hvac=True; got: {call_kwargs}"
         )
         assert ae._natural_vent_active is False, "Hard floor exit must end the nat-vent session"
+        floor_exit_events = [e for e in emitted if e[0] == "nat_vent_comfort_floor_exit"]
+        assert floor_exit_events, f"Expected nat_vent_comfort_floor_exit; got: {emitted}"
+        assert "fan_device" in floor_exit_events[0][1], "Issue #402: exit events must identify the fan mechanism"

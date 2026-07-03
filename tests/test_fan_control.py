@@ -1338,6 +1338,7 @@ class TestNatVentComfortFloorExit:
             call for call in engine._emit_event_callback.call_args_list if call[0][0] == "nat_vent_comfort_floor_exit"
         )
         assert "indoor_temp" in comfort_floor_call[0][1]
+        assert "fan_device" in comfort_floor_call[0][1], "Issue #402: exit events must identify the fan mechanism"
 
     def test_comfort_floor_check_skipped_when_not_in_nat_vent(self):
         """_natural_vent_active=False → no service calls even when indoor is below floor."""
@@ -1597,6 +1598,83 @@ class TestCheckNatVentGraceComfortCeiling:
         with patch(_PATCH_CALL_LATER):
             asyncio.run(engine.check_natural_vent_conditions())
 
+        assert engine._natural_vent_active is False
+
+
+def _make_idle_reactivation_engine(
+    hvac_state: str, hvac_action: str, indoor_temp: float = 70.0, outdoor_temp: float = 60.0
+) -> AutomationEngine:
+    """Engine with neither nat-vent flag set, a sensor open, and a given thermostat state.
+
+    comfort_heat=68, comfort_cool=74 (default overrides) so indoor=70 > comfort_heat and
+    outdoor=60 < indoor - hysteresis, satisfying the reactivation condition itself — the
+    only variable under test is whether the HVAC-state gate permits re-evaluation to run.
+    """
+    engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, "comfort_heat": 68.0, "comfort_cool": 74.0})
+    engine._natural_vent_active = False
+    engine._paused_by_door = False
+    engine._grace_active = False
+    engine._fan_active = False
+    engine._fan_override_active = False
+    engine._last_outdoor_temp = outdoor_temp
+    engine._sensor_check_callback = lambda: True
+    engine._activate_fan = AsyncMock()
+    engine._apply_nat_vent_hvac_state = AsyncMock()
+    engine._emit_event_callback = MagicMock()
+
+    mock_cs = MagicMock()
+    mock_cs.attributes = {"current_temperature": indoor_temp, "hvac_action": hvac_action}
+    mock_cs.state = hvac_state
+    engine.hass.states.get.return_value = mock_cs
+
+    return engine
+
+
+class TestIdleReactivationGate:
+    """Issue #244 idle re-eval gate, widened in Issue #402 to check hvac_action instead of
+
+    the literal armed mode. _apply_comfort_band() legitimately arms 'cool' mode as a ceiling
+    backstop once nat-vent releases HVAC ownership — but that permanently blocked this
+    reactivation path even when the compressor was never actually running (hvac_action
+    stayed 'idle' because indoor never reached the armed ceiling). Occupant impact: WHF
+    silently stopped controlling the home for hours overnight once this armed-but-idle state
+    was reached, despite outdoor conditions remaining ideal for free cooling.
+    """
+
+    def test_reactivates_when_mode_off(self):
+        """REGRESSION GUARD: the original case — thermostat mode literally 'off' — still works."""
+        engine = _make_idle_reactivation_engine(hvac_state="off", hvac_action="off")
+        with patch(_PATCH_CALL_LATER):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        engine._activate_fan.assert_awaited()
+        assert engine._natural_vent_active is True
+
+    def test_reactivates_when_mode_cool_but_action_idle(self):
+        """THE FIX: mode='cool' (ceiling backstop armed) but hvac_action='idle' (compressor
+
+        not actually running) must still permit reactivation — this is exactly the state
+        _apply_comfort_band() leaves the thermostat in after a nat-vent floor-exit.
+        """
+        engine = _make_idle_reactivation_engine(hvac_state="cool", hvac_action="idle")
+        with patch(_PATCH_CALL_LATER):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        engine._activate_fan.assert_awaited()
+        assert engine._natural_vent_active is True
+
+    def test_does_not_reactivate_when_mode_cool_and_action_cooling(self):
+        """REGRESSION GUARD: if the compressor is ACTIVELY cooling (hvac_action='cooling'),
+
+        reactivation must still be blocked — WHF must never fight a running compressor.
+        """
+        engine = _make_idle_reactivation_engine(hvac_state="cool", hvac_action="cooling")
+        with patch(_PATCH_CALL_LATER):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        engine._activate_fan.assert_not_awaited()
+        assert engine._natural_vent_active is False
+
         # Without grace the early-return fires normally (neither flag is True)
         assert engine._natural_vent_active is False
 
@@ -1644,6 +1722,10 @@ class TestFanThermostatCheck:
         assert engine._paused_by_door is True
         events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
         assert "nat_vent_outdoor_rise_exit" in events
+        payload = next(
+            c.args[1] for c in engine._emit_event_callback.call_args_list if c.args[0] == "nat_vent_outdoor_rise_exit"
+        )
+        assert "fan_device" in payload, "Issue #402: exit events must identify the fan mechanism"
 
     def test_stops_non_natvent_fan_without_natvent_event(self):
         """A non-nat-vent running fan stops on outdoor>=indoor with a generic reason (no nat-vent event)."""
@@ -1677,6 +1759,79 @@ class TestFanThermostatCheck:
         asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=80.0, trigger="test"))
 
         engine._deactivate_fan.assert_not_awaited()
+
+    # -----------------------------------------------------------------
+    # Issue #402: Check 2's hard floor must be sleep-aware, mirroring the
+    # #374 fix already applied to check_natural_vent_conditions(). Before this
+    # fix, this tick-level check always used the flat comfort_heat floor and —
+    # because it fires far more often than the 30-min classification cycle —
+    # always preempted nat_vent_temperature_check()'s correct sleep-window
+    # cycling, permanently ending nat-vent sessions at comfort_heat overnight
+    # instead of letting them cycle around the (lower) sleep floor.
+    # -----------------------------------------------------------------
+
+    _DT_NOW_PATH = "custom_components.climate_advisor.automation.dt_util.now"
+    _SLEEP_NOW = datetime(2026, 7, 21, 2, 0, 0)  # 02:00 — inside 22:30-07:00 sleep window
+
+    def _sleep_engine(self, **cfg):
+        engine = self._engine(
+            comfort_heat=68.0,
+            comfort_cool=74.0,
+            sleep_heat=64.0,
+            sleep_time="22:30",
+            wake_time="07:00",
+            nat_vent_hysteresis_f=1.0,
+            **cfg,
+        )
+        return engine
+
+    def test_sleep_window_does_not_stop_at_comfort_heat(self):
+        """Occupant: overnight, WHF must keep running past comfort_heat (68°F) — it should
+
+        only stop at the sleep floor (sleep_heat - hysteresis = 63°F), not the flat daytime
+        comfort_heat floor. This is the exact regression from Issue #402 — before the fix,
+        indoor=68 during the sleep window incorrectly ended the whole nat-vent session here.
+        """
+        engine = self._sleep_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        with patch(self._DT_NOW_PATH, return_value=self._SLEEP_NOW):
+            asyncio.run(engine.fan_thermostat_check(indoor=68.0, outdoor=60.0, trigger="test"))
+
+        engine._deactivate_fan.assert_not_awaited()
+        assert engine._natural_vent_active is True
+
+    def test_sleep_window_stops_at_sleep_floor(self):
+        """Occupant: WHF should still stop if indoor genuinely reaches the sleep floor
+
+        (sleep_heat - hysteresis = 64-1 = 63°F) — the safety net still works, just at the
+        correct sleep-aware threshold instead of the daytime one.
+        """
+        engine = self._sleep_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        with patch(self._DT_NOW_PATH, return_value=self._SLEEP_NOW):
+            asyncio.run(engine.fan_thermostat_check(indoor=63.0, outdoor=60.0, trigger="test"))
+
+        engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
+
+    def test_daytime_still_stops_at_comfort_heat(self):
+        """REGRESSION GUARD: daytime behavior is unchanged — comfort_heat (68°F) still ends
+
+        the session outside the sleep window.
+        """
+        engine = self._sleep_engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        with patch("custom_components.climate_advisor.automation._in_sleep_window", return_value=False):
+            asyncio.run(engine.fan_thermostat_check(indoor=68.0, outdoor=60.0, trigger="test"))
+
+        engine._deactivate_fan.assert_awaited()
+        assert engine._natural_vent_active is False
 
 
 class TestReconcileFanOnStartup:

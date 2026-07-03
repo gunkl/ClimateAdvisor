@@ -254,6 +254,52 @@ class TestHandleBedtimeHvacOffSkip:
         # Band model does not write a skipped reason for off-mode days.
         assert engine._today_record.setback_skipped_reason is None
 
+    def test_hvac_off_writes_cool_applied_field(self):
+        """Issue #402: hvac_mode='off' days must still record setback_cool_applied_f.
+
+        The sleep band's active edge (not c.hvac_mode) determines which DailyRecord field
+        gets written — before this fix, the `if hvac_mode == "heat"/"cool"` check had no
+        branch for "off", so on a warm/mild day (the majority case in most climates) neither
+        setback_heat_applied_f nor setback_cool_applied_f was ever recorded, even though the
+        sleep band ceiling WAS genuinely armed. This made `tools/learning_db.py --daily`
+        permanently show "Applied: --" for every off-mode night.
+        """
+        engine = _make_engine()
+        engine._emit_event_callback = lambda *_: None
+        engine._today_record = _make_today_record()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+        engine._current_classification = _make_classification(hvac_mode="off", day_type="warm")
+
+        asyncio.run(engine.handle_bedtime())
+
+        assert engine._today_record.setback_cool_applied_f is not None, (
+            "Off-mode/ceiling-active sleep band must still populate setback_cool_applied_f"
+        )
+        assert engine._today_record.setback_was_adaptive is False
+
+
+class TestHandleBedtimeManualOverrideSkip:
+    """Issue #402: manual-override skip must also write setback_skipped_reason.
+
+    Before this fix, the occupancy-skip and no-classification-skip branches both wrote
+    setback_skipped_reason, but the manual-override branch emitted the event and returned
+    without ever writing the field — a same-night, directly-observed mismatch between the
+    event log (correct) and the persisted DailyRecord (blank) during the #402 investigation.
+    """
+
+    def test_manual_override_writes_skipped_reason(self):
+        engine = _make_engine()
+        engine._emit_event_callback = lambda *_: None
+        engine._today_record = _make_today_record()
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+        engine._current_classification = _make_classification(hvac_mode="cool", day_type="hot")
+        engine._manual_override_active = True
+        engine._manual_override_mode = "cool"
+
+        asyncio.run(engine.handle_bedtime())
+
+        assert engine._today_record.setback_skipped_reason == "manual_override"
+
 
 class TestHandleBedtimeNoClassificationSkip:
     """When _current_classification is None, record skipped_reason='no_classification'."""

@@ -6080,6 +6080,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #400: mirror automation.py's nat_vent_temperature_check() sleep-window branch
         # so the dashboard target matches the actual cycling target, not always the daytime
         # comfort-band midpoint.
+        #
+        # NOTE (Issue #402): despite the "target" name, nat_vent_target/on_threshold/
+        # off_threshold below describe the WHF fan's on/off CYCLING midpoint — the range the
+        # fan hunts within while a nat-vent session is active. It is NOT a thermostat setpoint
+        # and is never written to the climate entity; do not confuse it with comfort_heat/
+        # comfort_cool or the armed comfort-band ceiling/floor.
         _nat_vent_hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         if ae._natural_vent_active:
             _comfort_heat = float(self.config.get("comfort_heat", 70))

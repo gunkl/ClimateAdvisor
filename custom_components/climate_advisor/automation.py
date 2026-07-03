@@ -1290,11 +1290,22 @@ class AutomationEngine:
                     _LOGGER.debug("ODE ceiling guard: skipped — k_passive=%s, conf=%s", _k_passive, _conf)
                 elif _outdoor is None or _indoor_cg is None:
                     _LOGGER.debug("ODE ceiling guard: skipped — missing outdoor/indoor temps")
-                elif (
-                    _outdoor <= _indoor_cg
-                    and self._natural_vent_active
-                    and (_ceiling_threshold_val is None or _indoor_cg <= _ceiling_threshold_val)
-                ):
+                elif _ceiling_threshold_val is None:
+                    # Issue #402: archetypes with no ceiling-based compressor handoff
+                    # (FAN_MODE_WHOLE_HOUSE/BOTH — see _ceiling_threshold() docstring) must never
+                    # escalate to AC here at all, not just stay dormant while nat-vent happens to
+                    # be active. Previously, a brief transient where _natural_vent_active flipped
+                    # False (e.g. a pause/reactivate cycle) let dormancy lift and this guard arm
+                    # 'cool' mode + a setpoint — which the reactivation gate then immediately
+                    # undid (that gate also has no ceiling threshold for this archetype, so
+                    # nothing blocked it from reactivating nat-vent right away) — producing a
+                    # rapid escalate/reactivate oscillation with redundant thermostat writes
+                    # every time this function re-evaluated, instead of a single clean decision.
+                    _LOGGER.debug(
+                        "ODE ceiling guard: dormant — no ceiling-based compressor handoff for this"
+                        " fan archetype (WHOLE_HOUSE/BOTH); free cooling is direction-only"
+                    )
+                elif _outdoor <= _indoor_cg and self._natural_vent_active and _indoor_cg <= _ceiling_threshold_val:
                     _LOGGER.debug(
                         "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
                         " indoor <= ceiling threshold %s (free cooling viable)",
@@ -1900,7 +1911,11 @@ class AutomationEngine:
                         if self._emit_event_callback:
                             self._emit_event_callback(
                                 "nat_vent_forecast_skip",
-                                {"forecast_peak": max(lookahead_temps), "threshold": nat_vent_threshold},
+                                {
+                                    "forecast_peak": max(lookahead_temps),
+                                    "threshold": nat_vent_threshold,
+                                    "fan_device": _fan_device_label(self.config),
+                                },
                             )
 
                 # Phase 2 Guard 2: thermal model floor imminence
@@ -1925,7 +1940,10 @@ class AutomationEngine:
                                     if self._emit_event_callback:
                                         self._emit_event_callback(
                                             "nat_vent_floor_imminent_skip",
-                                            {"time_to_floor_hr": round(time_to_floor, 2)},
+                                            {
+                                                "time_to_floor_hr": round(time_to_floor, 2),
+                                                "fan_device": _fan_device_label(self.config),
+                                            },
                                         )
 
                 if not _skip_nat_vent:
@@ -2102,9 +2120,27 @@ class AutomationEngine:
                 # Issue #244: a contact sensor open while HVAC is idle (door opened with
                 # nothing to pause) must still be re-evaluated so nat-vent can engage when
                 # outdoor later cools below indoor — otherwise the occupant misses free
-                # evening cooling. Restricted to HVAC-off so we never fight active heating/cooling.
+                # evening cooling. Restricted to HVAC-not-actively-calling so we never fight
+                # active heating/cooling.
+                #
+                # Issue #402 fix: originally this required the thermostat's armed MODE to be
+                # literally "off". But _apply_comfort_band() legitimately arms "cool" mode as a
+                # ceiling backstop once nat-vent releases HVAC ownership (so the compressor can
+                # save the day if the breeze alone can't hold the ceiling) — and that backstop
+                # arming was permanently blocking this reactivation path even though the
+                # compressor was never actually running (hvac_action stayed "idle" because
+                # indoor never reached the armed ceiling). Check hvac_action instead of the
+                # armed mode: as long as the compressor isn't ACTIVELY calling for heat/cool,
+                # passive/free WHF re-evaluation should still be allowed to resume.
                 _hvac_state_244 = self.hass.states.get(self.climate_entity)
-                _hvac_off_244 = (_hvac_state_244 is None) or (getattr(_hvac_state_244, "state", "off") == "off")
+                _hvac_action_244 = (
+                    str(_hvac_state_244.attributes.get("hvac_action", "")).lower() if _hvac_state_244 else ""
+                )
+                _hvac_off_244 = (
+                    _hvac_state_244 is None
+                    or getattr(_hvac_state_244, "state", "off") == "off"
+                    or _hvac_action_244 in ("", "off", "idle")
+                )
                 _idle_open = bool(self._sensor_check_callback and self._sensor_check_callback()) and _hvac_off_244
                 if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
                     return
@@ -2190,22 +2226,23 @@ class AutomationEngine:
                     await self._deactivate_fan(
                         reason=(
                             f"natural vent exit: indoor {indoor:.1f}\u00b0F \u2264 comfort floor"
-                            f" {comfort_heat:.1f}\u00b0F"
+                            f" {_vent_floor:.1f}\u00b0F"
                         )
                     )
                     _LOGGER.info(
                         "Natural vent exit (comfort floor): indoor %.1f\u00b0F"
-                        " \u2264 comfort_heat %.1f\u00b0F \u2014 restoring heat",
+                        " \u2264 floor %.1f\u00b0F \u2014 restoring heat",
                         indoor,
-                        comfort_heat,
+                        _vent_floor,
                     )
                     if self._emit_event_callback:
                         self._emit_event_callback(
                             "nat_vent_comfort_floor_exit",
                             {
                                 "indoor_temp": indoor,
-                                "comfort_heat": comfort_heat,
+                                "comfort_heat": _vent_floor,
                                 "fan_mode_change": "on→auto",
+                                "fan_device": _fan_device_label(self.config),
                                 "hvac_mode_restored": (
                                     self._current_classification.hvac_mode
                                     if self._current_classification
@@ -2243,7 +2280,11 @@ class AutomationEngine:
                     if self._emit_event_callback:
                         self._emit_event_callback(
                             "nat_vent_away_ceiling_exit",
-                            {"indoor": _indoor_away, "comfort_cool": comfort_cool},
+                            {
+                                "indoor": _indoor_away,
+                                "comfort_cool": comfort_cool,
+                                "fan_device": _fan_device_label(self.config),
+                            },
                         )
                     return
 
@@ -2281,6 +2322,7 @@ class AutomationEngine:
                                         {
                                             "time_to_floor_hr": round(time_to_floor, 2),
                                             "fan_mode_change": "on→auto",
+                                            "fan_device": _fan_device_label(self.config),
                                             "hvac_mode_restored": (
                                                 self._current_classification.hvac_mode
                                                 if self._current_classification
@@ -2321,7 +2363,10 @@ class AutomationEngine:
                     indoor,
                 )
                 if self._emit_event_callback:
-                    self._emit_event_callback("nat_vent_outdoor_rise_exit", {"outdoor": outdoor, "indoor": indoor})
+                    self._emit_event_callback(
+                        "nat_vent_outdoor_rise_exit",
+                        {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
+                    )
                 return
 
             if self._natural_vent_active and outdoor is not None and outdoor > threshold:
@@ -2446,7 +2491,12 @@ class AutomationEngine:
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "nat_vent_comfort_floor_exit",
-                        {"indoor_temp": current_temp, "comfort_heat": _hard_floor, "source": "temp_check"},
+                        {
+                            "indoor_temp": current_temp,
+                            "comfort_heat": _hard_floor,
+                            "source": "temp_check",
+                            "fan_device": _fan_device_label(self.config),
+                        },
                     )
                 return
 
@@ -2581,7 +2631,10 @@ class AutomationEngine:
                 self._nat_vent_outdoor_exit_time = dt_util.now()
                 await self._deactivate_fan(reason=f"nat vent exit (fast loop): {stop_reason}")
                 if self._emit_event_callback:
-                    self._emit_event_callback("nat_vent_outdoor_rise_exit", {"outdoor": outdoor, "indoor": indoor})
+                    self._emit_event_callback(
+                        "nat_vent_outdoor_rise_exit",
+                        {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
+                    )
                 return
             stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F (free cooling gone)"
             _LOGGER.debug(
@@ -2601,8 +2654,22 @@ class AutomationEngine:
         # stop when indoor >= comfort_cool: for a cooling fan, being above the ceiling means "keep
         # cooling" — the inverse would shut the fan off exactly when the home is too warm and needs
         # it most (Issue #327 — caught by the fan_fast_stop_on_outdoor_rise scenario).
-        if indoor is not None and indoor <= comfort_heat:
-            stop_reason = f"indoor {indoor:.1f}°F ≤ comfort_heat {comfort_heat:.1f}°F (cooled to floor)"
+        #
+        # Issue #402: this floor must be sleep-aware, mirroring the fix #374 already applied to
+        # check_natural_vent_conditions() (line ~2182). This tick-level check fires on every
+        # thermostat temperature change — far more often than the 30-min classification cycle —
+        # so if it used the flat daytime comfort_heat floor during the sleep window, it would
+        # always preempt nat_vent_temperature_check()'s correct sleep-window cycling (off at
+        # sleep_heat, on at sleep_heat+2*hysteresis) before that logic ever got a chance to run,
+        # permanently ending the nat-vent session at comfort_heat instead of letting it cycle.
+        _hysteresis_ftc = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        if _in_sleep_window(dt_util.now(), self.config):
+            _sleep_heat_ftc = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+            _vent_floor_ftc = _sleep_heat_ftc - _hysteresis_ftc
+        else:
+            _vent_floor_ftc = comfort_heat
+        if indoor is not None and indoor <= _vent_floor_ftc:
+            stop_reason = f"indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor_ftc:.1f}°F (cooled to floor)"
             _LOGGER.debug(
                 "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
                 trigger,
@@ -3193,6 +3260,8 @@ class AutomationEngine:
             )
             if self._emit_event_callback:
                 self._emit_event_callback("bedtime_setback_skipped", {"reason": "manual_override"})
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "manual_override"
             return
 
         _LOGGER.warning("Bedtime setback: clearing any pending override state before applying sleep setback")
@@ -3264,11 +3333,17 @@ class AutomationEngine:
                 },
             )
         if self._today_record is not None:
-            if c.hvac_mode == "heat":
+            # Issue #402: key off _sleep_band.active (the edge _apply_comfort_band() actually
+            # arms below), not c.hvac_mode. On a warm/mild day c.hvac_mode is "off", but the
+            # sleep band's ceiling is still armed as a single-setpoint cool backstop — the
+            # setback WAS applied, but the original `if hvac_mode == "heat"/"cool"` check had
+            # no branch for "off", so DailyRecord never recorded it (and neither Applied nor
+            # Skipped ever got populated on the majority of nights in a mild climate).
+            if _sleep_band.active == "floor":
                 self._today_record.setback_heat_applied_f = _sleep_band.floor
                 self._today_record.setback_depth_f = abs(self.config.get("comfort_heat", 70) - _sleep_band.floor)
                 self._today_record.setback_was_adaptive = False
-            elif c.hvac_mode == "cool":
+            elif _sleep_band.active == "ceiling":
                 self._today_record.setback_cool_applied_f = _sleep_band.ceiling
                 self._today_record.setback_depth_f = abs(self.config.get("comfort_cool", 75) - _sleep_band.ceiling)
                 self._today_record.setback_was_adaptive = False
@@ -3535,7 +3610,11 @@ class AutomationEngine:
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "nat_vent_ac_assist_armed",
-                        {"comfort_heat": comfort_heat, "comfort_cool": comfort_cool},
+                        {
+                            "comfort_heat": comfort_heat,
+                            "comfort_cool": comfort_cool,
+                            "fan_device": _fan_device_label(self.config),
+                        },
                     )
                 return
 
@@ -3559,7 +3638,11 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "nat_vent_ac_assist_armed",
-                    {"comfort_heat": comfort_heat, "comfort_cool": comfort_cool},
+                    {
+                        "comfort_heat": comfort_heat,
+                        "comfort_cool": comfort_cool,
+                        "fan_device": _fan_device_label(self.config),
+                    },
                 )
         else:
             # Savings mode — floor guard only; ceiling disarmed so compressor cannot run

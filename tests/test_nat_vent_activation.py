@@ -673,7 +673,9 @@ class TestForecastRisingOutdoorSkip:
         # Should NOT activate nat vent
         assert not engine._natural_vent_active
         # Should emit forecast_skip event
-        assert any(e[0] == "nat_vent_forecast_skip" for e in events)
+        skip_events = [e for e in events if e[0] == "nat_vent_forecast_skip"]
+        assert skip_events
+        assert "fan_device" in skip_events[0][1], "Issue #402: skip events must identify the fan mechanism"
 
     def test_forecast_peak_below_threshold_allows_nat_vent(self):
         """Forecast peak <= threshold -> Phase 2 guard passes -> nat vent activates.
@@ -750,6 +752,7 @@ class TestThermalFloorImminentSkip:
         assert any(e[0] == "nat_vent_floor_imminent_skip" for e in events)
         skip_event = next(e for e in events if e[0] == "nat_vent_floor_imminent_skip")
         assert skip_event[1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
+        assert "fan_device" in skip_event[1], "Issue #402: skip events must identify the fan mechanism"
 
     def test_floor_not_imminent_allows_activation(self):
         """Medium confidence, time_to_floor > 1 hr -> thermal guard passes -> nat vent activates.
@@ -879,6 +882,7 @@ class TestProactiveFloorExit:
         assert len(floor_events) == 1
         assert "time_to_floor_hr" in floor_events[0][1]
         assert floor_events[0][1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
+        assert "fan_device" in floor_events[0][1], "Issue #402: exit events must identify the fan mechanism"
 
 
 # ---------------------------------------------------------------------------
@@ -1519,6 +1523,8 @@ class TestNatVentSleepWindowBand:
         assert "nat_vent_ac_assist_armed" in event_types, (
             f"nat_vent_ac_assist_armed must still fire during sleep window. Got events: {event_types}"
         )
+        armed_payload = next(pl for et, pl in emitted if et == "nat_vent_ac_assist_armed")
+        assert "fan_device" in armed_payload, "Issue #402: ac_assist_armed must identify the fan mechanism"
 
     def test_awake_window_two_comfort_band_calls(self):
         """Nat-vent active + awake hours → two _apply_comfort_band calls (regression guard).

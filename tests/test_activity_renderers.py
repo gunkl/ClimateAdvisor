@@ -500,13 +500,45 @@ class TestFanEventRenderers:
     """Issue #331 follow-up: fan_activated / fan_deactivated / fan_running_untracked / cleared."""
 
     def test_fan_activated_shows_trigger(self):
+        """Issue #392 Fix 2: settings cell uses the archetype-specific fan_device label."""
         ev, st = _act_mod.EVENT_RENDERERS["fan_activated"](
-            {"reason": "min_runtime_cycle", "fan_mode": "hvac_fan"}, "fahrenheit"
+            {"reason": "min_runtime_cycle", "fan_device": "hvac_fan"}, "fahrenheit"
         )
+        assert "Fan activated" in ev and "min_runtime_cycle" in ev
+        assert st == "hvac_fan: off->on"
+
+    def test_fan_activated_shows_trigger_whf(self):
+        """Issue #392 Fix 2: whole-house-fan archetype renders 'whf', not the generic 'fan'."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_activated"](
+            {"reason": "natural ventilation", "fan_device": "whf"}, "fahrenheit"
+        )
+        assert "Fan activated" in ev and "natural ventilation" in ev
+        assert st == "whf: off->on"
+
+    def test_fan_activated_no_fan_device_falls_back(self):
+        """No fan_device in payload (legacy/pre-#392 event) -> generic 'fan' label, no crash."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_activated"]({"reason": "min_runtime_cycle"}, "fahrenheit")
         assert "Fan activated" in ev and "min_runtime_cycle" in ev
         assert st == "fan: off->on"
 
     def test_fan_deactivated_shows_trigger(self):
+        """Issue #392 Fix 2: settings cell uses the archetype-specific fan_device label."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_deactivated"](
+            {"reason": "economizer off -- fan no longer needed", "fan_device": "hvac_fan"}, "fahrenheit"
+        )
+        assert "Fan deactivated" in ev and "economizer off" in ev
+        assert st == "hvac_fan: on->off"
+
+    def test_fan_deactivated_shows_trigger_whf(self):
+        """Issue #392 Fix 2: whole-house-fan archetype renders 'whf', not the generic 'fan'."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_deactivated"](
+            {"reason": "door/window closed", "fan_device": "whf"}, "fahrenheit"
+        )
+        assert "Fan deactivated" in ev and "door/window closed" in ev
+        assert st == "whf: on->off"
+
+    def test_fan_deactivated_no_fan_device_falls_back(self):
+        """No fan_device in payload (legacy/pre-#392 event) -> generic 'fan' label, no crash."""
         ev, st = _act_mod.EVENT_RENDERERS["fan_deactivated"](
             {"reason": "economizer off -- fan no longer needed"}, "fahrenheit"
         )

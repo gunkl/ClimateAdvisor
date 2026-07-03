@@ -11,7 +11,7 @@
   },
   "config": {
     "comfort_heat": 70,
-    "comfort_cool": 72,
+    "comfort_cool": 76,
     "natural_vent_delta": 3.0
   },
   "events": [
@@ -20,7 +20,7 @@
       "type": "temp_update",
       "indoor_f": 76.0,
       "outdoor_f": 70.0,
-      "note": "evening: indoor above comfort_cool, outdoor 6F cooler — nat vent eligible"
+      "note": "evening: indoor at comfort_cool ceiling, outdoor 6F cooler — nat vent eligible. comfort_cool raised to 76 (Issue #392: reactivation gates now also require indoor <= ceiling_threshold for the default/HVAC-fan archetype used here — this scenario tests directional activation, not the ceiling gate)"
     },
     {
       "time": "2026-04-20T18:00:00",
@@ -33,7 +33,7 @@
     {
       "at": "2026-04-20T18:00:00",
       "expect": "natural_ventilation",
-      "reason": "outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 75F; indoor 76F > comfort_heat 70F — nat vent activates"
+      "reason": "outdoor 70F < indoor 76F (beneficial direction); outdoor 70F < threshold 79F; indoor 76F > comfort_heat 70F; indoor 76F <= ceiling_threshold 76F — nat vent activates"
     }
   ]
 }

@@ -461,44 +461,62 @@ def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
 def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor_temp")
     on_thr = p.get("on_threshold")
+    fan_device = p.get("fan_device", "fan")
     label = "Nat-vent fan on (cycling)"
     if indoor is not None and on_thr is not None:
         with contextlib.suppress(TypeError, ValueError):
             label = (
                 f"Nat-vent fan on -- indoor {format_temp(float(indoor), unit)} >= {format_temp(float(on_thr), unit)}"
             )
-    return label, "fan: auto->on"
+    return label, f"{fan_device}: auto->on"
 
 
 def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor_temp")
     off_thr = p.get("off_threshold")
+    fan_device = p.get("fan_device", "fan")
     label = "Nat-vent fan off (cycling)"
     if indoor is not None and off_thr is not None:
         with contextlib.suppress(TypeError, ValueError):
             label = (
                 f"Nat-vent fan off -- indoor {format_temp(float(indoor), unit)} <= {format_temp(float(off_thr), unit)}"
             )
-    return label, "fan: on->auto"
+    return label, f"{fan_device}: on->auto"
 
 
 def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
+    fan_device = p.get("fan_device", "fan")
     label = f"Fan activated -- {reason}" if reason else "Fan activated"
-    return label, "fan: off->on"
+    return label, f"{fan_device}: off->on"
 
 
 def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
+    fan_device = p.get("fan_device", "fan")
     label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
-    return label, "fan: on->off"
+    return label, f"{fan_device}: on->off"
+
+
+def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #392 Fix 1b: choke-point guard intercepted an HVAC write while WHF owns the thermostat.
+
+    Makes the structural WHF/AC mutual-exclusion guarantee visible in the Activity Log
+    instead of silently dropping the blocked write.
+    """
+    attempted_mode = str(p.get("attempted_mode", "")).strip()
+    reason = str(p.get("reason", "")).strip()
+    label = f"HVAC write blocked (whole-house fan active) -- {reason}" if reason else "HVAC write blocked"
+    settings = f"hvac: blocked ({attempted_mode})" if attempted_mode else ""
+    return label, settings
 
 
 def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
     fan_before = str(p.get("fan_before", "")).strip()
     fan_after = str(p.get("fan_after", "")).strip()
+    fan_device = p.get("fan_device", "fan")
     change = f"{fan_before}->{fan_after}" if fan_before and fan_after else ""
-    settings = f"fan: {change}" if change else ""
+    settings = f"{fan_device}: {change}" if change else ""
     return "Fan manual override", settings
 
 
@@ -517,7 +535,8 @@ def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
 def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
     fan_before = str(p.get("fan_before", "?")).strip()
     fan_after = str(p.get("fan_after", "?")).strip()
-    settings = f"fan: {fan_before}->{fan_after}" if fan_before and fan_after else ""
+    fan_device = p.get("fan_device", "fan")
+    settings = f"{fan_device}: {fan_before}->{fan_after}" if fan_before and fan_after else ""
     return "Fan cancel (user turned off)", settings
 
 
@@ -816,6 +835,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_activated": _render_fan_activated,
     "fan_deactivated": _render_fan_deactivated,
     "fan_manual_override": _render_fan_manual_override,
+    "hvac_write_blocked_whf_active": _render_hvac_write_blocked_whf_active,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,
     "fan_cancel": _render_fan_cancel,

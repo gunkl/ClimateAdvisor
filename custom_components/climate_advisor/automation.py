@@ -6,6 +6,7 @@ based on the day classification and learning state.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
@@ -386,6 +387,18 @@ class AutomationEngine:
         self._paused_by_door = False
         self._pre_pause_mode: str | None = None
 
+        # Issue #392 Fix 3: serialize the six automation decision-pass entry points
+        # (apply_classification, handle_door_window_open, handle_all_doors_windows_closed,
+        # check_natural_vent_conditions, _re_pause_for_open_sensor, nat_vent_temperature_check)
+        # against each other. asyncio is single-threaded but not atomic across awaits — without
+        # this lock, two triggers firing close together (e.g. a sensor-open debounce callback and
+        # a thermostat temperature-tick callback) can interleave and race on shared engine state
+        # (_natural_vent_active, _fan_active, _pre_fan_hvac_mode, _paused_by_door). See
+        # docs/08-COMPUTATION-REFERENCE.md §9g for the deadlock-avoidance analysis (none of the
+        # six methods calls another of the six directly in the same stack, so a plain
+        # `async with self._decision_lock:` wrap is safe — no `_impl` extraction needed).
+        self._decision_lock = asyncio.Lock()
+
         # Dry-run mode: when True, all service calls are logged but skipped
         self.dry_run: bool = False
 
@@ -526,6 +539,17 @@ class AutomationEngine:
     def natural_vent_active(self) -> bool:
         """Whether natural ventilation mode is currently active."""
         return self._natural_vent_active
+
+    @property
+    def _fan_running(self) -> bool:
+        """Whether any CA-owned fan (HVAC blower or whole-house) is currently running.
+
+        Collapses the recurring ``self._fan_active or self._natural_vent_active`` OR
+        pattern into a single derived property (Issue #392 Fix 1e) — the two flags are
+        one concept ("is CA's fan on") fractured into two names. Stepping stone toward a
+        future ``FanSession`` extraction (see Issue #392 shaping analysis).
+        """
+        return self._fan_active or self._natural_vent_active
 
     _VALID_OCCUPANCY_MODES = {OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST}
 
@@ -669,6 +693,7 @@ class AutomationEngine:
                     "fan_before": fan_before,
                     "fan_after": fan_after,
                     "override_active_since": self._fan_override_time,
+                    "fan_device": _fan_device_label(self.config),
                 },
             )
         self._start_grace_period("manual", trigger="fan_manual_override")
@@ -716,6 +741,7 @@ class AutomationEngine:
                     "fan_before": fan_before,
                     "fan_after": fan_after,
                     "trigger": "fan_off",
+                    "fan_device": _fan_device_label(self.config),
                 },
             )
 
@@ -1013,327 +1039,343 @@ class AutomationEngine:
                 to evaluate the pre-cool achievement gate (Issue #295). When
                 None the achievement check is skipped for this cycle.
         """
-        self._current_classification = classification
+        async with self._decision_lock:
+            self._current_classification = classification
 
-        if self._manual_override_active:
-            _LOGGER.info(
-                "Manual override active (mode=%s since %s) — skipping HVAC mode change",
-                self._manual_override_mode,
-                self._manual_override_time,
-            )
-            return
-
-        if self._override_confirm_pending:
-            _LOGGER.info(
-                "Override confirmation pending (detected=%s at %s) — skipping HVAC mode change",
-                self._override_confirm_mode,
-                self._override_confirm_time,
-            )
-            return
-
-        # Issue #85: respect occupancy mode — don't overwrite setback with comfort
-        if self._occupancy_mode == OCCUPANCY_VACATION:
-            _LOGGER.info("Vacation mode — skipping classification temp change (deep setback preserved)")
-            return
-        if self._occupancy_mode == OCCUPANCY_AWAY:
-            _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
-            await self.handle_occupancy_away()
-            return
-
-        # Issue #337: while paused by open door/window, suppress the band and hold HVAC off.
-        if self._paused_by_door:
-            _LOGGER.warning(
-                "apply_classification: door/window open (_paused_by_door=True) — "
-                "suppressing band, ensuring HVAC off; day_type=%s",
-                classification.day_type,
-            )
-            _cs_paused = self.hass.states.get(self.climate_entity)
-            if _cs_paused is not None and _cs_paused.state != "off":
+            if self._manual_override_active:
                 _LOGGER.info(
-                    "apply_classification: thermostat in state=%r — forcing off (windows open)",
-                    _cs_paused.state,
+                    "Manual override active (mode=%s since %s) — skipping HVAC mode change",
+                    self._manual_override_mode,
+                    self._manual_override_time,
                 )
-                await self._set_hvac_mode(
-                    "off",
-                    reason="classification cycle: door/window open — HVAC suppressed while paused",
-                )
-            else:
-                _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "classification_suppressed_paused",
-                    {"day_type": classification.day_type, "hvac_mode": classification.hvac_mode},
-                )
-            return
-
-        # Issue #338: while nat-vent is active with savings mode, enforce floor-only HVAC so the
-        # 30-minute cycle cannot re-arm the ceiling (compressor) through open windows.
-        # With savings off, call the helper to keep the full band current, then continue so the
-        # ODE ceiling guard can still fire as a safety backstop if a breach is predicted.
-        if self._natural_vent_active:
-            _aggressive = bool(self.config.get("aggressive_savings", False))
-            _LOGGER.info(
-                "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s day_type=%s",
-                not _aggressive,
-                classification.day_type,
-            )
-            await self._apply_nat_vent_hvac_state()
-            if _aggressive:
-                # Savings mode: no compressor through open windows — skip ceiling guard
                 return
 
-        _cs = self.hass.states.get(self.climate_entity)
-        _LOGGER.debug(
-            "apply_classification: wants=%r, thermostat=%r",
-            classification.hvac_mode,
-            _cs.state if _cs else "unavailable",
-        )
-
-        unit = self.config.get("temp_unit", "fahrenheit")
-        _LOGGER.warning(
-            "Applying classification: %s (trend: %s %s)",
-            classification.day_type,
-            classification.trend_direction,
-            format_temp_delta(classification.trend_magnitude, unit),
-        )
-        _old_mode_cls = _cs.state if _cs else None
-        _cls_key = (classification.day_type, classification.hvac_mode)
-        if _cls_key != self._last_classification_applied:
-            self._last_classification_applied = _cls_key
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "classification_applied",
-                    {
-                        "day_type": classification.day_type,
-                        "hvac_mode": classification.hvac_mode,
-                        "trend": classification.trend_direction,
-                        "old_hvac_mode": _old_mode_cls,
-                        "indoor_f": indoor_temp,
-                    },
-                )
-        else:
-            _LOGGER.debug(
-                "classification_applied suppressed — same as last (%s/%s)",
-                classification.day_type,
-                classification.hvac_mode,
-            )
-
-        # Issue #295: pre-cool achievement gate — daily reset + detection.
-        # Reset the flag at the start of each new calendar day so the pre-cool
-        # ceiling offset re-arms each morning.  Check whether the home has
-        # already reached the pre-cool target temperature; if so, set the flag
-        # so select_comfort_band() reverts to comfort_cool for the rest of the day.
-        _today = dt_util.now().strftime("%Y-%m-%d")
-        if self._pre_condition_achieved_date != _today:
-            self._pre_condition_achieved = False
-            self._pre_condition_achieved_date = _today
-
-        if (
-            not self._pre_condition_achieved
-            and classification.pre_condition
-            and classification.pre_condition_target is not None
-            and classification.pre_condition_target < 0
-            and indoor_temp is not None
-        ):
-            _absolute_target = float(self.config.get("comfort_cool", 75)) + float(classification.pre_condition_target)
-            if indoor_temp <= _absolute_target:
-                self._pre_condition_achieved = True
+            if self._override_confirm_pending:
                 _LOGGER.info(
-                    "Pre-cool achieved (indoor=%.1f°F ≤ target=%.1f°F) — reverting to comfort ceiling for rest of day",
-                    indoor_temp,
-                    _absolute_target,
+                    "Override confirmation pending (detected=%s at %s) — skipping HVAC mode change",
+                    self._override_confirm_mode,
+                    self._override_confirm_time,
                 )
+                return
 
-        # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
-        cls_reason = (
-            f"daily classification — {classification.day_type} day,"
-            f" trend {classification.trend_direction} {format_temp_delta(classification.trend_magnitude, unit)}"
-        )
-        _band = select_comfort_band(
-            classification,
-            self.config,
-            occupancy_mode=self._occupancy_mode,
-            in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
-            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
-            pre_condition_achieved=self._pre_condition_achieved,
-        )
-        await self._apply_comfort_band(_band, reason=cls_reason)
+            # Issue #85: respect occupancy mode — don't overwrite setback with comfort
+            if self._occupancy_mode == OCCUPANCY_VACATION:
+                _LOGGER.info("Vacation mode — skipping classification temp change (deep setback preserved)")
+                return
+            if self._occupancy_mode == OCCUPANCY_AWAY:
+                _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
+                await self.handle_occupancy_away()
+                return
 
-        # ODE ceiling guard (Issue #136): if thermal model predicts indoor will breach
-        # comfort_cool within lead_time AND outdoor is already warmer than indoor
-        # (nat-vent unavailable), set HVAC to cool proactively.
-        # Re-evaluated on every 30-min cycle — no flag needed; adapts to forecast changes.
-        if predicted_indoor and classification.hvac_mode == "off":
-            _thermal = self._thermal_model or {}
-            _k_passive = _thermal.get("k_passive")
-            _conf = _thermal.get("confidence_k_passive") or _thermal.get("confidence", "none")
-            _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
-            _k_active_cool = _thermal.get("k_active_cool")
-            _comfort_cool_cg = self.config.get("comfort_cool")
-            _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
-
-            _model_eligible = (
-                _k_passive is not None
-                and _k_passive < 0
-                and (_conf != "none" or _k_via_bridge)
-                and _comfort_cool_cg is not None
-            )
-
-            _outdoor = self._last_outdoor_temp
-            _indoor_cg = self._get_indoor_temp_f()
-
-            _LOGGER.debug(
-                "ODE ceiling guard eval: %d points, comfort_cool=%s, outdoor=%s, indoor=%s,"
-                " k_passive=%s, conf=%s, bridge=%s",
-                len(predicted_indoor),
-                _comfort_cool_cg,
-                _outdoor,
-                _indoor_cg,
-                _k_passive,
-                _conf,
-                _k_via_bridge,
-            )
-
-            # Issue #247: dormancy is THREE conditions (the change #218 specified but its commit
-            # omitted — only the escalation-on-fire half landed). Defer to free cooling ONLY when
-            # outdoor is cooler AND nat-vent is actually running AND indoor is still within band.
-            # If indoor has breached the ceiling (free cooling losing to solar/internal gains), or
-            # nat-vent is not actually running (sensors closed / fan override — #215), the guard must
-            # evaluate and escalate to AC even though outdoor <= indoor. aggressive_savings widens the
-            # in-band threshold so savings homes tolerate a small overshoot before paying for cooling.
-            _aggressive = bool(self.config.get("aggressive_savings", False))
-            _ceiling_threshold = (
-                _comfort_cool_cg + CEILING_ESCALATION_SAVINGS_MARGIN_F
-                if (_aggressive and _comfort_cool_cg is not None)
-                else _comfort_cool_cg
-            )
-            if not _model_eligible:
-                _LOGGER.debug("ODE ceiling guard: skipped — k_passive=%s, conf=%s", _k_passive, _conf)
-            elif _outdoor is None or _indoor_cg is None:
-                _LOGGER.debug("ODE ceiling guard: skipped — missing outdoor/indoor temps")
-            elif _outdoor <= _indoor_cg and self._natural_vent_active and _indoor_cg <= _ceiling_threshold:
-                _LOGGER.debug(
-                    "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
-                    " indoor <= ceiling threshold %.1f (free cooling viable)",
-                    _outdoor,
-                    _indoor_cg,
-                    _ceiling_threshold,
+            # Issue #337: while paused by open door/window, suppress the band and hold HVAC off.
+            if self._paused_by_door:
+                _LOGGER.warning(
+                    "apply_classification: door/window open (_paused_by_door=True) — "
+                    "suppressing band, ensuring HVAC off; day_type=%s",
+                    classification.day_type,
                 )
-            else:
-                # Dormancy lifted (outdoor rose above indoor, OR nat-vent is not running, OR indoor
-                # breached the ceiling under active nat-vent — Issue #247). Scan the predicted curve
-                # for a ceiling breach.
-                # Inline equivalent of _find_ceiling_breach_time() — avoids circular import.
-                _breach_ts: datetime | None = None
-                _threshold = _comfort_cool_cg + _tolerance
-                for _entry in predicted_indoor:
-                    _t = _entry.get("temp")
-                    if _t is not None and _t > _threshold:
-                        with contextlib.suppress(KeyError, ValueError, TypeError):
-                            _breach_ts = datetime.fromisoformat(_entry["ts"])
-                        break
-
-                if _breach_ts is None:
-                    _LOGGER.debug(
-                        "ODE ceiling guard: dormant — no breach above %.1f°F predicted",
-                        _threshold,
+                _cs_paused = self.hass.states.get(self.climate_entity)
+                if _cs_paused is not None and _cs_paused.state != "off":
+                    _LOGGER.info(
+                        "apply_classification: thermostat in state=%r — forcing off (windows open)",
+                        _cs_paused.state,
+                    )
+                    await self._set_hvac_mode(
+                        "off",
+                        reason="classification cycle: door/window open — HVAC suppressed while paused",
                     )
                 else:
-                    _now_cg = dt_util.now()
-                    # Normalize both to UTC for reliable subtraction
-                    _now_utc = (
-                        _now_cg.astimezone(UTC)
-                        if getattr(_now_cg, "tzinfo", None) is not None
-                        else _now_cg.replace(tzinfo=UTC)
+                    _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "classification_suppressed_paused",
+                        {"day_type": classification.day_type, "hvac_mode": classification.hvac_mode},
                     )
-                    _breach_utc = (
-                        _breach_ts.astimezone(UTC) if _breach_ts.tzinfo is not None else _breach_ts.replace(tzinfo=UTC)
+                return
+
+            # Issue #338: while nat-vent is active with savings mode, enforce floor-only HVAC so the
+            # 30-minute cycle cannot re-arm the ceiling (compressor) through open windows.
+            # With savings off, call the helper to keep the full band current, then continue so the
+            # ODE ceiling guard can still fire as a safety backstop if a breach is predicted.
+            if self._natural_vent_active:
+                _aggressive = bool(self.config.get("aggressive_savings", False))
+                _LOGGER.info(
+                    "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s day_type=%s",
+                    not _aggressive,
+                    classification.day_type,
+                )
+                await self._apply_nat_vent_hvac_state()
+                if _aggressive:
+                    # Savings mode: no compressor through open windows — skip ceiling guard
+                    return
+                # Issue #392 Fix 1b: WHF/BOTH is mutually exclusive with the compressor by
+                # design (_activate_fan suppresses HVAC) — skip select_comfort_band()/the ODE
+                # ceiling guard entirely rather than letting the choke-point guard silently drop
+                # the write. FAN_MODE_HVAC keeps falling through (fan/AC coexist safely).
+                _fan_cfg_cls = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+                if _fan_cfg_cls in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                    return
+
+            _cs = self.hass.states.get(self.climate_entity)
+            _LOGGER.debug(
+                "apply_classification: wants=%r, thermostat=%r",
+                classification.hvac_mode,
+                _cs.state if _cs else "unavailable",
+            )
+
+            unit = self.config.get("temp_unit", "fahrenheit")
+            _LOGGER.warning(
+                "Applying classification: %s (trend: %s %s)",
+                classification.day_type,
+                classification.trend_direction,
+                format_temp_delta(classification.trend_magnitude, unit),
+            )
+            _old_mode_cls = _cs.state if _cs else None
+            _cls_key = (classification.day_type, classification.hvac_mode)
+            if _cls_key != self._last_classification_applied:
+                self._last_classification_applied = _cls_key
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "classification_applied",
+                        {
+                            "day_type": classification.day_type,
+                            "hvac_mode": classification.hvac_mode,
+                            "trend": classification.trend_direction,
+                            "old_hvac_mode": _old_mode_cls,
+                            "indoor_f": indoor_temp,
+                        },
                     )
-                    _hours_to_breach = (_breach_utc - _now_utc).total_seconds() / 3600
+            else:
+                _LOGGER.debug(
+                    "classification_applied suppressed — same as last (%s/%s)",
+                    classification.day_type,
+                    classification.hvac_mode,
+                )
 
-                    if _k_active_cool is not None and abs(_k_active_cool) > 0:
-                        _lead_min = ((_comfort_cool_cg - _indoor_cg) / abs(_k_active_cool)) * 60 * 1.3
-                    else:
-                        _lead_min = float(CEILING_PRECOOL_FALLBACK_MIN)
-                    _lead_min = max(30.0, min(240.0, _lead_min))
+            # Issue #295: pre-cool achievement gate — daily reset + detection.
+            # Reset the flag at the start of each new calendar day so the pre-cool
+            # ceiling offset re-arms each morning.  Check whether the home has
+            # already reached the pre-cool target temperature; if so, set the flag
+            # so select_comfort_band() reverts to comfort_cool for the rest of the day.
+            _today = dt_util.now().strftime("%Y-%m-%d")
+            if self._pre_condition_achieved_date != _today:
+                self._pre_condition_achieved = False
+                self._pre_condition_achieved_date = _today
 
+            if (
+                not self._pre_condition_achieved
+                and classification.pre_condition
+                and classification.pre_condition_target is not None
+                and classification.pre_condition_target < 0
+                and indoor_temp is not None
+            ):
+                _absolute_target = float(self.config.get("comfort_cool", 75)) + float(
+                    classification.pre_condition_target
+                )
+                if indoor_temp <= _absolute_target:
+                    self._pre_condition_achieved = True
                     _LOGGER.info(
-                        "ODE ceiling guard: breach predicted at %s (%.1fh away), outdoor=%.1f, indoor=%.1f,"
-                        " nat_vent=%s",
-                        _breach_ts.strftime("%H:%M"),
-                        _hours_to_breach,
+                        "Pre-cool achieved (indoor=%.1f°F ≤ target=%.1f°F) — reverting to comfort"
+                        " ceiling for rest of day",
+                        indoor_temp,
+                        _absolute_target,
+                    )
+
+            # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
+            cls_reason = (
+                f"daily classification — {classification.day_type} day,"
+                f" trend {classification.trend_direction} {format_temp_delta(classification.trend_magnitude, unit)}"
+            )
+            _band = select_comfort_band(
+                classification,
+                self.config,
+                occupancy_mode=self._occupancy_mode,
+                in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+                aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+                pre_condition_achieved=self._pre_condition_achieved,
+            )
+            await self._apply_comfort_band(_band, reason=cls_reason)
+
+            # ODE ceiling guard (Issue #136): if thermal model predicts indoor will breach
+            # comfort_cool within lead_time AND outdoor is already warmer than indoor
+            # (nat-vent unavailable), set HVAC to cool proactively.
+            # Re-evaluated on every 30-min cycle — no flag needed; adapts to forecast changes.
+            if predicted_indoor and classification.hvac_mode == "off":
+                _thermal = self._thermal_model or {}
+                _k_passive = _thermal.get("k_passive")
+                _conf = _thermal.get("confidence_k_passive") or _thermal.get("confidence", "none")
+                _k_via_bridge = bool(_thermal.get("k_passive_via_bridge"))
+                _k_active_cool = _thermal.get("k_active_cool")
+                _comfort_cool_cg = self.config.get("comfort_cool")
+                _tolerance = CEILING_BRIDGE_TOLERANCE_F if _k_via_bridge else 0.0
+
+                _model_eligible = (
+                    _k_passive is not None
+                    and _k_passive < 0
+                    and (_conf != "none" or _k_via_bridge)
+                    and _comfort_cool_cg is not None
+                )
+
+                _outdoor = self._last_outdoor_temp
+                _indoor_cg = self._get_indoor_temp_f()
+
+                _LOGGER.debug(
+                    "ODE ceiling guard eval: %d points, comfort_cool=%s, outdoor=%s, indoor=%s,"
+                    " k_passive=%s, conf=%s, bridge=%s",
+                    len(predicted_indoor),
+                    _comfort_cool_cg,
+                    _outdoor,
+                    _indoor_cg,
+                    _k_passive,
+                    _conf,
+                    _k_via_bridge,
+                )
+
+                # Issue #247: dormancy is THREE conditions (the change #218 specified but its commit
+                # omitted — only the escalation-on-fire half landed). Defer to free cooling ONLY when
+                # outdoor is cooler AND nat-vent is actually running AND indoor is still within band.
+                # If indoor has breached the ceiling (free cooling losing to solar/internal gains), or
+                # nat-vent is not actually running (sensors closed / fan override — #215), the guard must
+                # evaluate and escalate to AC even though outdoor <= indoor. aggressive_savings widens the
+                # in-band threshold so savings homes tolerate a small overshoot before paying for cooling.
+                # Issue #392 Fix 1: the ceiling threshold is archetype-aware — None for whole-house-fan
+                # mode (direction-only, no ceiling handoff; see _ceiling_threshold() docstring).
+                _ceiling_threshold_val = self._ceiling_threshold(_comfort_cool_cg)
+                if not _model_eligible:
+                    _LOGGER.debug("ODE ceiling guard: skipped — k_passive=%s, conf=%s", _k_passive, _conf)
+                elif _outdoor is None or _indoor_cg is None:
+                    _LOGGER.debug("ODE ceiling guard: skipped — missing outdoor/indoor temps")
+                elif (
+                    _outdoor <= _indoor_cg
+                    and self._natural_vent_active
+                    and (_ceiling_threshold_val is None or _indoor_cg <= _ceiling_threshold_val)
+                ):
+                    _LOGGER.debug(
+                        "ODE ceiling guard: dormant — outdoor %.1f <= indoor %.1f, nat-vent running,"
+                        " indoor <= ceiling threshold %s (free cooling viable)",
                         _outdoor,
                         _indoor_cg,
-                        self._natural_vent_active,
+                        _ceiling_threshold_val,
                     )
+                else:
+                    # Dormancy lifted (outdoor rose above indoor, OR nat-vent is not running, OR indoor
+                    # breached the ceiling under active nat-vent — Issue #247). Scan the predicted curve
+                    # for a ceiling breach.
+                    # Inline equivalent of _find_ceiling_breach_time() — avoids circular import.
+                    _breach_ts: datetime | None = None
+                    _threshold = _comfort_cool_cg + _tolerance
+                    for _entry in predicted_indoor:
+                        _t = _entry.get("temp")
+                        if _t is not None and _t > _threshold:
+                            with contextlib.suppress(KeyError, ValueError, TypeError):
+                                _breach_ts = datetime.fromisoformat(_entry["ts"])
+                            break
 
-                    if _hours_to_breach <= _lead_min / 60:
-                        _LOGGER.info(
-                            "ODE ceiling guard: active — setting HVAC cool, target=%.1f"
-                            " (breach %.1fh, lead=%.0fmin, k_cool=%s)",
-                            _comfort_cool_cg,
-                            _hours_to_breach,
-                            _lead_min,
-                            _k_active_cool,
+                    if _breach_ts is None:
+                        _LOGGER.debug(
+                            "ODE ceiling guard: dormant — no breach above %.1f°F predicted",
+                            _threshold,
                         )
-                        if self._natural_vent_active:
-                            await self._deactivate_fan(reason="ceiling guard override -- nat-vent to active cooling")
-                            self._natural_vent_active = False
+                    else:
+                        _now_cg = dt_util.now()
+                        # Normalize both to UTC for reliable subtraction
+                        _now_utc = (
+                            _now_cg.astimezone(UTC)
+                            if getattr(_now_cg, "tzinfo", None) is not None
+                            else _now_cg.replace(tzinfo=UTC)
+                        )
+                        _breach_utc = (
+                            _breach_ts.astimezone(UTC)
+                            if _breach_ts.tzinfo is not None
+                            else _breach_ts.replace(tzinfo=UTC)
+                        )
+                        _hours_to_breach = (_breach_utc - _now_utc).total_seconds() / 3600
+
+                        if _k_active_cool is not None and abs(_k_active_cool) > 0:
+                            _lead_min = ((_comfort_cool_cg - _indoor_cg) / abs(_k_active_cool)) * 60 * 1.3
+                        else:
+                            _lead_min = float(CEILING_PRECOOL_FALLBACK_MIN)
+                        _lead_min = max(30.0, min(240.0, _lead_min))
+
+                        _LOGGER.info(
+                            "ODE ceiling guard: breach predicted at %s (%.1fh away), outdoor=%.1f, indoor=%.1f,"
+                            " nat_vent=%s",
+                            _breach_ts.strftime("%H:%M"),
+                            _hours_to_breach,
+                            _outdoor,
+                            _indoor_cg,
+                            self._natural_vent_active,
+                        )
+
+                        if _hours_to_breach <= _lead_min / 60:
+                            _LOGGER.info(
+                                "ODE ceiling guard: active — setting HVAC cool, target=%.1f"
+                                " (breach %.1fh, lead=%.0fmin, k_cool=%s)",
+                                _comfort_cool_cg,
+                                _hours_to_breach,
+                                _lead_min,
+                                _k_active_cool,
+                            )
+                            if self._natural_vent_active:
+                                await self._deactivate_fan(
+                                    reason="ceiling guard override -- nat-vent to active cooling"
+                                )
+                                self._natural_vent_active = False
+                                if self._emit_event_callback:
+                                    self._emit_event_callback(
+                                        "nat_vent_ceiling_escalation",
+                                        {
+                                            "indoor": _indoor_cg,
+                                            "outdoor": _outdoor,
+                                            "comfort_cool": _comfort_cool_cg,
+                                        },
+                                    )
+                            _cs_cg = self.hass.states.get(self.climate_entity)
+                            _old_mode_cg = _cs_cg.state if _cs_cg else None
+                            _old_setpoint_raw_cg = _cs_cg.attributes.get("temperature") if _cs_cg else None
+                            _old_setpoint_f_cg = (
+                                to_fahrenheit(_old_setpoint_raw_cg, unit) if _old_setpoint_raw_cg is not None else None
+                            )
+                            await self._set_hvac_mode(
+                                "cool",
+                                reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
+                            )
+                            await self._set_temperature(
+                                _comfort_cool_cg,
+                                reason="ODE ceiling guard — target comfort_cool",
+                                mode="cool",
+                            )
                             if self._emit_event_callback:
                                 self._emit_event_callback(
-                                    "nat_vent_ceiling_escalation",
+                                    "ceiling_guard_fired",
                                     {
-                                        "indoor": _indoor_cg,
-                                        "outdoor": _outdoor,
-                                        "comfort_cool": _comfort_cool_cg,
+                                        "breach_time": _breach_ts.isoformat(),
+                                        "hours_to_breach": round(_hours_to_breach, 1),
+                                        "lead_time_min": round(_lead_min),
+                                        "old_hvac_mode": _old_mode_cg,
+                                        "new_hvac_mode": "cool",
+                                        "new_setpoint_f": _comfort_cool_cg,
+                                        "old_setpoint_f": _old_setpoint_f_cg,
                                     },
                                 )
-                        _cs_cg = self.hass.states.get(self.climate_entity)
-                        _old_mode_cg = _cs_cg.state if _cs_cg else None
-                        _old_setpoint_raw_cg = _cs_cg.attributes.get("temperature") if _cs_cg else None
-                        _old_setpoint_f_cg = (
-                            to_fahrenheit(_old_setpoint_raw_cg, unit) if _old_setpoint_raw_cg is not None else None
-                        )
-                        await self._set_hvac_mode(
-                            "cool",
-                            reason=(f"ODE ceiling guard — breach predicted at {_breach_ts.strftime('%H:%M')}"),
-                        )
-                        await self._set_temperature(
-                            _comfort_cool_cg,
-                            reason="ODE ceiling guard — target comfort_cool",
-                            mode="cool",
-                        )
-                        if self._emit_event_callback:
-                            self._emit_event_callback(
-                                "ceiling_guard_fired",
-                                {
-                                    "breach_time": _breach_ts.isoformat(),
-                                    "hours_to_breach": round(_hours_to_breach, 1),
-                                    "lead_time_min": round(_lead_min),
-                                    "old_hvac_mode": _old_mode_cg,
-                                    "new_hvac_mode": "cool",
-                                    "new_setpoint_f": _comfort_cool_cg,
-                                    "old_setpoint_f": _old_setpoint_f_cg,
-                                },
+                        else:
+                            _LOGGER.debug(
+                                "ODE ceiling guard: standing by — breach %.1fh away, need %.0fmin lead time",
+                                _hours_to_breach,
+                                _lead_min,
                             )
-                    else:
-                        _LOGGER.debug(
-                            "ODE ceiling guard: standing by — breach %.1fh away, need %.0fmin lead time",
-                            _hours_to_breach,
-                            _lead_min,
-                        )
 
-        # Handle pre-conditioning
-        if classification.pre_condition and classification.pre_condition_target:
-            await self._schedule_pre_condition(classification)
+            # Handle pre-conditioning
+            if classification.pre_condition and classification.pre_condition_target:
+                await self._schedule_pre_condition(classification)
 
-        # Issue #96 Root Cause E: apply_classification() runs on every coordinator refresh
-        # (30-min scheduled AND 5-min revisits). Cancel any revisit _record_action() scheduled —
-        # the 30-min cycle provides sufficient re-evaluation frequency.
-        if self._revisit_cancel:
-            self._revisit_cancel()
-            self._revisit_cancel = None
-        _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
+            # Issue #96 Root Cause E: apply_classification() runs on every coordinator refresh
+            # (30-min scheduled AND 5-min revisits). Cancel any revisit _record_action() scheduled —
+            # the 30-min cycle provides sufficient re-evaluation frequency.
+            if self._revisit_cancel:
+                self._revisit_cancel()
+                self._revisit_cancel = None
+            _LOGGER.debug("apply_classification: revisit canceled — 30-min cycle handles re-evaluation")
 
     async def _apply_comfort_band(self, band: ComfortBand, *, reason: str) -> None:
         """Arm the thermostat with the comfort band (always single-setpoint).
@@ -1385,6 +1427,16 @@ class AutomationEngine:
 
     async def _set_hvac_mode(self, mode: str, *, reason: str) -> None:
         """Set the thermostat HVAC mode."""
+        # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
+        # enforced here rather than by convention at every one of the ~13 call sites.
+        if mode != "off" and self._whf_owns_hvac():
+            _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "hvac_write_blocked_whf_active",
+                    {"attempted_mode": mode, "reason": reason},
+                )
+            return
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would set HVAC mode to %s — %s", mode, reason)
             return
@@ -1436,6 +1488,16 @@ class AutomationEngine:
                 correct mode and HA deduplication is bypassed (the mode key makes
                 every call distinct even when temperature hasn't changed).
         """
+        # Issue #392 Fix 1b: structural choke-point guard — WHF/AC mutual exclusion is
+        # enforced here rather than by convention at every call site.
+        if mode != "off" and self._whf_owns_hvac():
+            _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "hvac_write_blocked_whf_active",
+                    {"attempted_mode": mode, "reason": reason},
+                )
+            return
         unit = self.config.get("temp_unit", "fahrenheit")
         # Convert internal °F to user's unit before sending to HA climate entity
         service_temp = from_fahrenheit(temperature, unit)
@@ -1705,264 +1767,279 @@ class AutomationEngine:
 
         Called by the coordinator after the debounce period.
         """
-        if self._paused_by_door:
-            return  # Already paused
+        async with self._decision_lock:
+            if self._paused_by_door:
+                return  # Already paused
 
-        if self._grace_active:
+            if self._grace_active:
+                outdoor = self._last_outdoor_temp
+                comfort_cool = float(self.config.get("comfort_cool", 75))
+                nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+                nat_vent_threshold = comfort_cool + nat_vent_delta
+                if outdoor is not None and outdoor < nat_vent_threshold:
+                    pass  # outdoor cool enough — fall through to nat-vent check below
+                else:
+                    _LOGGER.info(
+                        "Door/window open (%s) but %s grace period active — not pausing",
+                        entity_id,
+                        self._last_resume_source,
+                    )
+                    return
+
+            if self._is_within_planned_window_period():
+                _LOGGER.info(
+                    "Door/window open (%s) during planned window period — not pausing "
+                    "(windows recommended, HVAC off, day_type=%s)",
+                    entity_id,
+                    self._current_classification.day_type if self._current_classification else "unknown",
+                )
+                return
+
+            # Check for natural ventilation opportunity before falling through to pause
             outdoor = self._last_outdoor_temp
             comfort_cool = float(self.config.get("comfort_cool", 75))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             nat_vent_threshold = comfort_cool + nat_vent_delta
-            if outdoor is not None and outdoor < nat_vent_threshold:
-                pass  # outdoor cool enough — fall through to nat-vent check below
-            else:
-                _LOGGER.info(
-                    "Door/window open (%s) but %s grace period active — not pausing",
-                    entity_id,
-                    self._last_resume_source,
-                )
-                return
-
-        if self._is_within_planned_window_period():
-            _LOGGER.info(
-                "Door/window open (%s) during planned window period — not pausing "
-                "(windows recommended, HVAC off, day_type=%s)",
+            indoor = self._get_indoor_temp_f()
+            comfort_heat = float(self.config.get("comfort_heat", 70))
+            _LOGGER.debug(
+                "Nat vent gate check (%s): outdoor=%s indoor=%s comfort_heat=%.1f threshold=%.1f | "
+                "dir=%s floor=%s ceiling=%s",
                 entity_id,
-                self._current_classification.day_type if self._current_classification else "unknown",
+                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                f"{indoor:.1f}" if indoor is not None else "unavailable",
+                comfort_heat,
+                nat_vent_threshold,
+                outdoor is not None and indoor is not None and outdoor < indoor,
+                indoor is not None and indoor > comfort_heat,
+                outdoor is not None and outdoor < nat_vent_threshold,
             )
-            return
+            # Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition on reactivation —
+            # None (WHF, direction-only) always passes; FAN_MODE_HVAC blocks reactivation once indoor
+            # is already past the ceiling.
+            _ceiling_threshold_dw = self._ceiling_threshold(comfort_cool)
+            _ceiling_ok_dw = _ceiling_threshold_dw is None or (indoor is not None and indoor <= _ceiling_threshold_dw)
+            _nat_vent_gate_entered = False
+            if (
+                outdoor is not None
+                and indoor is not None
+                and outdoor < indoor  # outdoor must be cooler than indoor
+                and indoor > comfort_heat  # indoor must be above comfort floor
+                and outdoor < nat_vent_threshold
+                and _ceiling_ok_dw
+            ):
+                _nat_vent_gate_entered = True
+                _skip_nat_vent = False
 
-        # Check for natural ventilation opportunity before falling through to pause
-        outdoor = self._last_outdoor_temp
-        comfort_cool = float(self.config.get("comfort_cool", 75))
-        nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-        nat_vent_threshold = comfort_cool + nat_vent_delta
-        indoor = self._get_indoor_temp_f()
-        comfort_heat = float(self.config.get("comfort_heat", 70))
-        _LOGGER.debug(
-            "Nat vent gate check (%s): outdoor=%s indoor=%s comfort_heat=%.1f threshold=%.1f | "
-            "dir=%s floor=%s ceiling=%s",
-            entity_id,
-            f"{outdoor:.1f}" if outdoor is not None else "unavailable",
-            f"{indoor:.1f}" if indoor is not None else "unavailable",
-            comfort_heat,
-            nat_vent_threshold,
-            outdoor is not None and indoor is not None and outdoor < indoor,
-            indoor is not None and indoor > comfort_heat,
-            outdoor is not None and outdoor < nat_vent_threshold,
-        )
-        _nat_vent_gate_entered = False
-        if (
-            outdoor is not None
-            and indoor is not None
-            and outdoor < indoor  # outdoor must be cooler than indoor
-            and indoor > comfort_heat  # indoor must be above comfort floor
-            and outdoor < nat_vent_threshold
-        ):
-            _nat_vent_gate_entered = True
-            _skip_nat_vent = False
+                # Phase 2 Guard 1: rising outdoor forecast
+                hourly = self._hourly_forecast_temps or []
+                if hourly:
+                    now_dt = dt_util.now()
+                    # Ensure timezone-aware for comparison with forecast datetimes
+                    if now_dt.tzinfo is None:
+                        now_dt = now_dt.replace(tzinfo=UTC)
+                    lookahead_temps = [
+                        h["temperature"]
+                        for h in hourly
+                        if h.get("temperature") is not None
+                        and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
+                        and now_dt < parsed <= now_dt + timedelta(hours=2)
+                    ]
+                    if lookahead_temps and max(lookahead_temps) > nat_vent_threshold:
+                        _skip_nat_vent = True
+                        _LOGGER.info(
+                            "Nat vent skipped: forecast peak %.1f°F > threshold %.1f°F within 2 hr",
+                            max(lookahead_temps),
+                            nat_vent_threshold,
+                        )
+                        if self._emit_event_callback:
+                            self._emit_event_callback(
+                                "nat_vent_forecast_skip",
+                                {"forecast_peak": max(lookahead_temps), "threshold": nat_vent_threshold},
+                            )
 
-            # Phase 2 Guard 1: rising outdoor forecast
-            hourly = self._hourly_forecast_temps or []
-            if hourly:
-                now_dt = dt_util.now()
-                # Ensure timezone-aware for comparison with forecast datetimes
-                if now_dt.tzinfo is None:
-                    now_dt = now_dt.replace(tzinfo=UTC)
-                lookahead_temps = [
-                    h["temperature"]
-                    for h in hourly
-                    if h.get("temperature") is not None
-                    and (parsed := _parse_forecast_dt(h.get("datetime"))) is not None
-                    and now_dt < parsed <= now_dt + timedelta(hours=2)
-                ]
-                if lookahead_temps and max(lookahead_temps) > nat_vent_threshold:
-                    _skip_nat_vent = True
+                # Phase 2 Guard 2: thermal model floor imminence
+                if not _skip_nat_vent:
+                    thermal = self._thermal_model or {}
+                    confidence = thermal.get("confidence", "none")
+                    if confidence in ("medium", "high"):
+                        k_passive = thermal.get("k_passive")
+                        if k_passive is not None and k_passive < 0:
+                            passive_rate = k_passive * (indoor - outdoor)  # °F/hr, negative
+                            if passive_rate < 0:
+                                time_to_floor = (indoor - comfort_heat) / abs(passive_rate)
+                                if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
+                                    _skip_nat_vent = True
+                                    _LOGGER.info(
+                                        "Nat vent skipped: floor predicted in %.2f hr < %.1f hr"
+                                        " threshold (k_passive=%.3f)",
+                                        time_to_floor,
+                                        MIN_VIABLE_NAT_VENT_HOURS,
+                                        k_passive,
+                                    )
+                                    if self._emit_event_callback:
+                                        self._emit_event_callback(
+                                            "nat_vent_floor_imminent_skip",
+                                            {"time_to_floor_hr": round(time_to_floor, 2)},
+                                        )
+
+                if not _skip_nat_vent:
+                    # Capture mode before nat_vent changes
+                    _old_mode_nv = self.hass.states.get(self.climate_entity)
+                    _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
+
+                    nat_vent_reason = (
+                        f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
+                        f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
+                    )
+                    await self._activate_fan(reason=nat_vent_reason)
+                    self._natural_vent_active = True
                     _LOGGER.info(
-                        "Nat vent skipped: forecast peak %.1f°F > threshold %.1f°F within 2 hr",
-                        max(lookahead_temps),
+                        "Natural ventilation mode: outdoor %.1f°F < indoor %.1f°F,"
+                        " outdoor ≤ target %.1f°F — fan on, applying nat-vent HVAC state",
+                        outdoor,
+                        indoor,
                         nat_vent_threshold,
                     )
+                    await self._apply_nat_vent_hvac_state()
                     if self._emit_event_callback:
                         self._emit_event_callback(
-                            "nat_vent_forecast_skip",
-                            {"forecast_peak": max(lookahead_temps), "threshold": nat_vent_threshold},
+                            "sensor_opened",
+                            {
+                                "entity": entity_id,
+                                "result": "natural_ventilation",
+                                "hvac_mode_change": f"{_old_mode_nv}→band-armed",
+                                "fan_mode_change": "auto→on",
+                            },
                         )
+                    return
 
-            # Phase 2 Guard 2: thermal model floor imminence
-            if not _skip_nat_vent:
-                thermal = self._thermal_model or {}
-                confidence = thermal.get("confidence", "none")
-                if confidence in ("medium", "high"):
-                    k_passive = thermal.get("k_passive")
-                    if k_passive is not None and k_passive < 0:
-                        passive_rate = k_passive * (indoor - outdoor)  # °F/hr, negative
-                        if passive_rate < 0:
-                            time_to_floor = (indoor - comfort_heat) / abs(passive_rate)
-                            if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
-                                _skip_nat_vent = True
-                                _LOGGER.info(
-                                    "Nat vent skipped: floor predicted in %.2f hr < %.1f hr threshold (k_passive=%.3f)",
-                                    time_to_floor,
-                                    MIN_VIABLE_NAT_VENT_HOURS,
-                                    k_passive,
-                                )
-                                if self._emit_event_callback:
-                                    self._emit_event_callback(
-                                        "nat_vent_floor_imminent_skip",
-                                        {"time_to_floor_hr": round(time_to_floor, 2)},
-                                    )
-
-            if not _skip_nat_vent:
-                # Capture mode before nat_vent changes
-                _old_mode_nv = self.hass.states.get(self.climate_entity)
-                _old_mode_nv = _old_mode_nv.state if _old_mode_nv else "unknown"
-
-                nat_vent_reason = (
-                    f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
-                    f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
-                )
-                await self._activate_fan(reason=nat_vent_reason)
-                self._natural_vent_active = True
+            if not _nat_vent_gate_entered:
                 _LOGGER.info(
-                    "Natural ventilation mode: outdoor %.1f°F < indoor %.1f°F,"
-                    " outdoor ≤ target %.1f°F — fan on, applying nat-vent HVAC state",
-                    outdoor,
-                    indoor,
-                    nat_vent_threshold,
+                    "Nat vent not started (%s): outdoor=%s indoor=%s — "
+                    "primary gates failed (dir=%s floor=%s ceiling=%s) — proceeding to HVAC pause check",
+                    entity_id,
+                    f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                    f"{indoor:.1f}" if indoor is not None else "unavailable",
+                    outdoor is not None and indoor is not None and outdoor < indoor,
+                    indoor is not None and indoor > comfort_heat,
+                    outdoor is not None and outdoor < nat_vent_threshold,
                 )
-                await self._apply_nat_vent_hvac_state()
+
+            # Get current mode before pausing
+            state = self.hass.states.get(self.climate_entity)
+            if state:
+                self._pre_pause_mode = state.state
+
+            if self._pre_pause_mode and self._pre_pause_mode != "off":
+                self._paused_by_door = True
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "sensor_opened",
                         {
                             "entity": entity_id,
-                            "result": "natural_ventilation",
-                            "hvac_mode_change": f"{_old_mode_nv}→band-armed",
-                            "fan_mode_change": "auto→on",
+                            "result": "paused",
+                            "hvac_mode_change": f"{self._pre_pause_mode}→off",
                         },
                     )
-                return
-
-        if not _nat_vent_gate_entered:
-            _LOGGER.info(
-                "Nat vent not started (%s): outdoor=%s indoor=%s — "
-                "primary gates failed (dir=%s floor=%s ceiling=%s) — proceeding to HVAC pause check",
-                entity_id,
-                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
-                f"{indoor:.1f}" if indoor is not None else "unavailable",
-                outdoor is not None and indoor is not None and outdoor < indoor,
-                indoor is not None and indoor > comfort_heat,
-                outdoor is not None and outdoor < nat_vent_threshold,
-            )
-
-        # Get current mode before pausing
-        state = self.hass.states.get(self.climate_entity)
-        if state:
-            self._pre_pause_mode = state.state
-
-        if self._pre_pause_mode and self._pre_pause_mode != "off":
-            self._paused_by_door = True
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "sensor_opened",
-                    {
-                        "entity": entity_id,
-                        "result": "paused",
-                        "hvac_mode_change": f"{self._pre_pause_mode}→off",
-                    },
+                await self._set_hvac_mode(
+                    "off",
+                    reason=f"door/window open — {entity_id}, was {self._pre_pause_mode} mode",
                 )
-            await self._set_hvac_mode(
-                "off",
-                reason=f"door/window open — {entity_id}, was {self._pre_pause_mode} mode",
-            )
 
-            # Notify
-            debounce_minutes = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS) // 60
-            friendly_name = entity_id.split(".")[-1].replace("_", " ").title()
-            await self._notify(
-                f"🚪 HVAC paused — {friendly_name} has been open for "
-                f"{debounce_minutes} minutes. "
-                f"Heating/cooling will resume when it's closed.",
-                "Climate Advisor",
-                notification_type="door_window_pause",
-            )
+                # Notify
+                debounce_minutes = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS) // 60
+                friendly_name = entity_id.split(".")[-1].replace("_", " ").title()
+                await self._notify(
+                    f"🚪 HVAC paused — {friendly_name} has been open for "
+                    f"{debounce_minutes} minutes. "
+                    f"Heating/cooling will resume when it's closed.",
+                    "Climate Advisor",
+                    notification_type="door_window_pause",
+                )
 
     async def handle_all_doors_windows_closed(self) -> None:
         """Resume HVAC after all monitored doors/windows are closed."""
-        was_nat_vent = self._natural_vent_active
-        was_paused = self._paused_by_door
-        if self._emit_event_callback:
-            self._emit_event_callback(
-                "sensor_all_closed",
-                {"was_paused": was_paused, "was_nat_vent": was_nat_vent},
-            )
-
-        # Handle natural ventilation mode cleanup (sensors closed while in nat vent)
-        if self._natural_vent_active:
-            self._natural_vent_active = False
-            # emit_event=False: this transition is reported via sensor_all_closed above.
-            await self._deactivate_fan(reason="door/window closed — ending natural ventilation mode", emit_event=False)
-            # Resume normal classification if we have one
-            if self._current_classification:
-                c = self._current_classification
-                _LOGGER.info(
-                    "sensor_all_closed: nat-vent ended — re-arming HVAC immediately day_type=%s hvac_mode=%s",
-                    c.day_type,
-                    c.hvac_mode,
+        async with self._decision_lock:
+            was_nat_vent = self._natural_vent_active
+            was_paused = self._paused_by_door
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "sensor_all_closed",
+                    {"was_paused": was_paused, "was_nat_vent": was_nat_vent},
                 )
-                if c.hvac_mode in ("heat", "cool"):
-                    # Hot/cool/cold day: restore the classification mode + setpoint directly.
-                    await self._set_hvac_mode(
+
+            # Handle natural ventilation mode cleanup (sensors closed while in nat vent)
+            if self._natural_vent_active:
+                self._natural_vent_active = False
+                # emit_event=False: this transition is reported via sensor_all_closed above.
+                await self._deactivate_fan(
+                    reason="door/window closed — ending natural ventilation mode", emit_event=False
+                )
+                # Resume normal classification if we have one
+                if self._current_classification:
+                    c = self._current_classification
+                    _LOGGER.info(
+                        "sensor_all_closed: nat-vent ended — re-arming HVAC immediately day_type=%s hvac_mode=%s",
+                        c.day_type,
                         c.hvac_mode,
-                        reason="door/window closed — restoring mode after natural ventilation",
                     )
+                    if c.hvac_mode in ("heat", "cool"):
+                        # Hot/cool/cold day: restore the classification mode + setpoint directly.
+                        await self._set_hvac_mode(
+                            c.hvac_mode,
+                            reason="door/window closed — restoring mode after natural ventilation",
+                        )
+                        await self._set_temperature_for_mode(
+                            c,
+                            reason="door/window closed — restoring comfort after natural ventilation",
+                        )
+                    else:
+                        # Warm/mild day: classifier says "off" but actual control is the comfort band
+                        # (Issue #249). Re-arm immediately — don't wait up to 30 min for
+                        # apply_classification() to fire.
+                        _rearm_band = ComfortBand(
+                            floor=float(self.config.get("comfort_heat", 70)),
+                            ceiling=float(self.config.get("comfort_cool", 75)),
+                            active="ceiling",
+                            reason="nat-vent ended (warm/mild day) — immediate comfort band re-arm",
+                        )
+                        await self._apply_comfort_band(
+                            _rearm_band,
+                            reason="door/window closed — re-arming comfort band after nat-vent (warm/mild day)",
+                        )
+                    self._start_grace_period("automation", trigger="sensor_closed_resume")
+                return
+
+            # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
+            # when all sensors close — otherwise it draws outdoor air through a closed
+            # envelope, counteracting HVAC and wasting energy for the occupant.
+            _fan_cfg_d = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+            if (
+                self._fan_active
+                and _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+                and not self._natural_vent_active
+            ):
+                _LOGGER.info("All sensors closed — stopping whole-house fan (was running outside nat-vent)")
+                # emit_event=False: this transition is reported via sensor_all_closed above.
+                await self._deactivate_fan(reason="all sensors closed — stopping whole-house fan", emit_event=False)
+
+            if not self._paused_by_door:
+                return
+
+            self._paused_by_door = False
+            if self._pre_pause_mode:
+                await self._set_hvac_mode(
+                    self._pre_pause_mode,
+                    reason=f"door/window closed — restoring {self._pre_pause_mode} mode",
+                )
+                if self._current_classification:
                     await self._set_temperature_for_mode(
-                        c,
-                        reason="door/window closed — restoring comfort after natural ventilation",
-                    )
-                else:
-                    # Warm/mild day: classifier says "off" but actual control is the comfort band
-                    # (Issue #249). Re-arm immediately — don't wait up to 30 min for
-                    # apply_classification() to fire.
-                    _rearm_band = ComfortBand(
-                        floor=float(self.config.get("comfort_heat", 70)),
-                        ceiling=float(self.config.get("comfort_cool", 75)),
-                        active="ceiling",
-                        reason="nat-vent ended (warm/mild day) — immediate comfort band re-arm",
-                    )
-                    await self._apply_comfort_band(
-                        _rearm_band,
-                        reason="door/window closed — re-arming comfort band after nat-vent (warm/mild day)",
+                        self._current_classification,
+                        reason="door/window closed — restoring comfort",
                     )
                 self._start_grace_period("automation", trigger="sensor_closed_resume")
-            return
-
-        # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
-        # when all sensors close — otherwise it draws outdoor air through a closed
-        # envelope, counteracting HVAC and wasting energy for the occupant.
-        _fan_cfg_d = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        if self._fan_active and _fan_cfg_d in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._natural_vent_active:
-            _LOGGER.info("All sensors closed — stopping whole-house fan (was running outside nat-vent)")
-            # emit_event=False: this transition is reported via sensor_all_closed above.
-            await self._deactivate_fan(reason="all sensors closed — stopping whole-house fan", emit_event=False)
-
-        if not self._paused_by_door:
-            return
-
-        self._paused_by_door = False
-        if self._pre_pause_mode:
-            await self._set_hvac_mode(
-                self._pre_pause_mode,
-                reason=f"door/window closed — restoring {self._pre_pause_mode} mode",
-            )
-            if self._current_classification:
-                await self._set_temperature_for_mode(
-                    self._current_classification,
-                    reason="door/window closed — restoring comfort",
-                )
-            self._start_grace_period("automation", trigger="sensor_closed_resume")
-        self._pre_pause_mode = None
+            self._pre_pause_mode = None
 
     async def check_natural_vent_conditions(self) -> None:
         """Re-evaluate natural ventilation vs pause when temperatures change.
@@ -1970,287 +2047,311 @@ class AutomationEngine:
         Called by coordinator on each _async_update_data when sensors are open.
         Mirrors the monitoring logic in tools/simulate.py ClimateSimulator.
         """
-        if not (self._paused_by_door or self._natural_vent_active):
-            # Comfort-ceiling override (Issue #134): if grace is active and indoor has
-            # risen above comfort_cool, allow re-evaluation so nat-vent can engage.
-            # Grace still blocks rapid door-open/close cycling below the comfort ceiling.
-            _indoor = self._get_indoor_temp_f()
-            _cool = float(self.config.get("comfort_cool", 75))
-            # Issue #244: a contact sensor open while HVAC is idle (door opened with
-            # nothing to pause) must still be re-evaluated so nat-vent can engage when
-            # outdoor later cools below indoor — otherwise the occupant misses free
-            # evening cooling. Restricted to HVAC-off so we never fight active heating/cooling.
-            _hvac_state_244 = self.hass.states.get(self.climate_entity)
-            _hvac_off_244 = (_hvac_state_244 is None) or (getattr(_hvac_state_244, "state", "off") == "off")
-            _idle_open = bool(self._sensor_check_callback and self._sensor_check_callback()) and _hvac_off_244
-            if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
-                return
-
-        outdoor = self._last_outdoor_temp
-        comfort_cool = float(self.config.get("comfort_cool", 75))
-        nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-        threshold = comfort_cool + nat_vent_delta
-
-        # Issue #134: comfort-ceiling re-entry during grace — neither flag is True but
-        # indoor has risen above comfort_cool. Check nat-vent conditions directly.
-        if not (self._paused_by_door or self._natural_vent_active):
-            _indoor = self._get_indoor_temp_f()
-            _comfort_heat = float(self.config.get("comfort_heat", 70))
-            _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-            if (
-                outdoor is not None
-                and _indoor is not None
-                and outdoor < _indoor - _hysteresis
-                and _indoor > _comfort_heat
-                and outdoor < threshold
-            ):
-                # Band stays armed — just activate the fan; the compressor self-arbitrates.
-                await self._activate_fan(
-                    reason=(
-                        f"nat vent grace re-entry: indoor {_indoor:.1f}°F"
-                        f" > comfort_cool {comfort_cool:.1f}°F,"
-                        f" outdoor {outdoor:.1f}°F cool"
-                    )
-                )
-                self._natural_vent_active = True
-                await self._apply_nat_vent_hvac_state()
-                # Issue #244: emit so the re-evaluation activation is visible in the
-                # event log / timeline / AI report (previously this path was silent).
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "sensor_opened",
-                        {
-                            "entity": "natural_vent_reeval",
-                            "result": "natural_ventilation",
-                            "trigger": "open_door_reeval",
-                        },
-                    )
-            return
-
-        # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting
-        # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
-        # Do NOT enter pause — the house needs to warm up, not wait for nat vent re-evaluation.
-        if self._natural_vent_active:
-            comfort_heat = float(self.config.get("comfort_heat", 70))
-            indoor = self._get_indoor_temp_f()
-            if self._natural_vent_active and indoor is not None and comfort_cool is not None and indoor > comfort_cool:
-                # Issue #247: the ODE ceiling guard now ESCALATES to AC on the classification cycle
-                # when indoor breaches the ceiling under active nat-vent (its three-condition dormancy
-                # lifts), so this is an informational heads-up, not a stuck state.
-                _LOGGER.info(
-                    "Nat-vent active but indoor %.1fF > comfort_cool %.1fF --"
-                    " ceiling guard will escalate to AC this classification cycle",
-                    indoor,
-                    comfort_cool,
-                )
-            # During sleep window, lower the hard exit floor to sleep_heat - hysteresis so the
-            # cycling logic can gracefully pause the fan at sleep_heat before the session terminates.
-            _hysteresis_cv = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-            if _in_sleep_window(dt_util.now(), self.config):
-                _sleep_heat_cv = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-                _vent_floor = _sleep_heat_cv - _hysteresis_cv
-            else:
-                _vent_floor = comfort_heat
-            if indoor is not None and indoor <= _vent_floor:
-                self._natural_vent_active = False
-                await self._deactivate_fan(
-                    reason=(
-                        f"natural vent exit: indoor {indoor:.1f}\u00b0F \u2264 comfort floor {comfort_heat:.1f}\u00b0F"
-                    )
-                )
-                _LOGGER.info(
-                    "Natural vent exit (comfort floor): indoor %.1f\u00b0F"
-                    " \u2264 comfort_heat %.1f\u00b0F \u2014 restoring heat",
-                    indoor,
-                    comfort_heat,
-                )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_comfort_floor_exit",
-                        {
-                            "indoor_temp": indoor,
-                            "comfort_heat": comfort_heat,
-                            "fan_mode_change": "on→auto",
-                            "hvac_mode_restored": (
-                                self._current_classification.hvac_mode if self._current_classification else "unknown"
-                            ),
-                        },
-                    )
-                if self._current_classification:
-                    c = self._current_classification
-                    if c.hvac_mode in ("heat", "cool"):
-                        await self._set_hvac_mode(
-                            c.hvac_mode,
-                            reason=f"natural vent comfort-floor exit \u2014 restoring {c.hvac_mode} mode",
-                        )
-                        await self._set_temperature_for_mode(
-                            c,
-                            reason="natural vent comfort-floor exit \u2014 restoring comfort",
-                        )
-                        self._start_grace_period("automation", trigger="nat_vent_exit_resume")
-                return
-
-        # Priority 2b: Away mode ceiling exit — nat-vent exits at home comfort ceiling while away
-        # (away setback is higher than comfort_cool, but nat-vent only free-cools within home band)
-        if self._natural_vent_active and self._occupancy_mode == OCCUPANCY_AWAY:
-            _indoor_away = self._get_indoor_temp_f()
-            if _indoor_away is not None and comfort_cool is not None and _indoor_away >= comfort_cool:
-                _LOGGER.info(
-                    "Nat-vent away-mode ceiling exit: indoor %.1fF >= comfort_cool %.1fF while away",
-                    _indoor_away,
-                    comfort_cool,
-                )
-                self._natural_vent_active = False
-                await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
-                # Do NOT pause — just let away setback handle HVAC
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_away_ceiling_exit",
-                        {"indoor": _indoor_away, "comfort_cool": comfort_cool},
-                    )
-                return
-
-        # Phase 2: proactive floor exit — predict floor crossing before it happens
-        if self._natural_vent_active:
-            thermal = self._thermal_model or {}
-            if thermal.get("confidence", "none") in ("medium", "high"):
-                k_passive = thermal.get("k_passive")
-                _indoor_now = self._get_indoor_temp_f()
-                if (
-                    k_passive is not None
-                    and k_passive < 0
-                    and _indoor_now is not None
-                    and outdoor is not None
-                    and outdoor < _indoor_now
-                ):
-                    passive_rate = k_passive * (_indoor_now - outdoor)  # °F/hr, negative
-                    if passive_rate < 0:
-                        comfort_heat_now = float(self.config.get("comfort_heat", 70))
-                        time_to_floor = (_indoor_now - comfort_heat_now) / abs(passive_rate)
-                        if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
-                            self._natural_vent_active = False
-                            await self._deactivate_fan(
-                                reason=(f"nat vent proactive floor exit: floor in {time_to_floor:.2f} hr")
-                            )
-                            _LOGGER.info(
-                                "Natural vent proactive exit: floor predicted in %.2f hr"
-                                " < %.1f hr threshold — restoring heat",
-                                time_to_floor,
-                                MIN_VIABLE_NAT_VENT_HOURS,
-                            )
-                            if self._emit_event_callback:
-                                self._emit_event_callback(
-                                    "nat_vent_predicted_floor_exit",
-                                    {
-                                        "time_to_floor_hr": round(time_to_floor, 2),
-                                        "fan_mode_change": "on→auto",
-                                        "hvac_mode_restored": (
-                                            self._current_classification.hvac_mode
-                                            if self._current_classification
-                                            else "unknown"
-                                        ),
-                                    },
-                                )
-                            if self._current_classification:
-                                c = self._current_classification
-                                if c.hvac_mode in ("heat", "cool"):
-                                    await self._set_hvac_mode(
-                                        c.hvac_mode,
-                                        reason="nat vent proactive floor exit — restoring HVAC",
-                                    )
-                                    await self._set_temperature_for_mode(
-                                        c,
-                                        reason="nat vent proactive floor exit — restoring comfort",
-                                    )
-                                    self._start_grace_period("automation", trigger="nat_vent_exit_resume")
-                            return
-
-        # NEW (Issue #115): exit if outdoor > indoor — airflow now strictly heating
-        indoor = self._get_indoor_temp_f()
-        if self._natural_vent_active and outdoor is not None and indoor is not None and outdoor > indoor:
-            self._natural_vent_active = False
-            self._paused_by_door = True
-            self._nat_vent_outdoor_exit_time = dt_util.now()
-            await self._deactivate_fan(
-                reason=(
-                    f"nat vent exit: outdoor {outdoor:.1f}\u00b0F > indoor {indoor:.1f}\u00b0F \u2014 airflow reversed"
-                )
-            )
-            _LOGGER.info(
-                "Natural vent exit: outdoor %.1f\u00b0F > indoor %.1f\u00b0F \u2014 airflow reversed, entering pause",
-                outdoor,
-                indoor,
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback("nat_vent_outdoor_rise_exit", {"outdoor": outdoor, "indoor": indoor})
-            return
-
-        if self._natural_vent_active and outdoor is not None and outdoor > threshold:
-            # Outdoor got too warm — exit nat vent, enter pause
-            self._natural_vent_active = False
-            self._paused_by_door = True
-            await self._deactivate_fan(
-                reason=f"natural vent exit: outdoor {outdoor:.1f}\u00b0F > threshold {threshold:.1f}\u00b0F"
-            )
-            _LOGGER.info(
-                "Natural vent exit: outdoor %.1f\u00b0F > threshold %.1f\u00b0F \u2014 entering pause",
-                outdoor,
-                threshold,
-            )
-            return
-
-        if self._paused_by_door and outdoor is not None and indoor is not None:
-            hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-            lockout_s = float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S))
-            comfort_heat = float(self.config.get("comfort_heat", 70))
-
-            # Enforce lockout after outdoor-warm exit
-            if self._nat_vent_outdoor_exit_time is not None:
-                elapsed = (dt_util.now() - self._nat_vent_outdoor_exit_time).total_seconds()
-                if elapsed < lockout_s:
-                    _LOGGER.debug(
-                        "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
-                        elapsed,
-                        lockout_s,
-                        lockout_s - elapsed,
-                    )
+        async with self._decision_lock:
+            if not (self._paused_by_door or self._natural_vent_active):
+                # Comfort-ceiling override (Issue #134): if grace is active and indoor has
+                # risen above comfort_cool, allow re-evaluation so nat-vent can engage.
+                # Grace still blocks rapid door-open/close cycling below the comfort ceiling.
+                _indoor = self._get_indoor_temp_f()
+                _cool = float(self.config.get("comfort_cool", 75))
+                # Issue #244: a contact sensor open while HVAC is idle (door opened with
+                # nothing to pause) must still be re-evaluated so nat-vent can engage when
+                # outdoor later cools below indoor — otherwise the occupant misses free
+                # evening cooling. Restricted to HVAC-off so we never fight active heating/cooling.
+                _hvac_state_244 = self.hass.states.get(self.climate_entity)
+                _hvac_off_244 = (_hvac_state_244 is None) or (getattr(_hvac_state_244, "state", "off") == "off")
+                _idle_open = bool(self._sensor_check_callback and self._sensor_check_callback()) and _hvac_off_244
+                if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
                     return
 
-            _delta_ok = outdoor < indoor - hysteresis
-            _floor_ok = indoor > comfort_heat
-            _ceiling_ok = outdoor < threshold
-            if _delta_ok and _floor_ok and _ceiling_ok:
-                # Outdoor cooled down — activate natural vent
-                await self._activate_fan(
+            outdoor = self._last_outdoor_temp
+            comfort_cool = float(self.config.get("comfort_cool", 75))
+            nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+            threshold = comfort_cool + nat_vent_delta
+
+            # Issue #134: comfort-ceiling re-entry during grace — neither flag is True but
+            # indoor has risen above comfort_cool. Check nat-vent conditions directly.
+            if not (self._paused_by_door or self._natural_vent_active):
+                _indoor = self._get_indoor_temp_f()
+                _comfort_heat = float(self.config.get("comfort_heat", 70))
+                _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+                # Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition.
+                _ceiling_threshold_gr = self._ceiling_threshold(comfort_cool)
+                _ceiling_ok_gr = _ceiling_threshold_gr is None or (
+                    _indoor is not None and _indoor <= _ceiling_threshold_gr
+                )
+                if (
+                    outdoor is not None
+                    and _indoor is not None
+                    and outdoor < _indoor - _hysteresis
+                    and _indoor > _comfort_heat
+                    and outdoor < threshold
+                    and _ceiling_ok_gr
+                ):
+                    # Band stays armed — just activate the fan; the compressor self-arbitrates.
+                    await self._activate_fan(
+                        reason=(
+                            f"nat vent grace re-entry: indoor {_indoor:.1f}°F"
+                            f" > comfort_cool {comfort_cool:.1f}°F,"
+                            f" outdoor {outdoor:.1f}°F cool"
+                        )
+                    )
+                    self._natural_vent_active = True
+                    await self._apply_nat_vent_hvac_state()
+                    # Issue #244: emit so the re-evaluation activation is visible in the
+                    # event log / timeline / AI report (previously this path was silent).
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "sensor_opened",
+                            {
+                                "entity": "natural_vent_reeval",
+                                "result": "natural_ventilation",
+                                "trigger": "open_door_reeval",
+                            },
+                        )
+                return
+
+            # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting
+            # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
+            # Do NOT enter pause — the house needs to warm up, not wait for nat vent re-evaluation.
+            if self._natural_vent_active:
+                comfort_heat = float(self.config.get("comfort_heat", 70))
+                indoor = self._get_indoor_temp_f()
+                if (
+                    self._natural_vent_active
+                    and indoor is not None
+                    and comfort_cool is not None
+                    and indoor > comfort_cool
+                ):
+                    # Issue #247: the ODE ceiling guard now ESCALATES to AC on the classification cycle
+                    # when indoor breaches the ceiling under active nat-vent (its three-condition dormancy
+                    # lifts), so this is an informational heads-up, not a stuck state.
+                    _LOGGER.info(
+                        "Nat-vent active but indoor %.1fF > comfort_cool %.1fF --"
+                        " ceiling guard will escalate to AC this classification cycle",
+                        indoor,
+                        comfort_cool,
+                    )
+                # During sleep window, lower the hard exit floor to sleep_heat - hysteresis so the
+                # cycling logic can gracefully pause the fan at sleep_heat before the session terminates.
+                _hysteresis_cv = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+                if _in_sleep_window(dt_util.now(), self.config):
+                    _sleep_heat_cv = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+                    _vent_floor = _sleep_heat_cv - _hysteresis_cv
+                else:
+                    _vent_floor = comfort_heat
+                if indoor is not None and indoor <= _vent_floor:
+                    self._natural_vent_active = False
+                    await self._deactivate_fan(
+                        reason=(
+                            f"natural vent exit: indoor {indoor:.1f}\u00b0F \u2264 comfort floor"
+                            f" {comfort_heat:.1f}\u00b0F"
+                        )
+                    )
+                    _LOGGER.info(
+                        "Natural vent exit (comfort floor): indoor %.1f\u00b0F"
+                        " \u2264 comfort_heat %.1f\u00b0F \u2014 restoring heat",
+                        indoor,
+                        comfort_heat,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_comfort_floor_exit",
+                            {
+                                "indoor_temp": indoor,
+                                "comfort_heat": comfort_heat,
+                                "fan_mode_change": "on→auto",
+                                "hvac_mode_restored": (
+                                    self._current_classification.hvac_mode
+                                    if self._current_classification
+                                    else "unknown"
+                                ),
+                            },
+                        )
+                    if self._current_classification:
+                        c = self._current_classification
+                        if c.hvac_mode in ("heat", "cool"):
+                            await self._set_hvac_mode(
+                                c.hvac_mode,
+                                reason=f"natural vent comfort-floor exit \u2014 restoring {c.hvac_mode} mode",
+                            )
+                            await self._set_temperature_for_mode(
+                                c,
+                                reason="natural vent comfort-floor exit \u2014 restoring comfort",
+                            )
+                            self._start_grace_period("automation", trigger="nat_vent_exit_resume")
+                    return
+
+            # Priority 2b: Away mode ceiling exit — nat-vent exits at home comfort ceiling while away
+            # (away setback is higher than comfort_cool, but nat-vent only free-cools within home band)
+            if self._natural_vent_active and self._occupancy_mode == OCCUPANCY_AWAY:
+                _indoor_away = self._get_indoor_temp_f()
+                if _indoor_away is not None and comfort_cool is not None and _indoor_away >= comfort_cool:
+                    _LOGGER.info(
+                        "Nat-vent away-mode ceiling exit: indoor %.1fF >= comfort_cool %.1fF while away",
+                        _indoor_away,
+                        comfort_cool,
+                    )
+                    self._natural_vent_active = False
+                    await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
+                    # Do NOT pause — just let away setback handle HVAC
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_away_ceiling_exit",
+                            {"indoor": _indoor_away, "comfort_cool": comfort_cool},
+                        )
+                    return
+
+            # Phase 2: proactive floor exit — predict floor crossing before it happens
+            if self._natural_vent_active:
+                thermal = self._thermal_model or {}
+                if thermal.get("confidence", "none") in ("medium", "high"):
+                    k_passive = thermal.get("k_passive")
+                    _indoor_now = self._get_indoor_temp_f()
+                    if (
+                        k_passive is not None
+                        and k_passive < 0
+                        and _indoor_now is not None
+                        and outdoor is not None
+                        and outdoor < _indoor_now
+                    ):
+                        passive_rate = k_passive * (_indoor_now - outdoor)  # °F/hr, negative
+                        if passive_rate < 0:
+                            comfort_heat_now = float(self.config.get("comfort_heat", 70))
+                            time_to_floor = (_indoor_now - comfort_heat_now) / abs(passive_rate)
+                            if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
+                                self._natural_vent_active = False
+                                await self._deactivate_fan(
+                                    reason=(f"nat vent proactive floor exit: floor in {time_to_floor:.2f} hr")
+                                )
+                                _LOGGER.info(
+                                    "Natural vent proactive exit: floor predicted in %.2f hr"
+                                    " < %.1f hr threshold — restoring heat",
+                                    time_to_floor,
+                                    MIN_VIABLE_NAT_VENT_HOURS,
+                                )
+                                if self._emit_event_callback:
+                                    self._emit_event_callback(
+                                        "nat_vent_predicted_floor_exit",
+                                        {
+                                            "time_to_floor_hr": round(time_to_floor, 2),
+                                            "fan_mode_change": "on→auto",
+                                            "hvac_mode_restored": (
+                                                self._current_classification.hvac_mode
+                                                if self._current_classification
+                                                else "unknown"
+                                            ),
+                                        },
+                                    )
+                                if self._current_classification:
+                                    c = self._current_classification
+                                    if c.hvac_mode in ("heat", "cool"):
+                                        await self._set_hvac_mode(
+                                            c.hvac_mode,
+                                            reason="nat vent proactive floor exit — restoring HVAC",
+                                        )
+                                        await self._set_temperature_for_mode(
+                                            c,
+                                            reason="nat vent proactive floor exit — restoring comfort",
+                                        )
+                                        self._start_grace_period("automation", trigger="nat_vent_exit_resume")
+                                return
+
+            # NEW (Issue #115): exit if outdoor > indoor — airflow now strictly heating
+            indoor = self._get_indoor_temp_f()
+            if self._natural_vent_active and outdoor is not None and indoor is not None and outdoor > indoor:
+                self._natural_vent_active = False
+                self._paused_by_door = True
+                self._nat_vent_outdoor_exit_time = dt_util.now()
+                await self._deactivate_fan(
                     reason=(
-                        f"natural vent activated: outdoor {outdoor:.1f}°F"
-                        f" < indoor {indoor:.1f}°F − {hysteresis:.1f}°F hysteresis,"
-                        f" outdoor ≤ threshold {threshold:.1f}°F"
+                        f"nat vent exit: outdoor {outdoor:.1f}\u00b0F > indoor {indoor:.1f}\u00b0F"
+                        " \u2014 airflow reversed"
                     )
                 )
-                self._natural_vent_active = True
-                self._paused_by_door = False
                 _LOGGER.info(
-                    "Natural vent activated: outdoor %.1f°F < indoor %.1f°F − %.1f°F hysteresis,"
-                    " outdoor ≤ threshold %.1f°F while paused",
+                    "Natural vent exit: outdoor %.1f\u00b0F > indoor %.1f\u00b0F \u2014 airflow reversed,"
+                    " entering pause",
                     outdoor,
                     indoor,
-                    hysteresis,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback("nat_vent_outdoor_rise_exit", {"outdoor": outdoor, "indoor": indoor})
+                return
+
+            if self._natural_vent_active and outdoor is not None and outdoor > threshold:
+                # Outdoor got too warm — exit nat vent, enter pause
+                self._natural_vent_active = False
+                self._paused_by_door = True
+                await self._deactivate_fan(
+                    reason=f"natural vent exit: outdoor {outdoor:.1f}\u00b0F > threshold {threshold:.1f}\u00b0F"
+                )
+                _LOGGER.info(
+                    "Natural vent exit: outdoor %.1f\u00b0F > threshold %.1f\u00b0F \u2014 entering pause",
+                    outdoor,
                     threshold,
                 )
-                await self._apply_nat_vent_hvac_state()
-            else:
-                _LOGGER.debug(
-                    "Nat vent paused-by-door: conditions not met — "
-                    "outdoor=%.1f°F indoor=%.1f°F delta=%.1f°F (need>%.1f°F) "
-                    "floor_ok=%s ceiling_ok=%s",
-                    outdoor,
-                    indoor,
-                    indoor - outdoor,
-                    hysteresis,
-                    _floor_ok,
-                    _ceiling_ok,
+                return
+
+            if self._paused_by_door and outdoor is not None and indoor is not None:
+                hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+                lockout_s = float(
+                    self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
                 )
+                comfort_heat = float(self.config.get("comfort_heat", 70))
+
+                # Enforce lockout after outdoor-warm exit
+                if self._nat_vent_outdoor_exit_time is not None:
+                    elapsed = (dt_util.now() - self._nat_vent_outdoor_exit_time).total_seconds()
+                    if elapsed < lockout_s:
+                        _LOGGER.debug(
+                            "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
+                            elapsed,
+                            lockout_s,
+                            lockout_s - elapsed,
+                        )
+                        return
+
+                _delta_ok = outdoor < indoor - hysteresis
+                _floor_ok = indoor > comfort_heat
+                _ceiling_ok = outdoor < threshold
+                # Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition. Named
+                # distinctly from _ceiling_ok above (outdoor-vs-threshold direction check) — this
+                # is the comfort_cool-based handoff-to-AC condition instead.
+                _ceiling_threshold_pd = self._ceiling_threshold(comfort_cool)
+                _comfort_ceiling_ok = _ceiling_threshold_pd is None or indoor <= _ceiling_threshold_pd
+                if _delta_ok and _floor_ok and _ceiling_ok and _comfort_ceiling_ok:
+                    # Outdoor cooled down — activate natural vent
+                    await self._activate_fan(
+                        reason=(
+                            f"natural vent activated: outdoor {outdoor:.1f}°F"
+                            f" < indoor {indoor:.1f}°F − {hysteresis:.1f}°F hysteresis,"
+                            f" outdoor ≤ threshold {threshold:.1f}°F"
+                        )
+                    )
+                    self._natural_vent_active = True
+                    self._paused_by_door = False
+                    _LOGGER.info(
+                        "Natural vent activated: outdoor %.1f°F < indoor %.1f°F − %.1f°F hysteresis,"
+                        " outdoor ≤ threshold %.1f°F while paused",
+                        outdoor,
+                        indoor,
+                        hysteresis,
+                        threshold,
+                    )
+                    await self._apply_nat_vent_hvac_state()
+                else:
+                    _LOGGER.debug(
+                        "Nat vent paused-by-door: conditions not met — "
+                        "outdoor=%.1f°F indoor=%.1f°F delta=%.1f°F (need>%.1f°F) "
+                        "floor_ok=%s ceiling_ok=%s",
+                        outdoor,
+                        indoor,
+                        indoor - outdoor,
+                        hysteresis,
+                        _floor_ok,
+                        _ceiling_ok,
+                    )
 
     async def nat_vent_temperature_check(self, current_temp: float) -> None:
         """Thermostat-style cycling: keep indoor near the comfort midpoint during a nat-vent session.
@@ -2263,108 +2364,109 @@ class AutomationEngine:
         maintained (restore_hvac=False). When indoor warms back to (midpoint + hysteresis)
         the fan re-engages, subject to the outdoor-warm guard.
         """
-        if not self._natural_vent_active:
-            return
-
-        comfort_heat = float(self.config.get("comfort_heat", 70))
-        comfort_cool = float(self.config.get("comfort_cool", 75))
-        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        if _in_sleep_window(dt_util.now(), self.config):
-            sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-            nat_vent_target = sleep_heat + hysteresis  # e.g. 65+1=66; off at 65, on at 67
-            # Hard exit floor is one hysteresis step below the cycling-off threshold so the
-            # fan can cycle off gracefully at sleep_heat before the session ends.
-            _hard_floor = sleep_heat - hysteresis  # e.g. 64°F
-            _context = "sleep"
-        else:
-            nat_vent_target = (comfort_heat + comfort_cool) / 2.0
-            _hard_floor = comfort_heat
-            _context = "daytime"
-        off_threshold = nat_vent_target - hysteresis
-        on_threshold = nat_vent_target + hysteresis
-
-        # Hard floor exit takes priority over cycling.
-        # Sleep window: _hard_floor = sleep_heat - hysteresis (one step below cycling-off threshold),
-        # allowing the fan to cycle off gracefully at sleep_heat before the session terminates.
-        # Daytime: _hard_floor = comfort_heat (unchanged behaviour).
-        if current_temp <= _hard_floor:
-            _LOGGER.info(
-                "Nat-vent hard exit [%s] via temp-check: indoor %.1f°F ≤ floor %.1f°F — ending session",
-                _context,
-                current_temp,
-                _hard_floor,
-            )
-            await self._deactivate_fan(reason="nat_vent_floor_exit", restore_hvac=True)
-            self._natural_vent_active = False
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "nat_vent_comfort_floor_exit",
-                    {"indoor_temp": current_temp, "comfort_heat": _hard_floor, "source": "temp_check"},
-                )
-            return
-
-        if self._fan_active and current_temp <= off_threshold:
-            _LOGGER.info(
-                "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
-                " — indoor %.1f°F ≤ off_threshold, cycling fan off, session remains active",
-                _context,
-                nat_vent_target,
-                off_threshold,
-                on_threshold,
-                _fan_device_label(self.config),
-                current_temp,
-            )
-            # Deactivate the fan without restoring HVAC — session stays alive.
-            # emit_event=False: this transition is reported via nat_vent_fan_off below.
-            await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False)
-            # _natural_vent_active intentionally left True — session continues
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "nat_vent_fan_off",
-                    {
-                        "indoor_temp": current_temp,
-                        "off_threshold": off_threshold,
-                        "target": nat_vent_target,
-                        "fan_device": _fan_device_label(self.config),
-                    },
-                )
-            return
-
-        if not self._fan_active and current_temp >= on_threshold:
-            outdoor = self._last_outdoor_temp
-            if outdoor is not None and outdoor >= current_temp:
-                _LOGGER.info(
-                    "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F"
-                    " but outdoor %.1f°F ≥ indoor — skipping re-activation"
-                    " (outdoor-warm exit condition active)",
-                    current_temp,
-                    on_threshold,
-                    outdoor,
-                )
+        async with self._decision_lock:
+            if not self._natural_vent_active:
                 return
-            _LOGGER.info(
-                "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
-                " — indoor %.1f°F ≥ on_threshold, outdoor=%.1f°F, cycling fan on",
-                _context,
-                nat_vent_target,
-                off_threshold,
-                on_threshold,
-                _fan_device_label(self.config),
-                current_temp,
-                outdoor if outdoor is not None else 0.0,
-            )
-            # emit_event=False: this transition is reported via nat_vent_fan_on below.
-            await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "nat_vent_fan_on",
-                    {
-                        "indoor_temp": current_temp,
-                        "on_threshold": on_threshold,
-                        "target": nat_vent_target,
-                        "fan_device": _fan_device_label(self.config),
-                    },
+
+            comfort_heat = float(self.config.get("comfort_heat", 70))
+            comfort_cool = float(self.config.get("comfort_cool", 75))
+            hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+            if _in_sleep_window(dt_util.now(), self.config):
+                sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+                nat_vent_target = sleep_heat + hysteresis  # e.g. 65+1=66; off at 65, on at 67
+                # Hard exit floor is one hysteresis step below the cycling-off threshold so the
+                # fan can cycle off gracefully at sleep_heat before the session ends.
+                _hard_floor = sleep_heat - hysteresis  # e.g. 64°F
+                _context = "sleep"
+            else:
+                nat_vent_target = (comfort_heat + comfort_cool) / 2.0
+                _hard_floor = comfort_heat
+                _context = "daytime"
+            off_threshold = nat_vent_target - hysteresis
+            on_threshold = nat_vent_target + hysteresis
+
+            # Hard floor exit takes priority over cycling.
+            # Sleep window: _hard_floor = sleep_heat - hysteresis (one step below cycling-off threshold),
+            # allowing the fan to cycle off gracefully at sleep_heat before the session terminates.
+            # Daytime: _hard_floor = comfort_heat (unchanged behaviour).
+            if current_temp <= _hard_floor:
+                _LOGGER.info(
+                    "Nat-vent hard exit [%s] via temp-check: indoor %.1f°F ≤ floor %.1f°F — ending session",
+                    _context,
+                    current_temp,
+                    _hard_floor,
                 )
+                await self._deactivate_fan(reason="nat_vent_floor_exit", restore_hvac=True)
+                self._natural_vent_active = False
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_comfort_floor_exit",
+                        {"indoor_temp": current_temp, "comfort_heat": _hard_floor, "source": "temp_check"},
+                    )
+                return
+
+            if self._fan_active and current_temp <= off_threshold:
+                _LOGGER.info(
+                    "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
+                    " — indoor %.1f°F ≤ off_threshold, cycling fan off, session remains active",
+                    _context,
+                    nat_vent_target,
+                    off_threshold,
+                    on_threshold,
+                    _fan_device_label(self.config),
+                    current_temp,
+                )
+                # Deactivate the fan without restoring HVAC — session stays alive.
+                # emit_event=False: this transition is reported via nat_vent_fan_off below.
+                await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False)
+                # _natural_vent_active intentionally left True — session continues
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_fan_off",
+                        {
+                            "indoor_temp": current_temp,
+                            "off_threshold": off_threshold,
+                            "target": nat_vent_target,
+                            "fan_device": _fan_device_label(self.config),
+                        },
+                    )
+                return
+
+            if not self._fan_active and current_temp >= on_threshold:
+                outdoor = self._last_outdoor_temp
+                if outdoor is not None and outdoor >= current_temp:
+                    _LOGGER.info(
+                        "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F"
+                        " but outdoor %.1f°F ≥ indoor — skipping re-activation"
+                        " (outdoor-warm exit condition active)",
+                        current_temp,
+                        on_threshold,
+                        outdoor,
+                    )
+                    return
+                _LOGGER.info(
+                    "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
+                    " — indoor %.1f°F ≥ on_threshold, outdoor=%.1f°F, cycling fan on",
+                    _context,
+                    nat_vent_target,
+                    off_threshold,
+                    on_threshold,
+                    _fan_device_label(self.config),
+                    current_temp,
+                    outdoor if outdoor is not None else 0.0,
+                )
+                # emit_event=False: this transition is reported via nat_vent_fan_on below.
+                await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_fan_on",
+                        {
+                            "indoor_temp": current_temp,
+                            "on_threshold": on_threshold,
+                            "target": nat_vent_target,
+                            "fan_device": _fan_device_label(self.config),
+                        },
+                    )
 
     async def fan_thermostat_check(
         self,
@@ -2387,7 +2489,7 @@ class AutomationEngine:
             outdoor: Current outdoor temperature in °F (None = unavailable).
             trigger: Caller label for the DEBUG log ("indoor", "outdoor", "timer", etc.).
         """
-        ca_fan_active = self._fan_active or self._natural_vent_active
+        ca_fan_active = self._fan_running
         if not ca_fan_active:
             _LOGGER.debug(
                 "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
@@ -2785,57 +2887,63 @@ class AutomationEngine:
 
     async def _re_pause_for_open_sensor(self) -> None:
         """Re-pause HVAC because a sensor is still open when grace expired."""
-        if self._is_within_planned_window_period():
-            _LOGGER.info(
-                "Skipping re-pause — within planned window period (windows recommended)",
-            )
-            return
-        # Check nat-vent conditions before blindly re-pausing
-        outdoor = self._last_outdoor_temp
-        comfort_cool = float(self.config.get("comfort_cool", 75))
-        nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-        indoor = self._get_indoor_temp_f()
-        comfort_heat = float(self.config.get("comfort_heat", 70))
-        if (
-            outdoor is not None
-            and indoor is not None
-            and outdoor < indoor  # outdoor must be cooler than indoor
-            and indoor > comfort_heat  # indoor must be above comfort floor
-            and outdoor < comfort_cool + nat_vent_delta
-        ):
-            nat_vent_threshold = comfort_cool + nat_vent_delta
-            nat_vent_reason = (
-                f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
-                f" outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
-            )
-            await self._activate_fan(reason=nat_vent_reason)
-            self._natural_vent_active = True
-            _LOGGER.info(
-                "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
-                " outdoor ≤ %.1f°F, band stays armed",
-                outdoor,
-                indoor,
-                nat_vent_threshold,
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback("sensor_opened", {"entity": "re-check", "result": "natural_ventilation"})
-            return
-        state = self.hass.states.get(self.climate_entity)
-        if state and state.state not in ("off", "unavailable", "unknown"):
-            self._pre_pause_mode = state.state
-            self._paused_by_door = True
-            await self._set_hvac_mode(
-                "off",
-                reason="grace expired — door/window still open, re-pausing",
-            )
-            await self._notify(
-                "Grace period expired but a door/window is still open. HVAC has been paused again.",
-                "Climate Advisor",
-                notification_type="grace_repause",
-            )
-        elif state and state.state == "off":
-            # HVAC already off, just set the pause flag
-            self._paused_by_door = True
+        async with self._decision_lock:
+            if self._is_within_planned_window_period():
+                _LOGGER.info(
+                    "Skipping re-pause — within planned window period (windows recommended)",
+                )
+                return
+            # Check nat-vent conditions before blindly re-pausing
+            outdoor = self._last_outdoor_temp
+            comfort_cool = float(self.config.get("comfort_cool", 75))
+            nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+            indoor = self._get_indoor_temp_f()
+            comfort_heat = float(self.config.get("comfort_heat", 70))
+            # Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition.
+            _ceiling_threshold_rp = self._ceiling_threshold(comfort_cool)
+            _ceiling_ok_rp = _ceiling_threshold_rp is None or indoor <= _ceiling_threshold_rp
+            if (
+                outdoor is not None
+                and indoor is not None
+                and outdoor < indoor  # outdoor must be cooler than indoor
+                and indoor > comfort_heat  # indoor must be above comfort floor
+                and outdoor < comfort_cool + nat_vent_delta
+                and _ceiling_ok_rp
+            ):
+                nat_vent_threshold = comfort_cool + nat_vent_delta
+                nat_vent_reason = (
+                    f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
+                    f" outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
+                )
+                await self._activate_fan(reason=nat_vent_reason)
+                self._natural_vent_active = True
+                await self._apply_nat_vent_hvac_state()
+                _LOGGER.info(
+                    "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
+                    " outdoor ≤ %.1f°F, band stays armed",
+                    outdoor,
+                    indoor,
+                    nat_vent_threshold,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback("sensor_opened", {"entity": "re-check", "result": "natural_ventilation"})
+                return
+            state = self.hass.states.get(self.climate_entity)
+            if state and state.state not in ("off", "unavailable", "unknown"):
+                self._pre_pause_mode = state.state
+                self._paused_by_door = True
+                await self._set_hvac_mode(
+                    "off",
+                    reason="grace expired — door/window still open, re-pausing",
+                )
+                await self._notify(
+                    "Grace period expired but a door/window is still open. HVAC has been paused again.",
+                    "Climate Advisor",
+                    notification_type="grace_repause",
+                )
+            elif state and state.state == "off":
+                # HVAC already off, just set the pause flag
+                self._paused_by_door = True
 
     async def _apply_current_scheduled_state(self, reason: str = "grace_expired") -> None:
         """After override clears, converge to the scheduled automation state.
@@ -3307,6 +3415,38 @@ class AutomationEngine:
             reason=f"morning wake-up — comfort band [{_wakeup_band.floor:.0f}/{_wakeup_band.ceiling:.0f}]",
         )
 
+    def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
+        """Ceiling above which the compressor should take over from fan-assisted cooling.
+
+        Returns None for whole-house-fan mode (FAN_MODE_WHOLE_HOUSE / FAN_MODE_BOTH): a WHF
+        is guaranteed to keep converging toward outdoor temperature as long as outdoor stays
+        below indoor, so there is no ceiling-based handoff point — only the outdoor/indoor
+        direction matters (Issue #392 Fix 1). HVAC fan mode coexists with the compressor (band
+        stays armed per Issue #249), so the ceiling is a valid handoff signal there.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return None
+        if comfort_cool is None:
+            return None
+        aggressive = bool(self.config.get("aggressive_savings", False))
+        return comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive else comfort_cool
+
+    def _whf_owns_hvac(self) -> bool:
+        """Whether a whole-house-fan session currently owns (suppresses) the thermostat.
+
+        True when fan_mode is WHOLE_HOUSE/BOTH AND a suppression session is active
+        (``_pre_fan_hvac_mode is not None`` — the same flag ``_activate_fan``/
+        ``_deactivate_fan`` use to track an active suppression, not ``_natural_vent_active``,
+        which also covers HVAC-fan-mode nat-vent where HVAC is NOT suppressed).
+
+        Issue #392 Fix 1b: this is the seed of a future ``FanSession.may_run_hvac()`` object
+        (see Issue #392 shaping analysis) — a single choke-point check standing in for the
+        deferred `FanSession` extraction, not a permanent standalone guard.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._pre_fan_hvac_mode is not None
+
     async def _apply_nat_vent_hvac_state(self) -> None:
         """Apply the correct HVAC state when nat-vent is active.
 
@@ -3405,6 +3545,12 @@ class AutomationEngine:
 
         if self._fan_override_active:
             _LOGGER.info("Fan override active — skipping fan activation")
+            return
+
+        # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
+        # multiple gate sites into a single real state transition.
+        if self._fan_active:
+            _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
             return
 
         if self.dry_run:
@@ -3529,7 +3675,7 @@ class AutomationEngine:
         outdoor = self._last_outdoor_temp
         await self.fan_thermostat_check(indoor=indoor, outdoor=outdoor, trigger="timer")
         # Re-arm only if the fan is still active after the check
-        if self._fan_active or self._natural_vent_active:
+        if self._fan_running:
             self._start_fan_thermo_backstop()
 
     def _cancel_fan_thermo_backstop(self) -> None:
@@ -3560,6 +3706,12 @@ class AutomationEngine:
             _LOGGER.info("Fan override active — skipping fan deactivation")
             return
 
+        # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
+        # multiple gate sites into a single real state transition.
+        if not self._fan_active:
+            _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
+            return
+
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would deactivate fan — %s", reason)
             return
@@ -3579,11 +3731,18 @@ class AutomationEngine:
                 # Skipped during nat-vent cycling (restore_hvac=False) so HVAC stays
                 # suppressed between fan-on and fan-off cycles within the same session.
                 if restore_hvac and self._pre_fan_hvac_mode is not None:
-                    await self._set_hvac_mode(
-                        self._pre_fan_hvac_mode,
-                        reason=f"whole-house fan stopped — restoring HVAC mode ({self._pre_fan_hvac_mode})",
-                    )
+                    _restore_mode = self._pre_fan_hvac_mode
+                    # Issue #392: clear _pre_fan_hvac_mode BEFORE issuing the restore write, not
+                    # after. _whf_owns_hvac() (the Fix 1b choke-point guard in _set_hvac_mode())
+                    # treats "_pre_fan_hvac_mode is not None" as "WHF still owns the thermostat" —
+                    # the restore write itself ends the suppression session, so ownership must be
+                    # released before the write, or the guard self-blocks the very call that is
+                    # supposed to un-suppress HVAC.
                     self._pre_fan_hvac_mode = None
+                    await self._set_hvac_mode(
+                        _restore_mode,
+                        reason=f"whole-house fan stopped — restoring HVAC mode ({_restore_mode})",
+                    )
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                 await self.hass.services.async_call(

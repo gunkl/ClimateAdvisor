@@ -1,13 +1,13 @@
 {
   "name": "startup_indoor_above_cool_nat_vent_not_running",
-  "description": "Startup: ceiling guard fires before nat-vent can activate",
+  "description": "Startup: reactivation ceiling gate blocks nat-vent when indoor already exceeds comfort_cool (Issue #392)",
   "source": "synthetic",
   "issue": 218,
   "verdict": {
     "type": "positive",
-    "summary": "When startup has indoor exceeding comfort_cool, ceiling guard in production blocks nat-vent activation. Simulator lacks ceiling guard logic.",
-    "observed_behavior": "startup with indoor 76F > comfort_cool 74F, sensors open — simulator activates nat vent",
-    "expected_behavior": "In production: ceiling guard would block nat vent. In simulator: gap in logic means nat vent activates even with breached ceiling."
+    "summary": "When startup has indoor exceeding comfort_cool, the archetype-aware ceiling gate (Issue #392 Fix 1) blocks nat-vent (re)activation for the default/HVAC-fan archetype used here — the single-engine harness now exercises this directly since the gate lives in production's reactivation gates, not a separate simulator-only check.",
+    "observed_behavior": "startup with indoor 76F > comfort_cool 74F, sensors open — nat-vent activation is blocked; HVAC pauses instead",
+    "expected_behavior": "Ceiling gate blocks nat-vent activation because indoor 76F > ceiling_threshold 74F; door/window pause path applies instead."
   },
   "config": {
     "comfort_heat": 70,
@@ -34,20 +34,19 @@
       "time": "2026-05-23T08:05:00",
       "type": "sensor_open",
       "entity": "binary_sensor.living_room_window",
-      "note": "Sensor opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F. In production, ceiling breach would block nat vent. Simulator activates it (gap in ceiling guard)."
+      "note": "Sensor opens: outdoor 68F < indoor 76F, indoor > comfort_heat 70F, but indoor 76F > ceiling_threshold 74F. Issue #392 Fix 1: the reactivation gate now blocks nat-vent activation in this case for the default/HVAC-fan archetype — production pauses instead."
     }
   ],
   "assertions": [
     {
       "at": "2026-05-23T08:01:00",
       "expect": "classification_applied",
-      "reason": "Classification applied. In production, comfort ceiling guard would override."
+      "reason": "Classification applied. Ceiling gate governs the subsequent sensor-open event."
     },
     {
       "at": "2026-05-23T08:05:00",
-      "expect": "natural_ventilation",
-      "simulator_support": false,
-      "reason": "Simulator activates nat vent (no ceiling guard logic). In production: ceiling guard would block because indoor 76F > comfort_cool 74F. Documents gap: simulator needs ceiling guard to block nat vent activation when indoor exceeds comfort_cool."
+      "expect": "paused",
+      "reason": "Indoor 76F > ceiling_threshold 74F blocks nat-vent (re)activation (Issue #392 Fix 1) — HVAC pauses for the open sensor instead. This closes the gap this scenario originally documented: pre-#392, no reactivation gate checked the ceiling, so production and simulator would have diverged. Now production's own gate blocks it, verifiable directly through the single-engine harness."
     }
   ]
 }

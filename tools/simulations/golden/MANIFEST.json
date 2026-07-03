@@ -14,8 +14,8 @@
     "issue": 95
   },
   "2026-03-28-overnight": {
-    "sha256": "65deb17e5237191cefdda5468694f11539456d0c540f765a1b590b13594d1566",
-    "signed": "2026-06-13",
+    "sha256": "0a888340544f632afdde84b823688e6a82f7c322a1d603c0131c54d9b3d29faf",
+    "signed": "2026-07-02",
     "issue": 69
   },
   "away-mode-classification-cycle": {
@@ -29,18 +29,18 @@
     "issue": 115
   },
   "nat-vent-evening-activation": {
-    "sha256": "20c90ee48bce399afa0949a63b1af280a168e197db7130450cc3941a3a4a9f3f",
-    "signed": "2026-06-13",
+    "sha256": "9114cf34c3501d8884b11e39a6ae6728121a50ee04b83a839b85c25a8dae1471",
+    "signed": "2026-07-02",
     "issue": 115
   },
   "nat-vent-indoor-hot-outdoor-near-comfort": {
-    "sha256": "92d8fe0a3479c6f9b9b4c201c6e5394fd488d3dc062478cf8dfff4d01c624230",
-    "signed": "2026-06-13",
+    "sha256": "d1d8b2d815d4c855da2f7187ef182aa1600e9ab3d752957b63b00a104be9ab24",
+    "signed": "2026-07-02",
     "issue": 115
   },
   "nat-vent-outdoor-rises-above-indoor-exit": {
-    "sha256": "2faf2ba3e7ae0b6787253d8d5039bdaa7873cfc1e2ad61deb8ed772ff77dce1b",
-    "signed": "2026-06-13",
+    "sha256": "93414d8a93af51fe660d5c2a28715d27bb48d16d79ba7cabcce9406702c09b5a",
+    "signed": "2026-07-02",
     "issue": 115
   },
   "nat-vent-outdoor-warmer-no-activate": {
@@ -99,8 +99,8 @@
     "issue": 218
   },
   "startup_indoor_above_cool_nat_vent_not_running": {
-    "sha256": "a9b7c2a7b3a7fc4892c27ea9047629a41da7bf4745ceea4458e83c4a890d7162",
-    "signed": "2026-06-13",
+    "sha256": "894a9ac68a0e79cf79c6d896a9a453fc92f9ad75eb34fc8863479c831c2f92c8",
+    "signed": "2026-07-02",
     "issue": 218
   },
   "startup_indoor_above_cool_sensors_closed": {

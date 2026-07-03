@@ -3,6 +3,11 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.4.56] — 2026-07-02
+
+- Fix #392: Whole-house fan (WHF) and AC could fight each other in a repeating off→cool→off→cool loop roughly every 5 minutes — the ODE ceiling guard applied the same "switch to AC once indoor crosses the ceiling" rule to both fan archetypes, but a WHF is mutually exclusive with AC and physically guaranteed to keep cooling the house as long as outdoor air is cooler than indoor, so the ceiling number never applied to it. The ceiling check is now archetype-aware, HVAC writes are structurally blocked while a WHF session owns the thermostat (previously only enforced by convention), fan activation/deactivation are now idempotent, and automation decisions are serialized so independently-triggered handlers can no longer race on shared state.
+- Fix #392: Activity Log lines for fan events now show which fan (hvac_fan/whf/both) actually fired instead of a generic "fan" label.
+
 ## [0.4.55] — 2026-07-02
 
 - Fix #390: Whole-house fan status could show "off (manual override)" for up to 30 minutes after the fan was actually confirmed running — the coordinator listener that detects the fan_state_entity confirming physical on/off silently dropped the event once a manual override was already active, so the displayed status only caught up at the next scheduled poll. Now a coordinator refresh is requested immediately so the status reflects reality within one cycle.

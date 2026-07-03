@@ -1,0 +1,120 @@
+{
+  "name": "issue-392-natvent-ceiling-oscillation",
+  "description": "Reproduces the Issue #392 18:53->19:04 off->cool->off->cool oscillation: WHF nat-vent active, indoor rises above the comfort ceiling while outdoor stays below indoor. A real window close/reopen (18:55/18:56, matching the issue's repeated sensor-open pattern) forces the reactivation gate to re-evaluate while indoor is still past the ceiling -- this is the exact condition that used to trip the old ceiling-based AC escalation. After Fix 1, FAN_MODE_WHOLE_HOUSE ignores the ceiling entirely (direction-only: outdoor < indoor is sufficient) and reactivates cleanly with no cool-mode escalation.",
+  "source": "activity-report",
+  "issue": 392,
+  "notes": [
+    "Occupant impact: without Fix 1, the whole-house fan repeatedly deactivated, HVAC escalated to cool, and the very next sensor-open/grace-recheck immediately reactivated the fan and forced HVAC back to off -- an off->cool->off->cool fight roughly every 5 minutes. The occupant saw contradicting Activity Log entries and the AC cycling for no thermal benefit while a free breeze was already handling the load.",
+    "Config: fan_mode=whole_house_fan, comfort_cool=74F -- matches the issue's real config.",
+    "VERIFIED SCENARIO EFFECTIVENESS (three-exercise protocol, CLAUDE.md): the 18:53/18:58 temp_update assertions alone are NOT sufficient to catch a regression -- check_natural_vent_conditions()'s while-active exit checks (outdoor>indoor direction, outdoor>threshold) never consult _ceiling_threshold() while nat-vent is already running, so those two points pass identically whether or not Fix 1 is present. The REAL teeth of this scenario is the 18:56 assertion: it follows a real sensor_close (18:55, ends the session) then sensor_open (18:56, forces a fresh reactivation-gate evaluation) while indoor (75F) is still above comfort_cool (74F). Verified directly against tools/sim_harness/run_production.py with _ceiling_threshold() monkey-patched back to the pre-#392 blanket rule (comfort_cool with no archetype check): under the bug, the decision at 18:56 is 'paused' (reactivation blocked by the ceiling) and stays 'paused' through 19:00, only reactivating at 19:04 once indoor cooled back to exactly the ceiling value -- under the fix, 18:56 is 'natural_ventilation' immediately. This confirms the scenario would fail if Fix 1 were deleted.",
+    "The 18:55 sensor_close is a REAL window close, not a grace-timer artifact -- production correctly runs the normal Fix C restore path here (fan off, HVAC mode restored to cool), which is expected, intentional behavior distinct from the Issue #392 bug (the bug is the ceiling gate blocking/escalating while the window is OPEN and nat-vent is trying to run, not the normal restore-on-close path).",
+    "Two fan_activated events occur across the run (18:10 initial open, 18:56 after the real close/reopen) -- both are genuine new activations following a real sensor transition, not duplicates within the same tick (which Fix 1c's idempotency guard would collapse if a scenario triggered redundant same-tick reactivation attempts).",
+    "Single-engine harness (Issue #236): this scenario drives tools/sim_harness/ against the REAL production AutomationEngine -- it directly exercises the Issue #392 Fix 1 (_ceiling_threshold archetype awareness at the reactivation gate) and Fix 1b (_whf_owns_hvac choke-point guard preventing any stray 'cool' write while the WHF session is active and the window is open), not a parallel simulator model.",
+    "Two-way alignment check (docs vs production, per CLAUDE.md three-exercise protocol): docs/08-COMPUTATION-REFERENCE.md SS6c/SS9/SS17 (Scribe-owned, updated in the same PR) document _ceiling_threshold()'s archetype-aware behavior and the four reactivation gate sites; this scenario's 18:56 assertion exercises exactly the paused-by-door reactivation gate site documented there.",
+    "User outcome if this scenario fails to catch a regression: the WHF occupant would again see the fan needlessly stop and the AC cycle on while a free breeze was already handling the cooling load, and would see contradicting off->cool->off->cool entries in the Activity Log during any real close/reopen sequence while indoor is above the comfort ceiling.",
+    "Promote to golden/ once reviewed and confirmed by the user per the Golden Simulation Test Policy."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-02T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 68.0,
+      "note": "Evening: indoor 72F, outdoor 68F -- below comfort_cool ceiling, outdoor well below indoor."
+    },
+    {
+      "time": "2026-07-02T18:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: hvac_mode=cool (normal daytime baseline before nat-vent takes over)."
+    },
+    {
+      "time": "2026-07-02T18:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens. outdoor=68F < indoor=72F, indoor > comfort_heat=68F, outdoor <= threshold 77F. Nat-vent activates, whole-house fan turns on, HVAC suppressed to off (Fix 1b)."
+    },
+    {
+      "time": "2026-07-02T18:53:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 72.0,
+      "note": "Indoor has drifted up to 75F -- ABOVE comfort_cool=74F ceiling -- while outdoor (72F) is still below indoor and the window stays open. Nat-vent must stay active; the while-active exit checks in check_natural_vent_conditions() are direction/threshold-only and do not consult the ceiling, so this point is a baseline sanity check, not the scenario's primary regression-catching assertion (see notes)."
+    },
+    {
+      "time": "2026-07-02T18:55:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Occupant briefly closes the window. This is a REAL close, not a grace-timer artifact -- production correctly runs the normal Fix C restore path here (fan off, HVAC mode restored to cool), which is expected, intentional behavior distinct from the Issue #392 bug."
+    },
+    {
+      "time": "2026-07-02T18:56:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window re-opens moments later (matching the issue's repeated sensor-open pattern) -- forces a FRESH reactivation-gate evaluation at indoor=75F > ceiling=74F, outdoor=72F < indoor. This is the scenario's primary regression-catching assertion: under the pre-#392 ceiling rule this reactivation is blocked (falls to 'paused'); under Fix 1 it must reactivate immediately via the direction-only WHF gate."
+    },
+    {
+      "time": "2026-07-02T18:58:00",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 72.0,
+      "note": "Indoor holds at 75F, outdoor holds at 72F -- still past the ceiling but outdoor still below indoor and window still open. Second oscillation point from the issue's activity log (18:58); confirms the session remains stable after the 18:56 reactivation."
+    },
+    {
+      "time": "2026-07-02T19:04:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 72.0,
+      "note": "Indoor has converged back to the ceiling value; outdoor (72F) still below indoor (74F). Matches the issue's real HA log timestamp (19:03:59-19:04:10 in production, where the AC was incorrectly commanded to cool before the fix). WHF must remain active throughout."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-02T18:01:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied before nat-vent takes over."
+    },
+    {
+      "at": "2026-07-02T18:10:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opened with outdoor=68F < indoor=72F and outdoor <= threshold 77F -- nat-vent activates, WHF turns on, HVAC suppressed to off (Fix 1b choke-point guard)."
+    },
+    {
+      "at": "2026-07-02T18:53:00",
+      "expect": "natural_ventilation",
+      "reason": "Baseline sanity check: indoor (75F) above comfort_cool (74F) but window still open and outdoor (72F) still below indoor -- the while-active session must not have exited. (Does not by itself distinguish the archetype-aware ceiling fix -- see 18:56 for the scenario's primary regression-catching assertion.)"
+    },
+    {
+      "at": "2026-07-02T18:56:00",
+      "expect": "natural_ventilation",
+      "reason": "PRIMARY REGRESSION-CATCHING ASSERTION (Issue #392 Fix 1). Window closed then reopened with indoor (75F) still above comfort_cool (74F) -- forces a fresh reactivation-gate evaluation. FAN_MODE_WHOLE_HOUSE's ceiling_threshold is None (direction-only, outdoor 72F < indoor 75F) so reactivation must succeed immediately. Verified: with the pre-#392 blanket ceiling rule, this same event produces 'paused' instead (reactivation blocked until indoor drops back to the ceiling at 19:04) -- confirming this assertion fails if Fix 1 is reverted."
+    },
+    {
+      "at": "2026-07-02T18:58:00",
+      "expect": "natural_ventilation",
+      "reason": "Session remains stable after the 18:56 reactivation -- no flapping back to paused/cool."
+    },
+    {
+      "at": "2026-07-02T19:04:00",
+      "expect": "natural_ventilation",
+      "reason": "Matches the issue's real HA log timestamp where production previously commanded climate.set_hvac_mode('cool') right after a fan reactivation. After the fix, outdoor (72F) is still below indoor (74F) so nat-vent must still be active with no AC escalation."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "WHF nat-vent reactivates cleanly after a real window close/reopen even while indoor exceeds the comfort ceiling, as long as outdoor stays below indoor -- no ceiling-triggered blocking, no cool-mode escalation, no flapping",
+    "observed_behavior": "classification_applied -> natural_ventilation on window open -> natural_ventilation sustained through the 18:53 indoor-above-ceiling condition -> natural_ventilation immediately on the 18:56 reactivation (indoor still above ceiling) -> natural_ventilation sustained through 18:58 and 19:04",
+    "expected_behavior": "FAN_MODE_WHOLE_HOUSE ceiling_threshold is None (Issue #392 Fix 1) -- the ceiling never blocks WHF reactivation while outdoor stays below indoor, even immediately after a real window close/reopen. HVAC must never be commanded to 'cool' while the WHF session is active and the window is open (Fix 1b structural choke-point guarantee) -- a real window close still correctly restores HVAC via the normal Fix C path, which is separate, intentional behavior."
+  }
+}

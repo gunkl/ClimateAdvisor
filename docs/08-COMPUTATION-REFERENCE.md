@@ -819,6 +819,32 @@ If any condition fails, the guard **evaluates** (and fires if the breach scan co
 
 **`aggressive_savings` widens the ceiling threshold.** In normal mode the ceiling threshold is `comfort_cool`. In `aggressive_savings` mode it is `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` (2.0°F) — savings homes tolerate a small overshoot before paying for the compressor, but are still rescued from a real comfort failure once indoor exceeds that wider threshold.
 
+#### `_ceiling_threshold()` is archetype-aware (Issue #392 Fix 1)
+
+The ceiling threshold used in the dormancy check (condition 3 above) is computed by `_ceiling_threshold(comfort_cool)` in `automation.py`, not inlined. The helper returns a different answer depending on the configured fan archetype:
+
+```python
+def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
+    fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+    if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        return None
+    if comfort_cool is None:
+        return None
+    aggressive = bool(self.config.get("aggressive_savings", False))
+    return comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive else comfort_cool
+```
+
+| fan_mode | Return value | Why |
+|---|---|---|
+| `FAN_MODE_HVAC` | `comfort_cool` (or `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` if `aggressive_savings`) | The HVAC blower and the compressor **coexist** — the comfort band stays armed the whole time nat-vent is active (§6e / Issue #249), so handing off to AC once indoor crosses the ceiling is safe and correct. Nothing fights: the thermostat itself decides whether the compressor needs to run. |
+| `FAN_MODE_WHOLE_HOUSE` / `FAN_MODE_BOTH` | `None` | A whole-house fan (WHF) is **mutually exclusive** with the compressor by construction (`_activate_fan()` forces HVAC to `off` while a WHF session is active; see §9). A WHF is also physically guaranteed to keep converging toward outdoor temperature for as long as `outdoor < indoor` — the ceiling number says nothing about whether the WHF *will* succeed, only about how long it will take. So there is no ceiling-based handoff point for WHF: convergence is governed purely by outdoor/indoor direction, not by how far indoor has drifted above `comfort_cool`. |
+
+The ODE ceiling guard's dormancy check (condition 3, above) treats `ceiling_threshold_val is None` as "ceiling condition satisfied" — i.e. for WHF, dormancy collapses to `outdoor <= indoor AND _natural_vent_active` (no ceiling term at all). For `FAN_MODE_HVAC`, dormancy still requires `indoor <= ceiling_threshold` exactly as before Issue #392.
+
+**Why this had to change (Root Cause of Issue #392):** before this fix, the guard applied the same ceiling-based dormancy rule to both archetypes. For `FAN_MODE_WHOLE_HOUSE`, this meant that once indoor ticked one degree past `comfort_cool`, the guard would escalate to `cool` — which deactivates the WHF and forces HVAC to `cool` (per the mutual-exclusion contract) — even though outdoor was still comfortably below indoor and the WHF would have converged on its own. The very next reactivation check (any of the four gate sites in §17) would then see `outdoor < indoor` still holds and turn the WHF back on, which forces HVAC back to `off`, undoing the guard's `cool` command. That produced the `off→cool→off→cool` oscillation reported in #392 (repeating roughly every 5 minutes between 18:53 and 18:58). Making `_ceiling_threshold()` archetype-aware removes the false ceiling trigger for WHF entirely — see §17 for the matching change to the four reactivation gate sites, and "Structural WHF/AC Mutual Exclusion" below (§9, Issue #392 Fix 1b) for the structural guard that also closes a related but separate gap (mutual exclusion not being enforced everywhere HVAC mode is written).
+
+**Test coverage (Issue #392):** `tests/test_nat_vent_activation.py`, `tests/test_fan_control.py`, `tests/test_whole_house_fan_hvac_suppression.py` — exact function names pending as of this doc pass; see those files directly for current coverage of archetype-aware ceiling behavior.
+
 **On escalation the guard clears nat-vent** (Issue #218 part 2): if `_natural_vent_active` is true when the guard fires, it deactivates the fan, sets `_natural_vent_active = False`, and emits `nat_vent_ceiling_escalation` before switching to `cool` — so free cooling does not fight the compressor.
 
 #### Guard conditions
@@ -1183,6 +1209,44 @@ The whole-house fan is a dedicated appliance (e.g., `fan.*` or `switch.*` entity
 
 Each component (HVAC fan + whole-house fan) follows its own archetype contract above. `_pre_fan_hvac_mode` is still set, because the whole-house fan component requires HVAC suppression.
 
+### Structural WHF/AC Mutual Exclusion — `_whf_owns_hvac()` Choke-Point Guard (Issue #392 Fix 1b)
+
+**Can the whole-house fan and the compressor ever both be commanded on at the same time? No — this is now a structural guarantee, not a per-caller convention.**
+
+Before Issue #392, mutual exclusion was enforced only by convention inside `_activate_fan()`/`_deactivate_fan()` themselves (see the behavioral contract table above). Nothing stopped any of the ~13 other `_set_hvac_mode()` call sites, or the several `_apply_comfort_band()` call sites, from writing an active HVAC mode while a WHF session owned the thermostat. This was a real, confirmed gap: `apply_classification()`'s normal (non-`aggressive_savings`) fall-through called `_apply_comfort_band()` → `_set_temperature(..., mode="cool")` on every 30-minute cycle even while `_natural_vent_active` was `True` under `FAN_MODE_WHOLE_HOUSE` — re-arming the thermostat to `cool` every cycle while the WHF was physically running, fighting the fan CA itself had just turned on.
+
+**The fix: one guard at the single choke point every HVAC write already passes through**, rather than patching each caller individually (per this project's "trust internal invariants, single choke point" philosophy).
+
+```python
+def _whf_owns_hvac(self) -> bool:
+    fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+    return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._pre_fan_hvac_mode is not None
+```
+
+`_whf_owns_hvac()` is `True` only when both hold: the configured archetype includes a whole-house fan, **and** a suppression session is currently active (`_pre_fan_hvac_mode is not None` — the same flag `_activate_fan()`/`_deactivate_fan()` already use to track an active suppression). It deliberately does not use `_natural_vent_active`, because that flag is also `True` for `FAN_MODE_HVAC` nat-vent sessions, where HVAC is *not* suppressed and writes must be allowed through.
+
+Both HVAC-writing functions check this at their very top, before any service call:
+
+```python
+# inside _set_hvac_mode(mode, *, reason) and _set_temperature(temperature, *, reason, mode)
+if mode != "off" and self._whf_owns_hvac():
+    _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
+    if self._emit_event_callback:
+        self._emit_event_callback("hvac_write_blocked_whf_active", {"attempted_mode": mode, "reason": reason})
+    return
+```
+
+Key properties:
+- **`mode == "off"` is never blocked** — the guard only intercepts attempts to arm an *active* mode (`heat`, `cool`, `heat_cool`) while WHF owns the thermostat. Turning HVAC off is always allowed (it's what a WHF session wants anyway).
+- **Silent drops are made visible.** A blocked write logs a `WARNING` and emits `hvac_write_blocked_whf_active` (payload: `attempted_mode`, `reason`) so the Activity Log shows the interception rather than the write simply vanishing — per this project's Observability Requirements.
+- **`apply_classification()` also short-circuits before reaching the guard.** For `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`, the nat-vent branch (`if self._natural_vent_active:`) returns immediately after `_apply_nat_vent_hvac_state()` — the same early-return pattern already used for `aggressive_savings=True` — so the classification cycle does not even attempt (and log) a band-arm the choke-point guard would silently drop, and does not waste a cycle computing `select_comfort_band()` or running the ODE ceiling guard while WHF owns the thermostat. `FAN_MODE_HVAC` keeps falling through to the comfort-band write exactly as before, because fan and compressor coexist for that archetype (see §6c).
+
+**This closes Root Cause #2 of Issue #392 directly.** Because both writer functions share this one choke point, no future caller — however it decides to call `_set_hvac_mode()` or `_set_temperature()` — can bypass WHF/AC mutual exclusion. The answer to "can WHF and AC ever both be on" is now enforced at exactly one place, not re-derived correctly (or incorrectly) at every call site.
+
+**Follow-up direction (not yet implemented):** `_whf_owns_hvac()` is deliberately named and doc-commented in the code as the seed of a future `FanSession.may_run_hvac()` method. The Issue #392 shaping analysis found that `_natural_vent_active`, `_fan_active`, `_pre_fan_hvac_mode`, and `_fan_override_active` are one concept ("a fan/HVAC-suppression session with an owner and rules") fractured across four loose attributes with no single owner. A `FanSession` class that owns this state and exposes `activate()`/`deactivate()` (idempotent by construction) and `may_run_hvac(mode) -> bool` is tracked as a **separate, deferred follow-up issue** — it is not implemented as part of Issue #392. `_whf_owns_hvac()` and the idempotency guards in §9f below are the small, safe cuts taken now that are consistent with that future direction, without taking on the risk of a full extraction in a bugfix PR.
+
+**Test coverage:** `tests/test_whole_house_fan_hvac_suppression.py`, `tests/test_fan_control.py` — exact function names pending as of this doc pass; both files carry the current coverage for this guard.
+
 ### 9a. Fan State Tracking
 
 The coordinator maintains six internal fields to manage fan state across activate/deactivate calls and detect user overrides:
@@ -1512,6 +1576,72 @@ The fan clean-slate introduced in (A) is consistent with §11: `_fan_override_ac
 | `_pre_fan_hvac_mode` | Yes | Still preserved — needed if coalesce decides to turn off a whole-house fan and restore the HVAC mode |
 | `_natural_vent_active` | No | Cleared on restart (was already the case); coalesce adopt-on re-sets it |
 
+### 9f. Idempotency Guards and the `_fan_running` Property (Issue #392 Fix 1c / Fix 1e)
+
+**Occupant-facing symptom this fixes:** during the 18:53–19:04 burst reported in Issue #392, the Activity Log showed what looked like several different automation decisions "fighting" every few minutes — the user could not tell whether the system was actually deliberating or just re-logging the same decision repeatedly.
+
+**Root cause:** `_activate_fan()` and `_deactivate_fan()` had no check for "is the fan already in the state I'm about to put it in." Four independent (re)activation gate sites (§17) can each independently conclude "conditions are met" within the same few seconds — a grace-expiry timer callback, a sensor-open debounce callback, the 30-minute classification cycle, and the ODE ceiling guard all evaluate their own trigger conditions with no coordination. Before this fix, every one of them that reached the same conclusion re-ran the *entire* activation/deactivation sequence: re-capturing `_pre_fan_hvac_mode` from whatever the thermostat showed at that instant (possibly already stale from a sibling handler's change moments earlier), reissuing the physical service call, and emitting a fresh `fan_activated`/`fan_deactivated` event — even when the fan was already in the target state from a decision made two seconds prior.
+
+**Fix — idempotency guard at the top of both functions**, after the existing `FAN_MODE_DISABLED` and `_fan_override_active` checks, before any state mutation:
+
+```python
+# in _activate_fan()
+if self._fan_active:
+    _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
+    return
+```
+```python
+# in _deactivate_fan()
+if not self._fan_active:
+    _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
+    return
+```
+
+Effect: the first caller to legitimately flip the fan state performs the work and logs the event (INFO/WARNING + Activity Log entry). Every other handler that reaches the same conclusion moments later finds nothing left to do and produces only a `DEBUG`-level line — traceable in the logs, but not a duplicate Activity Log row. Combined with the archetype-aware ceiling fix (§6c) and the choke-point guard (above), which make the *decision itself* stable, this makes the *execution* stable too: one real state transition per actual change, not one log line per handler that happened to fire in the same window.
+
+**`_fan_running` property (Fix 1e — shaping cut):** a related but separate smell was the recurring pattern `self._fan_active or self._natural_vent_active` appearing inline at multiple call sites (e.g. `nat_vent_temperature_check()`) to answer "is CA's fan on right now" — needing to OR two fields together to answer one question is evidence the two flags are one concept fractured into two names. Collapsed into a derived property:
+
+```python
+@property
+def _fan_running(self) -> bool:
+    return self._fan_active or self._natural_vent_active
+```
+
+Purely a readability/correctness-by-construction cut (no behavior change) — every inline `_fan_active or _natural_vent_active` OR was replaced with this property. Like `_whf_owns_hvac()`, it is a small stepping stone toward the deferred `FanSession` extraction (see the follow-up note in the Structural WHF/AC Mutual Exclusion subsection above), not the extraction itself.
+
+**Test coverage:** `tests/test_fan_control.py` — exact function names pending as of this doc pass.
+
+### 9g. `_decision_lock` — Serializing the Six Automation Entry Points (Issue #392 Fix 3)
+
+The `__init__` code comment for `self._decision_lock` in `automation.py` points readers here (§9g) for the deadlock-avoidance analysis below.
+
+**Occupant-facing symptom this fixes:** the same 18:53–19:04 burst also showed decisions from genuinely different trigger sources interleaving within the same few seconds. Fixes in §6c, above (choke-point guard), and §9f (idempotency) make each *individual* decision correct and stop *redundant* re-execution — but neither one, by itself, prevents two independently-triggered handlers from reading and writing shared engine state (`_natural_vent_active`, `_fan_active`, `_pre_fan_hvac_mode`, `_paused_by_door`) while the other is mid-flight. Python's `asyncio` is single-threaded but not atomic across `await` points, so handler B can start acting on state handler A is in the middle of changing.
+
+**The six automation decision-pass entry points**, each independently triggerable by a different event source (HA state-change listener, `async_call_later` timer callback, or the coordinator's periodic `_async_update_data()`):
+
+| # | Method | Trigger source |
+|---|---|---|
+| 1 | `apply_classification()` | Coordinator's 30-minute classification cycle |
+| 2 | `handle_door_window_open()` | Coordinator callback after sensor-open debounce |
+| 3 | `handle_all_doors_windows_closed()` | Coordinator callback after all sensors close |
+| 4 | `check_natural_vent_conditions()` | Called by the coordinator on every `_async_update_data()` |
+| 5 | `_re_pause_for_open_sensor()` | Triggered via `hass.async_create_task(...)` from the grace-expiry callback |
+| 6 | `nat_vent_temperature_check()` | Periodic re-evaluation while nat-vent is active or paused |
+
+**Fix:** `self._decision_lock = asyncio.Lock()` is created once in `__init__`. Each of the six methods above wraps its entire body in `async with self._decision_lock:` — a second trigger firing while a decision pass is already in progress waits for the lock instead of interleaving and racing on shared state:
+
+```python
+async def apply_classification(self, classification, predicted_indoor=None, indoor_temp=None) -> None:
+    async with self._decision_lock:
+        ...  # entire method body
+```
+
+**Deadlock-avoidance pre-check (required before wrapping):** `asyncio.Lock` is not reentrant — if any of the six methods called another of the six directly within the same call stack, wrapping both with the same lock would deadlock. Before implementing, the code was searched for direct cross-calls among the six; **none were found** — no method in this list calls another method in this list synchronously in its own body. Because of that, a plain `async with self._decision_lock:` wrap around each method's existing body was sufficient; no `_impl` extraction (splitting each method into a locked wrapper plus an unlocked `_impl` twin for internal cross-calls) was needed for this PR. If a future change introduces a direct call between any two of these six methods, that pre-check must be repeated and the `_impl` pattern applied before merging.
+
+**What this does NOT change:** this lock does not introduce new automation behavior. The semantic fixes (§6c archetype-aware ceiling, above choke-point guard, §9f idempotency) already make each individual decision correct and idempotent; the lock ensures those correct decisions are evaluated one at a time against a consistent snapshot of engine state, instead of several handlers reading/writing overlapping state concurrently. In a well-behaved system where the semantic fixes hold, the lock should rarely be contended — its purpose is to make the *absence* of interleaving-driven chaos structurally guaranteed rather than incidentally true.
+
+**Test coverage:** concurrency test using `asyncio.gather()` to invoke two of the six entry points "concurrently" against a shared engine instance instrumented to record enter/exit order, asserting non-overlapping execution. Located in `tests/test_nat_vent_activation.py` as of this doc pass (exact function name pending — Craftsman work in `tests/` is running in parallel with this docs pass).
+
 ---
 
 ## 10. Door/Window HVAC Pause
@@ -1831,6 +1961,23 @@ When nat vent has exited due to an outdoor-warm event (Priority 2 above), re-act
 
 If all three conditions are met, nat vent re-activates: HVAC remains off, fan turns on, `_natural_vent_active` is set back to `True`.
 
+#### Archetype-aware reactivation gate (Issue #392 Fix 1) — cross-reference §6c and §9
+
+The re-activation condition table above is the primary, direction/floor/ceiling-delta gate. As of Issue #392, all four call sites that (re)activate nat-vent additionally require the **archetype-aware ceiling condition** from §6c — `self._ceiling_threshold(comfort_cool) is None OR indoor <= ceiling_threshold` — before proceeding, mirroring the ODE ceiling guard's own dormancy check so the guard and the reactivation gates can no longer disagree with each other. For `FAN_MODE_HVAC`, this blocks reactivation once indoor is already past the ceiling (same behavior as before Issue #392). For `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`, `_ceiling_threshold()` returns `None`, so this condition is always satisfied and reactivation is governed purely by the direction/floor/ceiling-delta gate above — a WHF keeps running (or resumes) whenever outdoor is still cooler than indoor, regardless of how far indoor has drifted above `comfort_cool`. See §9 (Structural WHF/AC Mutual Exclusion) for why this is safe: mutual exclusion with the compressor is enforced structurally, not by this gate.
+
+The four call sites, all in `automation.py`:
+
+| # | Function | Role |
+|---|---|---|
+| 1 | `handle_door_window_open()` | Sensor-open debounce callback — initial nat-vent activation |
+| 2 | `check_natural_vent_conditions()` | Grace re-entry branch — reactivation after a grace period |
+| 3 | `nat_vent_temperature_check()` | Paused-state reactivation (variable named `_comfort_ceiling_ok` here, distinct from an existing `_ceiling_ok` in the same function that means outdoor-vs-nat-vent-delta ceiling, not the comfort-cool ceiling) |
+| 4 | `_re_pause_for_open_sensor()` | Re-pause-time reactivation check after grace expires with a sensor still open. Also now calls `_apply_nat_vent_hvac_state()` after `_activate_fan()`, matching the other three sites — this was previously the one site that skipped that call, which was an inconsistency independent of the ceiling logic, fixed alongside it. |
+
+All four are wrapped in `self._decision_lock` (§9g) as part of Issue #392 Fix 3, so a reactivation decision from any one of them cannot interleave with a decision from `apply_classification()` or another of the six locked entry points.
+
+**`apply_classification()` short-circuits for WHF (Issue #392 Fix 1b)** — see §9 (Structural WHF/AC Mutual Exclusion) for the full mechanism. In summary: when `_natural_vent_active` is `True` and `aggressive_savings` is `False` (the default), `apply_classification()` used to fall through to `_apply_comfort_band()` regardless of fan archetype, re-arming `cool` on the thermostat every 30-minute cycle even while a WHF session was actively suppressing HVAC. It now returns immediately after `_apply_nat_vent_hvac_state()` when `fan_mode` is `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`, so the classification cycle never attempts a comfort-band write that the choke-point guard would otherwise silently block. `FAN_MODE_HVAC` keeps falling through unchanged, since fan and compressor coexist for that archetype.
+
 ### `natural_vent_delta` Semantics
 
 `natural_vent_delta` is a ceiling tolerance: the number of degrees above `comfort_cool` that outdoor air is still considered acceptable for natural ventilation. The effective outdoor temperature ceiling is `comfort_cool + natural_vent_delta`.
@@ -1947,10 +2094,10 @@ This is the definitive reference for expected system behavior across all classif
 | | E1: Sensor Open | E2: All Closed | E3: Grace+Open | E4: Override | E5: Fan Change | E6: Class Change | E7: Resume | E8: Restart Reconcile |
 |---|---|---|---|---|---|---|---|---|
 | C1 (hot/cool) | Pause HVAC→off, notify | Resume to cool, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` (§9e) | Re-apply classification | Resume cool, manual grace | Fan adopt-on (nat-vent eligible) or turn-off (not eligible); `Fan reconcile:` logged |
-| **C2 (warm/band/win=T/in)** | **No pause** (planned window) | No-op (not paused) | **No re-pause** (planned) | N/A (not paused) | Fan on, band stays armed; thermostatic loop monitors `outdoor vs indoor` | Re-apply band `[comfort_heat, comfort_cool]`; §6b backstop fires if indoor < comfort_heat | N/A (not paused) | Fan adopt-on (nat-vent eligible, sensors open) or turn-off; band re-armed by coalesce |
-| C3 (warm/band/win=T/out) | No pause (band armed, not paused) | No-op | N/A | N/A | Fan on, band stays armed; thermostatic loop monitors `outdoor vs indoor` | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off (outside window period → not nat-vent eligible) or no-fan |
+| **C2 (warm/band/win=T/in)** | **No pause** (planned window); reactivation gated by archetype-aware ceiling (§6c/§17 — WHF: direction-only; HVAC-fan: blocked once indoor > ceiling) | No-op (not paused) | **No re-pause** (planned); same archetype-aware ceiling gate applies | N/A (not paused) | Fan on, band stays armed for `FAN_MODE_HVAC`; for WHF, `apply_classification()` short-circuits before the band write (Issue #392 Fix 1b, §9) | Re-apply band `[comfort_heat, comfort_cool]` (`FAN_MODE_HVAC` only — WHF short-circuits per §9); §6b backstop fires if indoor < comfort_heat | N/A (not paused) | Fan adopt-on (nat-vent eligible) or turn-off; band re-armed by coalesce |
+| C3 (warm/band/win=T/out) | No pause (band armed, not paused); same archetype-aware ceiling gate | No-op | N/A | N/A | Fan on, band stays armed for `FAN_MODE_HVAC`; WHF short-circuits per §9 | Re-apply band (`FAN_MODE_HVAC` only); §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off (outside window period → not nat-vent eligible) or no-fan |
 | C4 (warm/band/win=F) | No pause (band armed, not paused) | No-op | N/A | N/A | Band stays armed | Re-apply band; §6b backstop fires if indoor < comfort_heat | N/A | Fan turn-off if physically running (no sensors open → not nat-vent eligible) |
-| **C5 (mild/band/win=T/in)** | **No pause** (planned window) | No-op | **No re-pause** (planned) | N/A | Fan on, band stays armed; thermostatic loop monitors `outdoor vs indoor` | Re-apply band `[comfort_heat, comfort_cool]` | N/A | Fan adopt-on (nat-vent eligible, sensors open) or turn-off; band re-armed |
+| **C5 (mild/band/win=T/in)** | **No pause** (planned window); same archetype-aware ceiling gate | No-op | **No re-pause** (planned); same gate | N/A | Fan on, band stays armed for `FAN_MODE_HVAC`; WHF short-circuits per §9 | Re-apply band `[comfort_heat, comfort_cool]` (`FAN_MODE_HVAC` only) | N/A | Fan adopt-on (nat-vent eligible) or turn-off; band re-armed |
 | C6 (cool/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` | Re-apply | Resume heat, manual grace | Fan turn-off (heat day → not nat-vent eligible) or no-fan |
 | C7 (cold/heat) | Pause HVAC→off, notify | Resume to heat, auto grace | Re-pause, notify | Clear pause, manual grace | Fan override grace; thermostatic loop exits fan if `outdoor ≥ indoor` | Re-apply | Resume heat, manual grace | Fan turn-off (cold day → not nat-vent eligible) or no-fan |
 
@@ -1963,6 +2110,8 @@ This is the definitive reference for expected system behavior across all classif
 **Thermostatic fan loop (Issue #327, §9e):** In all C1–C7 contexts, once the fan is CA-owned and running, `fan_thermostat_check()` re-evaluates on every indoor or outdoor temperature change. The fan is turned off immediately when `outdoor ≥ indoor` — it does not wait for the next 30-minute coordinator poll. See §9e for the full exit hierarchy and trigger-source table.
 
 **Restart reconciliation (E8, Issue #327, §9e):** `_fan_override_active` is always cleared on restart; `_do_startup_coalesce` decides adopt-on, turn-off, or no-fan based on live thermostat state. E8 applies uniformly to all contexts — the decision depends on current physical conditions, not the day classification.
+
+**Archetype-aware nat-vent ceiling and structural WHF/AC exclusion (Issue #392):** In C2/C3/C5, E1/E3 (reactivation) now consistently apply the archetype-aware ceiling threshold from §6c/§17 across all four reactivation gate sites (`handle_door_window_open()`, `check_natural_vent_conditions()`, `nat_vent_temperature_check()`, `_re_pause_for_open_sensor()`) — `FAN_MODE_HVAC` blocks reactivation once indoor exceeds `comfort_cool` (unchanged from before #392); `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH` reactivates purely on outdoor/indoor direction. In E5/E6, `apply_classification()` now short-circuits before the comfort-band write when a WHF session owns the thermostat (§9), and the `_whf_owns_hvac()` choke-point guard in `_set_hvac_mode()`/`_set_temperature()` (§9) makes WHF/AC mutual exclusion structural for every cell in this table, not just the ones exercised by nat-vent. All six automation entry points relevant to this table (`apply_classification`, `handle_door_window_open`, `handle_all_doors_windows_closed`, `check_natural_vent_conditions`, `_re_pause_for_open_sensor`, `nat_vent_temperature_check`) are additionally serialized by `self._decision_lock` (§9g) so that concurrent E1/E3/E5/E6 triggers cannot interleave on shared engine state.
 
 This logic table MUST be kept current for any changes to automation behavior.
 
@@ -1985,6 +2134,12 @@ This logic table MUST be kept current for any changes to automation behavior.
 | All×E8 (coalesce: adopt-on) | _(test-ref pending)_ | coalesce adopts running fan as CA nat-vent when conditions hold; `_natural_vent_active=True` |
 | C1×E5 / C6×E5 / C7×E5 (thermostatic exit: `outdoor ≥ indoor`) | _(test-ref pending)_ | `fan_thermostat_check` turns fan off on `outdoor ≥ indoor` before next 30-min poll |
 | D×E5 (economizer: `outdoor ≥ indoor` blocked) | _(test-ref pending)_ | economizer `check_window_cooling_opportunity` rejects activation when `outdoor ≥ indoor` |
+| C2/C3/C5×E1/E3 (archetype-aware ceiling, `FAN_MODE_HVAC` blocks reactivation past ceiling) | test_nat_vent_activation.py, test_fan_control.py | Issue #392 Fix 1 — function names pending as of this doc pass; see files directly |
+| C2/C3/C5×E1/E3 (archetype-aware ceiling, `FAN_MODE_WHOLE_HOUSE` reactivates direction-only past ceiling, incl. #392 repro sequence) | test_nat_vent_activation.py, test_whole_house_fan_hvac_suppression.py | Issue #392 Fix 1 — function names pending as of this doc pass; see files directly |
+| C2/C3/C5×E5/E6 (`_whf_owns_hvac()` choke-point guard blocks active-mode writes; `apply_classification()` WHF short-circuit) | test_whole_house_fan_hvac_suppression.py, test_fan_control.py | Issue #392 Fix 1b — function names pending as of this doc pass |
+| All×E1/E2/E3/E5/E6 (idempotent `_activate_fan()`/`_deactivate_fan()`; no duplicate `fan_activated`/`fan_deactivated` on redundant calls) | test_fan_control.py | Issue #392 Fix 1c — function names pending as of this doc pass |
+| All×E1/E2/E3/E5/E6 (`_decision_lock` serializes the six entry points; no interleaved execution under `asyncio.gather()`) | test_nat_vent_activation.py | Issue #392 Fix 3 — function names pending as of this doc pass |
+| Fan archetype activity-log labels (`fan_activated`/`fan_deactivated`/`fan_manual_override`/`fan_cancel` render `fan_device`) | test_activity_renderers.py | Issue #392 Fix 2 — function names pending as of this doc pass |
 
 ---
 

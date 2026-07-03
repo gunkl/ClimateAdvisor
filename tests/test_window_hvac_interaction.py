@@ -107,6 +107,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._request_refresh_callback = None
     ae._post_grace_fan_check_callback = None
     ae.dry_run = False
+    ae._decision_lock = asyncio.Lock()
 
     # Mock async service calls
     ae._set_hvac_mode = AsyncMock()

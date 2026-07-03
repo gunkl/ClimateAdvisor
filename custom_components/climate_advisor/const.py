@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.55"
+VERSION = "0.4.56"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.56": [
+        "Fix #392: Whole-house fan (WHF) and AC could fight each other — the ODE ceiling guard"
+        " applied the same 'switch to AC once indoor crosses the ceiling' rule to both fan types,"
+        " but a WHF is mutually exclusive with AC and physically guaranteed to keep cooling the"
+        " house as long as outdoor air is cooler than indoor, so the ceiling number never applied"
+        " to it. This caused a repeating off→cool→off→cool flip roughly every 5 minutes. The"
+        " ceiling check is now archetype-aware, and HVAC writes are structurally blocked while a"
+        " WHF session owns the thermostat (previously only enforced by convention). Fan"
+        " activation/deactivation are now idempotent, and automation decisions are serialized so"
+        " independently-triggered handlers can no longer race on shared state. Activity Log lines"
+        " for fan events now show which fan (hvac_fan/whf/both) actually fired instead of a"
+        " generic 'fan' label.",
+    ],
     "0.4.55": [
         "Fix #390: Whole-house fan status could show 'off (manual override)' for up to 30 minutes"
         " after the fan was actually confirmed running — the coordinator listener that detects the"
@@ -634,6 +647,54 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    392: {
+        "version_fixed": "0.4.56",
+        "title": "Whole-house fan (WHF) and AC could fight each other — repeating off→cool→off→cool oscillation",
+        "scope_covered": (
+            "automation.py: (1) _ceiling_threshold() is now archetype-aware — returns None for"
+            " FAN_MODE_WHOLE_HOUSE/BOTH (a WHF is mutually exclusive with AC and physically"
+            " guaranteed to converge while outdoor < indoor, so the ceiling number is irrelevant"
+            " to it) and the existing comfort_cool-based value for FAN_MODE_HVAC (fan and"
+            " compressor coexist, ceiling is a valid handoff signal there). Refactored into the"
+            " ODE ceiling guard's dormancy check and mirrored across all 4 nat-vent reactivation"
+            " gate sites (handle_door_window_open(), check_natural_vent_conditions() grace"
+            " re-entry, nat_vent_temperature_check() paused reactivation, _re_pause_for_open_sensor()"
+            " — the last of which was also missing its _apply_nat_vent_hvac_state() call, fixed"
+            " alongside). (2) _whf_owns_hvac() choke-point guard added inside _set_hvac_mode() and"
+            " _set_temperature() — the two functions every HVAC write ultimately reaches — blocks"
+            " non-off writes while a WHF session owns the thermostat, making mutual exclusion"
+            " structural rather than a per-caller convention (previously only _activate_fan()/"
+            "_deactivate_fan() themselves enforced it; apply_classification()'s normal 30-min"
+            " cycle could silently re-arm HVAC to cool while a WHF was running whenever"
+            " aggressive_savings was off, the default). apply_classification() now short-circuits"
+            " for WHF right after arming the nat-vent state. Emits hvac_write_blocked_whf_active"
+            " when a write is blocked, and _re_deactivate_fan() clears _pre_fan_hvac_mode before"
+            " (not after) its restore write, fixing a self-blocking ordering bug found during"
+            " testing. (3) _activate_fan()/_deactivate_fan() are now idempotent (no-op with a"
+            " debug log if already in the target state), so independently-triggered handlers"
+            " reaching the same conclusion no longer each re-execute the full activation sequence."
+            " (4) self._decision_lock (asyncio.Lock) serializes the six automation entry-point"
+            " methods (apply_classification, handle_door_window_open,"
+            " handle_all_doors_windows_closed, check_natural_vent_conditions,"
+            " _re_pause_for_open_sensor, nat_vent_temperature_check) so triggers firing close"
+            " together can no longer interleave on shared engine state; verified no cross-calls"
+            " exist between the six, so a direct lock wrap was used (no _impl extraction needed)."
+            " (5) _fan_running property replaces scattered _fan_active or _natural_vent_active"
+            " OR-checks. ai_skills_activity.py: fan-related Activity Log renderers"
+            " (fan_activated/deactivated, fan_manual_override, fan_cancel, nat_vent_fan_on/off)"
+            " now show the fan archetype (hvac_fan/whf/both) instead of a generic 'fan' label."
+        ),
+        "scope_not_covered": (
+            "No runtime/safety timeout backstop was added for a WHF session that never converges"
+            " (e.g. outdoor stays just barely below indoor for hours) — WHF is governed purely by"
+            " outdoor/indoor direction by design decision, not a gap. The underlying"
+            " _natural_vent_active/_fan_active/_pre_fan_hvac_mode state is still tracked as loose"
+            " engine attributes rather than a single owning object — Issue #393 tracks the deferred"
+            " extraction of a FanSession abstraction that would own this state and its invariants;"
+            " _whf_owns_hvac() is written as the seed of that future object but the full extraction"
+            " was intentionally not done in this fix to keep it reviewable."
+        ),
+    },
     390: {
         "version_fixed": "0.4.55",
         "title": "WHF status showed 'off (manual override)' for up to 30 min while fan was physically running",

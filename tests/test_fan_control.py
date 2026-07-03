@@ -228,6 +228,9 @@ class TestDeactivateFan:
                 CONF_FAN_ENTITY: "fan.attic",
             }
         )
+        # Fix 1c idempotency guard: _deactivate_fan() is now a no-op unless
+        # _fan_active is already True (mirrors _activate_fan()'s equivalent guard).
+        engine._fan_active = True
 
         asyncio.run(engine._deactivate_fan(reason="test"))
 
@@ -241,6 +244,8 @@ class TestDeactivateFan:
     def test_deactivate_hvac_fan(self):
         """fan_mode=hvac_fan → calls climate.set_fan_mode with 'auto'."""
         engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
+        # Fix 1c idempotency guard requires _fan_active=True before deactivate is real.
+        engine._fan_active = True
 
         asyncio.run(engine._deactivate_fan(reason="test"))
 
@@ -257,6 +262,8 @@ class TestDeactivateFan:
                 CONF_FAN_ENTITY: "fan.attic",
             }
         )
+        # Fix 1c idempotency guard requires _fan_active=True before deactivate is real.
+        engine._fan_active = True
 
         asyncio.run(engine._deactivate_fan(reason="test"))
 
@@ -308,6 +315,8 @@ class TestSwitchDomainFan:
                 CONF_FAN_ENTITY: "switch.attic_fan",
             }
         )
+        # Fix 1c idempotency guard requires _fan_active=True before deactivate is real.
+        engine._fan_active = True
 
         asyncio.run(engine._deactivate_fan(reason="test"))
 
@@ -421,6 +430,9 @@ class TestFanEconomizerIntegration:
         engine._current_classification = _make_hot_classification()
         engine._economizer_active = True
         engine._economizer_phase = "maintain"
+        # Fix 1c idempotency guard: fan must already be active for deactivate to be real
+        # (mirrors production — the economizer only ever stops a fan it previously started).
+        engine._fan_active = True
 
         # Trigger deactivation: outdoor too warm
         asyncio.run(
@@ -1507,25 +1519,50 @@ class TestCheckNatVentGraceComfortCeiling:
     _paused_by_door and _natural_vent_active were False — even if indoor was overheating.
     """
 
-    def test_grace_active_indoor_above_comfort_cool_allows_nat_vent(self):
-        """grace=True, indoor=76 > comfort_cool=75, outdoor cool → nat-vent activates.
+    def test_grace_active_indoor_above_comfort_cool_blocks_nat_vent_for_hvac_fan(self):
+        """grace=True, indoor=76 > comfort_cool=75, FAN_MODE_HVAC → nat-vent does NOT activate.
 
-        #249: nat-vent activation no longer calls set_hvac_mode("off") — the comfort
-        band stays armed; only the fan turns on. The "HVAC off first" step is removed.
+        Issue #392 Fix 1: for FAN_MODE_HVAC, the ceiling threshold (comfort_cool, since
+        aggressive_savings is off here) is still a valid handoff point to AC — fan and
+        compressor coexist safely for this archetype (band stays armed, Issue #249).
+        Once indoor exceeds the ceiling, reactivation must be BLOCKED so the compressor
+        (not the fan) handles the excess heat, matching the ODE ceiling guard's own
+        dormancy condition (`indoor <= ceiling_threshold`). This is the mirror image of
+        the FAN_MODE_WHOLE_HOUSE case (test_grace_active_whole_house_fan_ignores_ceiling
+        below), where the ceiling does not apply because WHF is direction-only.
+
+        Before Issue #392's archetype-aware ceiling fix, this test asserted the opposite
+        (nat-vent activates) — that was correct only for the (untested-for-archetype)
+        general case, but wrong once FAN_MODE_HVAC's ceiling-escalation contract is
+        applied to the four reactivation gates, not just the ODE guard.
         """
         engine = _make_grace_nat_vent_engine(indoor_temp=76.0, grace_active=True)
         with patch(_PATCH_CALL_LATER):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        assert engine._natural_vent_active is True, (
-            "check_natural_vent_conditions() should fall through grace when indoor > comfort_cool"
+        assert engine._natural_vent_active is False, (
+            "FAN_MODE_HVAC: indoor (76) > ceiling_threshold (comfort_cool=75) must block "
+            "nat-vent reactivation — compressor should take over, not the fan"
         )
-        # #249: no set_hvac_mode("off") call — band stays armed, compressor self-arbitrates
-        hvac_calls = _get_service_calls(engine, "climate", "set_hvac_mode")
-        assert not any(c[0][2]["hvac_mode"] == "off" for c in hvac_calls)
-        # Fan must end up on (set_fan_mode=on from _activate_fan)
-        fan_calls = _get_service_calls(engine, "climate", "set_fan_mode")
-        assert fan_calls[-1][0][2]["fan_mode"] == "on"
+
+    def test_grace_active_whole_house_fan_ignores_ceiling(self):
+        """grace=True, indoor=76 > comfort_cool=75, FAN_MODE_WHOLE_HOUSE, outdoor cool → activates.
+
+        Issue #392 Fix 1: WHF's ceiling_threshold is always None (mutually exclusive with
+        AC, direction-only convergence) — the comfort ceiling never blocks WHF reactivation,
+        only the outdoor/indoor direction primary gate does. Outdoor (65) < indoor (76), so
+        nat-vent must activate despite indoor being well past the comfort ceiling.
+        """
+        engine = _make_grace_nat_vent_engine(indoor_temp=76.0, grace_active=True)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+
+        with patch(_PATCH_CALL_LATER):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True, (
+            "FAN_MODE_WHOLE_HOUSE: ceiling_threshold is None, so indoor > comfort_cool must "
+            "NOT block reactivation as long as outdoor < indoor"
+        )
 
     def test_grace_active_outdoor_too_warm_no_nat_vent(self):
         """grace=True, indoor=76 > comfort_cool, but outdoor=74 is above threshold (75+3=78) — activates."""
@@ -1715,14 +1752,27 @@ class TestFanEventEmission:
         calls = {c.args[0]: c.args[1] for c in engine._emit_event_callback.call_args_list}
         assert "fan_activated" in calls
         assert calls["fan_activated"]["reason"] == "min_runtime_cycle"
+        # Issue #392 Fix 2: payload carries fan_device so the renderer can label the
+        # archetype (hvac_fan/whf/both) instead of a generic "fan" string.
+        assert calls["fan_activated"]["fan_device"] == "hvac_fan"
+
+    def test_activate_emits_fan_activated_with_whf_device_label(self):
+        """FAN_MODE_WHOLE_HOUSE -> fan_activated payload carries fan_device='whf'."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._emit_event_callback = MagicMock()
+        asyncio.run(engine._activate_fan(reason="natural ventilation"))
+        calls = {c.args[0]: c.args[1] for c in engine._emit_event_callback.call_args_list}
+        assert calls["fan_activated"]["fan_device"] == "whf"
 
     def test_deactivate_emits_fan_deactivated(self):
         engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_HVAC})
         engine._fan_active = True
         engine._emit_event_callback = MagicMock()
         asyncio.run(engine._deactivate_fan(reason="economizer off -- fan no longer needed"))
-        types = [c.args[0] for c in engine._emit_event_callback.call_args_list]
-        assert "fan_deactivated" in types
+        calls = {c.args[0]: c.args[1] for c in engine._emit_event_callback.call_args_list}
+        assert "fan_deactivated" in calls
+        # Issue #392 Fix 2: payload carries fan_device so the renderer can label the archetype.
+        assert calls["fan_deactivated"]["fan_device"] == "hvac_fan"
 
     def test_emit_event_false_suppresses_event(self):
         """nat-vent cycler passes emit_event=False so it does not double with nat_vent_fan_on."""

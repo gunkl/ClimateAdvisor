@@ -16,7 +16,7 @@ import asyncio
 import importlib
 import sys
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Patch dt_util.now before importing automation
 if "homeassistant.util.dt" in sys.modules:
@@ -441,3 +441,344 @@ class TestWindowCloseStopsWholehouseFan:
 
         fan_off_calls = _get_fan_entity_calls(engine, "turn_off", "fan.attic")
         assert len(fan_off_calls) == 0, f"Fix D must not call fan.turn_off when _fan_active=False; got: {fan_off_calls}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #392 Fix 1b: structural choke-point guard (_whf_owns_hvac in
+# _set_hvac_mode()/_set_temperature())
+# ---------------------------------------------------------------------------
+
+
+def _make_classification(day_type: str = "warm", hvac_mode: str = "cool"):
+    """Minimal DayClassification, bypassing __post_init__ validation."""
+    from custom_components.climate_advisor.classifier import DayClassification
+
+    c = object.__new__(DayClassification)
+    c.day_type = day_type
+    c.trend_direction = "stable"
+    c.trend_magnitude = 0.0
+    c.today_high = 85.0
+    c.today_low = 65.0
+    c.tomorrow_high = 85.0
+    c.tomorrow_low = 65.0
+    c.hvac_mode = hvac_mode
+    c.pre_condition = False
+    c.pre_condition_target = 0.0
+    c.windows_recommended = False
+    c.window_open_time = None
+    c.window_close_time = None
+    c.setback_modifier = 0.0
+    c.window_opportunity_morning = False
+    c.window_opportunity_evening = False
+    return c
+
+
+class TestChokePointGuardBlocksWhfWrites:
+    """Issue #392 Fix 1b: _set_hvac_mode()/_set_temperature() silently block active-mode
+    writes while a whole-house-fan session owns the thermostat (_whf_owns_hvac() == True),
+    making WHF/AC mutual exclusion a structural guarantee rather than a per-caller convention.
+
+    Occupant effect: without this guard, any of the ~13 call sites that write HVAC mode
+    (or the 7 _apply_comfort_band() call sites) could re-arm the compressor while the
+    whole-house fan is physically running, fighting the fan and wasting energy — even
+    though _activate_fan()/_deactivate_fan() already try to maintain exclusivity by
+    convention (Root Cause #2 in the #392 investigation).
+    """
+
+    def test_set_hvac_mode_blocked_when_whf_owns_hvac(self):
+        """mode='cool' write is silently dropped (no service call) while WHF suppresses HVAC."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"  # WHF session actively suppressing HVAC
+
+        asyncio.run(engine._set_hvac_mode("cool", reason="test: attempted re-arm"))
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "cool" not in hvac_calls, f"Expected 'cool' write blocked while WHF owns HVAC; got: {hvac_calls}"
+
+    def test_set_hvac_mode_off_never_blocked(self):
+        """mode='off' writes are never blocked — the guard only blocks active modes."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="cool")
+        engine._pre_fan_hvac_mode = "cool"
+
+        asyncio.run(engine._set_hvac_mode("off", reason="test: suppress"))
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "off" in hvac_calls, f"Expected 'off' write to always succeed; got: {hvac_calls}"
+
+    def test_set_hvac_mode_not_blocked_for_hvac_fan_mode(self):
+        """FAN_MODE_HVAC never sets _pre_fan_hvac_mode, so _whf_owns_hvac() is always False."""
+        engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = None
+
+        asyncio.run(engine._set_hvac_mode("cool", reason="test"))
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "cool" in hvac_calls, f"FAN_MODE_HVAC must not be blocked; got: {hvac_calls}"
+
+    def test_set_hvac_mode_not_blocked_when_no_whf_session_active(self):
+        """FAN_MODE_WHOLE_HOUSE but no active session (_pre_fan_hvac_mode=None) -> not blocked."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = None  # no suppression session in progress
+
+        asyncio.run(engine._set_hvac_mode("cool", reason="test"))
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "cool" in hvac_calls, f"No active WHF session must not block writes; got: {hvac_calls}"
+
+    def test_set_temperature_blocked_when_whf_owns_hvac(self):
+        """_set_temperature(mode='cool') is silently dropped while WHF suppresses HVAC."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"
+
+        asyncio.run(engine._set_temperature(74.0, reason="test: attempted re-arm", mode="cool"))
+
+        temp_calls = [
+            c
+            for c in engine.hass.services.async_call.call_args_list
+            if c[0][0] == "climate" and c[0][1] == "set_temperature"
+        ]
+        assert len(temp_calls) == 0, f"Expected set_temperature blocked while WHF owns HVAC; got: {temp_calls}"
+
+    def test_set_temperature_not_blocked_for_hvac_fan_mode(self):
+        """FAN_MODE_HVAC: set_temperature succeeds normally (fan/compressor coexist)."""
+        engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="cool")
+        engine._pre_fan_hvac_mode = None
+
+        asyncio.run(engine._set_temperature(74.0, reason="test", mode="cool"))
+
+        temp_calls = [
+            c
+            for c in engine.hass.services.async_call.call_args_list
+            if c[0][0] == "climate" and c[0][1] == "set_temperature"
+        ]
+        assert len(temp_calls) == 1, f"FAN_MODE_HVAC set_temperature must succeed; got: {temp_calls}"
+
+    def test_hvac_write_blocked_event_fires_on_set_hvac_mode(self):
+        """A blocked _set_hvac_mode() write emits hvac_write_blocked_whf_active."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._set_hvac_mode("cool", reason="test: attempted re-arm"))
+
+        events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "hvac_write_blocked_whf_active" in events, f"Expected block event; got: {events}"
+        payload = next(
+            c.args[1]
+            for c in engine._emit_event_callback.call_args_list
+            if c.args[0] == "hvac_write_blocked_whf_active"
+        )
+        assert payload["attempted_mode"] == "cool"
+
+    def test_hvac_write_blocked_event_fires_on_set_temperature(self):
+        """A blocked _set_temperature() write emits hvac_write_blocked_whf_active."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._set_temperature(74.0, reason="test: attempted re-arm", mode="cool"))
+
+        events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "hvac_write_blocked_whf_active" in events, f"Expected block event; got: {events}"
+
+    def test_no_block_event_when_write_succeeds(self):
+        """A successful (non-blocked) write does not emit hvac_write_blocked_whf_active."""
+        engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = None
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._set_hvac_mode("cool", reason="test"))
+
+        events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
+        assert "hvac_write_blocked_whf_active" not in events
+
+
+class TestRePauseCallsApplyNatVentHvacState:
+    """Issue #392 Fix 1: _re_pause_for_open_sensor() now calls _apply_nat_vent_hvac_state()
+    after activating nat-vent, matching the other three reactivation gate sites
+    (handle_door_window_open, check_natural_vent_conditions grace re-entry,
+    nat_vent_temperature_check paused-state reactivation). Before this fix,
+    _re_pause_for_open_sensor() was the one site that skipped this call — an
+    inconsistency the plan calls out as "fix alongside" Root Cause #1.
+
+    Occupant effect: without this call, a WHF session reactivated via this specific
+    path would not have its no-op _apply_nat_vent_hvac_state() invariant applied
+    consistently (WHF: no-op since _activate_fan() already suppressed HVAC; HVAC-fan
+    mode: fails to re-arm the full comfort band), producing inconsistent state
+    depending on which of the four reactivation paths happened to fire.
+    """
+
+    def test_re_pause_calls_apply_nat_vent_hvac_state_when_reactivating(self):
+        """WHF: outdoor cool -> nat-vent reactivates -> _apply_nat_vent_hvac_state() called."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="cool")
+        engine._get_indoor_temp_f = MagicMock(return_value=76.0)
+        engine._last_outdoor_temp = 68.0  # cool enough for nat-vent
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+        engine._apply_nat_vent_hvac_state.assert_awaited_once()
+
+    def test_re_pause_does_not_call_apply_nat_vent_hvac_state_when_not_reactivating(self):
+        """Outdoor too warm -> falls through to regular re-pause -> helper NOT called."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="cool")
+        engine._get_indoor_temp_f = MagicMock(return_value=76.0)
+        engine._last_outdoor_temp = 90.0  # too warm — nat-vent conditions not met
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is False
+        engine._apply_nat_vent_hvac_state.assert_not_awaited()
+
+
+class TestApplyClassificationWhfEarlyReturn:
+    """Issue #392 Fix 1b: apply_classification()'s nat-vent branch returns early for
+    FAN_MODE_WHOLE_HOUSE/BOTH right after _apply_nat_vent_hvac_state(), instead of falling
+    through to select_comfort_band()/_apply_comfort_band()/the ODE ceiling guard — all of
+    which would attempt (and have their writes silently dropped by) the choke-point guard
+    while WHF owns the thermostat. FAN_MODE_HVAC keeps falling through as before (band
+    stays armed; fan and compressor coexist per Issue #249).
+    """
+
+    def test_whf_nat_vent_active_skips_select_comfort_band(self):
+        """WHF + nat-vent active + savings off -> select_comfort_band() is NOT called."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._natural_vent_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+
+        classification = _make_classification()
+
+        with patch("custom_components.climate_advisor.automation.select_comfort_band") as mock_select:
+            asyncio.run(engine.apply_classification(classification))
+            mock_select.assert_not_called()
+
+        engine._apply_nat_vent_hvac_state.assert_awaited_once()
+
+    def test_hvac_fan_nat_vent_active_still_calls_select_comfort_band(self):
+        """FAN_MODE_HVAC + nat-vent active + savings off -> select_comfort_band() IS called
+        (band stays armed; the guard is only for WHF's structural mutual-exclusion contract).
+        """
+        engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="cool")
+        engine._natural_vent_active = True
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+
+        classification = _make_classification()
+
+        with patch("custom_components.climate_advisor.automation.select_comfort_band") as mock_select:
+            mock_select.return_value = MagicMock(active="ceiling", floor=70.0, ceiling=75.0, reason="test")
+            asyncio.run(engine.apply_classification(classification))
+            mock_select.assert_called_once()
+
+    def test_whf_aggressive_savings_still_returns_early_before_select_comfort_band(self):
+        """WHF + nat-vent + aggressive_savings=True -> already returned early for savings;
+        select_comfort_band() must still not be called (belt-and-suspenders for the WHF path).
+        """
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine.config["aggressive_savings"] = True
+        engine._natural_vent_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+
+        classification = _make_classification()
+
+        with patch("custom_components.climate_advisor.automation.select_comfort_band") as mock_select:
+            asyncio.run(engine.apply_classification(classification))
+            mock_select.assert_not_called()
+
+
+class TestFanActivateDeactivateIdempotency:
+    """Issue #392 Fix 1c: _activate_fan()/_deactivate_fan() are idempotent — a second call
+    while already in the target state is a no-op (debug log only), preventing the
+    18:53/18:58 burst pattern where multiple uncoordinated handlers each re-decide the
+    same already-satisfied condition and re-execute the full activation/deactivation
+    sequence (re-capturing _pre_fan_hvac_mode from a possibly-stale thermostat read,
+    reissuing the physical service call, emitting a duplicate event).
+    """
+
+    def test_activate_fan_twice_calls_service_once(self):
+        """Two _activate_fan() calls in a row -> physical turn_on called exactly once."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._activate_fan(reason="first"))
+        asyncio.run(engine._activate_fan(reason="second"))
+
+        turn_on_calls = _get_fan_entity_calls(engine, "turn_on", "fan.attic")
+        assert len(turn_on_calls) == 1, f"Expected exactly 1 turn_on call; got {len(turn_on_calls)}"
+
+    def test_activate_fan_twice_emits_event_once(self):
+        """Two _activate_fan() calls -> fan_activated emitted exactly once."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._activate_fan(reason="first"))
+        asyncio.run(engine._activate_fan(reason="second"))
+
+        activated_events = [c for c in engine._emit_event_callback.call_args_list if c.args[0] == "fan_activated"]
+        assert len(activated_events) == 1, f"Expected exactly 1 fan_activated event; got {len(activated_events)}"
+
+    def test_activate_fan_twice_does_not_recapture_pre_fan_hvac_mode(self):
+        """Second _activate_fan() call does not overwrite _pre_fan_hvac_mode from a
+        possibly-stale thermostat read — it should already equal the mode captured
+        by the first (real) activation.
+        """
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="cool")
+
+        asyncio.run(engine._activate_fan(reason="first"))
+        assert engine._pre_fan_hvac_mode == "cool"
+
+        # Simulate the thermostat now reading "off" (already suppressed) — if the second
+        # call incorrectly re-captured, _pre_fan_hvac_mode would become "off" (wrong).
+        engine.hass.states.get = MagicMock(return_value=_make_thermostat_state("off"))
+        asyncio.run(engine._activate_fan(reason="second"))
+
+        assert engine._pre_fan_hvac_mode == "cool", (
+            f"Idempotency guard must prevent re-capture on the redundant call; got {engine._pre_fan_hvac_mode!r}"
+        )
+
+    def test_deactivate_fan_twice_calls_service_once(self):
+        """Two _deactivate_fan() calls in a row -> physical turn_off called exactly once."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="off")
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._deactivate_fan(reason="first"))
+        asyncio.run(engine._deactivate_fan(reason="second"))
+
+        turn_off_calls = _get_fan_entity_calls(engine, "turn_off", "fan.attic")
+        assert len(turn_off_calls) == 1, f"Expected exactly 1 turn_off call; got {len(turn_off_calls)}"
+
+    def test_deactivate_fan_twice_emits_event_once(self):
+        """Two _deactivate_fan() calls -> fan_deactivated emitted exactly once."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="off")
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._emit_event_callback = MagicMock()
+
+        asyncio.run(engine._deactivate_fan(reason="first"))
+        asyncio.run(engine._deactivate_fan(reason="second"))
+
+        deactivated_events = [c for c in engine._emit_event_callback.call_args_list if c.args[0] == "fan_deactivated"]
+        assert len(deactivated_events) == 1, f"Expected exactly 1 fan_deactivated event; got {len(deactivated_events)}"
+
+    def test_deactivate_fan_twice_does_not_double_restore_hvac(self):
+        """Second _deactivate_fan() call does not re-issue the HVAC restore write —
+        _pre_fan_hvac_mode is already None after the first (real) deactivation.
+        """
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, fan_entity="fan.attic", current_hvac_mode="off")
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+
+        asyncio.run(engine._deactivate_fan(reason="first"))
+        hvac_calls_after_first = _get_hvac_mode_calls(engine)
+        assert "cool" in hvac_calls_after_first
+
+        asyncio.run(engine._deactivate_fan(reason="second"))
+        hvac_calls_after_second = _get_hvac_mode_calls(engine)
+        assert hvac_calls_after_second.count("cool") == 1, (
+            f"Expected exactly 1 HVAC restore write across both calls; got {hvac_calls_after_second}"
+        )

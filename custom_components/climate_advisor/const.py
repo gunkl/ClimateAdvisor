@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.60"
+VERSION = "0.4.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.61": [
+        "Fix #405: HVAC writes no longer stay permanently blocked after a whole-house-fan"
+        " nat-vent session ends with the fan already off at a restart/coalesce boundary."
+        " reconcile_fan_on_startup()'s 'no-fan' decision now releases any stranded HVAC"
+        " suppression flag (_pre_fan_hvac_mode) the same way a normal fan deactivation"
+        " does, instead of only clearing the fan-tracking flags — previously the home"
+        " could be left with no automated cooling response for the rest of the day.",
+    ],
     "0.4.60": [
         "Fix #402: whole-house-fan nat-vent could silently stop controlling the home for hours"
         " overnight. Two causes: (1) fan_thermostat_check() — the tick-level safety check that"
@@ -701,6 +709,36 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    405: {
+        "version_fixed": "0.4.61",
+        "title": "HVAC writes permanently blocked by stale WHF suppression flag after nat-vent fan goes idle",
+        "scope_covered": (
+            "automation.py: reconcile_fan_on_startup()'s 'no-fan' branch (fires when a"
+            " coalesce/restart boundary observes the thermostat fan confirmed off) now calls"
+            " _deactivate_fan(restore_hvac=True) after clearing the fan-tracking flags, instead"
+            " of only clearing _fan_active/_fan_on_since/_natural_vent_active. Previously, a WHF"
+            " nat-vent session that ended via cycling-off (nat_vent_temperature_check() calling"
+            " _deactivate_fan(restore_hvac=False) by design, so the session can resume) and then"
+            " never reactivated left _pre_fan_hvac_mode stranded non-None forever once a later"
+            " coalesce boundary cleared _natural_vent_active — _whf_owns_hvac() then permanently"
+            " blocked every subsequent HVAC write with no recovery path short of a config change"
+            " or manual fan cycling. The fix reuses the existing 'already inactive but restore"
+            " pending' branch inside _deactivate_fan() (built for the #402 follow-up) — no new"
+            " restore-write logic was added, only a new caller of the existing correct path."
+        ),
+        "scope_not_covered": (
+            "If _fan_override_active is True at the moment a no-fan reconcile fires (user"
+            " manually turned the fan off while a WHF suppression session was active),"
+            " _deactivate_fan()'s override guard returns before reaching the restore logic —"
+            " the stranded flag is not released until the override clears and a later reconcile"
+            " runs. This mirrors existing, intentional behavior everywhere else _deactivate_fan()"
+            " is called (CA never fights a manual override) and is not new to this fix. Also:"
+            " this fix does not address the repeated HA-restart-boundary churn itself observed"
+            " in the issue #405 activity log (4 restarts within about an hour) — that instability"
+            " is tracked separately (see #403's restart-cause classification work, added the"
+            " same morning) and was not investigated as part of this fix."
+        ),
+    },
     402: {
         "version_fixed": "0.4.60",
         "title": (

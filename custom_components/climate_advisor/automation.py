@@ -2745,7 +2745,13 @@ class AutomationEngine:
         archetype = fan_mode
 
         if not thermostat_fan_running:
-            # Fan is off — ensure CA flags are clean (defence in depth)
+            # Fan is off — ensure CA flags are clean (defence in depth), and release any
+            # stranded WHF HVAC suppression left over from a session that ended without
+            # a matching _deactivate_fan() call (Issue #405). Without this, a nat-vent
+            # cycling-off (restore_hvac=False, by design) followed by a coalesce boundary
+            # that observes the fan already off would clear _natural_vent_active here but
+            # leave _pre_fan_hvac_mode stranded non-None forever, permanently blocking
+            # every future HVAC write via _whf_owns_hvac() with no recovery path.
             self._fan_active = False
             self._fan_on_since = None
             self._natural_vent_active = False
@@ -2756,6 +2762,10 @@ class AutomationEngine:
                 False,
                 decision,
                 archetype,
+            )
+            await self._deactivate_fan(
+                reason="startup reconcile — fan confirmed off, releasing any stranded HVAC suppression",
+                restore_hvac=True,
             )
             return
 

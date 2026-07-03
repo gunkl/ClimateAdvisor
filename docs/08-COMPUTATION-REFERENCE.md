@@ -1259,7 +1259,7 @@ The coordinator maintains six internal fields to manage fan state across activat
 | `_fan_override_time` | `datetime \| None` | Timestamp of when the fan override was detected |
 | `_fan_command_pending` | `bool` | Set to `True` immediately before the integration issues a fan command; cleared immediately after |
 | `_fan_command_time` | `datetime \| None` | Timestamp recorded at the start of every `_activate_fan()` and `_deactivate_fan()` call; used by `_is_recent_fan_command()` as a timestamp-based secondary guard |
-| `_pre_fan_hvac_mode` | `str \| None` | **`FAN_MODE_WHOLE_HOUSE` only.** Captures the thermostat's HVAC mode immediately before fan activation (e.g., `"heat_cool"`, `"cool"`). Restored to the thermostat on deactivation, then cleared to `None`. `None` when no whole-house fan session is active or when using `FAN_MODE_HVAC`. Persisted in state across HA restarts so HVAC restoration survives a restart during a fan session. |
+| `_pre_fan_hvac_mode` | `str \| None` | **`FAN_MODE_WHOLE_HOUSE` only.** Captures the thermostat's HVAC mode immediately before fan activation (e.g., `"heat_cool"`, `"cool"`). Restored to the thermostat on deactivation, then cleared to `None`. `None` when no whole-house fan session is active or when using `FAN_MODE_HVAC`. Persisted in state across HA restarts so HVAC restoration survives a restart during a fan session. Released by two call sites: `_deactivate_fan(restore_hvac=True)` (the normal end-of-session path) and `reconcile_fan_on_startup()`'s `no-fan` branch (§9e-B, Issue #405 — catches a session that ended via cycling-off and never reactivated). |
 
 **`_activate_fan()`** sets `_fan_command_time = dt_util.now()` and `_fan_command_pending = True`, issues the fan-on service call, then sets `_fan_active = True` and records `_fan_on_since`. If `_fan_override_active` is `True` at activation time, the call is skipped so the integration does not fight the user's manual setting. For `FAN_MODE_WHOLE_HOUSE` (or `both`), the current thermostat HVAC mode is captured in `_pre_fan_hvac_mode` and HVAC is set to `off` before the fan is turned on.
 
@@ -1498,9 +1498,11 @@ After the existing nat-vent / `apply_classification` logic in `_do_startup_coale
 
 | Physical fan running? | Nat-vent eligible? | Decision | Action |
 |---|---|---|---|
-| No | — | **no-fan** | No action; state flags already cleared by (A) |
+| No | — | **no-fan** | `_fan_active`/`_fan_on_since`/`_natural_vent_active` cleared, then `_deactivate_fan(restore_hvac=True)` is called to release any stranded WHF HVAC suppression (Issue #405) |
 | Yes | Yes (`outdoor < indoor`, gate passes, sensors open) | **adopt-on** | `_fan_active = True`, `_natural_vent_active = True`; fast thermostatic loop started |
 | Yes | No | **turn-off** | `_deactivate_fan()` or `set_fan_mode("auto")` (FAN_MODE_HVAC) / fan `turn_off` + HVAC restore (FAN_MODE_WHOLE_HOUSE) |
+
+**Issue #405 — the `no-fan` path is a second `_pre_fan_hvac_mode` release point, not just a flag-clear.** A WHF nat-vent session can end via cycling-off (`nat_vent_temperature_check()` calling `_deactivate_fan(restore_hvac=False)` by design — see the `_pre_fan_hvac_mode` row above), which intentionally leaves `_pre_fan_hvac_mode` set so the session can resume. If the fan never reactivates and a later coalesce boundary observes it confirmed off, the `no-fan` branch must still release that suppression — otherwise `_pre_fan_hvac_mode` stays stranded non-`None` forever and `_whf_owns_hvac()` permanently blocks every future HVAC write with no recovery path. Calling `_deactivate_fan(restore_hvac=True)` here is a safe no-op when nothing is stranded (`_fan_active` is already `False`, so it takes the "already inactive" early-return path added for the #402 follow-up) and correctly restores HVAC when it is stranded.
 
 The 5-minute `_first_run` coalesce window already suppresses override detection (coordinator's `_async_thermostat_changed` override guard), so the turn-off command is not misread as a user manual action.
 

@@ -3292,8 +3292,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.automation_engine._fan_command_pending:
             return
 
-        # Skip if fan override is already active
+        # Skip if fan override is already active — but a physical-state confirmation
+        # event (e.g. the fan_state_entity flipping on right after fan_entity did) still
+        # needs to reach the displayed status promptly, otherwise it stays stale until
+        # the next scheduled coordinator poll (up to update_interval, currently 30 min).
         if self.automation_engine._fan_override_active:
+            _LOGGER.info(
+                "Fan/state entity changed while override already active (%s -> %s) — "
+                "requesting refresh so displayed status reflects confirmed physical state",
+                old_state.state,
+                new_state.state,
+            )
+            await self.async_request_refresh()
             return
 
         # Skip if a fan command was issued recently (cloud thermostat echo guard)

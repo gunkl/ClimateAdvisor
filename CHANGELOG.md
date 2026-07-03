@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.4.55] — 2026-07-02
+
+- Fix #390: Whole-house fan status could show "off (manual override)" for up to 30 minutes after the fan was actually confirmed running — the coordinator listener that detects the fan_state_entity confirming physical on/off silently dropped the event once a manual override was already active, so the displayed status only caught up at the next scheduled poll. Now a coordinator refresh is requested immediately so the status reflects reality within one cycle.
+
 ## [0.4.54] — 2026-07-02
 
 - Fix #388: Climate Advisor was missing from the Integrations page in Settings → Devices & Services — v0.4.53 set manifest.json integration_type to 'helper', which Home Assistant's frontend excludes from the Integrations dashboard and routes to the Helpers tab instead. Corrected to 'service', the accurate HA taxonomy value for a full custom integration.

@@ -21,7 +21,7 @@ import importlib
 import sys
 import types
 from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 if "homeassistant" not in sys.modules:
     from tools.sim_harness.ha_stubs import install_ha_stubs
@@ -73,6 +73,7 @@ def _make_coord_stub(config: dict) -> MagicMock:
     coord.automation_engine = ae
 
     coord._is_recent_fan_command = MagicMock(return_value=False)
+    coord.async_request_refresh = AsyncMock()
 
     return coord
 
@@ -512,3 +513,68 @@ class TestComputeFanStatusOverride:
             f"Expected 'running (manual override)' when _fan_active=True under override, got {result!r}"
         )
         coord._get_fan_physical_state.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestOverrideActiveRequestsRefresh (Issue #390)
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideActiveRequestsRefresh:
+    """Tests for Issue #390: a physical-state confirmation event arriving after
+    _fan_override_active is already True must request a coordinator refresh so the
+    displayed status catches up immediately, instead of staying stale until the next
+    scheduled poll (up to update_interval, currently 30 minutes).
+    """
+
+    def test_state_entity_confirms_on_while_override_active_requests_refresh(self):
+        """fan_state_entity flips on shortly after override started → refresh requested.
+
+        Scenario: fan_entity turns on, override is set. Seconds later fan_state_entity
+        (the real physical-state confirmation sensor) flips on too. Before the fix this
+        event was silently dropped; the status stayed at 'off (manual override)' until
+        the next scheduled poll.
+        """
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_active = False
+        ae._fan_override_active = True  # override already active
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("off")
+        new_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        coord.async_request_refresh.assert_called_once()
+        ae.handle_fan_manual_override.assert_not_called()
+        ae.on_fan_turned_off.assert_not_called()
+
+    def test_no_state_change_does_not_request_refresh(self):
+        """No-op state change (old == new) must not request a refresh."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_override_active = True
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        same_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": same_state, "new_state": same_state}
+
+        asyncio.run(method(event))
+
+        coord.async_request_refresh.assert_not_called()

@@ -31,7 +31,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .automation import AutomationEngine, compute_bedtime_setback
+from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
@@ -82,8 +82,10 @@ from .const import (
     CONF_HOME_TOGGLE,
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_PERIOD,
+    CONF_NAT_VENT_HYSTERESIS_F,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
+    CONF_SLEEP_HEAT,
     CONF_THRESHOLD_COOL,
     CONF_THRESHOLD_HOT,
     CONF_THRESHOLD_MILD,
@@ -115,6 +117,7 @@ from .const import (
     INVESTIGATION_REPORTS_FILE,
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_WEATHER_BIAS_APPLY_F,
+    NAT_VENT_HYSTERESIS_F,
     OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
@@ -6074,6 +6077,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "friendly_name": sensor_id.split(".")[-1].replace("_", " ").title(),
             }
 
+        # Issue #400: mirror automation.py's nat_vent_temperature_check() sleep-window branch
+        # so the dashboard target matches the actual cycling target, not always the daytime
+        # comfort-band midpoint.
+        _nat_vent_hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        if ae._natural_vent_active:
+            _comfort_heat = float(self.config.get("comfort_heat", 70))
+            _comfort_cool = float(self.config.get("comfort_cool", 75))
+            if _in_sleep_window(dt_util.now(), self.config):
+                _sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, _comfort_heat))
+                _nat_vent_target = _sleep_heat + _nat_vent_hysteresis
+            else:
+                _nat_vent_target = (_comfort_heat + _comfort_cool) / 2.0
+        else:
+            _nat_vent_target = None
+
         return {
             "automation_enabled": self._automation_enabled,
             "occupancy_mode": self._occupancy_mode,
@@ -6178,20 +6196,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 and self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
                 and not self.config.get("aggressive_savings", False)
             ),
-            "nat_vent_target": (
-                (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0
-                if ae._natural_vent_active
-                else None
-            ),
+            "nat_vent_target": _nat_vent_target,
             "nat_vent_on_threshold": (
-                (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0 + 1.0
-                if ae._natural_vent_active
-                else None
+                _nat_vent_target + _nat_vent_hysteresis if _nat_vent_target is not None else None
             ),
             "nat_vent_off_threshold": (
-                (float(self.config.get("comfort_heat", 70)) + float(self.config.get("comfort_cool", 75))) / 2.0 - 1.0
-                if ae._natural_vent_active
-                else None
+                _nat_vent_target - _nat_vent_hysteresis if _nat_vent_target is not None else None
             ),
             "nat_vent_cycling_paused": ae._natural_vent_active and not ae._fan_active,
         }

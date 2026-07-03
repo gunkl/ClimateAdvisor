@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.58"
+VERSION = "0.4.59"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.59": [
+        "Fix #400: nat-vent dashboard/status showed the daytime comfort-band target (e.g. 71°F)"
+        " even during the overnight sleep window, after Issue #374 already fixed the fan's actual"
+        " cycling target to follow sleep_heat + hysteresis (e.g. 66°F) overnight. The fan was"
+        " behaving correctly, but coordinator.py's get_debug_state() independently recomputed the"
+        " target with a hardcoded daytime-only formula, so the status page never reflected the"
+        " #374 fix. The dashboard now mirrors the same sleep-vs-daytime logic used by the fan"
+        " itself.",
+    ],
     "0.4.58": [
         "Fix #396: The status card could show 'waiting for coalescing' indefinitely after an HA"
         " restart with no clue why. Diagnostics deployed to confirm the cause ruled out the #392"
@@ -665,6 +674,27 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    400: {
+        "version_fixed": "0.4.59",
+        "title": "Nat-vent dashboard target stuck at daytime comfort-band midpoint during sleep window",
+        "scope_covered": (
+            "coordinator.py: get_debug_state() now computes nat_vent_target,"
+            " nat_vent_on_threshold, and nat_vent_off_threshold using the same"
+            " sleep-vs-daytime branch as automation.py::nat_vent_temperature_check() (the"
+            " fix from Issue #374) — during the sleep window (_in_sleep_window() True), the"
+            " target is sleep_heat + hysteresis; otherwise it remains the daytime"
+            " comfort-band midpoint (comfort_heat + comfort_cool) / 2. Previously"
+            " coordinator.py independently recomputed these three fields with a hardcoded"
+            " daytime-only formula, so the dashboard never reflected the #374 fix even"
+            " though the fan's actual cycling behavior was already correct."
+        ),
+        "scope_not_covered": (
+            "The formula is still duplicated between automation.py and coordinator.py"
+            " (not extracted into one shared helper) — a future change to the sleep-window"
+            " target formula in one file could again silently drift from the other. Not"
+            " extracted in this fix to keep the change minimal and reviewable."
+        ),
+    },
     396: {
         "version_fixed": "0.4.58",
         "title": (

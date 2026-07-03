@@ -1915,7 +1915,8 @@ class TestReconcileFanOnStartup:
         return engine
 
     def test_no_fan_when_thermostat_fan_not_running(self):
-        """thermostat fan off → decision no-fan; stale flags cleared, no deactivate call."""
+        """thermostat fan off → decision no-fan; stale flags cleared, deactivate called to
+        release any stranded HVAC suppression (Issue #405)."""
         engine = self._engine()
         engine._fan_active = True  # stale
 
@@ -1925,9 +1926,77 @@ class TestReconcileFanOnStartup:
             )
         )
 
-        engine._deactivate_fan.assert_not_awaited()
+        engine._deactivate_fan.assert_awaited_once()
+        assert engine._deactivate_fan.call_args.kwargs.get("restore_hvac") is True
         assert engine._fan_active is False
         assert engine._natural_vent_active is False
+
+    def test_stranded_hvac_suppression_released_when_fan_confirmed_off(self):
+        """Issue #405: a WHF suppression session that ends via nat-vent cycling-off
+        (restore_hvac=False, by design) followed by a coalesce boundary that confirms
+        the fan is off must not leave _pre_fan_hvac_mode stranded forever — it must be
+        restored via the real _deactivate_fan() restore path, not just flag-cleared."""
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # use the real method
+        engine._set_hvac_mode = AsyncMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._pre_fan_hvac_mode = "cool"  # stranded from a prior _activate_fan() session
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=69.0, outdoor=70.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._set_hvac_mode.assert_awaited_once()
+        assert engine._set_hvac_mode.call_args.args[0] == "cool"
+        assert engine._pre_fan_hvac_mode is None
+
+    def test_no_fan_and_nothing_stranded_is_a_true_noop(self):
+        """Companion to the #405 regression test: when nothing is stranded, releasing
+        the (nonexistent) suppression must not issue a spurious HVAC write or Activity
+        Log event on every ordinary restart — the common case."""
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._set_hvac_mode = AsyncMock()
+        engine._emit_event_callback = MagicMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._pre_fan_hvac_mode = None
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=60.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._set_hvac_mode.assert_not_awaited()
+        engine._emit_event_callback.assert_not_called()
+        assert engine._pre_fan_hvac_mode is None
+
+    def test_no_fan_stranded_suppression_stays_inert_during_manual_override(self):
+        """Known scope boundary: if a manual fan override is active when a no-fan
+        reconcile fires, _deactivate_fan()'s override guard returns before ever
+        reaching the restore logic — the stranded flag is left untouched until the
+        override clears and a later reconcile runs. This is existing, intentional
+        behavior (CA never fights a manual override), not a gap introduced here."""
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._set_hvac_mode = AsyncMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._pre_fan_hvac_mode = "cool"
+        engine._fan_override_active = True
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=69.0, outdoor=70.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._set_hvac_mode.assert_not_awaited()
+        assert engine._pre_fan_hvac_mode == "cool"
 
     def test_adopt_on_when_nat_vent_eligible(self):
         """Fan running + window open + outdoor cooler → adopt as CA nat-vent."""

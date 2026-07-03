@@ -738,7 +738,23 @@ def _render_pre_cool_overshoot(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_system_restarted(p: dict, unit: str) -> tuple[str, str]:
     recovered = p.get("recovered_events", 0)
-    return f"--- HA restart boundary ({recovered} prior events recovered) ---", ""
+    cause = p.get("cause", "unknown")
+    if cause == "version_changed":
+        old = p.get("old_version")
+        new = p.get("new_version")
+        return (
+            f"--- HA restart boundary (version_changed {old}->{new}, {recovered} prior events recovered) ---",
+            "",
+        )
+    if cause == "user_restart":
+        return f"--- HA restart boundary (user_restart, {recovered} prior events recovered) ---", ""
+    return f"--- HA restart boundary (unknown, {recovered} prior events recovered) ---", ""
+
+
+def _render_version_changed(p: dict, unit: str) -> tuple[str, str]:
+    old = p.get("old_version")
+    new = p.get("new_version")
+    return f"Version changed: {old} -> {new}", ""
 
 
 def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
@@ -856,6 +872,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "pre_cool_suppressed_nat_vent": _render_pre_cool_suppressed_nat_vent,
     "pre_cool_overshoot": _render_pre_cool_overshoot,
     "system_restarted": _render_system_restarted,
+    "version_changed": _render_version_changed,
     "startup_coalesced": _render_startup_coalesced,
     "stuck_grace_recovered": _render_stuck_grace_recovered,
     "state_contradiction_warning": _render_state_contradiction_warning,
@@ -911,6 +928,7 @@ def _default_renderer(event_type: str, payload: dict, unit: str) -> tuple[str, s
 _NO_DEDUP: frozenset[str] = frozenset(
     {
         "system_restarted",
+        "version_changed",
         "override_detected",
         "override_confirmed",
         "override_cleared",

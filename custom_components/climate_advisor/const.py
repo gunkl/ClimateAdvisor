@@ -28,6 +28,11 @@ RELEASE_NOTES: dict[str, list[str]] = {
         " annotation when the real thermostat setpoint diverges from CA's intended target by"
         " more than 1°, matching the divergence indicator the heat_cool card already had. The"
         " CA target itself is now also sleep-window aware.",
+        "Fix #403: CA now logs its own version at startup and shutdown and classifies why it"
+        " restarted — a routine version-change deploy, a user-initiated Home Assistant"
+        " restart/stop, or an unexplained (crash-like) restart — and shows that cause on the"
+        " restart boundary marker in the AI activity report, instead of leaving restarts"
+        " unexplained.",
     ],
     "0.4.59": [
         "Fix #400: nat-vent dashboard/status showed the daytime comfort-band target (e.g. 71°F)"
@@ -729,6 +734,32 @@ KNOWN_FIXES: dict[int, dict] = {
             " recur. Not extracted here to keep the fix minimal and reviewable. Root cause of"
             " the 7 unexplained system restarts observed during this incident's investigation is"
             " tracked separately in #403 (restart identity / version logging), not fixed here."
+        ),
+    },
+    403: {
+        "version_fixed": "0.4.60",
+        "title": "CA restarts were unexplained — no way to distinguish routine deploy, user restart, or crash",
+        "scope_covered": (
+            "coordinator.py: async_shutdown() logs 'Climate Advisor vX shutting down' and persists"
+            " clean_shutdown=True, last_shutdown_version=VERSION, and user_initiated_restart"
+            " (reflecting whether a homeassistant.restart/stop service call was observed) via"
+            " learning.save_state(). async_setup() registers an EVENT_CALL_SERVICE listener that"
+            " sets self._user_initiated_shutdown=True only for homeassistant.restart/stop calls."
+            " async_restore_state() logs 'Climate Advisor vX starting up' and classifies the"
+            " restart cause by comparing the persisted last_shutdown_version against the running"
+            " VERSION and checking clean_shutdown: 'version_changed' (with a separate"
+            " version_changed event carrying old/new versions), 'user_restart', or 'unknown' when"
+            " neither condition is met (crash residual case). The classification is added to the"
+            " system_restarted event payload (cause, plus old_version/new_version when"
+            " version_changed), and learning.py's LearningState gained the three new persisted"
+            " fields with defensive type-checked load. ai_skills_activity.py's"
+            " _render_system_restarted() renders the cause on the restart boundary marker."
+        ),
+        "scope_not_covered": (
+            "Cannot retroactively diagnose the 6 other unexplained restarts observed during the"
+            " #402 incident night — this only classifies restarts going forward. The 'unknown'"
+            " bucket cannot distinguish an OS/container kill from an HA core crash; both look"
+            " identical (no clean shutdown, no service-call event observed)."
         ),
     },
     400: {

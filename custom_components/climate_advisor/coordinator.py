@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
     from .claude_api import ClaudeAPIClient
 
+from homeassistant.const import EVENT_CALL_SERVICE
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_call_later,
@@ -242,6 +243,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners: list[Any] = []
         self._unsub_dw_listeners: list[Any] = []
         self._resolved_sensors: list[str] = []
+        # Restart-cause diagnostics (Issue #403): set True when a homeassistant.restart/stop
+        # service call is observed before shutdown, so async_shutdown() can distinguish a
+        # user-initiated restart from a crash.
+        self._user_initiated_shutdown = False
 
         # Sub-components
         self._state_persistence = StatePersistence(Path(hass.config.config_dir))
@@ -600,6 +605,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Start minimum fan runtime rolling cycle (Issue #77) — not clock-aligned
         await self.automation_engine.start_min_fan_runtime_cycles()
 
+        # Listener: detect user-initiated HA restart/stop (Issue #403) — best-effort restart
+        # cause diagnostics. Distinguishes a user pressing "Restart Home Assistant" from a
+        # crash so async_restore_state() can classify the boundary correctly.
+        @callback
+        def _async_call_service_event(event: Event) -> None:
+            if event.data.get("domain") == "homeassistant" and event.data.get("service") in (
+                "restart",
+                "stop",
+            ):
+                self._user_initiated_shutdown = True
+
+        self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_CALL_SERVICE, _async_call_service_event))
+
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
 
     @callback
@@ -609,6 +627,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
+        _LOGGER.info("Climate Advisor v%s starting up", VERSION)
         await self.hass.async_add_executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -769,7 +788,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         saved_log = state.get("event_log")
         if isinstance(saved_log, list):
             self._event_log = saved_log[-EVENT_LOG_CAP:]
-        self._emit_event("system_restarted", {"recovered_events": len(self._event_log)})
+
+        # Restart-cause classification (Issue #403): compare the persisted last-shutdown
+        # version against VERSION, and check whether the prior shutdown was clean.
+        _last_shutdown_version = self.learning._state.last_shutdown_version
+        _clean_shutdown = self.learning._state.clean_shutdown
+        _restart_payload: dict[str, Any] = {"recovered_events": len(self._event_log)}
+        if isinstance(_last_shutdown_version, str) and _last_shutdown_version and _last_shutdown_version != VERSION:
+            _cause = "version_changed"
+            _LOGGER.info("Version changed: %s -> %s", _last_shutdown_version, VERSION)
+            self._emit_event(
+                "version_changed",
+                {"old_version": _last_shutdown_version, "new_version": VERSION},
+            )
+            _restart_payload["old_version"] = _last_shutdown_version
+            _restart_payload["new_version"] = VERSION
+        elif _clean_shutdown:
+            _cause = "user_restart"
+        else:
+            _cause = "unknown"
+        _restart_payload["cause"] = _cause
+        self._emit_event("system_restarted", _restart_payload)
+
+        # Reset in-memory clean_shutdown so an unclean exit before the next clean shutdown
+        # is correctly classified as "unknown" rather than stale-carrying "user_restart".
+        # Not persisted here — it will be written on the next save_state() call.
+        self.learning._state.clean_shutdown = False
 
         _LOGGER.info("State restore complete")
 
@@ -6214,6 +6258,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def async_shutdown(self) -> None:
         """Clean up on shutdown."""
+        _LOGGER.info("Climate Advisor v%s shutting down", VERSION)
+
+        # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
+        # next startup can distinguish a routine restart from a crash. Persisted via the
+        # existing learning.save_state() call below — no second/duplicate save.
+        self.learning._state.clean_shutdown = True
+        self.learning._state.last_shutdown_version = VERSION
+        self.learning._state.user_initiated_restart = self._user_initiated_shutdown
+        await self.hass.async_add_executor_job(self.learning.save_state)
+
         # Flush HVAC runtime and save state before cleanup
         self._flush_hvac_runtime()
         await self._async_save_state()

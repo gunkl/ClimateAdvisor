@@ -664,6 +664,10 @@ class LearningState:
     pending_observations: dict = field(default_factory=dict)  # v3 multi-type obs windows
     thermal_model_cache: dict | None = None  # EWMA-accumulated k_passive, k_active_heat/cool
     rejection_log: dict = field(default_factory=dict)  # keyed by obs_type; each list capped at 100 entries
+    # Restart-cause diagnostics (Issue #403)
+    last_shutdown_version: str | None = None
+    clean_shutdown: bool = False
+    user_initiated_restart: bool = False
 
 
 class LearningEngine:
@@ -740,6 +744,13 @@ class LearningEngine:
                             self._state.rejection_log[_obs_type] = []
                         elif len(_entries) > 100:
                             self._state.rejection_log[_obs_type] = _entries[-100:]
+                # Validate restart-cause diagnostics fields (Issue #403)
+                if not isinstance(self._state.last_shutdown_version, str):
+                    self._state.last_shutdown_version = None
+                if not isinstance(self._state.clean_shutdown, bool):
+                    self._state.clean_shutdown = False
+                if not isinstance(self._state.user_initiated_restart, bool):
+                    self._state.user_initiated_restart = False
                 return
             except (json.JSONDecodeError, TypeError) as err:
                 _LOGGER.warning("Failed to load learning state, starting fresh: %s", err)

@@ -1157,6 +1157,9 @@ class TestOccupancyAwayDelay:
         # Simulate automation_engine.cleanup to avoid AttributeError on shutdown
         coord.automation_engine.cleanup = MagicMock()
         coord._flush_hvac_runtime = MagicMock()
+        # Issue #403: async_shutdown() now persists restart-cause fields via
+        # learning.save_state() through the executor — needs an awaitable mock.
+        coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
 
         # Shutdown must cancel the timer
         asyncio.run(coord.async_shutdown())

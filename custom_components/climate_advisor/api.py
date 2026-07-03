@@ -54,12 +54,15 @@ from .const import (
     ATTR_WHF_STATUS,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
+    CONF_FAN_MODE,
     CONF_GITHUB_REPO,
     CONF_GITHUB_TOKEN,
     CONFIG_METADATA,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
     DOMAIN,
+    FAN_MODE_DISABLED,
+    FAN_MODE_HVAC,
     VERSION,
 )
 from .temperature import convert_delta, from_fahrenheit
@@ -112,6 +115,40 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
         trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
 
+        # Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep
+        # window, not always the flat daytime comfort_heat/comfort_cool — otherwise the
+        # single-setpoint divergence check below (and any heat_cool-mode consumer of these
+        # fields) compares the real thermostat setpoint against the wrong intended value
+        # all night, masking exactly the kind of stuck/frozen-target bug this issue covers.
+        from homeassistant.util import dt as dt_util  # noqa: PLC0415
+
+        from .automation import _in_sleep_window  # noqa: PLC0415
+
+        if _in_sleep_window(dt_util.now(), coordinator.config):
+            _ca_target_heat = coordinator.config.get("sleep_heat", coordinator.config.get("comfort_heat"))
+            _ca_target_cool = coordinator.config.get("sleep_cool", coordinator.config.get("comfort_cool"))
+        else:
+            _ca_target_heat = coordinator.config.get("comfort_heat")
+            _ca_target_cool = coordinator.config.get("comfort_cool")
+
+        # Issue #402 follow-up: surface the WHF fan's actual on/off cycling band so the
+        # Natural Vent status card can show it instead of a single static midpoint number
+        # with no visible range — this was part of why "target 71°F but indoor is 69°F,
+        # why is the fan still on" read as contradictory (69°F is within the 70-72°F
+        # cycling band, the fan just hasn't ticked past 70°F yet).
+        #
+        # nat_vent_active/nat_vent_ac_assist were never included in this endpoint at all
+        # (only in the Debug tab's automation_state endpoint) — the frontend's "Natural
+        # Vent" status-item has been unreachable dead code since it was written, since
+        # data.nat_vent_active was always undefined here.
+        _nat_vent_band = coordinator.compute_nat_vent_cycling_band()
+        _nat_vent_active = bool(ae._natural_vent_active)
+        _nat_vent_ac_assist = (
+            _nat_vent_active
+            and coordinator.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_HVAC
+            and not coordinator.config.get("aggressive_savings", False)
+        )
+
         return self.json(
             {
                 "version": VERSION,
@@ -142,8 +179,13 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
                 "fan_override_active": ae._fan_override_active,
                 "paused_by_door": ae.is_paused_by_door,
-                "ca_target_heat": coordinator.config.get("comfort_heat"),
-                "ca_target_cool": coordinator.config.get("comfort_cool"),
+                "ca_target_heat": _ca_target_heat,
+                "ca_target_cool": _ca_target_cool,
+                "nat_vent_active": _nat_vent_active,
+                "nat_vent_ac_assist": _nat_vent_ac_assist,
+                "nat_vent_target": _nat_vent_band["nat_vent_target"],
+                "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
+                "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
                 "pre_cool_status": data.get("pre_cool_status"),
             }
         )

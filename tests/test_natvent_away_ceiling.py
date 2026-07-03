@@ -120,6 +120,7 @@ class TestNatVentAwayCeilingExit:
         payload = ceiling_events[0][1]
         assert payload["indoor"] == 74.0
         assert payload["comfort_cool"] == 74.0
+        assert "fan_device" in payload, "Issue #402: exit events must identify which fan mechanism was involved"
 
     def test_natvent_does_not_exit_below_ceiling_while_away(self):
         """Indoor below comfort_cool (73F < 74F) while away → nat_vent stays active."""

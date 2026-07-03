@@ -4,9 +4,36 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.59"
+VERSION = "0.4.60"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.60": [
+        "Fix #402: whole-house-fan nat-vent could silently stop controlling the home for hours"
+        " overnight. Two causes: (1) fan_thermostat_check() — the tick-level safety check that"
+        " runs far more often than the 30-minute classification cycle — still used the flat"
+        " daytime comfort_heat floor even during the sleep window, so it always ended the"
+        " nat-vent session prematurely before the correct sleep-window cycling"
+        " (nat_vent_temperature_check(), fixed in #374) ever got a chance to run. (2) Once that"
+        " premature exit fired, apply_classification() legitimately arms 'cool' mode as a"
+        " compressor backstop — but that permanently blocked the fan's own re-activation check,"
+        " which required the thermostat's armed mode to be literally 'off' even though the"
+        " compressor was never actually running. Both are fixed: the tick-level floor check is"
+        " now sleep-aware, and re-activation now checks whether the compressor is actively"
+        " calling (hvac_action) instead of the armed mode string.",
+        "Fix #402: nat-vent exit/assist events (comfort-floor exit, predicted-floor exit,"
+        " away-ceiling exit, outdoor-rise exit, forecast/floor-imminent skip, AC-assist-armed)"
+        " now all carry a fan_device field identifying which physical fan mechanism (WHF/HVAC"
+        " fan/both) was involved — previously only the fan-on/off cycling events did.",
+        "Fix #402: the single-setpoint dashboard card (cool/heat modes) now shows a '(CA: X)'"
+        " annotation when the real thermostat setpoint diverges from CA's intended target by"
+        " more than 1°, matching the divergence indicator the heat_cool card already had. The"
+        " CA target itself is now also sleep-window aware.",
+        "Fix #403: CA now logs its own version at startup and shutdown and classifies why it"
+        " restarted — a routine version-change deploy, a user-initiated Home Assistant"
+        " restart/stop, or an unexplained (crash-like) restart — and shows that cause on the"
+        " restart boundary marker in the AI activity report, instead of leaving restarts"
+        " unexplained.",
+    ],
     "0.4.59": [
         "Fix #400: nat-vent dashboard/status showed the daytime comfort-band target (e.g. 71°F)"
         " even during the overnight sleep window, after Issue #374 already fixed the fan's actual"
@@ -674,6 +701,67 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    402: {
+        "version_fixed": "0.4.60",
+        "title": (
+            "WHF nat-vent permanently stops controlling the home overnight instead of cycling through the sleep window"
+        ),
+        "scope_covered": (
+            "automation.py: fan_thermostat_check()'s Check 2 hard-floor threshold is now"
+            " sleep-aware (sleep_heat - hysteresis during the sleep window, comfort_heat"
+            " otherwise), mirroring the fix Issue #374 already applied to"
+            " check_natural_vent_conditions(). Previously this tick-level check (which fires on"
+            " every thermostat temperature change, far more often than the 30-minute"
+            " classification cycle) always used the flat daytime floor, so it permanently ended"
+            " nat-vent sessions at comfort_heat before the correct sleep-window cycling"
+            " (nat_vent_temperature_check()) ever got a chance to run. Separately, the idle"
+            " re-activation gate in check_natural_vent_conditions() (Issue #244) now checks"
+            " hvac_action (idle/off) instead of requiring the thermostat's armed mode to be"
+            " literally 'off' — apply_classification()'s cool-mode ceiling backstop was"
+            " permanently blocking re-activation even when the compressor was never actually"
+            " running. Also: all nat-vent exit/assist events now carry a fan_device field;"
+            " ca_target_heat/cool in the status API are now sleep-window aware; the"
+            " single-setpoint dashboard card gained the same (CA: X) divergence annotation the"
+            " heat_cool card already had; docs/07 and docs/08 updated to remove the stale"
+            " 'Priority 0 sleep-ceiling reached' description (removed from code in #371, docs"
+            " never updated until now)."
+        ),
+        "scope_not_covered": (
+            "The floor/cycling threshold formula is now duplicated across three functions"
+            " (check_natural_vent_conditions(), fan_thermostat_check(),"
+            " nat_vent_temperature_check()) rather than extracted into one shared helper — a"
+            " future formula change must be applied to all three or this exact class of bug can"
+            " recur. Not extracted here to keep the fix minimal and reviewable. Root cause of"
+            " the 7 unexplained system restarts observed during this incident's investigation is"
+            " tracked separately in #403 (restart identity / version logging), not fixed here."
+        ),
+    },
+    403: {
+        "version_fixed": "0.4.60",
+        "title": "CA restarts were unexplained — no way to distinguish routine deploy, user restart, or crash",
+        "scope_covered": (
+            "coordinator.py: async_shutdown() logs 'Climate Advisor vX shutting down' and persists"
+            " clean_shutdown=True, last_shutdown_version=VERSION, and user_initiated_restart"
+            " (reflecting whether a homeassistant.restart/stop service call was observed) via"
+            " learning.save_state(). async_setup() registers an EVENT_CALL_SERVICE listener that"
+            " sets self._user_initiated_shutdown=True only for homeassistant.restart/stop calls."
+            " async_restore_state() logs 'Climate Advisor vX starting up' and classifies the"
+            " restart cause by comparing the persisted last_shutdown_version against the running"
+            " VERSION and checking clean_shutdown: 'version_changed' (with a separate"
+            " version_changed event carrying old/new versions), 'user_restart', or 'unknown' when"
+            " neither condition is met (crash residual case). The classification is added to the"
+            " system_restarted event payload (cause, plus old_version/new_version when"
+            " version_changed), and learning.py's LearningState gained the three new persisted"
+            " fields with defensive type-checked load. ai_skills_activity.py's"
+            " _render_system_restarted() renders the cause on the restart boundary marker."
+        ),
+        "scope_not_covered": (
+            "Cannot retroactively diagnose the 6 other unexplained restarts observed during the"
+            " #402 incident night — this only classifies restarts going forward. The 'unknown'"
+            " bucket cannot distinguish an OS/container kill from an HA core crash; both look"
+            " identical (no clean shutdown, no service-call event observed)."
+        ),
+    },
     400: {
         "version_fixed": "0.4.59",
         "title": "Nat-vent dashboard target stuck at daytime comfort-band midpoint during sleep window",

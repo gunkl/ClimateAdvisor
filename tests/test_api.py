@@ -331,6 +331,70 @@ def _extract_setpoints(climate_state, hvac_mode):
     return setpoint, target_temp_low, target_temp_high
 
 
+def _compute_ca_targets(config: dict, now) -> tuple[float | None, float | None]:
+    """Replicate the Issue #402 ca_target_heat/cool sleep-aware logic in api.py.
+
+    Before the fix, these were always the flat comfort_heat/comfort_cool values,
+    so the divergence check (both the pre-existing heat_cool one and the new
+    single-setpoint one, Issue #402) compared the real thermostat setpoint against
+    the wrong intended value throughout the sleep window.
+    """
+    from custom_components.climate_advisor.automation import _in_sleep_window
+
+    if _in_sleep_window(now, config):
+        return (
+            config.get("sleep_heat", config.get("comfort_heat")),
+            config.get("sleep_cool", config.get("comfort_cool")),
+        )
+    return config.get("comfort_heat"), config.get("comfort_cool")
+
+
+class TestCATargetSleepAware:
+    """Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep window,
+
+    not always the flat daytime comfort_heat/comfort_cool — otherwise both the heat_cool
+    and single-setpoint divergence indicators compare the real thermostat setpoint against
+    the wrong value all night, masking exactly the kind of stuck/frozen-target bug #402
+    covers.
+    """
+
+    _CONFIG = {
+        "comfort_heat": 68.0,
+        "comfort_cool": 74.0,
+        "sleep_heat": 64.0,
+        "sleep_cool": 72.0,
+        "sleep_time": "22:30",
+        "wake_time": "07:00",
+    }
+
+    def test_daytime_uses_comfort_band(self):
+        from datetime import datetime
+
+        now = datetime(2026, 7, 21, 14, 0, 0)  # 14:00 — outside sleep window
+        heat, cool = _compute_ca_targets(self._CONFIG, now)
+        assert heat == 68.0
+        assert cool == 74.0
+
+    def test_sleep_window_uses_sleep_band(self):
+        from datetime import datetime
+
+        now = datetime(2026, 7, 21, 2, 0, 0)  # 02:00 — inside 22:30-07:00 sleep window
+        heat, cool = _compute_ca_targets(self._CONFIG, now)
+        assert heat == 64.0
+        assert cool == 72.0
+        assert heat != 68.0, "must not fall back to the flat daytime comfort_heat overnight"
+        assert cool != 74.0, "must not fall back to the flat daytime comfort_cool overnight"
+
+    def test_sleep_window_falls_back_to_comfort_when_sleep_not_configured(self):
+        from datetime import datetime
+
+        config = {"comfort_heat": 68.0, "comfort_cool": 74.0, "sleep_time": "22:30", "wake_time": "07:00"}
+        now = datetime(2026, 7, 21, 2, 0, 0)
+        heat, cool = _compute_ca_targets(config, now)
+        assert heat == 68.0
+        assert cool == 74.0
+
+
 class TestStatusSetpointExtraction:
     """Issue #266: the status endpoint must expose the dual band setpoints in heat_cool mode."""
 

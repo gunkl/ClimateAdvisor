@@ -913,7 +913,20 @@
           hvacTemps = `Heat ${lo} · Cool ${hi}`;
         }
       } else if (data.current_setpoint != null) {
-        hvacTemps = data.current_setpoint + unitSym;
+        // Issue #402: single-setpoint mode previously had no divergence check at all, unlike
+        // heat_cool mode above — so a thermostat write suppressed by an active whole-house-fan
+        // session (or any other reason the real setpoint stops tracking CA's intent) showed no
+        // indication of staleness. Mirror the same (CA: X) annotation here.
+        const caTargetSingle = data.hvac_mode === 'cool' ? data.ca_target_cool
+          : data.hvac_mode === 'heat' ? data.ca_target_heat
+          : null;
+        const divergedSingle = caTargetSingle != null && Math.abs(data.current_setpoint - caTargetSingle) > 1;
+        if (divergedSingle) {
+          const caValSingle = Math.round(caTargetSingle) + unitSym;
+          hvacTemps = `${data.current_setpoint}${unitSym} <span style="color:#888;font-size:0.85em">(CA: ${caValSingle})</span>`;
+        } else {
+          hvacTemps = data.current_setpoint + unitSym;
+        }
       }
 
       const outdoorDisplay = data.outdoor_temp != null ? data.outdoor_temp.toFixed(1) + unitSym : '—';
@@ -982,7 +995,11 @@
           <div class="label">Natural Vent</div>
           <div class="value">${escapeHtml(data.nat_vent_ac_assist
             ? 'Natural ventilation + AC assist'
-            : 'Natural ventilation (savings mode — fan only)')}</div>
+            : 'Natural ventilation (savings mode — fan only)')}${
+            data.nat_vent_off_threshold != null && data.nat_vent_on_threshold != null
+              ? `<br><span style="font-size:0.8rem;opacity:0.85">cycling ${Math.round(data.nat_vent_off_threshold)}${unitSym}–${Math.round(data.nat_vent_on_threshold)}${unitSym}${data.nat_vent_target != null ? ` (target ${Math.round(data.nat_vent_target)}${unitSym})` : ''}</span>`
+              : ''
+          }</div>
         </div>
         ` : ''}
         ${data.contact_sensors && data.contact_sensors.length > 0 ? `

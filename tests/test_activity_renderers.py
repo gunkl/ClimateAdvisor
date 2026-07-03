@@ -244,6 +244,77 @@ class TestBuildEventTimelineTable:
             f"Found {row_count} rows. Table:\n{table}"
         )
 
+    def test_single_fan_activated_event_shows_full_reason_in_event_column(self):
+        """Issue #402 follow-up: a single (non-repeated) fan_activated event must show its
+
+        full reason text in the Event column, not a bare '_humanize_type()' label.
+
+        Before this fix, _flush_run() used _humanize_type(run_type) even for a run of
+        exactly one event (never actually deduplicated with anything) — discarding the
+        renderer's real ev_text for every event type not in the small _NO_DEDUP allowlist.
+        fan_activated is not in _NO_DEDUP, so this was silently losing the reason for the
+        single most common case: one fan-activation event with nothing before/after it of
+        the same type. Confirmed against live production data showing bare "Fan activated"
+        rows with no explanation.
+        """
+        event = _make_event(
+            "fan_activated",
+            reason="nat-vent re-engaged: outdoor 65.0°F < indoor 70.0°F, indoor > comfort_heat 68.0°F",
+            fan_device="whf",
+        )
+        table = _build_table([event])
+
+        assert "nat-vent re-engaged" in table, (
+            f"#402: single fan_activated event must show its full reason in the Event column, "
+            f"not a bare label. Table:\n{table}"
+        )
+
+    def test_single_nat_vent_fan_off_event_shows_indoor_and_threshold(self):
+        """Issue #402 follow-up: same bug, different event type — nat_vent_fan_off is also
+
+        not in _NO_DEDUP, so a single occurrence must still show its real indoor/threshold
+        values in the Event column rather than bare 'Nat vent fan off'.
+        """
+        event = _make_event(
+            "nat_vent_fan_off",
+            indoor_temp=69.0,
+            off_threshold=70.0,
+            target=71.0,
+        )
+        table = _build_table([event])
+
+        assert "69" in table and "70" in table, (
+            f"#402: single nat_vent_fan_off event must show real indoor/threshold values "
+            f"in the Event column. Table:\n{table}"
+        )
+
+    def test_repeated_run_still_collapses_with_xn_label(self):
+        """REGRESSION GUARD: genuinely repeated events (run_count > 1) must still collapse
+
+        to the generic '_humanize_type() xN (time range)' label — the fix must only change
+        behavior for run_count == 1, not break real deduplication.
+        """
+        events = [
+            _make_event(
+                "fan_activated",
+                hours_ago=float(i) * 0.05 + 0.1,
+                reason=f"reason variant {i}",
+                fan_device="whf",
+            )
+            for i in range(5)
+        ]
+        table = _build_table(events)
+
+        assert "Fan activated x5" in table or "Fan activated x4" in table, (
+            f"#402: repeated fan_activated events must still collapse with an xN label. Table:\n{table}"
+        )
+        # Only the LAST event's distinct reason text should appear in a collapsed run's
+        # Settings-adjacent context — the individual "reason variant N" strings for the
+        # collapsed middle events must NOT all appear (that would mean dedup broke).
+        assert "reason variant 0" not in table, (
+            f"#402: collapsed run must not list every individual reason. Table:\n{table}"
+        )
+
     # -- Non-band events keep expected Settings content --
 
     def test_override_detected_settings_shows_setpoint_transition(self):
@@ -272,13 +343,15 @@ class TestBuildEventTimelineTable:
         assert "Sensor opened" in table
 
     def test_grace_started_settings_blank_for_unknown_trigger(self):
-        """grace_started with unknown trigger → Event cell 'Grace started', Settings empty.
+        """grace_started with unknown trigger → Event cell shows the renderer's full label
 
-        grace_started is not in _NO_DEDUP, so the dedup flush path uses
-        _humanize_type('grace_started') → 'Grace started' for the Event cell
-        (the renderer ev_text is discarded for dedup-eligible types).
-        For triggers not in _GRACE_TRIGGER_LABELS the renderer returns Settings=''
-        so the Settings cell stays blank.
+        ('Grace period started (90 min)'), Settings empty.
+
+        Issue #402 follow-up: before the run_count==1 fix, this single event's Event cell
+        would show the bare _humanize_type('grace_started') -> 'Grace started' instead of
+        the renderer's real, more informative label — locked in here as the corrected
+        expectation. For triggers not in _GRACE_TRIGGER_LABELS the renderer returns
+        Settings='' so the Settings cell stays blank.
         """
         event = _make_event(
             "grace_started",
@@ -287,8 +360,8 @@ class TestBuildEventTimelineTable:
         )
         table = _build_table([event])
 
-        assert "Grace started" in table, f"grace_started row must appear. Table:\n{table}"
-        rows = [line for line in table.splitlines() if "Grace started" in line]
+        assert "Grace period started (90 min)" in table, f"grace_started row must appear. Table:\n{table}"
+        rows = [line for line in table.splitlines() if "Grace period started" in line]
         assert rows, "No grace_started row found"
         cells = rows[0].split("|")
         if len(cells) >= 4:
@@ -613,8 +686,8 @@ class TestGraceStartedRendering:
             source="manual",
         )
         table = _build_table([event])
-        assert "Grace started" in table
-        rows = [line for line in table.splitlines() if "Grace started" in line]
+        assert "Grace period started" in table
+        rows = [line for line in table.splitlines() if "Grace period started" in line]
         assert rows, "No grace_started row found"
         cells = rows[0].split("|")
         if len(cells) >= 4:

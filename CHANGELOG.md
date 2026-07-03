@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.4.60] — 2026-07-03
+
+- Fix #402: whole-house-fan nat-vent could silently stop controlling the home for hours overnight instead of cycling through the sleep window. Two causes: (1) `fan_thermostat_check()` — the tick-level safety check that runs far more often than the 30-minute classification cycle — still used the flat daytime `comfort_heat` floor even during the sleep window, so it always ended the nat-vent session prematurely before the correct sleep-window cycling (fixed in #374) ever got a chance to run. (2) Once that premature exit fired, `apply_classification()` legitimately arms `cool` mode as a compressor backstop — but that permanently blocked the fan's own re-activation check, which required the thermostat's armed mode to be literally "off" even though the compressor was never actually running. Both fixed: the tick-level floor check is now sleep-aware, and re-activation now checks whether the compressor is actively calling instead of the armed mode string.
+- Fix #402: root-caused and fixed a related ceiling-guard/nat-vent oscillation — whole-house-fan archetypes have no compressor-assist model by design, but the ODE ceiling guard's escalation branch didn't check that before arming AC, causing repeated escalate/reactivate bursts with redundant thermostat writes whenever nat-vent briefly paused.
+- Fix #402: bedtime setback tracking — a manual-override skip now correctly records the reason, and (a deeper related bug found while fixing it) days classified `hvac_mode="off"` — the majority case in mild climates — now correctly record that the sleep-band setback was applied; previously neither "applied" nor "skipped" was ever recorded for those nights.
+- Fix #402: nat-vent exit/assist events now all carry a `fan_device` field identifying which physical fan mechanism was involved; the single-setpoint dashboard card now shows a "(CA: X)" divergence annotation when the real thermostat setpoint diverges from CA's intended target, matching the indicator the dual-setpoint card already had.
+- Fix #403: CA now logs its own version at startup and shutdown and classifies why it restarted — a routine version-change deploy, a user-initiated Home Assistant restart/stop, or an unexplained (crash-like) restart — and shows that cause on the restart boundary marker in the AI activity report, instead of leaving restarts unexplained.
+
+## [0.4.59] — 2026-07-02
+
+- Fix #400: nat-vent dashboard/status showed the daytime comfort-band target (e.g. 71°F) even during the overnight sleep window, after Issue #374 already fixed the fan's actual cycling target to follow sleep_heat + hysteresis (e.g. 66°F) overnight. The fan was behaving correctly, but coordinator.py's get_debug_state() independently recomputed the target with a hardcoded daytime-only formula, so the status page never reflected the #374 fix. The dashboard now mirrors the same sleep-vs-daytime logic used by the fan itself.
+
 ## [0.4.58] — 2026-07-02
 
 - Fix #396: The status card could show "waiting for coalescing" indefinitely after an HA restart with no clue why. Live diagnostics confirmed the #392 decision lock was never the cause (nothing was holding it) — the real blocker is that the coalesce check only runs once weather data is available, and the weather entity can stay unavailable for a long time after restart. The status card now says "starting — waiting for weather data" in that specific case instead of the misleading generic "waiting for coalescing".

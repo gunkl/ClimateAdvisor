@@ -444,7 +444,6 @@ def _render_grace_started(p: dict, unit: str) -> tuple[str, str]:
     if source:
         label = f"{label} ({source})"
     # Settings cell: human-readable trigger label for known triggers; empty otherwise.
-    # (The Event cell for this dedup-eligible type always shows _humanize_type → "Grace started".)
     trigger_label = _GRACE_TRIGGER_LABELS.get(trigger, "")
     return label, trigger_label
 
@@ -738,7 +737,23 @@ def _render_pre_cool_overshoot(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_system_restarted(p: dict, unit: str) -> tuple[str, str]:
     recovered = p.get("recovered_events", 0)
-    return f"--- HA restart boundary ({recovered} prior events recovered) ---", ""
+    cause = p.get("cause", "unknown")
+    if cause == "version_changed":
+        old = p.get("old_version")
+        new = p.get("new_version")
+        return (
+            f"--- HA restart boundary (version_changed {old}->{new}, {recovered} prior events recovered) ---",
+            "",
+        )
+    if cause == "user_restart":
+        return f"--- HA restart boundary (user_restart, {recovered} prior events recovered) ---", ""
+    return f"--- HA restart boundary (unknown, {recovered} prior events recovered) ---", ""
+
+
+def _render_version_changed(p: dict, unit: str) -> tuple[str, str]:
+    old = p.get("old_version")
+    new = p.get("new_version")
+    return f"Version changed: {old} -> {new}", ""
 
 
 def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
@@ -856,6 +871,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "pre_cool_suppressed_nat_vent": _render_pre_cool_suppressed_nat_vent,
     "pre_cool_overshoot": _render_pre_cool_overshoot,
     "system_restarted": _render_system_restarted,
+    "version_changed": _render_version_changed,
     "startup_coalesced": _render_startup_coalesced,
     "stuck_grace_recovered": _render_stuck_grace_recovered,
     "state_contradiction_warning": _render_state_contradiction_warning,
@@ -911,6 +927,7 @@ def _default_renderer(event_type: str, payload: dict, unit: str) -> tuple[str, s
 _NO_DEDUP: frozenset[str] = frozenset(
     {
         "system_restarted",
+        "version_changed",
         "override_detected",
         "override_confirmed",
         "override_cleared",
@@ -997,17 +1014,32 @@ def build_event_timeline_table(
     run_count = 0
     run_first_time: str = ""
     run_last_time: str = ""
+    run_ev_text: str = ""
     run_settings: str = ""
     run_source: str = ""
     run_indoor: str = ""
     run_outdoor: str = ""
 
     def _flush_run() -> None:
-        nonlocal run_type, run_count, run_first_time, run_last_time, run_settings, run_source, run_indoor, run_outdoor
+        nonlocal \
+            run_type, \
+            run_count, \
+            run_first_time, \
+            run_last_time, \
+            run_ev_text, \
+            run_settings, \
+            run_source, \
+            run_indoor, \
+            run_outdoor
         if run_type is None or run_count == 0:
             return
         if run_count == 1:
-            rows.append((run_first_time, _humanize_type(run_type), run_settings, run_source, run_indoor, run_outdoor))
+            # A run of exactly one event was never actually deduplicated with anything —
+            # this is the common case, not a collapsed group. Use the renderer's real
+            # event text (which carries the descriptive reason) instead of the bare
+            # _humanize_type(run_type) fallback, which silently discarded it for every
+            # event type not on the small _NO_DEDUP allowlist.
+            rows.append((run_first_time, run_ev_text, run_settings, run_source, run_indoor, run_outdoor))
         else:
             time_range = f"{run_first_time}-{run_last_time}" if run_first_time != run_last_time else run_first_time
             event_text = f"{_humanize_type(run_type)} x{run_count} ({time_range})"
@@ -1067,6 +1099,7 @@ def build_event_timeline_table(
                 run_count = 1
                 run_first_time = time_str
                 run_last_time = time_str
+                run_ev_text = ev_text
                 run_settings = settings_text
                 run_source = source
                 run_indoor = indoor_cell

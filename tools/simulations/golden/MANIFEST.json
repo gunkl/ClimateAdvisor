@@ -252,5 +252,10 @@
     "sha256": "0ecee88989fb299e7a443f225be96cd1f85350749586e3aca833a0be2dcd6153",
     "signed": "2026-06-15",
     "issue": 258
+  },
+  "whf_reactivates_after_sleep_floor_exit": {
+    "sha256": "1f006241b2d6b8dc11d04fdfa1da86a7bc43dd6d91626a86962b8ac10c6a13db",
+    "signed": "2026-07-03",
+    "issue": 402
   }
 }

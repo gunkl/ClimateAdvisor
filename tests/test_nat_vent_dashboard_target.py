@@ -133,3 +133,55 @@ class TestNatVentDashboardTargetSleepWindow:
         assert state["nat_vent_target"] is None
         assert state["nat_vent_on_threshold"] is None
         assert state["nat_vent_off_threshold"] is None
+
+
+class TestComputeNatVentCyclingBand:
+    """Issue #402 follow-up: compute_nat_vent_cycling_band() is the extracted single
+
+    source of truth get_debug_state() now delegates to — this class locks in that the
+    extraction is behavior-preserving and covers the method directly (rather than only
+    indirectly through get_debug_state()), since it's now also called from api.py's main
+    status endpoint to power the Natural Vent status card's cycling-band display.
+    """
+
+    def _config(self):
+        return {
+            "comfort_heat": 68,
+            "comfort_cool": 74,
+            "sleep_heat": 65,
+            "sleep_time": "22:00",
+            "wake_time": "07:00",
+        }
+
+    def test_daytime_band(self):
+        coord = _make_nat_vent_coord_stub(config=self._config())
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 14, 0, 0)):
+            band = coord.compute_nat_vent_cycling_band()
+        assert band == {"nat_vent_target": 71.0, "nat_vent_on_threshold": 72.0, "nat_vent_off_threshold": 70.0}
+
+    def test_sleep_window_band(self):
+        coord = _make_nat_vent_coord_stub(config=self._config())
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
+            band = coord.compute_nat_vent_cycling_band()
+        assert band == {"nat_vent_target": 66.0, "nat_vent_on_threshold": 67.0, "nat_vent_off_threshold": 65.0}
+
+    def test_none_when_inactive(self):
+        coord = _make_nat_vent_coord_stub(config=self._config())
+        coord.automation_engine._natural_vent_active = False
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
+            band = coord.compute_nat_vent_cycling_band()
+        assert band == {"nat_vent_target": None, "nat_vent_on_threshold": None, "nat_vent_off_threshold": None}
+
+    def test_get_debug_state_and_direct_call_agree(self):
+        """get_debug_state() must delegate to compute_nat_vent_cycling_band(), not
+
+        reimplement it separately — regression guard against the extraction drifting
+        back into two copies.
+        """
+        coord = _make_nat_vent_coord_stub(config=self._config())
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
+            band = coord.compute_nat_vent_cycling_band()
+            state = coord.get_debug_state()
+        assert state["nat_vent_target"] == band["nat_vent_target"]
+        assert state["nat_vent_on_threshold"] == band["nat_vent_on_threshold"]
+        assert state["nat_vent_off_threshold"] == band["nat_vent_off_threshold"]

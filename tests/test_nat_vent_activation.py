@@ -673,7 +673,9 @@ class TestForecastRisingOutdoorSkip:
         # Should NOT activate nat vent
         assert not engine._natural_vent_active
         # Should emit forecast_skip event
-        assert any(e[0] == "nat_vent_forecast_skip" for e in events)
+        skip_events = [e for e in events if e[0] == "nat_vent_forecast_skip"]
+        assert skip_events
+        assert "fan_device" in skip_events[0][1], "Issue #402: skip events must identify the fan mechanism"
 
     def test_forecast_peak_below_threshold_allows_nat_vent(self):
         """Forecast peak <= threshold -> Phase 2 guard passes -> nat vent activates.
@@ -750,6 +752,7 @@ class TestThermalFloorImminentSkip:
         assert any(e[0] == "nat_vent_floor_imminent_skip" for e in events)
         skip_event = next(e for e in events if e[0] == "nat_vent_floor_imminent_skip")
         assert skip_event[1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
+        assert "fan_device" in skip_event[1], "Issue #402: skip events must identify the fan mechanism"
 
     def test_floor_not_imminent_allows_activation(self):
         """Medium confidence, time_to_floor > 1 hr -> thermal guard passes -> nat vent activates.
@@ -843,6 +846,7 @@ class TestProactiveFloorExit:
         time_to_floor = (70.5 - 70.0) / 2.75 = 0.18 hr < 1.0 -> proactive exit
         """
         engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
+        engine._deactivate_fan = AsyncMock()
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -850,6 +854,13 @@ class TestProactiveFloorExit:
 
         assert not engine._natural_vent_active
         assert any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
+        # The activity log's fan-deactivated reason must state the WHY with real numbers —
+        # current indoor temp and the comfort_heat threshold it's predicted to reach, not
+        # just a bare "floor in X hr" with no indication of which floor.
+        engine._deactivate_fan.assert_awaited_once()
+        reason = engine._deactivate_fan.call_args.kwargs.get("reason") or engine._deactivate_fan.call_args.args[0]
+        assert "70.5" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
+        assert "70.0" in reason, f"reason must state the comfort_heat threshold; got: {reason!r}"
 
     def test_no_proactive_exit_when_floor_distant(self):
         """Floor predicted > 1 hr -> stays in nat vent.
@@ -879,6 +890,7 @@ class TestProactiveFloorExit:
         assert len(floor_events) == 1
         assert "time_to_floor_hr" in floor_events[0][1]
         assert floor_events[0][1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
+        assert "fan_device" in floor_events[0][1], "Issue #402: exit events must identify the fan mechanism"
 
 
 # ---------------------------------------------------------------------------
@@ -1519,6 +1531,8 @@ class TestNatVentSleepWindowBand:
         assert "nat_vent_ac_assist_armed" in event_types, (
             f"nat_vent_ac_assist_armed must still fire during sleep window. Got events: {event_types}"
         )
+        armed_payload = next(pl for et, pl in emitted if et == "nat_vent_ac_assist_armed")
+        assert "fan_device" in armed_payload, "Issue #402: ac_assist_armed must identify the fan mechanism"
 
     def test_awake_window_two_comfort_band_calls(self):
         """Nat-vent active + awake hours → two _apply_comfort_band calls (regression guard).
@@ -1758,6 +1772,46 @@ class TestCeilingGateArchetypeAllFourSites:
         assert engine._natural_vent_active is True, (
             "FAN_MODE_WHOLE_HOUSE: ceiling must not block grace re-entry as long as outdoor < indoor"
         )
+
+    def test_site2_reactivation_reason_does_not_falsely_claim_indoor_above_ceiling(self):
+        """Issue #402 follow-up: the reactivation reason text must not claim
+
+        "indoor > comfort_cool" when that's not the actual trigger condition.
+
+        This is the idle_open trigger path (contact sensor open, HVAC not actively
+        calling) rather than the original grace-active-ceiling-breach case — indoor here
+        (70) is well BELOW comfort_cool (74), so the old hardcoded message
+        ("indoor {X} > comfort_cool {Y}") was factually false, confirmed against live
+        production data showing exactly this combination (indoor=70, comfort_cool=74).
+        The message must instead describe the real condition: outdoor cooler than indoor,
+        indoor above the comfort floor, outdoor below the ceiling threshold.
+        """
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=70.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        engine._paused_by_door = False
+        engine._natural_vent_active = False
+        engine._grace_active = False
+        engine._sensor_check_callback = lambda: True
+        engine._last_outdoor_temp = 65.0
+        engine.hass.states.get.return_value.state = "off"
+        engine._activate_fan = AsyncMock()
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        fan_events = [e for e in events if e[0] == "sensor_opened" and e[1].get("entity") == "natural_vent_reeval"]
+        assert fan_events, f"expected natural_vent_reeval re-evaluation event; got: {events}"
+        # The reason lives on the fan_activated call, not this event's payload — inspect
+        # the mocked _activate_fan call directly since that's where the string is built.
+        engine._activate_fan.assert_awaited()
+        reason = engine._activate_fan.call_args.kwargs.get("reason", "")
+        assert "indoor 70.0" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
+        assert "> comfort_cool 74.0" not in reason, (
+            f"reason must not falsely claim indoor > comfort_cool; got: {reason!r}"
+        )
+        assert "comfort_heat" in reason, f"reason must describe the actual trigger condition; got: {reason!r}"
 
     # -- Site 3: handle_door_window_open() --------------------------------------
 

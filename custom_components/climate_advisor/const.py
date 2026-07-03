@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.54"
+VERSION = "0.4.55"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.55": [
+        "Fix #390: Whole-house fan status could show 'off (manual override)' for up to 30 minutes"
+        " after the fan was actually confirmed running — the coordinator listener that detects the"
+        " fan_state_entity confirming physical on/off silently dropped the event once a manual"
+        " override was already active, so the displayed status only caught up at the next scheduled"
+        " poll. Now a coordinator refresh is requested immediately so the status reflects reality"
+        " within one cycle.",
+    ],
     "0.4.54": [
         "Fix #388: Climate Advisor was missing from the Integrations page in Settings → Devices &"
         " Services — v0.4.53 set manifest.json integration_type to 'helper', which Home Assistant's"
@@ -626,6 +634,26 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    390: {
+        "version_fixed": "0.4.55",
+        "title": "WHF status showed 'off (manual override)' for up to 30 min while fan was physically running",
+        "scope_covered": (
+            "coordinator.py _async_fan_entity_changed(): when a state change arrives on"
+            " fan_entity or fan_state_entity while _fan_override_active is already True, the"
+            " listener now calls await self.async_request_refresh() before returning, instead of"
+            " silently dropping the event. This lets a physical-state confirmation (e.g. the"
+            " fan_state_entity flipping on a few seconds after fan_entity did) correct the"
+            " displayed fan_status/whf_status within one refresh cycle rather than waiting for the"
+            " next scheduled 30-minute poll. handle_fan_manual_override()/on_fan_turned_off() are"
+            " still correctly skipped on this path — only the display-refresh trigger was added."
+        ),
+        "scope_not_covered": (
+            "Does not change the coordinator's update_interval (still 30 minutes); only removes"
+            " the silent-drop that made this specific confirmation event invisible between polls."
+            " Command-only mode (fan_state_feedback=False) is unaffected — that path already"
+            " returns before reaching this branch."
+        ),
+    },
     388: {
         "version_fixed": "0.4.54",
         "title": "Integration missing from Settings → Devices & Services → Integrations page",

@@ -1640,7 +1640,40 @@ async def apply_classification(self, classification, predicted_indoor=None, indo
 
 **What this does NOT change:** this lock does not introduce new automation behavior. The semantic fixes (§6c archetype-aware ceiling, above choke-point guard, §9f idempotency) already make each individual decision correct and idempotent; the lock ensures those correct decisions are evaluated one at a time against a consistent snapshot of engine state, instead of several handlers reading/writing overlapping state concurrently. In a well-behaved system where the semantic fixes hold, the lock should rarely be contended — its purpose is to make the *absence* of interleaving-driven chaos structurally guaranteed rather than incidentally true.
 
-**Test coverage:** concurrency test using `asyncio.gather()` to invoke two of the six entry points "concurrently" against a shared engine instance instrumented to record enter/exit order, asserting non-overlapping execution. Located in `tests/test_nat_vent_activation.py` as of this doc pass (exact function name pending — Craftsman work in `tests/` is running in parallel with this docs pass).
+**Test coverage:** `tests/test_nat_vent_activation.py::TestDecisionLockConcurrency::test_two_entry_points_do_not_interleave` — `asyncio.gather()` invokes two of the six entry points "concurrently" against a shared engine instance instrumented to record enter/exit order, asserting non-overlapping execution.
+
+#### Holder tracking — diagnosing a stuck lock (Issue #396)
+
+This lock shipped with WARNING-level logging for the *contended-and-blocked* case
+(`hvac_write_blocked_whf_active`, §9 above) but nothing for "a method is waiting on this lock and
+it isn't coming back" — the exact failure mode that caused startup coalescing to hang indefinitely
+in production shortly after this lock was deployed (root cause not yet confirmed as of this doc
+pass; see Issue #396). That gap is closed by `_decision_pass()`, an async context manager every one
+of the six entry points now goes through instead of a bare `async with self._decision_lock:`:
+
+```python
+async def apply_classification(self, ...) -> None:
+    async with self._decision_pass("apply_classification"):
+        ...  # entire method body, unchanged
+```
+
+`_decision_pass()`:
+- Logs (DEBUG) when a method starts waiting on an already-held lock, naming the current holder.
+- Sets `self._decision_lock_holder` (method name) and `self._decision_lock_held_since` (timestamp)
+  immediately after acquiring — cleared in a `finally` immediately before release, so this is
+  accurate even on exception paths.
+- Logs (DEBUG) the wait duration on acquire and the hold duration on release.
+
+`_decision_lock_holder` / `_decision_lock_held_since` are also surfaced on the coordinator status
+API (`coordinator.py`, alongside `startup_coalesce_active`) as `decision_lock_holder` /
+`decision_lock_held_seconds`, so a stuck lock is visible from the dashboard — "waiting on
+`check_natural_vent_conditions`, held 340s" — instead of a generic "waiting for coalescing" with no
+further detail. This is purely additive observability; it does not change which method acquires the
+lock or when.
+
+**Test coverage:** `tests/test_nat_vent_activation.py::TestDecisionLockHolderTracking` — holder set
+during a pass and cleared after, cleared even when the pass body raises, and a second (waiting) pass
+can see the first pass's holder name while blocked.
 
 ---
 

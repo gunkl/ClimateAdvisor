@@ -1285,7 +1285,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     nat_vent_threshold,
                 )
                 first_sensor = open_sensors[0]
+                _LOGGER.debug("[coalesce-diag] before handle_door_window_open(%s)", first_sensor)
                 await self.automation_engine.handle_door_window_open(first_sensor)
+                _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
                 nat_vent_activated = True
             else:
                 _LOGGER.info(
@@ -1306,11 +1308,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 c.hvac_mode,
             )
             indoor_temp = self._get_indoor_temp()
+            _LOGGER.debug("[coalesce-diag] before apply_classification() [coalesce path]")
             await self.automation_engine.apply_classification(
                 c,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
             )
+            _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
 
         # Issue #327: Startup fan reconciliation.
@@ -1329,12 +1333,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _fan_mode_reconcile = "unknown"
             _hvac_action_reconcile = "unknown"
             _thermostat_fan_running = False
+        _LOGGER.debug("[coalesce-diag] before reconcile_fan_on_startup()")
         await self.automation_engine.reconcile_fan_on_startup(
             indoor=indoor,
             outdoor=outdoor,
             thermostat_fan_running=_thermostat_fan_running,
             any_sensor_open=self._any_sensor_open(),
         )
+        _LOGGER.debug("[coalesce-diag] after reconcile_fan_on_startup()")
 
         self._emit_event(
             "startup_coalesced",
@@ -1351,6 +1357,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
         # Re-resolve group membership in case it changed
+        _LOGGER.debug("[coalesce-diag] _async_update_data: enter")
         new_resolved = self._resolve_monitored_sensors()
         if set(new_resolved) != set(self._resolved_sensors):
             _LOGGER.info("Door/window sensor membership changed; updating listeners")
@@ -1358,7 +1365,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._resolved_sensors = new_resolved
             self._subscribe_door_window_listeners()
 
+        _LOGGER.debug("[coalesce-diag] _async_update_data: before _get_forecast()")
         forecast = await self._get_forecast()
+        _LOGGER.debug("[coalesce-diag] _async_update_data: after _get_forecast() — forecast=%s", forecast is not None)
         self._hourly_forecast_temps = await self._get_hourly_forecast_data()
         self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
         if forecast:
@@ -1477,8 +1486,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         # Flag is set inside the method after completion
 
             # Bug 1 (Issue #321): Startup coalescing — evaluate state at t+5min instead of detecting override at t+30s
+            _LOGGER.debug(
+                "[coalesce-diag] coalesce condition check: startup_timer_fired=%s"
+                " startup_coalesce_active=%s current_classification=%s",
+                self._startup_timer_fired,
+                self._startup_coalesce_active,
+                self._current_classification is not None,
+            )
             if self._startup_timer_fired and self._startup_coalesce_active and self._current_classification:
+                _LOGGER.debug("[coalesce-diag] before _do_startup_coalesce()")
                 await self._do_startup_coalesce()
+                _LOGGER.debug("[coalesce-diag] after _do_startup_coalesce()")
 
             # Periodic daily solar phase re-fit (Issue #310): run once per calendar day
             # using only the last 2 days of chart_log (backfill=False). Stamping
@@ -1558,11 +1576,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _ae.clear_manual_override(reason="stuck_grace_recovery")
                     self._emit_event("stuck_grace_recovered", {"grace_end_time": _ae._grace_end_time})
 
+            _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
             await self.automation_engine.apply_classification(
                 self._current_classification,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),
             )
+            _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
             # If the day type changed since the briefing was generated,
             # regenerate the briefing text without re-sending notifications (Issue #78).
@@ -1624,10 +1644,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             # Re-evaluate natural vent conditions while any sensor is open
             if self._any_sensor_open():
+                _LOGGER.debug("[coalesce-diag] before check_natural_vent_conditions()")
                 await self.automation_engine.check_natural_vent_conditions()
+                _LOGGER.debug("[coalesce-diag] after check_natural_vent_conditions()")
 
             # Save state after classification update
+            _LOGGER.debug("[coalesce-diag] before _async_save_state()")
             await self._async_save_state()
+            _LOGGER.debug("[coalesce-diag] after _async_save_state() — _async_update_data exiting normally")
         else:
             # Weather entity not ready yet (common after HA restart).
             # Retry with gentle backoff: 30s → 60s → 120s → 240s → 480s
@@ -6116,6 +6140,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     (dt_util.parse_datetime(self._startup_coalesce_expiry) - dt_util.now()).total_seconds(),
                 )
                 if self._startup_coalesce_expiry and self._startup_coalesce_active
+                else None
+            ),
+            # Issue #396: surface decision-lock holder so a stuck coalesce/decision pass is
+            # diagnosable from the dashboard, not just backend logs — "waiting on X since Y"
+            # instead of a generic "waiting for coalescing" with no further detail.
+            "decision_lock_holder": ae._decision_lock_holder,
+            "decision_lock_held_seconds": (
+                (dt_util.now() - ae._decision_lock_held_since).total_seconds()
+                if ae._decision_lock_held_since is not None
                 else None
             ),
             # Bug 2 (Issue #321): stuck-grace detection for debug pane

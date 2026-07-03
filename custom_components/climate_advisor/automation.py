@@ -398,6 +398,13 @@ class AutomationEngine:
         # six methods calls another of the six directly in the same stack, so a plain
         # `async with self._decision_lock:` wrap is safe — no `_impl` extraction needed).
         self._decision_lock = asyncio.Lock()
+        # Issue #396: holder tracking so a stuck/slow lock is diagnosable from logs alone —
+        # the #392 lock shipped with WARNING-level logging for the contended-and-blocked case
+        # (hvac_write_blocked_whf_active) but nothing for "a method is waiting on this lock and
+        # it isn't coming back," which is the failure mode that actually occurred. Set
+        # immediately after acquiring, cleared in a finally immediately before release.
+        self._decision_lock_holder: str | None = None
+        self._decision_lock_held_since: datetime | None = None
 
         # Dry-run mode: when True, all service calls are logged but skipped
         self.dry_run: bool = False
@@ -1018,6 +1025,44 @@ class AutomationEngine:
         )
         self._start_grace_period("manual", trigger="override_confirmed")
 
+    @contextlib.asynccontextmanager
+    async def _decision_pass(self, method_name: str):
+        """Acquire ``self._decision_lock`` with wait/hold instrumentation (Issue #396).
+
+        Logs when a method starts waiting on the lock and how long it waited once
+        acquired, and tracks who currently holds it (`_decision_lock_holder` /
+        `_decision_lock_held_since`) so a stuck or slow lock is diagnosable from logs
+        alone instead of requiring another multi-hour investigation.
+        """
+        _wait_start = dt_util.now()
+        if self._decision_lock.locked():
+            _LOGGER.debug(
+                "[decision-lock] %s: waiting — currently held by %s since %s",
+                method_name,
+                self._decision_lock_holder,
+                self._decision_lock_held_since,
+            )
+        async with self._decision_lock:
+            _wait_seconds = (dt_util.now() - _wait_start).total_seconds()
+            self._decision_lock_holder = method_name
+            self._decision_lock_held_since = dt_util.now()
+            _LOGGER.debug(
+                "[decision-lock] %s: acquired (waited %.3fs)",
+                method_name,
+                _wait_seconds,
+            )
+            try:
+                yield
+            finally:
+                _held_seconds = (dt_util.now() - self._decision_lock_held_since).total_seconds()
+                _LOGGER.debug(
+                    "[decision-lock] %s: releasing (held %.3fs)",
+                    method_name,
+                    _held_seconds,
+                )
+                self._decision_lock_holder = None
+                self._decision_lock_held_since = None
+
     async def apply_classification(
         self,
         classification: DayClassification,
@@ -1039,7 +1084,7 @@ class AutomationEngine:
                 to evaluate the pre-cool achievement gate (Issue #295). When
                 None the achievement check is skipped for this cycle.
         """
-        async with self._decision_lock:
+        async with self._decision_pass("apply_classification"):
             self._current_classification = classification
 
             if self._manual_override_active:
@@ -1767,7 +1812,7 @@ class AutomationEngine:
 
         Called by the coordinator after the debounce period.
         """
-        async with self._decision_lock:
+        async with self._decision_pass("handle_door_window_open"):
             if self._paused_by_door:
                 return  # Already paused
 
@@ -1960,7 +2005,7 @@ class AutomationEngine:
 
     async def handle_all_doors_windows_closed(self) -> None:
         """Resume HVAC after all monitored doors/windows are closed."""
-        async with self._decision_lock:
+        async with self._decision_pass("handle_all_doors_windows_closed"):
             was_nat_vent = self._natural_vent_active
             was_paused = self._paused_by_door
             if self._emit_event_callback:
@@ -2047,7 +2092,7 @@ class AutomationEngine:
         Called by coordinator on each _async_update_data when sensors are open.
         Mirrors the monitoring logic in tools/simulate.py ClimateSimulator.
         """
-        async with self._decision_lock:
+        async with self._decision_pass("check_natural_vent_conditions"):
             if not (self._paused_by_door or self._natural_vent_active):
                 # Comfort-ceiling override (Issue #134): if grace is active and indoor has
                 # risen above comfort_cool, allow re-evaluation so nat-vent can engage.
@@ -2364,7 +2409,7 @@ class AutomationEngine:
         maintained (restore_hvac=False). When indoor warms back to (midpoint + hysteresis)
         the fan re-engages, subject to the outdoor-warm guard.
         """
-        async with self._decision_lock:
+        async with self._decision_pass("nat_vent_temperature_check"):
             if not self._natural_vent_active:
                 return
 
@@ -2887,7 +2932,7 @@ class AutomationEngine:
 
     async def _re_pause_for_open_sensor(self) -> None:
         """Re-pause HVAC because a sensor is still open when grace expired."""
-        async with self._decision_lock:
+        async with self._decision_pass("_re_pause_for_open_sensor"):
             if self._is_within_planned_window_period():
                 _LOGGER.info(
                     "Skipping re-pause — within planned window period (windows recommended)",

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.4.57] — 2026-07-02
+
+- Fix #396: Added diagnostics to pinpoint a startup-coalescing regression introduced by #392's automation decision lock — after that fix, the status card could show "waiting for coalescing" indefinitely after a restart, with no way to tell what was stuck. The decision lock now tracks and logs which method holds it and for how long, with checkpoint logging through the coalesce call chain and a new `decision_lock_holder` / `decision_lock_held_seconds` status field. This is diagnostics only — the underlying hang itself is not yet confirmed fixed; the next occurrence will name the exact stuck step.
+
 ## [0.4.56] — 2026-07-02
 
 - Fix #392: Whole-house fan (WHF) and AC could fight each other in a repeating off→cool→off→cool loop roughly every 5 minutes — the ODE ceiling guard applied the same "switch to AC once indoor crosses the ceiling" rule to both fan archetypes, but a WHF is mutually exclusive with AC and physically guaranteed to keep cooling the house as long as outdoor air is cooler than indoor, so the ceiling number never applied to it. The ceiling check is now archetype-aware, HVAC writes are structurally blocked while a WHF session owns the thermostat (previously only enforced by convention), fan activation/deactivation are now idempotent, and automation decisions are serialized so independently-triggered handlers can no longer race on shared state.

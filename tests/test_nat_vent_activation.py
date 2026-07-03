@@ -19,6 +19,8 @@ import sys
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
@@ -1953,6 +1955,10 @@ class TestDecisionLockConcurrency:
                 self._name_source.append(f"exit:{id(asyncio.current_task())}")
                 real_lock.release()
 
+            def locked(self) -> bool:
+                """Proxy to the real lock — Issue #396's _decision_pass() diagnostic checks this."""
+                return real_lock.locked()
+
         engine._decision_lock = _TrackingLock(order)
 
         async def _run_both():
@@ -1975,3 +1981,70 @@ class TestDecisionLockConcurrency:
             f"Second task's enter must be immediately followed by its own exit; got: {order}"
         )
         assert first_task_id != second_task_id, "The two tasks must be distinct"
+
+
+class TestDecisionLockHolderTracking:
+    """Issue #396: the #392 decision lock shipped with no observability for the
+    "something is holding this lock and it isn't coming back" failure mode — the
+    exact case that caused startup coalescing to hang indefinitely in production.
+    _decision_lock_holder / _decision_lock_held_since must be set while a decision
+    pass owns the lock and cleared afterward, including on exception paths, so a
+    stuck lock is diagnosable from logs/status API alone next time.
+    """
+
+    def test_holder_set_during_pass_and_cleared_after(self):
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        assert engine._decision_lock_holder is None
+        assert engine._decision_lock_held_since is None
+
+        observed_holder = {}
+
+        async def _run():
+            async with engine._decision_pass("test_method"):
+                observed_holder["holder"] = engine._decision_lock_holder
+                observed_holder["held_since"] = engine._decision_lock_held_since
+
+        asyncio.run(_run())
+
+        assert observed_holder["holder"] == "test_method"
+        assert observed_holder["held_since"] is not None
+        # Cleared after the pass completes.
+        assert engine._decision_lock_holder is None
+        assert engine._decision_lock_held_since is None
+
+    def test_holder_cleared_even_when_pass_body_raises(self):
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+
+        async def _run():
+            with pytest.raises(ValueError):
+                async with engine._decision_pass("test_method_raises"):
+                    raise ValueError("boom")
+
+        asyncio.run(_run())
+
+        assert engine._decision_lock_holder is None
+        assert engine._decision_lock_held_since is None
+
+    def test_second_pass_reports_first_as_holder_while_waiting(self):
+        """Regression guard for the exact log line #396's diagnostics rely on: a
+        method waiting on an already-held lock must be able to see who holds it.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        seen_holder_while_waiting = {}
+
+        async def _first_pass_holds_briefly():
+            async with engine._decision_pass("first_method"):
+                await asyncio.sleep(0.05)
+
+        async def _second_pass_checks_holder():
+            await asyncio.sleep(0.01)  # ensure first pass has acquired by now
+            seen_holder_while_waiting["holder"] = engine._decision_lock_holder
+            async with engine._decision_pass("second_method"):
+                pass
+
+        async def _run_both():
+            await asyncio.gather(_first_pass_holds_briefly(), _second_pass_checks_holder())
+
+        asyncio.run(_run_both())
+
+        assert seen_holder_while_waiting["holder"] == "first_method"

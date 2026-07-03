@@ -9,6 +9,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) co
 - Fix #402: root-caused and fixed a related ceiling-guard/nat-vent oscillation — whole-house-fan archetypes have no compressor-assist model by design, but the ODE ceiling guard's escalation branch didn't check that before arming AC, causing repeated escalate/reactivate bursts with redundant thermostat writes whenever nat-vent briefly paused.
 - Fix #402: bedtime setback tracking — a manual-override skip now correctly records the reason, and (a deeper related bug found while fixing it) days classified `hvac_mode="off"` — the majority case in mild climates — now correctly record that the sleep-band setback was applied; previously neither "applied" nor "skipped" was ever recorded for those nights.
 - Fix #402: nat-vent exit/assist events now all carry a `fan_device` field identifying which physical fan mechanism was involved; the single-setpoint dashboard card now shows a "(CA: X)" divergence annotation when the real thermostat setpoint diverges from CA's intended target, matching the indicator the dual-setpoint card already had.
+- Fix #403: CA now logs its own version at startup and shutdown and classifies why it restarted — a routine version-change deploy, a user-initiated Home Assistant restart/stop, or an unexplained (crash-like) restart — and shows that cause on the restart boundary marker in the AI activity report, instead of leaving restarts unexplained.
 
 ## [0.4.59] — 2026-07-02
 

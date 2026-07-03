@@ -1374,7 +1374,11 @@ class AutomationEngine:
                             )
                             if self._natural_vent_active:
                                 await self._deactivate_fan(
-                                    reason="ceiling guard override -- nat-vent to active cooling"
+                                    reason=(
+                                        f"ceiling guard override — indoor {_indoor_cg:.1f}°F approaching"
+                                        f" comfort_cool {_comfort_cool_cg:.1f}°F, breach predicted in"
+                                        f" {_hours_to_breach:.1f}h — switching to active cooling"
+                                    )
                                 )
                                 self._natural_vent_active = False
                                 if self._emit_event_callback:
@@ -2308,7 +2312,11 @@ class AutomationEngine:
                             if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
                                 self._natural_vent_active = False
                                 await self._deactivate_fan(
-                                    reason=(f"nat vent proactive floor exit: floor in {time_to_floor:.2f} hr")
+                                    reason=(
+                                        f"nat-vent proactive floor exit: indoor {_indoor_now:.1f}°F"
+                                        f" predicted to reach comfort_heat {comfort_heat_now:.1f}°F"
+                                        f" in {time_to_floor:.2f}h"
+                                    )
                                 )
                                 _LOGGER.info(
                                     "Natural vent proactive exit: floor predicted in %.2f hr"
@@ -2486,7 +2494,13 @@ class AutomationEngine:
                     current_temp,
                     _hard_floor,
                 )
-                await self._deactivate_fan(reason="nat_vent_floor_exit", restore_hvac=True)
+                await self._deactivate_fan(
+                    reason=(
+                        f"nat-vent hard floor exit [{_context}]: indoor {current_temp:.1f}°F"
+                        f" ≤ floor {_hard_floor:.1f}°F"
+                    ),
+                    restore_hvac=True,
+                )
                 self._natural_vent_active = False
                 if self._emit_event_callback:
                     self._emit_event_callback(

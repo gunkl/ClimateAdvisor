@@ -384,6 +384,30 @@ class TestCeilingGuardFires:
         temp_calls = [c for c in calls if c.args[1] == "set_temperature"]
         assert any(c.args[2].get("temperature") == 74.0 for c in temp_calls)
 
+    def test_fan_deactivated_reason_includes_indoor_and_ceiling_values(self):
+        """The activity log's fan-deactivated reason must state the WHY with real numbers —
+
+        not just "ceiling guard override" with no indoor/ceiling/breach-time values. This is
+        what actually renders in the Activity Report's Settings column.
+        """
+        engine = _make_cg_engine(comfort_cool=74.0, indoor_temp=73.0)
+        engine._last_outdoor_temp = 76.0
+        engine._natural_vent_active = True
+        engine._deactivate_fan = AsyncMock()
+        _set_thermal_model(engine, k_passive=-0.05, conf="medium", k_active_cool=None)
+
+        now = datetime(2026, 5, 11, 10, 0, 0, tzinfo=UTC)
+        curve = _make_predicted_indoor(start_hour_utc=10, temps=[73.0, 74.5, 76.0])
+
+        with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
+            mock_dt.now.return_value = now
+            asyncio.run(engine.apply_classification(_make_warm_off_classification(), predicted_indoor=curve))
+
+        engine._deactivate_fan.assert_awaited_once()
+        reason = engine._deactivate_fan.call_args.kwargs.get("reason") or engine._deactivate_fan.call_args.args[0]
+        assert "73.0" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
+        assert "74.0" in reason, f"reason must state the actual comfort_cool ceiling; got: {reason!r}"
+
     def test_emits_ceiling_guard_fired_event(self):
         """Guard fires ceiling_guard_fired event with breach_time and hours_to_breach."""
         engine = _make_cg_engine(comfort_cool=74.0, indoor_temp=73.0)

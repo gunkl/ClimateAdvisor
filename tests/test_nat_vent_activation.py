@@ -846,6 +846,7 @@ class TestProactiveFloorExit:
         time_to_floor = (70.5 - 70.0) / 2.75 = 0.18 hr < 1.0 -> proactive exit
         """
         engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
+        engine._deactivate_fan = AsyncMock()
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
 
@@ -853,6 +854,13 @@ class TestProactiveFloorExit:
 
         assert not engine._natural_vent_active
         assert any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
+        # The activity log's fan-deactivated reason must state the WHY with real numbers —
+        # current indoor temp and the comfort_heat threshold it's predicted to reach, not
+        # just a bare "floor in X hr" with no indication of which floor.
+        engine._deactivate_fan.assert_awaited_once()
+        reason = engine._deactivate_fan.call_args.kwargs.get("reason") or engine._deactivate_fan.call_args.args[0]
+        assert "70.5" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
+        assert "70.0" in reason, f"reason must state the comfort_heat threshold; got: {reason!r}"
 
     def test_no_proactive_exit_when_floor_distant(self):
         """Floor predicted > 1 hr -> stays in nat vent.

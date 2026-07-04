@@ -401,6 +401,21 @@ def _render_setpoint_rejected(p: dict, unit: str) -> tuple[str, str]:
     return label, settings
 
 
+def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
+    nudge_value = p.get("nudge_value")
+    real_target = p.get("real_target")
+    mode = p.get("mode", "")
+    label = "Reconciling stuck setpoint -- nudging thermostat"
+    settings = ""
+    if nudge_value is not None and real_target is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = (
+                f"nudge to {format_temp(float(nudge_value), unit)} ({mode}),"
+                f" then {format_temp(float(real_target), unit)} in 30s"
+            )
+    return label, settings
+
+
 def _render_override_cleared(p: dict, unit: str) -> tuple[str, str]:
     was_mode = p.get("was_mode", "")
     old_t = p.get("old_setpoint_f")
@@ -840,6 +855,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "classification_suppressed_paused": _render_classification_suppressed_paused,
     "occupancy_setback_suppressed_paused": _render_occupancy_setback_suppressed_paused,
     "setpoint_rejected": _render_setpoint_rejected,
+    "setpoint_nudge": _render_setpoint_nudge,
     "override_cleared": _render_override_cleared,
     "override_confirmed": _render_override_confirmed,
     "override_self_resolved": _render_override_self_resolved,

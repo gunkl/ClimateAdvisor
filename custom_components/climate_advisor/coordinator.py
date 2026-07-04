@@ -1674,7 +1674,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     else:
                         elapsed_minutes = 30.0
                     self._last_violation_check = now
-                    if forecast.current_indoor_temp < comfort_low or forecast.current_indoor_temp > comfort_high:
+                    if (
+                        forecast.current_indoor_temp < comfort_low or forecast.current_indoor_temp > comfort_high
+                    ) and not self._is_nat_vent_tolerated_deviation(
+                        forecast.current_indoor_temp, comfort_low, comfort_high
+                    ):
                         self._today_record.comfort_violations_minutes += elapsed_minutes
 
             # Check economizer opportunity (window cooling on hot days)
@@ -5326,6 +5330,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             payload.update(extra)
         self._emit_event("incident_detected", payload)
 
+    def _is_nat_vent_tolerated_deviation(self, indoor: float, comfort_heat: float, comfort_cool: float) -> bool:
+        """True if this comfort-band deviation is expected nat-vent cycling tolerance, not a violation.
+
+        WHF nat-vent cycling (see automation.py's nat_vent_temperature_check()) is designed to
+        let indoor oscillate slightly past the comfort_heat/comfort_cool band edges — the fan
+        cycles on/off around a midpoint using the same CONF_NAT_VENT_HYSTERESIS_F hysteresis band.
+        A momentary deviation within that hysteresis tolerance, while a nat-vent session is
+        actively running, is the system successfully exercising control (CLAUDE.md
+        "Goal-Oriented Comfort Model", Issue #74) — not a comfort failure. Only used to gate
+        false-positive detection (incident emission, violation-minute accumulation); it does not
+        change the underlying >0.5°F trigger threshold or any other decision logic.
+        """
+        if not (self.automation_engine and self.automation_engine._natural_vent_active):
+            return False
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        return (comfort_heat - hysteresis) <= indoor <= (comfort_cool + hysteresis)
+
     def _detect_and_emit_incidents(self) -> None:
         """Scan recent event_log and state for noteworthy production incidents.
 
@@ -5403,7 +5424,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         indoor = current_data.get("indoor_temp")
         comfort_cool = self.config.get("comfort_cool")
         comfort_heat = self.config.get("comfort_heat")
-        if indoor and comfort_cool and indoor > comfort_cool + 0.5:
+        if (
+            indoor
+            and comfort_cool
+            and indoor > comfort_cool + 0.5
+            and not self._is_nat_vent_tolerated_deviation(indoor, comfort_heat or 0.0, comfort_cool)
+        ):
             recent_violations = [
                 e
                 for e in self._event_log[-50:]
@@ -5424,7 +5450,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         ),
                     },
                 )
-        elif indoor and comfort_heat and indoor < comfort_heat - 0.5:
+        elif (
+            indoor
+            and comfort_heat
+            and indoor < comfort_heat - 0.5
+            and not self._is_nat_vent_tolerated_deviation(indoor, comfort_heat, comfort_cool or 999.0)
+        ):
             recent_violations = [
                 e
                 for e in self._event_log[-50:]
@@ -5440,6 +5471,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "indoor_f": indoor,
                         "outdoor_f": current_data.get("outdoor_temp"),
                         "hvac_mode": current_data.get("hvac_mode"),
+                        "nat_vent_active": (
+                            self.automation_engine._natural_vent_active if self.automation_engine else None
+                        ),
                     },
                 )
 

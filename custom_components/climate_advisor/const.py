@@ -4,16 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.65"
+VERSION = "0.4.66"
 
 RELEASE_NOTES: dict[str, list[str]] = {
-    "0.4.65": [
+    "0.4.66": [
         "Fix #413: restart-cause diagnostics (added in #403) now correctly classify real HA"
         " restarts and deploys as 'version_changed' or 'user_restart' instead of always"
         " showing 'unknown'. The persistence step was wired to async_shutdown(), which only"
         " runs on config-entry unload/reload — not on a normal Home Assistant restart. A new"
         " EVENT_HOMEASSISTANT_STOP listener now persists the same shutdown diagnostics on the"
         " restart path that actually happens in practice.",
+    ],
+    "0.4.65": [
+        "Fix #411: nat-vent floor-exit decisions and false comfort-violation alarms during"
+        " correct WHF cycling are now consistent; a stuck thermostat setpoint disagreement"
+        " self-corrects instead of retrying forever.",
     ],
     "0.4.64": [
         "Fix #409: streamlined the Status card's nat-vent display — removed the duplicate"
@@ -736,7 +741,7 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     413: {
-        "version_fixed": "0.4.65",
+        "version_fixed": "0.4.66",
         "title": "Restart-cause classification (#403) always showed 'unknown' on real HA restarts/deploys",
         "scope_covered": (
             "coordinator.py: extracted _persist_shutdown_diagnostics() (sets clean_shutdown,"
@@ -758,6 +763,62 @@ KNOWN_FIXES: dict[int, dict] = {
             " process exits on an unusually fast shutdown; this mirrors the reliability"
             " envelope of every other async_create_task-scheduled cleanup task in this"
             " integration and was not treated as a new risk introduced by this fix."
+        ),
+    },
+    411: {
+        "version_fixed": "0.4.65",
+        "title": (
+            "Nat-vent floor-exit decision loop told a contradictory story and falsely"
+            " flagged correct WHF cycling as a comfort violation"
+        ),
+        "scope_covered": (
+            "automation.py: added _exit_nat_vent(reason, set_outdoor_exit_time=False), the"
+            " single choke point for ending a nat-vent session, and rewired all 4 exit paths"
+            " (the proactive/predictive k_passive-projected floor exit in apply_classification(),"
+            " the reactive hard-floor exit, the outdoor-reversal exit, and the outdoor-too-warm"
+            " exit) to call it instead of each hand-rolling its own HVAC restore. This removes"
+            " the proactive exit's sensor-blind _set_hvac_mode() override (it never checked"
+            " whether a monitored door/window sensor was still open) and its redundant"
+            " double-restore on top of _deactivate_fan(), and gives the outdoor-too-warm exit a"
+            " _pre_pause_mode capture it never had before. Only the outdoor-reversal call site"
+            " sets set_outdoor_exit_time=True, preserving the existing reactivation lockout"
+            " timer as a side effect of just that one path. Also added"
+            " _nat_vent_may_reactivate(outdoor, indoor, comfort_heat, comfort_cool, threshold,"
+            " hysteresis=0.0), unifying the identical 4-part reactivation gate that was"
+            " hand-copied at 4 sites (handle_door_window_open(), the paused-by-door"
+            " reactivation block, _re_pause_for_open_sensor(), and the Issue #134"
+            " comfort-ceiling re-entry check inside check_natural_vent_conditions()) — this"
+            " duplication had already caused one prior shipped bug (#402) from a copy drifting"
+            " out of sync. Also added _setpoint_reject_streak tracking in _set_temperature():"
+            " on the second consecutive setpoint_rejected result for the same commanded value,"
+            " the retry nudges the setpoint by +/-1 F (by mode sign) first, waits ~30s, then"
+            " re-sends the real target — forcing a thermostat that silently ignores repeated"
+            " identical commands to recognize a real change. A distinct setpoint_nudge event"
+            " (not a generic setpoint event) keeps the transient nudge value from appearing in"
+            " status/activity output as if it were a real decision."
+            " coordinator.py: added _is_nat_vent_tolerated_deviation(indoor, comfort_heat,"
+            " comfort_cool), gating both _detect_and_emit_incidents()'s comfort_violation/"
+            "comfort_undertemp emission and the persisted comfort_violations_minutes"
+            " accumulation (feeds comfort_score in learning.py) so an in-tolerance deviation"
+            " while a nat-vent session is actively cycling is not counted as a comfort failure,"
+            " per the project's own 'violations should only count when the system had control"
+            " and failed' principle (CLAUDE.md, Issue #74). comfort_undertemp's payload now"
+            " also carries nat_vent_active, matching comfort_violation."
+            " ai_skills_investigator.py: investigation_fallback() now detects rapid nat-vent"
+            " cycling (3+ exit/re-entry pairs within any 60-minute window) and repeated"
+            " identical setpoint rejections (2+ setpoint_rejected events for the same commanded"
+            " value) as generalized patterns, not hardcoded to the #411 timeline specifically."
+        ),
+        "scope_not_covered": (
+            "Away-mode ceiling exit is intentionally NOT routed through _exit_nat_vent() — it"
+            " has no pause/grace state machine and is a genuinely different concept by design."
+            " There is no runtime timeout backstop if the setpoint nudge itself also gets"
+            " rejected (the retry loop would still cycle on the nudged value); flag as a"
+            " follow-up if that recurs in practice. The ODE ceiling-escalation guard"
+            " (automation.py ~L1288) intentionally still calls _ceiling_threshold() directly"
+            " rather than _nat_vent_may_reactivate() — it is a different decision (escalate to"
+            " AC, not start nat-vent) and only the ceiling sub-condition is shared with it, not"
+            " the full 4-part reactivation gate."
         ),
     },
     409: {

@@ -71,15 +71,17 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
 
 });
 
-// Issue #402 follow-up: nat_vent_active/nat_vent_ac_assist were never included in the
-// status endpoint at all, so the "Natural Vent" status card was unreachable dead code —
-// it could never render regardless of whether nat-vent was actually active. Also adds the
-// cycling band (off/on threshold + target) to the card, addressing "target 71°F but indoor
-// is 69°F, why is the fan still on" — showing the band makes clear 69°F is within the
-// fan's normal cycling range, not a contradiction.
-test.describe('Natural Vent status card (Issue #402 follow-up)', () => {
+// Issue #407: the "Natural Vent" info previously rendered as its own separate
+// status-item card, duplicating (and drifting from) the main Status card's own
+// nat-vent target text — a UI the user never asked for (a byproduct of the #402
+// follow-up fix). Merged the cycling band (off/on threshold + target) and
+// AC-assist/savings-mode label back into the Status card as a supplemental line,
+// and removed the standalone card. This still guards against "target 71°F but
+// indoor is 69°F, why is the fan still on" by showing the band makes clear 69°F
+// is within the fan's normal cycling range, not a contradiction.
+test.describe('Natural Vent info merged into Status card (Issue #407)', () => {
 
-  test('renders and shows the cycling band when nat-vent is active', async ({ page }) => {
+  test('Status card shows the cycling band when nat-vent is active', async ({ page }) => {
     await page.route('**/api/climate_advisor/status', (route) => {
       route.fulfill({
         status: 200,
@@ -105,15 +107,19 @@ test.describe('Natural Vent status card (Issue #402 follow-up)', () => {
     await page.goto('/');
     await page.waitForSelector('#status-grid', { state: 'visible' });
 
-    const natVentItem = page.locator('.status-item', { hasText: 'Natural Vent' });
-    await expect(natVentItem).toBeVisible();
-    const html = await natVentItem.innerHTML();
+    // No separate "Natural Vent" card should exist anymore.
+    await expect(page.locator('.status-item .label', { hasText: 'Natural Vent' })).toHaveCount(0);
+
+    const statusItem = page.locator('.status-item', { hasText: 'Status' }).first();
+    await expect(statusItem).toBeVisible();
+    const html = await statusItem.innerHTML();
     expect(html).toContain('70');
     expect(html).toContain('72');
     expect(html).toContain('71');
+    expect(html).toContain('savings mode');
   });
 
-  test('does not render when nat-vent is not active', async ({ page }) => {
+  test('Status card shows no nat-vent line when nat-vent is not active', async ({ page }) => {
     await page.route('**/api/climate_advisor/status', (route) => {
       route.fulfill({
         status: 200,
@@ -135,8 +141,9 @@ test.describe('Natural Vent status card (Issue #402 follow-up)', () => {
     await page.goto('/');
     await page.waitForSelector('#status-grid', { state: 'visible' });
 
-    const natVentItem = page.locator('.status-item', { hasText: 'Natural Vent' });
-    await expect(natVentItem).toHaveCount(0);
+    const statusItem = page.locator('.status-item', { hasText: 'Status' }).first();
+    const html = await statusItem.innerHTML();
+    expect(html).not.toContain('Natural ventilation');
   });
 
 });

@@ -185,3 +185,66 @@ class TestComputeNatVentCyclingBand:
         assert state["nat_vent_target"] == band["nat_vent_target"]
         assert state["nat_vent_on_threshold"] == band["nat_vent_on_threshold"]
         assert state["nat_vent_off_threshold"] == band["nat_vent_off_threshold"]
+
+
+class TestComputeAutomationStatusNatVentTarget:
+    """Issue #407: _compute_automation_status()'s nat-vent branch must call
+
+    compute_nat_vent_cycling_band() — the same single source of truth used by the
+    "Natural Vent" status card — instead of independently recomputing the flat
+    daytime comfort-band midpoint. Before this fix, the main Status card always
+    showed the daytime midpoint (e.g. 71°F) even overnight during the sleep window,
+    contradicting the already-correct Natural Vent card (e.g. 65-66°F), repeating the
+    exact "fix one duplicate implementation, miss the sibling" pattern documented on
+    compute_nat_vent_cycling_band() from #374/#400/#402.
+    """
+
+    def _config(self):
+        return {
+            "comfort_heat": 68,
+            "comfort_cool": 74,
+            "sleep_heat": 65,
+            "sleep_time": "22:00",
+            "wake_time": "07:00",
+        }
+
+    def test_daytime_status_uses_comfort_midpoint(self):
+        """Outside the sleep window, the status string shows the daytime midpoint target."""
+        coord = _make_nat_vent_coord_stub(config=self._config())
+
+        # 14:00 — outside the 22:00-07:00 sleep window
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 14, 0, 0)):
+            status = coord._compute_automation_status()
+
+        assert status == "windows open · nat-vent (target 71°F)"
+
+    def test_sleep_window_status_uses_sleep_heat_not_daytime_midpoint(self):
+        """During the sleep window, the status string must show the sleep-window target
+        (sleep_heat + hysteresis), NOT the daytime comfort-band midpoint.
+
+        This is the exact regression this bug produced: the Status card previously showed
+        71°F (the daytime midpoint) overnight instead of 66°F (sleep_heat(65) + hysteresis(1)).
+        """
+        coord = _make_nat_vent_coord_stub(config=self._config())
+
+        # 02:00 — inside the overnight sleep window
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
+            status = coord._compute_automation_status()
+
+        assert status == "windows open · nat-vent (target 66°F)"
+        assert "71" not in status
+
+    def test_status_and_cycling_band_agree(self):
+        """The target embedded in the status string must equal
+
+        compute_nat_vent_cycling_band()["nat_vent_target"], formatted the same way — a
+        guard against the two ever drifting apart again.
+        """
+        coord = _make_nat_vent_coord_stub(config=self._config())
+
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
+            status = coord._compute_automation_status()
+            band = coord.compute_nat_vent_cycling_band()
+
+        expected = f"windows open · nat-vent (target {band['nat_vent_target']:.0f}°F)"
+        assert status == expected

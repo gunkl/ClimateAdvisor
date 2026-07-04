@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.61"
+VERSION = "0.4.63"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.63": [
+        "Fix #407 follow-up: removed the standalone 'Natural Vent' dashboard card — its"
+        " cycling-band and AC-assist info is now shown as a supplemental line on the main"
+        " Status card instead of a separate card, per the project's 'no new cards, extend"
+        " existing ones' dashboard convention.",
+    ],
+    "0.4.62": [
+        "Fix #407: the dashboard Status card no longer shows a stale daytime nat-vent target"
+        " (e.g. 71°F) overnight during the sleep window — it now matches the Natural Vent"
+        " card's correct sleep-window target (e.g. 65°F).",
+    ],
     "0.4.61": [
         "Fix #405: HVAC writes no longer stay permanently blocked after a whole-house-fan"
         " nat-vent session ends with the fan already off at a restart/coalesce boundary."
@@ -709,6 +720,34 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    407: {
+        "version_fixed": "0.4.63",
+        "title": "Dashboard Status card showed stale nat-vent target + redundant Natural Vent card",
+        "scope_covered": (
+            "coordinator.py: _compute_automation_status()'s nat-vent branch now calls the"
+            " existing compute_nat_vent_cycling_band() helper (the Issue #402 follow-up single"
+            " source of truth for this value) instead of independently recomputing the flat"
+            " daytime comfort-band midpoint ((comfort_heat + comfort_cool) / 2). Previously the"
+            " main Status card always showed the daytime midpoint (e.g. 71°F) even overnight"
+            " during the sleep window, contradicting the already-correct Natural Vent card,"
+            " which fed off compute_nat_vent_cycling_band() and correctly showed the"
+            " sleep_heat + hysteresis target (e.g. 65-66°F). This repeats the exact"
+            " fix-one-duplicate-implementation-miss-the-sibling pattern documented on that"
+            " helper's docstring from #374, #400, and #402. Follow-up (0.4.63): the separate"
+            " standalone 'Natural Vent' status-item card in frontend/index.html (added by the"
+            " #402 follow-up) duplicated this info and was never requested — its AC-assist"
+            " label and cycling-band line are now rendered as a supplemental line inside the"
+            " Status card instead, and the standalone card was removed, per the project's"
+            " existing 'no new cards, extend existing ones' dashboard convention."
+        ),
+        "scope_not_covered": (
+            "Does not touch automation.py's nat_vent_temperature_check() (the fan's actual"
+            " cycling logic, already correct since #374) or api.py's status endpoint (already"
+            " correct since #402's extraction of compute_nat_vent_cycling_band()). Does not"
+            " touch the unrelated, pre-existing stale test replica of _compute_automation_status()"
+            " in tests/test_status_sensors.py — that is a separate, already-known issue."
+        ),
+    },
     405: {
         "version_fixed": "0.4.61",
         "title": "HVAC writes permanently blocked by stale WHF suppression flag after nat-vent fan goes idle",

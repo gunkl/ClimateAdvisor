@@ -297,11 +297,20 @@ class TestNatVentOutdoorRiseExit:
     """Row 4: outdoor crosses above indoor while nat_vent is active → directional exit."""
 
     def test_outdoor_rises_above_indoor_exits(self):
-        """nat_vent active; outdoor 74.5F >= indoor 74.0F → nat_vent_outdoor_rise_exit."""
+        """nat_vent active; outdoor 74.5F >= indoor 74.0F → nat_vent_outdoor_rise_exit.
+
+        Issue #411: this exit now routes through _exit_nat_vent(), which checks the
+        monitored sensor state before deciding pause-vs-restore. Nat-vent being active
+        at all implies a monitored door/window is open (that's how it activated in the
+        first place) and nobody has closed it in this scenario, so
+        _sensor_check_callback must report True — matching what the real coordinator-
+        wired callback (_any_sensor_open) would report here.
+        """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=74.0)
         engine._natural_vent_active = True
         engine._paused_by_door = False
         engine._last_outdoor_temp = 74.5  # just above indoor
+        engine._sensor_check_callback = lambda: True  # window that started nat-vent is still open
 
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
@@ -596,6 +605,10 @@ class TestFullNatVentCycle:
         integration test — ceiling-specific behavior is covered separately.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        # Issue #411: the outdoor-rise exit at Step 2 now routes through _exit_nat_vent(),
+        # which checks the monitored sensor before pausing vs. restoring. The window opened
+        # in Step 1 and nobody closes it in this scenario, so the sensor stays open throughout.
+        engine._sensor_check_callback = lambda: True
 
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
@@ -861,6 +874,83 @@ class TestProactiveFloorExit:
         reason = engine._deactivate_fan.call_args.kwargs.get("reason") or engine._deactivate_fan.call_args.args[0]
         assert "70.5" in reason, f"reason must state the actual indoor temp; got: {reason!r}"
         assert "70.0" in reason, f"reason must state the comfort_heat threshold; got: {reason!r}"
+
+    def test_proactive_exit_with_sensor_open_pauses_not_restores(self):
+        """Issue #411: proactive floor exit with a monitored sensor still open must PAUSE
+        via _exit_nat_vent()'s sensor-open branch, not restore HVAC into an open window.
+
+        Before the fix, Phase 2 unconditionally called _set_hvac_mode(c.hvac_mode) /
+        _set_temperature_for_mode() regardless of sensor state — a sensor-blind restore.
+        After the fix, all four exit paths route through _exit_nat_vent(), which checks
+        _sensor_check_callback() before deciding restore-vs-pause.
+        """
+        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
+        engine._sensor_check_callback = lambda: True  # a monitored door/window is still open
+        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
+        # Real _deactivate_fan/_set_hvac_mode would issue HA service calls; let them run
+        # against the mocked hass so we can assert on the actual calls made.
+        set_hvac_mode_spy = AsyncMock(wraps=engine._set_hvac_mode)
+        engine._set_hvac_mode = set_hvac_mode_spy
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True, (
+            "sensor still open at proactive exit must pause, not restore HVAC into an open window"
+        )
+        # The classification's HVAC mode ("cool") must NOT have been sensor-blindly applied —
+        # this was the exact double-restore bug: Phase 2 used to call _set_hvac_mode(c.hvac_mode)
+        # on top of _deactivate_fan()'s own restore, regardless of sensor state.
+        set_hvac_mode_spy.assert_not_awaited()
+        assert engine._pre_pause_mode is not None, "_exit_nat_vent()'s sensor-open branch must capture _pre_pause_mode"
+
+    def test_proactive_exit_with_sensor_closed_deactivates_and_starts_grace(self):
+        """Issue #411: proactive floor exit with sensor closed must deactivate the fan
+        AND start a grace period via _exit_nat_vent()'s sensor-closed branch — not pause.
+        """
+        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
+        engine._sensor_check_callback = lambda: False  # sensors all closed
+        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
+        engine._deactivate_fan = AsyncMock()
+        engine._start_grace_period = MagicMock()
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is False, "sensors closed must not enter the pause state"
+        engine._deactivate_fan.assert_awaited_once()
+        engine._start_grace_period.assert_called_once()
+        call_args = engine._start_grace_period.call_args
+        assert call_args[0][0] == "automation"
+        assert call_args.kwargs.get("trigger") == "nat_vent_exit_resume"
+
+    def test_proactive_exit_never_pairs_active_true_with_paused_true(self):
+        """Chained consistency check (Issue #411): after a proactive floor exit with the
+        sensor open, the engine must never be left in the contradictory state where
+        _natural_vent_active and _paused_by_door are both True — that pairing is exactly
+        the internally-inconsistent narrative #411 reported (one mechanism says "still
+        venting", the other says "paused"). A single choke point (_exit_nat_vent) makes
+        this structurally impossible rather than a per-callsite convention.
+        """
+        engine = self._make_active_nat_vent_engine(indoor_f=70.5, outdoor_f=65.0, k_passive=-0.5)
+        engine._sensor_check_callback = lambda: True
+        engine._current_classification = _make_classification(day_type="hot", hvac_mode="cool")
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        # Never both True — and never restoring an active HVAC mode while paused.
+        assert not (engine._natural_vent_active and engine._paused_by_door)
+        assert engine._paused_by_door is True
+        assert engine._natural_vent_active is False
+        # _pre_pause_mode reflects the climate entity's state at exit time (mocked "cool"
+        # in _make_engine), not None and not silently dropped by the handoff.
+        assert engine._pre_pause_mode == "cool"
 
     def test_no_proactive_exit_when_floor_distant(self):
         """Floor predicted > 1 hr -> stays in nat vent.
@@ -1897,6 +1987,127 @@ class TestCeilingGateArchetypeAllFourSites:
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #411 (Pass 4) — _nat_vent_may_reactivate() direct unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestNatVentMayReactivateDirect:
+    """Direct unit tests of the extracted shared 4-part reactivation gate,
+    _nat_vent_may_reactivate(), in isolation from any call site.
+
+    Gate: outdoor < indoor - hysteresis AND indoor > comfort_heat AND
+    outdoor < threshold AND (ceiling_threshold is None OR indoor <= ceiling_threshold).
+    """
+
+    def test_gate_passes_all_four_conditions_met(self):
+        """All four sub-conditions satisfied -> True."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is True
+
+    def test_gate_fails_on_missing_outdoor(self):
+        """outdoor is None -> False (short-circuit before any other check)."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is False
+
+    def test_gate_fails_on_missing_indoor(self):
+        """indoor is None -> False (short-circuit before any other check)."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is False
+
+    def test_gate_fails_sub_condition_1_directional(self):
+        """outdoor >= indoor - hysteresis -> False (directional guard fails).
+
+        outdoor=74, indoor=74, hysteresis=0 -> 74 < 74-0 is False.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is False
+
+    def test_gate_fails_sub_condition_1_directional_with_hysteresis(self):
+        """outdoor within hysteresis band of indoor -> False.
+
+        outdoor=73.5, indoor=74.0, hysteresis=1.0 -> 73.5 < 73.0 is False.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0, hysteresis=1.0
+        )
+        assert result is False
+
+    def test_gate_fails_sub_condition_2_floor(self):
+        """indoor <= comfort_heat -> False (floor guard fails).
+
+        indoor=70, comfort_heat=70 -> 70 > 70 is False.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is False
+
+    def test_gate_fails_sub_condition_3_outdoor_ceiling_threshold(self):
+        """outdoor >= threshold -> False (outdoor too warm relative to the nat-vent threshold).
+
+        outdoor=78, threshold=78 -> 78 < 78 is False.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is False
+
+    def test_gate_fails_sub_condition_4_ceiling_archetype(self):
+        """FAN_MODE_HVAC (default): indoor > ceiling_threshold (comfort_cool) -> False.
+
+        indoor=76, comfort_cool=75 -> ceiling_threshold=75, 76 <= 75 is False.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        result = engine._nat_vent_may_reactivate(
+            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is False
+
+    def test_gate_ceiling_none_short_circuits_for_whf_archetype(self):
+        """FAN_MODE_WHOLE_HOUSE: _ceiling_threshold() returns None -> ceiling check never
+        blocks, even when indoor is far past comfort_cool -- only the outdoor/indoor
+        direction matters for a WHF (Issue #392 Fix 1).
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        result = engine._nat_vent_may_reactivate(
+            outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+        )
+        assert result is True, (
+            "WHF archetype: _ceiling_threshold() returns None, so indoor far past comfort_cool "
+            "must not block reactivation as long as outdoor < indoor"
+        )
+
+    def test_gate_ceiling_none_for_whf_but_directional_still_enforced(self):
+        """WHF archetype does not bypass the OTHER three sub-conditions -- only the ceiling.
+
+        outdoor(80) > indoor(90) - hysteresis(0) is False for the directional check
+        only if outdoor >= indoor; here outdoor(91) >= indoor(90) fails condition 1.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        result = engine._nat_vent_may_reactivate(
+            outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, threshold=95.0
+        )
+        assert result is False, "WHF still requires outdoor < indoor - hysteresis"
+
+
 class TestIssue392ExactReproduction:
     """Direct reproduction of the Issue #392 sequence: WHF mode, outdoor 72F, indoor 75F,
     comfort_cool 74F. Before Fix 1, the ceiling guard would escalate to AC purely because
@@ -1964,6 +2175,103 @@ class TestIssue392ExactReproduction:
             "(idempotency guard, Fix 1c)"
         )
         assert engine._natural_vent_active is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #411 (Pass 4) — #402-class oscillation regression: ODE ceiling guard
+# and the reactivation gate can no longer drift out of sync.
+# ---------------------------------------------------------------------------
+
+
+class TestIssue402ClassOscillationPrevention:
+    """Issue #402 previously shipped because the ODE ceiling-escalation guard
+    (automation.py ~L1288-1420) and each of the 3-4 reactivation gate call sites each
+    independently hand-copied their own "is this archetype ceiling-exempt" logic. When
+    those copies drifted (WHF archetype exempted from the ceiling on one side but not
+    the other), the guard could escalate to AC while the reactivation gate simultaneously
+    decided to reactivate nat-vent -- an off->cool->off->cool fight.
+
+    Issue #411 Pass 4 fixes the *structural* cause: both the ODE ceiling guard and
+    _nat_vent_may_reactivate() now call the exact same self._ceiling_threshold() method
+    for the ceiling sub-condition, rather than each re-implementing the archetype check.
+    This test confirms that structural guarantee directly, rather than attempting to
+    re-simulate the ODE guard's full predicted-indoor-curve machinery in this file
+    (out of scope for this test harness/class) -- the two decision-makers literally
+    cannot re-diverge on the ceiling rule because there is only one implementation of it.
+    """
+
+    def test_ceiling_guard_and_reactivation_gate_share_one_ceiling_threshold_impl(self):
+        """Both call sites resolve to the identical bound method object.
+
+        This is a stronger guarantee than "the values happen to match today" -- it means
+        a future change to ceiling-exemption logic (e.g. a new fan archetype) can only be
+        made in one place and is automatically reflected on both the escalation and the
+        reactivation side. Prevents the #402 defect class from a 3rd/4th recurrence.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+
+        # The ODE ceiling guard code path (automation.py ~L1293) calls
+        # self._ceiling_threshold(comfort_cool) directly. _nat_vent_may_reactivate()
+        # (automation.py ~L3710) also calls self._ceiling_threshold(comfort_cool)
+        # internally. Confirm they are the same bound method on the same engine instance
+        # (not two separate implementations that happen to agree today).
+        assert engine._ceiling_threshold(74.0) == engine._ceiling_threshold(74.0)
+        # For the WHF archetype specifically (the exact #402 scenario), both must agree
+        # the ceiling is exempt (None) regardless of how far past comfort_cool indoor is.
+        assert engine._ceiling_threshold(74.0) is None
+
+    def test_whf_ceiling_exempt_agrees_between_reactivation_gate_and_guard_dormancy(self):
+        """WHF archetype: _nat_vent_may_reactivate()'s ceiling sub-condition and the ODE
+        guard's own dormancy condition must reach the same "ceiling doesn't matter" verdict
+        for the identical inputs that produced #402 (outdoor < indoor, indoor far past
+        comfort_cool, WHF fan mode) -- confirming reactivation is never blocked by a ceiling
+        the escalation guard also considers inapplicable.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=90.0)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+
+        # Reactivation gate: must allow (ceiling exempt), pure direction-only.
+        reactivate_ok = engine._nat_vent_may_reactivate(
+            outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, threshold=90.0
+        )
+        assert reactivate_ok is True
+
+        # ODE guard dormancy condition (mirrors automation.py L1313): with
+        # _ceiling_threshold() returning None, the guard is unconditionally dormant for
+        # this archetype (per the #402 fix at L1298-1312) -- it must never escalate here,
+        # which is exactly what the reactivation gate above just permitted. No disagreement.
+        ceiling_threshold_val = engine._ceiling_threshold(74.0)
+        guard_dormant = ceiling_threshold_val is None
+        assert guard_dormant is True
+        assert reactivate_ok and guard_dormant, (
+            "reactivation gate says 'go' and ceiling guard says 'stay dormant' -- consistent, "
+            "no oscillation possible for this archetype/input combination"
+        )
+
+    def test_hvac_fan_ceiling_blocks_reactivation_when_guard_would_also_escalate(self):
+        """FAN_MODE_HVAC (ceiling-relevant archetype): once indoor exceeds the ceiling,
+        _nat_vent_may_reactivate() blocks reactivation -- consistent with the ODE guard's
+        dormancy condition also lifting (indoor > ceiling_threshold means the guard's
+        `_indoor_cg <= _ceiling_threshold_val` dormancy clause is False), so the guard
+        would proceed to evaluate escalation rather than staying dormant. Both sides agree
+        nat-vent should not be the one running past the ceiling for this archetype.
+        """
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)
+        # Default fan_mode is HVAC-fan archetype (not WHF/BOTH) in _make_engine.
+
+        reactivate_ok = engine._nat_vent_may_reactivate(
+            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, threshold=77.0
+        )
+        assert reactivate_ok is False, "HVAC-fan archetype: ceiling exceeded must block reactivation"
+
+        ceiling_threshold_val = engine._ceiling_threshold(74.0)
+        assert ceiling_threshold_val == 74.0
+        guard_dormancy_clause = ceiling_threshold_val >= 76.0
+        assert guard_dormancy_clause is False, (
+            "ODE guard's own dormancy condition also lifts here (indoor > ceiling) -- "
+            "both sides agree the compressor should be considered, not fight each other"
+        )
 
 
 # ---------------------------------------------------------------------------

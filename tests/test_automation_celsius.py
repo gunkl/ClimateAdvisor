@@ -575,3 +575,310 @@ class TestSetpointRetry:
             "Retry callback must NOT call set_temperature when _write_seq has been incremented "
             "(a newer command superseded the original)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: setpoint nudge on repeated rejection (Issue #411)
+# ---------------------------------------------------------------------------
+
+
+class TestSetpointNudgeStreak:
+    """Issue #411: on the 2nd+ consecutive setpoint_rejected for the same commanded
+    value, _set_temperature()'s retry path nudges by ±1°F before sending the real
+    target 30s later — some thermostat integrations dedup a repeated identical
+    set_temperature payload, so retrying with the exact same value can never succeed.
+
+    Occupant impact (before fix): a stuck disagreement between what CA commanded and
+    what the thermostat reports never resolves — CA keeps re-sending the same rejected
+    value every 15 minutes forever. (After fix): a distinct value forces the device to
+    recognize a real change, and a distinct 'setpoint_nudge' event (not a generic
+    setpoint change) lets the status/activity report show "reconciling stuck setpoint"
+    instead of surfacing the transient nudge value as if it were a real decision.
+    """
+
+    def _make_engine_stub(self) -> AutomationEngine:
+        """Minimal AutomationEngine with controllable seq and pending state."""
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock()
+        hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+
+        config: dict = {
+            "climate_entity": "climate.test_thermostat",
+            "temp_unit": "fahrenheit",
+            "comfort_heat": 68.0,
+            "comfort_cool": 76.0,
+            "setback_heat": 60.0,
+            "setback_cool": 80.0,
+            "notify_service": "notify.notify",
+        }
+        engine = AutomationEngine(
+            hass=hass,
+            climate_entity=config["climate_entity"],
+            weather_entity="weather.forecast_home",
+            door_window_sensors=[],
+            notify_service=config["notify_service"],
+            config=config,
+        )
+        return engine
+
+    def _fire_validation_cb(self, engine: AutomationEngine, validation_cb, captured_call_later: list) -> None:
+        """Invoke the 10s validation callback and run its inner coroutine synchronously."""
+        coros: list = []
+
+        def capture_task(coro):
+            coros.append(coro)
+
+        engine.hass.async_create_task = MagicMock(side_effect=capture_task)
+        validation_cb(None)
+        assert len(coros) == 1, "validation lambda must call async_create_task once"
+        asyncio.run(coros[0])
+
+    def _reject_once(self, engine: AutomationEngine, commanded: float, reported: float, mode: str) -> None:
+        """Run one full _set_temperature -> 10s validation cycle with a rejected value.
+
+        Leaves engine._setpoint_reject_streak incremented and does NOT fire the
+        900s retry callback — callers fire that separately to inspect nudge behavior.
+        """
+        wrong_state = MagicMock()
+        wrong_state.state = mode
+        wrong_state.attributes = {"temperature": reported, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(commanded, reason="test", mode=mode))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+    def _reject_and_fire_retry(self, engine: AutomationEngine, commanded: float, reported: float, mode: str) -> None:
+        """Run _reject_once(), then also fire the resulting 900s retry callback.
+
+        The setpoint_nudge event (and the immediate nudge service call) only fires
+        inside _retry_callback — the validation callback alone only increments the
+        streak and schedules the retry. This mirrors production timing: rejection is
+        detected at t+10s, but the nudge decision/action happens when the 15-minute
+        retry timer fires at t+900s.
+        """
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        wrong_state = MagicMock()
+        wrong_state.state = mode
+        wrong_state.attributes = {"temperature": reported, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(commanded, reason="test", mode=mode))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+        # captured_call_later now holds the 900s retry callback registration (if rejected).
+        assert len(captured_call_later) >= 1, "expected a 900s retry to have been scheduled"
+        retry_delay, retry_lambda = captured_call_later[0]
+        assert retry_delay == 900
+
+        retry_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: retry_coros.append(coro))
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            retry_lambda(None)
+            assert len(retry_coros) == 1
+            asyncio.run(retry_coros[0])
+
+    def test_first_rejection_plain_retry_no_nudge(self):
+        """First setpoint_rejected for a commanded value → plain retry, no nudge sent.
+
+        A single transient miss should not trigger the nudge — only a REPEATED
+        rejection for the same value indicates the device is deduping identical
+        payloads. Firing the resulting 900s retry callback re-issues _set_temperature
+        with the SAME value (plain retry path), not a nudge — confirmed by checking no
+        setpoint_nudge event fires and only one service call (the plain retry) is made.
+        """
+        engine = self._make_engine_stub()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        self._reject_and_fire_retry(engine, commanded=75.0, reported=72.0, mode="cool")
+
+        assert engine._setpoint_reject_streak == 1
+        nudge_events = [e for e in emitted_events if e[0] == "setpoint_nudge"]
+        assert len(nudge_events) == 0, "first rejection must not emit a setpoint_nudge event"
+        # Plain retry sends the ORIGINAL commanded value, not a nudged one.
+        calls = engine.hass.services.async_call.call_args_list
+        assert len(calls) >= 1
+        last_temp = calls[-1][0][2]["temperature"]
+        assert abs(last_temp - 75.0) < 0.01, f"plain retry must resend the original value 75.0; got {last_temp}"
+
+    def test_second_consecutive_rejection_nudges_before_real_target(self):
+        """2nd consecutive setpoint_rejected for the same commanded value → nudge
+        (+1.0°F for cool mode, matching the mode's escalation sign) sent before the
+        real target 30s later, with a distinct setpoint_nudge event.
+        """
+        engine = self._make_engine_stub()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        # First rejection — streak becomes 1, plain retry (no nudge on this cycle).
+        self._reject_and_fire_retry(engine, commanded=75.0, reported=72.0, mode="cool")
+        assert engine._setpoint_reject_streak == 1
+
+        # Second rejection for the SAME commanded value — streak becomes 2, must nudge.
+        self._reject_and_fire_retry(engine, commanded=75.0, reported=72.0, mode="cool")
+        assert engine._setpoint_reject_streak == 2
+
+        nudge_events = [e for e in emitted_events if e[0] == "setpoint_nudge"]
+        assert len(nudge_events) == 1, f"expected exactly one setpoint_nudge event; got {emitted_events}"
+        payload = nudge_events[0][1]
+        assert payload["real_target"] == 75.0
+        assert payload["mode"] == "cool"
+        # Cool mode nudges UP (+1.0°F) per the mode-sign rule in _set_temperature().
+        assert abs(payload["nudge_value"] - 76.0) < 0.01, (
+            f"cool-mode nudge must be +1.0F above the real target; got {payload['nudge_value']}"
+        )
+
+    def test_second_consecutive_rejection_heat_mode_nudges_down(self):
+        """Heat mode nudges DOWN (-1.0°F) — sign matches mode, mirroring the escalation
+        direction already used elsewhere in the engine (cool escalates up, heat down).
+        """
+        engine = self._make_engine_stub()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        self._reject_and_fire_retry(engine, commanded=70.0, reported=73.0, mode="heat")
+        self._reject_and_fire_retry(engine, commanded=70.0, reported=73.0, mode="heat")
+
+        nudge_events = [e for e in emitted_events if e[0] == "setpoint_nudge"]
+        assert len(nudge_events) == 1
+        payload = nudge_events[0][1]
+        assert payload["mode"] == "heat"
+        assert abs(payload["nudge_value"] - 69.0) < 0.01, (
+            f"heat-mode nudge must be -1.0F below the real target; got {payload['nudge_value']}"
+        )
+
+    def test_nudge_sends_nudge_value_then_real_target_after_30s(self):
+        """The nudge retry callback sends the nudge value immediately, then schedules
+        the real target via a separate 30s async_call_later before delivering it.
+        """
+        engine = self._make_engine_stub()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        # Build up to a 2nd rejection so the retry callback (not yet fired) will nudge.
+        self._reject_once(engine, commanded=75.0, reported=72.0, mode="cool")
+
+        # Third _set_temperature + 10s validation cycle to capture the 900s retry callback
+        # from the 2nd rejection without firing it yet.
+        wrong_state = MagicMock()
+        wrong_state.state = "cool"
+        wrong_state.attributes = {"temperature": 72.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(75.0, reason="test", mode="cool"))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+        assert engine._setpoint_reject_streak == 2
+        # captured_call_later now holds the 900s retry callback registration.
+        retry_delay, retry_lambda = captured_call_later[0]
+        assert retry_delay == 900
+
+        # Fire the retry callback — with streak >= 2 this must nudge first, then
+        # schedule the real target via a fresh async_call_later(30, ...).
+        nested_call_later: list = []
+
+        def fake_call_later_nested(hass, delay, callback):
+            nested_call_later.append((delay, callback))
+            return MagicMock()
+
+        retry_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: retry_coros.append(coro))
+        engine.hass.services.async_call.reset_mock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later_nested,
+            ),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            retry_lambda(None)
+            assert len(retry_coros) == 1
+            asyncio.run(retry_coros[0])
+
+        # The nudge value must have been sent immediately via the climate service.
+        nudge_calls = engine.hass.services.async_call.call_args_list
+        assert len(nudge_calls) == 1, f"expected exactly one immediate nudge service call; got {nudge_calls}"
+        nudge_data = nudge_calls[0][0][2]
+        assert abs(nudge_data["temperature"] - 76.0) < 0.01
+        assert nudge_data["hvac_mode"] == "cool"
+
+        # And a 30s callback must have been scheduled to deliver the real target afterward.
+        thirty_s_calls = [(d, cb) for d, cb in nested_call_later if d == 30]
+        assert len(thirty_s_calls) == 1, f"expected a 30s async_call_later for the real target; got {nested_call_later}"
+
+    def test_streak_resets_to_zero_after_confirmation(self):
+        """After a rejection streak, a subsequent CONFIRMED setpoint resets
+        _setpoint_reject_streak to 0 — so a later, unrelated rejection starts a fresh
+        streak rather than immediately nudging (a stale streak would otherwise nudge
+        on the first rejection of a completely different, later setpoint change).
+        """
+        engine = self._make_engine_stub()
+        emitted_events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda name, data: emitted_events.append((name, data))
+
+        # One rejection — streak = 1.
+        self._reject_once(engine, commanded=75.0, reported=72.0, mode="cool")
+        assert engine._setpoint_reject_streak == 1
+
+        # Now the thermostat matches the commanded value — confirmation path.
+        ok_state = MagicMock()
+        ok_state.state = "cool"
+        ok_state.attributes = {"temperature": 74.0, "hvac_action": "cool", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=ok_state)
+
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(74.0, reason="test", mode="cool"))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+            self._fire_validation_cb(engine, validation_cb, captured_call_later)
+
+        assert engine._setpoint_reject_streak == 0, "streak must reset to 0 once the thermostat confirms the setpoint"

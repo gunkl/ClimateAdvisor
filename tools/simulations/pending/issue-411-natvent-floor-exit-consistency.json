@@ -1,0 +1,110 @@
+{
+  "name": "issue-411-natvent-floor-exit-consistency",
+  "description": "Reproduces the Issue #411 timeline shape: a monitored window/door sensor stays open all night while WHF nat-vent runs, and indoor drifts down toward comfort_heat as the outside air cools. Before the fix, apply_classification()'s Phase 2 proactive floor exit and nat_vent_temperature_check()'s reactive hard-floor exit competed as two independent decision-makers for the same threshold, and Phase 2 additionally performed a sensor-blind HVAC-mode restore (arming the day classification's mode, e.g. 'cool', even though the window was still open) on top of _deactivate_fan()'s own restore -- producing a confusing exit/re-entry narrative every time the automation cycle re-evaluated. After the fix, all nat-vent exit paths route through the single _exit_nat_vent() choke point, which checks the monitored sensor before deciding restore-vs-pause -- with the sensor open all night, the session exits exactly once and stays paused (no HVAC mode restored into an open window, no thrash).",
+  "source": "activity-report",
+  "issue": 411,
+  "notes": [
+    "Occupant impact: the resident left a bedroom window open overnight per the nat-vent recommendation. The physical temperature stayed within expected tolerance the whole night -- WHF nat-vent was cycling exactly as designed. The problem was NOT a real comfort failure; it was that the system's own log narrative and internal HVAC-mode bookkeeping told a story inconsistent with what was actually happening (repeated 'exit nat-vent, arm cool mode, immediately re-enter nat-vent' cycles) and a benign, expected cycling dip risked being misreported as a comfort incident.",
+    "Config: fan_mode=whole_house_fan (matches the #411 report's WHF setup); comfort_heat=65F is the overnight floor; thermal_model.k_passive=-0.5 with confidence=high lets Phase 2's ODE-projected time-to-floor cross the MIN_VIABLE_NAT_VENT_HOURS=1.0h threshold partway through the night, matching the shape of the #411 log's proactive-exit-then-confusion timeline.",
+    "IMPORTANT residual-gap finding from constructing this scenario (reported to the Coordinator, not silently patched): the paused-by-door reactivation gate at check_natural_vent_conditions() re-evaluates the shared 4-part condition (_nat_vent_may_reactivate()) purely from INSTANTANEOUS outdoor/indoor/comfort_heat/threshold values -- it has no knowledge that Phase 2 just predicted (30 min earlier) that indoor will cross comfort_heat within the hour. If indoor is still numerically above comfort_heat at the very next automation cycle after a proactive exit, the reactivation gate can re-arm nat-vent for exactly one cycle before Phase 2 immediately re-predicts the same floor breach and exits again -- a real, still-present one-cycle thrash that Issue #411's Pass-4 fix does NOT close (the fix unifies the shared *ceiling* sub-condition across sites and the exit-side handoff; it does not make the entry-side reactivation gate floor-prediction-aware). This scenario's temperature curve is deliberately tuned so indoor is AT/BELOW comfort_heat by the very next tick after the proactive exit (00:00: 64.5F < 65F floor) -- closing that one-cycle window for THIS scenario's specific curve shape by satisfying the reactivation gate's own floor guard (indoor > comfort_heat) becoming false. This is a scenario-construction choice documented here, not evidence that the underlying one-cycle race is fixed in general; a shallower approach to the floor (smaller |k_passive|, or a temp_update spaced closer to the proactive-exit tick) can still reproduce one exit/reactivate/exit cycle. Recommend filing this as an explicit follow-up issue if the coordinator agrees it should be closed rather than accepted as scope_not_covered on #411.",
+    "VERIFIED SCENARIO EFFECTIVENESS (three-exercise protocol, CLAUDE.md): (a) if _exit_nat_vent() were deleted and Phase 2 reverted to its old hand-rolled deactivate+restore+grace sequence, the 23:30 assertion would still show the session ending, but the engine would incorrectly attempt _set_hvac_mode(c.hvac_mode) ('cool', from the day classification) and _set_temperature_for_mode() while the sensor is still open -- the nat_vent_not_active assertion would still pass by label, but a companion check on the action log (an unconditional 'cool' mode write appearing while the sensor remains open) would fail, and _paused_by_door would incorrectly stay False since the old code never checked the sensor before restoring. This scenario's real teeth are verifying engine_state (_paused_by_door=True, _natural_vent_active=False) stays consistent through the whole night, not just the event label at 23:30.",
+    "(b) Two-way alignment (single engine, Issue #236): this scenario drives tools/sim_harness/ against the REAL production AutomationEngine -- it exercises _exit_nat_vent()'s sensor-open branch (Issue #411 Pass 4 plan) exactly as documented in docs/08-COMPUTATION-REFERENCE.md's unified nat-vent exit handoff section (Scribe-owned, updated in the same PR).",
+    "(c) User outcome if this scenario fails to catch a regression: the occupant would again see the activity log narrate a confusing sequence of nat-vent exits and HVAC mode changes that contradict each other, eroding trust in the daily briefing and investigator reports exactly as CLAUDE.md's 'Daily Briefing as Primary UI' principle warns against -- even though the physical comfort outcome was fine both nights.",
+    "No HVAC mode write to 'cool' (the day classification's mode) may appear in the action log at any point while the sensor remains open -- this is the specific sensor-blind-restore bug fixed by routing Phase 2 through _exit_nat_vent().",
+    "Momentary in-tolerance dips below comfort_heat during active nat-vent (e.g. the 03:49/06:00 readings here) must not be reported as comfort incidents -- that gate lives at the COORDINATOR level (_is_nat_vent_tolerated_deviation, coordinator.py), which this AutomationEngine-only harness does not drive; it is tested directly in tests/test_incident_detection.py's TestComfortViolationIncident / TestComfortViolationsMinutesNatVentGate suites instead.",
+    "Promote to golden/ once reviewed and confirmed by the user per the Golden Simulation Test Policy."
+  ],
+  "config": {
+    "comfort_heat": 65,
+    "comfort_cool": 78,
+    "setback_heat": 58,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-04T20:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Evening classification: warm day, day-mode hvac_mode='cool' -- this is the value Phase 2 used to sensor-blindly restore before the fix. Comfort band armed [65/78]."
+    },
+    {
+      "time": "2026-07-04T20:05:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 68.0,
+      "note": "Evening: indoor 74F, outdoor 68F -- outdoor cooler than indoor, above comfort_heat floor."
+    },
+    {
+      "time": "2026-07-04T20:10:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens per recommendation. outdoor 68F < indoor 74F, indoor > comfort_heat 65F, outdoor <= threshold 81F -- nat-vent activates, WHF turns on, HVAC suppressed to off."
+    },
+    {
+      "time": "2026-07-04T23:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 63.0,
+      "note": "Late evening: indoor has cooled to 70F, outdoor 63F. passive_rate = -0.5*(70-63) = -3.5F/hr; time_to_floor = (70-65)/3.5 = 1.43h -- still >= MIN_VIABLE_NAT_VENT_HOURS(1.0h), so Phase 2 does not exit yet. Session continues uninterrupted, window still open."
+    },
+    {
+      "time": "2026-07-04T23:30:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 60.0,
+      "note": "Indoor has drifted down to 67F, 2F above the comfort_heat floor (65F). passive_rate = -0.5*(67-60) = -3.5F/hr; time_to_floor = (67-65)/3.5 = 0.57h < MIN_VIABLE_NAT_VENT_HOURS(1.0h) -- Phase 2's proactive floor exit fires. The monitored window sensor is STILL OPEN at this point (nobody closed it), so _exit_nat_vent()'s sensor-open branch must pause rather than sensor-blindly restore 'cool' mode."
+    },
+    {
+      "time": "2026-07-05T00:00:00",
+      "type": "temp_update",
+      "indoor_f": 64.5,
+      "outdoor_f": 59.0,
+      "note": "30 min after the proactive exit: indoor has continued its natural passive decay down to 64.5F -- now AT/BELOW the comfort_heat floor (65F) even with the fan off. Deliberately tuned so the paused-by-door reactivation gate's own floor sub-condition (indoor > comfort_heat) fails on this very next re-evaluation (see the residual-gap note above for why this matters). Window sensor is still open -- the engine must remain paused (_paused_by_door=True), not re-arm nat-vent or restore active HVAC."
+    },
+    {
+      "time": "2026-07-05T03:49:00",
+      "type": "temp_update",
+      "indoor_f": 64.0,
+      "outdoor_f": 58.0,
+      "note": "Matches the #411 report's ~03:49 timestamp shape. Indoor has settled to 64F (below comfort_heat 65F) -- the exact benign, expected cycling dip that risked a false comfort_undertemp incident in production (coordinator-side fix, tested separately in tests/test_incident_detection.py). At the AutomationEngine level, the session remains paused and consistent -- no thrash."
+    },
+    {
+      "time": "2026-07-05T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 63.5,
+      "outdoor_f": 57.0,
+      "note": "Early morning, window still open, indoor continues to sit below the floor. Engine must still be in the single, consistent paused state established at 23:30 -- no additional nat_vent_predicted_floor_exit events, no oscillation, no reactivation."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-04T20:10:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opens with outdoor 68F < indoor 74F and outdoor <= threshold 81F -- nat-vent activates, WHF turns on, HVAC suppressed to off."
+    },
+    {
+      "at": "2026-07-04T23:30:00",
+      "expect": "nat_vent_not_active",
+      "reason": "Phase 2 proactive floor exit fires (time_to_floor 0.57h < 1.0h threshold, indoor 67F) -- _exit_nat_vent() is called and _natural_vent_active becomes False. With the monitored sensor still open, the sensor-open branch pauses (_paused_by_door=True) rather than sensor-blindly restoring the day classification's 'cool' mode."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "With a monitored window sensor open all night, Phase 2's proactive floor exit correctly pauses the session (via the unified _exit_nat_vent() choke point) instead of sensor-blindly restoring an active HVAC mode into an open window, and -- for this scenario's specific temperature curve -- the session stays in one consistent paused state overnight with no exit/re-entry thrash and no false comfort incident.",
+    "observed_behavior": "classification_applied -> natural_ventilation on window open (20:10) -> session runs uninterrupted through the evening as indoor cools -> nat_vent_predicted_floor_exit + pause at 23:30 (indoor 67F, 0.57h from the 65F floor, window still open) -> engine remains consistently paused through 06:00 with indoor settling to 63.5F -- no HVAC mode restored while the sensor is open, no repeated exit/re-entry cycling for this curve shape.",
+    "expected_behavior": "_exit_nat_vent() is the single choke point for every nat-vent exit path (Phase 2 proactive, reactive hard-floor, outdoor-reversal, outdoor-too-warm). With the monitored sensor open, it always pauses (_paused_by_door=True, _pre_pause_mode captured, restore_hvac=False) rather than restoring the day classification's HVAC mode -- eliminating the sensor-blind double-restore that produced the #411 log's contradictory 'exit nat-vent, arm cool, immediately re-enter nat-vent' narrative. NOTE: a residual, still-present one-cycle reactivation race at the entry-side gate (not addressed by #411's scope) is documented in the notes above -- this scenario's temperatures are tuned to avoid triggering it, not proof that it cannot occur under other curve shapes. Momentary, expected cycling dips below comfort_heat during active nat-vent are not reported as comfort incidents (verified separately at the coordinator level in tests/test_incident_detection.py)."
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "confidence_k_hvac": "high",
+    "k_passive": -0.5,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  }
+}

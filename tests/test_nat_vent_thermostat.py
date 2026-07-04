@@ -646,11 +646,14 @@ class TestNatVentSleepWindowCycling:
         with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
             asyncio.run(ae.nat_vent_temperature_check(64.0))
 
-        # Hard exit fires — session ends, HVAC is restored
+        # Hard exit fires — session ends, HVAC is restored. Issue #411: this now routes
+        # through _exit_nat_vent(), which relies on _deactivate_fan()'s restore_hvac=True
+        # default rather than passing it explicitly — so the kwarg may be absent from the
+        # call rather than present-and-True; either way restore_hvac must not be False.
         ae._deactivate_fan.assert_called_once()
         call_kwargs = ae._deactivate_fan.call_args[1]
-        assert call_kwargs.get("restore_hvac") is True, (
-            f"Hard floor exit must pass restore_hvac=True; got: {call_kwargs}"
+        assert call_kwargs.get("restore_hvac", True) is True, (
+            f"Hard floor exit must not suppress HVAC restore; got: {call_kwargs}"
         )
         # The activity log's fan-deactivated reason must state the WHY with real numbers
         # (not just an internal identifier like "nat_vent_floor_exit").

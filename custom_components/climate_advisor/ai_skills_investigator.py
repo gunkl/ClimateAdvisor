@@ -396,6 +396,143 @@ def investigation_fallback(coordinator: Any, **kwargs: Any) -> dict[str, Any]:
     except Exception:
         _LOGGER.warning("investigator fallback: failed to access learning engine")
 
+    # --- Rapid nat-vent cycling detection (Issue #411) ---
+    # A "thrash" pattern: nat-vent activates and exits repeatedly within a short
+    # window, indicating a decision-loop oscillation rather than a stable state
+    # change. Detect 3+ nat-vent state-transition events within any rolling
+    # 60-minute window, without hardcoding any specific temperature/threshold.
+    try:
+        event_log_cycle: list[Any] = getattr(coordinator, "_event_log", []) or []
+        hours_cycle: int = int(kwargs.get("hours", 48))
+        cutoff_cycle = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours_cycle)
+        _NAT_VENT_TRANSITION_TYPES = {
+            "nat_vent_comfort_floor_exit",
+            "nat_vent_away_ceiling_exit",
+            "nat_vent_predicted_floor_exit",
+            "nat_vent_outdoor_rise_exit",
+            "fan_activated",
+            "fan_deactivated",
+        }
+        nat_vent_events: list[tuple[datetime.datetime, str]] = []
+        for entry in event_log_cycle[-200:]:
+            if not isinstance(entry, dict):
+                continue
+            etype = str(entry.get("type", ""))
+            is_transition = etype in _NAT_VENT_TRANSITION_TYPES or (
+                "nat_vent" in etype.lower() and ("exit" in etype.lower() or "activ" in etype.lower())
+            )
+            if not is_transition:
+                continue
+            # For generic fan_activated/fan_deactivated events, only count them if
+            # they relate to nat-vent (reason mentions nat-vent / natural ventilation
+            # / free cooling) so HVAC fan-only activity isn't mistaken for thrash.
+            if etype in ("fan_activated", "fan_deactivated"):
+                reason_text = str(entry.get("reason", "")).lower()
+                if not any(
+                    keyword in reason_text for keyword in ("nat-vent", "nat vent", "natural vent", "free cooling")
+                ):
+                    continue
+            raw_time = entry.get("time")
+            if raw_time is None:
+                continue
+            try:
+                if isinstance(raw_time, datetime.datetime):
+                    event_dt = raw_time
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                else:
+                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
+            except ValueError:
+                continue
+            if event_dt < cutoff_cycle:
+                continue
+            nat_vent_events.append((event_dt, etype))
+
+        nat_vent_events.sort(key=lambda pair: pair[0])
+        window_delta = datetime.timedelta(minutes=60)
+        n = len(nat_vent_events)
+        worst_count = 0
+        worst_start: datetime.datetime | None = None
+        worst_end: datetime.datetime | None = None
+        for i in range(n):
+            window_start = nat_vent_events[i][0]
+            j = i
+            while j < n and nat_vent_events[j][0] - window_start <= window_delta:
+                j += 1
+            count_in_window = j - i
+            if count_in_window > worst_count:
+                worst_count = count_in_window
+                worst_start = window_start
+                worst_end = nat_vent_events[j - 1][0]
+        if worst_count >= 3 and worst_start is not None and worst_end is not None:
+            incongruity_parts.append(
+                f"Rapid nat-vent cycling detected: {worst_count} transitions between"
+                f" {worst_start.strftime('%H:%M')} and {worst_end.strftime('%H:%M')}"
+                " — possible decision-loop thrash"
+            )
+    except Exception:
+        _LOGGER.warning("investigator fallback: failed to scan nat-vent cycling")
+
+    # --- Repeated identical setpoint rejection (Issue #411) ---
+    # If the same commanded setpoint is rejected 2+ times without resolving, this
+    # points at a device-level command deduplication or rejection loop. A
+    # setpoint_nudge event (if present) is treated as evidence the rejection was
+    # already being addressed, not as an additional problem.
+    try:
+        event_log_setpoint: list[Any] = getattr(coordinator, "_event_log", []) or []
+        hours_setpoint: int = int(kwargs.get("hours", 48))
+        cutoff_setpoint = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours_setpoint)
+        rejected_by_value: dict[float, list[str]] = {}
+        nudged_values: set[float] = set()
+        for entry in event_log_setpoint[-200:]:
+            if not isinstance(entry, dict):
+                continue
+            etype = str(entry.get("type", ""))
+            if etype not in ("setpoint_rejected", "setpoint_nudge"):
+                continue
+            raw_time = entry.get("time")
+            event_dt = None
+            if raw_time is not None:
+                try:
+                    if isinstance(raw_time, datetime.datetime):
+                        event_dt = raw_time
+                        if event_dt.tzinfo is None:
+                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                    else:
+                        event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                        if event_dt.tzinfo is None:
+                            event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                except ValueError:
+                    event_dt = None
+            if event_dt is not None and event_dt < cutoff_setpoint:
+                continue
+            commanded = entry.get("commanded")
+            if commanded is None:
+                continue
+            try:
+                commanded_val = float(commanded)
+            except (TypeError, ValueError):
+                continue
+            if etype == "setpoint_nudge":
+                nudged_values.add(commanded_val)
+                continue
+            rejected_by_value.setdefault(commanded_val, []).append(str(entry.get("time", "?")))
+
+        for commanded_val, timestamps in rejected_by_value.items():
+            if len(timestamps) < 2:
+                continue
+            if commanded_val in nudged_values:
+                # Already being addressed by a corrective nudge — not a new problem.
+                continue
+            data_quality_parts.append(
+                f"Setpoint {commanded_val:g}°F rejected {len(timestamps)} times without"
+                " resolving — possible device-level command deduplication"
+            )
+    except Exception:
+        _LOGGER.warning("investigator fallback: failed to scan repeated setpoint rejections")
+
     # --- Build summary ---
     total_issues = len(errors_parts) + len(incongruity_parts) + len(data_quality_parts)
     if total_issues == 0:

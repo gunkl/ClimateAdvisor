@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.62"
+VERSION = "0.4.63"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.63": [
+        "Fix #407 follow-up: removed the standalone 'Natural Vent' dashboard card — its"
+        " cycling-band and AC-assist info is now shown as a supplemental line on the main"
+        " Status card instead of a separate card, per the project's 'no new cards, extend"
+        " existing ones' dashboard convention.",
+    ],
     "0.4.62": [
         "Fix #407: the dashboard Status card no longer shows a stale daytime nat-vent target"
         " (e.g. 71°F) overnight during the sleep window — it now matches the Natural Vent"
@@ -715,8 +721,8 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     407: {
-        "version_fixed": "0.4.62",
-        "title": "Dashboard Status card showed stale daytime nat-vent target overnight during the sleep window",
+        "version_fixed": "0.4.63",
+        "title": "Dashboard Status card showed stale nat-vent target + redundant Natural Vent card",
         "scope_covered": (
             "coordinator.py: _compute_automation_status()'s nat-vent branch now calls the"
             " existing compute_nat_vent_cycling_band() helper (the Issue #402 follow-up single"
@@ -727,7 +733,12 @@ KNOWN_FIXES: dict[int, dict] = {
             " which fed off compute_nat_vent_cycling_band() and correctly showed the"
             " sleep_heat + hysteresis target (e.g. 65-66°F). This repeats the exact"
             " fix-one-duplicate-implementation-miss-the-sibling pattern documented on that"
-            " helper's docstring from #374, #400, and #402."
+            " helper's docstring from #374, #400, and #402. Follow-up (0.4.63): the separate"
+            " standalone 'Natural Vent' status-item card in frontend/index.html (added by the"
+            " #402 follow-up) duplicated this info and was never requested — its AC-assist"
+            " label and cycling-band line are now rendered as a supplemental line inside the"
+            " Status card instead, and the standalone card was removed, per the project's"
+            " existing 'no new cards, extend existing ones' dashboard convention."
         ),
         "scope_not_covered": (
             "Does not touch automation.py's nat_vent_temperature_check() (the fan's actual"

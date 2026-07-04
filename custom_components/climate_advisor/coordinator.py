@@ -5468,8 +5468,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # sleep window, and never migrated to compute_nat_vent_cycling_band() (the Issue #402
             # follow-up single source of truth for this exact value) — see that method's docstring
             # for the fix-one-duplicate-miss-the-sibling history this repeats (#374, #400, #402).
+            # Issue #409: dropped the "windows open · " prefix — natural_vent_active does not
+            # imply a sensor is open (it can activate on temperature/idle-HVAC conditions alone,
+            # see automation.py's idle-reeval path, and door/window sensors are optional config),
+            # and real window state is already shown by the dedicated Doors/Windows status card.
+            # Restating it here was both potentially inaccurate and duplicative.
             _nt = self.compute_nat_vent_cycling_band()["nat_vent_target"]
-            return f"windows open · nat-vent (target {_nt:.0f}°F)"
+            return f"nat-vent (target {_nt:.0f}°F)"
         if self.automation_engine.is_paused_by_door:
             if self._occupancy_mode == OCCUPANCY_AWAY:
                 return "paused — away (setback deferred: windows open)"

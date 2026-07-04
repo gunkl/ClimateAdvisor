@@ -5463,10 +5463,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():
             return "windows open (as planned)"
         if self.automation_engine.natural_vent_active:
-            # Bug 3 (Issue #321): surface midpoint target in status for at-a-glance visibility
-            _nh = float(self.config.get("comfort_heat", 70))
-            _nc = float(self.config.get("comfort_cool", 75))
-            _nt = (_nh + _nc) / 2.0
+            # Bug 3 (Issue #321): surface cycling target in status for at-a-glance visibility.
+            # Issue #407: was hardcoded to the flat daytime comfort-band midpoint, ignoring the
+            # sleep window, and never migrated to compute_nat_vent_cycling_band() (the Issue #402
+            # follow-up single source of truth for this exact value) — see that method's docstring
+            # for the fix-one-duplicate-miss-the-sibling history this repeats (#374, #400, #402).
+            _nt = self.compute_nat_vent_cycling_band()["nat_vent_target"]
             return f"windows open · nat-vent (target {_nt:.0f}°F)"
         if self.automation_engine.is_paused_by_door:
             if self._occupancy_mode == OCCUPANCY_AWAY:

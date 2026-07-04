@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.65"
+VERSION = "0.4.66"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.66": [
+        "Fix #413: restart-cause diagnostics (added in #403) now correctly classify real HA"
+        " restarts and deploys as 'version_changed' or 'user_restart' instead of always"
+        " showing 'unknown'. The persistence step was wired to async_shutdown(), which only"
+        " runs on config-entry unload/reload — not on a normal Home Assistant restart. A new"
+        " EVENT_HOMEASSISTANT_STOP listener now persists the same shutdown diagnostics on the"
+        " restart path that actually happens in practice.",
+    ],
     "0.4.65": [
         "Fix #411: nat-vent floor-exit decisions and false comfort-violation alarms during"
         " correct WHF cycling are now consistent; a stuck thermostat setpoint disagreement"
@@ -732,6 +740,31 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    413: {
+        "version_fixed": "0.4.66",
+        "title": "Restart-cause classification (#403) always showed 'unknown' on real HA restarts/deploys",
+        "scope_covered": (
+            "coordinator.py: extracted _persist_shutdown_diagnostics() (sets clean_shutdown,"
+            " last_shutdown_version, user_initiated_restart, and persists via"
+            " learning.save_state()) out of async_shutdown(), and added a new"
+            " EVENT_HOMEASSISTANT_STOP listener in async_setup() that calls the same helper."
+            " async_shutdown() — reachable only via async_unload_entry(), which fires on"
+            " config-entry unload/reload, not on a normal HA restart — is unchanged and still"
+            " calls the same helper. Before this fix, the three shutdown-diagnostics fields"
+            " added in #403 were only ever written on the entry-unload path, so a real restart"
+            " (deploy, or a user clicking 'Restart Home Assistant') never persisted them, and"
+            " async_restore_state() always fell through to the 'unknown' cause bucket."
+        ),
+        "scope_not_covered": (
+            "A true crash or container OOM/kill still fires neither EVENT_HOMEASSISTANT_STOP"
+            " nor async_unload_entry, so it correctly still classifies as 'unknown' — this is"
+            " expected behavior, not a gap. The persist task scheduled from the STOP listener"
+            " runs via hass.async_create_task() and is not guaranteed to complete before the"
+            " process exits on an unusually fast shutdown; this mirrors the reliability"
+            " envelope of every other async_create_task-scheduled cleanup task in this"
+            " integration and was not treated as a new risk introduced by this fix."
+        ),
+    },
     411: {
         "version_fixed": "0.4.65",
         "title": (

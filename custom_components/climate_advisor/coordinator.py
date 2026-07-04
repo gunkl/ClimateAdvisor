@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
     from .claude_api import ClaudeAPIClient
 
-from homeassistant.const import EVENT_CALL_SERVICE
+from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_call_later,
@@ -617,6 +617,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._user_initiated_shutdown = True
 
         self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_CALL_SERVICE, _async_call_service_event))
+
+        # Listener: persist restart-cause diagnostics on a real HA restart (Issue #413).
+        # EVENT_HOMEASSISTANT_STOP fires on homeassistant.restart/stop and on HAOS/deploy
+        # restarts, but async_unload_entry() (which calls async_shutdown()) does NOT — HA
+        # only unloads config entries on entry removal/reload, not on a full restart. Without
+        # this listener, clean_shutdown/last_shutdown_version/user_initiated_restart were only
+        # ever written on the rare entry-unload path, so the restart-cause classifier in
+        # async_restore_state() fell through to "unknown" on every real-world restart.
+        @callback
+        def _async_homeassistant_stop(_event: Event) -> None:
+            self.hass.async_create_task(self._persist_shutdown_diagnostics())
+
+        self._unsub_listeners.append(self.hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _async_homeassistant_stop))
 
         _LOGGER.info("Climate Advisor v%s coordinator setup complete", VERSION)
 
@@ -6307,17 +6320,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "nat_vent_cycling_paused": ae._natural_vent_active and not ae._fan_active,
         }
 
+    async def _persist_shutdown_diagnostics(self) -> None:
+        """Persist restart-cause diagnostics (Issue #403/#413).
+
+        Shared by async_shutdown() (fires on config-entry unload/reload) and the
+        EVENT_HOMEASSISTANT_STOP listener registered in async_setup() (fires on a real
+        HA restart/deploy, which does NOT call async_unload_entry). Both paths must
+        write these fields for the restart-cause classifier in async_restore_state()
+        to work on the restarts that actually happen in practice.
+        """
+        self.learning._state.clean_shutdown = True
+        self.learning._state.last_shutdown_version = VERSION
+        self.learning._state.user_initiated_restart = self._user_initiated_shutdown
+        await self.hass.async_add_executor_job(self.learning.save_state)
+        _LOGGER.info(
+            "Shutdown diagnostics persisted: version=%s user_initiated=%s",
+            VERSION,
+            self._user_initiated_shutdown,
+        )
+
     async def async_shutdown(self) -> None:
         """Clean up on shutdown."""
         _LOGGER.info("Climate Advisor v%s shutting down", VERSION)
 
         # Restart-cause diagnostics (Issue #403): mark this as a clean shutdown so the
-        # next startup can distinguish a routine restart from a crash. Persisted via the
-        # existing learning.save_state() call below — no second/duplicate save.
-        self.learning._state.clean_shutdown = True
-        self.learning._state.last_shutdown_version = VERSION
-        self.learning._state.user_initiated_restart = self._user_initiated_shutdown
-        await self.hass.async_add_executor_job(self.learning.save_state)
+        # next startup can distinguish a routine restart from a crash.
+        await self._persist_shutdown_diagnostics()
 
         # Flush HVAC runtime and save state before cleanup
         self._flush_hvac_runtime()

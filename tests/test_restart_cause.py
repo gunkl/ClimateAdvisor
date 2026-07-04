@@ -1,14 +1,19 @@
-"""Tests for Issue #403: restart-cause diagnostics.
+"""Tests for Issue #403/#413: restart-cause diagnostics.
 
 Covers:
-- async_shutdown() logs version, persists clean_shutdown/last_shutdown_version/
-  user_initiated_restart via learning.save_state().
+- _persist_shutdown_diagnostics() (shared helper) persists clean_shutdown/
+  last_shutdown_version/user_initiated_restart via learning.save_state(), called from
+  both async_shutdown() and the EVENT_HOMEASSISTANT_STOP listener.
 - async_restore_state() logs version, classifies restart cause
   (version_changed / user_restart / unknown), emits the cause on the
   system_restarted event (plus old/new version for version_changed), and
   resets clean_shutdown in memory afterward.
 - The EVENT_CALL_SERVICE listener sets _user_initiated_shutdown only for
   homeassistant.restart/stop service calls.
+- The EVENT_HOMEASSISTANT_STOP listener persists shutdown diagnostics even when
+  async_unload_entry()/async_shutdown() never runs (Issue #413 regression — a real HA
+  restart/deploy does NOT call async_unload_entry, so relying solely on async_shutdown()
+  left every real restart classified as "unknown").
 - LearningState persists and defensively validates the three new fields.
 """
 
@@ -98,6 +103,9 @@ def _make_coord_stub():
 
     coord.async_shutdown = types.MethodType(ClimateAdvisorCoordinator.async_shutdown, coord)
     coord.async_restore_state = types.MethodType(ClimateAdvisorCoordinator.async_restore_state, coord)
+    coord._persist_shutdown_diagnostics = types.MethodType(
+        ClimateAdvisorCoordinator._persist_shutdown_diagnostics, coord
+    )
 
     return coord
 
@@ -262,6 +270,90 @@ class TestUserInitiatedRestartDetection:
         handler(event)
 
         assert coord._user_initiated_shutdown is False
+
+
+# ---------------------------------------------------------------------------
+# EVENT_HOMEASSISTANT_STOP listener behavior (Issue #413)
+# ---------------------------------------------------------------------------
+
+
+class TestHomeAssistantStopPersistsShutdownDiagnostics:
+    """Verify the EVENT_HOMEASSISTANT_STOP handler logic registered in async_setup().
+
+    A real HA restart (user-clicked "Restart Home Assistant", `ha core restart`, or a
+    HACS-deploy-triggered restart) fires EVENT_HOMEASSISTANT_STOP and then the process
+    exits — it does NOT call async_unload_entry()/async_shutdown(). Before this fix, the
+    three shutdown-diagnostics fields were only ever written inside async_shutdown(), so
+    every real restart fell through to "unknown" in async_restore_state().
+    """
+
+    def _make_handler(self, coord):
+        """Extract the handler by replicating the closure logic in async_setup()."""
+
+        def _async_homeassistant_stop(_event):
+            coord.hass.async_create_task(coord._persist_shutdown_diagnostics())
+
+        return _async_homeassistant_stop
+
+    def test_stop_event_schedules_persist_diagnostics_task(self):
+        coord = _make_coord_stub()
+        scheduled = []
+        coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+        handler = self._make_handler(coord)
+
+        handler(MagicMock())
+
+        assert len(scheduled) == 1
+        asyncio.run(scheduled[0])
+        assert coord.learning._state.clean_shutdown is True
+        assert coord.learning._state.last_shutdown_version == VERSION
+        coord.learning.save_state.assert_called_once()
+
+    def test_stop_event_persists_user_initiated_flag(self):
+        coord = _make_coord_stub()
+        coord._user_initiated_shutdown = True
+        scheduled = []
+        coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+        handler = self._make_handler(coord)
+
+        handler(MagicMock())
+        asyncio.run(scheduled[0])
+
+        assert coord.learning._state.user_initiated_restart is True
+
+    def test_stop_event_alone_without_unload_produces_user_restart_not_unknown(self):
+        """Regression for #413: previously, if async_unload_entry() never ran (the normal
+        case for a real HA restart), clean_shutdown/last_shutdown_version were never
+        persisted and the classifier fell through to "unknown" even for a graceful
+        restart. Now the EVENT_HOMEASSISTANT_STOP listener alone — WITHOUT
+        async_shutdown() ever running — is sufficient to persist them correctly.
+        """
+        coord = _make_coord_stub()
+        scheduled = []
+        coord.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+        handler = self._make_handler(coord)
+
+        handler(MagicMock())  # STOP fires — async_unload_entry/async_shutdown NEVER called
+        asyncio.run(scheduled[0])  # the scheduled persist task runs to completion
+
+        asyncio.run(coord.async_restore_state())
+
+        calls = coord._emit_event.call_args_list
+        restarted_payload = next(c[0][1] for c in calls if c[0][0] == "system_restarted")
+        assert restarted_payload["cause"] == "user_restart"
+
+    def test_no_stop_event_and_no_unload_still_classifies_unknown(self):
+        """A true crash/container kill fires neither EVENT_HOMEASSISTANT_STOP nor
+        async_unload_entry — the classifier must still correctly report "unknown" for
+        this case (not a regression to fix)."""
+        coord = _make_coord_stub()
+        # Neither the STOP listener nor async_shutdown() ran — fresh LearningState defaults.
+
+        asyncio.run(coord.async_restore_state())
+
+        calls = coord._emit_event.call_args_list
+        restarted_payload = next(c[0][1] for c in calls if c[0][0] == "system_restarted")
+        assert restarted_payload["cause"] == "unknown"
 
 
 # ---------------------------------------------------------------------------

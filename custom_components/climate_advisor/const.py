@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.63"
+VERSION = "0.4.64"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.64": [
+        "Fix #409: streamlined the Status card's nat-vent display — removed the duplicate"
+        " target temperature (previously shown twice), removed the redundant 'Natural"
+        " ventilation'/'nat-vent' double-naming, and dropped the unverified 'windows open'"
+        " prefix (nat-vent can be active without any window physically open; real window"
+        " state is already shown by the dedicated Doors/Windows card).",
+    ],
     "0.4.63": [
         "Fix #407 follow-up: removed the standalone 'Natural Vent' dashboard card — its"
         " cycling-band and AC-assist info is now shown as a supplemental line on the main"
@@ -720,6 +727,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    409: {
+        "version_fixed": "0.4.64",
+        "title": "Status card nat-vent display duplicated target/naming and claimed unverified 'windows open'",
+        "scope_covered": (
+            "coordinator.py: _compute_automation_status()'s nat-vent branch no longer prefixes"
+            " its return string with 'windows open · ' — natural_vent_active does not imply a"
+            " contact sensor is open (it can activate purely on temperature/idle-HVAC"
+            " conditions per automation.py's idle-reeval path, and door/window sensors are"
+            " optional config), and real window state is already shown by the dedicated"
+            " Doors/Windows status card, so restating it here was both potentially inaccurate"
+            " and duplicative. frontend/index.html: the supplemental nat-vent line under the"
+            " Status card no longer repeats the target temperature (already shown once in"
+            " automation_status) or the 'Natural ventilation' name (already named 'nat-vent'"
+            " in automation_status) — it now shows only the mode qualifier (AC assist / savings"
+            " mode) and the cycling band."
+        ),
+        "scope_not_covered": (
+            "Does not touch the other branches of _compute_automation_status() that"
+            " legitimately reference window/door state (e.g. 'windows open (as planned)',"
+            " 'paused — door/window open') — those describe genuinely door/window-driven"
+            " states. Does not touch automation.py or api.py, both already correct."
+        ),
+    },
     407: {
         "version_fixed": "0.4.63",
         "title": "Dashboard Status card showed stale nat-vent target + redundant Natural Vent card",

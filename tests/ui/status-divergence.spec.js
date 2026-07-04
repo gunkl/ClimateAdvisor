@@ -74,12 +74,18 @@ test.describe('Status card CA-target divergence indicator (Issue #402)', () => {
 // Issue #407: the "Natural Vent" info previously rendered as its own separate
 // status-item card, duplicating (and drifting from) the main Status card's own
 // nat-vent target text — a UI the user never asked for (a byproduct of the #402
-// follow-up fix). Merged the cycling band (off/on threshold + target) and
-// AC-assist/savings-mode label back into the Status card as a supplemental line,
-// and removed the standalone card. This still guards against "target 71°F but
-// indoor is 69°F, why is the fan still on" by showing the band makes clear 69°F
-// is within the fan's normal cycling range, not a contradiction.
-test.describe('Natural Vent info merged into Status card (Issue #407)', () => {
+// follow-up fix). Merged the cycling band (off/on threshold) and AC-assist/savings-mode
+// label back into the Status card as a supplemental line, and removed the standalone
+// card. This still guards against "target 71°F but indoor is 69°F, why is the fan
+// still on" by showing the band makes clear 69°F is within the fan's normal cycling
+// range, not a contradiction.
+//
+// Issue #409 follow-up: the merged card still duplicated the target number (once in
+// automation_status, once in the supplemental line) and used two names ("Natural
+// ventilation" / "nat-vent") for the same concept. The supplemental line now shows
+// only the mode qualifier + cycling band, not the target — the target lives solely in
+// automation_status.
+test.describe('Natural Vent info merged into Status card (Issue #407, #409)', () => {
 
   test('Status card shows the cycling band when nat-vent is active', async ({ page }) => {
     await page.route('**/api/climate_advisor/status', (route) => {
@@ -93,7 +99,7 @@ test.describe('Natural Vent info merged into Status card (Issue #407)', () => {
           outdoor_temp: 65,
           automation_enabled: true,
           occupancy_mode: 'home',
-          automation_status: 'active',
+          automation_status: 'nat-vent (target 71°F)',
           compliance_score: 1.0,
           nat_vent_active: true,
           nat_vent_ac_assist: false,
@@ -117,6 +123,11 @@ test.describe('Natural Vent info merged into Status card (Issue #407)', () => {
     expect(html).toContain('72');
     expect(html).toContain('71');
     expect(html).toContain('savings mode');
+    // Issue #409: no duplicate naming — "Natural ventilation" must not appear
+    // (the concept is named once, as "nat-vent", in automation_status).
+    expect(html).not.toContain('Natural ventilation');
+    // Issue #409: the nat-vent branch must not assert an unverified "windows open" fact.
+    expect(html).not.toContain('windows open');
   });
 
   test('Status card shows no nat-vent line when nat-vent is not active', async ({ page }) => {

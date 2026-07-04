@@ -197,6 +197,11 @@ class TestComputeAutomationStatusNatVentTarget:
     contradicting the already-correct Natural Vent card (e.g. 65-66°F), repeating the
     exact "fix one duplicate implementation, miss the sibling" pattern documented on
     compute_nat_vent_cycling_band() from #374/#400/#402.
+
+    Issue #409: the "windows open · " prefix was dropped — natural_vent_active does
+    not imply a sensor is open, and real window state is already shown by the
+    dedicated Doors/Windows status card, so restating it here was both potentially
+    inaccurate and duplicative.
     """
 
     def _config(self):
@@ -216,7 +221,7 @@ class TestComputeAutomationStatusNatVentTarget:
         with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 14, 0, 0)):
             status = coord._compute_automation_status()
 
-        assert status == "windows open · nat-vent (target 71°F)"
+        assert status == "nat-vent (target 71°F)"
 
     def test_sleep_window_status_uses_sleep_heat_not_daytime_midpoint(self):
         """During the sleep window, the status string must show the sleep-window target
@@ -231,7 +236,7 @@ class TestComputeAutomationStatusNatVentTarget:
         with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
             status = coord._compute_automation_status()
 
-        assert status == "windows open · nat-vent (target 66°F)"
+        assert status == "nat-vent (target 66°F)"
         assert "71" not in status
 
     def test_status_and_cycling_band_agree(self):
@@ -246,5 +251,19 @@ class TestComputeAutomationStatusNatVentTarget:
             status = coord._compute_automation_status()
             band = coord.compute_nat_vent_cycling_band()
 
-        expected = f"windows open · nat-vent (target {band['nat_vent_target']:.0f}°F)"
+        expected = f"nat-vent (target {band['nat_vent_target']:.0f}°F)"
         assert status == expected
+
+    def test_status_does_not_claim_windows_open(self):
+        """Issue #409: natural_vent_active does not imply a window/door sensor is open
+
+        (it can activate purely on temperature/idle-HVAC conditions, and contact sensors
+        are optional config), so the nat-vent status string must not assert "windows open"
+        — that fact belongs solely to the dedicated Doors/Windows status card.
+        """
+        coord = _make_nat_vent_coord_stub(config=self._config())
+
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 14, 0, 0)):
+            status = coord._compute_automation_status()
+
+        assert "windows open" not in status

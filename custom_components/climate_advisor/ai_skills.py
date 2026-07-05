@@ -126,6 +126,7 @@ class AISkillRegistry:
                     "error": None,
                     "input_context": context,
                     "raw_response": response.content,
+                    "truncated": response.truncated,
                 }
             except Exception:
                 _LOGGER.exception("Failed to parse AI response for skill '%s'", name)
@@ -211,6 +212,7 @@ class AISkillRegistry:
         override_reasoning = cfg.get(skill.config_key_reasoning) if skill.config_key_reasoning else None
 
         full_text = ""
+        stop_reason: str | None = None
         try:
             async for event in claude_client.async_request_streaming(
                 system_prompt=skill.system_prompt,
@@ -227,6 +229,8 @@ class AISkillRegistry:
                 elif event_type == "text":
                     full_text += event_text
                     yield {"type": "chunk", "text": event_text}
+                elif event_type == "stop":
+                    stop_reason = event.get("stop_reason")
         except Exception as exc:
             _LOGGER.error("Streaming request failed for skill '%s': %s", name, exc)
             yield {"type": "error", "message": str(exc)}
@@ -246,6 +250,7 @@ class AISkillRegistry:
             "error": None,
             "input_context": context,
             "raw_response": full_text,
+            "truncated": stop_reason == "max_tokens",
         }
 
 

@@ -80,6 +80,8 @@ class ClaudeResponse:
     rate_limited: bool = False
     circuit_open: bool = False
     budget_exceeded: bool = False
+    stop_reason: str | None = None
+    truncated: bool = False
 
 
 @dataclass
@@ -402,6 +404,24 @@ class ClaudeAPIClient:
             input_tokens: int = getattr(final_msg.usage, "input_tokens", 0)
             output_tokens: int = getattr(final_msg.usage, "output_tokens", 0)
             estimated_cost = self._estimate_cost(resolved_model, input_tokens, output_tokens)
+
+            stop_reason = getattr(final_msg, "stop_reason", None)
+            truncated = stop_reason == "max_tokens"
+            skill_name = self._extract_skill_name(system_prompt)
+            _LOGGER.debug(
+                "Claude streaming response finished: skill=%s stop_reason=%s output_tokens=%d",
+                skill_name,
+                stop_reason,
+                output_tokens,
+            )
+            if truncated:
+                _LOGGER.warning(
+                    "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
+                    skill_name,
+                    output_tokens,
+                    kwargs["max_tokens"],
+                )
+            yield {"type": "stop", "stop_reason": stop_reason}
 
             # Update counters on success
             self._circuit_breaker.consecutive_failures = 0
@@ -801,6 +821,23 @@ class ClaudeAPIClient:
                     if hasattr(block, "text"):
                         content_text += block.text
 
+                stop_reason = getattr(api_response, "stop_reason", None)
+                truncated = stop_reason == "max_tokens"
+                skill_name = self._extract_skill_name(system_prompt)
+                _LOGGER.debug(
+                    "Claude response finished: skill=%s stop_reason=%s output_tokens=%d",
+                    skill_name,
+                    stop_reason,
+                    output_tokens,
+                )
+                if truncated:
+                    _LOGGER.warning(
+                        "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
+                        skill_name,
+                        output_tokens,
+                        kwargs["max_tokens"],
+                    )
+
                 return ClaudeResponse(
                     success=True,
                     content=content_text,
@@ -808,6 +845,8 @@ class ClaudeAPIClient:
                     output_tokens=output_tokens,
                     estimated_cost=estimated_cost,
                     latency_ms=latency_ms,
+                    stop_reason=stop_reason,
+                    truncated=truncated,
                 )
 
             except RateLimitError as exc:

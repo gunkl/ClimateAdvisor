@@ -66,7 +66,12 @@ def _make_config(**overrides) -> dict:
     return config
 
 
-def _mock_message(content_text: str = "test response", input_tokens: int = 10, output_tokens: int = 20) -> MagicMock:
+def _mock_message(
+    content_text: str = "test response",
+    input_tokens: int = 10,
+    output_tokens: int = 20,
+    stop_reason: str = "end_turn",
+) -> MagicMock:
     """Build a mock anthropic Message response."""
     msg = MagicMock()
     content_block = MagicMock()
@@ -76,6 +81,7 @@ def _mock_message(content_text: str = "test response", input_tokens: int = 10, o
     msg.usage = MagicMock()
     msg.usage.input_tokens = input_tokens
     msg.usage.output_tokens = output_tokens
+    msg.stop_reason = stop_reason
     return msg
 
 
@@ -516,3 +522,115 @@ class TestPersistentStats:
         client = ClaudeAPIClient(_make_config())
         client.restore_persistent_stats({"counter_date": "not-a-date"})
         assert client._rate_counters.counter_date == date.today()
+
+
+# ---------------------------------------------------------------------------
+# Truncation detection (Issue #420)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStreamCM:
+    """Fake async context manager mimicking anthropic's `messages.stream()` return value."""
+
+    def __init__(self, events: list, final_message: MagicMock) -> None:
+        self._events = events
+        self._final_message = final_message
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    def __aiter__(self):
+        return self._agen()
+
+    async def _agen(self):
+        for event in self._events:
+            yield event
+
+    async def get_final_message(self):
+        return self._final_message
+
+
+def _mock_text_delta_event(text: str) -> MagicMock:
+    event = MagicMock()
+    event.type = "content_block_delta"
+    event.delta = MagicMock()
+    event.delta.type = "text_delta"
+    event.delta.text = text
+    return event
+
+
+class TestTruncationDetection:
+    """stop_reason must be inspected on every request so a max_tokens cutoff is never silent."""
+
+    def test_non_streaming_max_tokens_marks_truncated_and_warns(self, caplog):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message(
+            "partial report...", output_tokens=8192, stop_reason="max_tokens"
+        )
+        client = _make_client(mock_api)
+
+        with caplog.at_level("WARNING"):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert response.stop_reason == "max_tokens"
+        assert response.truncated is True
+        assert any("truncated" in rec.message.lower() for rec in caplog.records)
+
+    def test_non_streaming_end_turn_is_not_truncated(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message("complete report", stop_reason="end_turn")
+        client = _make_client(mock_api)
+
+        response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.stop_reason == "end_turn"
+        assert response.truncated is False
+
+    def test_streaming_max_tokens_yields_stop_event_and_warns(self, caplog):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=4096)
+        final_msg.stop_reason = "max_tokens"
+        mock_api.messages.stream = MagicMock(
+            return_value=_FakeStreamCM([_mock_text_delta_event("partial...")], final_msg)
+        )
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert len(stop_events) == 1
+        assert stop_events[0]["stop_reason"] == "max_tokens"
+        assert any("truncated" in rec.message.lower() for rec in caplog.records)
+
+    def test_streaming_end_turn_yields_stop_event_without_warning(self, caplog):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=100)
+        final_msg.stop_reason = "end_turn"
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([_mock_text_delta_event("done.")], final_msg))
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert stop_events == [{"type": "stop", "stop_reason": "end_turn"}]
+        assert not any("truncated" in rec.message.lower() for rec in caplog.records)

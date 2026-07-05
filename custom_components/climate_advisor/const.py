@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.68"
+VERSION = "0.4.69"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.69": [
+        "Fix #420: AI Investigation reports now flag when a report was cut off before"
+        " Claude finished writing it (hit the configured max response length), instead of"
+        " silently showing an incomplete report as if it were 'Completed'. The dashboard"
+        " now shows a clear truncation warning and a log WARNING is emitted so you know to"
+        " raise 'Investigator Max Response Length' in AI settings and re-run.",
+    ],
     "0.4.68": [
         "Fix #417: overnight nat-vent no longer flickers between 'nat-vent' and"
         " 'paused — door/window open' every few minutes while the window stays open the"
@@ -758,6 +765,37 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    420: {
+        "version_fixed": "0.4.69",
+        "title": "AI Investigation report streamed text stops mid-way with no error shown",
+        "scope_covered": (
+            "claude_api.py: ClaudeResponse gained truncated/stop_reason fields;"
+            " _async_call_with_retry() (non-streaming) and async_request_streaming()"
+            " (streaming) both now read the Anthropic API's stop_reason on every request,"
+            " log it unconditionally at DEBUG, and log a WARNING plus set truncated=True"
+            " when stop_reason == 'max_tokens'. ai_skills.py: async_execute() and"
+            " async_execute_streaming() propagate truncated into their result/'done' dicts."
+            " api.py: ClimateAdvisorInvestigateView.post() logs a WARNING and stores"
+            " truncated in the persisted investigation report for both the streaming and"
+            " non-streaming branches. frontend/index.html: _runAIInvestigation() shows a"
+            " truncation warning instead of 'Completed' status; renderReportInPreview()"
+            " and the history list both show a truncation banner/badge when reopening a"
+            " truncated report; _formatInvestigationReport() notes it in markdown exports."
+            " Root cause: stop_reason was never inspected anywhere in the stack, so a"
+            " response cut off at the configured max_tokens cap was indistinguishable from"
+            " a normal completion — no exception, no log line, UI showed 'Completed'."
+        ),
+        "scope_not_covered": (
+            "Does not change the actual token budget or system-prompt verbosity — a"
+            " Investigator Max Response Length that is genuinely too low for the report"
+            " content will still truncate the report; it is now visibly flagged instead of"
+            " silent. Does not distinguish an early legitimate stop_reason == 'end_turn'"
+            " from a complete report — that case was not observed and could not be"
+            " confirmed without production log evidence (none was retrievable during this"
+            " investigation), but is now always logged at DEBUG so a future occurrence is"
+            " diagnosable."
+        ),
+    },
     417: {
         "version_fixed": "0.4.68",
         "title": "Overnight nat-vent flapped between nat-vent and paused-by-door every ~5min",

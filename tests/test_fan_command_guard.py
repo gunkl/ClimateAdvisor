@@ -382,3 +382,43 @@ class TestPostStartupUntrackedFanReconcile:
         asyncio.run(coord._async_thermostat_changed(event))
 
         coord.automation_engine.reconcile_fan_on_startup.assert_not_awaited()
+
+    def test_fan_action_start_with_pending_ca_command_skips_reconcile(self):
+        """hvac_action idle→fan while a CA fan command is still in flight → no reconcile
+        (Issue #417).
+
+        Occupant effect: CA just issued its own nat-vent cycle-on service call; the
+        thermostat's hvac_action briefly reports 'fan' before CA's own _fan_active /
+        _natural_vent_active flags finish settling. Without this guard, the reconcile
+        listener could see this transient window as "unowned" and immediately turn the
+        fan back off, undoing the cycling decision CA just made.
+        """
+        coord = _make_coord()
+        coord.automation_engine._fan_command_pending = True
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_not_awaited()
+
+    def test_fan_action_start_with_recent_ca_command_skips_reconcile(self):
+        """hvac_action idle→fan within 30s of a CA fan command (pending already cleared)
+        → no reconcile (Issue #417)."""
+        coord = _make_coord(fan_command_time=_NOW - timedelta(seconds=5))
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        with _fixed_now(_NOW):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_not_awaited()
+
+    def test_fan_action_start_with_stale_ca_command_still_triggers_reconcile(self):
+        """hvac_action idle→fan more than 30s after any CA fan command → reconcile still
+        fires normally — the guard must not suppress genuine untracked-fan detection."""
+        coord = _make_coord(fan_command_time=_NOW - timedelta(seconds=45))
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        with _fixed_now(_NOW):
+            asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_awaited_once()

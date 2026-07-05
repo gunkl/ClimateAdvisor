@@ -586,6 +586,12 @@ def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
     return label, ", ".join(parts)
 
 
+def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[str, str]:
+    label = "Nat-vent exit -- fan found running without a CA-owned session"
+    reason = p.get("reason", "")
+    return label, reason
+
+
 def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor")
     cool = p.get("comfort_cool")
@@ -871,6 +877,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_untracked_cleared": _render_fan_untracked_cleared,
     "fan_cancel": _render_fan_cancel,
     "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,
+    "nat_vent_reconcile_exit": _render_nat_vent_reconcile_exit,
     "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
     "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,

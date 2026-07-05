@@ -3076,6 +3076,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not _ae_347._fan_active
             and not _ae_347._natural_vent_active
             and not _ae_347._fan_override_active
+            # Issue #417: every sibling race-sensitive check in this file (e.g. lines
+            # ~2875, ~2916, ~2939, ~3225, ~3300) guards against CA's own in-flight fan
+            # commands with these two checks — this was the one place that didn't,
+            # letting a CA-issued nat-vent cycle-on transiently look "unowned" to this
+            # listener before _activate_fan()'s flags settle.
+            and not _ae_347._fan_command_pending
+            and not self._is_recent_fan_command(threshold_seconds=30.0)
         ):
             _LOGGER.info(
                 "hvac_action transitioned to fan while CA does not own fan — "

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.67"
+VERSION = "0.4.68"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.68": [
+        "Fix #417: overnight nat-vent no longer flickers between 'nat-vent' and"
+        " 'paused — door/window open' every few minutes while the window stays open the"
+        " whole time. The reactivation gate that decides whether nat-vent can resume was"
+        " using the flat daytime comfort floor even during the sleep window, so indoor"
+        " temperatures that were perfectly fine relative to the (lower) sleep floor kept"
+        " reading as 'too cold' and repeatedly shutting the session down. It now uses the"
+        " same sleep-aware floor the fan-cycling logic already used.",
+    ],
     "0.4.67": [
         "Fix #415: the Status card no longer shows a stale nat-vent target temperature"
         " (e.g. 'nat-vent (target 71°F)') that could disagree with the correct cycling"
@@ -749,6 +758,39 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    417: {
+        "version_fixed": "0.4.68",
+        "title": "Overnight nat-vent flapped between nat-vent and paused-by-door every ~5min",
+        "scope_covered": (
+            "automation.py: added _nat_vent_reactivation_floor(), a sleep-aware comfort"
+            " floor (mirrors the branch already used correctly by"
+            " nat_vent_temperature_check() and fan_thermostat_check()'s comfort-floor"
+            " check), and applied it at all 5 places that previously hardcoded the flat"
+            " daytime comfort_heat: the two _nat_vent_may_reactivate() call sites inside"
+            " check_natural_vent_conditions() (initial gate + Issue #134 comfort-ceiling"
+            " re-entry), the paused-by-door reactivation block, _re_pause_for_open_sensor(),"
+            " and reconcile_fan_on_startup()'s previously-separate hand-rolled eligibility"
+            " check (now folded into _nat_vent_may_reactivate() instead of a 5th copy)."
+            " Confirmed root cause via the CA chart_log: comfort_heat=68°F, sleep_heat=64°F,"
+            " sleep window 20:30-06:30; indoor held at 67-70°F all night — fine against the"
+            " correct sleep floor, but flapping across the wrong daytime floor on every"
+            " 1°F-resolution sensor tick. Also: reconcile_fan_on_startup()'s turn-off branch"
+            " now routes through the canonical _exit_nat_vent() choke point (Issue #411)"
+            " instead of hand-rolling the pause/grace decision, emitting a new"
+            " nat_vent_reconcile_exit event for Activity Report visibility. Also: the"
+            " coordinator's Issue #347 post-startup-fan-reconcile listener now guards"
+            " against CA's own in-flight fan commands (_fan_command_pending /"
+            " _is_recent_fan_command), matching every sibling race-sensitive check in"
+            " coordinator.py — defense in depth, not the primary fix."
+        ),
+        "scope_not_covered": (
+            "Two other direct manipulators of _natural_vent_active that bypass"
+            " _exit_nat_vent() (handle_all_doors_windows_closed() and the fast-loop"
+            " fan_thermostat_check() outdoor-reversal check) were found during this"
+            " investigation but neither reads comfort_heat and neither was implicated in"
+            " this bug — tracked separately in issue #418, not fixed here."
+        ),
+    },
     415: {
         "version_fixed": "0.4.67",
         "title": "Status card nat-vent target reappears (71°F) desynced from cycling band",

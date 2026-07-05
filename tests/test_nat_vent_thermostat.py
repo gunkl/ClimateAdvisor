@@ -664,3 +664,122 @@ class TestNatVentSleepWindowCycling:
         floor_exit_events = [e for e in emitted if e[0] == "nat_vent_comfort_floor_exit"]
         assert floor_exit_events, f"Expected nat_vent_comfort_floor_exit; got: {emitted}"
         assert "fan_device" in floor_exit_events[0][1], "Issue #402: exit events must identify the fan mechanism"
+
+
+# ---------------------------------------------------------------------------
+# TestNatVentReactivationFloorSleepAware: Issue #417 regression
+# ---------------------------------------------------------------------------
+#
+# Real incident: comfort_heat=68, sleep_heat=64, sleep window 20:30-06:30. Indoor
+# hovered at 67-70F overnight — above the correct sleep floor (64) but flapping
+# across the wrong flat daytime floor (68) that _nat_vent_may_reactivate() and its
+# callers used unconditionally. Config below mirrors the real incident values.
+
+
+class TestNatVentReactivationFloorSleepAware:
+    """_nat_vent_reactivation_floor() must use sleep_heat during the sleep window."""
+
+    def test_returns_daytime_comfort_heat_outside_sleep_window(self):
+        ae = _make_automation_engine({"comfort_heat": 68.0, "sleep_heat": 64.0})
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
+            assert ae._nat_vent_reactivation_floor() == 68.0
+
+    def test_returns_sleep_heat_inside_sleep_window(self):
+        ae = _make_automation_engine({"comfort_heat": 68.0, "sleep_heat": 64.0})
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=True):
+            assert ae._nat_vent_reactivation_floor() == 64.0
+
+    def test_falls_back_to_comfort_heat_if_sleep_heat_unset(self):
+        ae = _make_automation_engine({"comfort_heat": 68.0})
+        ae.config.pop("sleep_heat", None)
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=True):
+            assert ae._nat_vent_reactivation_floor() == 68.0
+
+
+class TestReconcileFanOnStartupSleepAwareFloor:
+    """reconcile_fan_on_startup() eligibility must use the sleep-aware floor (Issue #417).
+
+    Real incident values: comfort_heat=68, sleep_heat=64. Indoor=67F sits below the
+    (wrong) daytime floor but above the (correct) sleep floor — this is exactly the
+    band that caused the observed ~5min overnight flapping.
+    """
+
+    def _make_reconcile_engine(self) -> AutomationEngine:
+        ae = _make_automation_engine(
+            {
+                "comfort_heat": 68.0,
+                "comfort_cool": 74.0,
+                "sleep_heat": 64.0,
+                "sleep_time": "20:30",
+                "wake_time": "06:30",
+                "nat_vent_hysteresis_f": 1.0,
+                CONF_FAN_MODE: FAN_MODE_HVAC,
+            }
+        )
+        ae._fan_active = False
+        ae._natural_vent_active = False
+        ae._fan_override_active = False
+        ae._exit_nat_vent = AsyncMock()
+        ae._start_fan_thermo_backstop = MagicMock()
+        ae._record_action = MagicMock()
+        return ae
+
+    def test_indoor_between_sleep_floor_and_daytime_floor_is_eligible_at_night(self):
+        """indoor=67F: below comfort_heat(68) but above sleep_heat(64) — must adopt, not turn off.
+
+        Before the Issue #417 fix, this evaluated indoor(67) > comfort_heat(68) == False and
+        force-deactivated a fan CA had legitimately just turned on for nat-vent.
+        """
+        ae = self._make_reconcile_engine()
+        with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
+            asyncio.run(
+                ae.reconcile_fan_on_startup(
+                    indoor=67.0,
+                    outdoor=59.0,
+                    thermostat_fan_running=True,
+                    any_sensor_open=True,
+                )
+            )
+
+        ae._exit_nat_vent.assert_not_called()
+        assert ae._fan_active is True
+        assert ae._natural_vent_active is True
+
+    def test_indoor_between_sleep_floor_and_daytime_floor_is_ineligible_in_daytime(self):
+        """Same indoor=67F reading during the daytime must still be ineligible (comfort_heat applies)."""
+        ae = self._make_reconcile_engine()
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
+            asyncio.run(
+                ae.reconcile_fan_on_startup(
+                    indoor=67.0,
+                    outdoor=59.0,
+                    thermostat_fan_running=True,
+                    any_sensor_open=True,
+                )
+            )
+
+        ae._exit_nat_vent.assert_called_once()
+
+    def test_turn_off_branch_routes_through_exit_nat_vent_with_specific_event(self):
+        """The turn-off branch must emit nat_vent_reconcile_exit and call _exit_nat_vent(),
+        not hand-roll the pause/grace decision (Issue #417 blast-radius finding)."""
+        ae = self._make_reconcile_engine()
+        emitted: list[tuple] = []
+        ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
+            asyncio.run(
+                ae.reconcile_fan_on_startup(
+                    indoor=67.0,
+                    outdoor=59.0,
+                    thermostat_fan_running=True,
+                    any_sensor_open=True,
+                )
+            )
+
+        assert ae._fan_active is True, (
+            "_fan_active must be True before _exit_nat_vent() so its internal deactivate is not a no-op"
+        )
+        ae._exit_nat_vent.assert_called_once()
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_reconcile_exit" in event_names, f"Expected nat_vent_reconcile_exit event; got: {event_names}"

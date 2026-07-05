@@ -1924,7 +1924,7 @@ class AutomationEngine:
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             nat_vent_threshold = comfort_cool + nat_vent_delta
             indoor = self._get_indoor_temp_f()
-            comfort_heat = float(self.config.get("comfort_heat", 70))
+            comfort_heat = self._nat_vent_reactivation_floor()
             _LOGGER.debug(
                 "Nat vent gate check (%s): outdoor=%s indoor=%s comfort_heat=%.1f threshold=%.1f | "
                 "dir=%s floor=%s ceiling=%s",
@@ -2217,7 +2217,7 @@ class AutomationEngine:
             # indoor has risen above comfort_cool. Check nat-vent conditions directly.
             if not (self._paused_by_door or self._natural_vent_active):
                 _indoor = self._get_indoor_temp_f()
-                _comfort_heat = float(self.config.get("comfort_heat", 70))
+                _comfort_heat = self._nat_vent_reactivation_floor()
                 _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
                 # Issue #411 Pass 4: this was a 4th hand-copied instance of the shared
                 # reactivation gate (found after the initial 3-site extraction) — folded
@@ -2448,7 +2448,7 @@ class AutomationEngine:
                 lockout_s = float(
                     self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
                 )
-                comfort_heat = float(self.config.get("comfort_heat", 70))
+                comfort_heat = self._nat_vent_reactivation_floor()
 
                 # Enforce lockout after outdoor-warm exit
                 if self._nat_vent_outdoor_exit_time is not None:
@@ -2816,17 +2816,23 @@ class AutomationEngine:
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
         comfort_cool = float(self.config.get("comfort_cool", 75))
-        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_heat = self._nat_vent_reactivation_floor()
         nat_vent_threshold = comfort_cool + nat_vent_delta
 
+        # Issue #417: folded into the shared _nat_vent_may_reactivate() gate instead of a
+        # 5th hand-rolled copy — this hand-rolled version was also missing the sleep-aware
+        # floor and the ceiling dormancy check the shared gate already accounts for.
         nat_vent_eligible = (
             fan_mode != FAN_MODE_DISABLED
             and any_sensor_open
-            and outdoor is not None
-            and indoor is not None
-            and outdoor < indoor - hysteresis  # outdoor must be genuinely cooler
-            and indoor > comfort_heat  # indoor above comfort floor
-            and outdoor < nat_vent_threshold  # outdoor within acceptable ceiling
+            and self._nat_vent_may_reactivate(
+                outdoor=outdoor,
+                indoor=indoor,
+                comfort_heat=comfort_heat,
+                comfort_cool=comfort_cool,
+                threshold=nat_vent_threshold,
+                hysteresis=hysteresis,
+            )
         )
 
         if nat_vent_eligible:
@@ -2872,10 +2878,26 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
-            # Ensure flags are correct before deactivating so _deactivate_fan runs
+            _turn_off_reason = "startup reconcile — fan running without CA warrant"
+            # Ensure flags are correct before deactivating — _exit_nat_vent()'s internal
+            # _deactivate_fan() call is a no-op unless _fan_active reads True.
             self._fan_active = True  # let _deactivate_fan see an owned fan
-            self._natural_vent_active = False
-            await self._deactivate_fan(reason="startup reconcile — fan running without CA warrant")
+            # Issue #417: route through the canonical _exit_nat_vent() choke point (Issue
+            # #411) instead of hand-rolling the pause/grace decision here — this makes a
+            # genuine reconcile-driven turn-off behave identically to the other nat-vent
+            # exit sites (sets _paused_by_door + _pre_pause_mode when the window is still
+            # open, starts a grace period otherwise). Emit a specific event first since
+            # _exit_nat_vent() always passes emit_event=False to _deactivate_fan(),
+            # assuming the caller already recorded one — this call site didn't before.
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_reconcile_exit",
+                    {
+                        "reason": _turn_off_reason,
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
+            await self._exit_nat_vent(reason=_turn_off_reason)
 
     async def handle_manual_override_during_pause(
         self,
@@ -3105,7 +3127,7 @@ class AutomationEngine:
             comfort_cool = float(self.config.get("comfort_cool", 75))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             indoor = self._get_indoor_temp_f()
-            comfort_heat = float(self.config.get("comfort_heat", 70))
+            comfort_heat = self._nat_vent_reactivation_floor()
             # Issue #411 (Pass 4): shared reactivation gate, previously hand-copied here as
             # "Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition." No
             # hysteresis applied at this call site (default 0.0).
@@ -3674,6 +3696,25 @@ class AutomationEngine:
             await self._deactivate_fan(reason=reason, emit_event=False)
             self._start_grace_period("automation", trigger="nat_vent_exit_resume")
             _LOGGER.info("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
+
+    def _nat_vent_reactivation_floor(self) -> float:
+        """Sleep-aware comfort floor for nat-vent reactivation/eligibility gates (Issue #417).
+
+        Mirrors the sleep-window branch already used correctly by
+        ``nat_vent_temperature_check()`` and ``fan_thermostat_check()``'s comfort-floor
+        check. Every reactivation-gate call site (``_nat_vent_may_reactivate()`` and its
+        4 callers, plus ``reconcile_fan_on_startup``) previously hardcoded the flat
+        daytime ``comfort_heat`` floor with no sleep-window branch — during the sleep
+        window, indoor temp sitting between ``sleep_heat`` and ``comfort_heat`` would
+        read as "below the floor" and repeatedly reject reactivation, even though the
+        session should stay armed until the (lower) sleep floor. This is the same
+        failure mode already fixed once for the cycling functions under Issue #402;
+        this closes the gap on the reactivation-gate side.
+        """
+        comfort_heat = float(self.config.get("comfort_heat", 70))
+        if _in_sleep_window(dt_util.now(), self.config):
+            return float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+        return comfort_heat
 
     def _nat_vent_may_reactivate(
         self,

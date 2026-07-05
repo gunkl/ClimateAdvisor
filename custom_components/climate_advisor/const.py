@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.66"
+VERSION = "0.4.67"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.67": [
+        "Fix #415: the Status card no longer shows a stale nat-vent target temperature"
+        " (e.g. 'nat-vent (target 71°F)') that could disagree with the correct cycling"
+        " band shown right below it (e.g. '64°F–66°F'). The status string is cached for"
+        " up to 30 minutes while the cycling band is recomputed live on every dashboard"
+        " load, so the two could drift apart across a sleep-window transition. The status"
+        " string now just says 'nat-vent' — the live cycling band is the only place the"
+        " temperature is shown.",
+    ],
     "0.4.66": [
         "Fix #413: restart-cause diagnostics (added in #403) now correctly classify real HA"
         " restarts and deploys as 'version_changed' or 'user_restart' instead of always"
@@ -740,6 +749,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    415: {
+        "version_fixed": "0.4.67",
+        "title": "Status card nat-vent target reappears (71°F) desynced from cycling band",
+        "scope_covered": (
+            "coordinator.py: _compute_automation_status()'s nat-vent branch no longer embeds"
+            " a numeric target — it returns the plain string 'nat-vent'. Root cause: that"
+            " string is cached for up to update_interval (30 min) while api.py independently"
+            " recomputes compute_nat_vent_cycling_band() live on every dashboard poll to"
+            " populate the cycling-band line, so the two could diverge whenever a sleep-window"
+            " boundary fell between the last coordinator refresh and the current poll. Every"
+            " prior fix (#374, #400, #402, #407, #409) corrected which formula each call site"
+            " used but left both independently-timed call sites in place, so the divergence was"
+            " structurally guaranteed to recur. Removing the number from automation_status"
+            " means there is nothing left to desync — the live cycling-band line is now the"
+            " sole place this temperature is shown."
+        ),
+        "scope_not_covered": (
+            "compute_nat_vent_cycling_band() itself and the 30-minute coordinator update_interval"
+            " are unchanged — this fix removes the redundant, cache-timing-vulnerable display of"
+            " the same number, it does not change how or how often the underlying value is"
+            " computed."
+        ),
+    },
     413: {
         "version_fixed": "0.4.66",
         "title": "Restart-cause classification (#403) always showed 'unknown' on real HA restarts/deploys",

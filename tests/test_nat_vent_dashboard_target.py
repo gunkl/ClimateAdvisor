@@ -188,15 +188,15 @@ class TestComputeNatVentCyclingBand:
 
 
 class TestComputeAutomationStatusNatVentTarget:
-    """Issue #407: _compute_automation_status()'s nat-vent branch must call
+    """Issue #415: _compute_automation_status()'s nat-vent branch must never embed a
 
-    compute_nat_vent_cycling_band() — the same single source of truth used by the
-    "Natural Vent" status card — instead of independently recomputing the flat
-    daytime comfort-band midpoint. Before this fix, the main Status card always
-    showed the daytime midpoint (e.g. 71°F) even overnight during the sleep window,
-    contradicting the already-correct Natural Vent card (e.g. 65-66°F), repeating the
-    exact "fix one duplicate implementation, miss the sibling" pattern documented on
-    compute_nat_vent_cycling_band() from #374/#400/#402.
+    numeric target. It is cached for up to update_interval (30 min) while api.py
+    recomputes compute_nat_vent_cycling_band() live on every dashboard poll for the
+    cycling-band line — so a number embedded here can silently drift from the live
+    band across a sleep-window boundary (e.g. cached "71°F" vs. live "64°F–66°F").
+    This repeated the "fix one duplicate implementation, miss the sibling" pattern
+    from #374/#400/#402 because every prior fix (#407, #409) corrected which formula
+    to use rather than removing the second, independently-timed computation.
 
     Issue #409: the "windows open · " prefix was dropped — natural_vent_active does
     not imply a sensor is open, and real window state is already shown by the
@@ -213,22 +213,22 @@ class TestComputeAutomationStatusNatVentTarget:
             "wake_time": "07:00",
         }
 
-    def test_daytime_status_uses_comfort_midpoint(self):
-        """Outside the sleep window, the status string shows the daytime midpoint target."""
+    def test_daytime_status_has_no_numeric_target(self):
+        """Outside the sleep window, the status string is plain "nat-vent"."""
         coord = _make_nat_vent_coord_stub(config=self._config())
 
         # 14:00 — outside the 22:00-07:00 sleep window
         with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 14, 0, 0)):
             status = coord._compute_automation_status()
 
-        assert status == "nat-vent (target 71°F)"
+        assert status == "nat-vent"
 
-    def test_sleep_window_status_uses_sleep_heat_not_daytime_midpoint(self):
-        """During the sleep window, the status string must show the sleep-window target
-        (sleep_heat + hysteresis), NOT the daytime comfort-band midpoint.
+    def test_sleep_window_status_has_no_numeric_target(self):
+        """During the sleep window, the status string is also plain "nat-vent" —
 
-        This is the exact regression this bug produced: the Status card previously showed
-        71°F (the daytime midpoint) overnight instead of 66°F (sleep_heat(65) + hysteresis(1)).
+        no number is embedded here at all, so it can never disagree with the live
+        cycling-band line regardless of which side of the sleep-window boundary the
+        coordinator's cached status was last computed on.
         """
         coord = _make_nat_vent_coord_stub(config=self._config())
 
@@ -236,23 +236,30 @@ class TestComputeAutomationStatusNatVentTarget:
         with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
             status = coord._compute_automation_status()
 
-        assert status == "nat-vent (target 66°F)"
+        assert status == "nat-vent"
         assert "71" not in status
+        assert "°F" not in status
 
-    def test_status_and_cycling_band_agree(self):
-        """The target embedded in the status string must equal
+    def test_stale_cached_status_cannot_disagree_with_live_band(self):
+        """Regression guard for the recurring bug: simulate a coordinator whose
 
-        compute_nat_vent_cycling_band()["nat_vent_target"], formatted the same way — a
-        guard against the two ever drifting apart again.
+        automation_status was cached during the daytime (stale, up to 30 min old)
+        while compute_nat_vent_cycling_band() is queried live during the sleep
+        window (as api.py does on every poll). Since automation_status embeds no
+        number, the two can never visibly disagree, no matter how stale the cache is.
         """
         coord = _make_nat_vent_coord_stub(config=self._config())
 
-        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 2, 0, 0)):
-            status = coord._compute_automation_status()
-            band = coord.compute_nat_vent_cycling_band()
+        # Cache automation_status as of 21:59 (still daytime).
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 21, 59, 0)):
+            cached_status = coord._compute_automation_status()
 
-        expected = f"nat-vent (target {band['nat_vent_target']:.0f}°F)"
-        assert status == expected
+        # api.py queries the live band 2 minutes later, now inside the sleep window.
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 22, 1, 0)):
+            live_band = coord.compute_nat_vent_cycling_band()
+
+        assert cached_status == "nat-vent"
+        assert f"{live_band['nat_vent_target']:.0f}" not in cached_status
 
     def test_status_does_not_claim_windows_open(self):
         """Issue #409: natural_vent_active does not imply a window/door sensor is open

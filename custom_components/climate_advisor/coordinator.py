@@ -5510,18 +5510,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():
             return "windows open (as planned)"
         if self.automation_engine.natural_vent_active:
-            # Bug 3 (Issue #321): surface cycling target in status for at-a-glance visibility.
-            # Issue #407: was hardcoded to the flat daytime comfort-band midpoint, ignoring the
-            # sleep window, and never migrated to compute_nat_vent_cycling_band() (the Issue #402
-            # follow-up single source of truth for this exact value) — see that method's docstring
-            # for the fix-one-duplicate-miss-the-sibling history this repeats (#374, #400, #402).
-            # Issue #409: dropped the "windows open · " prefix — natural_vent_active does not
-            # imply a sensor is open (it can activate on temperature/idle-HVAC conditions alone,
-            # see automation.py's idle-reeval path, and door/window sensors are optional config),
-            # and real window state is already shown by the dedicated Doors/Windows status card.
-            # Restating it here was both potentially inaccurate and duplicative.
-            _nt = self.compute_nat_vent_cycling_band()["nat_vent_target"]
-            return f"nat-vent (target {_nt:.0f}°F)"
+            # Issue #415: no numeric target here. This string is cached for up to
+            # update_interval (30 min), but api.py recomputes compute_nat_vent_cycling_band()
+            # live on every dashboard poll for the cycling-band line — so a number embedded
+            # here can silently drift from the live band across a sleep-window boundary
+            # (e.g. cached "71°F" vs. live "64°F–66°F"). The live band is the only place
+            # this temperature is shown now; don't reintroduce it here.
+            return "nat-vent"
         if self.automation_engine.is_paused_by_door:
             if self._occupancy_mode == OCCUPANCY_AWAY:
                 return "paused — away (setback deferred: windows open)"

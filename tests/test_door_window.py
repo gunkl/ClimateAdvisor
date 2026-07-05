@@ -987,7 +987,7 @@ class TestAutomationStatusPausedWithOccupancy:
         if within_planned_window and any_sensor_open:
             return "windows open (as planned)"
         if natural_vent_active:
-            return "windows open · nat-vent (target 73°F)"
+            return "nat-vent"
         if is_paused_by_door:
             if occupancy_mode == OCCUPANCY_AWAY:
                 return "paused — away (setback deferred: windows open)"

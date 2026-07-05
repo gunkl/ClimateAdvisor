@@ -2741,6 +2741,7 @@
               error: event.error || null,
               raw_response: event.raw_response || accumulated,
               input_context: event.input_context || '',
+              truncated: !!event.truncated,
             };
             _currentReport = {
               reportType: 'investigation',
@@ -2748,9 +2749,11 @@
               result,
               focus,
             };
-            console.log('[CA] Done event received, total=' + accumulated.length + ' chars');
+            console.log('[CA] Done event received, total=' + accumulated.length + ' chars, truncated=' + result.truncated);
             renderReportInPreview(_currentReport);
-            status.textContent = 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
+            status.textContent = result.truncated
+              ? '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.'
+              : 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
             break;
 
@@ -2864,11 +2867,15 @@
       ? ' <span style="background:var(--primary);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;vertical-align:middle;">refined</span>'
       : '';
     const tsSpan = ts ? '<div style="color:var(--text-secondary);font-size:0.82rem;margin-bottom:8px;">' + escapeHtml(ts) + refinedBadge + '</div>' : '';
+    const truncatedBanner = result.truncated
+      ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
+        + '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.</div>'
+      : '';
     const data = result.data || {};
     const sourceLabel = result.source === 'fallback'
       ? '<span style="color:var(--warning);font-size:0.8rem">(fallback \u2014 AI unavailable)</span>'
       : '<span style="color:var(--success);font-size:0.8rem">(AI-generated)</span>';
-    let html = tsSpan + '<div style="margin-bottom:8px">' + sourceLabel + '</div>';
+    let html = tsSpan + truncatedBanner + '<div style="margin-bottom:8px">' + sourceLabel + '</div>';
     if (entry.reportType === 'activity') {
       const sections = ['summary', 'timeline', 'decisions', 'anomalies', 'diagnostics'];
       const sectionLabels = { summary: 'Summary', timeline: 'Timeline', decisions: 'Decisions', anomalies: 'Anomalies', diagnostics: 'Diagnostics' };
@@ -3089,6 +3096,9 @@
         : '<span style="background:var(--success);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;">Activity</span>';
       const result = entry.result || {};
       const source = result.source || 'unknown';
+      const truncatedBadge = result.truncated
+        ? '<span title="Report was cut off — hit max response length" style="background:var(--warning);color:#000;font-size:0.7rem;padding:1px 6px;border-radius:10px;">⚠ truncated</span>'
+        : '';
       const summary = (result.data && result.data.summary)
         ? result.data.summary.replace(/\s+/g, ' ').trim().substring(0, 110) + (result.data.summary.length > 110 ? '…' : '')
         : '';
@@ -3099,6 +3109,7 @@
         + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">'
         + '<span style="font-size:0.82rem;font-weight:500;">' + escapeHtml(ts) + '</span>'
         + typeBadge
+        + truncatedBadge
         + '<span style="font-size:0.75rem;color:var(--text-secondary);">' + escapeHtml(source) + '</span>'
         + '</div>'
         + (summary ? '<div style="font-size:0.78rem;color:var(--text-secondary);margin-top:3px;line-height:1.4;">' + escapeHtml(summary) + '</div>' : '')
@@ -3165,6 +3176,7 @@
     out += '| **Date** | ' + ts + ' |\n';
     out += '| **Source** | ' + source + ' |\n';
     if (focus) out += '| **Focus** | ' + focus + ' |\n';
+    if (result.truncated) out += '| **Truncated** | ⚠ Yes — hit max response length |\n';
     out += '\n---\n\n';
     for (const { key, label } of sections) {
       const content = (data[key] || '').trim();

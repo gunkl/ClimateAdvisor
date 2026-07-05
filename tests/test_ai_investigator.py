@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── HA module stubs must be in place before importing climate_advisor modules ──
 if "homeassistant" not in sys.modules:
@@ -732,16 +732,23 @@ class TestInvestigatorRateLimit:
 # ---------------------------------------------------------------------------
 
 
-def _simulate_investigate_post(
+async def _simulate_investigate_post(
     coordinator: MagicMock,
     focus: str | None = None,
     hours: int = 48,
+    run_skill: bool = False,
 ) -> tuple[int, str]:
     """Replicate the logic of ClimateAdvisorInvestigateView.post() as a plain function.
 
     Returns (status_code, body_text) for assertions.
     This avoids instantiating HomeAssistantView which has metaclass constraints.
+
+    When *run_skill* is True, also replicates the non-streaming execution branch
+    (calls coordinator.ai_skills.async_execute(), logs a WARNING and stores the
+    report on success — mirroring api.py's truncation handling, Issue #420).
     """
+    import logging
+
     from custom_components.climate_advisor.const import (
         CONF_AI_ENABLED,
         CONF_AI_INVESTIGATOR_ENABLED,
@@ -762,7 +769,29 @@ def _simulate_investigate_post(
     if not allowed:
         return 429, reason
 
-    return 200, "ok"
+    if not run_skill:
+        return 200, "ok"
+
+    result = await coordinator.ai_skills.async_execute(
+        "investigator",
+        coordinator.hass,
+        coordinator,
+        coordinator.claude_client,
+        focus=focus or "",
+        hours=hours,
+    )
+
+    if result.get("success") or result.get("source") == "fallback":
+        if result.get("truncated"):
+            logging.getLogger("custom_components.climate_advisor.api").warning(
+                "Investigation report truncated: hit max_tokens limit; "
+                "consider raising Investigator Max Response Length"
+            )
+        coordinator.claude_client.increment_investigator_counter()
+        await coordinator.async_store_investigation_report(result)
+        return 200, "ok"
+
+    return 500, result.get("error", "Investigation failed")
 
 
 def _simulate_investigation_reports_get(coordinator: MagicMock) -> list[dict]:
@@ -791,7 +820,7 @@ class TestAPIEndpointLogic:
         """POST returns 403 when ai_enabled is False."""
         coord = self._make_api_coordinator(ai_enabled=False)
 
-        status, body = _simulate_investigate_post(coord)
+        status, body = asyncio.run(_simulate_investigate_post(coord))
 
         assert status == 403
         assert "AI features are not enabled" in body
@@ -800,7 +829,7 @@ class TestAPIEndpointLogic:
         """POST returns 403 when ai_investigator_enabled is False."""
         coord = self._make_api_coordinator(ai_investigator_enabled=False)
 
-        status, body = _simulate_investigate_post(coord)
+        status, body = asyncio.run(_simulate_investigate_post(coord))
 
         assert status == 403
         assert "Investigative agent is not enabled" in body
@@ -810,7 +839,7 @@ class TestAPIEndpointLogic:
         coord = self._make_api_coordinator()
         coord.claude_client = None
 
-        status, body = _simulate_investigate_post(coord)
+        status, body = asyncio.run(_simulate_investigate_post(coord))
 
         assert status == 503
 
@@ -819,7 +848,7 @@ class TestAPIEndpointLogic:
         coord = self._make_api_coordinator()
         coord.claude_client.check_investigator_rate_limit.return_value = (False, "limit reached")
 
-        status, body = _simulate_investigate_post(coord)
+        status, body = asyncio.run(_simulate_investigate_post(coord))
 
         assert status == 429
         assert "limit reached" in body
@@ -828,9 +857,61 @@ class TestAPIEndpointLogic:
         """POST returns 200 when all pre-conditions are satisfied."""
         coord = self._make_api_coordinator()
 
-        status, _ = _simulate_investigate_post(coord)
+        status, _ = asyncio.run(_simulate_investigate_post(coord))
 
         assert status == 200
+
+    def test_post_truncated_result_logs_warning_and_stores_flag(self, caplog):
+        """A truncated skill result logs a WARNING and stores truncated=True (Issue #420)."""
+        coord = self._make_api_coordinator()
+        coord.hass = MagicMock()
+        coord.ai_skills = MagicMock()
+        coord.ai_skills.async_execute = AsyncMock(
+            return_value={
+                "success": True,
+                "source": "ai",
+                "data": {},
+                "error": None,
+                "input_context": "ctx",
+                "raw_response": "cut off",
+                "truncated": True,
+            }
+        )
+        coord.async_store_investigation_report = AsyncMock()
+
+        with caplog.at_level("WARNING"):
+            status, _ = asyncio.run(_simulate_investigate_post(coord, run_skill=True))
+
+        assert status == 200
+        assert any("truncated" in rec.message.lower() for rec in caplog.records)
+        stored = coord.async_store_investigation_report.call_args[0][0]
+        assert stored["truncated"] is True
+
+    def test_post_normal_result_does_not_warn(self, caplog):
+        """A normal (non-truncated) result stores truncated=False and logs no warning."""
+        coord = self._make_api_coordinator()
+        coord.hass = MagicMock()
+        coord.ai_skills = MagicMock()
+        coord.ai_skills.async_execute = AsyncMock(
+            return_value={
+                "success": True,
+                "source": "ai",
+                "data": {},
+                "error": None,
+                "input_context": "ctx",
+                "raw_response": "complete report",
+                "truncated": False,
+            }
+        )
+        coord.async_store_investigation_report = AsyncMock()
+
+        with caplog.at_level("WARNING"):
+            status, _ = asyncio.run(_simulate_investigate_post(coord, run_skill=True))
+
+        assert status == 200
+        assert not any("truncated" in rec.message.lower() for rec in caplog.records)
+        stored = coord.async_store_investigation_report.call_args[0][0]
+        assert stored["truncated"] is False
 
     def test_get_reports_returns_coordinator_history(self):
         """GET returns the list from get_investigation_report_history()."""

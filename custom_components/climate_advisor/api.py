@@ -820,7 +820,13 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                         "error": None,
                         "input_context": event.get("input_context", ""),
                         "raw_response": event.get("raw_response", ""),
+                        "truncated": event.get("truncated", False),
                     }
+                    if final_result["truncated"]:
+                        _LOGGER.warning(
+                            "Investigation report truncated: hit max_tokens limit; "
+                            "consider raising Investigator Max Response Length"
+                        )
 
             if final_result and final_result.get("success"):
                 coordinator.claude_client.increment_investigator_counter()
@@ -840,6 +846,11 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
         )
 
         if result.get("success") or result.get("source") == "fallback":
+            if result.get("truncated"):
+                _LOGGER.warning(
+                    "Investigation report truncated: hit max_tokens limit; "
+                    "consider raising Investigator Max Response Length"
+                )
             coordinator.claude_client.increment_investigator_counter()
             await coordinator.async_store_investigation_report(result)
             _LOGGER.info("Investigation complete: source=%s", result.get("source", "unknown"))

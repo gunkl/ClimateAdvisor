@@ -19,6 +19,7 @@
 | What rules govern the AI investigator's thermal pipeline health diagnosis? | Three THERMAL PIPELINE HEALTH rules in the system prompt: flag 0 committed HVAC obs as pipeline failure; flag `k_active_cool=NEVER LEARNED` with recent AC history as failure; flag ≥ 3 `new_session_started` abandonments as short-cycling. | [§THERMAL PIPELINE HEALTH System Prompt Rules](#thermal-pipeline-health-system-prompt-rules) |
 | Does the registry cache skill responses? | No. The registry has no response cache. Every `async_execute()` call builds a fresh context, calls Claude, and parses a new response. | [Caching](#caching) |
 | What invariant holds for `async_execute()` with respect to exceptions? | `async_execute()` never raises to the caller. Every exception inside context building, Claude call, parsing, and fallback invocation is caught and surfaced as a structured error dict. | [Invariants](#invariants) |
+| How does a caller know a report was cut off before Claude finished writing it? | `ClaudeAPIClient` inspects the Anthropic API's `stop_reason` on every request; `truncated=True` (present only on the AI success path) iff `stop_reason == "max_tokens"`. A stream ending on `max_tokens` is otherwise indistinguishable from a normal completion — no exception is raised (Issue #420). | [Return contract](#return-contract) |
 
 ---
 
@@ -106,7 +107,8 @@ No type enforcement is performed on callable signatures at registration time.
 4. **Claude call:** `await claude_client.async_request(system_prompt=skill.system_prompt, user_message=context, triggered_by=skill.triggered_by, model=..., max_tokens=..., reasoning_effort=...)`.
 5. **Success path:** If `response.success=True`:
    - Call `skill.response_parser(response.content)`. If the parser raises, fall through to step 6.
-   - Return `{success: True, source: "ai", data: parsed, error: None, input_context: context, raw_response: response.content}`.
+   - Return `{success: True, source: "ai", data: parsed, error: None, input_context: context, raw_response: response.content, truncated: response.truncated}`.
+   - `response.truncated` (and `response.stop_reason`) come from the Anthropic API's `stop_reason` field, which `ClaudeAPIClient` now inspects on every request (both `async_request` and `async_request_streaming`). `truncated=True` iff `stop_reason == "max_tokens"` — the model was cut off before finishing, not because it chose to stop. This is always logged (DEBUG for any stop_reason, WARNING when truncated) so a cut-off report is diagnosable instead of silently indistinguishable from a complete one (Issue #420).
 6. **Fallback path:** `response.success=False` or parser raised. Log WARNING. If `skill.fallback` is defined → `_run_fallback(skill, coordinator, context=context, **kwargs)`. Else → `_error_result(response.error or "AI request failed...", input_context=context)`.
 
 ### Fallback Trigger Conditions
@@ -133,10 +135,13 @@ Every `async_execute()` call returns exactly this shape:
     "error": str | None,      # error message string; None on success
     "input_context": str,     # assembled context string; "" if context build failed early
     "raw_response": str,      # Claude's raw text; "" on failure/fallback
+    "truncated": bool,        # True iff Claude's stop_reason was "max_tokens" (AI success path only)
 }
 ```
 
-All six keys are always present. `async_execute()` never raises.
+The first six keys are always present. `truncated` is only present on the AI success path
+(step 5) — fallback and error results omit it, and callers should treat a missing key as
+`False`. `async_execute()` never raises.
 
 ### `_run_fallback()` contract
 

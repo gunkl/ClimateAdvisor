@@ -2095,46 +2095,18 @@ class AutomationEngine:
                     {"was_paused": was_paused, "was_nat_vent": was_nat_vent},
                 )
 
-            # Handle natural ventilation mode cleanup (sensors closed while in nat vent)
+            # Handle natural ventilation mode cleanup (sensors closed while in nat vent).
+            # Issue #418: routed through the canonical _exit_nat_vent() choke point (Issue
+            # #411) instead of hand-rolling the pause/grace decision here — this was one of
+            # 2 remaining sites bypassing it. _exit_nat_vent() restores the pre-fan HVAC mode
+            # and starts a grace period; the classification-aware re-arm this branch used to
+            # do inline now happens when that grace period expires, via
+            # _apply_current_scheduled_state() -> apply_classification() (up to
+            # DEFAULT_AUTOMATION_GRACE_SECONDS later, not instantly — an accepted tradeoff for
+            # unification, see #418). The "sensor_all_closed" event emitted above already
+            # satisfies _exit_nat_vent()'s "caller emits its own specific event" contract.
             if self._natural_vent_active:
-                self._natural_vent_active = False
-                # emit_event=False: this transition is reported via sensor_all_closed above.
-                await self._deactivate_fan(
-                    reason="door/window closed — ending natural ventilation mode", emit_event=False
-                )
-                # Resume normal classification if we have one
-                if self._current_classification:
-                    c = self._current_classification
-                    _LOGGER.info(
-                        "sensor_all_closed: nat-vent ended — re-arming HVAC immediately day_type=%s hvac_mode=%s",
-                        c.day_type,
-                        c.hvac_mode,
-                    )
-                    if c.hvac_mode in ("heat", "cool"):
-                        # Hot/cool/cold day: restore the classification mode + setpoint directly.
-                        await self._set_hvac_mode(
-                            c.hvac_mode,
-                            reason="door/window closed — restoring mode after natural ventilation",
-                        )
-                        await self._set_temperature_for_mode(
-                            c,
-                            reason="door/window closed — restoring comfort after natural ventilation",
-                        )
-                    else:
-                        # Warm/mild day: classifier says "off" but actual control is the comfort band
-                        # (Issue #249). Re-arm immediately — don't wait up to 30 min for
-                        # apply_classification() to fire.
-                        _rearm_band = ComfortBand(
-                            floor=float(self.config.get("comfort_heat", 70)),
-                            ceiling=float(self.config.get("comfort_cool", 75)),
-                            active="ceiling",
-                            reason="nat-vent ended (warm/mild day) — immediate comfort band re-arm",
-                        )
-                        await self._apply_comfort_band(
-                            _rearm_band,
-                            reason="door/window closed — re-arming comfort band after nat-vent (warm/mild day)",
-                        )
-                    self._start_grace_period("automation", trigger="sensor_closed_resume")
+                await self._exit_nat_vent(reason="door/window closed — ending natural ventilation mode")
                 return
 
             # Fix D (Issue #277): whole-house fan running outside nat-vent must stop
@@ -2682,8 +2654,14 @@ class AutomationEngine:
         # early — e.g. stop at outdoor 71 / indoor 72 while a favorable gradient remains.
         if outdoor is not None and indoor is not None and outdoor >= indoor:
             if self._natural_vent_active:
-                # Route through the canonical nat-vent outdoor-rise exit so the event
-                # taxonomy + pause bookkeeping match check_natural_vent_conditions (~line 2004).
+                # Issue #418: actually routed through the canonical nat-vent outdoor-rise
+                # exit now (previously this comment claimed it did, but the code hand-rolled
+                # _natural_vent_active/_paused_by_door/_deactivate_fan itself — which set
+                # _paused_by_door=True while still restoring HVAC via _deactivate_fan()'s
+                # default restore_hvac=True, contradicting the pause semantics, and never
+                # captured _pre_pause_mode or checked whether a sensor was genuinely still
+                # open). _exit_nat_vent() gets all three right, mirroring
+                # check_natural_vent_conditions()'s equivalent outdoor-rise-exit call site.
                 stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F — airflow reversed"
                 _LOGGER.debug(
                     "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
@@ -2693,15 +2671,15 @@ class AutomationEngine:
                     True,
                     f"stop:{stop_reason}",
                 )
-                self._natural_vent_active = False
-                self._paused_by_door = True
-                self._nat_vent_outdoor_exit_time = dt_util.now()
-                await self._deactivate_fan(reason=f"nat vent exit (fast loop): {stop_reason}")
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "nat_vent_outdoor_rise_exit",
                         {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
                     )
+                await self._exit_nat_vent(
+                    reason=f"nat vent exit (fast loop): {stop_reason}",
+                    set_outdoor_exit_time=True,
+                )
                 return
             stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F (free cooling gone)"
             _LOGGER.debug(

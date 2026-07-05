@@ -1710,22 +1710,59 @@ class TestFanThermostatCheck:
         assert engine._natural_vent_active is True
 
     def test_stops_natvent_and_emits_outdoor_rise_exit(self):
-        """outdoor >= indoor while nat-vent active → deactivate + nat_vent_outdoor_rise_exit."""
+        """outdoor >= indoor while nat-vent active → deactivate + nat_vent_outdoor_rise_exit.
+
+        Issue #418: this now routes through the canonical _exit_nat_vent() choke point
+        (Issue #411) instead of hand-rolling _natural_vent_active/_paused_by_door/
+        _deactivate_fan() inline. A monitored sensor is still open (matching the real
+        precondition — nat-vent can't be active without one), so _exit_nat_vent() must
+        pause rather than restore HVAC into an open window: restore_hvac=False,
+        _paused_by_door=True, _pre_pause_mode captured, and the outdoor-exit lockout
+        timer set (set_outdoor_exit_time=True).
+        """
         engine = self._engine()
         engine._natural_vent_active = True
         engine._fan_active = True
+        engine._sensor_check_callback = lambda: True  # window that started nat-vent is still open
 
         asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=72.5, trigger="test"))
 
         engine._deactivate_fan.assert_awaited()
+        call_kwargs = engine._deactivate_fan.call_args[1]
+        assert call_kwargs.get("restore_hvac") is False, (
+            f"Issue #418: sensor still open -- must not restore HVAC into it; got: {call_kwargs}"
+        )
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is True
+        assert engine._pre_pause_mode is not None, "Issue #418: _pre_pause_mode must be captured on pause"
+        assert engine._nat_vent_outdoor_exit_time is not None, (
+            "Issue #418: set_outdoor_exit_time=True must set the reactivation lockout timer"
+        )
         events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
         assert "nat_vent_outdoor_rise_exit" in events
         payload = next(
             c.args[1] for c in engine._emit_event_callback.call_args_list if c.args[0] == "nat_vent_outdoor_rise_exit"
         )
         assert "fan_device" in payload, "Issue #402: exit events must identify the fan mechanism"
+
+    def test_stops_natvent_restores_hvac_when_no_sensor_open(self):
+        """Issue #418 regression: if no sensor is known open, _exit_nat_vent() must
+        restore HVAC (not pause) and start a grace period — the fast-loop path must not
+        strand HVAC off with no notion of when to resume, unlike the pre-fix code which
+        unconditionally set _paused_by_door=True regardless of sensor state.
+        """
+        engine = self._engine()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._sensor_check_callback = None
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=72.5, trigger="test"))
+
+        engine._deactivate_fan.assert_awaited()
+        call_kwargs = engine._deactivate_fan.call_args[1]
+        assert call_kwargs.get("restore_hvac", True) is True
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "automation"
 
     def test_stops_non_natvent_fan_without_natvent_event(self):
         """A non-nat-vent running fan stops on outdoor>=indoor with a generic reason (no nat-vent event)."""

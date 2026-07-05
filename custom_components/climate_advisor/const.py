@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.69"
+VERSION = "0.4.70"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.70": [
+        "Fix #418: two remaining nat-vent exit paths (closing the last open window, and the"
+        " fast free-cooling-reversal check that runs on every temperature update) now go"
+        " through the same unified exit handling the other paths already used. The"
+        " fast-loop path had a real bug — it could mark the session as 'paused, waiting for"
+        " the window to close' while still turning the HVAC back on into that open window."
+        " Closing the last window now restores HVAC and lets it settle into the right mode"
+        " within a few minutes (previously instant) — a deliberate tradeoff for consistency.",
+    ],
     "0.4.69": [
         "Fix #420: AI Investigation reports now flag when a report was cut off before"
         " Claude finished writing it (hit the configured max response length), instead of"
@@ -765,6 +774,34 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    418: {
+        "version_fixed": "0.4.70",
+        "title": "Two nat-vent exit sites bypassed the _exit_nat_vent() choke point (Issue #411 follow-up)",
+        "scope_covered": (
+            "automation.py: handle_all_doors_windows_closed()'s nat-vent-cleanup branch"
+            " (Priority 1 sensor-all-close) and fan_thermostat_check()'s fast-loop Check 1"
+            " (fast-loop mirror of the Priority 3 outdoor-rise exit) now both call"
+            " _exit_nat_vent() (Issue #411's single choke point) instead of hand-rolling"
+            " _natural_vent_active/_paused_by_door/_deactivate_fan() inline. The fast-loop"
+            " site had a live correctness bug: it set _paused_by_door=True (implying HVAC"
+            " should stay off, waiting for the window to close) but called _deactivate_fan()"
+            " with the default restore_hvac=True, restoring HVAC into a window it had just"
+            " marked as still open — the exact contradiction _exit_nat_vent() exists to"
+            " prevent — and never captured _pre_pause_mode or checked whether a sensor was"
+            " genuinely open. The sensor-all-close site had no such bug, but its immediate"
+            " classification-aware restore (comfort band re-arm for warm/mild days, direct"
+            " mode restore for hot days) is now traded for the generic restore-then-grace"
+            " path, converging to the same eventual state via _apply_current_scheduled_state()"
+            " at grace expiry (DEFAULT_AUTOMATION_GRACE_SECONDS = 5 min) instead of instantly"
+            " — a deliberate tradeoff accepted for full unification, reviewed with the user"
+            " before implementation."
+        ),
+        "scope_not_covered": (
+            "The classification-aware restore behavior itself (apply_classification()'s"
+            " warm/hot-day mode-setting logic) is unchanged — only its timing after a"
+            " sensor-all-close event moved from instant to grace-period-later."
+        ),
+    },
     420: {
         "version_fixed": "0.4.69",
         "title": "AI Investigation report streamed text stops mid-way with no error shown",

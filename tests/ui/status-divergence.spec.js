@@ -99,7 +99,7 @@ test.describe('Natural Vent info merged into Status card (Issue #407, #409)', ()
           outdoor_temp: 65,
           automation_enabled: true,
           occupancy_mode: 'home',
-          automation_status: 'nat-vent (target 71°F)',
+          automation_status: 'nat-vent',
           compliance_score: 1.0,
           nat_vent_active: true,
           nat_vent_ac_assist: false,
@@ -121,7 +121,10 @@ test.describe('Natural Vent info merged into Status card (Issue #407, #409)', ()
     const html = await statusItem.innerHTML();
     expect(html).toContain('70');
     expect(html).toContain('72');
-    expect(html).toContain('71');
+    // Issue #415: automation_status must never embed a numeric target (it's cached for
+    // up to 30 min while the cycling band is recomputed live on every poll, so a number
+    // here can silently drift from the live band across a sleep-window boundary).
+    expect(html).not.toContain('71');
     expect(html).toContain('savings mode');
     // Issue #409: no duplicate naming — "Natural ventilation" must not appear
     // (the concept is named once, as "nat-vent", in automation_status).

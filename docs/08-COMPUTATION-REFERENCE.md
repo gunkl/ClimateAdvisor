@@ -2064,6 +2064,8 @@ Once `_natural_vent_active = True`, the fan does not simply stay on until the se
 
 *Sleep-window note:* The sleep target is the sleep floor plus one hysteresis step, so the fan cools the home to `sleep_heat` (cycling off there) and then maintains it by re-activating at `sleep_heat + 2 × hysteresis`. The hard-exit threshold (`sleep_heat − hysteresis`) sits one step below the cycling-off point, so the session ends only if indoor temperature falls past `sleep_heat` — i.e., after the fan has already paused.
 
+*Dashboard display note (Issue #415):* `nat_vent_target` is used to compute the cycling band shown on the Status card, but is never embedded as a number in the `automation_status` string itself. `automation_status` is cached for up to `update_interval` (30 min), while `api.py` recomputes `compute_nat_vent_cycling_band()` live on every dashboard poll — so a number embedded in the cached string can drift from the live band across a sleep-window boundary. Do not reintroduce a numeric target into `automation_status`; the live cycling-band line is the sole place this temperature is displayed.
+
 **Fan cycles off (indoor ≤ off_threshold):**
 - `_fan_active` is set to `False`; fan deactivated.
 - `_natural_vent_active` remains `True` — the session is still active.

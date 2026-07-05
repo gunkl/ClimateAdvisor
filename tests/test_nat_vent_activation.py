@@ -1475,17 +1475,27 @@ class TestNatVentAcAssist:
 
     # ------------------------------------------------------------------
     # Test 6: handle_all_doors_windows_closed, warm/mild day (hvac_mode="off")
-    # -> comfort band re-armed immediately
+    # -> Issue #418: routed through _exit_nat_vent(); classification-aware
+    #    re-arm now happens at grace-period expiry, not synchronously here.
     # ------------------------------------------------------------------
     def test_sensor_close_warm_day_rearmed_immediately(self):
         """All sensors close while nat-vent active, day_type='warm' (hvac_mode='off').
 
-        handle_all_doors_windows_closed() must re-arm the comfort band immediately,
-        not wait for the next apply_classification() cycle (up to 30 min away).
+        Issue #418: handle_all_doors_windows_closed() now routes the nat-vent-cleanup
+        branch through the canonical _exit_nat_vent() choke point (Issue #411) instead
+        of hand-rolling the classification-aware restore inline. The immediate
+        comfort-band re-arm this test used to assert synchronously here now happens
+        up to DEFAULT_AUTOMATION_GRACE_SECONDS later, when the automation grace period
+        started by _exit_nat_vent() expires and _apply_current_scheduled_state() calls
+        apply_classification() (covered generically by
+        test_grace_convergence.py::test_grace_expiry_applies_classification_outside_bedtime_window;
+        apply_classification()'s own warm/hot-day mode-setting logic is covered by its
+        dedicated test files). This is an accepted, delayed-convergence tradeoff for
+        unifying all nat-vent exit sites through one choke point (see #418) — the
+        eventual HVAC state is the same, just not instant.
 
-        Occupant experience: closing windows on a warm day immediately re-arms the
-        AC so the indoor temp does not drift above comfort_cool before the next
-        30-min automation cycle.
+        Occupant experience: closing windows on a warm day re-arms the AC within one
+        automation grace period (5 min by default) instead of instantly.
         """
         engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=76.0)
         engine._natural_vent_active = True
@@ -1493,31 +1503,38 @@ class TestNatVentAcAssist:
         # Classification with hvac_mode="off" = warm/mild day
         engine._current_classification = _make_classification(day_type="warm", hvac_mode="off")
 
-        # Stub _apply_comfort_band to assert immediate re-arm
-        engine._apply_comfort_band = AsyncMock()
         # Stub _deactivate_fan so it doesn't call real fan service
         engine._deactivate_fan = AsyncMock()
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         asyncio.run(engine.handle_all_doors_windows_closed())
 
         assert engine._natural_vent_active is False
-        engine._apply_comfort_band.assert_called_once()
-        call_band = engine._apply_comfort_band.call_args[0][0]
-        assert call_band.active == "ceiling"
+        engine._deactivate_fan.assert_called_once()
+        call_kwargs = engine._deactivate_fan.call_args[1]
+        assert call_kwargs.get("restore_hvac", True) is True, (
+            f"sensors genuinely closed -> full HVAC restore, not a pause; got: {call_kwargs}"
+        )
+        assert engine._grace_active is True, "must start a grace period so classification reconciles"
+        assert engine._last_resume_source == "automation"
+        event_names = [e[0] for e in emitted]
+        assert "grace_started" in event_names, f"expected grace_started event; got: {event_names}"
 
     # ------------------------------------------------------------------
     # Test 7: handle_all_doors_windows_closed, hot day (hvac_mode="cool")
-    # -> HVAC set to "cool" (not comfort band)
+    # -> Issue #418: routed through _exit_nat_vent(); mode restore now
+    #    happens at grace-period expiry, not synchronously here.
     # ------------------------------------------------------------------
     def test_sensor_close_hot_day_mode_restored(self):
         """All sensors close while nat-vent active, day_type='hot' (hvac_mode='cool').
 
-        handle_all_doors_windows_closed() must restore 'cool' mode (not re-arm a band),
-        because the classifier explicitly wants compressor cooling.
-
-        Occupant experience: on a hot day the AC compressor comes back on immediately
-        when windows close -- the occupant does not experience a comfort gap while
-        waiting for the next automation cycle.
+        Issue #418: same unification as the warm-day test above — the immediate 'cool'
+        mode restore this test used to assert synchronously is now deferred to
+        grace-period expiry via _apply_current_scheduled_state() -> apply_classification().
+        Asserting the generic exit+grace path here; apply_classification()'s hot-day
+        'cool' mode-setting behavior is covered by its own dedicated tests, independent
+        of the nat-vent exit path that leads into it.
         """
         engine = _make_hvac_engine(fan_mode="hvac_fan", aggressive_savings=False, indoor_f=76.0)
         engine._natural_vent_active = True
@@ -1530,13 +1547,10 @@ class TestNatVentAcAssist:
         asyncio.run(engine.handle_all_doors_windows_closed())
 
         assert engine._natural_vent_active is False
-        hvac_calls = [
-            c
-            for c in engine.hass.services.async_call.call_args_list
-            if c[0][0] == "climate" and c[0][1] == "set_hvac_mode"
-        ]
-        cool_calls = [c for c in hvac_calls if c[0][2].get("hvac_mode") == "cool"]
-        assert len(cool_calls) >= 1, "hot-day close must restore 'cool' HVAC mode"
+        engine._deactivate_fan.assert_called_once()
+        call_kwargs = engine._deactivate_fan.call_args[1]
+        assert call_kwargs.get("restore_hvac", True) is True
+        assert engine._grace_active is True, "must start a grace period so classification reconciles"
 
 
 # ---------------------------------------------------------------------------

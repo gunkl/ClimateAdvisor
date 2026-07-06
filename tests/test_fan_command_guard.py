@@ -30,6 +30,13 @@ if "homeassistant" not in sys.modules:
 
     _install_ha_stubs()
 
+from custom_components.climate_advisor.const import (  # noqa: E402
+    CONF_FAN_MODE,
+    FAN_MODE_BOTH,
+    FAN_MODE_HVAC,
+    FAN_MODE_WHOLE_HOUSE,
+)
+
 _NOW = datetime(2026, 6, 11, 14, 0, 0)
 
 
@@ -175,6 +182,13 @@ def _make_coord(*, fan_command_time=None):
     coord._is_recent_hvac_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_hvac_command, coord)
     coord._is_recent_temp_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_temp_command, coord)
     coord._is_recent_fan_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_fan_command, coord)
+    # Issue #423: archetype-aware fan-running derivation, bound for real so tests can mock
+    # just _get_fan_physical_state/_fan_state_feedback_enabled underneath it.
+    coord._derive_thermostat_fan_running_for_reconcile = types.MethodType(
+        ClimateAdvisorCoordinator._derive_thermostat_fan_running_for_reconcile, coord
+    )
+    coord._fan_state_feedback_enabled = types.MethodType(ClimateAdvisorCoordinator._fan_state_feedback_enabled, coord)
+    coord._get_fan_physical_state = MagicMock(return_value=None)  # default: command-only / no feedback
     return coord
 
 
@@ -422,3 +436,117 @@ class TestPostStartupUntrackedFanReconcile:
             asyncio.run(coord._async_thermostat_changed(event))
 
         coord.automation_engine.reconcile_fan_on_startup.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Issue #423: archetype-aware fan-running derivation for reconcile_fan_on_startup()
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveThermostatFanRunningForReconcile:
+    """_derive_thermostat_fan_running_for_reconcile() — archetype-aware ground truth."""
+
+    def test_hvac_mode_uses_thermostat_attrs_regardless_of_physical_state(self):
+        """FAN_MODE_HVAC: thermostat attrs ARE the fan — trust them, ignore physical state."""
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_HVAC
+        coord._get_fan_physical_state = MagicMock(return_value=False)
+
+        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="fan") is True
+        coord._get_fan_physical_state.assert_not_called()
+
+    def test_whole_house_mode_uses_physical_state_not_thermostat_attrs(self):
+        """FAN_MODE_WHOLE_HOUSE regression test for Issue #423: thermostat attrs say the fan
+        is running (a thermostat-internal blip), but the real configured WHF entity reads off
+        — must return False, not adopt a fan that was never actually turned on."""
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        coord._get_fan_physical_state = MagicMock(return_value=False)
+
+        result = coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="fan")
+
+        assert result is False, "Issue #423: WHF physical state=off must win over a thermostat-only signal"
+
+    def test_whole_house_mode_agrees_when_physical_state_true(self):
+        """FAN_MODE_WHOLE_HOUSE: physical state confirms on -> True."""
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        coord._get_fan_physical_state = MagicMock(return_value=True)
+
+        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="idle") is True
+
+    def test_command_only_mode_falls_back_to_thermostat_attrs(self):
+        """FAN_MODE_WHOLE_HOUSE with fan_state_feedback disabled: _get_fan_physical_state()
+        returns None (no ground truth) -> falls back to the thermostat-attribute signal
+        (documented, explicit fallback, not an accidental fallthrough)."""
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        coord._get_fan_physical_state = MagicMock(return_value=None)
+
+        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="fan") is True
+        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="idle") is False
+
+    def test_both_mode_ors_whf_and_thermostat_signals(self):
+        """FAN_MODE_BOTH: ORs the real WHF physical state with the thermostat signal — a
+        strict superset of the pre-#423 behavior, not a true per-device model (tracked as a
+        follow-up gap, not solved here)."""
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_BOTH
+        coord._get_fan_physical_state = MagicMock(return_value=False)
+
+        # WHF physically off, but thermostat's own blower attrs say running -> True (OR).
+        assert coord._derive_thermostat_fan_running_for_reconcile(fan_mode_attr="", hvac_action_attr="fan") is True
+
+
+class TestReconcileSite3ArchetypeAware:
+    """Issue #423 regression: the exact Issue #347/#417 runtime trigger site (Site 3) that
+    misfired in the reported incident, now archetype-aware for FAN_MODE_WHOLE_HOUSE."""
+
+    def _make_fan_action_event(self, old_action: str, new_action: str, hvac_mode: str = "cool") -> MagicMock:
+        old_s = MagicMock()
+        old_s.state = hvac_mode
+        old_s.attributes = {"hvac_action": old_action, "temperature": 70.0, "fan_mode": "auto"}
+        new_s = MagicMock()
+        new_s.state = hvac_mode
+        new_s.attributes = {"hvac_action": new_action, "temperature": 70.0, "fan_mode": "auto"}
+        event = MagicMock()
+        event.data = {"old_state": old_s, "new_state": new_s}
+        return event
+
+    def test_whf_thermostat_blip_with_whf_physically_off_does_not_adopt(self):
+        """Issue #423 exact incident reproduction: FAN_MODE_WHOLE_HOUSE, hvac_action
+        transitions idle->fan (a thermostat-internal blip, e.g. after a nat-vent proactive
+        floor exit), but the real WHF entity reads physically off. Reconcile must NOT adopt
+        — thermostat_fan_running must be False, not the pre-fix hardcoded True.
+        """
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        coord._get_fan_physical_state = MagicMock(return_value=False)
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_awaited_once_with(
+            indoor=72.0,
+            outdoor=65.0,
+            thermostat_fan_running=False,
+            any_sensor_open=False,
+        )
+
+    def test_whf_thermostat_blip_with_whf_physically_on_does_adopt(self):
+        """Same transition, but the real WHF entity confirms it's genuinely on -> adopt
+        (thermostat_fan_running=True) — the fix must not make WHF adoption impossible, only
+        correct when the signal disagrees with reality."""
+        coord = _make_coord()
+        coord.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        coord._get_fan_physical_state = MagicMock(return_value=True)
+        event = self._make_fan_action_event(old_action="idle", new_action="fan")
+
+        asyncio.run(coord._async_thermostat_changed(event))
+
+        coord.automation_engine.reconcile_fan_on_startup.assert_awaited_once_with(
+            indoor=72.0,
+            outdoor=65.0,
+            thermostat_fan_running=True,
+            any_sensor_open=False,
+        )

@@ -511,6 +511,13 @@ class AutomationEngine:
         self._resumed_from_pause: bool = False
         self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
 
+        # Issue #423: physical fan ground-truth callbacks — set by coordinator after
+        # construction, mirroring _sensor_check_callback/_emit_event_callback above.
+        # Used by _reconcile_fan_physical_drift() to self-correct a stale _fan_active.
+        self._get_fan_physical_state_callback: Any | None = None
+        self._is_recent_fan_command_callback: Any | None = None
+        self._fan_drift_tick_count: int = 0
+
         # Welcome home notification debounce (Issue #59)
         self._last_welcome_home_notified: datetime | None = None
 
@@ -741,11 +748,6 @@ class AutomationEngine:
             self._fan_override_active = False
             self._fan_override_time = None
 
-        # Clear all fan tracking state — fan is physically off.
-        self._fan_active = False
-        self._fan_on_since = None
-        self._natural_vent_active = False
-
         if self._emit_event_callback:
             self._emit_event_callback(
                 "fan_cancel",
@@ -757,8 +759,52 @@ class AutomationEngine:
                 },
             )
 
+        self._clear_fan_flags_and_start_grace(
+            reason=f"fan={fan_before or '?'}->{fan_after or '?'}",
+            trigger_label="fan_off",
+            preserve_nat_vent_session=False,
+        )
+
+    def _clear_fan_flags_and_start_grace(
+        self,
+        *,
+        reason: str,
+        trigger_label: str = "fan_off",
+        preserve_nat_vent_session: bool = False,
+    ) -> None:
+        """Shared "fan confirmed off" flag-clearing + grace-period logic.
+
+        Extracted so both a genuine user fan-off (``on_fan_turned_off()``, always ends the
+        nat-vent session — the user made a real decision) and a physical-drift
+        self-correction (``_reconcile_fan_physical_drift()``, Issue #423 — CA's own belief was
+        wrong, the session should survive so cycling-on logic can immediately re-evaluate) can
+        share the mechanics without the drift-correction path silently killing a nat-vent
+        session it never should have.
+
+        Callers emit their own specific event (with a literal event-type string) before
+        calling this — mirroring the established `_exit_nat_vent()` pattern — so the static
+        event-coverage check (`tests/test_activity_renderers.py`) can still find the literal,
+        and so each caller's payload shape stays under its own control.
+
+        Args:
+            reason: Human-readable reason logged alongside the correction.
+            trigger_label: `trigger` field on the grace period, for log/event correlation.
+            preserve_nat_vent_session: When True, `_natural_vent_active` is left untouched so
+                the session survives the correction (Issue #423 drift-correction case). When
+                False (the default, matching the original `on_fan_turned_off()` behavior), the
+                session ends — a genuine fan-off is a real end-of-session signal.
+        """
+        self._fan_active = False
+        self._fan_on_since = None
+        if not preserve_nat_vent_session:
+            self._natural_vent_active = False
+
         _LOGGER.info(
-            "Fan turned off: cleared _fan_active, _fan_on_since, _natural_vent_active; starting fan_off grace period",
+            "Fan flags cleared (%s): _fan_active/_fan_on_since cleared, _natural_vent_active %s;"
+            " starting %s grace period",
+            reason,
+            "preserved" if preserve_nat_vent_session else "cleared",
+            trigger_label,
         )
 
         # Restart min-runtime cycle scheduling (same as clear_fan_override does)
@@ -766,7 +812,7 @@ class AutomationEngine:
 
         # Start grace period to gate nat-vent re-activation — same duration as manual grace
         # but with a distinct trigger string so logs/events are distinguishable.
-        self._start_grace_period("manual", trigger="fan_off")
+        self._start_grace_period("manual", trigger=trigger_label)
 
     def clear_fan_override(self) -> None:
         """Clear the fan override flag (called at transition points, Issue #327).
@@ -2758,8 +2804,19 @@ class AutomationEngine:
         Args:
             indoor:               Current indoor temperature in °F (None = unavailable).
             outdoor:              Current outdoor temperature in °F (None = unavailable).
-            thermostat_fan_running: True when the thermostat reports the fan is on
-                                    (fan_mode=="on" or hvac_action=="fan").
+            thermostat_fan_running: The archetype-appropriate "is a fan physically running"
+                                    ground-truth signal (Issue #423). Despite the name, this is
+                                    NOT always the thermostat's own fan_mode/hvac_action —
+                                    callers resolve it via
+                                    coordinator._derive_thermostat_fan_running_for_reconcile(),
+                                    which uses the thermostat's attributes for FAN_MODE_HVAC but
+                                    the real configured WHF entity's physical state
+                                    (_get_fan_physical_state()) for FAN_MODE_WHOLE_HOUSE, since
+                                    those are physically separate devices. A prior version of
+                                    every caller here always used the thermostat's attributes
+                                    regardless of archetype, which could "adopt" a whole-house
+                                    fan session based on an unrelated thermostat-internal fan
+                                    blip while the real WHF was off (Issue #423).
             any_sensor_open:      True when at least one door/window sensor is open.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -4001,6 +4058,11 @@ class AutomationEngine:
         """Execute a thermostatic check and reschedule the backstop (Issue #327)."""
         indoor = self._get_indoor_temp_f()
         outdoor = self._last_outdoor_temp
+        # Issue #423: self-healing physical-state check runs first — if _fan_active is stale
+        # (e.g. from a reconcile that "adopted" a fan that was never actually turned on), correct
+        # it here so fan_thermostat_check()/nat_vent_temperature_check() below see the corrected
+        # state instead of stale-True on this same tick.
+        self._reconcile_fan_physical_drift()
         await self.fan_thermostat_check(indoor=indoor, outdoor=outdoor, trigger="timer")
         # Issue #402 follow-up: nat_vent_temperature_check() (the function that owns the
         # cycling on/off-threshold decision) is otherwise invoked ONLY when the coordinator
@@ -4021,6 +4083,85 @@ class AutomationEngine:
         if self._fan_thermo_cancel:
             self._fan_thermo_cancel()
             self._fan_thermo_cancel = None
+
+    def _reconcile_fan_physical_drift(self) -> None:
+        """Detect and self-correct a stale _fan_active=True with no matching physical fan (Issue #423).
+
+        Closes the gap that let the reported incident persist for 3.5+ hours: nothing
+        previously compared `_fan_active`'s belief against the real configured fan entity's
+        physical state and corrected it — `_compute_fan_status()`/`_compute_whf_status()`
+        already do this comparison, but only to render "active (unconfirmed)" in the UI.
+
+        Only applies to FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH with fan_state_feedback enabled —
+        those are the only archetypes with an independent physical ground-truth read
+        (`_get_fan_physical_state_callback`). FAN_MODE_HVAC has no separate physical entity to
+        drift from (the thermostat's own attributes ARE the fan) and command-only mode
+        (`_get_fan_physical_state_callback()` returns None) has no ground truth to compare
+        against — both are no-ops here by construction.
+
+        Guards against two false-positive sources:
+        - Recent CA command echo/lag: skip if a fan command was issued in the last 30s
+          (`_is_recent_fan_command_callback`, the same guard `_async_fan_entity_changed()`
+          already uses for this exact purpose).
+        - Single-tick transient: requires the drift to persist across 2 consecutive backstop
+          ticks (5 min apart) before correcting, so a momentary sensor flap doesn't trigger a
+          correct-then-immediately-re-adopt cycle every 5 minutes.
+
+        On confirmed drift, clears the stale flags via `_clear_fan_flags_and_start_grace()`
+        with `preserve_nat_vent_session=True` — the nat-vent session survives so the
+        immediately-following `nat_vent_temperature_check()` call in `_thermo_backstop_task()`
+        can re-fire `_activate_fan()` on the same tick if conditions still warrant it.
+        """
+        if not self._fan_active:
+            self._fan_drift_tick_count = 0
+            return
+
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return
+
+        if self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0):
+            self._fan_drift_tick_count = 0
+            return
+
+        if not self._get_fan_physical_state_callback:
+            return
+        physical_on = self._get_fan_physical_state_callback()
+        if physical_on is None:
+            return  # command-only mode — no ground truth, nothing to reconcile
+        if physical_on:
+            self._fan_drift_tick_count = 0  # agrees — reset
+            return
+
+        # physical_on is False but _fan_active is True — disagreement.
+        self._fan_drift_tick_count += 1
+        if self._fan_drift_tick_count < 2:
+            _LOGGER.info(
+                "Fan physical-state drift detected (tick %d/2): _fan_active=True but physical"
+                " state=off — awaiting confirmation tick before correcting",
+                self._fan_drift_tick_count,
+            )
+            return
+
+        _LOGGER.warning(
+            "Fan physical-state drift confirmed over 2 backstop ticks: _fan_active=True but"
+            " physical state=off — self-correcting stale flag (Issue #423)"
+        )
+        self._fan_drift_tick_count = 0
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "fan_cancel",
+                {
+                    "trigger": "physical_drift_correction",
+                    "reason": "physical-state drift confirmed over 2 backstop ticks",
+                    "fan_device": _fan_device_label(self.config),
+                },
+            )
+        self._clear_fan_flags_and_start_grace(
+            reason="physical-state drift confirmed over 2 backstop ticks",
+            trigger_label="physical_drift_correction",
+            preserve_nat_vent_session=True,
+        )
 
     async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:
         """Deactivate fan based on configured fan_mode.

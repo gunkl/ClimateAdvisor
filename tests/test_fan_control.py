@@ -1943,6 +1943,176 @@ class TestThermoBackstopTask:
         engine.nat_vent_temperature_check.assert_not_awaited()
 
 
+# ---------------------------------------------------------------------------
+# Issue #423: self-healing physical-state drift correction
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileFanPhysicalDrift:
+    """_reconcile_fan_physical_drift() — self-corrects a stale _fan_active (Issue #423)."""
+
+    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE, physical_state=False, recent_command=False):
+        engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
+        engine._get_fan_physical_state_callback = MagicMock(return_value=physical_state)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=recent_command)
+        engine._clear_fan_flags_and_start_grace = MagicMock()
+        return engine
+
+    def test_noop_when_fan_not_active(self):
+        """_fan_active already False — nothing to reconcile, no-op."""
+        engine = self._engine()
+        engine._fan_active = False
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        engine._get_fan_physical_state_callback.assert_not_called()
+
+    def test_noop_for_hvac_mode(self):
+        """FAN_MODE_HVAC has no separate physical entity to drift from — no-op regardless
+        of the (irrelevant) physical-state mock."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC, physical_state=False)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._get_fan_physical_state_callback.assert_not_called()
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+
+    def test_noop_when_physical_state_agrees(self):
+        """_fan_active=True and physical state confirms on — no drift, no correction."""
+        engine = self._engine(physical_state=True)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 0
+
+    def test_noop_command_only_mode(self):
+        """_get_fan_physical_state_callback() returns None (command-only mode, no feedback
+        entity) — no ground truth, must not correct."""
+        engine = self._engine(physical_state=None)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+
+    def test_noop_on_recent_ca_command_echo(self):
+        """A CA fan command was issued in the last 30s — skip, this is command echo/lag,
+        not real drift (mirrors _is_recent_fan_command()'s existing purpose elsewhere)."""
+        engine = self._engine(physical_state=False, recent_command=True)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 0
+
+    def test_first_drift_tick_does_not_correct(self):
+        """First tick of disagreement only logs — does not correct yet (2-tick guard)."""
+        engine = self._engine(physical_state=False)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 1
+
+    def test_second_consecutive_drift_tick_corrects(self):
+        """Second consecutive tick of disagreement (5 min later) confirms drift and
+        self-corrects — preserving the nat-vent session so cycling-on can re-fire."""
+        engine = self._engine(physical_state=False)
+        engine._fan_active = True
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_called_once_with(
+            reason="physical-state drift confirmed over 2 backstop ticks",
+            trigger_label="physical_drift_correction",
+            preserve_nat_vent_session=True,
+        )
+        assert engine._fan_drift_tick_count == 0
+
+    def test_correction_emits_fan_cancel_with_drift_trigger(self):
+        """The correction emits a fan_cancel event with a distinct trigger so Activity
+        Report consumers can tell a self-correction apart from a genuine user fan-off."""
+        engine = self._engine(physical_state=False)
+        engine._fan_active = True
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()
+
+        cancel_events = [e for e in events if e[0] == "fan_cancel"]
+        assert len(cancel_events) == 1, f"Expected one fan_cancel event; got: {events}"
+        assert cancel_events[0][1]["trigger"] == "physical_drift_correction"
+
+    def test_drift_tick_count_resets_on_agreement(self):
+        """A single tick of disagreement followed by a tick where physical state now agrees
+        must reset the counter — no correction on a transient blip that resolved itself."""
+        engine = self._engine(physical_state=False)
+        engine._fan_active = True
+        engine._reconcile_fan_physical_drift()
+        assert engine._fan_drift_tick_count == 1
+
+        engine._get_fan_physical_state_callback = MagicMock(return_value=True)
+        engine._reconcile_fan_physical_drift()
+
+        assert engine._fan_drift_tick_count == 0
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+
+
+class TestReconcileFanDriftIntegration:
+    """Issue #423 integration: drift correction + immediate re-cycle-on in the same backstop tick."""
+
+    def test_drift_correction_allows_immediate_recycle_on(self):
+        """The exact reported incident's recovery path: _fan_active stuck True with the real
+        WHF off, indoor well above the sleep on_threshold. Two backstop ticks confirm the
+        drift and correct it (preserving _natural_vent_active); the immediately-following
+        nat_vent_temperature_check() call in the same _thermo_backstop_task() tick must then
+        re-fire _activate_fan() — the real HA service call that turns the WHF back on.
+        """
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                # Chosen so indoor=69 sits well above the daytime on_threshold (midpoint=63,
+                # on=64) and nowhere near the off_threshold (62) -- isolates the drift/recycle
+                # behavior under test from the separate cycling-off decision.
+                "comfort_heat": 60.0,
+                "comfort_cool": 66.0,
+                "nat_vent_hysteresis_f": 1.0,
+            }
+        )
+        engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._get_indoor_temp_f = MagicMock(return_value=69.0)  # well above on_threshold
+        engine._last_outdoor_temp = 59.0  # well below indoor -- favorable
+        engine._start_fan_thermo_backstop = MagicMock()
+        engine.fan_thermostat_check = AsyncMock()
+
+        engine._fan_active = True
+        engine._natural_vent_active = True
+
+        _dt_now_path = "custom_components.climate_advisor.automation.dt_util.now"
+        with patch(_dt_now_path, return_value=datetime(2026, 4, 20, 2, 0, 0)):
+            # First tick: drift detected, not yet confirmed (1/2) -- session/flags untouched.
+            asyncio.run(engine._thermo_backstop_task())
+            assert engine._fan_active is True
+            assert engine._natural_vent_active is True
+
+            # Second tick: drift confirmed -- flags cleared (preserving the session), then
+            # nat_vent_temperature_check's cycling-on branch re-fires _activate_fan() because
+            # indoor (69) is still above on_threshold and _fan_active is now False.
+            asyncio.run(engine._thermo_backstop_task())
+
+        assert engine._natural_vent_active is True, "Issue #423: session must survive the correction"
+        assert engine._fan_active is True, "cycling-on must have re-activated the real fan on the same tick"
+
+
 class TestReconcileFanOnStartup:
     """Startup fan reconciliation — no running fan is ever left in limbo (Issue #327)."""
 

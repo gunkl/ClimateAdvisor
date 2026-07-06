@@ -432,7 +432,7 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 | Value | Meaning |
 |---|---|
 | `"active"` | CA commanded the fan on (nat vent or HVAC fan-only mode); physical state confirmed for WHF |
-| `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged (added Issue #374) |
+| `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged (added Issue #374). Since Issue #423, this is expected to be **transient** — `_reconcile_fan_physical_drift()` (the 5-min backstop) self-corrects a confirmed disagreement within 2 ticks (~10 min) rather than displaying this indefinitely. |
 | `"running (manual override)"` | Fan is running; CA's `_fan_override_active` flag is set |
 | `"running (untracked)"` | Thermostat reports fan running (`fan_mode=on` or `hvac_action=fan`) but CA's `_fan_active=False` — typical after HA restart or when user ran fan from thermostat app |
 | `"inactive"` | Fan is off and CA has no record of activating it |

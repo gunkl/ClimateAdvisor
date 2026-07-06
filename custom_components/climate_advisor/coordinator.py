@@ -270,6 +270,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         # Issue #359: post-grace fan check callback — called by engine when any grace period expires
         self.automation_engine._post_grace_fan_check_callback = self._on_post_grace_fan_check
+        # Issue #423: physical fan ground-truth callbacks for _reconcile_fan_physical_drift()
+        self.automation_engine._get_fan_physical_state_callback = self._get_fan_physical_state
+        self.automation_engine._is_recent_fan_command_callback = self._is_recent_fan_command
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1388,11 +1391,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _attrs_reconcile = _climate_state_reconcile.attributes
             _fan_mode_reconcile = _attrs_reconcile.get("fan_mode", "")
             _hvac_action_reconcile = _attrs_reconcile.get("hvac_action", "")
-            _thermostat_fan_running = _fan_mode_reconcile == "on" or _hvac_action_reconcile == "fan"
         else:
             _fan_mode_reconcile = "unknown"
             _hvac_action_reconcile = "unknown"
-            _thermostat_fan_running = False
+        # Issue #423: archetype-aware — for FAN_MODE_WHOLE_HOUSE this reads the real configured
+        # WHF entity's physical state instead of the thermostat's own attributes.
+        _thermostat_fan_running = self._derive_thermostat_fan_running_for_reconcile(
+            fan_mode_attr=_fan_mode_reconcile,
+            hvac_action_attr=_hvac_action_reconcile,
+        )
         _LOGGER.debug("[coalesce-diag] before reconcile_fan_on_startup()")
         await self.automation_engine.reconcile_fan_on_startup(
             indoor=indoor,
@@ -1849,12 +1856,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ):
             _LOGGER.info("Fan running untracked with no active override/grace — triggering periodic reconciliation")
             _cs_bst = self.hass.states.get(self.config.get("climate_entity", ""))
+            _bst_fan_mode = str(_cs_bst.attributes.get("fan_mode", "")) if _cs_bst else ""
             _bst_hvac_action = str(_cs_bst.attributes.get("hvac_action", "")).lower() if _cs_bst else ""
             if _bst_hvac_action not in ("heating", "cooling"):
                 await self.automation_engine.reconcile_fan_on_startup(
                     indoor=self._get_indoor_temp(),
                     outdoor=self._last_outdoor_temp,
-                    thermostat_fan_running=True,
+                    # Issue #423: archetype-aware — WHF mode checks the real fan entity's
+                    # physical state instead of always trusting the thermostat's attributes.
+                    thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
+                        fan_mode_attr=_bst_fan_mode,
+                        hvac_action_attr=_bst_hvac_action,
+                    ),
                     any_sensor_open=self._any_sensor_open(),
                 )
             else:
@@ -3092,7 +3105,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await _ae_347.reconcile_fan_on_startup(
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
-                thermostat_fan_running=True,
+                # Issue #423: this is the exact site that could misfire on a WHF config —
+                # hvac_action transitioning to "fan" is a thermostat-internal event unrelated
+                # to a physically separate whole-house fan. Archetype-aware derivation checks
+                # the real fan entity's state instead of assuming this transition means it.
+                thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
+                    fan_mode_attr=_new_fan_mode_347,
+                    hvac_action_attr=new_action,
+                ),
                 any_sensor_open=self._any_sensor_open(),
             )
 
@@ -3502,7 +3522,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             await ae.reconcile_fan_on_startup(
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
-                thermostat_fan_running=True,
+                # Issue #423: archetype-aware — WHF mode checks the real fan entity's
+                # physical state instead of always trusting the thermostat's attributes.
+                thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
+                    fan_mode_attr=fan_mode,
+                    hvac_action_attr=hvac_action,
+                ),
                 any_sensor_open=self._any_sensor_open(),
             )
 
@@ -3547,6 +3572,40 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if fan_state is not None:
                 return fan_state.state.lower() in ("on", "true")
         return False
+
+    def _derive_thermostat_fan_running_for_reconcile(self, *, fan_mode_attr: str, hvac_action_attr: str) -> bool:
+        """Archetype-aware 'is a fan running' signal for reconcile_fan_on_startup() (Issue #423).
+
+        Every caller of reconcile_fan_on_startup() previously derived this signal purely from
+        the thermostat's own fan_mode/hvac_action attributes, regardless of configured fan_mode.
+        That's correct for FAN_MODE_HVAC (the thermostat's own blower IS the fan), but wrong for
+        FAN_MODE_WHOLE_HOUSE — a physically separate switch/relay whose real state the
+        thermostat's attributes say nothing about. A thermostat-internal fan-schedule blip could
+        (and did — Issue #423) cause reconcile to "adopt" a whole-house fan that was never
+        actually turned on, permanently wedging _fan_active=True with no physical entity state
+        ever changing to trigger the normal _async_fan_entity_changed() self-correction.
+
+        FAN_MODE_HVAC: thermostat attributes ARE the fan — trust them, unchanged.
+        FAN_MODE_WHOLE_HOUSE: use _get_fan_physical_state() (the real configured WHF entity)
+            when fan_state_feedback is enabled; falls back to the thermostat signal only when
+            physical feedback is unavailable (command-only mode) — there is no better ground
+            truth in that case, so this is an explicit, documented fallback, not silent reuse
+            of the wrong signal.
+        FAN_MODE_BOTH: ORs both signals. This is a strict superset of the old (wrong) behavior,
+            not a true per-device model — the WHF and HVAC blower can genuinely be in different
+            states and a single boolean can't represent that. Tracked as a known gap in a
+            separate follow-up issue; do not treat this as a full BOTH-archetype fix.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        thermostat_signal = fan_mode_attr == "on" or hvac_action_attr == "fan"
+        if fan_mode == FAN_MODE_HVAC:
+            return thermostat_signal
+        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            physical = self._get_fan_physical_state()
+            if physical is not None:
+                return physical if fan_mode == FAN_MODE_WHOLE_HOUSE else (physical or thermostat_signal)
+            return thermostat_signal  # command-only mode — no independent ground truth available
+        return thermostat_signal
 
     async def _initialize_hvac_session_from_current_state(self, climate_state: Any) -> None:
         """Late-start HVAC session when HA restarted mid-session (Issue #96).

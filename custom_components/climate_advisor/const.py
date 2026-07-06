@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.70"
+VERSION = "0.4.71"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.71": [
+        "Fix #423: a whole-house fan could get stuck showing 'active (unconfirmed)' for"
+        " hours after physically turning off, with nat-vent never resuming even though"
+        " conditions clearly favored free cooling. Root cause: the fan-reconcile logic that"
+        " runs after a thermostat-internal fan blip always trusted the thermostat's own fan"
+        ' attributes as "the fan is running" — correct for a furnace/AC blower, but wrong'
+        " for a physically separate whole-house fan switch, which could get silently"
+        ' "adopted" as running when it was actually off. It now checks the real configured'
+        " fan's own reported state for whole-house-fan setups. Also added a background check"
+        " that self-corrects a stuck fan-status flag within about 10 minutes if it ever"
+        " disagrees with the real device, instead of only showing 'unconfirmed' in the UI.",
+    ],
     "0.4.70": [
         "Fix #418: two remaining nat-vent exit paths (closing the last open window, and the"
         " fast free-cooling-reversal check that runs on every temperature update) now go"
@@ -774,6 +786,49 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    423: {
+        "version_fixed": "0.4.71",
+        "title": "Whole-house fan stuck 'active (unconfirmed)' for hours, nat-vent never resumed",
+        "scope_covered": (
+            "coordinator.py: added _derive_thermostat_fan_running_for_reconcile(), an"
+            " archetype-aware 'is a fan running' signal for reconcile_fan_on_startup(). All 4"
+            " callers (_do_startup_coalesce, the 30-min periodic backstop, the Issue #347"
+            " one-shot hvac_action=fan runtime trigger, and _async_post_grace_fan_reconcile)"
+            " previously derived this signal purely from the thermostat's own"
+            " fan_mode/hvac_action attributes regardless of configured fan_mode — correct for"
+            " FAN_MODE_HVAC, wrong for FAN_MODE_WHOLE_HOUSE (a physically separate device)."
+            " Confirmed via the CA chart_log: a thermostat-internal fan blip at the moment a"
+            " nat-vent proactive-floor-exit ended a real WHF session caused the runtime trigger"
+            " to 're-adopt' a WHF that was never actually turned back on, wedging"
+            " _fan_active=True for 3.5+ hours despite indoor/outdoor conditions strongly"
+            " favoring free cooling the whole time. All 4 sites now resolve the signal via the"
+            " new helper: FAN_MODE_HVAC unchanged (thermostat attrs); FAN_MODE_WHOLE_HOUSE uses"
+            " _get_fan_physical_state() (the real configured WHF entity) when fan_state_feedback"
+            " is enabled; FAN_MODE_BOTH ORs both signals (a strict superset of prior behavior,"
+            " not a true per-device model — see scope_not_covered). automation.py: extracted"
+            " _clear_fan_flags_and_start_grace() from on_fan_turned_off() (pure refactor, no"
+            " behavior change for its existing caller) with a preserve_nat_vent_session"
+            " parameter, and added _reconcile_fan_physical_drift(), a new self-healing check"
+            " wired into the existing 5-minute _thermo_backstop_task() timer. It compares"
+            " _fan_active against the real fan entity's physical state (for WHF/BOTH archetypes"
+            " with feedback enabled) and, after 2 consecutive confirming ticks (~10 min, to"
+            " avoid acting on command-echo/lag), self-corrects a stale flag while preserving"
+            " the nat-vent session — letting the immediately-following"
+            " nat_vent_temperature_check() cycling-on branch re-activate the real fan on the"
+            " same tick if conditions still warrant it. Previously, nothing ever corrected a"
+            " stale _fan_active — _compute_fan_status()/_compute_whf_status() already compared"
+            " it against physical reality, but only to render 'active (unconfirmed)' in the UI."
+        ),
+        "scope_not_covered": (
+            "FAN_MODE_BOTH's OR-based signal cannot represent two independent physical devices"
+            " (WHF, HVAC blower) in different states with a single boolean — a proper per-device"
+            " redesign (independent adopt/turn-off decisions per device) is tracked in a separate"
+            " follow-up issue, not implemented here. Command-only mode (fan_state_feedback"
+            " disabled) has no independent physical ground truth for WHF, so both the archetype"
+            " helper and the drift-correction check are no-ops there by design — unchanged from"
+            " prior behavior, not a regression."
+        ),
+    },
     418: {
         "version_fixed": "0.4.70",
         "title": "Two nat-vent exit sites bypassed the _exit_nat_vent() choke point (Issue #411 follow-up)",

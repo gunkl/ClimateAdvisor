@@ -45,6 +45,7 @@ from .const import (
     CONF_EMAIL_GRACE_REPAUSE,
     CONF_EMAIL_NOTIFY,
     CONF_EMAIL_OCCUPANCY_HOME,
+    CONF_FAN_MODE,
     CONF_GUEST_TOGGLE,
     CONF_GUEST_TOGGLE_INVERT,
     CONF_HOME_TOGGLE,
@@ -90,6 +91,8 @@ from .const import (
     DEFAULT_THRESHOLD_WARM,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
+    FAN_MODE_BOTH,
+    FAN_MODE_WHOLE_HOUSE,
     PANEL_FRONTEND_PATH,
     PANEL_URL,
     TEMP_SOURCE_CLIMATE_FALLBACK,
@@ -332,6 +335,15 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         new_data.setdefault(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL)
         hass.config_entries.async_update_entry(config_entry, data=new_data, version=16)
         _LOGGER.info("Migration to version 16 complete")
+
+    if config_entry.version == 16:
+        _LOGGER.info("Migrating Climate Advisor config entry from version 16 to 17")
+        new_data = {**config_entry.data}
+        if new_data.get(CONF_FAN_MODE) == FAN_MODE_BOTH:
+            new_data[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+            _LOGGER.warning("fan_mode 'both' is no longer supported — migrated to 'whole_house_fan'")
+        hass.config_entries.async_update_entry(config_entry, data=new_data, version=17)
+        _LOGGER.info("Migration to version 17 complete")
 
     return True
 

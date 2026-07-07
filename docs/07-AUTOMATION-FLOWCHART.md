@@ -530,6 +530,8 @@ flowchart TD
     D -->|True| F[Floor-only guard\nheat mode at comfort_heat\nCeiling disarmed — no compressor through open windows]
 ```
 
+**Note (v0.4.72, Issue #424):** `BOTH` is a legacy/internal-only value as of v0.4.72 — it is no longer selectable in setup or options (existing `"both"` configs migrate to `FAN_MODE_WHOLE_HOUSE` on load). The `BOTH` branch above remains in the code and this diagram only because the branch logic was intentionally left in place, not because users can still choose it.
+
 **Why this matters for the occupant:**
 - `FAN_MODE_WHOLE_HOUSE`/`DISABLED`: the HVAC is already suppressed by the fan activation path; no further band arming is needed.
 - `FAN_MODE_HVAC` + `aggressive_savings=False`: a single cool setpoint at `comfort_cool` is programmed immediately on nat-vent activate (or re-activate). The thermostat can run the compressor if the breeze cannot hold the ceiling. The floor (`comfort_heat`) is not re-armed by this call — it remains enforced by the existing 30-min `apply_classification()` warm-day band cycle.
@@ -594,6 +596,8 @@ flowchart TD
     H --> J
     I --> J
 ```
+
+**Note (v0.4.72, Issue #424):** `BOTH` is a legacy/internal-only value as of v0.4.72 — it is no longer selectable in setup or options (existing `"both"` configs migrate to `FAN_MODE_WHOLE_HOUSE` on load). The `BOTH` branch above remains in the code and this diagram only because the branch logic was intentionally left in place, not because users can still choose it.
 
 **Key invariants:**
 - The coalesce window (`_first_run = True`, 5-minute settling) suppresses override detection — the turn-off command is not misread as a user manual action.

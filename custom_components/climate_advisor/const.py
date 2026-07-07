@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.71"
+VERSION = "0.4.72"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.72": [
+        "Fix #424: fan mode 'Both' (whole house fan + HVAC fan simultaneously) is no longer"
+        " selectable during setup or in options — a proper per-device redesign for two"
+        " independently-tracked physical fans was judged too risky to build on top of the"
+        " already-fragile fan-reconcile logic (site of the recent #423 incident), so the"
+        " option is removed instead. Existing installs configured with 'Both' are"
+        " automatically migrated to 'Whole house fan' the next time the config entry loads.",
+    ],
     "0.4.71": [
         "Fix #423: a whole-house fan could get stuck showing 'active (unconfirmed)' for"
         " hours after physically turning off, with nat-vent never resuming even though"
@@ -786,6 +794,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    424: {
+        "version_fixed": "0.4.72",
+        "title": "Remove selectable 'Both' fan mode; migrate existing configs to whole house fan",
+        "scope_covered": (
+            "config_flow.py: removed the FAN_MODE_BOTH SelectOptionDict from FAN_MODE_OPTIONS"
+            " (no longer offered in setup or options flow) and bumped ClimateAdvisorConfigFlow"
+            " VERSION to 17. __init__.py: added a v16->v17 migration block that coerces any"
+            " existing fan_mode == 'both' config to FAN_MODE_WHOLE_HOUSE, logging a WARNING when"
+            " it does so. const.py: updated the fan_mode CONFIG_METADATA description to drop the"
+            " 'Both' mention. translations/en.json and strings.json: dropped the 'Both' mention"
+            " from both the setup-step and options-step fan_mode field descriptions."
+        ),
+        "scope_not_covered": (
+            "The per-device independent-signal redesign originally proposed in #424 (tracking"
+            " whole-house fan and HVAC fan as two independent physical signals instead of a"
+            " single OR'd boolean) was NOT implemented — deliberately superseded by removing the"
+            " 'Both' option entirely instead, since building that redesign on top of the"
+            " already-fragile fan-reconcile logic (site of the recent #423 incident) was judged"
+            " too risky for the benefit. All existing FAN_MODE_BOTH branch logic in automation.py"
+            " and coordinator.py (~13 shared conditionals per file) is left exactly as-is —"
+            " stubbed and unreachable for new configs, not deleted — since ripping it out is not"
+            " worth the risk for a value nobody can select anymore."
+        ),
+    },
     423: {
         "version_fixed": "0.4.71",
         "title": "Whole-house fan stuck 'active (unconfirmed)' for hours, nat-vent never resumed",
@@ -3370,7 +3402,7 @@ CONFIG_METADATA = {
         "label": "Fan Control Mode",
         "description": (
             "Controls how fans assist ventilation. 'Whole house fan' controls a dedicated entity."
-            " 'HVAC fan' uses the thermostat fan mode. 'Both' uses both."
+            " 'HVAC fan' uses the thermostat fan mode."
             " Fan activates during economizer maintain phase."
         ),
         "category": "fan",

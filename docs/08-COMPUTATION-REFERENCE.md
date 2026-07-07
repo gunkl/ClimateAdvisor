@@ -1210,6 +1210,8 @@ The whole-house fan is a dedicated appliance (e.g., `fan.*` or `switch.*` entity
 
 #### `FAN_MODE_BOTH`
 
+**As of v0.4.72 (Issue #424), `FAN_MODE_BOTH` is no longer selectable via config** — it was removed from the setup/options fan-mode selector, and existing configs with `fan_mode: "both"` are migrated to `FAN_MODE_WHOLE_HOUSE` on config-entry load. The behavior contract below remains accurate only because the branch logic is intentionally left in place in `automation.py`/`coordinator.py` (unreachable for new configs, not deleted) — not because users can still pick it.
+
 Each component (HVAC fan + whole-house fan) follows its own archetype contract above. `_pre_fan_hvac_mode` is still set, because the whole-house fan component requires HVAC suppression.
 
 ### Structural WHF/AC Mutual Exclusion — `_whf_owns_hvac()` Choke-Point Guard (Issue #392 Fix 1b)

@@ -94,7 +94,6 @@ from .const import (
     DEFAULT_THRESHOLD_WARM,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     DOMAIN,
-    FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
@@ -113,7 +112,6 @@ FAN_MODE_OPTIONS = [
     selector.SelectOptionDict(value=FAN_MODE_DISABLED, label="Disabled (no fan control)"),
     selector.SelectOptionDict(value=FAN_MODE_WHOLE_HOUSE, label="Whole house fan (dedicated entity)"),
     selector.SelectOptionDict(value=FAN_MODE_HVAC, label="HVAC fan mode"),
-    selector.SelectOptionDict(value=FAN_MODE_BOTH, label="Both (whole house fan + HVAC fan mode)"),
 ]
 
 OUTDOOR_SOURCE_OPTIONS = [
@@ -166,7 +164,7 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
-    VERSION = 16
+    VERSION = 17
 
     def __init__(self) -> None:
         """Initialize the config flow."""

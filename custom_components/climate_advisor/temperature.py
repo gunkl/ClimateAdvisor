@@ -68,6 +68,15 @@ def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0) -> 
     return f"{delta:.{decimals}f}{symbol}"
 
 
+def free_cooling_direction_ok(outdoor_temp: float | None, indoor_temp: float | None) -> bool:
+    """True if outdoor air is actually cooler than indoor — the precondition for any
+    window/fan cooling advice or economizer/nat-vent action. Mirrors the direction
+    guard already enforced in automation.py's economizer and nat-vent gates (Issue #327).
+    Unknown readings default to True (caller decides whether to act on an unknown).
+    """
+    return indoor_temp is None or outdoor_temp is None or outdoor_temp < indoor_temp
+
+
 def convert_delta(value_fahrenheit: float, unit: str) -> float:
     """Convert a temperature delta from °F to the display unit (scale only, no offset).
 

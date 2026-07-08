@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.72"
+VERSION = "0.4.73"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.73": [
+        "Fix #428: 'Your Next Action' could tell you to open a window or turn on a fan to cool"
+        " down even when it was hotter outside than inside — advice that would have made things"
+        " worse. It now checks live outdoor temperature (the same free-cooling direction guard"
+        " already used by the economizer/nat-vent logic) before ever suggesting a window or fan,"
+        " covers the mirrored heating-direction case, and won't repeat advice that's redundant"
+        " with what you've already done or what automation is already doing.",
+    ],
     "0.4.72": [
         "Fix #424: fan mode 'Both' (whole house fan + HVAC fan simultaneously) is no longer"
         " selectable during setup or in options — a proper per-device redesign for two"
@@ -794,6 +802,38 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    428: {
+        "version_fixed": "0.4.73",
+        "title": "next_human_action gives backwards window/fan advice when outdoor is hotter than indoor",
+        "scope_covered": (
+            "temperature.py: added free_cooling_direction_ok(outdoor_temp, indoor_temp), mirroring"
+            " automation.py's existing economizer direction_ok gate (~line 4360, Issue #327)."
+            " coordinator.py: _compute_next_action() rewritten to accept outdoor_temp,"
+            " windows_physically_open, and the AutomationEngine reference; every window/fan"
+            " suggestion (both cooling-direction and the previously entirely-missing"
+            " heating-direction mirror) is now gated on the live direction check. Added checks for"
+            " physically-open windows (avoids redundant 'open windows' when already open),"
+            " automation-engine live state (nat_vent/economizer already active, manual override,"
+            " grace period, paused-by-door — checked early per the approved guard-ordering"
+            " decision), and GUEST occupancy parity with HOME. Added INFO logging at entry and"
+            " each decision outcome, WARNING when the direction guard suppresses what would"
+            " otherwise have been the wrong suggestion. tests/test_coordinator.py:"
+            " TestComputeNextAction now calls the real bound method via a coordinator stub instead"
+            " of a hand-copied replica (the replica is how the missing outdoor check went uncaught"
+            " through 20+ existing tests) — full matrix of new test cases added, including the"
+            " exact reported repro (indoor 75°F / outdoor 80°F)."
+        ),
+        "scope_not_covered": (
+            "Two related gaps were identified but deliberately deferred to separate tracked"
+            " issues rather than bundled here: (1) automation.py's existing duplicate direction-gate"
+            " copies (economizer ~line 4360, fan/nat-vent check ~line 2695) are not yet"
+            " consolidated onto the new shared free_cooling_direction_ok() — they remain their own"
+            " separate, already-correct, already-tested implementations. (2) briefing.py's daily"
+            " window-advice prose does not yet get a live-outdoor cross-check — it still relies"
+            " solely on forecast-time DayClassification data, which is lower-risk since the"
+            " briefing is a point-in-time narrative rather than a continuously-displayed sensor."
+        ),
+    },
     424: {
         "version_fixed": "0.4.72",
         "title": "Remove selectable 'Both' fan mode; migrate existing configs to whole house fan",

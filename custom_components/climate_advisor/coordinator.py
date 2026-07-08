@@ -208,7 +208,7 @@ from .const import (
 )
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .state import StatePersistence
-from .temperature import convert_delta, format_temp, from_fahrenheit, to_fahrenheit
+from .temperature import convert_delta, format_temp, free_cooling_direction_ok, from_fahrenheit, to_fahrenheit
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1940,7 +1940,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_TREND_MAGNITUDE: c.trend_magnitude if c else 0,
             ATTR_BRIEFING: self._last_briefing,
             ATTR_BRIEFING_SHORT: self._last_briefing_short,
-            ATTR_NEXT_ACTION: self._compute_next_action(c, self._get_indoor_temp()),
+            ATTR_NEXT_ACTION: self._compute_next_action(
+                c,
+                indoor_temp=_indoor_temp,
+                outdoor_temp=_outdoor_temp,
+                windows_physically_open=self._any_sensor_open(),
+                ae=self.automation_engine,
+            ),
             ATTR_AUTOMATION_STATUS: self._compute_automation_status(),
             ATTR_LEARNING_SUGGESTIONS: suggestions,
             ATTR_COMPLIANCE_SCORE: compliance.get("comfort_score", 1.0),
@@ -5339,43 +5345,179 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         obs["status"] = "committing"
         self.hass.async_create_task(self._commit_observation(obs_type, force_grade="low"))
 
-    def _compute_next_action(self, c: DayClassification | None, indoor_temp: float | None = None) -> str:
-        """Compute the next recommended human action for display."""
-        if not c:
-            return "Waiting for forecast data..."
+    def _compute_next_action(
+        self,
+        c: DayClassification | None,
+        *,
+        indoor_temp: float | None = None,
+        outdoor_temp: float | None = None,
+        windows_physically_open: bool = False,
+        ae: AutomationEngine | None = None,
+    ) -> str:
+        """Compute the next recommended human action for display.
 
-        if self._occupancy_mode == OCCUPANCY_VACATION:
-            return "On vacation — deep energy-saving setback active."
-        if self._occupancy_mode == OCCUPANCY_AWAY:
-            return "You're away — automation managing temperature."
-
-        now = dt_util.now().time()
+        Every window/fan cooling (or heating) suggestion is gated on
+        free_cooling_direction_ok() — the same live outdoor-vs-indoor direction
+        guard already enforced in automation.py's economizer/nat-vent gates
+        (Issue #327) — so this display text can never recommend an action that
+        would work against the occupant's actual comfort goal (Issue #428).
+        """
         unit = self.config.get("temp_unit", "fahrenheit")
         comfort_cool = self.config.get("comfort_cool", 75)
+        comfort_heat = self.config.get("comfort_heat", 70)
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        fan_enabled = fan_mode != FAN_MODE_DISABLED
+
+        _LOGGER.info(
+            "Next-action evaluation: day_type=%s indoor=%s outdoor=%s windows_open=%s"
+            " nat_vent=%s economizer=%s override=%s grace=%s paused_by_door=%s occupancy=%s",
+            c.day_type if c else "none",
+            f"{indoor_temp:.1f}" if indoor_temp is not None else "?",
+            f"{outdoor_temp:.1f}" if outdoor_temp is not None else "?",
+            windows_physically_open,
+            ae._natural_vent_active if ae else "?",
+            ae._economizer_active if ae else "?",
+            ae._manual_override_active if ae else "?",
+            ae._grace_active if ae else "?",
+            ae.is_paused_by_door if ae else "?",
+            self._occupancy_mode,
+        )
+
+        def _decide(msg: str, *, warn: bool = False, **ctx: Any) -> str:
+            ctx_str = " ".join(f"{k}={v}" for k, v in ctx.items())
+            (_LOGGER.warning if warn else _LOGGER.info)("Next-action: %s (%s)", msg, ctx_str)
+            return msg
+
+        if not c:
+            return _decide("Waiting for forecast data...")
+
+        if self._occupancy_mode == OCCUPANCY_VACATION:
+            return _decide("On vacation — deep energy-saving setback active.")
+        if self._occupancy_mode == OCCUPANCY_AWAY:
+            return _decide("You're away — automation managing temperature.")
+
+        # Automation-state guards checked early/globally: if the system isn't in its
+        # normal control loop right now, that fact is more relevant to the occupant
+        # than a scheduled reminder that ignores it (see plan's "Guard ordering"
+        # decision, Issue #428).
+        if ae is not None:
+            if ae._manual_override_active:
+                return _decide("Manual override active — automation is standing by.")
+            if ae._grace_active:
+                return _decide("Grace period active — automation will resume shortly.")
+            if ae.is_paused_by_door:
+                return _decide("Automation paused — a door or window is open.")
+
+        now = dt_util.now().time()
+        direction_ok = free_cooling_direction_ok(outdoor_temp, indoor_temp)
 
         if c.windows_recommended:
             if c.window_open_time and now < c.window_open_time:
-                return f"Open windows at {c.window_open_time.strftime('%I:%M %p')}"
+                return _decide(f"Open windows at {c.window_open_time.strftime('%I:%M %p')}")
             elif c.window_close_time and now < c.window_close_time:
-                return f"Close windows by {c.window_close_time.strftime('%I:%M %p')}"
+                return _decide(f"Close windows by {c.window_close_time.strftime('%I:%M %p')}")
             elif now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
-                return "Open windows to cool down — outdoor air may be cooler now."
+                if windows_physically_open:
+                    if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
+                        return _decide(
+                            f"Windows are open, but outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler"
+                            f" than indoor ({format_temp(indoor_temp, unit)}) — consider closing them so the"
+                            f" AC/fan can help.",
+                            warn=True,
+                            outdoor=outdoor_temp,
+                            indoor=indoor_temp,
+                        )
+                    return _decide("Windows are open — you're all set.")
+                if outdoor_temp is not None and indoor_temp is not None:
+                    if direction_ok:
+                        return _decide(
+                            f"Open windows to cool down — outdoor ({format_temp(outdoor_temp, unit)}) is"
+                            f" now cooler than indoor ({format_temp(indoor_temp, unit)}).",
+                            outdoor=outdoor_temp,
+                            indoor=indoor_temp,
+                        )
+                    return _decide(
+                        f"Outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler than indoor"
+                        f" ({format_temp(indoor_temp, unit)}) yet — keep windows closed for now.",
+                        warn=True,
+                        outdoor=outdoor_temp,
+                        indoor=indoor_temp,
+                    )
+                return _decide("Open windows to cool down — outdoor air may be cooler now.")
 
         if c.day_type == DAY_TYPE_HOT:
             threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
             if c.window_opportunity_morning and now < time(ECONOMIZER_MORNING_END_HOUR, 0):
                 end_t = time(ECONOMIZER_MORNING_END_HOUR, 0).strftime("%I:%M %p").lstrip("0")
-                return f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})"
+                return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)} (until {end_t})")
             elif c.window_opportunity_evening and now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
-                return f"Open windows if outdoor temp is below {format_temp(threshold, unit)}"
-            return "Keep windows and blinds closed. AC is handling it."
+                return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)}")
+            if ae is not None and (ae._natural_vent_active or ae._economizer_active):
+                return _decide("AC and free cooling are both working on it.")
+            return _decide("Keep windows and blinds closed. AC is handling it.")
         elif c.day_type == DAY_TYPE_COLD:
-            return "Keep doors closed — help the heater out."
+            if windows_physically_open:
+                return _decide("Keep doors closed — help the heater out.")
+            return _decide("Doors are closed — heater is handling it.")
 
-        if indoor_temp is not None and indoor_temp > comfort_cool:
-            return f"Indoor temp is {format_temp(indoor_temp, unit)} — open windows or turn on a fan to cool down."
+        # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
+        # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
+        cooling_needed = indoor_temp is not None and indoor_temp > comfort_cool
+        heating_needed = indoor_temp is not None and indoor_temp < comfort_heat
 
-        return "No action needed right now. Automation is handling it."
+        if cooling_needed:
+            if ae is not None and (ae._natural_vent_active or ae._economizer_active):
+                return _decide("Free cooling is already active.")
+            if windows_physically_open:
+                if outdoor_temp is not None and not direction_ok:
+                    return _decide(
+                        f"Windows are open, but outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler"
+                        f" than indoor ({format_temp(indoor_temp, unit)}) — consider closing them so the"
+                        f" AC/fan can help.",
+                        warn=True,
+                        outdoor=outdoor_temp,
+                        indoor=indoor_temp,
+                    )
+                return _decide("Windows are open and outdoor air is helping.")
+            if outdoor_temp is None:
+                return _decide(
+                    f"Indoor is {format_temp(indoor_temp, unit)} — outdoor reading unavailable,"
+                    f" automation is handling it conservatively.",
+                    indoor=indoor_temp,
+                )
+            if direction_ok:
+                fan_clause = " or turn on the fan" if fan_enabled else ""
+                return _decide(
+                    f"Indoor temp is {format_temp(indoor_temp, unit)} — open windows{fan_clause} to cool"
+                    f" down; outdoor ({format_temp(outdoor_temp, unit)}) is cooler now.",
+                    outdoor=outdoor_temp,
+                    indoor=indoor_temp,
+                )
+            return _decide(
+                f"Indoor is {format_temp(indoor_temp, unit)} — outdoor ({format_temp(outdoor_temp, unit)})"
+                f" isn't cooler, so windows/fan won't help right now. Automation is handling it.",
+                warn=True,
+                outdoor=outdoor_temp,
+                indoor=indoor_temp,
+            )
+
+        if heating_needed:
+            if windows_physically_open:
+                return _decide("Windows are open — close them to help the heater.")
+            if outdoor_temp is not None and outdoor_temp > indoor_temp:
+                return _decide(
+                    f"Indoor is {format_temp(indoor_temp, unit)} — outdoor ({format_temp(outdoor_temp, unit)})"
+                    f" is warmer; opening windows briefly could help warm the home.",
+                    outdoor=outdoor_temp,
+                    indoor=indoor_temp,
+                )
+            return _decide(
+                f"Indoor is {format_temp(indoor_temp, unit)} — keep windows and doors closed to hold heat."
+                f" Automation is handling it.",
+                indoor=indoor_temp,
+            )
+
+        return _decide("No action needed right now. Automation is handling it.")
 
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""

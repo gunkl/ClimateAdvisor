@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.73"
+VERSION = "0.4.74"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.4.74": [
+        "Fix #427: overnight whole-house-fan nat-vent sessions were being torn down and"
+        " re-adopted every 5-15 minutes for hours, showing repeated 'fan running (untracked)'"
+        " and 'startup reconcile' notifications even though the window never closed. The"
+        " proactive floor-exit check (which predicts an imminent floor crossing from the"
+        " thermal model) was comparing indoor temperature against the flat daytime comfort"
+        " floor instead of the lower overnight sleep floor, so during the sleep window it"
+        " believed the floor was already breached hours before it actually was and kept"
+        " ending the session for no reason. It now uses the same sleep-aware floor as every"
+        " other nat-vent exit/reactivation check, so sessions persist correctly through the"
+        " night and the fan only cycles the way it's supposed to.",
+    ],
     "0.4.73": [
         "Fix #428: 'Your Next Action' could tell you to open a window or turn on a fan to cool"
         " down even when it was hotter outside than inside — advice that would have made things"
@@ -802,6 +814,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    427: {
+        "version_fixed": "0.4.74",
+        "title": (
+            "Overnight nat-vent session torn down and re-adopted every 5-15 min"
+            " ('running (untracked)' / repeated 'startup reconcile')"
+        ),
+        "scope_covered": (
+            "automation.py: check_natural_vent_conditions()'s Phase 2 proactive floor exit"
+            " (~line 2380) was reading the flat daytime comfort_heat directly instead of the"
+            " sleep-aware _nat_vent_reactivation_floor() helper already used by Priority-1 hard"
+            " exit and reconcile_fan_on_startup() (Issue #417). During the sleep window this made"
+            " time_to_floor go negative hours before the real floor was reached, which always"
+            " satisfied the exit threshold and tore the session down every ~5 min; the physical"
+            " fan kept running independently and got re-adopted as a brand-new session each time"
+            " via the Issue #359 Fix D untracked-fan backstop, which Phase 2 then immediately"
+            " re-exited on the next tick. Fixed by routing the floor read through"
+            " _nat_vent_reactivation_floor() and guarding the block to only fire when"
+            " time_to_floor >= 0 (a negative value means the floor is already breached — that"
+            " belongs to the Priority-1 hard exit or nat_vent_temperature_check()'s in-session"
+            " cycling, not this predictive check). No changes to reconcile_fan_on_startup(), the"
+            " untracked-fan backstop, or the in-session cycling mechanism — all three already"
+            " implemented the correct behavior; only Phase 2's floor source and guard needed"
+            " correcting. tests/test_nat_vent_activation.py: two new regression tests"
+            " (test_proactive_exit_uses_sleep_aware_floor_not_daytime_floor,"
+            " test_proactive_exit_skips_when_floor_already_breached). New pending simulation"
+            " scenario tools/simulations/pending/issue-427-natvent-sleep-floor-churn.json,"
+            " verified to fail against the pre-fix code (reproduces the exact -2.09h churn"
+            " reading from the reported activity log)."
+        ),
+        "scope_not_covered": (
+            "Two related items were identified but deliberately deferred: (1) Priority-1's hard"
+            " comfort-floor exit (~line 2288-2312) has its own separate inline sleep-window"
+            " calculation rather than calling _nat_vent_reactivation_floor() directly — it"
+            " computes the same value today so it did not contribute to this bug, but it is the"
+            " same class of duplicate-threshold risk documented for #400/#402; left alone in this"
+            " fix to avoid widening the diff for a path that isn't broken. (2) Activity-log"
+            " truncation on 'last 12 hours' dashboard views (EVENT_LOG_CAP=500, a flat count cap"
+            " that this bug's ~100+ events/night likely helped exceed) was investigated but split"
+            " into a separate issue (#432) — it needs its own right-sizing decision independent of"
+            " whatever event volume this fix produces, not a bolt-on cap bump here."
+        ),
+    },
     428: {
         "version_fixed": "0.4.73",
         "title": "next_human_action gives backwards window/fan advice when outdoor is hotter than indoor",

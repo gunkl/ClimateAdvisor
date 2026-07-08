@@ -2392,9 +2392,23 @@ class AutomationEngine:
                     ):
                         passive_rate = k_passive * (_indoor_now - outdoor)  # °F/hr, negative
                         if passive_rate < 0:
-                            comfort_heat_now = float(self.config.get("comfort_heat", 70))
+                            # Issue #427: use the same sleep-aware canonical floor as
+                            # Priority-1 hard exit and reconcile (_nat_vent_reactivation_floor,
+                            # added in #417) instead of the flat daytime comfort_heat. The old
+                            # hardcoded read disagreed with every other exit/reactivation site
+                            # during the sleep window, causing this block to believe the floor
+                            # was already breached while Priority-1/cycling correctly still
+                            # considered the session in-band — a repeating exit/reconcile-adopt
+                            # loop every ~5-15 min all night.
+                            comfort_heat_now = self._nat_vent_reactivation_floor()
                             time_to_floor = (_indoor_now - comfort_heat_now) / abs(passive_rate)
-                            if time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
+                            # A negative/zero time_to_floor means the floor is already at or
+                            # below current indoor — that's not a *prediction*, it's already
+                            # reality, and belongs to the Priority-1 hard-exit or the in-session
+                            # thermostatic cycling (nat_vent_temperature_check), not to this
+                            # proactive/anticipatory check. Firing here as well is what produced
+                            # the nonsensical "floor in -2.09 hr" log text in #427.
+                            if 0 <= time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
                                 _LOGGER.info(
                                     "Natural vent proactive exit: floor predicted in %.2f hr"
                                     " < %.1f hr threshold — exiting nat-vent session",

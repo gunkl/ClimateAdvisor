@@ -26,6 +26,7 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
+    CONF_SLEEP_HEAT,
     FAN_MODE_WHOLE_HOUSE,
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_REACTIVATION_LOCKOUT_S,
@@ -981,6 +982,65 @@ class TestProactiveFloorExit:
         assert "time_to_floor_hr" in floor_events[0][1]
         assert floor_events[0][1]["time_to_floor_hr"] < MIN_VIABLE_NAT_VENT_HOURS
         assert "fan_device" in floor_events[0][1], "Issue #402: exit events must identify the fan mechanism"
+
+    def test_proactive_exit_uses_sleep_aware_floor_not_daytime_floor(self):
+        """Issue #427: during the sleep window, Phase 2 must use the same sleep-aware
+        floor as Priority-1/reconcile (_nat_vent_reactivation_floor), not the flat
+        daytime comfort_heat.
+
+        sleep_heat=60, comfort_heat=70 (deliberately far apart to make the divergence
+        unambiguous), hysteresis=1, indoor=68, outdoor=65, k=-0.1
+        passive_rate = -0.1 * (68 - 65) = -0.3 F/hr
+
+        Old buggy behavior (flat daytime comfort_heat=70):
+            time_to_floor = (68 - 70) / 0.3 = -6.67 hr -> negative, always < 1.0 -> wrongly exits
+
+        Correct behavior (sleep-aware floor=60 during sleep window):
+            time_to_floor = (68 - 60) / 0.3 = 26.67 hr -> nowhere near the floor -> stays active
+
+        Priority-1's hard floor (sleep_heat - hysteresis = 59) also does not fire since
+        indoor 68 > 59, isolating this test to the Phase 2 code path.
+        """
+        engine = self._make_active_nat_vent_engine(indoor_f=68.0, outdoor_f=65.0, k_passive=-0.1, comfort_heat=70.0)
+        engine.config["sleep_time"] = "09:00"
+        engine.config["wake_time"] = "11:00"  # 10:00 test clock falls inside this window
+        engine.config[CONF_SLEEP_HEAT] = 60.0
+        engine._deactivate_fan = AsyncMock()
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active, "session must survive — floor is 6+ hours away, not breached"
+        assert not any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
+        engine._deactivate_fan.assert_not_awaited()
+
+    def test_proactive_exit_skips_when_floor_already_breached(self):
+        """Issue #427: a negative time_to_floor means the floor is already at/below
+        current indoor — that's not a *prediction*, so Phase 2 must not fire (and must
+        not emit the nonsensical "floor in -X hr" text). That situation belongs to the
+        Priority-1 hard exit or in-session thermostatic cycling, not this block.
+
+        sleep_time/wake_time configured so the fixed test clock (10:00) is in-window;
+        sleep_heat=66, hysteresis=1 -> Priority-1 hard floor = 65 (does not fire, indoor
+        65.5 > 65) while Phase 2's floor (sleep_heat=66, no hysteresis) is already at/above
+        indoor 65.5, giving a negative time_to_floor that must be guarded out.
+        """
+        engine = self._make_active_nat_vent_engine(indoor_f=65.5, outdoor_f=60.0, k_passive=-0.2, comfort_heat=70.0)
+        engine.config["sleep_time"] = "09:00"
+        engine.config["wake_time"] = "11:00"
+        engine.config[CONF_SLEEP_HEAT] = 66.0
+        engine._deactivate_fan = AsyncMock()
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 10, 0, 0)):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active, "Phase 2 must not exit on an already-negative time_to_floor"
+        assert not any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
+        engine._deactivate_fan.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

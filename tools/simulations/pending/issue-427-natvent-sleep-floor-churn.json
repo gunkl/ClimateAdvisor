@@ -1,0 +1,118 @@
+{
+  "name": "issue-427-natvent-sleep-floor-churn",
+  "description": "Issue #427: overnight WHF nat-vent session with indoor drifting down through the sleep window while comfort_heat (daytime) and sleep_heat (overnight) diverge. Before the fix, Phase 2's proactive floor exit (check_natural_vent_conditions) read the flat daytime comfort_heat instead of the sleep-aware canonical floor (_nat_vent_reactivation_floor()) that every other exit/reactivation site already uses -- so during the sleep window it believed the floor was already breached (negative time_to_floor) hours before it actually was, tearing the whole nat-vent session down every ~5-15 min. The physical fan kept running independently (thermostat circulation / hardware lag), which the coordinator saw as 'running (untracked)' and re-adopted as a brand-new nat-vent session via reconcile_fan_on_startup(), which Phase 2 then immediately re-exited on the next tick -- a self-inflicted exit/untracked/reconcile-adopt loop for 6 straight hours. After the fix, Phase 2 uses the same sleep-aware floor as Priority-1/reconcile, so the session survives continuously through the sleep window and the fan only cycles via the correct in-session thermostatic mechanism (nat_vent_temperature_check), never tearing down session identity.",
+  "source": "activity-report",
+  "issue": 427,
+  "notes": [
+    "Occupant impact: the resident had a bedroom window open overnight for free cooling. Before the fix, the activity log/notifications showed 5+ churning entries every 5-15 minutes for 6 hours (fan activated -> proactive exit -> fan running untracked -> fan re-adopted -> exit again), which is both confusing noise in the daily briefing and (combined with daytime activity) a major contributor to exceeding the activity log's entry cap. The physical fan behavior was arguably fine throughout -- what was broken was the system's own bookkeeping repeatedly destroying and recreating session identity it should never have torn down, given conditions never meaningfully changed.",
+    "Config: fan_mode=whole_house_fan; comfort_heat=68F (daytime floor) vs sleep_heat=64F (overnight floor) -- deliberately several degrees apart, matching the divergence that caused the bug. sleep_time=22:00, wake_time=06:30 so the whole overnight timeline (00:00-06:00) falls inside the sleep window. thermal_model.k_passive=-0.08 (slow, matches the real report's multi-hour gradual drift) with confidence=high so Phase 2's ODE-projected time_to_floor is active throughout.",
+    "Three-exercise protocol (CLAUDE.md Sec.10): (a) Scenario effectiveness: reverting the fix (restoring the flat `self.config.get(\"comfort_heat\", 70)` read and removing the `>= 0` guard in Phase 2) causes the 02:00 and 04:00 assertions to fail -- production_outcome_at would return \"nat_vent_predicted_floor_exit\" instead of \"natural_ventilation\", and the final nat_vent_still_active assertion would fail since the session would have been torn down. (b) Docs<->production alignment: docs/08-COMPUTATION-REFERENCE.md nat-vent section must document that Phase 2 uses the same _nat_vent_reactivation_floor() as Priority-1/reconcile before this is promoted to golden. (c) User outcome if this regresses: the occupant again sees hours of churning fan-activated/exit/untracked/reconcile notifications for a session that never needed to end, eroding trust in the activity log and daily briefing (CLAUDE.md 'Daily Briefing as Primary UI').",
+    "This harness (tools/sim_harness) drives the real AutomationEngine only -- it does not model the coordinator-level 'running (untracked)' detection or reconcile_fan_on_startup() re-adoption (those live in coordinator.py and are triggered by the coordinator's periodic backstop, not by AutomationEngine methods the harness dispatches). This scenario proves the AutomationEngine-level root cause (Phase 2 tearing down the session) is fixed; it does not directly exercise the coordinator-level symptom chain. That chain is documented as a consequence of this root cause in the issue, not as a separately-tested code path.",
+    "Promote to golden/ once reviewed and confirmed by the user per the Golden Simulation Test Policy."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "nat_vent_hysteresis_f": 1.0,
+    "sleep_heat": 64,
+    "sleep_time": "22:00",
+    "wake_time": "06:30",
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "thermal_model": {
+    "confidence": "high",
+    "confidence_k_passive": "high",
+    "confidence_k_hvac": "high",
+    "k_passive": -0.08,
+    "k_active_cool": -2.0,
+    "k_active_heat": 2.0
+  },
+  "events": [
+    {
+      "time": "2026-01-10T21:55:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Evening classification: mild day, hvac_mode=off. Comfort band armed [68/74]."
+    },
+    {
+      "time": "2026-01-10T22:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 60.0,
+      "note": "Evening: indoor 70F, outdoor 60F -- outdoor cooler than indoor, above both floors."
+    },
+    {
+      "time": "2026-01-10T22:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens. outdoor 60F < indoor 70F, indoor > comfort_heat 68F, outdoor <= threshold 77F -- nat-vent activates, WHF turns on."
+    },
+    {
+      "time": "2026-01-11T00:00:00",
+      "type": "temp_update",
+      "indoor_f": 67.0,
+      "outdoor_f": 55.0,
+      "note": "Sleep window active (22:00-06:30). indoor=67F: below daytime comfort_heat(68F) but above sleep_heat(64F). passive_rate = -0.08*(67-55) = -0.96F/hr. OLD buggy floor (flat 68): time_to_floor = (67-68)/0.96 = -1.04h -> negative, old code wrongly exits. NEW canonical sleep-aware floor (64): time_to_floor = (67-64)/0.96 = 3.13h -- comfortably above MIN_VIABLE_NAT_VENT_HOURS(1.0h) -- session correctly stays active."
+    },
+    {
+      "time": "2026-01-11T02:00:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 54.0,
+      "note": "indoor continues drifting down to 66F. passive_rate = -0.08*(66-54) = -0.96F/hr. OLD floor(68): time_to_floor = (66-68)/0.96 = -2.08h (matches the real #427 report's '-2.09 hr' churn readings). NEW floor(64): time_to_floor = (66-64)/0.96 = 2.08h -- still comfortably above threshold, session stays active with no exit."
+    },
+    {
+      "time": "2026-01-11T04:00:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 53.0,
+      "note": "indoor at 65F, closest approach to sleep_heat(64F) this scenario reaches. passive_rate = -0.08*(65-53) = -0.96F/hr. NEW floor(64): time_to_floor = (65-64)/0.96 = 1.04h -- just above the 1.0h threshold, session still correctly stays active (proves the fix holds even near its own margin, not just far from the floor)."
+    },
+    {
+      "time": "2026-01-11T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 65.0,
+      "outdoor_f": 53.0,
+      "note": "Still inside the sleep window (before 06:30 wake_time). Same reading as 04:00 -- confirms the session has remained continuously active across multiple hours/ticks, not just survived a single check."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-10T22:05:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opens with outdoor 60F < indoor 70F, outdoor <= threshold 77F -- nat-vent activates, WHF turns on."
+    },
+    {
+      "at": "2026-01-11T00:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Sleep-aware floor (64F) puts the predicted floor 3.13h away -- Phase 2 must not fire, so the last recorded decision is still the 22:05 activation, not a floor-exit."
+    },
+    {
+      "at": "2026-01-11T02:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Same as above at the point matching the real report's -2.09h old-code reading -- with the sleep-aware floor, time_to_floor is +2.08h and Phase 2 does not fire."
+    },
+    {
+      "at": "2026-01-11T04:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Even at the closest approach to the sleep floor in this scenario (time_to_floor=1.04h, just above the 1.0h threshold), Phase 2 correctly does not fire."
+    },
+    {
+      "at": "2026-01-11T06:00:00",
+      "expect": "nat_vent_still_active",
+      "reason": "After 8 hours and 4 re-evaluations spanning the whole sleep window, the nat-vent session must still be the SAME continuous session -- no proactive-exit/reconcile-adopt churn occurred at any point."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "During the sleep window, Phase 2's proactive floor exit correctly uses the sleep-aware canonical floor (matching Priority-1 and reconcile) instead of the flat daytime comfort_heat, so a nat-vent session with indoor hovering between the two floors survives continuously for hours instead of being torn down and re-adopted every 5-15 minutes.",
+    "observed_behavior": "natural_ventilation at 22:05 -> session persists unchanged through 00:00, 02:00, 04:00, 06:00 despite indoor drifting from 67F down to 65F (approaching but never below the 64F sleep floor) -- no nat_vent_predicted_floor_exit events, no reconcile-adopt churn, _natural_vent_active remains True at the end.",
+    "expected_behavior": "Phase 2 (check_natural_vent_conditions' proactive floor exit) reads _nat_vent_reactivation_floor() -- the same sleep-aware floor Priority-1 and reconcile_fan_on_startup already use -- and only exits when time_to_floor is genuinely non-negative and below MIN_VIABLE_NAT_VENT_HOURS. A negative time_to_floor (floor already at/below indoor) is left to the Priority-1 hard exit or nat_vent_temperature_check's in-session cycling, never destroying session identity for a condition that hasn't actually changed."
+  }
+}

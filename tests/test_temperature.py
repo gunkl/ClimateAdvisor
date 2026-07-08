@@ -10,6 +10,7 @@ from custom_components.climate_advisor.temperature import (
     UNIT_SYMBOL,
     format_temp,
     format_temp_delta,
+    free_cooling_direction_ok,
     from_fahrenheit,
     to_fahrenheit,
 )
@@ -163,3 +164,24 @@ class TestUnitSymbols:
 
     def test_celsius_constant_value(self):
         assert CELSIUS == "celsius"
+
+
+class TestFreeCoolingDirectionOk:
+    """Tests for free_cooling_direction_ok() — the shared free-cooling direction gate (Issue #428)."""
+
+    def test_outdoor_cooler_than_indoor_is_ok(self):
+        assert free_cooling_direction_ok(outdoor_temp=70.0, indoor_temp=78.0) is True
+
+    def test_outdoor_hotter_than_indoor_is_not_ok(self):
+        """The exact reported scenario: indoor 75, outdoor 80 — free cooling doesn't help."""
+        assert free_cooling_direction_ok(outdoor_temp=80.0, indoor_temp=75.0) is False
+
+    def test_outdoor_equal_to_indoor_is_not_ok(self):
+        assert free_cooling_direction_ok(outdoor_temp=75.0, indoor_temp=75.0) is False
+
+    def test_outdoor_none_defaults_to_ok(self):
+        """Unknown outdoor reading doesn't itself block — the caller decides how to act on unknown."""
+        assert free_cooling_direction_ok(outdoor_temp=None, indoor_temp=78.0) is True
+
+    def test_indoor_none_defaults_to_ok(self):
+        assert free_cooling_direction_ok(outdoor_temp=70.0, indoor_temp=None) is True

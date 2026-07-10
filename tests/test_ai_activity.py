@@ -171,6 +171,29 @@ class TestActivityCrossValidationSection:
         )
         assert "[WARNING]" not in ctx
 
+    def test_no_warning_when_hvac_mode_off_action_fan_active_unconfirmed(self):
+        """Issue #458 regression: fan_status='active (unconfirmed)' (the WHF ground-truth-
+        disagreement state added by #423) must suppress the contradiction warning, same as
+        'active'/'running (manual override)'/'running (untracked)' — this allow-list
+        previously omitted this value, misreporting a fan CA itself was running."""
+        ctx = _build_context(
+            hvac_mode="off",
+            hvac_action="fan",
+            current_temp=72.0,
+            fan_status="active (unconfirmed)",
+        )
+        assert "[WARNING]" not in ctx
+
+    def test_no_warning_when_hvac_mode_off_action_fan_untracked(self):
+        """No [WARNING] when hvac_mode=off + hvac_action=fan + fan_status=running (untracked)."""
+        ctx = _build_context(
+            hvac_mode="off",
+            hvac_action="fan",
+            current_temp=72.0,
+            fan_status="running (untracked)",
+        )
+        assert "[WARNING]" not in ctx
+
     def test_warning_when_hvac_mode_off_action_heating(self):
         """[WARNING] emitted when hvac_mode=off but hvac_action=heating."""
         ctx = _build_context(hvac_mode="off", hvac_action="heating")

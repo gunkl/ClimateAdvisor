@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.7"
+VERSION = "0.5.8"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.8": [
+        "Fix #458: the AI Activity Report could misreport the whole-house fan as a"
+        " contradiction ('hvac_mode=off but hvac_action=fan') during the brief window"
+        " where CA detects and self-corrects a stale WHF on/off flag (Issue #423's"
+        " 'active (unconfirmed)' state) — that specific fan state was missing from this"
+        " report's allow-list of expected fan activity, even though the dashboard status"
+        " card already handled it correctly. Consolidated the two independently-written"
+        " checks (coordinator.py, ai_skills_activity.py) onto one shared predicate so this"
+        " class of drift can't recur; also fixed a second latent gap the consolidation"
+        " surfaced: a confirmed-running manual fan override wasn't suppressing the"
+        " coordinator's own internal contradiction-warning event either.",
+    ],
     "0.5.7": [
         "Fix #456: no user-visible change (confirmed via differential testing and a"
         " positive control). Consolidated the nat-vent 'hard exit floor' formula — the"
@@ -922,6 +934,34 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    458: {
+        "version_fixed": "0.5.8",
+        "title": "Consolidate CA-fan-running suppression predicate; fix missing 'active (unconfirmed)'",
+        "scope_covered": (
+            "New fan_status.py module (mirrors the temperature.py precedent): FAN_STATUS_ACTIVE_VALUES"
+            " + is_ca_fan_running(fan_status) — the single source of truth for 'does this fan_status"
+            " represent activity CA can account for.' ai_skills_activity.py's async_build_activity_context()"
+            " now calls it directly, fixing the real bug: its allow-list was missing"
+            " 'active (unconfirmed)' (the WHF ground-truth-disagreement state added by #423), so the AI"
+            " Activity Report misreported that specific fan state as a contradiction. coordinator.py's"
+            " _async_update_data() state-contradiction check also routed through the same predicate"
+            " (previously a separate ae._fan_active/_natural_vent_active flag check plus an ad hoc"
+            " running-untracked check) — this ALSO fixed a second latent gap: a manual fan override"
+            " confirmed running via physical state (ae._fan_override_active=True, ae._fan_active=False)"
+            " was not suppressing the coordinator's own contradiction-warning event, even though"
+            " ai_skills_activity.py's independent check already treated that case as expected."
+            " ae._natural_vent_active is kept as an explicit extra OR condition in coordinator.py,"
+            " covering the nat-vent-armed-but-idle moment between cycles"
+            " ('nat-vent (session active, fan idle)') — deliberately not one of the four canonical"
+            " active values, since the physical fan genuinely isn't running then."
+        ),
+        "scope_not_covered": (
+            "Does not add a fan_status.py constant for every _compute_fan_status() literal — only the"
+            " suppression-check subset needed here. Does not change dashboard/status-card fan display"
+            " logic, which already handled 'active (unconfirmed)' correctly before this fix; only the"
+            " AI Activity Report and the coordinator's internal contradiction-warning event were wrong."
+        ),
+    },
     456: {
         "version_fixed": "0.5.7",
         "title": "Consolidate the nat-vent hard-exit floor formula duplicated 3 times",

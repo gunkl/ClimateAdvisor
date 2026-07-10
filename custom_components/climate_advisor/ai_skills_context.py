@@ -20,8 +20,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.util import dt as dt_util
-
 if TYPE_CHECKING:
     pass
 
@@ -410,14 +408,8 @@ async def build_current_state_context(hass: Any, coordinator: Any, **kwargs: Any
         day_type = data.get(ATTR_DAY_TYPE, "unknown")
         trend = data.get(ATTR_TREND, "unknown")
         hvac_action = data.get(ATTR_HVAC_ACTION, "unknown")
-        # Compute fresh runtime — coordinator.data may be up to 30 min stale
-        _base_runtime = coordinator._today_record.hvac_runtime_minutes if coordinator._today_record is not None else 0.0
-        _session_elapsed = (
-            (dt_util.now() - coordinator._hvac_on_since).total_seconds() / 60.0
-            if coordinator._hvac_on_since is not None
-            else 0.0
-        )
-        hvac_runtime_today = round(_base_runtime + _session_elapsed, 1)
+        # Compute fresh runtime — coordinator.data may be up to 30 min stale (Issue #464)
+        hvac_runtime_today = coordinator.get_hvac_runtime_today()
         automation_status = data.get(ATTR_AUTOMATION_STATUS, "unknown")
         last_action_time = data.get(ATTR_LAST_ACTION_TIME, "unknown")
         last_action_reason = data.get(ATTR_LAST_ACTION_REASON, "unknown")

@@ -1956,9 +1956,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         _last_cmd,
                     )
 
-        _base_runtime = self._today_record.hvac_runtime_minutes if self._today_record else 0.0
-        _session_elapsed = (dt_util.now() - self._hvac_on_since).total_seconds() / 60 if self._hvac_on_since else 0.0
-        hvac_runtime_today = round(_base_runtime + _session_elapsed, 1)
+        hvac_runtime_today = self.get_hvac_runtime_today()
 
         # --- Thermal observation pipeline sampling ---
         self._update_pre_heat_buffer()
@@ -6141,6 +6139,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def today_record(self) -> DailyRecord | None:
         """Return today's learning record."""
         return self._today_record
+
+    def get_hvac_runtime_today(self) -> float:
+        """Return today's HVAC runtime in minutes, computed live (Issue #464).
+
+        `coordinator.data[ATTR_HVAC_RUNTIME_TODAY]` is only refreshed once per
+        update cycle (up to ~30 min stale) — this method is the single source of
+        truth for consumers that need the current value right now (AI context
+        builders previously hand-copied this exact formula for that reason).
+        Adds the accumulated base runtime from today's record to the elapsed
+        time of any HVAC session currently in progress.
+        """
+        base_runtime = self._today_record.hvac_runtime_minutes if self._today_record is not None else 0.0
+        session_elapsed = (
+            (dt_util.now() - self._hvac_on_since).total_seconds() / 60.0 if self._hvac_on_since is not None else 0.0
+        )
+        return round(base_runtime + session_elapsed, 1)
 
     @property
     def yesterday_record(self) -> dict | None:

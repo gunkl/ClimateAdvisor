@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── HA module stubs — must run before any climate_advisor import ──
 if "homeassistant" not in sys.modules:
@@ -278,3 +279,90 @@ class TestApplyComfortBandSingleServiceCall:
         call_data = climate_calls[0].args[2]
         assert call_data.get("hvac_mode") == "heat", f"Floor band must send hvac_mode='heat', got {call_data}"
         assert call_data.get("temperature") == 68.0, f"Floor band must send temperature=floor (68.0), got {call_data}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #444: comfort_band_applied event dedup — overlapping triggers (startup
+# coalesce + its own follow-on refresh; grace-expiry re-application colliding with
+# the regular cycle) must not each re-announce an identical band as a fresh event.
+# ---------------------------------------------------------------------------
+
+
+def _band_engine() -> AutomationEngine:
+    """Like _minimal_engine() but with a heat_cool-capable thermostat and an
+    _emit_event_callback that records every emitted (event_type, payload)."""
+    engine = _minimal_engine()
+    state_mock = MagicMock()
+    state_mock.state = "cool"
+    state_mock.attributes = {
+        "hvac_modes": ["off", "heat", "cool", "heat_cool"],
+        "supported_features": CLIMATE_FEATURE_TARGET_TEMP_RANGE | 1,
+    }
+    engine.hass.states.get.return_value = state_mock
+    engine._emitted_events = []
+    engine._emit_event_callback = lambda etype, payload: engine._emitted_events.append((etype, payload))
+    return engine
+
+
+class TestApplyComfortBandEventDedup:
+    """Issue #444 — the comfort_band_applied EVENT is deduped within a short window
+    when the band is unchanged; the underlying set_temperature call is never deduped."""
+
+    def test_identical_band_within_window_emits_event_once(self):
+        """Revert-test: without the guard this emits 2 events, not 1."""
+        engine = _band_engine()
+        band = ComfortBand(floor=68.0, ceiling=76.0, active="ceiling", reason="test")
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 10, 53, 0, tzinfo=UTC),
+        ):
+            asyncio.run(engine._apply_comfort_band(band, reason="coalesce path"))
+            asyncio.run(engine._apply_comfort_band(band, reason="regular cycle path"))
+
+        band_events = [e for e in engine._emitted_events if e[0] == "comfort_band_applied"]
+        assert len(band_events) == 1, f"Expected exactly 1 comfort_band_applied event, got {len(band_events)}"
+
+        # The underlying thermostat command is NEVER deduped — both calls must have fired.
+        climate_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "climate"]
+        assert len(climate_calls) == 2, (
+            f"Expected 2 set_temperature calls (thermostat re-assertion is unconditional), got {len(climate_calls)}"
+        )
+
+    def test_different_band_always_emits_regardless_of_timing(self):
+        """A genuinely different band must never be suppressed, even seconds apart."""
+        engine = _band_engine()
+        band_a = ComfortBand(floor=68.0, ceiling=76.0, active="ceiling", reason="test")
+        band_b = ComfortBand(floor=68.0, ceiling=74.0, active="ceiling", reason="test")  # different ceiling
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 10, 53, 0, tzinfo=UTC),
+        ):
+            asyncio.run(engine._apply_comfort_band(band_a, reason="first"))
+            asyncio.run(engine._apply_comfort_band(band_b, reason="second"))
+
+        band_events = [e for e in engine._emitted_events if e[0] == "comfort_band_applied"]
+        assert len(band_events) == 2, f"Different bands must both emit, got {len(band_events)}"
+
+    def test_identical_band_after_dedup_window_emits_again(self):
+        """Not a permanent suppression — a real re-announcement after the window fires normally."""
+        engine = _band_engine()
+        band = ComfortBand(floor=68.0, ceiling=76.0, active="ceiling", reason="test")
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 10, 53, 0, tzinfo=UTC),
+        ):
+            asyncio.run(engine._apply_comfort_band(band, reason="first"))
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 11, 5, 0, tzinfo=UTC),  # 12 min later — past the 10-min window
+        ):
+            asyncio.run(engine._apply_comfort_band(band, reason="30-min cycle, unchanged"))
+
+        band_events = [e for e in engine._emitted_events if e[0] == "comfort_band_applied"]
+        assert len(band_events) == 2, (
+            f"A re-announcement after COMFORT_BAND_EVENT_DEDUP_SECONDS must not be suppressed, got {len(band_events)}"
+        )

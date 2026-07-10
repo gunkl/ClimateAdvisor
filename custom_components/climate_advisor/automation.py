@@ -24,6 +24,7 @@ from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CEILING_PRECOOL_FALLBACK_MIN,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
+    COMFORT_BAND_EVENT_DEDUP_SECONDS,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
@@ -474,6 +475,12 @@ class AutomationEngine:
         self._last_resume_source: str | None = None
         self._grace_end_time: str | None = None
         self._grace_duration_seconds: int = 0
+
+        # Comfort-band event dedup (Issue #444): tracks the last-announced band so
+        # overlapping triggers (startup coalesce + its own refresh, grace-expiry
+        # re-application) don't each re-announce an identical band as a fresh event.
+        self._last_comfort_band_signature: tuple[str, str, float] | None = None
+        self._last_comfort_band_event_at: datetime | None = None
 
         # Economizer state (two-phase window cooling per Issue #27)
         # Phase "cool-down": AC runs to cool to set temp (outdoor air assists)
@@ -1601,9 +1608,11 @@ class AutomationEngine:
         if band.active == "ceiling" and caps.supports_cool:
             await self._set_temperature(band.ceiling, reason=reason, mode="cool")
             _cmd_shape = "cool"
+            _target = band.ceiling
         elif band.active == "floor" and caps.supports_heat:
             await self._set_temperature(band.floor, reason=reason, mode="heat")
             _cmd_shape = "heat"
+            _target = band.floor
         else:
             # The thermostat advertises no mode that can defend the active edge (e.g. a heat-only
             # unit on a warm day, or an unavailable entity). Surface this at INFO in real operation
@@ -1613,6 +1622,42 @@ class AutomationEngine:
                 "_apply_comfort_band: no capable mode for active=%r (modes=%s) — band not armed this cycle",
                 band.active,
                 list(caps.modes),
+            )
+            return
+
+        # Issue #444: _set_temperature() above is always called (unconditional thermostat
+        # re-assertion) — only the human-facing ANNOUNCEMENT is deduped here. Overlapping
+        # triggers (startup coalesce + its own follow-on refresh; grace-expiry re-application
+        # colliding with the regular cycle) otherwise each re-announce an identical band as a
+        # fresh comfort_band_applied event within the same minute. Time-windowed, not
+        # permanent: a real re-announcement after COMFORT_BAND_EVENT_DEDUP_SECONDS (well under
+        # the 30-min regular cycle) still fires normally.
+        _signature = (band.active, _cmd_shape, round(_target, 2))
+        _now = dt_util.now()
+        # getattr: some tests construct AutomationEngine via object.__new__() and populate
+        # only the attributes they need, bypassing __init__ — mirrors the existing
+        # _nat_vent_was_active defensive-read pattern in coordinator.py._emit_event().
+        _last_signature = getattr(self, "_last_comfort_band_signature", None)
+        _last_at = getattr(self, "_last_comfort_band_event_at", None)
+        # isinstance guard: some tests mock dt_util as a bare MagicMock (never calling
+        # datetime.now() for real), which would otherwise make the elapsed-time comparison
+        # below operate on MagicMock objects instead of real timedeltas. Treat anything that
+        # isn't a real datetime as "no prior timestamp" — the safe default (never suppress).
+        _is_redundant = (
+            _last_signature == _signature
+            and isinstance(_last_at, datetime)
+            and isinstance(_now, datetime)
+            and (_now - _last_at).total_seconds() < COMFORT_BAND_EVENT_DEDUP_SECONDS
+        )
+        self._last_comfort_band_signature = _signature
+        self._last_comfort_band_event_at = _now
+
+        if _is_redundant:
+            _LOGGER.debug(
+                "comfort_band_applied event suppressed — identical band (%s %.1f°F) already announced %.1fs ago",
+                _cmd_shape,
+                _target,
+                (_now - _last_at).total_seconds(),
             )
             return
 

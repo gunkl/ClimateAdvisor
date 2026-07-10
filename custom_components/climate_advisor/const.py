@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.9"
+VERSION = "0.5.10"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.10": [
+        "Fix #462: the dashboard's setpoint-divergence indicator (ca_target_heat/cool)"
+        " could show the wrong intended target while the home was in away or vacation"
+        " mode — it never accounted for occupancy at all, so it displayed the comfort or"
+        " sleep band even though the thermostat was actually being held at the (wider)"
+        " setback band. Routed through the same select_comfort_band() function every"
+        " real setpoint-writing code path already uses, so this indicator can no longer"
+        " silently drift from what the thermostat is actually doing. Also corrected the"
+        " fallback used when sleep_heat/sleep_cool aren't explicitly configured, from the"
+        " flat daytime comfort temps to the documented sleep defaults (64/72°F), matching"
+        " what the thermostat is actually set to overnight in that configuration.",
+    ],
     "0.5.9": [
         "Fix #460: no user-visible change (confirmed via unit tests and a positive"
         " control). Consolidated the 'should this comfort/setback code path defer"
@@ -945,6 +957,33 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    462: {
+        "version_fixed": "0.5.10",
+        "title": "Route api.py's ca_target_heat/cool through the canonical select_comfort_band() resolver",
+        "scope_covered": (
+            "api.py: ClimateAdvisorStatusView.get()'s ca_target_heat/cool computation (Issue #402)"
+            " replaced its own third independent implementation of the sleep/day band branch with a"
+            " call to automation.py's select_comfort_band() — the same resolver apply_classification(),"
+            " handle_bedtime(), handle_pre_cool(), handle_morning_wakeup(), and the occupancy handlers"
+            " already use to decide the live floor/ceiling. Deliberately NOT compute_bedtime_setback()"
+            " (the chart/briefing's adaptive resolver — a different, documented split per const.py's"
+            " #333 changelog): this field exists to detect divergence from the ACTUAL live setpoint,"
+            " which is select_comfort_band()'s job. Falls back to the old sleep/day-only heuristic only"
+            " when coordinator.current_classification is None (e.g. right after HA restart, before the"
+            " first classification cycle). Fixed two real gaps the old inline branch had: (1) it ignored"
+            " occupancy mode entirely, so away/vacation setback was never reflected even though the"
+            " thermostat was really being held at the setback band; (2) its unconfigured-sleep-temp"
+            " fallback was comfort_heat/comfort_cool, not the documented DEFAULT_SLEEP_HEAT/"
+            " DEFAULT_SLEEP_COOL (64/72°F) select_comfort_band() actually uses."
+        ),
+        "scope_not_covered": (
+            "Does not change select_comfort_band() itself or any live setpoint-writing behavior — this"
+            " endpoint is read-only display. Does not touch _compute_target_band_schedule() (the chart's"
+            " band-schedule builder, already a separate concern per #333) or compute_bedtime_setback()"
+            " (the adaptive resolver) — those remain intentionally distinct from the live-setpoint"
+            " resolver this fix routes through."
+        ),
+    },
     460: {
         "version_fixed": "0.5.9",
         "title": "Consolidate the occupancy-defer predicate (3 formulations across automation.py)",

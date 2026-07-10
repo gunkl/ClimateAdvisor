@@ -305,6 +305,22 @@ def _in_sleep_window(now: datetime, config: dict) -> bool:
     return now_time >= sleep_t or now_time < wake_t
 
 
+def should_defer_to_occupancy_setback(occupancy_mode: str) -> bool:
+    """Return True if `occupancy_mode` means comfort/setback logic should defer to
+    the away/vacation setback handlers instead of running normally (Issue #460).
+
+    Single source of truth for a gate previously phrased 3 different (but
+    logically equivalent) ways across this module's setpoint paths — the same
+    "sibling formulation drift" risk as #400/#402/#417/#456/#458. Equivalence
+    relies on occupancy_mode always being one of exactly the 4 values in
+    const.py (OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST):
+    `occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)` is equivalent to
+    `occupancy_mode not in (OCCUPANCY_HOME, OCCUPANCY_GUEST)`, the inverted form
+    handle_morning_wakeup() used.
+    """
+    return occupancy_mode in (OCCUPANCY_AWAY, OCCUPANCY_VACATION)
+
+
 def _fan_device_label(config: dict) -> str:
     """Return a human-readable device label for the active fan type."""
     mode = config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -1991,14 +2007,16 @@ class AutomationEngine:
         Safety net: redirects to setback handlers when occupancy is away/vacation
         so that any code path calling this function respects occupancy mode (Issue #85).
         """
-        # Issue #85: redirect to setback when not home/guest
-        if self._occupancy_mode == OCCUPANCY_AWAY:
-            _LOGGER.info("Away mode — redirecting to setback instead of comfort (%s)", reason)
-            await self.handle_occupancy_away()
-            return
-        if self._occupancy_mode == OCCUPANCY_VACATION:
-            _LOGGER.info("Vacation mode — redirecting to deep setback instead of comfort (%s)", reason)
-            await self.handle_occupancy_vacation()
+        # Issue #85: redirect to setback when not home/guest. Gate unified via
+        # should_defer_to_occupancy_setback() (Issue #460); which handler to redirect
+        # to still depends on which of the two deferring modes this is.
+        if should_defer_to_occupancy_setback(self._occupancy_mode):
+            if self._occupancy_mode == OCCUPANCY_AWAY:
+                _LOGGER.info("Away mode — redirecting to setback instead of comfort (%s)", reason)
+                await self.handle_occupancy_away()
+            else:
+                _LOGGER.info("Vacation mode — redirecting to deep setback instead of comfort (%s)", reason)
+                await self.handle_occupancy_vacation()
             return
 
         unit = self.config.get("temp_unit", "fahrenheit")
@@ -3664,8 +3682,9 @@ class AutomationEngine:
             _LOGGER.debug("handle_bedtime: skipping — setpoint write within last 30s (startup dedup guard)")
             return
 
-        # Issue #85: vacation/away already has a setback — don't override it with sleep temps
-        if self._occupancy_mode in (OCCUPANCY_VACATION, OCCUPANCY_AWAY):
+        # Issue #85: vacation/away already has a setback — don't override it with sleep temps.
+        # Gate unified via should_defer_to_occupancy_setback() (Issue #460).
+        if should_defer_to_occupancy_setback(self._occupancy_mode):
             _LOGGER.info("Bedtime skipped — %s mode (setback already active)", self._occupancy_mode)
             if self._emit_event_callback:
                 self._emit_event_callback(
@@ -3793,7 +3812,8 @@ class AutomationEngine:
             )
             return "skipped: no warming trend"
 
-        if self._occupancy_mode in (OCCUPANCY_VACATION, OCCUPANCY_AWAY):
+        # Gate unified via should_defer_to_occupancy_setback() (Issue #460).
+        if should_defer_to_occupancy_setback(self._occupancy_mode):
             _LOGGER.info("Pre-cool skipped — %s mode (setback already active)", self._occupancy_mode)
             return f"skipped: {self._occupancy_mode}"
 
@@ -3886,8 +3906,12 @@ class AutomationEngine:
 
     async def handle_morning_wakeup(self, indoor_temp: float | None = None) -> None:
         """Restore comfort for morning wake-up."""
-        # Issue #85: skip comfort restore when nobody is home
-        if self._occupancy_mode not in (OCCUPANCY_HOME, OCCUPANCY_GUEST):
+        # Issue #85: skip comfort restore when nobody is home. Gate unified via
+        # should_defer_to_occupancy_setback() (Issue #460) — this call site's original
+        # inverted form (`not in (HOME, GUEST)`) is logically equivalent to the
+        # predicate's `in (AWAY, VACATION)`, since occupancy_mode is always one of
+        # exactly those 4 values.
+        if should_defer_to_occupancy_setback(self._occupancy_mode):
             _LOGGER.info(
                 "Morning wakeup skipped — occupancy mode is '%s'",
                 self._occupancy_mode,

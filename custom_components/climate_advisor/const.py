@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.8"
+VERSION = "0.5.9"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.9": [
+        "Fix #460: no user-visible change (confirmed via unit tests and a positive"
+        " control). Consolidated the 'should this comfort/setback code path defer"
+        " because occupancy is away/vacation' gate — previously phrased 3 different"
+        " (but logically equivalent) ways across automation.py's setpoint paths"
+        " (_set_temperature_for_mode, handle_bedtime, handle_pre_cool,"
+        " handle_morning_wakeup) — into a single should_defer_to_occupancy_setback()"
+        " function. No drift had occurred yet, but the risk was live: a future change"
+        " to which occupancy modes should defer could easily be applied to 3 of the 4"
+        " sites and miss the 4th, the same class of bug already found once in #458.",
+    ],
     "0.5.8": [
         "Fix #458: the AI Activity Report could misreport the whole-house fan as a"
         " contradiction ('hvac_mode=off but hvac_action=fan') during the brief window"
@@ -934,6 +945,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    460: {
+        "version_fixed": "0.5.9",
+        "title": "Consolidate the occupancy-defer predicate (3 formulations across automation.py)",
+        "scope_covered": (
+            "automation.py: new pure module-level function should_defer_to_occupancy_setback"
+            "(occupancy_mode) — True for OCCUPANCY_AWAY/OCCUPANCY_VACATION. Routed handle_bedtime(),"
+            " handle_pre_cool(), and handle_morning_wakeup() (previously the inverted"
+            " 'not in (HOME, GUEST)' form) through it directly, and routed"
+            " _set_temperature_for_mode() through it as an outer guard while preserving its"
+            " distinct per-mode redirect (AWAY -> handle_occupancy_away(),"
+            " VACATION -> handle_occupancy_vacation()) — only the boolean gate is unified, not"
+            " the dispatch logic. Verified via a unit test proving the predicate agrees with"
+            " the original inverted formulation across all 4 occupancy modes, plus a positive"
+            " control: corrupting the predicate to always return False was independently caught"
+            " by 9 unit test failures across all 4 call sites AND 2 golden scenario divergences"
+            " (54/56), proving the extraction is load-bearing in production."
+        ),
+        "scope_not_covered": (
+            "Does not change which occupancy modes defer (still exactly AWAY/VACATION) or add a"
+            " 5th occupancy mode. Does not touch the display/status-label occupancy checks in"
+            " coordinator.py (next_human_action, status-string builders) — those are a different,"
+            " lower-risk kind of duplication (labeling, not control-flow gating), out of scope here."
+        ),
+    },
     458: {
         "version_fixed": "0.5.8",
         "title": "Consolidate CA-fan-running suppression predicate; fix missing 'active (unconfirmed)'",

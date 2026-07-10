@@ -96,6 +96,7 @@ from .fan_thermostat_decision import (
     FanThermostatOutcome,
     _resolve_vent_floor,
     decide_fan_thermostat_check,
+    resolve_hard_exit_floor,
 )
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .nat_vent_reactivation_lockout import is_reactivation_locked_out
@@ -2477,14 +2478,15 @@ class AutomationEngine:
                         indoor,
                         comfort_cool,
                     )
-                # During sleep window, lower the hard exit floor to sleep_heat - hysteresis so the
-                # cycling logic can gracefully pause the fan at sleep_heat before the session terminates.
+                # Hard exit floor — single source of truth in resolve_hard_exit_floor()
+                # (Issue #456), also used by fan_thermostat_check()/nat_vent_temperature_check().
                 _hysteresis_cv = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-                if _in_sleep_window(dt_util.now(), self.config):
-                    _sleep_heat_cv = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-                    _vent_floor = _sleep_heat_cv - _hysteresis_cv
-                else:
-                    _vent_floor = comfort_heat
+                _vent_floor = resolve_hard_exit_floor(
+                    comfort_heat_raw=comfort_heat,
+                    sleep_heat=float(self.config.get(CONF_SLEEP_HEAT, comfort_heat)),
+                    in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+                    hysteresis=_hysteresis_cv,
+                )
                 if indoor is not None and indoor <= _vent_floor:
                     self._natural_vent_active = False
                     await self._deactivate_fan(
@@ -2740,17 +2742,24 @@ class AutomationEngine:
             comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
             comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-            if _in_sleep_window(dt_util.now(), self.config):
-                sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+            sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
+            in_sleep_window = _in_sleep_window(dt_util.now(), self.config)
+            if in_sleep_window:
                 nat_vent_target = sleep_heat + hysteresis  # e.g. 65+1=66; off at 65, on at 67
-                # Hard exit floor is one hysteresis step below the cycling-off threshold so the
-                # fan can cycle off gracefully at sleep_heat before the session ends.
-                _hard_floor = sleep_heat - hysteresis  # e.g. 64°F
                 _context = "sleep"
             else:
                 nat_vent_target = (comfort_heat + comfort_cool) / 2.0
-                _hard_floor = comfort_heat
                 _context = "daytime"
+            # Hard exit floor — single source of truth in resolve_hard_exit_floor() (Issue #456),
+            # also used by fan_thermostat_check()/check_natural_vent_conditions(). In the sleep
+            # branch this is one hysteresis step below the cycling-off threshold above, so the
+            # fan can cycle off gracefully at sleep_heat before the session ends.
+            _hard_floor = resolve_hard_exit_floor(
+                comfort_heat_raw=comfort_heat,
+                sleep_heat=sleep_heat,
+                in_sleep_window=in_sleep_window,
+                hysteresis=hysteresis,
+            )
             off_threshold = nat_vent_target - hysteresis
             on_threshold = nat_vent_target + hysteresis
 

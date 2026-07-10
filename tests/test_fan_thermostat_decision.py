@@ -12,6 +12,7 @@ from custom_components.climate_advisor.fan_thermostat_decision import (
     FanThermostatOutcome,
     _resolve_vent_floor,
     decide_fan_thermostat_check,
+    resolve_hard_exit_floor,
 )
 
 _BASE = {
@@ -118,6 +119,81 @@ class TestCheck2CooledToFloor:
 
     def test_none_indoor_never_triggers_check2(self):
         assert decide_fan_thermostat_check(_inputs(indoor=None, outdoor=65.0)) == FanThermostatOutcome.KEEP
+
+
+class TestResolveHardExitFloorConsolidation:
+    """Issue #456: resolve_hard_exit_floor() is the single source of truth for the
+    nat-vent hard-exit floor, consolidating this module's own _resolve_vent_floor(),
+    automation.py's check_natural_vent_conditions() (formerly inline _vent_floor),
+    and automation.py's nat_vent_temperature_check() (formerly inline _hard_floor).
+    These tests reproduce the exact old inline formulas from both automation.py
+    sites to prove the shared function is behavior-identical to what it replaced.
+    """
+
+    def _old_check_natural_vent_conditions_formula(
+        self, comfort_heat: float, sleep_heat: float, hysteresis: float, in_sleep_window: bool
+    ) -> float:
+        """The exact pre-#456 inline formula from check_natural_vent_conditions()."""
+        if in_sleep_window:
+            return sleep_heat - hysteresis
+        return comfort_heat
+
+    def _old_nat_vent_temperature_check_formula(
+        self, comfort_heat: float, sleep_heat: float, hysteresis: float, in_sleep_window: bool
+    ) -> float:
+        """The exact pre-#456 inline formula from nat_vent_temperature_check()."""
+        if in_sleep_window:
+            return sleep_heat - hysteresis
+        return comfort_heat
+
+    def test_matches_old_check_natural_vent_conditions_formula(self):
+        for comfort_heat, sleep_heat, hysteresis, in_sleep_window in [
+            (70.0, 64.0, 1.0, True),
+            (70.0, 64.0, 1.0, False),
+            (68.0, 60.0, 2.0, True),
+            (68.0, 60.0, 2.0, False),
+            (72.0, 72.0, 0.0, True),
+        ]:
+            expected = self._old_check_natural_vent_conditions_formula(
+                comfort_heat, sleep_heat, hysteresis, in_sleep_window
+            )
+            actual = resolve_hard_exit_floor(
+                comfort_heat_raw=comfort_heat,
+                sleep_heat=sleep_heat,
+                in_sleep_window=in_sleep_window,
+                hysteresis=hysteresis,
+            )
+            assert actual == expected
+
+    def test_matches_old_nat_vent_temperature_check_formula(self):
+        for comfort_heat, sleep_heat, hysteresis, in_sleep_window in [
+            (70.0, 64.0, 1.0, True),
+            (70.0, 64.0, 1.0, False),
+            (68.0, 60.0, 2.0, True),
+            (68.0, 60.0, 2.0, False),
+            (72.0, 72.0, 0.0, True),
+        ]:
+            expected = self._old_nat_vent_temperature_check_formula(
+                comfort_heat, sleep_heat, hysteresis, in_sleep_window
+            )
+            actual = resolve_hard_exit_floor(
+                comfort_heat_raw=comfort_heat,
+                sleep_heat=sleep_heat,
+                in_sleep_window=in_sleep_window,
+                hysteresis=hysteresis,
+            )
+            assert actual == expected
+
+    def test_resolve_vent_floor_delegates_to_resolve_hard_exit_floor(self):
+        """_resolve_vent_floor() (this module's own consumer) must produce the
+        identical value as calling resolve_hard_exit_floor() directly."""
+        inputs = _inputs(comfort_heat_raw=70.0, sleep_heat=64.0, hysteresis=1.0, in_sleep_window=True)
+        assert _resolve_vent_floor(inputs) == resolve_hard_exit_floor(
+            comfort_heat_raw=inputs.comfort_heat_raw,
+            sleep_heat=inputs.sleep_heat,
+            in_sleep_window=inputs.in_sleep_window,
+            hysteresis=inputs.hysteresis,
+        )
 
 
 class TestCheckOrdering:

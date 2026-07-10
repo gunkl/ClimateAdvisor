@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.6"
+VERSION = "0.5.7"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.7": [
+        "Fix #456: no user-visible change (confirmed via differential testing and a"
+        " positive control). Consolidated the nat-vent 'hard exit floor' formula — the"
+        " sleep-aware threshold below which an active free-cooling session ends outright"
+        " — from 3 independent implementations down to 1. Two automation.py call sites"
+        " (check_natural_vent_conditions, nat_vent_temperature_check) previously"
+        " recomputed this formula inline instead of using the already-pure, already-tested"
+        " fan_thermostat_decision.py version — the same 'sibling function silently drifts'"
+        " bug class behind issues #400/#402/#417. No drift had occurred yet here, but the"
+        " risk was live: a future fix to one copy could easily miss the other two.",
+    ],
     "0.5.6": [
         "Fix #454: no user-visible change. Extracted the shared shape behind the"
         " nat-vent gate's old-vs-new differential comparator (shadow-mode instrumentation,"
@@ -911,6 +922,32 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    456: {
+        "version_fixed": "0.5.7",
+        "title": "Consolidate the nat-vent hard-exit floor formula duplicated 3 times",
+        "scope_covered": (
+            "fan_thermostat_decision.py: promoted the private _resolve_vent_floor()'s body into"
+            " a new public, standalone pure function resolve_hard_exit_floor(comfort_heat_raw,"
+            " sleep_heat, in_sleep_window, hysteresis); _resolve_vent_floor() now delegates to it."
+            " automation.py: routed check_natural_vent_conditions()'s inline _vent_floor and"
+            " nat_vent_temperature_check()'s inline _hard_floor through the new function instead"
+            " of recomputing the sleep/day branch inline. Explicitly out of scope:"
+            " _nat_vent_reactivation_floor() (the reactivation GATE's floor) is a deliberately"
+            " different formula (no hysteresis subtraction) answering a different question — not"
+            " a 4th copy of this same formula, left untouched. Verified via a unit test"
+            " reproducing both old inline formulas exactly across 5 sleep/day/hysteresis"
+            " combinations, plus a positive control: corrupting resolve_hard_exit_floor() was"
+            " independently caught by 3 unit test failures AND a golden scenario divergence"
+            " (55/56), proving the extraction is load-bearing in production, not just in tests."
+        ),
+        "scope_not_covered": (
+            "Does not touch the cycling-midpoint logic (nat_vent_target/on_threshold/off_threshold)"
+            " in nat_vent_temperature_check() — that's a distinct concept (how far past the target"
+            " the fan is allowed to cycle), not the hard-exit floor this issue consolidates. Does"
+            " not change any threshold value or boundary — confirmed behavior-identical, not a"
+            " behavior fix."
+        ),
+    },
     454: {
         "version_fixed": "0.5.6",
         "title": "Extract shared differential-comparator base for pure decide_*() modules",

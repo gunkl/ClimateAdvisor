@@ -69,18 +69,44 @@ class FanThermostatInputs:
     natural_vent_active: bool
 
 
-def _resolve_vent_floor(inputs: FanThermostatInputs) -> float:
-    """Pure reimplementation of Check 2's floor resolution.
+def resolve_hard_exit_floor(
+    *,
+    comfort_heat_raw: float,
+    sleep_heat: float,
+    in_sleep_window: bool,
+    hysteresis: float,
+) -> float:
+    """The nat-vent hard-exit floor: the sleep-aware threshold below which an
+    active nat-vent session ends outright (Issue #456 — single source of truth,
+    consolidating three prior copies: this function, automation.py's
+    check_natural_vent_conditions()'s ``_vent_floor``, and
+    nat_vent_temperature_check()'s ``_hard_floor``).
 
     Deliberately asymmetric, matching production exactly: the sleep-window
     branch subtracts hysteresis from sleep_heat; the awake branch does NOT
     subtract hysteresis from comfort_heat_raw. This is not a simplification
     opportunity — it's what the real code does, and the two floors are allowed
     to have different boundary shapes.
+
+    Not to be confused with ``_nat_vent_reactivation_floor()`` in automation.py
+    (the reactivation GATE's floor) — that is a deliberately different formula
+    (no hysteresis subtraction) answering a different question ("is it still
+    eligible to reactivate") than this one ("should the live session end now").
     """
-    if inputs.in_sleep_window:
-        return inputs.sleep_heat - inputs.hysteresis
-    return inputs.comfort_heat_raw
+    if in_sleep_window:
+        return sleep_heat - hysteresis
+    return comfort_heat_raw
+
+
+def _resolve_vent_floor(inputs: FanThermostatInputs) -> float:
+    """Pure reimplementation of Check 2's floor resolution — delegates to
+    resolve_hard_exit_floor(), the single source of truth (Issue #456)."""
+    return resolve_hard_exit_floor(
+        comfort_heat_raw=inputs.comfort_heat_raw,
+        sleep_heat=inputs.sleep_heat,
+        in_sleep_window=inputs.in_sleep_window,
+        hysteresis=inputs.hysteresis,
+    )
 
 
 def decide_fan_thermostat_check(inputs: FanThermostatInputs) -> FanThermostatOutcome:

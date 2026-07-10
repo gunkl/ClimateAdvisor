@@ -4,9 +4,25 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.4": [
+        "Fix #449: found the real reason a whole-house fan could stay off for hours"
+        " overnight after being turned off outside of Climate Advisor (e.g. a wall"
+        " switch or the device's own remote) — in dual-entity setups (a control switch"
+        " plus a separate power-detection sensor), the control entity's Home Assistant"
+        " state can silently keep saying 'on' even though the fan is truly off, since"
+        " it's a one-way command with no feedback of its own. A plain 'turn on' command"
+        " sent to an entity Home Assistant already believes is on can be silently"
+        " dropped before it ever reaches the device. Climate Advisor now checks the"
+        " power-detection sensor before every command: if the control entity and the"
+        " sensor already agree, nothing is touched; if they disagree, it forces a real"
+        " transition (off, briefly, then on — or the reverse) so the command actually"
+        " reaches the fan. Confirmed against real device history from an actual"
+        " overnight incident. Only affects dual-entity whole-house-fan setups —"
+        " single-entity setups and HVAC-fan-mode ventilation are unchanged.",
+    ],
     "0.5.3": [
         "Fix #446: an automated self-correction (Issue #423's fan physical-drift check"
         " fixing its own stale belief about whether the fan was on) was reported in the"
@@ -873,6 +889,32 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    449: {
+        "version_fixed": "0.5.4",
+        "title": "WHF control-entity command dedup silently drops reactivation in dual-entity setups",
+        "scope_covered": (
+            "automation.py: confirmed the real root cause behind #446's symptoms via real HA entity"
+            " history (not theory) — a whole-house-fan control/transmitter entity's HA-reported state"
+            " showed only 2 transitions across a ~14-hour incident window (on at adoption, off at"
+            " morning wake-up), while ~14 repeated turn_on calls during a drift-correction loop"
+            " produced zero state changes, because the physical fan had been turned off outside HA's"
+            " command path and the one-way transmitter entity had no feedback to reflect that. New"
+            " _command_whf_control_entity(desired_on, reason) helper, used by _activate_fan(),"
+            " _deactivate_fan(), and the drift-reconciliation correction path: when dual-entity ground"
+            " truth (fan_state_entity) is available and the control entity already claims the desired"
+            " state but ground truth disagrees, forces a real transition by commanding the OPPOSITE"
+            " state first, waiting 5 seconds, then the desired state — symmetric in both directions"
+            " (want-on-but-stuck-on and want-off-but-stuck-off). When both signals already agree, no"
+            " command is sent at all. Scoped narrowly: single-entity/command-only WHF setups and all"
+            " FAN_MODE_HVAC fan-mode control are completely untouched — the helper only activates when"
+            " a live dual-entity ground-truth reading is available to justify it."
+        ),
+        "scope_not_covered": (
+            "Does not change the drift-detection cadence or thresholds (already confirmed correct) —"
+            " only the correction's command reliability. Does not add any new configuration; relies"
+            " entirely on the existing fan_state_entity/fan_state_feedback dual-entity setup."
+        ),
+    },
     446: {
         "version_fixed": "0.5.3",
         "title": "Automated fan drift-correction mislabeled as manual grace + repeated unwarranted-fan reconcile spam",

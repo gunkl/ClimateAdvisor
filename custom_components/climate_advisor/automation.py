@@ -4200,6 +4200,69 @@ class AutomationEngine:
                 comfort_heat, reason="nat-vent savings mode — protecting comfort floor", mode="heat"
             )
 
+    async def _command_whf_control_entity(self, desired_on: bool, *, reason: str) -> bool:
+        """Command the WHF control/transmitter entity, guarding against HA's belief-based
+        command dedup in dual-entity (split control/detect) setups (Issue #449).
+
+        Scope: WHOLE_HOUSE_FAN/BOTH archetypes only, and only when dual-entity feedback
+        ground truth is available (``_get_fan_physical_state_callback`` returns non-None).
+        Single-entity/command-only WHF setups and FAN_MODE_HVAC are entirely untouched —
+        a single-entity control can be trusted, and the separate HVAC fan-mode command
+        path is unaffected.
+
+        A one-way transmitter entity has no feedback of its own; its HA-reported state
+        can silently drift from physical reality. Confirmed via real HA history (Issue
+        #449): ~14 repeated ``turn_on`` calls produced zero state transitions once the
+        entity's HA-reported state already read "on", because the physical fan had been
+        turned off by something outside HA's command path. When the control entity's
+        belief already matches the desired state AND ground truth disagrees, force a
+        real transition by commanding the OPPOSITE state first, waiting 5 seconds, then
+        the desired state. When both signals already agree, do nothing — no redundant
+        command.
+
+        Returns:
+            True if an HA service call was issued, False if the desired state was
+            already confirmed correct and nothing needed to change.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return False
+        fan_entity = self.config.get(CONF_FAN_ENTITY)
+        if not fan_entity:
+            return False
+        domain = fan_entity.split(".")[0]  # "fan" or "switch"
+        desired_service = "turn_on" if desired_on else "turn_off"
+
+        ground_truth = self._get_fan_physical_state_callback() if self._get_fan_physical_state_callback else None
+
+        if ground_truth is not None:
+            control_state = self.hass.states.get(fan_entity)
+            control_matches_desired = bool(control_state and (control_state.state == "on") == desired_on)
+            if control_matches_desired and ground_truth == desired_on:
+                _LOGGER.debug(
+                    "WHF control entity and detected physical state already agree (%s) — no command needed (%s)",
+                    "on" if desired_on else "off",
+                    reason,
+                )
+                return False
+            if control_matches_desired and ground_truth != desired_on:
+                _LOGGER.warning(
+                    "WHF control entity already reads %s but detected physical state"
+                    " disagrees — forcing a real transition before reasserting (%s)",
+                    "on" if desired_on else "off",
+                    reason,
+                )
+                opposite_service = "turn_off" if desired_on else "turn_on"
+                await self.hass.services.async_call(domain, opposite_service, {"entity_id": fan_entity})
+                await asyncio.sleep(5)
+                await self.hass.services.async_call(domain, desired_service, {"entity_id": fan_entity})
+                return True
+
+        # Not dual-entity mode, ground truth unavailable this tick, or control entity
+        # doesn't yet match the desired state — a plain command is a genuine transition.
+        await self.hass.services.async_call(domain, desired_service, {"entity_id": fan_entity})
+        return True
+
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
         """Activate fan based on configured fan_mode.
 
@@ -4245,8 +4308,9 @@ class AutomationEngine:
                 fan_entity = self.config.get(CONF_FAN_ENTITY)
                 if fan_entity:
                     domain = fan_entity.split(".")[0]  # "fan" or "switch"
-                    await self.hass.services.async_call(domain, "turn_on", {"entity_id": fan_entity})
-                    _LOGGER.warning("Activated %s fan (%s) — %s", domain, fan_entity, reason)
+                    _commanded = await self._command_whf_control_entity(True, reason=reason)
+                    if _commanded:
+                        _LOGGER.warning("Activated %s fan (%s) — %s", domain, fan_entity, reason)
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                 hvac_state = self.hass.states.get(self.climate_entity)
@@ -4484,6 +4548,15 @@ class AutomationEngine:
             preserve_nat_vent_session=True,
             source="automation",
         )
+        # Issue #449: the control entity's own HA-reported state can silently stay
+        # stuck "on" (a one-way transmitter has no feedback of its own) even though
+        # ground truth has just confirmed the fan is physically off — reconcile it now
+        # so the very next reactivation attempt (nat_vent_temperature_check()'s
+        # immediate same-tick re-fire, since preserve_nat_vent_session=True above)
+        # starts from a control entity that genuinely reads "off".
+        self.hass.async_create_task(
+            self._command_whf_control_entity(False, reason="physical-state drift confirmed over 2 backstop ticks")
+        )
 
     async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:
         """Deactivate fan based on configured fan_mode.
@@ -4544,8 +4617,9 @@ class AutomationEngine:
                 fan_entity = self.config.get(CONF_FAN_ENTITY)
                 if fan_entity:
                     domain = fan_entity.split(".")[0]
-                    await self.hass.services.async_call(domain, "turn_off", {"entity_id": fan_entity})
-                    _LOGGER.warning("Deactivated %s fan (%s) — %s", domain, fan_entity, reason)
+                    _commanded = await self._command_whf_control_entity(False, reason=reason)
+                    if _commanded:
+                        _LOGGER.warning("Deactivated %s fan (%s) — %s", domain, fan_entity, reason)
 
                 # Restore prior HVAC mode that was suppressed when the fan activated
                 # (Issue #277 Fix C). Only restore if we have a stored mode to go back to.

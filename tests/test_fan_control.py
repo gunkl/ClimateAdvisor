@@ -2856,3 +2856,178 @@ class TestDualFanStatus:
             climate_fan_mode="auto",
         )
         assert coord._compute_hvac_fan_status() == "inactive"
+
+
+class TestCommandWhfControlEntity:
+    """Issue #449 — dedup-safe WHF control-entity commands in dual-entity setups.
+
+    Root cause (confirmed via real HA entity history, not theory): once a one-way
+    transmitter entity's HA-reported state already says "on", a plain turn_on call is
+    silently absorbed and never reaches the physical device — the real fan stayed off
+    for hours while CA repeated the same no-op command every 10 minutes.
+    """
+
+    def _engine(self, *, control_state, ground_truth):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        if control_state is None:
+            engine.hass.states.get = MagicMock(return_value=None)
+        else:
+            state_mock = MagicMock()
+            state_mock.state = control_state
+            engine.hass.states.get = MagicMock(return_value=state_mock)
+        engine._get_fan_physical_state_callback = MagicMock(return_value=ground_truth)
+        return engine
+
+    def test_no_ground_truth_sends_plain_command_regardless_of_control_state(self):
+        """Command-only mode (or the callback currently returns None) — always the
+        plain, direct command, matching pre-#449 behavior exactly. A control entity
+        already reading "on" must NOT trigger a toggle here — this is the blast-radius
+        boundary for single-entity setups."""
+        engine = self._engine(control_state="on", ground_truth=None)
+
+        commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
+
+        assert commanded is True
+        calls = engine.hass.services.async_call.call_args_list
+        assert len(calls) == 1
+        assert calls[0].args == ("fan", "turn_on", {"entity_id": "fan.whf"})
+
+    def test_want_on_control_on_ground_truth_on_leaves_alone(self):
+        """Both signals agree the fan is really on — no command, nothing to fix."""
+        engine = self._engine(control_state="on", ground_truth=True)
+
+        commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
+
+        assert commanded is False
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_want_on_control_on_ground_truth_off_forces_toggle(self):
+        """The confirmed real-world bug: control claims on but the fan is really off —
+        must force off->wait->on, not a single (silently-dropped) turn_on."""
+        engine = self._engine(control_state="on", ground_truth=False)
+
+        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
+
+        assert commanded is True
+        calls = engine.hass.services.async_call.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args == ("fan", "turn_off", {"entity_id": "fan.whf"})
+        assert calls[1].args == ("fan", "turn_on", {"entity_id": "fan.whf"})
+        mock_sleep.assert_awaited_once_with(5)
+
+    def test_want_off_control_off_ground_truth_off_leaves_alone(self):
+        """Both signals agree the fan is really off — no command needed."""
+        engine = self._engine(control_state="off", ground_truth=False)
+
+        commanded = asyncio.run(engine._command_whf_control_entity(False, reason="test"))
+
+        assert commanded is False
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_want_off_control_off_ground_truth_on_forces_toggle(self):
+        """Mirror-image stuck-off case: control claims off but the fan is really still
+        running — must force on->wait->off."""
+        engine = self._engine(control_state="off", ground_truth=True)
+
+        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            commanded = asyncio.run(engine._command_whf_control_entity(False, reason="test"))
+
+        assert commanded is True
+        calls = engine.hass.services.async_call.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args == ("fan", "turn_on", {"entity_id": "fan.whf"})
+        assert calls[1].args == ("fan", "turn_off", {"entity_id": "fan.whf"})
+        mock_sleep.assert_awaited_once_with(5)
+
+    def test_control_does_not_match_desired_sends_single_direct_command(self):
+        """Control genuinely needs to transition — no toggle needed, one command."""
+        engine = self._engine(control_state="off", ground_truth=False)
+
+        commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
+
+        assert commanded is True
+        calls = engine.hass.services.async_call.call_args_list
+        assert len(calls) == 1
+        assert calls[0].args == ("fan", "turn_on", {"entity_id": "fan.whf"})
+
+    def test_hvac_mode_is_a_no_op(self):
+        """FAN_MODE_HVAC must be entirely unaffected — the helper no-ops for this
+        archetype regardless of inputs, confirming the blast-radius boundary."""
+        engine = self._engine(control_state="on", ground_truth=False)
+        engine.config[CONF_FAN_MODE] = FAN_MODE_HVAC
+
+        commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
+
+        assert commanded is False
+        engine.hass.services.async_call.assert_not_called()
+
+
+class TestCommandWhfControlEntityWiring:
+    """Issue #449 — confirms the new helper is genuinely load-bearing through
+    _activate_fan()/_deactivate_fan()/drift-reconciliation, not dead code."""
+
+    def test_activate_fan_uses_the_new_helper(self):
+        """_activate_fan()'s WHF branch must route through _command_whf_control_entity,
+        not a direct service call — proven by forcing the toggle path and confirming
+        the resulting 2-call sequence."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        state_mock = MagicMock()
+        state_mock.state = "on"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+
+        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(engine._activate_fan(reason="test"))
+
+        calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
+        assert len(calls) == 2, f"Expected the forced toggle (2 calls), got {calls}"
+        assert engine._fan_active is True
+
+    def test_deactivate_fan_uses_the_new_helper(self):
+        """_deactivate_fan()'s WHF branch must route through _command_whf_control_entity."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        engine._fan_active = True
+        state_mock = MagicMock()
+        state_mock.state = "off"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        engine._get_fan_physical_state_callback = MagicMock(return_value=True)
+
+        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(engine._deactivate_fan(reason="test"))
+
+        calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
+        assert len(calls) == 2, f"Expected the forced toggle (2 calls), got {calls}"
+        assert engine._fan_active is False
+
+    def test_drift_correction_schedules_control_entity_reconcile(self):
+        """The real overnight incident, reproduced and fixed end-to-end: control entity
+        stuck "on", ground truth confirms off over 2 backstop ticks — the drift
+        correction must schedule a reconcile that turns the control entity off (a
+        single direct command, since control no longer matches "off" once we ask for
+        it), so the next reactivation starts from a truthful state."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        state_mock = MagicMock()
+        state_mock.state = "on"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._fan_active = True
+
+        scheduled: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()  # 2nd tick confirms drift -> CORRECT
+
+        # Find the reconcile coroutine (not the min-runtime-cycle one _clear_fan_flags
+        # also schedules) and run it for real to prove it issues the off command.
+        assert scheduled, "Expected _reconcile_fan_physical_drift to schedule at least one task"
+        engine.hass.services.async_call.reset_mock()
+        for coro in scheduled:
+            asyncio.run(coro)
+        calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[:2] == ("fan", "turn_off")]
+        assert len(calls) == 1, (
+            f"Expected exactly one turn_off reconcile command among scheduled tasks, got: "
+            f"{engine.hass.services.async_call.call_args_list}"
+        )

@@ -211,6 +211,7 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
+from .fan_status import is_ca_fan_running
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
@@ -1808,11 +1809,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Suppress when Climate Advisor itself activated fan-only mode (natural ventilation).
         _active_hvac_actions = {"heating", "cooling", "fan"}
         if hvac_mode == "off" and str(hvac_action).lower() in _active_hvac_actions:
-            # Suppress when CA activated the fan OR when thermostat ground-truth shows
-            # fan running (untracked) — either way the fan action is not a contradiction.
-            _ca_fan_running = self.automation_engine._fan_active or self.automation_engine._natural_vent_active
-            _fan_untracked = str(hvac_action).lower() == "fan" and self._compute_fan_status() == "running (untracked)"
-            _is_expected_fan = str(hvac_action).lower() == "fan" and (_ca_fan_running or _fan_untracked)
+            # Suppress when CA's own fan activity explains the reading (Issue #458 —
+            # is_ca_fan_running() is the single source of truth for this, consolidating
+            # what was a separate ad hoc flag check here). _natural_vent_active is kept
+            # as an explicit extra condition — it covers the nat-vent-armed-but-idle
+            # moment between cycles, a distinct state _compute_fan_status() reports as
+            # "nat-vent (session active, fan idle)" (not one of the four active values,
+            # since the physical fan genuinely isn't running then).
+            #
+            # Consolidating onto is_ca_fan_running() also fixes a second latent gap this
+            # issue found: previously a manual fan override confirmed running via physical
+            # state (ae._fan_override_active=True, ae._fan_active=False) was NOT suppressed
+            # here, even though ai_skills_activity.py's independent check already treated
+            # "running (manual override)" as expected — the two sites had silently
+            # disagreed on this case.
+            _ca_fan_running = self.automation_engine._natural_vent_active or is_ca_fan_running(
+                self._compute_fan_status()
+            )
+            _is_expected_fan = str(hvac_action).lower() == "fan" and _ca_fan_running
             if not _is_expected_fan:
                 _now = dt_util.now()
                 _dedup_window = timedelta(minutes=30)

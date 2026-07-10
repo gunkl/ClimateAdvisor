@@ -253,7 +253,11 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._compute_next_automation_action = MagicMock(return_value=("No action", ""))
     coord._compute_next_action = MagicMock(return_value="No action")
     coord._compute_automation_status = MagicMock(return_value="active")
-    coord._compute_fan_status = MagicMock(return_value="inactive")
+    # Must track ca_fan_active (Issue #458): the state-contradiction suppression
+    # check now derives "is CA's fan explaining this reading" from
+    # is_ca_fan_running(self._compute_fan_status()) rather than the ae._fan_active
+    # flag directly, so this stub has to agree with the flag set on `ae` below.
+    coord._compute_fan_status = MagicMock(return_value="active" if ca_fan_active else "inactive")
     coord._compute_contact_status = MagicMock(return_value="closed")
     coord._any_sensor_open = MagicMock(return_value=False)
     coord._last_briefing = ""

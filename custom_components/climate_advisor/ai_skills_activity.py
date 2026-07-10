@@ -34,6 +34,7 @@ from .const import (
     FAN_MODE_WHOLE_HOUSE,
     THERMAL_SWING_DEFAULT_F,
 )
+from .fan_status import is_ca_fan_running
 from .temperature import format_temp
 
 _LOGGER = logging.getLogger(__name__)
@@ -1252,12 +1253,11 @@ async def async_build_activity_context(
         # Suppress if CA intentionally has the fan running (e.g., natural ventilation).
         # hvac_mode=off + hvac_action=fan is expected when CA activated fan_mode=on.
         # Only warn when the thermostat reports activity CA cannot account for.
-        ca_fan_running = fan_status in (
-            "active",
-            "running (manual override)",
-            "running (untracked)",
-            "nat-vent (session active, fan idle)",
-        )
+        # is_ca_fan_running() is the single source of truth for this check (Issue #458) —
+        # this call site previously omitted "active (unconfirmed)" (the WHF ground-truth-
+        # disagreement state added by #423), so a fan legitimately in that state was
+        # misreported as a contradiction.
+        ca_fan_running = is_ca_fan_running(fan_status)
         if str(hvac_action).lower() == "fan" and ca_fan_running:
             pass  # Expected: CA activated HVAC fan-only mode for natural ventilation
         else:

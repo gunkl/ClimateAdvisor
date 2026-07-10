@@ -2113,6 +2113,33 @@ class TestReconcileFanDriftIntegration:
         assert engine._fan_active is True, "cycling-on must have re-activated the real fan on the same tick"
 
 
+class TestReconcileFanDriftIntegrationLoadBearing:
+    """Architecture-reset Step 2: proves _reconcile_fan_physical_drift() genuinely calls
+    decide_fan_drift_reconciliation() to decide, not some other code path that happens
+    to agree. Patches the exact name automation.py imports at module scope."""
+
+    def test_forcing_reset_outcome_prevents_a_real_confirmed_correction(self):
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._clear_fan_flags_and_start_grace = MagicMock()
+        engine._fan_active = True
+
+        from custom_components.climate_advisor.fan_drift_reconciliation import FanDriftOutcome
+
+        with patch(
+            "custom_components.climate_advisor.automation.decide_fan_drift_reconciliation",
+            lambda inputs: (FanDriftOutcome.RESET, 0),
+        ):
+            # Two real drift ticks would normally confirm and correct — forcing RESET
+            # every time must prevent that, proving the real decision function is load-bearing.
+            engine._reconcile_fan_physical_drift()
+            engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_not_called()
+        assert engine._fan_drift_tick_count == 0
+
+
 class TestReconcileFanOnStartup:
     """Startup fan reconciliation — no running fan is ever left in limbo (Issue #327)."""
 

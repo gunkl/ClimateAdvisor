@@ -32,7 +32,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback
+from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback, compute_pre_cool_target
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
@@ -97,10 +97,15 @@ from .const import (
     DAY_TYPE_COLD,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
+    DEFAULT_COMFORT_COOL,
+    DEFAULT_COMFORT_HEAT,
     DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
+    DEFAULT_SETBACK_HEAT,
     DEFAULT_THRESHOLD_COOL,
     DEFAULT_THRESHOLD_HOT,
     DEFAULT_THRESHOLD_MILD,
@@ -207,6 +212,7 @@ from .const import (
     VERSION,
 )
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
+from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
 from .temperature import convert_delta, format_temp, free_cooling_direction_ok, from_fahrenheit, to_fahrenheit
 
@@ -326,6 +332,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._pre_cool_status: str | None = None  # surfaced in status API
         self._pre_cool_trigger_dt: datetime | None = None  # full tz-aware trigger datetime
         self._pre_cool_target: float | None = None  # pre-cool ceiling target temp
+        # #437 follow-up: tracks natural_vent_active across _emit_event() calls so a
+        # True->False transition (nat-vent genuinely exiting, any of its 6 real exit
+        # paths) can pull a pending pre-cool trigger earlier instead of leaving it on
+        # the STATIC classification-time schedule.
+        self._nat_vent_was_active: bool = False
 
         # Startup coalescing (Issue #321): suppress override detection for 5 min after restart
         self._startup_coalesce_active: bool = True
@@ -1296,8 +1307,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if outdoor is None:
             return  # No current data — keep classifier's recommendation
 
-        comfort_cool = float(self.config.get("comfort_cool", 75))
-        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
 
         if outdoor > comfort_cool:
             _LOGGER.debug(
@@ -1333,11 +1344,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hvac_commanded = False
 
         if open_sensors and outdoor is not None and indoor is not None:
-            comfort_heat = float(self.config.get("comfort_heat", 70))
-            comfort_cool = float(self.config.get("comfort_cool", 75))
-            nat_vent_delta = float(self.config.get("natural_vent_delta", 3.0))
+            comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+            comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+            nat_vent_delta = float(self.config.get("natural_vent_delta", DEFAULT_NATURAL_VENT_DELTA))
             nat_vent_threshold = comfort_cool + nat_vent_delta
-            if outdoor < indoor and indoor > comfort_heat and outdoor < nat_vent_threshold:
+            # Architecture-reset (Issue #429 consolidation): this pre-check used to hand-roll
+            # the same 3-part gate (direction/floor/ceiling) that _nat_vent_may_reactivate()
+            # already consolidates — risking exactly the site-drift #429/#411 warns about
+            # (e.g. this copy never considered fan_mode archetype or aggressive_savings for
+            # the ceiling check, unlike the real gate). No hysteresis and no sleep-window
+            # floor resolution here, matching this call site's original (pre-consolidation)
+            # scope exactly — comfort_heat is passed through as-is, not sleep-aware, since
+            # startup coalescing has never resolved that here.
+            _startup_gate_inputs = NatVentGateInputs(
+                outdoor=outdoor,
+                indoor=indoor,
+                comfort_heat_raw=comfort_heat,
+                sleep_heat=comfort_heat,
+                in_sleep_window=False,
+                comfort_cool=comfort_cool,
+                nat_vent_delta=nat_vent_delta,
+                hysteresis=0.0,
+                fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+                aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            )
+            if decide_nat_vent_gate(_startup_gate_inputs):
                 _LOGGER.info(
                     "Startup coalescing: nat-vent conditions met"
                     " (outdoor %.1f°F < indoor %.1f°F, indoor > comfort_heat %.1f°F,"
@@ -1353,13 +1384,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
                 nat_vent_activated = True
             else:
+                _nat_vent_delta_log = float(self.config.get("natural_vent_delta", DEFAULT_NATURAL_VENT_DELTA))
                 _LOGGER.info(
                     "Startup coalescing: nat-vent conditions not met"
                     " (outdoor=%.1f, indoor=%.1f, comfort_heat=%.1f, threshold=%.1f)",
                     outdoor or 0,
                     indoor or 0,
-                    float(self.config.get("comfort_heat", 70)),
-                    float(self.config.get("comfort_cool", 75)) + float(self.config.get("natural_vent_delta", 3.0)),
+                    float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
+                    float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)) + _nat_vent_delta_log,
                 )
 
         if not nat_vent_activated and c:
@@ -1686,8 +1718,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
                 # Track comfort violations (elapsed minutes since last check, capped at 30)
                 if self._today_record:
-                    comfort_low = self.config.get("comfort_heat", 70)
-                    comfort_high = self.config.get("comfort_cool", 75)
+                    comfort_low = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
+                    comfort_high = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
                     now = dt_util.now()
                     if self._last_violation_check is not None:
                         elapsed_minutes = min((now - self._last_violation_check).total_seconds() / 60, 30.0)
@@ -2570,7 +2602,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         from .const import (
             CONF_SLEEP_COOL,
-            PRE_COOL_MIN_HEADROOM_F,
+            DEFAULT_SLEEP_COOL,
             PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
             PRE_COOL_WAKE_OFFSET_HOURS,
         )
@@ -2580,9 +2612,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
 
         # Verify the pre-cool target would actually differ from sleep_cool
-        sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
-        comfort_heat = float(self.config.get("comfort_heat", 70.0))
-        pre_cool_target = max(sleep_cool + c.setback_modifier, comfort_heat + PRE_COOL_MIN_HEADROOM_F)
+        sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+        pre_cool_target = compute_pre_cool_target(self.config, c.setback_modifier)
         if pre_cool_target >= sleep_cool:
             _LOGGER.info(
                 "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
@@ -2640,12 +2671,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         # Build the pre-cool target for status display
-        from .const import CONF_SLEEP_COOL, PRE_COOL_MIN_HEADROOM_F
-
         c = self._current_classification
-        sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
-        comfort_heat = float(self.config.get("comfort_heat", 70.0))
-        pre_cool_target = max(sleep_cool + c.setback_modifier, comfort_heat + PRE_COOL_MIN_HEADROOM_F)
+        pre_cool_target = compute_pre_cool_target(self.config, c.setback_modifier)
 
         self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, trigger_time)
         self._pre_cool_trigger_scheduled = True
@@ -2670,6 +2697,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         elif "applied" in result:
             self._pre_cool_status = result.replace("applied: ", "pre-cool active (").rstrip() + ")"
         await self.async_refresh()
+
+    def _maybe_reschedule_pre_cool_on_nat_vent_exit(self) -> None:
+        """Pull a pending pre-cool trigger earlier when nat-vent exits for real, ahead
+        of its originally-scheduled window_close_time (#437 follow-up).
+
+        Occupant impact without this: a nat-vent session that ends early — the
+        reactivation gate exiting, a sensor closing, outdoor rising, an away/vacation
+        ceiling exit, or a startup reconcile — leaves pre-cool waiting on the STATIC
+        classification-time schedule (window_close_time + 30 min, computed once at
+        classification time), wasting the AC-vs-free-cooling decision gap between the
+        real exit and the stale trigger time. Called from _emit_event() on every
+        natural_vent_active True->False transition.
+        """
+        from .const import PRE_COOL_POST_NAT_VENT_DELAY_MINUTES
+
+        if not self._current_classification:
+            return
+        new_trigger = _decide_pre_cool_reschedule(
+            current_trigger_at=self._pre_cool_trigger_dt,
+            setback_modifier=self._current_classification.setback_modifier,
+            nat_vent_close_delay_minutes=PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+            now=dt_util.now(),
+        )
+        if new_trigger is None:
+            return
+        if self._pre_cool_trigger_cancel is not None:
+            self._pre_cool_trigger_cancel()
+        self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, new_trigger)
+        self._pre_cool_trigger_dt = new_trigger
+        self._pre_cool_status = (
+            f"Pre-cool rescheduled ({new_trigger.strftime('%I:%M %p').lstrip('0')}) — nat-vent exited early"
+        )
+        _LOGGER.info(
+            "Pre-cool trigger pulled earlier to %s — nat-vent exited ahead of its scheduled window close",
+            new_trigger.strftime("%H:%M"),
+        )
 
     async def _async_end_of_day(self, now: datetime) -> None:
         """Finalize the day's record and reset for tomorrow."""
@@ -5363,8 +5426,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         would work against the occupant's actual comfort goal (Issue #428).
         """
         unit = self.config.get("temp_unit", "fahrenheit")
-        comfort_cool = self.config.get("comfort_cool", 75)
-        comfort_heat = self.config.get("comfort_heat", 70)
+        comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
+        comfort_heat = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         fan_enabled = fan_mode != FAN_MODE_DISABLED
 
@@ -5537,6 +5600,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._event_log.append(entry)
         if len(self._event_log) > EVENT_LOG_CAP:
             self._event_log.pop(0)
+
+        # #437 follow-up: detect a genuine nat-vent True->False exit transition (any of
+        # the 6 real exit paths — comfort-floor, away-ceiling, predicted-floor,
+        # outdoor-rise, reconcile, or all-sensors-closed — this deliberately does NOT
+        # enumerate event-type strings, which would silently miss a future exit path)
+        # and pull a pending pre-cool trigger earlier if it's still on the stale
+        # classification-time schedule.
+        _nat_vent_active_now = bool(self.automation_engine._natural_vent_active) if self.automation_engine else False
+        if getattr(self, "_nat_vent_was_active", False) and not _nat_vent_active_now:
+            self._maybe_reschedule_pre_cool_on_nat_vent_exit()
+        self._nat_vent_was_active = _nat_vent_active_now
 
     def _emit_incident(self, incident_class: str, incident_id: str, extra: dict | None = None) -> None:
         """Emit an incident_detected event into the event log."""
@@ -6225,14 +6299,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             _pc_trigger_time = self._compute_pre_cool_trigger_time()
             if _pc_trigger_time is not None:
                 _pc_trigger_h = _pc_trigger_time.hour + _pc_trigger_time.minute / 60.0
-                from .const import CONF_SLEEP_COOL, PRE_COOL_MIN_HEADROOM_F
-
-                _pc_sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
-                _pc_comfort_heat = float(self.config.get("comfort_heat", 70.0))
-                _pc_target = max(
-                    _pc_sleep_cool + self._current_classification.setback_modifier,
-                    _pc_comfort_heat + PRE_COOL_MIN_HEADROOM_F,
-                )
+                _pc_target = compute_pre_cool_target(self.config, self._current_classification.setback_modifier)
 
         _raw_band = list(
             _compute_target_band_schedule(
@@ -6384,8 +6451,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         if not ae._natural_vent_active:
             return {"nat_vent_target": None, "nat_vent_on_threshold": None, "nat_vent_off_threshold": None}
-        comfort_heat = float(self.config.get("comfort_heat", 70))
-        comfort_cool = float(self.config.get("comfort_cool", 75))
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
         if _in_sleep_window(dt_util.now(), self.config):
             sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
             target = sleep_heat + hysteresis
@@ -6568,6 +6635,37 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.clear()
         self._unsubscribe_door_window_listeners()
         self.automation_engine.cleanup()
+
+
+def _decide_pre_cool_reschedule(
+    *,
+    current_trigger_at: datetime | None,
+    setback_modifier: float,
+    nat_vent_close_delay_minutes: float,
+    now: datetime,
+) -> datetime | None:
+    """Pure decision for _maybe_reschedule_pre_cool_on_nat_vent_exit() (#437 follow-up):
+    should a pending pre-cool trigger be pulled earlier because nat-vent just exited
+    for real, ahead of its originally-scheduled window_close_time?
+
+    Returns the new (earlier) trigger time, or None when no reschedule should happen:
+      - no trigger is currently pending (already fired today, or none was ever needed —
+        `current_trigger_at is None`)
+      - no warming trend is active (`setback_modifier >= 0` — pre-cool wouldn't have
+        been scheduled in the first place)
+      - the candidate time (now + the same nat-vent-close delay the original schedule
+        uses) is NOT earlier than what's already scheduled — this only ever pulls the
+        trigger EARLIER, never later, so a nat-vent exit that happens to occur close to
+        (or after) the already-scheduled time can't accidentally push pre-cool back.
+    """
+    if current_trigger_at is None:
+        return None
+    if setback_modifier >= 0:
+        return None
+    candidate = now + timedelta(minutes=nat_vent_close_delay_minutes)
+    if candidate >= current_trigger_at:
+        return None
+    return candidate
 
 
 def _compute_ramp_hours(temp_delta: float, hvac_mode: str, thermal_model: dict | None) -> float:
@@ -6996,10 +7094,10 @@ def _compute_target_band_schedule(
     When thermal_model and classification are both provided, sleep_heat is derived
     via compute_bedtime_setback() — matching automation.py's adaptive setpoint logic.
     """
-    comfort_heat = float(config.get("comfort_heat", 70))
-    comfort_cool = float(config.get("comfort_cool", 75))
-    setback_heat = float(config.get("setback_heat", 60))
-    setback_cool = float(config.get("setback_cool", 80))
+    comfort_heat = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+    comfort_cool = float(config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+    setback_heat = float(config.get("setback_heat", DEFAULT_SETBACK_HEAT))
+    setback_cool = float(config.get("setback_cool", DEFAULT_SETBACK_COOL))
     sleep_heat = float(config.get("sleep_heat", comfort_heat - DEFAULT_SETBACK_DEPTH_F))
     sleep_cool = float(config.get("sleep_cool", comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F))
 
@@ -7170,10 +7268,10 @@ def _build_predicted_indoor_future(
         now.isoformat() if hasattr(now, "isoformat") else now,
     )
 
-    comfort_heat = float(config.get("comfort_heat", 70))
-    comfort_cool = float(config.get("comfort_cool", 75))
-    setback_heat = float(config.get("setback_heat", 60))  # absolute floor for heat
-    setback_cool = float(config.get("setback_cool", 80))  # absolute ceiling for cool
+    comfort_heat = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+    comfort_cool = float(config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+    setback_heat = float(config.get("setback_heat", DEFAULT_SETBACK_HEAT))  # absolute floor for heat
+    setback_cool = float(config.get("setback_cool", DEFAULT_SETBACK_COOL))  # absolute ceiling for cool
 
     # Mirror automation engine (automation.py compute_setback_temp) and
     # compute_predicted_temps (coordinator.py ~line 2678) — use sleep_heat/sleep_cool if
@@ -7334,8 +7432,6 @@ def _build_predicted_indoor_future(
     _setback_mod = getattr(classification, "setback_modifier", None)
     if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
         from .const import (
-            CONF_SLEEP_COOL,
-            PRE_COOL_MIN_HEADROOM_F,
             PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
             PRE_COOL_WAKE_OFFSET_HOURS,
         )
@@ -7347,12 +7443,7 @@ def _build_predicted_indoor_future(
             _wake_str = config.get("wake_time", "06:30")
             _wake_h_raw = int(_wake_str.split(":")[0]) + int(_wake_str.split(":")[1]) / 60.0
             _ode_pc_trigger_h = _wake_h_raw - PRE_COOL_WAKE_OFFSET_HOURS
-        _ode_sc = float(config.get(CONF_SLEEP_COOL) or config.get("sleep_cool", 78.0))
-        _ode_ch = float(config.get("comfort_heat", 70.0))
-        _ode_pc_target = max(
-            _ode_sc + classification.setback_modifier,
-            _ode_ch + PRE_COOL_MIN_HEADROOM_F,
-        )
+        _ode_pc_target = compute_pre_cool_target(config, classification.setback_modifier)
 
     _band_schedule = _compute_target_band_schedule(
         _future_timestamps_for_band,
@@ -7576,21 +7667,24 @@ def compute_predicted_temps(
 
     # --- HVAC floor and ceiling for this day type ---
     if c.hvac_mode == "heat":
-        hvac_floor = config.get("comfort_heat", 70)
+        hvac_floor = config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
         hvac_ceiling = None
     elif c.hvac_mode == "cool":
-        hvac_floor = config.get("setback_cool", 80) + c.setback_modifier
-        hvac_ceiling = config.get("comfort_cool", 75)
+        hvac_floor = config.get("setback_cool", DEFAULT_SETBACK_COOL) + c.setback_modifier
+        hvac_ceiling = config.get("comfort_cool", DEFAULT_COMFORT_COOL)
     else:  # "off" / mild
-        hvac_floor = config.get("setback_heat", 60) + c.setback_modifier
+        hvac_floor = config.get("setback_heat", DEFAULT_SETBACK_HEAT) + c.setback_modifier
         hvac_ceiling = None
 
     # --- Schedule timing (for heat/cool days where HVAC actively ramps) ---
-    comfort = config.get("comfort_heat", 70) if c.hvac_mode != "cool" else config.get("comfort_cool", 75)
+    if c.hvac_mode != "cool":
+        comfort = config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
+    else:
+        comfort = config.get("comfort_cool", DEFAULT_COMFORT_COOL)
     if c.hvac_mode == "heat":
-        setback = config.get("setback_heat", 60) + c.setback_modifier
+        setback = config.get("setback_heat", DEFAULT_SETBACK_HEAT) + c.setback_modifier
     elif c.hvac_mode == "cool":
-        setback = config.get("setback_cool", 80) + c.setback_modifier
+        setback = config.get("setback_cool", DEFAULT_SETBACK_COOL) + c.setback_modifier
     else:
         setback = hvac_floor
 
@@ -7887,7 +7981,7 @@ def _compute_predicted_activity(
     indoor_by_ts = {e["ts"]: e.get("temp") for e in predicted_indoor if e.get("ts")}
     hvac_mode = getattr(classification, "hvac_mode", "off") if classification is not None else "off"
     fan_mode = str(config.get("fan_mode", "auto"))
-    natural_vent_delta = float(config.get("natural_vent_delta", 5.0))
+    natural_vent_delta = float(config.get("natural_vent_delta", DEFAULT_NATURAL_VENT_DELTA))
 
     result = []
     for band_entry in target_band:

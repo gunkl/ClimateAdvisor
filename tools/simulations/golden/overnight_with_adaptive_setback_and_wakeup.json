@@ -1,15 +1,15 @@
 {
   "name": "overnight_with_adaptive_setback_and_wakeup",
-  "description": "Warm summer day: afternoon cooling (14:00–22:00), bedtime at 22:30 applies P3 sleep band (ceiling=DEFAULT_SLEEP_COOL=78F), morning wakeup at 07:00 restores comfort. Full overnight cycle.",
+  "description": "Warm summer day: afternoon cooling (14:00–22:00), bedtime at 22:30 applies P3 sleep band (ceiling=DEFAULT_SLEEP_COOL=72F), morning wakeup at 07:00 restores comfort. Full overnight cycle.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
     "P3 migration (Issue #249): bedtime no longer uses comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F.",
-    "P3 uses select_comfort_band(in_sleep_window=True): ceiling = sleep_cool or DEFAULT_SLEEP_COOL = 78F.",
-    "DEFAULT_SLEEP_COOL = 78.0 (const.py). With comfort_cool=74, this is 4F above comfort ceiling.",
+    "P3 uses select_comfort_band(in_sleep_window=True): ceiling = sleep_cool or DEFAULT_SLEEP_COOL = 72F.",
+    "DEFAULT_SLEEP_COOL = 72.0 (const.py) — reformatted to a real tuned installation's own flat overnight value (architecture-reset session). With comfort_cool=74, this is 2F BELOW comfort ceiling: this household sleeps cooler, not warmer.",
     "Wakeup restores comfort_cool=74F.",
     "No thermal model configured — uses default sleep band path.",
-    "NOTE: expect_temp updated from 77F (old formula) to 78F (DEFAULT_SLEEP_COOL in P3)."
+    "NOTE: expect_temp updated from 77F (old formula) to 78F (DEFAULT_SLEEP_COOL in P3), then to 72F when DEFAULT_SLEEP_COOL was reformatted to match a real household's own configured overnight preference (Issue #435/#436)."
   ],
   "config": {
     "comfort_heat": 70,
@@ -36,14 +36,14 @@
     {
       "time": "2026-07-15T22:30:00",
       "type": "bedtime",
-      "note": "Bedtime: cool setback fires. Default depth = comfort_cool(74) + 3F = 77F. Ceiling=79F so 77F applies."
+      "note": "Bedtime: cool setback fires. DEFAULT_SLEEP_COOL=72F (no explicit sleep_cool configured) — cooler than daytime comfort_cool=74F."
     },
     {
       "time": "2026-07-16T00:00:00",
       "type": "temp_update",
       "indoor_f": 76.5,
       "outdoor_f": 68.0,
-      "note": "Overnight: indoor 76.5F with setback target 77F — AC barely running"
+      "note": "Overnight: indoor 76.5F with setback target 72F — AC runs to reach the cooler sleep target"
     },
     {
       "time": "2026-07-16T07:00:00",
@@ -66,8 +66,8 @@
     {
       "at": "2026-07-15T22:30:00",
       "expect": "setback_applied",
-      "expect_temp": 78.0,
-      "reason": "P3 bedtime: sleep band ceiling = DEFAULT_SLEEP_COOL = 78F (active=ceiling, warm night). Previously 77F = comfort_cool+3; P3 uses sleep_cool/DEFAULT_SLEEP_COOL directly."
+      "expect_temp": 72.0,
+      "reason": "P3 bedtime: sleep band ceiling = DEFAULT_SLEEP_COOL = 72F (active=ceiling, warm night). This household sleeps cooler than daytime comfort (74F), not warmer — a real, tuned installation's own preference (Issue #435/#436)."
     },
     {
       "at": "2026-07-16T07:00:00",
@@ -78,8 +78,8 @@
   ],
   "verdict": {
     "type": "positive",
-    "summary": "P3 overnight cycle: cool classification → sleep band (78F ceiling) → morning comfort restore (74F)",
-    "observed_behavior": "classification_applied (74F) at 14:00; setback_applied (band ceiling=78F) at 22:30; comfort_restored (74F) at 07:00",
-    "expected_behavior": "P3: sleep band [66/78] active=ceiling. Occupant sleeps in home set to 78F ceiling — cooler than daytime comfort 74F? Wait, 78>74. Sleepers tolerate warmer. Band floor 66F guards against overcooling during the night."
+    "summary": "P3 overnight cycle: cool classification → sleep band (72F ceiling) → morning comfort restore (74F)",
+    "observed_behavior": "classification_applied (74F) at 14:00; setback_applied (band ceiling=72F) at 22:30; comfort_restored (74F) at 07:00",
+    "expected_behavior": "P3: sleep band [64/72] active=ceiling. Occupant sleeps in home set to a 72F ceiling — cooler than daytime comfort 74F, matching this household's real preference to sleep cooler. Band floor 64F guards against overcooling during the night."
   }
 }

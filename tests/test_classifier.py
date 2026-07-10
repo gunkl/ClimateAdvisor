@@ -309,7 +309,7 @@ class TestRecommendations:
         assert result.window_close_time == time(10, 0)
 
     def test_warm_windows_not_recommended_when_low_too_high(self):
-        # today_low=74 > 72 → gate fails, windows_recommended=False
+        # today_low=74 > boundary(71) → gate fails, windows_recommended=False
         # but the times should still be populated
         result = self._classify(today_high=80, today_low=74)
         assert result.windows_recommended is False
@@ -317,13 +317,14 @@ class TestRecommendations:
         assert result.window_close_time == time(10, 0)
 
     def test_warm_windows_recommended_when_low_is_cool(self):
-        # today_low=60 <= 72 → gate passes, windows_recommended=True
+        # today_low=60 <= boundary(71) → gate passes, windows_recommended=True
         result = self._classify(today_high=80, today_low=60)
         assert result.windows_recommended is True
 
     def test_warm_windows_recommended_at_boundary(self):
-        # today_low=72 == 72 → exactly at boundary (<=), windows_recommended=True
-        result = self._classify(today_high=80, today_low=72)
+        # Boundary = DEFAULT_COMFORT_COOL(74) - ECONOMIZER_TEMP_DELTA(3) = 71.
+        # today_low=71 == boundary → exactly at boundary (<=), windows_recommended=True
+        result = self._classify(today_high=80, today_low=71)
         assert result.windows_recommended is True
 
     # --- MILD ---

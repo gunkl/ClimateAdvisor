@@ -1,21 +1,36 @@
 {
   "name": "warming_trend_pre_cool_applied",
-  "description": "Strong warming trend night: setback_modifier=-3.0. Bedtime at 22:30 sets normal sleep band [66/78]. Pre-cool trigger fires at 02:30 (wake_time 06:30 - 4h fallback, no nat-vent config). handle_pre_cool() lowers cool ceiling to 75F (sleep_cool=78 + modifier=-3.0=75F, floor=comfort_heat+2=72F so no clamp). Occupant sleeps through the quiet AC cycle that banks 3F of cold thermal mass before the hot day peaks.",
+  "description": "Strong warming trend night: setback_modifier=-3.0. Bedtime at 22:30 sets normal sleep band [64/72]. Pre-cool trigger fires at 02:30 (wake_time 06:30 - 4h fallback, no nat-vent config). compute_pre_cool_target() computes a target of 69F (sleep_cool=72 + modifier=-3.0), which is above the sleep_heat+hysteresis floor (64+1=65), so it applies uncapped — the home banks 3F of cold thermal mass below the bedtime ceiling before the hot day peaks.",
   "source": "synthetic",
   "issue": 258,
   "notes": [
     "Config: comfort_heat=70, comfort_cool=74. No explicit sleep_cool/sleep_heat → defaults used:",
-    "  DEFAULT_SLEEP_COOL=78.0, DEFAULT_SLEEP_HEAT=66.0.",
+    "  handle_bedtime()'s select_comfort_band() reads DEFAULT_SLEEP_COOL=72.0, DEFAULT_SLEEP_HEAT=64.0",
+    "  (reformatted from 78.0/66.0 to a real tuned installation's own flat overnight preference —",
+    "  Issue #435/#436).",
+    "handle_pre_cool() now calls the shared compute_pre_cool_target() (automation.py), the single",
+    "  source of truth for all 5 call sites that need this value (the real AC trigger, trigger-time",
+    "  scheduling, chart status text, the chart target-band dip, and the ODE predicted-indoor curve).",
+    "  It reads DEFAULT_SLEEP_COOL (not a stray literal 78.0 fallback — that literal was found to",
+    "  invert pre-cool's purpose once DEFAULT_SLEEP_COOL dropped to 72) AND floors the result at",
+    "  sleep_heat + hysteresis instead of comfort_heat + a fixed headroom (Issue #436 fix, round 2):",
+    "  the original comfort_heat-anchored floor left little to no headroom once sleep_cool was",
+    "  reformatted to a flat, cooler-than-daytime household default — the fix anchors the floor to",
+    "  the sleep band itself, the same '+1 above the floor' convention nat_vent_temperature_check()",
+    "  already uses for sleep-window fan cycling, so pre-cool can travel the full",
+    "  [sleep_heat, sleep_cool] range instead of being clamped near daytime comfort_heat.",
     "No nat-vent configured (natural_vent_delta absent) → pre-cool uses wake_time-4h fallback.",
     "  wake_time default = '06:30' → trigger at 02:30.",
-    "Pre-cool target = sleep_cool(78) + modifier(-3.0) = 75.0F.",
-    "  floor = comfort_heat(70) + PRE_COOL_MIN_HEADROOM_F(2.0) = 72.0F.",
-    "  max(75.0, 72.0) = 75.0F — no clamp needed.",
-    "Bedtime band [66/78] at 22:30 is unchanged (handle_bedtime independent of pre-cool).",
-    "Pre-cool emits pre_cool_applied event with target=75.0 and calls _apply_comfort_band([66/75]).",
-    "  action_log: set_temperature with target_temp_high=75.0 (heat_cool dual-setpoint or single cool).",
+    "Pre-cool raw target = sleep_cool(72) + modifier(-3.0) = 69.0F.",
+    "  floor = DEFAULT_SLEEP_HEAT(64) + NAT_VENT_HYSTERESIS_F(1.0) = 65.0F.",
+    "  raw_target(69.0) > floor(65.0) → applies uncapped, no clamp warning logged.",
+    "Bedtime band [64/72] at 22:30 is unchanged (handle_bedtime independent of pre-cool).",
+    "Pre-cool emits pre_cool_applied event with target=69.0 and calls _apply_comfort_band([64/69]).",
+    "  action_log: set_temperature with target_temp_high=69.0 (heat_cool dual-setpoint or single cool).",
     "Scenario effectiveness: if handle_pre_cool() is deleted, pre_cool_applied event never fires",
-    "  and the 02:30 assertion fails — regression caught."
+    "  and the 02:30 assertion fails — regression caught. If the floor formula regresses back to",
+    "  comfort_heat + 2 (=72), this scenario's target would incorrectly clamp to 72 instead of 69,",
+    "  also catching that regression."
   ],
   "config": {
     "comfort_heat": 70,
@@ -44,34 +59,34 @@
     {
       "time": "2026-07-16T22:30:00",
       "type": "bedtime",
-      "note": "Bedtime: normal sleep band [66/78] applied. Pre-cool fires separately at 02:30."
+      "note": "Bedtime: normal sleep band [64/72] applied. Pre-cool fires separately at 02:30."
     },
     {
       "time": "2026-07-17T02:30:00",
       "type": "pre_cool",
       "indoor_f": 76.5,
       "nat_vent_just_closed": false,
-      "note": "Pre-cool trigger fires (wake_time 06:30 - 4h fallback). indoor=76.5F, target=75F. No nat-vent bypass. AC sets cool ceiling to 75F."
+      "note": "Pre-cool trigger fires (wake_time 06:30 - 4h fallback). indoor=76.5F, target=69F (no clamp — above the sleep_heat+hysteresis floor of 65F). No nat-vent bypass. AC lowers cool ceiling to 69F, 3F below the bedtime ceiling."
     }
   ],
   "assertions": [
     {
       "at": "2026-07-16T22:30:00",
       "expect": "setback_applied",
-      "expect_temp": 78.0,
-      "reason": "Bedtime sleep band [66/78] — ceiling=78F for cool mode. Pre-cool has not fired yet; sleep setpoints are normal."
+      "expect_temp": 72.0,
+      "reason": "Bedtime sleep band [64/72] — ceiling=72F for cool mode (DEFAULT_SLEEP_COOL, cooler than daytime). Pre-cool has not fired yet; sleep setpoints are normal."
     },
     {
       "at": "2026-07-17T02:30:00",
       "expect": "pre_cool_applied",
-      "expect_temp": 75.0,
-      "reason": "Pre-cool trigger fired: sleep_cool(78) + modifier(-3.0) = 75F. Floor = comfort_heat(70) + 2 = 72F; no clamp. AC sets cool ceiling to 75F to bank cold thermal mass before the hot day. Occupant is asleep; home quietly cools 3F below normal sleep ceiling over 4h before wake-up."
+      "expect_temp": 69.0,
+      "reason": "Pre-cool trigger fired: sleep_cool(72) + modifier(-3.0) = 69F raw target, which is above the sleep_heat(64)+hysteresis(1)=65F floor, so it applies uncapped. AC lowers the cool ceiling to 69F, 3F below the bedtime ceiling (72F), banking cold thermal mass before the hot day."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Bedtime sets normal [66/78] sleep band; pre-cool trigger at 02:30 lowers cool ceiling to 75F for thermal mass banking on a strong warming-trend night",
-    "observed_behavior": "classification_applied (74F) → setback_applied (78F sleep ceiling) → pre_cool_applied (75F cool ceiling)",
-    "expected_behavior": "Bedtime band unchanged at 78F ceiling. 4h before wake-up, handle_pre_cool lowers the cool ceiling to 75F (sleep_cool - |modifier|). Occupant experience: home is 3F cooler at wake-up than on a non-warming-trend night, extending the coast time before afternoon AC kicks in."
+    "summary": "Bedtime sets normal [64/72] sleep band; pre-cool trigger at 02:30 lowers the cool ceiling to 69F for thermal mass banking on a strong warming-trend night",
+    "observed_behavior": "classification_applied (74F) → setback_applied (72F sleep ceiling) → pre_cool_applied (69F cool ceiling)",
+    "expected_behavior": "Bedtime band is 72F ceiling (cooler than daytime comfort — this household's real sleep preference). 4h before wake-up, handle_pre_cool lowers the cool ceiling further to 69F, anchored to the sleep_heat+hysteresis floor rather than daytime comfort_heat, so the household's full sleep-temperature range is available for thermal mass banking regardless of how the comfort_heat/comfort_cool config happens to be set."
   }
 }

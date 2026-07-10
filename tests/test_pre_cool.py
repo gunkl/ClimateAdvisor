@@ -37,11 +37,10 @@ from custom_components.climate_advisor.automation import (  # noqa: E402
 )
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
-    DEFAULT_SLEEP_COOL,
+    NAT_VENT_HYSTERESIS_F,
     OCCUPANCY_AWAY,
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
-    PRE_COOL_MIN_HEADROOM_F,
 )
 
 # ---------------------------------------------------------------------------
@@ -194,7 +193,14 @@ class TestComputeBedtimeSetbackCoolSignConvention:
 
 
 class TestHandlePreCoolTargetFormula:
-    """Verify the pre-cool target computation: sleep_cool + setback_modifier, floored at comfort_heat+2."""
+    """Verify the pre-cool target computation: sleep_cool + setback_modifier, floored at
+    sleep_heat + hysteresis (compute_pre_cool_target(), architecture-reset session).
+
+    The floor was moved off comfort_heat (a daytime concept) onto sleep_heat + hysteresis —
+    the same "+1 above the floor" convention nat_vent_temperature_check() already uses for
+    sleep-window fan cycling — so pre-cool can travel the full [sleep_heat, sleep_cool] range
+    instead of being clamped near daytime comfort_heat regardless of trend severity (Issue #436).
+    """
 
     def test_target_uses_sleep_cool_plus_modifier(self):
         """Target = sleep_cool(78) + modifier(-3) = 75 with no clamp needed."""
@@ -213,8 +219,19 @@ class TestHandlePreCoolTargetFormula:
         assert payload["target"] == pytest.approx(75.0), f"Expected target 78 + (-3) = 75°F, got {payload['target']}"
 
     def test_target_uses_default_sleep_cool_when_not_configured(self):
-        """Without explicit sleep_cool in config, falls back to DEFAULT_SLEEP_COOL(78)."""
-        engine = _make_engine()  # no sleep_cool in config
+        """Without explicit sleep_cool/sleep_heat in config, falls back to
+        DEFAULT_SLEEP_COOL (72°F) and DEFAULT_SLEEP_HEAT (64°F).
+
+        handle_pre_cool() was fixed (architecture-reset session) to read the same
+        DEFAULT_SLEEP_COOL the bedtime sleep band uses, instead of a stray literal
+        78.0 fallback — the literal was found to invert pre-cool's purpose once
+        DEFAULT_SLEEP_COOL was reformatted to 72 (a real tuned installation's own
+        flatter, cooler overnight default): it would have computed a target WARMER
+        than the new bedtime ceiling. The floor was also moved to sleep_heat + hysteresis
+        (64 + 1 = 65), so the raw target (72 - 3 = 69) is NOT clamped — pre-cool banks
+        the full modifier depth instead of being stuck near comfort_heat.
+        """
+        engine = _make_engine()  # no sleep_cool/sleep_heat in config
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda e, d: emitted.append((e, d))
         engine.set_occupancy_mode(OCCUPANCY_HOME)
@@ -225,26 +242,28 @@ class TestHandlePreCoolTargetFormula:
         applied_events = [(e, d) for e, d in emitted if e == "pre_cool_applied"]
         assert len(applied_events) == 1
         _, payload = applied_events[0]
-        # DEFAULT_SLEEP_COOL=78 + (-3) = 75
-        assert payload["target"] == pytest.approx(DEFAULT_SLEEP_COOL + (-3.0))
+        # DEFAULT_SLEEP_COOL(72) + (-3) = 69, floor = DEFAULT_SLEEP_HEAT(64) + hysteresis(1) = 65
+        # raw(69) > floor(65) -> no clamp
+        assert payload["target"] == pytest.approx(69.0)
 
-    def test_floor_clamp_prevents_target_below_comfort_heat_plus_headroom(self):
-        """When target < comfort_heat + PRE_COOL_MIN_HEADROOM_F, clamp to floor."""
-        # sleep_cool=72, modifier=-5 → raw=67, floor=70+2=72, clamped to 72
-        engine = _make_engine({"sleep_cool": 72.0, "comfort_heat": 70.0})
+    def test_floor_clamp_prevents_target_below_sleep_heat_plus_hysteresis(self):
+        """When raw target < sleep_heat + hysteresis, clamp to that floor."""
+        # sleep_cool=66, sleep_heat defaults to 64, hysteresis defaults to 1 -> floor=65
+        # modifier=-3 -> raw=63, below floor(65) -> clamped to 65
+        engine = _make_engine({"sleep_cool": 66.0})
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda e, d: emitted.append((e, d))
         engine.set_occupancy_mode(OCCUPANCY_HOME)
-        engine._current_classification = _make_classification(setback_modifier=-5.0)
+        engine._current_classification = _make_classification(setback_modifier=-3.0)
 
-        asyncio.run(engine.handle_pre_cool(indoor_temp=70.0, nat_vent_just_closed=False))
+        asyncio.run(engine.handle_pre_cool(indoor_temp=65.0, nat_vent_just_closed=False))
 
         applied_events = [(e, d) for e, d in emitted if e == "pre_cool_applied"]
         assert len(applied_events) == 1
         _, payload = applied_events[0]
-        floor = 70.0 + PRE_COOL_MIN_HEADROOM_F
+        floor = 64.0 + NAT_VENT_HYSTERESIS_F
         assert payload["target"] == pytest.approx(floor), (
-            f"Expected target clamped to comfort_heat(70)+headroom(2)=72°F, got {payload['target']}"
+            f"Expected target clamped to sleep_heat(64)+hysteresis(1)=65°F, got {payload['target']}"
         )
 
     def test_pre_cool_modifier_in_event_payload(self):

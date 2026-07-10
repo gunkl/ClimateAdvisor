@@ -26,8 +26,10 @@ from .const import (
     DEFAULT_AUTOMATION_GRACE_SECONDS,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_DEPTH_COOL_F,
     DEFAULT_SETBACK_DEPTH_F,
+    DEFAULT_SETBACK_HEAT,
     ECONOMIZER_TEMP_DELTA,
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
@@ -264,8 +266,8 @@ def _generate_tldr_table(
     day_type_val = f"{c.day_type.title()} ({format_temp(c.today_high, temp_unit)})"
 
     # --- HVAC Mode row (Issue #85: show setback temps when away/vacation) ---
-    setback_heat = config.get("setback_heat", 62)
-    setback_cool = config.get("setback_cool", 80)
+    setback_heat = config.get("setback_heat", DEFAULT_SETBACK_HEAT)
+    setback_cool = config.get("setback_cool", DEFAULT_SETBACK_COOL)
     if occupancy_mode in ("away", "vacation"):
         if c.hvac_mode == "cool":
             hvac_val = f"Cool at {format_temp(setback_cool, temp_unit)} (setback — {occupancy_mode})"
@@ -445,6 +447,18 @@ def _hot_day_plan(
 
 _CEILING_PRECOOL_FALLBACK_MIN = 120  # default lead time when k_active_cool is unavailable
 
+_NAT_VENT_CUTOFF_MARGIN_F = 1.0  # forecast-hour margin — distinct from the live-control gates'
+# own boundary choices (nat_vent_gate.py's strict <, fan_thermostat_decision.py's non-strict >=);
+# this is a PREDICTIVE identification of "the hour nat-vent stops being viable", not a live
+# control decision, so a small conservative buffer is appropriate here specifically.
+
+
+def _nat_vent_cutoff_reached(outdoor_temp: float, indoor_temp: float) -> bool:
+    """Architecture-reset (Issue #429 consolidation): the shared predicate both
+    _derive_warm_day_events() and _derive_natural_vent_events() independently
+    hand-rolled as `outdoor >= indoor - 1.0` — now a single shared definition."""
+    return outdoor_temp >= indoor_temp - _NAT_VENT_CUTOFF_MARGIN_F
+
 
 def _derive_warm_day_events(
     predicted_indoor: list[dict] | None,
@@ -494,7 +508,7 @@ def _derive_warm_day_events(
 
     # nat_vent_cutoff: first entry where outdoor >= indoor - 1 F
     for ts, i_temp, o_temp in pairs:
-        if o_temp >= i_temp - 1.0:
+        if _nat_vent_cutoff_reached(o_temp, i_temp):
             result["nat_vent_cutoff"] = ts
             break
 
@@ -573,7 +587,7 @@ def _derive_natural_vent_events(
 
     # nat_vent_cutoff: first hour where outdoor >= indoor - 1.0 °F
     for h in range(n):
-        if predicted_outdoor_future[h] >= predicted_indoor_future[h] - 1.0:
+        if _nat_vent_cutoff_reached(predicted_outdoor_future[h], predicted_indoor_future[h]):
             result["nat_vent_cutoff"] = h
             break
 

@@ -21,6 +21,12 @@ id_rsa
 id_ed25519
 id_ecdsa
 
+# Real chart_log / telemetry samples pulled locally for replay/debugging — home data,
+# never a committed test fixture (see tools/sim_harness/chart_log_driver.py)
+scratch_chart_log.json
+*chart_log*.json
+!tools/simulations/**/*.json
+
 # Claude Code workspace
 /.claude/
 

@@ -68,8 +68,8 @@
     },
     {
       "at": "2026-06-12T10:00:00",
-      "expect": "natural_ventilation",
-      "reason": "temp_update with outdoor=66F still below indoor=71F — most recent decision is still natural_ventilation from when sensor opened; nat-vent continues uninterrupted."
+      "expect": "nat_vent_fan_off",
+      "reason": "Indoor cooled to 71F, exactly at the cycling off-threshold (midpoint 72F - 1F hysteresis) — whole-house fan cycles off temporarily to avoid overcooling. Nat-vent session stays active (HVAC still suppressed); fan will cycle back on if indoor drifts back up toward 73F."
     },
     {
       "at": "2026-06-12T12:00:00",

@@ -28,12 +28,13 @@ unpatches on exit.
 
 from __future__ import annotations
 
-import asyncio
 import heapq
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
+
+from tools.sim_harness._loop import run_coro
 
 
 class _ScheduledCallback:
@@ -65,7 +66,7 @@ class FakeScheduler:
 
         with scheduler.installed():
             # engine calls that schedule timers land in the scheduler
-            asyncio.run(engine.handle_all_doors_windows_closed())
+            run_coro(engine.handle_all_doors_windows_closed())
             # advance time; all due callbacks fire, tasks drain
             scheduler.advance_by(300 + 1)
     """
@@ -121,15 +122,20 @@ class FakeScheduler:
         self._task_queue.append(coro)
 
     def _drain_tasks(self) -> None:
-        """Run all enqueued coroutines synchronously."""
+        """Run all enqueued coroutines synchronously on the shared persistent loop.
+
+        (Issue: architecture-reset Step 2 root-caused thousands of fresh
+        asyncio.run() calls per process to a Windows ProactorEventLoop handle
+        exhaustion that freezes the process at scale — see tools/sim_harness/_loop.py.
+        The old RuntimeError/get_event_loop() fallback here existed for the
+        "already inside a running loop" case that asyncio.run() can hit; running
+        everything on one shared, not-currently-running persistent loop via
+        run_coro() doesn't have that failure mode, so the fallback is removed.)
+        """
         while self._task_queue:
             coro = self._task_queue.pop(0)
             try:
-                asyncio.run(coro)
-            except RuntimeError:
-                # Already inside an event loop — schedule on the running loop
-                loop = asyncio.get_event_loop()
-                loop.run_until_complete(coro)
+                run_coro(coro)
             except Exception as exc:  # noqa: BLE001
                 import traceback
 

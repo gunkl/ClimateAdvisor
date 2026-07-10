@@ -1,0 +1,61 @@
+{
+  "name": "reconcile-adopts-running-fan-as-nat-vent",
+  "description": "HA restart / startup coalesce finds a whole-house fan already physically running with a sensor open and conditions favorable for nat-vent -- reconcile_fan_on_startup() must adopt it as CA-owned nat-vent rather than leaving it in silent limbo (Issue #429 blind-spot closure -- reconcile_fan_on_startup had zero golden coverage before this scenario).",
+  "source": "synthetic",
+  "issue": 429,
+  "notes": [
+    "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: reconcile_fan_on_startup() had zero golden coverage -- a boundary bug here would have shipped undetected, and this is exactly the function documented (Issue #327) to exist so a running fan always has an explicit owner, never silent limbo.",
+    "Required adding a new reconcile_fan_on_startup event type to tools/sim_harness/run_production.py -- unlike the other two Step-1 blind spots, no existing event type dispatched to this function at all.",
+    "Uses two new custom assertion types (reconcile_adopted_fan / reconcile_turned_off_fan / reconcile_no_fan in outcomes.py), scanned directly from reason-string/event-type combinations unique to this function -- purely additive, no existing outcome mapping touched.",
+    "thermostat_fan_running is passed as an already-resolved boolean (matching the coordinator's archetype-aware resolution per Issue #423) -- this scenario is not testing that resolution logic, only reconcile_fan_on_startup()'s own decision given the resolved signal."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: HVAC off. Coordinator runs classification before startup-coalesce reconcile."
+    },
+    {
+      "time": "2026-07-10T06:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 74.0,
+      "outdoor_f": 65.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "Startup coalesce: WHF already physically running, a sensor is open, outdoor 65F < indoor 74F, indoor above comfort_heat=68F, outdoor <= threshold 78F -- nat-vent eligible. Must adopt as CA-owned (decision=adopt-on)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied: hvac_mode=off."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "reconcile_adopted_fan",
+      "reason": "Fan physically running + sensor open + nat-vent conditions favorable -- reconcile_fan_on_startup() adopts the running fan as CA-owned nat-vent (decision=adopt-on), emitting a fan_activated event with the startup-reconcile reason so the adoption isn't a silent, unexplained state change."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "nat_vent_still_active",
+      "reason": "Confirms the adoption actually set _natural_vent_active=True, not just emitted the event."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "reconcile_fan_on_startup() adopts a physically-running, warranted fan as CA-owned nat-vent at startup, previously untested by any golden scenario",
+    "observed_behavior": "adopt-on: _fan_active=True, _natural_vent_active=True, fan_activated event recorded with an explanatory reason",
+    "expected_behavior": "Per Issue #327: a fan found running at startup must always get an explicit CA-owned disposition (adopt or turn off), never silent limbo"
+  }
+}

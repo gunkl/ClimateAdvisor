@@ -25,7 +25,7 @@ The automation logic table and all threshold constants in this document are expr
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
 | When does nat-vent continue past bedtime instead of stopping, and what stops it afterward? | When nat-vent is active, the fan is CA-owned, and `outdoor < sleep_cool`, bedtime emits `nat_vent_bedtime_continue` and keeps the fan running. Through the sleep window the fan cycles on/off around `sleep_heat + hysteresis` (`nat_vent_temperature_check()`); the session itself only ends via the Priority 2 comfort-floor exit (`indoor ≤ sleep_heat − hysteresis`, event `nat_vent_comfort_floor_exit`) — the old Priority 0 `nat_vent_sleep_ceiling_reached` exit was removed in Issue #371. | [§5a nat-vent continuation gate](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) · [Exit Hierarchy](08-COMPUTATION-REFERENCE.md#exit-hierarchy) |
-| When and how does CA pre-cool the home on warming-trend nights? | Mid-night trigger (nat-vent close + 30 min, or wake − 4 h fallback); target = `sleep_cool + setback_modifier` floored at `comfort_heat + 2°F`. AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258) |
+| When and how does CA pre-cool the home on warming-trend nights? | Mid-night trigger (nat-vent close + 30 min, or wake − 4 h fallback); target = `sleep_cool + setback_modifier` floored at `sleep_heat + hysteresis` (`compute_pre_cool_target()`, single source of truth for all 5 call sites). AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258) |
 | How does the physics ODE predict future indoor temperature? | `T(t+dt) = T_outdoor + (T − T_outdoor) × exp(k_p × dt) + (Q/k_p) × (exp(k_p × dt) − 1)`, where Q switches between k_active_heat, k_active_cool, and 0 per schedule period. | [§5c. Predicted Temperature Graph — Physics Path](08-COMPUTATION-REFERENCE.md#5c-predicted-temperature-graph--physics-path) |
 | What is the dynamic target band and how does occupancy mode change it? | `_compute_target_band_schedule()` returns `[{ts, lower, upper}]` per forecast hour; away = setback today only, vacation = deep setback all days, home/guest = comfort with sleep/wake ramps. | [§5d. Dynamic Target Band](08-COMPUTATION-REFERENCE.md#5d-dynamic-target-band--_compute_target_band_schedule) |
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
@@ -182,15 +182,16 @@ On warming-trend nights (`setback_modifier < 0`), the coordinator schedules a se
 | No nat-vent config | `wake_time − PRE_COOL_WAKE_OFFSET_HOURS (4 h)` — fallback |
 | `setback_modifier >= 0` | No trigger scheduled (no warming trend) |
 
-**Target formula** (`handle_pre_cool()` in `automation.py`):
+**Target formula** (`compute_pre_cool_target()` in `automation.py` — the single source of truth, called by all 5 sites that need this value: the real AC trigger in `handle_pre_cool()`, `_compute_pre_cool_trigger_time()`, `_maybe_schedule_pre_cool()`'s status text, the chart target-band dip, and the ODE predicted-indoor curve):
 
 ```
-raw_target  = sleep_cool + setback_modifier          # modifier is negative → lower ceiling
-floor       = comfort_heat + PRE_COOL_MIN_HEADROOM_F  # default: comfort_heat + 2°F
-pre_cool_target = max(raw_target, floor)              # clamp prevents morning heating
+raw_target  = sleep_cool + setback_modifier   # modifier is negative → lower ceiling
+floor       = sleep_heat + hysteresis         # same "+1 above the floor" convention as
+                                               # nat_vent_temperature_check()'s sleep-window cycling
+pre_cool_target = max(raw_target, floor)      # clamp prevents dropping below the sleep floor
 ```
 
-The floor guard prevents the home from dropping so far below `comfort_heat` that the heat fires at wake-up (doubly wasteful: night AC + morning heat).
+The floor guard prevents the home from dropping below the sleep band's own floor (`sleep_heat`), so pre-cool can travel the full `[sleep_heat, sleep_cool]` range on a strong warming trend instead of being clamped near daytime `comfort_heat` (the pre-Issue-#436 formula, whose floor left little to no headroom once `sleep_cool` was reformatted to a flat, cooler-than-daytime household default).
 
 **Nat-vent bypass condition:** If the pre-cool trigger fires with `nat_vent_just_closed=True` AND `indoor_temp ≤ pre_cool_target`, the AC service call is suppressed — free cooling via open windows already achieved the target. Event `pre_cool_suppressed_nat_vent` is emitted.
 

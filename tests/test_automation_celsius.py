@@ -882,3 +882,162 @@ class TestSetpointNudgeStreak:
             self._fire_validation_cb(engine, validation_cb, captured_call_later)
 
         assert engine._setpoint_reject_streak == 0, "streak must reset to 0 once the thermostat confirms the setpoint"
+
+
+class TestSetpointRetryActionLoadBearing:
+    """Positive control (architecture-reset session, last of the 9 DesiredState
+    mechanisms): proves _retry_callback() actually dispatches on
+    decide_setpoint_retry_action()'s outcome rather than the wiring being dead
+    code — corrupt the pure function at its source module (patched at
+    `automation.decide_setpoint_retry_action`, the name automation.py imports
+    at module scope, mirroring every other positive control this session) and
+    confirm production behavior changes.
+    """
+
+    def _make_engine_stub(self) -> AutomationEngine:
+        hass = MagicMock()
+        hass.services.async_call = AsyncMock()
+        hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+        config: dict = {
+            "climate_entity": "climate.test_thermostat",
+            "temp_unit": "fahrenheit",
+            "comfort_heat": 68.0,
+            "comfort_cool": 76.0,
+            "setback_heat": 60.0,
+            "setback_cool": 80.0,
+            "notify_service": "notify.notify",
+        }
+        return AutomationEngine(
+            hass=hass,
+            climate_entity=config["climate_entity"],
+            weather_entity="weather.forecast_home",
+            door_window_sensors=[],
+            notify_service=config["notify_service"],
+            config=config,
+        )
+
+    def test_forcing_superseded_suppresses_the_real_retry(self):
+        """With decide_setpoint_retry_action() patched to always return SUPERSEDED,
+        firing the 900s retry callback must NOT re-send the setpoint — proving the
+        real _retry_callback() genuinely branches on this function's answer instead
+        of always retrying regardless."""
+        from custom_components.climate_advisor.desired_state import SetpointRetryAction
+
+        engine = self._make_engine_stub()
+        wrong_state = MagicMock()
+        wrong_state.state = "cool"
+        wrong_state.attributes = {"temperature": 72.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(75.0, reason="test", mode="cool"))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+
+            coros: list = []
+            engine.hass.async_create_task = MagicMock(side_effect=lambda coro: coros.append(coro))
+            validation_cb(None)
+            asyncio.run(coros[0])
+
+        assert engine._setpoint_reject_streak == 1
+        retry_delay, retry_lambda = captured_call_later[0]
+        assert retry_delay == 900
+
+        engine.hass.services.async_call.reset_mock()
+        retry_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: retry_coros.append(coro))
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+            patch(
+                "custom_components.climate_advisor.automation.decide_setpoint_retry_action",
+                return_value=SetpointRetryAction.SUPERSEDED,
+            ),
+        ):
+            retry_lambda(None)
+            assert len(retry_coros) == 1
+            asyncio.run(retry_coros[0])
+
+        assert engine.hass.services.async_call.call_count == 0, (
+            "forcing SUPERSEDED must suppress the retry entirely — load-bearing confirmed"
+        )
+
+    def test_forcing_nudge_then_target_sends_a_nudge_on_the_first_rejection(self):
+        """With decide_setpoint_retry_action() patched to always return
+        NUDGE_THEN_TARGET, even a FIRST rejection (reject_streak=1, which would
+        normally be a plain direct retry) must nudge — proving the real code
+        dispatches on the function's return value, not its own separate
+        reject_streak>=2 check baked back in as a shadow copy."""
+        from custom_components.climate_advisor.desired_state import SetpointRetryAction
+
+        engine = self._make_engine_stub()
+        wrong_state = MagicMock()
+        wrong_state.state = "cool"
+        wrong_state.attributes = {"temperature": 72.0, "hvac_action": "idle", "fan_mode": "auto"}
+        engine.hass.states.get = MagicMock(return_value=wrong_state)
+
+        captured_call_later: list = []
+
+        def fake_call_later(hass, delay, callback):
+            captured_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch("custom_components.climate_advisor.automation.async_call_later", side_effect=fake_call_later),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+        ):
+            asyncio.run(engine._set_temperature(75.0, reason="test", mode="cool"))
+            validation_cb = captured_call_later[0][1]
+            captured_call_later.clear()
+
+            coros: list = []
+            engine.hass.async_create_task = MagicMock(side_effect=lambda coro: coros.append(coro))
+            validation_cb(None)
+            asyncio.run(coros[0])
+
+        assert engine._setpoint_reject_streak == 1, "this is deliberately a FIRST rejection"
+        _, retry_lambda = captured_call_later[0]
+
+        engine.hass.services.async_call.reset_mock()
+        retry_coros: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: retry_coros.append(coro))
+        nested_call_later: list = []
+
+        def fake_call_later_nested(hass, delay, callback):
+            nested_call_later.append((delay, callback))
+            return MagicMock()
+
+        with (
+            patch(
+                "custom_components.climate_advisor.automation.async_call_later",
+                side_effect=fake_call_later_nested,
+            ),
+            patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
+            patch(
+                "custom_components.climate_advisor.automation.decide_setpoint_retry_action",
+                return_value=SetpointRetryAction.NUDGE_THEN_TARGET,
+            ),
+        ):
+            retry_lambda(None)
+            assert len(retry_coros) == 1
+            asyncio.run(retry_coros[0])
+
+        nudge_calls = engine.hass.services.async_call.call_args_list
+        assert len(nudge_calls) == 1, (
+            f"forcing NUDGE_THEN_TARGET on a first rejection must still nudge — load-bearing confirmed;"
+            f" got {nudge_calls}"
+        )
+        nudge_temp = nudge_calls[0][0][2]["temperature"]
+        assert abs(nudge_temp - 76.0) < 0.01, "cool mode nudges +1.0F"
+        thirty_s_calls = [(d, cb) for d, cb in nested_call_later if d == 30]
+        assert len(thirty_s_calls) == 1, "must also schedule the 30s real-target follow-up"

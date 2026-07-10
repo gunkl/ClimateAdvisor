@@ -4,9 +4,46 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.4.74"
+VERSION = "0.5.1"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.1": [
+        "Fix #439: the initial setup wizard could write stale sleep-temperature"
+        " defaults into a brand-new install — Fahrenheit sleep fields, and all six"
+        " Celsius setpoints, were hardcoded and never picked up the household-matched"
+        " defaults shipped in 0.5.0. Every unit now derives its default directly from"
+        " the same shared constants, so new installs get the intended values.",
+        "Fix #440: on a warming-trend night, if natural ventilation ended earlier than"
+        " its originally scheduled close time — for any reason, including the window"
+        " simply being closed — the overnight pre-cool AC trigger stayed on the old"
+        " schedule instead of stepping in right away. It now reacts to nat-vent"
+        " actually ending and moves the AC trigger earlier when that saves time,"
+        " never later.",
+    ],
+    "0.5.0": [
+        "Feat #438: the default comfort/setback/sleep temperatures shipped for fresh installs"
+        " (and any config relying on an unconfigured fallback) now match a real, tuned household"
+        " configuration instead of arbitrary round numbers — comfort 68°F/74°F, setback 63°F/79°F,"
+        " and a flat sleep target of 64°F/72°F that's cooler than daytime comfort, not warmer."
+        " Fixed 3 latent bugs found along the way where a hardcoded fallback had silently drifted"
+        " from the value it was supposed to mirror (a setpoint-inconsistency check, the chart's"
+        " fan-activity prediction, and the away/vacation display in the daily briefing).",
+        "Fix #437: on a warming-trend night, the overnight pre-cool phase (which lowers the AC"
+        " ceiling to bank cold thermal mass before the next hot day) could silently become a"
+        " no-op — it computed a target but immediately clamped it back up near daytime comfort,"
+        " so no extra cooling ever happened even though the system reported pre-cool as active."
+        " The clamp now anchors to the sleep temperature range instead of the daytime one, so"
+        " pre-cool can use its full intended range. This also closes #436: the chart's target-band"
+        " display and the real overnight setpoint can no longer show different pre-cool numbers,"
+        " since both now compute the target the same single way.",
+    ],
+    "0.4.75": [
+        "Fix #435: if you run natural ventilation with no whole-house fan or HVAC-fan device"
+        " configured (relying on manually-opened windows instead), the activity report could"
+        " show a confusing 'Nat-vent fan on/off' entry claiming device \"none\" turned on or"
+        " off — even though nothing happened, since there's no fan to control in that setup."
+        " The cycling check now only reports a fan transition when one actually occurred.",
+    ],
     "0.4.74": [
         "Fix #427: overnight whole-house-fan nat-vent sessions were being torn down and"
         " re-adopted every 5-15 minutes for hours, showing repeated 'fan running (untracked)'"
@@ -814,6 +851,149 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    440: {
+        "version_fixed": "0.5.1",
+        "title": "Pre-cool AC trigger stuck on stale schedule when nat-vent exits ahead of its scheduled close",
+        "scope_covered": (
+            "coordinator.py: _compute_pre_cool_trigger_time() computes the pre-cool AC trigger ONCE at"
+            " classification time (window_close_time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES, or a"
+            " wake_time-4h fallback) and _maybe_schedule_pre_cool() only ever runs it once per day"
+            " (idempotent via _pre_cool_trigger_scheduled). If nat-vent exited for real well before"
+            " that scheduled time — the reactivation gate firing, a sensor closing, outdoor rising, an"
+            " away/vacation ceiling exit, or a startup reconcile — the trigger stayed on the stale"
+            " schedule, wasting the AC-vs-free-cooling decision gap in between. Fixed by detecting a"
+            " genuine natural_vent_active True->False transition inside _emit_event() (deliberately not"
+            " enumerating the 6 real exit event-type strings, which would silently miss a future exit"
+            " path) and, via new pure function _decide_pre_cool_reschedule(), pulling the pending"
+            " trigger to now + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES whenever that is earlier than what's"
+            " already scheduled — never later, so an exit close to (or after) the scheduled time cannot"
+            " accidentally push pre-cool back. New coordinator method"
+            " _maybe_reschedule_pre_cool_on_nat_vent_exit() owns cancelling/rescheduling the real timer."
+            " 9 new tests (tests/test_pre_cool_reschedule.py): pure-function boundaries plus a"
+            " coordinator-level load-bearing positive control proving the _emit_event() transition"
+            " detection genuinely drives the reschedule."
+        ),
+        "scope_not_covered": (
+            "Does not add any mechanism to actively EXTEND a nat-vent session (e.g. delaying an"
+            " already-favorable exit to bank more free cooling before pre-cool would fire) — only pulls"
+            " the AC trigger earlier when a real exit already happened ahead of schedule."
+            " handle_pre_cool()'s own nat-vent bypass check (whether indoor already reached the target"
+            " at fire time) is unchanged."
+        ),
+    },
+    439: {
+        "version_fixed": "0.5.1",
+        "title": "Initial setup wizard wrote stale sleep-temperature defaults into brand-new installs",
+        "scope_covered": (
+            "config_flow.py: async_step_setpoints() (the INITIAL setup wizard, distinct from the"
+            " options/edit flow which already read current.get(key, DEFAULT_X) correctly). Fahrenheit"
+            " branch: comfort_heat/comfort_cool/setback_heat/setback_cool already referenced the"
+            " DEFAULT_* named constants, but sleep_heat/sleep_cool were hardcoded literals 66/78 — the"
+            " pre-0.5.0 values, never updated when those constants were reformatted to 64/72. Celsius"
+            " branch: ALL SIX fields were hardcoded literal Celsius numbers hand-converted from the OLD"
+            " Fahrenheit defaults and never updated. Since these are vol.Required fields with the stale"
+            " value pre-filled, submitting the form unchanged wrote the stale numbers explicitly into"
+            " the new install's config — not merely a display glitch. Fixed by extracting"
+            " setpoint_slider_ranges(is_celsius) — derives every default (both unit branches) from the"
+            " DEFAULT_* Fahrenheit constants directly, converting to Celsius via from_fahrenheit()"
+            " rounded to the 0.5 step. 4 new regression tests in test_config_flow.py pin both branches'"
+            " defaults against the named constants."
+        ),
+        "scope_not_covered": (
+            "Only the INITIAL setup wizard's setpoint defaults were touched. The options/edit flow was"
+            " already correct and was not modified. Slider min/max bounds (not the defaults) were not"
+            " audited for staleness."
+        ),
+    },
+    437: {
+        "version_fixed": "0.5.0",
+        "title": "Overnight pre-cool thermal-mass banking silently became a no-op on many configs",
+        "scope_covered": (
+            "automation.py: handle_pre_cool()'s target floor was comfort_heat + PRE_COOL_MIN_HEADROOM_F"
+            " (a fixed 2°F above the DAYTIME comfort floor) — correct when DEFAULT_SLEEP_COOL was a"
+            " warmer economizer-style 78°F (plenty of headroom below it), but once sleep_cool was"
+            " reformatted to a flatter, cooler-than-daytime household default (74->closer to comfort_heat),"
+            " the same floor left little to no room: pre-cool clamped its target right back up near the"
+            " normal sleep ceiling, banking nothing while still emitting pre_cool_applied as if it worked."
+            " Root-caused after the user recalled an existing '+1 above the floor' convention"
+            " (nat_vent_temperature_check()'s sleep_heat + hysteresis sleep-window cycling target) and"
+            " asked whether pre-cool should reuse it. New compute_pre_cool_target() in automation.py"
+            " floors the target at sleep_heat + hysteresis instead, letting pre-cool travel the full"
+            " [sleep_heat, sleep_cool] range regardless of the comfort_heat/comfort_cool configuration."
+            " The same formula (plus a stale literal 78.0 sleep_cool fallback, same bug class as #435)"
+            " was independently duplicated across 5 call sites (handle_pre_cool, trigger-time scheduling,"
+            " status text, the chart target-band dip, and the ODE predicted-indoor curve) — all 5 now"
+            " route through the one shared function. PRE_COOL_MIN_HEADROOM_F removed (dead)."
+        ),
+        "scope_not_covered": (
+            "The nat-vent-preference behavior itself (pre-cool is a single scheduled trigger that"
+            " checks after the fact whether nat-vent already reached the target, not an actively"
+            " extended/preferred free-cooling window before falling back to AC) was not changed —"
+            " only the target/floor computation."
+        ),
+    },
+    438: {
+        "version_fixed": "0.5.0",
+        "title": "Shipped default comfort/setback/sleep temperatures reformatted to a real household config",
+        "scope_covered": (
+            "const.py: DEFAULT_COMFORT_HEAT/DEFAULT_COMFORT_COOL/DEFAULT_SETBACK_HEAT/"
+            "DEFAULT_SETBACK_COOL changed from arbitrary round numbers (70/75/60/80) to a real, tuned"
+            " installation's own configured values (68/74/63/79). DEFAULT_SLEEP_HEAT/DEFAULT_SLEEP_COOL"
+            " changed from a derived-from-comfort_cool formula (66/78, implicitly warmer-at-night) to"
+            " independent flat values (64/72) reflecting a deliberate 'sleep cooler than daytime,"
+            " not warmer' household preference. Dozens of scattered literal fallbacks in"
+            " automation.py/coordinator.py/briefing.py were swept to reference these named constants"
+            " instead of duplicated literals, surfacing and fixing 3 genuine latent drift bugs: the"
+            " setpoint-mode-inconsistency incident detector's stray comfort_cool fallback of 76 (vs"
+            " 75/74 everywhere else), coordinator.py's chart fan-activity prediction using a stray"
+            " natural_vent_delta fallback of 5.0 (vs the real default 3.0), and briefing.py's"
+            " away/vacation display using a stray setback_heat fallback of 62 (vs 60/63 elsewhere)."
+            " 5 locked golden scenarios depending on the old default values were reviewed and re-signed."
+        ),
+        "scope_not_covered": (
+            "config_flow.py's UI slider bounds and initial-setup default tuple (still a separate"
+            " hardcoded (69, 89, 78, 1) for sleep_cool's first-run slider) were not audited or changed"
+            " as part of this sweep."
+        ),
+    },
+    435: {
+        "version_fixed": "0.4.75",
+        "title": (
+            "Nat-vent activity report showed 'fan on/off' events for device \"none\" when no fan device was configured"
+        ),
+        "scope_covered": (
+            "automation.py: nat_vent_temperature_check()'s two thermostatic-cycling branches"
+            " called _activate_fan()/_deactivate_fan() and then unconditionally emitted the"
+            " nat_vent_fan_on/nat_vent_fan_off event regardless of whether the call actually"
+            " changed self._fan_active. Both helpers correctly no-op when fan_mode is disabled"
+            " (a supported manual-window-only nat-vent configuration), but the event still fired,"
+            ' and _fan_device_label() returns "none" in that config — so the rendered activity'
+            " report line (ai_skills_activity.py _render_nat_vent_fan_on/_off) read 'Nat-vent fan"
+            " on -- indoor X >= Y' / 'none: auto->on', claiming a nonexistent device transitioned."
+            " Found via architecture-reset Step 2: fixing a sim-harness fidelity gap in"
+            " tools/sim_harness/run_production.py (the harness never dispatched to"
+            " nat_vent_temperature_check()/fan_thermostat_check() on an ordinary temp_update tick,"
+            " missing the real _async_thermostat_changed state-listener path from"
+            " coordinator.py:2837-2862) let 3 golden scenarios reach this code path for the first"
+            " time and fail. Fixed by guarding both emissions on whether self._fan_active actually"
+            " changed as a result of the call, rather than duplicating the fan_mode check — robust"
+            " against any other no-op condition inside _activate_fan()/_deactivate_fan() (override"
+            " active, dry_run, idempotency guard). Golden scenarios mild_all_day_nat_vent_only,"
+            " nat_vent_active_indoor_in_band_guard_dormant, and nat_vent_ceiling_breach_hvac_escalation"
+            " now pass without the spurious event. A 4th golden, whole_house_fan_hvac_suppression"
+            " (which DOES configure a real fan_mode), was separately updated (not a bug — its"
+            " assertion predated this code path being reachable and didn't anticipate the fan"
+            " legitimately cycling off mid-session) to expect nat_vent_fan_off at the point indoor"
+            " reaches the cycling off-threshold."
+        ),
+        "scope_not_covered": (
+            "Only the two cycling branches in nat_vent_temperature_check() were touched. Other"
+            " event emissions elsewhere in automation.py (fan_activated, fan_deactivated,"
+            " nat_vent_outdoor_rise_exit, nat_vent_comfort_floor_exit, etc.) were not audited for"
+            " the same class of unconditional-emit-after-no-op-call pattern — this fix does not"
+            " claim they're safe, only that this specific pair was found and fixed."
+        ),
+    },
     427: {
         "version_fixed": "0.4.74",
         "title": (
@@ -3092,11 +3272,17 @@ CONF_GITHUB_TOKEN = "github_token"
 CONF_GITHUB_REPO = "github_repo"
 API_SUBMIT_GITHUB_ISSUE = "/api/climate_advisor/submit_github_issue"
 
-# Default setpoints (°F)
-DEFAULT_COMFORT_HEAT = 70
-DEFAULT_COMFORT_COOL = 75
-DEFAULT_SETBACK_HEAT = 60
-DEFAULT_SETBACK_COOL = 80
+# Default setpoints (°F) — reformatted to match a real, tuned installation's own
+# configured values (architecture-reset session, user-requested) rather than
+# arbitrary round numbers. Does NOT affect the version 14->15 migration in
+# __init__.py, which intentionally preserves the OLD historical defaults
+# (70/75/60/80) as its own literal fallbacks for backfilling PRE-EXISTING
+# installs that upgrade through that specific version transition — that is
+# backward-compatibility logic, not a "new install" default, and must not change.
+DEFAULT_COMFORT_HEAT = 68
+DEFAULT_COMFORT_COOL = 74
+DEFAULT_SETBACK_HEAT = 63
+DEFAULT_SETBACK_COOL = 79
 
 # Day type classifications
 DAY_TYPE_HOT = "hot"
@@ -4048,8 +4234,13 @@ THERMAL_PASSIVE_CONF_HIGH = 30
 # Sleep temperature config keys (Issue #101)
 CONF_SLEEP_HEAT = "sleep_heat"
 CONF_SLEEP_COOL = "sleep_cool"
-DEFAULT_SLEEP_HEAT = 66.0  # comfort_heat(70) - DEFAULT_SETBACK_DEPTH_F(4)
-DEFAULT_SLEEP_COOL = 78.0  # comfort_cool(75) + DEFAULT_SETBACK_DEPTH_COOL_F(3)
+DEFAULT_SLEEP_HEAT = 64.0  # comfort_heat(68) - DEFAULT_SETBACK_DEPTH_F(4) — still holds
+DEFAULT_SLEEP_COOL = 72.0  # a real, tuned installation's own value — NOT derived from
+# comfort_cool + DEFAULT_SETBACK_DEPTH_COOL_F (that formula assumes a warmer/looser
+# overnight setback for economizing; this household's real preference is the opposite
+# direction — cooler for sleep, not warmer — so this is now an independent flat default,
+# matching the confirmed-correct P3 bedtime-application behavior (Issue #435/#436
+# investigation found production already applies this flat value, not the formula).
 MAX_SETBACK_DEPTH_F = 8.0  # never set back more than this
 SETBACK_RECOVERY_BUFFER_MINUTES = 30  # pre-heat leads wake_time by this much
 
@@ -4059,7 +4250,11 @@ SETBACK_RECOVERY_BUFFER_MINUTES = 30  # pre-heat leads wake_time by this much
 # ---------------------------------------------------------------------------
 PRE_COOL_POST_NAT_VENT_DELAY_MINUTES: int = 30  # delay after nat-vent window closes before AC pre-cool fires
 PRE_COOL_WAKE_OFFSET_HOURS: float = 4.0  # fallback trigger: this many hours before wake_time
-PRE_COOL_MIN_HEADROOM_F: float = 2.0  # pre-cool target floor = comfort_heat + this (prevents morning heat firing)
+# Pre-cool target floor is sleep_heat + nat_vent hysteresis (compute_pre_cool_target() in
+# automation.py) — the same "+1 above the floor" convention nat_vent_temperature_check() uses
+# for sleep-window fan cycling. Replaces the old comfort_heat + 2F floor (architecture-reset
+# session), which left little to no headroom once DEFAULT_SLEEP_COOL was reformatted to a flat,
+# cooler-than-daytime default (Issue #436).
 THERMAL_OBS_CAP = 200  # max observations in LearningState
 
 # ---------------------------------------------------------------------------

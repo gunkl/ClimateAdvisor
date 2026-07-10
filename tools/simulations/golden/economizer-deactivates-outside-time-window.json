@@ -1,0 +1,72 @@
+{
+  "name": "economizer-deactivates-outside-time-window",
+  "description": "Hot day economizer engaged in the morning window; at hour=9 (the exclusive upper boundary of the morning window [6,9)) it must deactivate even though every temperature condition is identical to the prior tick (Issue #429 blind-spot closure).",
+  "source": "synthetic",
+  "issue": 429,
+  "notes": [
+    "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: check_window_cooling_opportunity (the economizer) had zero golden coverage — a boundary bug here would have shipped undetected.",
+    "Exercises the exclusive upper boundary of the morning time window: ECONOMIZER_MORNING_END_HOUR=9 means hour=9 is NOT in-window (6 <= hour < 9). This is exactly the kind of off-by-one boundary the existing bug population (#327/#392/#402/#417/#427/#428) has repeatedly hit in sibling functions — the economizer had never been checked against it.",
+    "Deactivation DOES emit a fresh fan_deactivated event (unlike the cool-down->maintain transition in economizer-cool-down-to-maintain.json), since the fan genuinely turns off — the event-based economizer_phase assertion type applies here."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot day: hvac_mode=cool."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "hour=7 is in the morning window [6,9). Economizer engages, cool-down phase."
+    },
+    {
+      "time": "2026-07-10T09:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 9,
+      "note": "hour=9 is the exclusive end of the morning window [6,9) -- NOT eligible on this boundary, even though outdoor/indoor/windows_open are byte-for-byte identical to the previous tick. Economizer must deactivate and hand control back to normal AC."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Hot-day classification applied: hvac_mode=cool."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Morning window, indoor 78F > comfort_cool 75F, direction favorable, outdoor within delta -> cool-down phase engages."
+    },
+    {
+      "at": "2026-07-10T09:00:00",
+      "expect": "economizer_phase",
+      "phase": "inactive",
+      "reason": "hour=9 exits the morning time window (exclusive upper bound) -- economizer must deactivate even though temperature conditions are otherwise unchanged, restoring normal AC control."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Economizer respects the morning window's exclusive upper time boundary, previously untested by any golden scenario",
+    "observed_behavior": "economizer deactivates the instant hour crosses out of the eligible window, even with identical temperatures",
+    "expected_behavior": "Time-bounded economizer per Issue #27: only active during the configured morning/evening windows, regardless of otherwise-favorable temperature conditions"
+  }
+}

@@ -43,11 +43,15 @@ from .const import (
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
+    DEFAULT_COMFORT_COOL,
+    DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
+    DEFAULT_SETBACK_COOL,
+    DEFAULT_SETBACK_HEAT,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
@@ -73,7 +77,36 @@ from .const import (
     TEMP_SOURCE_SENSOR,
     VACATION_SETBACK_EXTRA,
 )
-from .temperature import convert_delta, format_temp, format_temp_delta, from_fahrenheit, to_fahrenheit
+from .desired_state import (
+    FanCycleOutcome,
+    SetpointRetryAction,
+    decide_fan_cycle_off,
+    decide_fan_cycle_on,
+    decide_fan_thermo_backstop,
+    decide_grace_start,
+    decide_override_confirm,
+    decide_revisit,
+    decide_scheduled_write_seq_current,
+    decide_setpoint_retry_action,
+)
+from .fan_drift_reconciliation import FanDriftInputs, FanDriftOutcome, decide_fan_drift_reconciliation
+from .fan_thermostat_decision import (
+    FanThermostatInputs,
+    FanThermostatOutcome,
+    _resolve_vent_floor,
+    decide_fan_thermostat_check,
+)
+from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_reactivation_lockout import is_reactivation_locked_out
+from .setpoint_verify_decision import SetpointVerifyOutcome, decide_setpoint_verify
+from .temperature import (
+    convert_delta,
+    format_temp,
+    format_temp_delta,
+    free_cooling_direction_ok,
+    from_fahrenheit,
+    to_fahrenheit,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -176,10 +209,10 @@ def select_comfort_band(
     ``aggressive_savings`` widens BOTH comfort edges by ``CEILING_ESCALATION_SAVINGS_MARGIN_F``
     (floor down, ceiling up) so the system runs less; setback/sleep bands are unaffected.
     """
-    comfort_heat = float(config.get("comfort_heat", 70))
-    comfort_cool = float(config.get("comfort_cool", 75))
-    setback_heat = float(config.get("setback_heat", 60))
-    setback_cool = float(config.get("setback_cool", 80))
+    comfort_heat = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+    comfort_cool = float(config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+    setback_heat = float(config.get("setback_heat", DEFAULT_SETBACK_HEAT))
+    setback_cool = float(config.get("setback_cool", DEFAULT_SETBACK_COOL))
     sleep_heat = float(config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
     sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
     margin = CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive_savings else 0.0
@@ -216,6 +249,31 @@ def select_comfort_band(
         f"{', aggressive' if aggressive_savings else ''})"
     )
     return ComfortBand(floor=floor, ceiling=ceiling, active=active, reason=reason)
+
+
+def compute_pre_cool_target(config: dict, setback_modifier: float) -> float:
+    """Compute the overnight pre-cool AC ceiling that banks cold thermal mass on a warming-trend
+    night (Issue #258, floor formula revised — architecture-reset session).
+
+    ``raw_target = sleep_cool + setback_modifier`` (modifier is negative on a warming trend, so
+    this lowers the ceiling below the normal sleep target). The result is floored at
+    ``sleep_heat + hysteresis`` — the same "+1 above the floor" convention
+    ``nat_vent_temperature_check()`` already uses for sleep-window fan cycling — so pre-cool can
+    travel the full ``[sleep_heat, sleep_cool]`` range instead of being clamped near daytime
+    ``comfort_heat`` (the original formula's floor, which left little to no headroom once
+    ``sleep_cool`` was reformatted to a flat, cooler-than-daytime default).
+
+    This is the single source of truth for the pre-cool target — every one of its 5 call sites
+    (the real AC trigger in ``handle_pre_cool()``, trigger-time scheduling, the chart's target-band
+    dip, and the ODE predicted-indoor curve) must call this, not re-derive the formula, so the
+    chart and the control path can never diverge (Issue #436).
+    """
+    sleep_cool = float(config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+    sleep_heat = float(config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
+    hysteresis = float(config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+    raw_target = sleep_cool + setback_modifier
+    floor = sleep_heat + hysteresis
+    return max(raw_target, floor)
 
 
 def _in_sleep_window(now: datetime, config: dict) -> bool:
@@ -293,8 +351,8 @@ def compute_bedtime_setback(
     hvac_mode = c.hvac_mode
 
     if hvac_mode == "heat":
-        comfort = config.get("comfort_heat", 70)
-        floor = config.get("setback_heat", 60)
+        comfort = config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
+        floor = config.get("setback_heat", DEFAULT_SETBACK_HEAT)
         rate = (thermal_model or {}).get("heating_rate_f_per_hour")
         default_depth = DEFAULT_SETBACK_DEPTH_F
         # Explicit sleep temp takes priority over adaptive calculation
@@ -302,8 +360,8 @@ def compute_bedtime_setback(
         if _explicit is not None:
             return max(float(_explicit), floor)
     elif hvac_mode == "cool":
-        comfort = config.get("comfort_cool", 75)
-        floor = config.get("setback_cool", 80)
+        comfort = config.get("comfort_cool", DEFAULT_COMFORT_COOL)
+        floor = config.get("setback_cool", DEFAULT_SETBACK_COOL)
         rate = (thermal_model or {}).get("cooling_rate_f_per_hour")
         default_depth = DEFAULT_SETBACK_DEPTH_COOL_F
         # Explicit sleep temp takes priority over adaptive calculation
@@ -313,7 +371,7 @@ def compute_bedtime_setback(
         if _explicit is not None:
             return min(float(_explicit), floor)
     else:
-        return config.get("comfort_heat", 70)
+        return config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
 
     if not config.get("learning_enabled", True) or not config.get(CONF_ADAPTIVE_SETBACK, True):
         _LOGGER.debug(
@@ -614,12 +672,23 @@ class AutomationEngine:
         self._schedule_revisit()
 
     def _schedule_revisit(self) -> None:
-        """Schedule a follow-up re-evaluation after an HVAC action."""
+        """Schedule a follow-up re-evaluation after an HVAC action.
+
+        Architecture-reset Step 2 (session state machine slice): the
+        decision (should a revisit be scheduled, and when) now lives in
+        ``desired_state.decide_revisit()``. This method still owns cancelling
+        any prior timer and scheduling the real ``async_call_later``.
+        """
         if self._revisit_cancel:
             self._revisit_cancel()
             self._revisit_cancel = None
 
-        if not self._revisit_callback:
+        revisit = decide_revisit(
+            has_revisit_callback=bool(self._revisit_callback),
+            delay_seconds=REVISIT_DELAY_SECONDS,
+            now=dt_util.now(),
+        )
+        if revisit is None:
             return
 
         revisit_cb = self._revisit_callback
@@ -853,45 +922,63 @@ class AutomationEngine:
         self._fan_min_runtime_active = False
 
     async def _fan_cycle_on(self) -> None:
-        """Fan 'on' phase: activate fan, schedule off after min_runtime minutes."""
+        """Fan 'on' phase: activate fan, schedule off after min_runtime minutes.
+
+        Architecture-reset Step 2: the decision now lives in
+        desired_state.decide_fan_cycle_on() — this method owns actually calling
+        _activate_fan() and scheduling the real async_call_later.
+        """
         min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
-        if min_runtime <= 0 or self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) == FAN_MODE_DISABLED:
-            return  # Feature disabled — stop cycling
+        outcome, delay = decide_fan_cycle_on(
+            min_runtime_minutes=min_runtime,
+            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            fan_override_active=self._fan_override_active,
+            fan_active=self._fan_active,
+        )
 
-        if self._fan_override_active:
-            return  # User has control; cycle suspended until override cleared
+        if outcome in (FanCycleOutcome.DISABLED, FanCycleOutcome.OVERRIDE_SUSPENDED):
+            return
 
-        if not self._fan_active:
+        if outcome is FanCycleOutcome.ACTIVATE_ALWAYS_ON:
             await self._activate_fan(reason="min_runtime_cycle")
             self._fan_min_runtime_active = True
+            return
 
-            if min_runtime >= 60:
-                return  # Always-on: fan stays on, no further scheduling
+        if outcome is FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER:
+            await self._activate_fan(reason="min_runtime_cycle")
+            self._fan_min_runtime_active = True
 
             @callback
             def _turn_off(_now: Any) -> None:
                 self._fan_min_cycle_cancel = None
                 self.hass.async_create_task(self._fan_cycle_off())
 
-            self._fan_min_cycle_cancel = async_call_later(self.hass, min_runtime * 60, _turn_off)
-        else:
-            # Fan already running for another reason — skip, retry in 60 minutes
-            @callback
-            def _retry(_now: Any) -> None:
-                self._fan_min_cycle_cancel = None
-                self.hass.async_create_task(self._fan_cycle_on())
+            self._fan_min_cycle_cancel = async_call_later(self.hass, delay, _turn_off)
+            return
 
-            self._fan_min_cycle_cancel = async_call_later(self.hass, 60 * 60, _retry)
+        # outcome is RETRY_LATER — fan already running for another reason
+        @callback
+        def _retry(_now: Any) -> None:
+            self._fan_min_cycle_cancel = None
+            self.hass.async_create_task(self._fan_cycle_on())
+
+        self._fan_min_cycle_cancel = async_call_later(self.hass, delay, _retry)
 
     async def _fan_cycle_off(self) -> None:
-        """Fan 'off' phase: deactivate fan, schedule next on after wait period."""
-        min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
+        """Fan 'off' phase: deactivate fan, schedule next on after wait period.
 
-        if self._fan_min_runtime_active:
+        Architecture-reset Step 2: the decision now lives in
+        desired_state.decide_fan_cycle_off().
+        """
+        min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
+        should_deactivate, wait_sec = decide_fan_cycle_off(
+            fan_min_runtime_active=self._fan_min_runtime_active,
+            min_runtime_minutes=min_runtime,
+        )
+
+        if should_deactivate:
             self._fan_min_runtime_active = False
             await self._deactivate_fan(reason="min_runtime_cycle_complete")
-
-        wait_sec = max(0, (60 - min_runtime) * 60)
 
         @callback
         def _turn_on(_now: Any) -> None:
@@ -961,7 +1048,13 @@ class AutomationEngine:
         detected_mode = state.state if state else "unknown"
         confirm_seconds = int(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS))
 
-        if confirm_seconds <= 0:
+        # Architecture-reset Step 2 (session state machine slice): the disabled-vs-pending
+        # branch now lives in desired_state.decide_override_confirm() — this method still
+        # owns the immediate-accept side effect and the real async_call_later scheduling.
+        _override_pending = decide_override_confirm(
+            confirm_seconds=confirm_seconds, detected_mode=detected_mode, now=dt_util.now()
+        )
+        if _override_pending is None:
             # Confirmation disabled — accept override immediately (legacy behaviour)
             self._confirm_override(detected_mode)
             return
@@ -1265,7 +1358,7 @@ class AutomationEngine:
                 and classification.pre_condition_target < 0
                 and indoor_temp is not None
             ):
-                _absolute_target = float(self.config.get("comfort_cool", 75)) + float(
+                _absolute_target = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)) + float(
                     classification.pre_condition_target
                 )
                 if indoor_temp <= _absolute_target:
@@ -1621,7 +1714,7 @@ class AutomationEngine:
             )
             return
         # Check setpoint is appropriate for commanded mode
-        if mode == "cool" and temperature < (self.config.get("comfort_heat", 70) - 1.0):
+        if mode == "cool" and temperature < (self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT) - 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: cool mode but target %.1fF is below comfort_heat threshold",
                 temperature,
@@ -1634,11 +1727,11 @@ class AutomationEngine:
                         "incident_id": dt_util.now().isoformat(),
                         "hvac_mode": mode,
                         "setpoint_f": temperature,
-                        "comfort_heat": self.config.get("comfort_heat", 70),
-                        "comfort_cool": self.config.get("comfort_cool", 76),
+                        "comfort_heat": self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT),
+                        "comfort_cool": self.config.get("comfort_cool", DEFAULT_COMFORT_COOL),
                     },
                 )
-        elif mode == "heat" and temperature > (self.config.get("comfort_cool", 76) + 1.0):
+        elif mode == "heat" and temperature > (self.config.get("comfort_cool", DEFAULT_COMFORT_COOL) + 1.0):
             _LOGGER.error(
                 "SETPOINT INCONSISTENCY: heat mode but target %.1fF is above comfort_cool threshold",
                 temperature,
@@ -1651,8 +1744,8 @@ class AutomationEngine:
                         "incident_id": dt_util.now().isoformat(),
                         "hvac_mode": mode,
                         "setpoint_f": temperature,
-                        "comfort_heat": self.config.get("comfort_heat", 70),
-                        "comfort_cool": self.config.get("comfort_cool", 76),
+                        "comfort_heat": self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT),
+                        "comfort_cool": self.config.get("comfort_cool", DEFAULT_COMFORT_COOL),
                     },
                 )
         # Set state tracking BEFORE the write so the validation callback always
@@ -1687,16 +1780,32 @@ class AutomationEngine:
             self._temp_command_pending = False
 
         async def _check_single_setpoint_accepted() -> None:
-            if self._write_seq != _my_seq:
-                return
+            # Architecture-reset Step 2: reuses the SAME pure decision already built for
+            # the post-fan setpoint verify (setpoint_verify_decision.decide_setpoint_verify) —
+            # this is structurally the identical stale/no-reading/tolerance check (0.6°F),
+            # just without the no-setpoint/override-active branches, which never apply here
+            # (pending_setpoint_single/_mode are always set by this point, and this check
+            # doesn't consider manual override).
             state = self.hass.states.get(self.climate_entity)
-            if state is None:
+            reported: float | None = None
+            if state is not None:
+                _reported_raw = state.attributes.get("temperature")
+                if _reported_raw is not None:
+                    try:
+                        reported = float(_reported_raw)
+                    except (ValueError, TypeError):
+                        reported = None
+            outcome = decide_setpoint_verify(
+                current_write_seq=self._write_seq,
+                verify_write_seq=_my_seq,
+                expected_temp=self._pending_setpoint_single,
+                expected_mode=self._pending_setpoint_mode,
+                manual_override_active=False,
+                actual_temp=reported,
+            )
+            if outcome in (SetpointVerifyOutcome.STALE, SetpointVerifyOutcome.NO_READING):
                 return
-            reported = state.attributes.get("temperature")
-            if reported is None:
-                return
-            _TOLERANCE = 0.6
-            if abs(float(reported) - self._pending_setpoint_single) > _TOLERANCE:
+            if outcome is SetpointVerifyOutcome.REASSERT:
                 self._setpoint_reject_streak += 1
                 _LOGGER.error(
                     "Setpoint validation FAILED: commanded=%.1f (%s mode), "
@@ -1711,24 +1820,36 @@ class AutomationEngine:
                         "setpoint_rejected",
                         {
                             "commanded": self._pending_setpoint_single,
-                            "reported": float(reported),
+                            "reported": reported,
                         },
                     )
                 # Retry after 15 minutes if no newer command has superseded this one.
+                # Architecture-reset Step 3 (last of the 9 DesiredState mechanisms): the
+                # write_seq/nudge BRANCHING decision is now pure (decide_setpoint_retry_action
+                # below). The delay itself stays a literal constant, not derived from
+                # dt_util.now() arithmetic — this code path has never depended on the wall
+                # clock (unlike grace/revisit), and introducing that dependency here would
+                # repeat the exact decide_fan_cycle_on/off pitfall from earlier this session:
+                # dt_util is a bare, unpatched MagicMock in these tests, so a mocked
+                # `(at - now).total_seconds()` returns a MagicMock, not a real float.
                 _retry_seq = _my_seq
                 _retry_temp = service_temp
                 _retry_mode = mode
-                # Issue #411: on the 2nd+ consecutive rejection for this commanded value,
-                # nudge the setpoint by ±1°F first — some thermostat integrations dedup a
-                # repeated identical set_temperature payload, so retrying with the exact
-                # same value can never succeed. A brief nudge forces the device to
-                # recognize a real change before the actual target is sent 30s later.
-                _do_nudge = self._setpoint_reject_streak >= 2
 
                 async def _retry_callback(_now: Any) -> None:
-                    if self._write_seq != _retry_seq:
+                    # Issue #411: on the 2nd+ consecutive rejection for this commanded value,
+                    # nudge the setpoint by ±1°F first — some thermostat integrations dedup a
+                    # repeated identical set_temperature payload, so retrying with the exact
+                    # same value can never succeed. A brief nudge forces the device to
+                    # recognize a real change before the actual target is sent 30s later.
+                    _action = decide_setpoint_retry_action(
+                        current_write_seq=self._write_seq,
+                        retry_write_seq=_retry_seq,
+                        reject_streak=self._setpoint_reject_streak,
+                    )
+                    if _action is SetpointRetryAction.SUPERSEDED:
                         return  # newer command superseded; skip retry
-                    if _do_nudge:
+                    if _action is SetpointRetryAction.NUDGE_THEN_TARGET:
                         _nudge_delta = convert_delta(1.0, unit)
                         _nudge_temp = (
                             _retry_temp + _nudge_delta if _retry_mode == "cool" else _retry_temp - _nudge_delta
@@ -1762,7 +1883,9 @@ class AutomationEngine:
                         )
 
                         async def _send_real_target(_later: Any) -> None:
-                            if self._write_seq != _retry_seq:
+                            if not decide_scheduled_write_seq_current(
+                                current_write_seq=self._write_seq, target_write_seq=_retry_seq
+                            ):
                                 return  # newer command superseded; skip
                             _LOGGER.info(
                                 "Sending real target after nudge: %.1f %s",
@@ -1942,7 +2065,7 @@ class AutomationEngine:
 
             if self._grace_active:
                 outdoor = self._last_outdoor_temp
-                comfort_cool = float(self.config.get("comfort_cool", 75))
+                comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
                 nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
                 nat_vent_threshold = comfort_cool + nat_vent_delta
                 if outdoor is not None and outdoor < nat_vent_threshold:
@@ -1966,7 +2089,7 @@ class AutomationEngine:
 
             # Check for natural ventilation opportunity before falling through to pause
             outdoor = self._last_outdoor_temp
-            comfort_cool = float(self.config.get("comfort_cool", 75))
+            comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             nat_vent_threshold = comfort_cool + nat_vent_delta
             indoor = self._get_indoor_temp_f()
@@ -1991,7 +2114,7 @@ class AutomationEngine:
                 indoor=indoor,
                 comfort_heat=comfort_heat,
                 comfort_cool=comfort_cool,
-                threshold=nat_vent_threshold,
+                nat_vent_delta=nat_vent_delta,
             )
             if _nat_vent_gate_entered:
                 _skip_nat_vent = False
@@ -2197,7 +2320,7 @@ class AutomationEngine:
                 # risen above comfort_cool, allow re-evaluation so nat-vent can engage.
                 # Grace still blocks rapid door-open/close cycling below the comfort ceiling.
                 _indoor = self._get_indoor_temp_f()
-                _cool = float(self.config.get("comfort_cool", 75))
+                _cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
                 # Issue #244: a contact sensor open while HVAC is idle (door opened with
                 # nothing to pause) must still be re-evaluated so nat-vent can engage when
                 # outdoor later cools below indoor — otherwise the occupant misses free
@@ -2227,7 +2350,7 @@ class AutomationEngine:
                     return
 
             outdoor = self._last_outdoor_temp
-            comfort_cool = float(self.config.get("comfort_cool", 75))
+            comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             threshold = comfort_cool + nat_vent_delta
 
@@ -2245,7 +2368,7 @@ class AutomationEngine:
                     indoor=_indoor,
                     comfort_heat=_comfort_heat,
                     comfort_cool=comfort_cool,
-                    threshold=threshold,
+                    nat_vent_delta=nat_vent_delta,
                     hysteresis=_hysteresis,
                 ):
                     # Band stays armed — just activate the fan; the compressor self-arbitrates.
@@ -2285,7 +2408,7 @@ class AutomationEngine:
             # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
             # Do NOT enter pause — the house needs to warm up, not wait for nat vent re-evaluation.
             if self._natural_vent_active:
-                comfort_heat = float(self.config.get("comfort_heat", 70))
+                comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
                 indoor = self._get_indoor_temp_f()
                 if (
                     self._natural_vent_active
@@ -2482,17 +2605,26 @@ class AutomationEngine:
                 )
                 comfort_heat = self._nat_vent_reactivation_floor()
 
-                # Enforce lockout after outdoor-warm exit
-                if self._nat_vent_outdoor_exit_time is not None:
-                    elapsed = (dt_util.now() - self._nat_vent_outdoor_exit_time).total_seconds()
-                    if elapsed < lockout_s:
-                        _LOGGER.debug(
-                            "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
-                            elapsed,
-                            lockout_s,
-                            lockout_s - elapsed,
-                        )
-                        return
+                # Enforce lockout after outdoor-warm exit. Architecture-reset Step 2: the
+                # decision itself now lives in
+                # nat_vent_reactivation_lockout.is_reactivation_locked_out() — deliberately
+                # NOT spread to the other 4 reactivation-gate call sites, each of which is
+                # structurally unreachable in the immediate aftermath of an outdoor-warm
+                # exit-with-pause (see that module's docstring).
+                _lockout_check_now = dt_util.now()
+                if is_reactivation_locked_out(
+                    outdoor_exit_time=self._nat_vent_outdoor_exit_time,
+                    now=_lockout_check_now,
+                    lockout_seconds=lockout_s,
+                ):
+                    elapsed = (_lockout_check_now - self._nat_vent_outdoor_exit_time).total_seconds()
+                    _LOGGER.debug(
+                        "Nat vent paused-by-door: lockout active — %.0fs elapsed of %.0fs (%.0fs remaining)",
+                        elapsed,
+                        lockout_s,
+                        lockout_s - elapsed,
+                    )
+                    return
 
                 _floor_ok = indoor > comfort_heat
                 _ceiling_ok = outdoor < threshold
@@ -2502,7 +2634,7 @@ class AutomationEngine:
                     indoor=indoor,
                     comfort_heat=comfort_heat,
                     comfort_cool=comfort_cool,
-                    threshold=threshold,
+                    nat_vent_delta=nat_vent_delta,
                     hysteresis=hysteresis,
                 )
                 if _may_reactivate:
@@ -2553,8 +2685,8 @@ class AutomationEngine:
             if not self._natural_vent_active:
                 return
 
-            comfort_heat = float(self.config.get("comfort_heat", 70))
-            comfort_cool = float(self.config.get("comfort_cool", 75))
+            comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+            comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
             if _in_sleep_window(dt_util.now(), self.config):
                 sleep_heat = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
@@ -2614,7 +2746,14 @@ class AutomationEngine:
                 # emit_event=False: this transition is reported via nat_vent_fan_off below.
                 await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False)
                 # _natural_vent_active intentionally left True — session continues
-                if self._emit_event_callback:
+                # Issue #435: only report the cycling transition if there's an actual device
+                # to control — _deactivate_fan() is a no-op when fan_mode is disabled (a
+                # supported manual-window-only nat-vent configuration), and emitting
+                # unconditionally previously claimed device "none" turned off in that config.
+                # Checked directly against fan_mode (the real root cause) rather than a
+                # self._fan_active before/after comparison, since several existing tests
+                # mock _deactivate_fan() itself and don't simulate its state mutation.
+                if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED and self._emit_event_callback:
                     self._emit_event_callback(
                         "nat_vent_fan_off",
                         {
@@ -2651,7 +2790,14 @@ class AutomationEngine:
                 )
                 # emit_event=False: this transition is reported via nat_vent_fan_on below.
                 await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
-                if self._emit_event_callback:
+                # Issue #435: only report the cycling transition if there's an actual device
+                # to control — _activate_fan() is a no-op when fan_mode is disabled (a
+                # supported manual-window-only nat-vent configuration), and emitting
+                # unconditionally previously claimed device "none" turned on in that config.
+                # Checked directly against fan_mode (the real root cause) rather than a
+                # self._fan_active before/after comparison, since several existing tests
+                # mock _activate_fan() itself and don't simulate its state mutation.
+                if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED and self._emit_event_callback:
                     self._emit_event_callback(
                         "nat_vent_fan_on",
                         {
@@ -2704,43 +2850,76 @@ class AutomationEngine:
             )
             return
 
-        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        hysteresis_ftc = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+        in_sleep_window = _in_sleep_window(dt_util.now(), self.config)
+        sleep_heat_ftc = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
 
-        # --- Check 1: free-cooling direction guard ---
-        # Free cooling requires outdoor cooler than indoor. Once outdoor >= indoor the
-        # airflow no longer cools (neutral or reversed) — stop. NOTE: NO hysteresis on the
-        # STOP side; the anti-flap hysteresis lives on nat-vent RE-activation
-        # (check_natural_vent_conditions). Subtracting it here would kill free cooling ~1°F
-        # early — e.g. stop at outdoor 71 / indoor 72 while a favorable gradient remains.
-        if outdoor is not None and indoor is not None and outdoor >= indoor:
-            if self._natural_vent_active:
-                # Issue #418: actually routed through the canonical nat-vent outdoor-rise
-                # exit now (previously this comment claimed it did, but the code hand-rolled
-                # _natural_vent_active/_paused_by_door/_deactivate_fan itself — which set
-                # _paused_by_door=True while still restoring HVAC via _deactivate_fan()'s
-                # default restore_hvac=True, contradicting the pause semantics, and never
-                # captured _pre_pause_mode or checked whether a sensor was genuinely still
-                # open). _exit_nat_vent() gets all three right, mirroring
-                # check_natural_vent_conditions()'s equivalent outdoor-rise-exit call site.
-                stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F — airflow reversed"
-                _LOGGER.debug(
-                    "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
-                    trigger,
-                    f"{indoor:.1f}",
-                    f"{outdoor:.1f}",
-                    True,
-                    f"stop:{stop_reason}",
+        # Issue #435 follow-up (architecture-reset Step 2): Check 1 + Check 2's decision
+        # logic now lives in one pure, independently-tested function
+        # (fan_thermostat_decision.decide_fan_thermostat_check) — shadow + substitution
+        # differential-tested against this exact dispatch (see
+        # tools/fan_thermostat_decision_diff.py, tools/sim_harness/fan_thermostat_decision_compare.py).
+        # This method now only reconstructs the same reason strings/log lines/side effects
+        # the pre-extraction inline code produced — no decision logic here.
+        inputs = FanThermostatInputs(
+            indoor=indoor,
+            outdoor=outdoor,
+            comfort_heat_raw=comfort_heat,
+            sleep_heat=sleep_heat_ftc,
+            in_sleep_window=in_sleep_window,
+            hysteresis=hysteresis_ftc,
+            natural_vent_active=self._natural_vent_active,
+        )
+        outcome = decide_fan_thermostat_check(inputs)
+
+        if outcome is FanThermostatOutcome.KEEP:
+            _LOGGER.debug(
+                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
+                trigger,
+                f"{indoor:.1f}" if indoor is not None else "unavailable",
+                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                True,
+            )
+            return
+
+        if outcome is FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT:
+            # Issue #418: actually routed through the canonical nat-vent outdoor-rise
+            # exit now (previously this comment claimed it did, but the code hand-rolled
+            # _natural_vent_active/_paused_by_door/_deactivate_fan itself — which set
+            # _paused_by_door=True while still restoring HVAC via _deactivate_fan()'s
+            # default restore_hvac=True, contradicting the pause semantics, and never
+            # captured _pre_pause_mode or checked whether a sensor was genuinely still
+            # open). _exit_nat_vent() gets all three right, mirroring
+            # check_natural_vent_conditions()'s equivalent outdoor-rise-exit call site.
+            stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F — airflow reversed"
+            _LOGGER.debug(
+                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
+                trigger,
+                f"{indoor:.1f}",
+                f"{outdoor:.1f}",
+                True,
+                f"stop:{stop_reason}",
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_outdoor_rise_exit",
+                    {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
                 )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_outdoor_rise_exit",
-                        {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
-                    )
-                await self._exit_nat_vent(
-                    reason=f"nat vent exit (fast loop): {stop_reason}",
-                    set_outdoor_exit_time=True,
-                )
-                return
+            await self._exit_nat_vent(
+                reason=f"nat vent exit (fast loop): {stop_reason}",
+                set_outdoor_exit_time=True,
+            )
+            return
+
+        if outcome is FanThermostatOutcome.STOP_DEACTIVATE:
+            # --- Check 1's non-nat-vent stop branch: free-cooling direction guard ---
+            # Free cooling requires outdoor cooler than indoor. Once outdoor >= indoor the
+            # airflow no longer cools (neutral or reversed) — stop. NOTE: NO hysteresis on
+            # the STOP side; the anti-flap hysteresis lives on nat-vent RE-activation
+            # (check_natural_vent_conditions). Subtracting it here would kill free cooling
+            # ~1°F early — e.g. stop at outdoor 71 / indoor 72 while a favorable gradient
+            # remains.
             stop_reason = f"outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F (free cooling gone)"
             _LOGGER.debug(
                 "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
@@ -2753,6 +2932,7 @@ class AutomationEngine:
             await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
             return
 
+        # outcome is STOP_COOLED_TO_FLOOR
         # --- Check 2: cooled to target ---
         # A CA fan only runs while outdoor < indoor (Check 1 stops it otherwise), so it is ALWAYS
         # cooling. Stop once indoor has cooled to the comfort floor, to avoid overcooling. Do NOT
@@ -2767,34 +2947,19 @@ class AutomationEngine:
         # always preempt nat_vent_temperature_check()'s correct sleep-window cycling (off at
         # sleep_heat, on at sleep_heat+2*hysteresis) before that logic ever got a chance to run,
         # permanently ending the nat-vent session at comfort_heat instead of letting it cycle.
-        _hysteresis_ftc = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        if _in_sleep_window(dt_util.now(), self.config):
-            _sleep_heat_ftc = float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
-            _vent_floor_ftc = _sleep_heat_ftc - _hysteresis_ftc
-        else:
-            _vent_floor_ftc = comfort_heat
-        if indoor is not None and indoor <= _vent_floor_ftc:
-            stop_reason = f"indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor_ftc:.1f}°F (cooled to floor)"
-            _LOGGER.debug(
-                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
-                trigger,
-                f"{indoor:.1f}",
-                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
-                True,
-                f"stop:{stop_reason}",
-            )
-            if self._natural_vent_active:
-                self._natural_vent_active = False
-            await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
-            return
-
+        vent_floor_ftc = _resolve_vent_floor(inputs)
+        stop_reason = f"indoor {indoor:.1f}°F ≤ comfort floor {vent_floor_ftc:.1f}°F (cooled to floor)"
         _LOGGER.debug(
-            "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
+            "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=%s",
             trigger,
-            f"{indoor:.1f}" if indoor is not None else "unavailable",
+            f"{indoor:.1f}",
             f"{outdoor:.1f}" if outdoor is not None else "unavailable",
             True,
+            f"stop:{stop_reason}",
         )
+        if self._natural_vent_active:
+            self._natural_vent_active = False
+        await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
 
     async def reconcile_fan_on_startup(
         self,
@@ -2864,9 +3029,8 @@ class AutomationEngine:
         # Evaluate nat-vent eligibility
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-        comfort_cool = float(self.config.get("comfort_cool", 75))
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
         comfort_heat = self._nat_vent_reactivation_floor()
-        nat_vent_threshold = comfort_cool + nat_vent_delta
 
         # Issue #417: folded into the shared _nat_vent_may_reactivate() gate instead of a
         # 5th hand-rolled copy — this hand-rolled version was also missing the sleep-aware
@@ -2879,7 +3043,7 @@ class AutomationEngine:
                 indoor=indoor,
                 comfort_heat=comfort_heat,
                 comfort_cool=comfort_cool,
-                threshold=nat_vent_threshold,
+                nat_vent_delta=nat_vent_delta,
                 hysteresis=hysteresis,
             )
         )
@@ -3012,23 +3176,36 @@ class AutomationEngine:
         Args:
             source: "manual" for user-initiated overrides,
                     "automation" for Climate Advisor resumptions.
+
+        Architecture-reset Step 2 (session state machine slice): the
+        duration/should_notify RESOLUTION now lives in
+        ``desired_state.decide_grace_start()`` — the first real production
+        wiring of a DesiredState type, not just a schema. This method still
+        owns everything decide_grace_start() doesn't cover: cancelling prior
+        timers, scheduling the real ``async_call_later``, setting instance
+        flags, and emitting the ``grace_started`` event.
         """
         self._cancel_grace_timers()
 
-        if source == "manual":
-            duration = self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS)
-            should_notify = self.config.get(CONF_MANUAL_GRACE_NOTIFY, True)
-        else:
-            duration = self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS)
-            should_notify = self.config.get(CONF_AUTOMATION_GRACE_NOTIFY, True)
-
-        if duration <= 0:
+        now = dt_util.now()
+        grace = decide_grace_start(
+            source=source,
+            manual_duration_seconds=self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS),
+            manual_should_notify=self.config.get(CONF_MANUAL_GRACE_NOTIFY, True),
+            automation_duration_seconds=self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS),
+            automation_should_notify=self.config.get(CONF_AUTOMATION_GRACE_NOTIFY, True),
+            now=now,
+        )
+        if grace is None:
             return  # Grace period disabled
+
+        duration = int((grace.at - now).total_seconds())
+        should_notify = grace.should_notify
 
         self._grace_active = True
         self._last_resume_source = source
         self._grace_duration_seconds = duration
-        self._grace_end_time = (dt_util.now() + timedelta(seconds=duration)).isoformat()
+        self._grace_end_time = grace.at.isoformat()
 
         @callback
         def _grace_expired(_now: Any) -> None:
@@ -3173,7 +3350,7 @@ class AutomationEngine:
                 return
             # Check nat-vent conditions before blindly re-pausing
             outdoor = self._last_outdoor_temp
-            comfort_cool = float(self.config.get("comfort_cool", 75))
+            comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             indoor = self._get_indoor_temp_f()
             comfort_heat = self._nat_vent_reactivation_floor()
@@ -3186,7 +3363,7 @@ class AutomationEngine:
                 indoor=indoor,
                 comfort_heat=comfort_heat,
                 comfort_cool=comfort_cool,
-                threshold=nat_vent_threshold,
+                nat_vent_delta=nat_vent_delta,
             ):
                 nat_vent_reason = (
                     f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
@@ -3506,11 +3683,13 @@ class AutomationEngine:
             # Skipped ever got populated on the majority of nights in a mild climate).
             if _sleep_band.active == "floor":
                 self._today_record.setback_heat_applied_f = _sleep_band.floor
-                self._today_record.setback_depth_f = abs(self.config.get("comfort_heat", 70) - _sleep_band.floor)
+                _comfort_heat_f = self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)
+                self._today_record.setback_depth_f = abs(_comfort_heat_f - _sleep_band.floor)
                 self._today_record.setback_was_adaptive = False
             elif _sleep_band.active == "ceiling":
                 self._today_record.setback_cool_applied_f = _sleep_band.ceiling
-                self._today_record.setback_depth_f = abs(self.config.get("comfort_cool", 75) - _sleep_band.ceiling)
+                _comfort_cool_f = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
+                self._today_record.setback_depth_f = abs(_comfort_cool_f - _sleep_band.ceiling)
                 self._today_record.setback_was_adaptive = False
         await self._apply_comfort_band(
             _sleep_band,
@@ -3524,8 +3703,6 @@ class AutomationEngine:
         Suppressed when nat-vent already brought indoor to or below the target.
         Returns a short status string for logging.
         """
-        from .const import CONF_SLEEP_COOL, PRE_COOL_MIN_HEADROOM_F
-
         c = self._current_classification
         if not c or c.setback_modifier >= 0:
             _LOGGER.info(
@@ -3546,11 +3723,12 @@ class AutomationEngine:
             )
             return "skipped: manual override"
 
-        sleep_cool = float(self.config.get(CONF_SLEEP_COOL) or self.config.get("sleep_cool", 78.0))
-        comfort_heat = float(self.config.get("comfort_heat", 70.0))
+        sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
+        sleep_heat_floor = float(self.config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
+        hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         raw_target = sleep_cool + c.setback_modifier  # setback_modifier is negative for warming trend
-        floor = comfort_heat + PRE_COOL_MIN_HEADROOM_F
-        pre_cool_target = max(raw_target, floor)
+        floor = sleep_heat_floor + hysteresis
+        pre_cool_target = compute_pre_cool_target(self.config, c.setback_modifier)
 
         _LOGGER.info(
             "Pre-cool trigger fired: indoor=%s°F, target=%.1f°F, modifier=%.1f (sleep_cool=%.1f, floor=%.1f)",
@@ -3563,11 +3741,11 @@ class AutomationEngine:
 
         if raw_target < floor:
             _LOGGER.warning(
-                "Pre-cool target %.1f°F below floor %.1f°F (comfort_heat=%.1f + headroom=%.1f); clamped to %.1f°F",
+                "Pre-cool target %.1f°F below floor %.1f°F (sleep_heat=%.1f + hysteresis=%.1f); clamped to %.1f°F",
                 raw_target,
                 floor,
-                comfort_heat,
-                PRE_COOL_MIN_HEADROOM_F,
+                sleep_heat_floor,
+                hysteresis,
                 pre_cool_target,
             )
 
@@ -3657,7 +3835,7 @@ class AutomationEngine:
 
         # Morning pre-cool overshoot guard: warn if indoor is below comfort_heat (heat may fire)
         _current_indoor = indoor_temp
-        _comfort_heat = float(self.config.get("comfort_heat", 70.0))
+        _comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         if _current_indoor is not None:
             if _current_indoor < _comfort_heat:
                 _LOGGER.warning(
@@ -3760,7 +3938,7 @@ class AutomationEngine:
         failure mode already fixed once for the cycling functions under Issue #402;
         this closes the gap on the reactivation-gate side.
         """
-        comfort_heat = float(self.config.get("comfort_heat", 70))
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
         if _in_sleep_window(dt_util.now(), self.config):
             return float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
         return comfort_heat
@@ -3772,7 +3950,7 @@ class AutomationEngine:
         indoor: float | None,
         comfort_heat: float,
         comfort_cool: float,
-        threshold: float,
+        nat_vent_delta: float,
         hysteresis: float = 0.0,
     ) -> bool:
         """Shared 4-part reactivation gate for nat-vent (Issue #411, Pass 4).
@@ -3788,23 +3966,44 @@ class AutomationEngine:
         applying nat-vent HVAC state) — this function returns only the shared boolean
         gate, mirroring how ``_ceiling_threshold()`` is scoped as a value helper.
 
+        Architecture-reset Step 2 follow-up: the decision itself now lives in
+        ``nat_vent_gate.decide_nat_vent_gate()`` — differential + substitution
+        tested against this exact call (see tools/nat_vent_gate_diff.py,
+        tools/nat_vent_gate_substitution_diff.py). This method only reconstructs
+        the ``NatVentGateInputs`` from already-caller-resolved values (``comfort_heat``
+        is already sleep-window-resolved by every caller via
+        ``_nat_vent_reactivation_floor()``, so ``in_sleep_window=False`` here is not a
+        second resolution — it's a pass-through that keeps the pure core's own
+        sleep-window branch a no-op, since that resolution already happened once).
+
         Args:
             outdoor: Current outdoor temperature (°F), or None if unavailable.
             indoor: Current indoor temperature (°F), or None if unavailable.
-            comfort_heat: Comfort floor (°F) — indoor must be above this.
+            comfort_heat: Comfort floor (°F) — indoor must be above this. Already
+                sleep-window-resolved by the caller (via ``_nat_vent_reactivation_floor()``).
             comfort_cool: Comfort ceiling (°F) — used for the archetype-aware ceiling check.
-            threshold: Outdoor must be below this (typically comfort_cool + nat_vent_delta).
-                Passed in rather than recomputed here so this stays a pure boolean gate.
+            nat_vent_delta: Added to comfort_cool to form the outdoor threshold —
+                every real call site already holds this as a separate local before
+                summing it into a threshold, so passing it through unchanged (instead
+                of the pre-summed threshold) avoids re-deriving it via subtraction.
             hysteresis: Subtracted from indoor in the outdoor/indoor delta check. Callers
                 that don't apply hysteresis (handle_door_window_open, _re_pause_for_open_sensor)
                 pass 0.0 (the default); the paused-by-door reactivation block passes the
                 configured nat-vent hysteresis.
         """
-        if outdoor is None or indoor is None:
-            return False
-        ceiling_threshold = self._ceiling_threshold(comfort_cool)
-        ceiling_ok = ceiling_threshold is None or indoor <= ceiling_threshold
-        return outdoor < indoor - hysteresis and indoor > comfort_heat and outdoor < threshold and ceiling_ok
+        inputs = NatVentGateInputs(
+            outdoor=outdoor,
+            indoor=indoor,
+            comfort_heat_raw=comfort_heat,
+            sleep_heat=comfort_heat,
+            in_sleep_window=False,
+            comfort_cool=comfort_cool,
+            nat_vent_delta=nat_vent_delta,
+            hysteresis=hysteresis,
+            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        return decide_nat_vent_gate(inputs)
 
     def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.
@@ -3862,8 +4061,8 @@ class AutomationEngine:
             return
 
         aggressive_savings = bool(self.config.get("aggressive_savings", False))
-        comfort_heat = float(self.config.get("comfort_heat", 70))
-        comfort_cool = float(self.config.get("comfort_cool", 75))
+        comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
 
         if not aggressive_savings:
             # Sleep window: skip the full-band setpoint call — apply_classification() will arm
@@ -4009,33 +4208,35 @@ class AutomationEngine:
             _expected_mode = self._last_commanded_hvac_mode
 
             async def _do_verify_after_fan_on() -> None:
-                if self._write_seq != _verify_seq:
-                    return  # newer command issued — skip
-                if _expected_temp is None or _expected_mode is None:
-                    return  # no active setpoint
-                if self._manual_override_active:
-                    return  # genuine confirmed override — don't fight it
+                # Architecture-reset Step 2: the decision now lives in
+                # setpoint_verify_decision.decide_setpoint_verify() — shared with
+                # _do_verify_after_fan_off(), which had byte-for-byte identical logic
+                # before this consolidation (found during the #429 dedup sweep).
                 current_state = self.hass.states.get(self.climate_entity)
-                if current_state is None:
-                    return
-                actual = current_state.attributes.get("temperature")
-                if actual is None:
-                    return
-                try:
-                    if (
-                        abs(float(actual) - _expected_temp) > 0.6
-                    ):  # 0.6°F — same tolerance as _check_single_setpoint_accepted
-                        _LOGGER.info(
-                            "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
-                            float(actual),
-                            _expected_temp,
-                            _expected_mode,
-                        )
-                        await self._set_temperature(
-                            _expected_temp, reason="post-fan-verify/repair", mode=_expected_mode
-                        )
-                except (ValueError, TypeError):
-                    pass
+                actual_temp: float | None = None
+                if current_state is not None:
+                    _actual_raw = current_state.attributes.get("temperature")
+                    if _actual_raw is not None:
+                        try:
+                            actual_temp = float(_actual_raw)
+                        except (ValueError, TypeError):
+                            actual_temp = None
+                outcome = decide_setpoint_verify(
+                    current_write_seq=self._write_seq,
+                    verify_write_seq=_verify_seq,
+                    expected_temp=_expected_temp,
+                    expected_mode=_expected_mode,
+                    manual_override_active=self._manual_override_active,
+                    actual_temp=actual_temp,
+                )
+                if outcome is SetpointVerifyOutcome.REASSERT:
+                    _LOGGER.info(
+                        "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
+                        actual_temp,
+                        _expected_temp,
+                        _expected_mode,
+                    )
+                    await self._set_temperature(_expected_temp, reason="post-fan-verify/repair", mode=_expected_mode)
 
             @callback
             def _verify_setpoint_after_fan_on(_now: Any) -> None:
@@ -4088,8 +4289,11 @@ class AutomationEngine:
         # timer to also re-evaluate cycling while nat-vent is active.
         if self._natural_vent_active and indoor is not None:
             await self.nat_vent_temperature_check(indoor)
-        # Re-arm only if the fan is still active after the check
-        if self._fan_running:
+        # Re-arm only if the fan is still active after the check. Architecture-reset
+        # Step 2: the decision now lives in desired_state.decide_fan_thermo_backstop() —
+        # this method still owns actually calling _start_fan_thermo_backstop() to
+        # schedule the real timer.
+        if decide_fan_thermo_backstop(fan_running=self._fan_running, delay_seconds=5 * 60, now=dt_util.now()):
             self._start_fan_thermo_backstop()
 
     def _cancel_fan_thermo_backstop(self) -> None:
@@ -4125,43 +4329,55 @@ class AutomationEngine:
         with `preserve_nat_vent_session=True` — the nat-vent session survives so the
         immediately-following `nat_vent_temperature_check()` call in `_thermo_backstop_task()`
         can re-fire `_activate_fan()` on the same tick if conditions still warrant it.
+
+        Architecture-reset Step 2 (session state machine slice): the decision itself now
+        lives in `fan_drift_reconciliation.decide_fan_drift_reconciliation()` — this method
+        only reconstructs the pure inputs and applies the returned outcome's side effects.
         """
-        if not self._fan_active:
-            self._fan_drift_tick_count = 0
-            return
-
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        recent_fan_command = bool(
+            self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0)
+        )
+        physical_state_available = bool(self._get_fan_physical_state_callback)
+        # Mirrors the original code's laziness: only actually read live physical state
+        # once every cheaper guard (fan active, applicable archetype, no recent CA
+        # command echo) has already passed — avoids an unnecessary state read otherwise.
+        physical_on = None
+        if (
+            self._fan_active
+            and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+            and not recent_fan_command
+            and physical_state_available
+        ):
+            physical_on = self._get_fan_physical_state_callback()
+
+        inputs = FanDriftInputs(
+            fan_active=self._fan_active,
+            fan_mode=fan_mode,
+            recent_fan_command=recent_fan_command,
+            physical_state_available=physical_state_available,
+            physical_on=physical_on,
+            tick_count=self._fan_drift_tick_count,
+        )
+        outcome, next_tick_count = decide_fan_drift_reconciliation(inputs)
+        self._fan_drift_tick_count = next_tick_count
+
+        if outcome in (FanDriftOutcome.RESET, FanDriftOutcome.NOOP):
             return
 
-        if self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0):
-            self._fan_drift_tick_count = 0
-            return
-
-        if not self._get_fan_physical_state_callback:
-            return
-        physical_on = self._get_fan_physical_state_callback()
-        if physical_on is None:
-            return  # command-only mode — no ground truth, nothing to reconcile
-        if physical_on:
-            self._fan_drift_tick_count = 0  # agrees — reset
-            return
-
-        # physical_on is False but _fan_active is True — disagreement.
-        self._fan_drift_tick_count += 1
-        if self._fan_drift_tick_count < 2:
+        if outcome is FanDriftOutcome.AWAITING:
             _LOGGER.info(
                 "Fan physical-state drift detected (tick %d/2): _fan_active=True but physical"
                 " state=off — awaiting confirmation tick before correcting",
-                self._fan_drift_tick_count,
+                next_tick_count,
             )
             return
 
+        # outcome is CORRECT
         _LOGGER.warning(
             "Fan physical-state drift confirmed over 2 backstop ticks: _fan_active=True but"
             " physical state=off — self-correcting stale flag (Issue #423)"
         )
-        self._fan_drift_tick_count = 0
         if self._emit_event_callback:
             self._emit_event_callback(
                 "fan_cancel",
@@ -4284,33 +4500,35 @@ class AutomationEngine:
             _expected_mode = self._last_commanded_hvac_mode
 
             async def _do_verify_after_fan_off() -> None:
-                if self._write_seq != _verify_seq:
-                    return  # newer command issued — skip
-                if _expected_temp is None or _expected_mode is None:
-                    return  # no active setpoint
-                if self._manual_override_active:
-                    return  # genuine confirmed override — don't fight it
+                # Architecture-reset Step 2: the decision now lives in
+                # setpoint_verify_decision.decide_setpoint_verify() — shared with
+                # _do_verify_after_fan_on(), which had byte-for-byte identical logic
+                # before this consolidation (found during the #429 dedup sweep).
                 current_state = self.hass.states.get(self.climate_entity)
-                if current_state is None:
-                    return
-                actual = current_state.attributes.get("temperature")
-                if actual is None:
-                    return
-                try:
-                    if (
-                        abs(float(actual) - _expected_temp) > 0.6
-                    ):  # 0.6°F — same tolerance as _check_single_setpoint_accepted
-                        _LOGGER.info(
-                            "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
-                            float(actual),
-                            _expected_temp,
-                            _expected_mode,
-                        )
-                        await self._set_temperature(
-                            _expected_temp, reason="post-fan-verify/repair", mode=_expected_mode
-                        )
-                except (ValueError, TypeError):
-                    pass
+                actual_temp: float | None = None
+                if current_state is not None:
+                    _actual_raw = current_state.attributes.get("temperature")
+                    if _actual_raw is not None:
+                        try:
+                            actual_temp = float(_actual_raw)
+                        except (ValueError, TypeError):
+                            actual_temp = None
+                outcome = decide_setpoint_verify(
+                    current_write_seq=self._write_seq,
+                    verify_write_seq=_verify_seq,
+                    expected_temp=_expected_temp,
+                    expected_mode=_expected_mode,
+                    manual_override_active=self._manual_override_active,
+                    actual_temp=actual_temp,
+                )
+                if outcome is SetpointVerifyOutcome.REASSERT:
+                    _LOGGER.info(
+                        "Post-fan setpoint verify: thermostat %.1f°F != expected %.1f°F — re-asserting %s mode",
+                        actual_temp,
+                        _expected_temp,
+                        _expected_mode,
+                    )
+                    await self._set_temperature(_expected_temp, reason="post-fan-verify/repair", mode=_expected_mode)
 
             @callback
             def _verify_setpoint_after_fan_off(_now: Any) -> None:
@@ -4353,7 +4571,7 @@ class AutomationEngine:
             return False
 
         unit = self.config.get("temp_unit", "fahrenheit")
-        comfort_cool = self.config.get("comfort_cool", 75)
+        comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
         delta = self.config.get("economizer_temp_delta", ECONOMIZER_TEMP_DELTA)
         aggressive_savings = self.config.get("aggressive_savings", False)
 
@@ -4371,7 +4589,10 @@ class AutomationEngine:
         # nat-vent's gate at check_natural_vent_conditions. Without this guard the economizer
         # could start the fan while it is warmer outside than in (e.g. on a hot evening), pulling
         # warmer outdoor air into the house and working against comfort.
-        direction_ok = indoor_temp is None or outdoor_temp < indoor_temp
+        # Architecture-reset (Issue #429 consolidation): routed through temperature.py's shared
+        # free_cooling_direction_ok() — the exact same strict-<, fail-open-on-None variant
+        # already used by coordinator.py's next_human_action(), instead of a third hand-copy.
+        direction_ok = free_cooling_direction_ok(outdoor_temp, indoor_temp)
         if not direction_ok:
             _LOGGER.debug(
                 "Economizer gate: direction rejected — outdoor %.1f°F >= indoor %.1f°F"

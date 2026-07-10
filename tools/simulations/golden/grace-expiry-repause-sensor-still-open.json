@@ -1,0 +1,87 @@
+{
+  "name": "grace-expiry-repause-sensor-still-open",
+  "description": "Door opens (unfavorable direction, pauses HVAC), closes (resumes + starts a 120s automation grace period), reopens mid-grace while still unfavorable (grace silently blocks the immediate pause), then the grace timer naturally expires with the sensor still open -- _re_pause_for_open_sensor() must re-check nat-vent eligibility and, finding it still unfavorable, genuinely re-pause the HVAC (Issue #429 blind-spot closure -- _re_pause_for_open_sensor() had zero golden coverage before this scenario).",
+  "source": "synthetic",
+  "issue": 429,
+  "notes": [
+    "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: _re_pause_for_open_sensor() had zero golden coverage.",
+    "Deliberately isolates _re_pause_for_open_sensor()'s OWN re-check from handle_door_window_open()'s separate nat-vent gate: the reopen at 13:07 happens while outdoor is STILL unfavorable, so handle_door_window_open()'s grace-active branch just logs 'not pausing' and returns silently -- it does NOT reach handle_door_window_open()'s own nat-vent-reactivation check. Outdoor never changes for the rest of the scenario, so the eventual re-pause at grace expiry is unambiguously _re_pause_for_open_sensor()'s own doing, not a side effect of a different code path.",
+    "The 13:08:01 sensor_open event re-fires on the SAME already-open sensor purely to advance the virtual clock past the grace timer's 13:08:00 expiry -- handle_door_window_open()'s own first line (`if self._paused_by_door: return`) makes this a no-op by the time it dispatches, since the grace-expiry timer (which fires first, during the clock advance) has already set _paused_by_door=True.",
+    "grace_expired with re_paused=True already maps to outcome 'paused' in outcomes.py (pre-existing mapping) -- no new assertion type was needed for this blind spot, unlike the economizer scenarios."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "automation_grace_seconds": 120
+  },
+  "events": [
+    {
+      "time": "2026-07-10T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 80.0,
+      "note": "Outdoor 80F > indoor 76F -- unfavorable direction, nat-vent not eligible."
+    },
+    {
+      "time": "2026-07-10T13:00:01",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool."
+    },
+    {
+      "time": "2026-07-10T13:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door opens. Outdoor 80F >= indoor 76F -- nat-vent ineligible. Automation pauses (HVAC off)."
+    },
+    {
+      "time": "2026-07-10T13:06:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.back_door",
+      "note": "Door closes. HVAC restores to cool. 120s automation grace period starts (ends 13:08:00)."
+    },
+    {
+      "time": "2026-07-10T13:07:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door reopens 1 min into the 120s grace window. Outdoor is STILL 80F (unfavorable, >= threshold 78F) -- handle_door_window_open()'s grace-active branch logs 'not pausing' and returns silently. No pause, no reactivation -- sensor is simply left physically open."
+    },
+    {
+      "time": "2026-07-10T13:08:01",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Re-fires on the same already-open sensor purely to advance the clock past the grace timer's 13:08:00 expiry (see notes). By the time this dispatches, _paused_by_door is already True from the timer firing during the clock advance, so this specific call is a no-op."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T13:00:01",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=cool."
+    },
+    {
+      "at": "2026-07-10T13:05:00",
+      "expect": "paused",
+      "reason": "Door opens with outdoor 80F >= indoor 76F -- nat-vent ineligible, automation pauses HVAC."
+    },
+    {
+      "at": "2026-07-10T13:06:00",
+      "expect": "resumed",
+      "reason": "Door closes -- HVAC restores to cool, 120s automation grace period begins."
+    },
+    {
+      "at": "2026-07-10T13:08:00",
+      "expect": "classification_suppressed_paused",
+      "reason": "Grace timer expires at 13:08:00 with the sensor still open and outdoor still unfavorable (80F >= threshold 78F) -- _re_pause_for_open_sensor() re-checks nat-vent eligibility, finds it still ineligible, and genuinely re-pauses the HVAC (grace_expired re_paused=True, confirmed via action_log: set_hvac_mode off + the exact 'Grace period expired but a door/window is still open' notification only _re_pause_for_open_sensor() sends). _on_grace_expired() then schedules _apply_current_scheduled_state(), which re-applies the current classification -- apply_classification() correctly sees _paused_by_door=True (just set by the re-pause) and suppresses re-arming the band, emitting classification_suppressed_paused at the SAME timestamp. This is the last decision in the tied-timestamp cascade (grace_expired's own 'paused' outcome is superseded in the decisions list by this immediately-following one), and its presence is itself confirmation the re-pause took effect before this suppression check ran."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "_re_pause_for_open_sensor() correctly re-pauses HVAC when a grace period expires with the monitored sensor still open and conditions still unfavorable for nat-vent, previously untested by any golden scenario",
+    "observed_behavior": "paused (13:05) -> resumed + grace starts (13:06) -> grace silently blocks immediate re-pause on reopen (13:07) -> grace expires, sensor still open, re-paused (13:08:00)",
+    "expected_behavior": "Grace period prevents rapid pause/resume oscillation on a brief reopen, but genuinely re-pauses once it expires if the door/window is still open and no nat-vent opportunity has appeared in the meantime"
+  }
+}

@@ -2033,6 +2033,7 @@ class TestReconcileFanPhysicalDrift:
             reason="physical-state drift confirmed over 2 backstop ticks",
             trigger_label="physical_drift_correction",
             preserve_nat_vent_session=True,
+            source="automation",
         )
         assert engine._fan_drift_tick_count == 0
 
@@ -2064,6 +2065,31 @@ class TestReconcileFanPhysicalDrift:
 
         assert engine._fan_drift_tick_count == 0
         engine._clear_fan_flags_and_start_grace.assert_not_called()
+
+    def test_correction_grace_period_is_labeled_automation_not_manual(self):
+        """Issue #446: the drift correction is CA fixing its own stale belief, not a user
+        action — the grace period it starts must be labeled "automation", not "manual",
+        or the Activity Report falsely tells the user they turned the fan off.
+
+        Uses the REAL (unmocked) _clear_fan_flags_and_start_grace()/_start_grace_period()
+        so the actual emitted grace_started event's source field is asserted directly —
+        a mock-call-args assertion alone wouldn't catch a label bug this specific."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._fan_active = True
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()
+
+        grace_events = [e for e in events if e[0] == "grace_started"]
+        assert len(grace_events) == 1, f"Expected one grace_started event; got: {events}"
+        assert grace_events[0][1]["source"] == "automation", (
+            f"Drift-correction grace period must be source='automation', not "
+            f"{grace_events[0][1]['source']!r} — nobody touched the fan"
+        )
 
 
 class TestReconcileFanDriftIntegration:
@@ -2299,6 +2325,97 @@ class TestReconcileFanOnStartup:
         )
 
         engine._deactivate_fan.assert_awaited()
+
+    def test_unwarranted_fan_correction_suppressed_within_cooldown(self):
+        """Issue #446: reconcile_fan_on_startup() is called from 4 different sites with no
+        rate limit — a fan that keeps re-appearing as unwarranted (e.g. a thermostat's own
+        circulation schedule) previously triggered a full correction on every single call.
+        Two calls within the 5-minute cooldown must only correct once."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 8, 24, 0),
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+                )
+            )
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 8, 28, 59),  # just under 5 min later — within cooldown
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+                )
+            )
+
+        assert engine._deactivate_fan.await_count == 1, (
+            f"Expected exactly 1 correction within the cooldown window, got {engine._deactivate_fan.await_count}"
+        )
+
+    def test_unwarranted_fan_correction_fires_again_after_cooldown(self):
+        """Not a permanent suppression — a genuinely persistent stray fan must still get
+        corrected again once the cooldown window elapses."""
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 8, 24, 0),
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+                )
+            )
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 8, 30, 1),  # just past the 5-minute cooldown
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+                )
+            )
+
+        assert engine._deactivate_fan.await_count == 2, (
+            f"Expected a fresh correction after the cooldown elapsed, got {engine._deactivate_fan.await_count}"
+        )
+
+    def test_suppressed_correction_is_logged_not_silent(self, caplog):
+        """A persistently-stray fan must stay visible in logs even while suppressed —
+        never silently dropped."""
+        import logging
+
+        engine = self._engine(fan_mode=FAN_MODE_HVAC)
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 8, 24, 0),
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+                )
+            )
+        with (
+            caplog.at_level(logging.INFO, logger="custom_components.climate_advisor.automation"),
+            patch(
+                "custom_components.climate_advisor.automation.dt_util.now",
+                return_value=datetime(2026, 7, 10, 8, 27, 0),
+            ),
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=False
+                )
+            )
+
+        assert any("suppressed" in r.message.lower() for r in caplog.records), (
+            "Expected an INFO log line reporting the suppressed correction"
+        )
 
 
 class TestFanEventEmission:

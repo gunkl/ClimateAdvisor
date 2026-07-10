@@ -728,79 +728,45 @@ class TestInvestigatorRateLimit:
 
 
 # ---------------------------------------------------------------------------
-# Group 6: API endpoint logic (replicated as plain helpers)
+# Group 6: API endpoint logic — exercises the real views (Issue #452)
 # ---------------------------------------------------------------------------
 
 
-async def _simulate_investigate_post(
-    coordinator: MagicMock,
-    focus: str | None = None,
-    hours: int = 48,
-    run_skill: bool = False,
-) -> tuple[int, str]:
-    """Replicate the logic of ClimateAdvisorInvestigateView.post() as a plain function.
+def _make_investigate_request(coordinator: MagicMock, body: dict | None = None) -> MagicMock:
+    from custom_components.climate_advisor.const import DOMAIN
 
-    Returns (status_code, body_text) for assertions.
-    This avoids instantiating HomeAssistantView which has metaclass constraints.
+    hass = coordinator.hass if isinstance(coordinator.hass, MagicMock) else MagicMock()
+    hass.data = {DOMAIN: {"entry1": coordinator}}
 
-    When *run_skill* is True, also replicates the non-streaming execution branch
-    (calls coordinator.ai_skills.async_execute(), logs a WARNING and stores the
-    report on success — mirroring api.py's truncation handling, Issue #420).
-    """
-    import logging
-
-    from custom_components.climate_advisor.const import (
-        CONF_AI_ENABLED,
-        CONF_AI_INVESTIGATOR_ENABLED,
-        DEFAULT_AI_ENABLED,
-        DEFAULT_AI_INVESTIGATOR_ENABLED,
-    )
-
-    if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
-        return 403, "AI features are not enabled"
-
-    if not coordinator.config.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED):
-        return 403, "Investigative agent is not enabled"
-
-    if coordinator.claude_client is None:
-        return 503, "AI client not available"
-
-    allowed, reason = coordinator.claude_client.check_investigator_rate_limit()
-    if not allowed:
-        return 429, reason
-
-    if not run_skill:
-        return 200, "ok"
-
-    result = await coordinator.ai_skills.async_execute(
-        "investigator",
-        coordinator.hass,
-        coordinator,
-        coordinator.claude_client,
-        focus=focus or "",
-        hours=hours,
-    )
-
-    if result.get("success") or result.get("source") == "fallback":
-        if result.get("truncated"):
-            logging.getLogger("custom_components.climate_advisor.api").warning(
-                "Investigation report truncated: hit max_tokens limit; "
-                "consider raising Investigator Max Response Length"
-            )
-        coordinator.claude_client.increment_investigator_counter()
-        await coordinator.async_store_investigation_report(result)
-        return 200, "ok"
-
-    return 500, result.get("error", "Investigation failed")
+    req = MagicMock()
+    req.app = {"hass": hass}
+    req.json = AsyncMock(return_value=body or {})
+    req.headers = {}
+    return req
 
 
-def _simulate_investigation_reports_get(coordinator: MagicMock) -> list[dict]:
-    """Replicate the logic of ClimateAdvisorInvestigationReportsView.get()."""
-    return coordinator.get_investigation_report_history()
+async def _post_investigate(coordinator: MagicMock, body: dict | None = None):
+    from custom_components.climate_advisor.api import ClimateAdvisorInvestigateView
+
+    view = ClimateAdvisorInvestigateView()
+    request = _make_investigate_request(coordinator, body)
+    return await view.post(request)
+
+
+async def _get_investigation_reports(coordinator: MagicMock):
+    from custom_components.climate_advisor.api import ClimateAdvisorInvestigationReportsView
+    from custom_components.climate_advisor.const import DOMAIN
+
+    view = ClimateAdvisorInvestigationReportsView()
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"entry1": coordinator}}
+    req = MagicMock()
+    req.app = {"hass": hass}
+    return await view.get(req)
 
 
 class TestAPIEndpointLogic:
-    """Tests for the investigate POST / investigation_reports GET endpoint logic."""
+    """Tests for the real ClimateAdvisorInvestigateView.post() / InvestigationReportsView.get()."""
 
     def _make_api_coordinator(self, **config_overrides) -> MagicMock:
         config = {
@@ -814,58 +780,70 @@ class TestAPIEndpointLogic:
         claude.check_investigator_rate_limit.return_value = (True, "")
         coord.claude_client = claude
         coord.get_investigation_report_history.return_value = []
+        coord.hass = MagicMock()
+        coord.ai_skills = MagicMock()
+        coord.ai_skills.async_execute = AsyncMock(
+            return_value={
+                "success": True,
+                "source": "ai",
+                "data": {},
+                "error": None,
+                "input_context": "ctx",
+                "raw_response": "ok",
+                "truncated": False,
+            }
+        )
+        coord.async_store_investigation_report = AsyncMock()
         return coord
 
     def test_post_ai_disabled_returns_403(self):
         """POST returns 403 when ai_enabled is False."""
         coord = self._make_api_coordinator(ai_enabled=False)
 
-        status, body = asyncio.run(_simulate_investigate_post(coord))
+        resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 403
-        assert "AI features are not enabled" in body
+        assert resp.status == 403
+        assert "AI features are not enabled" in resp.json_data["message"]
 
     def test_post_investigator_disabled_returns_403(self):
         """POST returns 403 when ai_investigator_enabled is False."""
         coord = self._make_api_coordinator(ai_investigator_enabled=False)
 
-        status, body = asyncio.run(_simulate_investigate_post(coord))
+        resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 403
-        assert "Investigative agent is not enabled" in body
+        assert resp.status == 403
+        assert "Investigative agent is not enabled" in resp.json_data["message"]
 
     def test_post_no_client_returns_503(self):
         """POST returns 503 when claude_client is None."""
         coord = self._make_api_coordinator()
         coord.claude_client = None
 
-        status, body = asyncio.run(_simulate_investigate_post(coord))
+        resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 503
+        assert resp.status == 503
 
     def test_post_rate_limit_reached_returns_429(self):
         """POST returns 429 when the investigator daily limit is reached."""
         coord = self._make_api_coordinator()
         coord.claude_client.check_investigator_rate_limit.return_value = (False, "limit reached")
 
-        status, body = asyncio.run(_simulate_investigate_post(coord))
+        resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 429
-        assert "limit reached" in body
+        assert resp.status == 429
+        assert "limit reached" in resp.json_data["message"]
 
     def test_post_all_checks_pass_returns_200(self):
         """POST returns 200 when all pre-conditions are satisfied."""
         coord = self._make_api_coordinator()
 
-        status, _ = asyncio.run(_simulate_investigate_post(coord))
+        resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 200
+        assert resp.status == 200
 
     def test_post_truncated_result_logs_warning_and_stores_flag(self, caplog):
         """A truncated skill result logs a WARNING and stores truncated=True (Issue #420)."""
         coord = self._make_api_coordinator()
-        coord.hass = MagicMock()
-        coord.ai_skills = MagicMock()
         coord.ai_skills.async_execute = AsyncMock(
             return_value={
                 "success": True,
@@ -877,12 +855,11 @@ class TestAPIEndpointLogic:
                 "truncated": True,
             }
         )
-        coord.async_store_investigation_report = AsyncMock()
 
         with caplog.at_level("WARNING"):
-            status, _ = asyncio.run(_simulate_investigate_post(coord, run_skill=True))
+            resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 200
+        assert resp.status == 200
         assert any("truncated" in rec.message.lower() for rec in caplog.records)
         stored = coord.async_store_investigation_report.call_args[0][0]
         assert stored["truncated"] is True
@@ -890,8 +867,6 @@ class TestAPIEndpointLogic:
     def test_post_normal_result_does_not_warn(self, caplog):
         """A normal (non-truncated) result stores truncated=False and logs no warning."""
         coord = self._make_api_coordinator()
-        coord.hass = MagicMock()
-        coord.ai_skills = MagicMock()
         coord.ai_skills.async_execute = AsyncMock(
             return_value={
                 "success": True,
@@ -903,12 +878,11 @@ class TestAPIEndpointLogic:
                 "truncated": False,
             }
         )
-        coord.async_store_investigation_report = AsyncMock()
 
         with caplog.at_level("WARNING"):
-            status, _ = asyncio.run(_simulate_investigate_post(coord, run_skill=True))
+            resp = asyncio.run(_post_investigate(coord))
 
-        assert status == 200
+        assert resp.status == 200
         assert not any("truncated" in rec.message.lower() for rec in caplog.records)
         stored = coord.async_store_investigation_report.call_args[0][0]
         assert stored["truncated"] is False
@@ -919,18 +893,18 @@ class TestAPIEndpointLogic:
         expected = [{"timestamp": "2026-04-06T10:00:00", "result": {"summary": "test"}}]
         coord.get_investigation_report_history.return_value = expected
 
-        result = _simulate_investigation_reports_get(coord)
+        resp = asyncio.run(_get_investigation_reports(coord))
 
-        assert result == expected
+        assert resp.json_data == expected
 
     def test_get_reports_returns_empty_list_initially(self):
         """GET returns [] when there are no stored reports."""
         coord = self._make_api_coordinator()
         coord.get_investigation_report_history.return_value = []
 
-        result = _simulate_investigation_reports_get(coord)
+        resp = asyncio.run(_get_investigation_reports(coord))
 
-        assert result == []
+        assert resp.json_data == []
 
 
 # ---------------------------------------------------------------------------

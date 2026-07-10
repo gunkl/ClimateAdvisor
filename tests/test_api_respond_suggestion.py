@@ -1,53 +1,44 @@
 """Tests for respond_suggestion endpoint feedback handling (Issue #84).
 
-The view class cannot be directly instantiated in the lightweight test
-environment (same metaclass constraint as sensor entities). Tests verify:
-- The endpoint path constant is correct
-- The underlying record_feedback / dismiss_suggestion integration logic
-- Validation conditions that the post() handler checks
+Exercises the real ClimateAdvisorRespondSuggestionView.post() handler —
+HomeAssistantView is now a real minimal base class (Issue #452), so the
+view no longer needs to be hand-replicated in this test file.
 """
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
-from custom_components.climate_advisor.const import API_RESPOND_SUGGESTION
-
-# ---------------------------------------------------------------------------
-# Helpers — replicate the logic the post() handler executes
-# ---------------------------------------------------------------------------
+from custom_components.climate_advisor.api import ClimateAdvisorRespondSuggestionView
+from custom_components.climate_advisor.const import API_RESPOND_SUGGESTION, DOMAIN
 
 
-def _simulate_post(body: dict, coordinator: MagicMock) -> str:
-    """Simulate the validation + dispatch logic of ClimateAdvisorRespondSuggestionView.post().
+def _make_request(body: dict, coordinator) -> MagicMock:
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"entry1": coordinator}}
+    hass.async_add_executor_job = AsyncMock()
 
-    Returns the logical outcome: 'ok', '400_feedback', '400_key', '400_none',
-    '400_action', or 'feedback_only_ok'.
-    """
-    action = body.get("action")
-    suggestion_key = body.get("suggestion_key")
-    feedback = body.get("feedback")
+    req = MagicMock()
+    req.app = {"hass": hass}
+    req.json = AsyncMock(return_value=body)
+    return req
 
-    if feedback is not None and feedback not in ("correct", "incorrect"):
-        return "400_feedback"
-    if not suggestion_key:
-        return "400_key"
-    if action is None and feedback is None:
-        return "400_none"
-    if action is not None and action not in ("accept", "dismiss"):
-        return "400_action"
 
-    if feedback is not None:
-        coordinator.learning.record_feedback(suggestion_key, feedback)
+def _post(body: dict, coordinator):
+    view = ClimateAdvisorRespondSuggestionView()
+    request = _make_request(body, coordinator)
+    return asyncio.run(view.post(request))
 
-    if action == "accept":
-        coordinator.learning.accept_suggestion(suggestion_key)
-        return "ok"
-    elif action == "dismiss":
-        coordinator.learning.dismiss_suggestion(suggestion_key)
-        return "ok"
-    else:
-        return "ok"
+
+def _coord() -> MagicMock:
+    coord = MagicMock()
+    coord.config = {}
+    coord.learning.record_feedback = MagicMock()
+    coord.learning.dismiss_suggestion = MagicMock()
+    coord.learning.accept_suggestion = MagicMock(return_value={})
+    coord.learning.save_state = MagicMock()
+    return coord
 
 
 # ---------------------------------------------------------------------------
@@ -66,47 +57,41 @@ class TestRespondSuggestionEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# TestRespondSuggestionFeedback — logic-level tests
+# TestRespondSuggestionFeedback — real view.post() tests
 # ---------------------------------------------------------------------------
 
 
 class TestRespondSuggestionFeedback:
-    """Logic-level tests for the feedback dispatch in post()."""
-
-    def _coord(self) -> MagicMock:
-        coord = MagicMock()
-        coord.learning.record_feedback = MagicMock()
-        coord.learning.dismiss_suggestion = MagicMock()
-        coord.learning.accept_suggestion = MagicMock(return_value={})
-        return coord
+    """Tests against the real ClimateAdvisorRespondSuggestionView.post() handler."""
 
     def test_feedback_correct_recorded(self):
-        coord = self._coord()
-        result = _simulate_post({"suggestion_key": "low_window_compliance", "feedback": "correct"}, coord)
-        assert result == "ok"
+        coord = _coord()
+        resp = _post({"suggestion_key": "low_window_compliance", "feedback": "correct"}, coord)
+        assert resp.status == 200
+        assert resp.json_data["status"] == "ok"
         coord.learning.record_feedback.assert_called_once_with("low_window_compliance", "correct")
 
     def test_feedback_incorrect_recorded(self):
-        coord = self._coord()
-        result = _simulate_post({"suggestion_key": "low_window_compliance", "feedback": "incorrect"}, coord)
-        assert result == "ok"
+        coord = _coord()
+        resp = _post({"suggestion_key": "low_window_compliance", "feedback": "incorrect"}, coord)
+        assert resp.status == 200
         coord.learning.record_feedback.assert_called_once_with("low_window_compliance", "incorrect")
 
     def test_feedback_invalid_value_rejected(self):
-        coord = self._coord()
-        result = _simulate_post({"suggestion_key": "low_window_compliance", "feedback": "maybe"}, coord)
-        assert result == "400_feedback"
+        coord = _coord()
+        resp = _post({"suggestion_key": "low_window_compliance", "feedback": "maybe"}, coord)
+        assert resp.status == 400
         coord.learning.record_feedback.assert_not_called()
 
     def test_feedback_requires_suggestion_key(self):
-        coord = self._coord()
-        result = _simulate_post({"feedback": "correct"}, coord)
-        assert result == "400_key"
+        coord = _coord()
+        resp = _post({"feedback": "correct"}, coord)
+        assert resp.status == 400
         coord.learning.record_feedback.assert_not_called()
 
     def test_action_and_feedback_together(self):
-        coord = self._coord()
-        result = _simulate_post(
+        coord = _coord()
+        resp = _post(
             {
                 "suggestion_key": "low_window_compliance",
                 "action": "dismiss",
@@ -114,27 +99,36 @@ class TestRespondSuggestionFeedback:
             },
             coord,
         )
-        assert result == "ok"
+        assert resp.status == 200
+        assert resp.json_data["dismissed"] == "low_window_compliance"
         coord.learning.record_feedback.assert_called_once_with("low_window_compliance", "incorrect")
         coord.learning.dismiss_suggestion.assert_called_once_with("low_window_compliance")
 
     def test_feedback_only_no_action_returns_ok(self):
-        coord = self._coord()
-        result = _simulate_post({"suggestion_key": "low_window_compliance", "feedback": "correct"}, coord)
-        assert result == "ok"
+        coord = _coord()
+        resp = _post({"suggestion_key": "low_window_compliance", "feedback": "correct"}, coord)
+        assert resp.status == 200
         coord.learning.dismiss_suggestion.assert_not_called()
         coord.learning.accept_suggestion.assert_not_called()
 
     def test_no_action_no_feedback_returns_400(self):
-        coord = self._coord()
-        result = _simulate_post({"suggestion_key": "low_window_compliance"}, coord)
-        assert result == "400_none"
+        coord = _coord()
+        resp = _post({"suggestion_key": "low_window_compliance"}, coord)
+        assert resp.status == 400
         coord.learning.record_feedback.assert_not_called()
 
     def test_invalid_action_returns_400(self):
-        coord = self._coord()
-        result = _simulate_post({"suggestion_key": "low_window_compliance", "action": "snooze"}, coord)
-        assert result == "400_action"
+        coord = _coord()
+        resp = _post({"suggestion_key": "low_window_compliance", "action": "snooze"}, coord)
+        assert resp.status == 400
         coord.learning.record_feedback.assert_not_called()
         coord.learning.dismiss_suggestion.assert_not_called()
         coord.learning.accept_suggestion.assert_not_called()
+
+    def test_accept_action_applies_changes_to_config(self):
+        coord = _coord()
+        coord.learning.accept_suggestion = MagicMock(return_value={"comfort_heat": 68})
+        resp = _post({"suggestion_key": "low_window_compliance", "action": "accept"}, coord)
+        assert resp.status == 200
+        assert resp.json_data["changes"] == {"comfort_heat": 68}
+        assert coord.config["comfort_heat"] == 68

@@ -6,7 +6,6 @@ Coverage:
 - coordinator _rejection_log accumulation, capping, and per-type isolation
 - _build_learning_health() reason-code counting
 - ClimateAdvisorComplianceSensor.extra_state_attributes thermal_learning_health key
-  (tested via plain helper — never instantiate the sensor class directly)
 """
 
 from __future__ import annotations
@@ -39,6 +38,7 @@ from custom_components.climate_advisor.learning import (  # noqa: E402
     LearningEngine,
     compute_k_passive,
 )
+from custom_components.climate_advisor.sensor import ClimateAdvisorComplianceSensor  # noqa: E402
 
 _TODAY = "2026-03-27"
 
@@ -351,61 +351,17 @@ class TestLearningHealth:
 
 
 def _compliance_extra_state_attributes(coordinator) -> dict:
-    """Replicate ClimateAdvisorComplianceSensor.extra_state_attributes logic.
+    """Return the real ClimateAdvisorComplianceSensor.extra_state_attributes for `coordinator`.
 
-    Pattern: plain helper function, never instantiate the sensor class directly
-    (metaclass conflict in the lightweight HA stub environment).
-    Reference: test_fan_control.py / test_contact_status.py.
+    HomeAssistantView/sensor bases are real minimal classes now (Issue #452), so
+    the sensor can be instantiated directly instead of replicated — this was
+    already independently duplicated in test_status_sensors.py, a live drift risk
+    this consolidation removes.
     """
-    from custom_components.climate_advisor.const import (
-        ATTR_FORECAST_BIAS_CONFIDENCE,
-        ATTR_FORECAST_HIGH_BIAS,
-        ATTR_FORECAST_LOW_BIAS,
-        ATTR_LEARNING_SUGGESTIONS,
-        ATTR_THERMAL_CONFIDENCE,
-        ATTR_THERMAL_COOLING_RATE,
-        ATTR_THERMAL_HEATING_RATE,
-    )
-    from custom_components.climate_advisor.temperature import FAHRENHEIT, convert_delta
-
-    data = coordinator.data or {}
-    suggestions = data.get(ATTR_LEARNING_SUGGESTIONS, [])
-    today = coordinator.today_record
-    attrs: dict = {
-        "pending_suggestions": len(suggestions),
-        "comfort_violations_minutes_today": today.comfort_violations_minutes if today else 0.0,
-        "comfort_range_low": coordinator.config.get("comfort_heat", 70),
-        "comfort_range_high": coordinator.config.get("comfort_cool", 75),
-    }
-    unit = coordinator.config.get("temp_unit", FAHRENHEIT)
-    thermal = coordinator.learning.get_thermal_model()
-    heat_rate_f = thermal.get("heating_rate_f_per_hour")
-    cool_rate_f = thermal.get("cooling_rate_f_per_hour")
-    attrs[ATTR_THERMAL_HEATING_RATE] = convert_delta(heat_rate_f, unit) if heat_rate_f is not None else None
-    attrs[ATTR_THERMAL_COOLING_RATE] = convert_delta(cool_rate_f, unit) if cool_rate_f is not None else None
-    attrs[ATTR_THERMAL_CONFIDENCE] = thermal.get("confidence", "none")
-    attrs["thermal_observation_count"] = thermal.get("observation_count_heat", 0) + thermal.get(
-        "observation_count_cool", 0
-    )
-    health = thermal.get("learning_health", {})
-    attrs["thermal_learning_health"] = (
-        {
-            obs_type: {
-                "attempts": h.get("attempts", 0),
-                "committed": h.get("committed", 0),
-                "rejections": h.get("rejections", {}),
-                "last_rejection_reason": (h["last_rejection"]["reason_code"] if h.get("last_rejection") else None),
-            }
-            for obs_type, h in health.items()
-        }
-        if health
-        else {}
-    )
-    weather_bias = coordinator.learning.get_weather_bias()
-    attrs[ATTR_FORECAST_HIGH_BIAS] = convert_delta(weather_bias.get("high_bias", 0.0), unit)
-    attrs[ATTR_FORECAST_LOW_BIAS] = convert_delta(weather_bias.get("low_bias", 0.0), unit)
-    attrs[ATTR_FORECAST_BIAS_CONFIDENCE] = weather_bias.get("confidence", "none")
-    return attrs
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    sensor = ClimateAdvisorComplianceSensor(coordinator, entry)
+    return sensor.extra_state_attributes
 
 
 def _make_compliance_coordinator_stub(learning_health: dict) -> MagicMock:

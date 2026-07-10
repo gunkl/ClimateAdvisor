@@ -19,6 +19,14 @@ wording ever changes.
 Shadow mode only (see the "Substitution mode — DEFERRED" note further down for
 why): observes real side effects and compares against the new pure function's
 prediction; the wrapped method's real behavior is completely untouched.
+
+Does NOT use ``tools.sim_harness.decision_compare_base`` (Issue #454): that
+base covers comparators for production methods that RETURN a value (see
+``nat_vent_gate_compare.py``). This comparator's production method returns
+nothing and requires capturing inputs BEFORE the call (production mutates
+state as part of the decision) plus side-effect observation to infer the
+outcome — a genuinely different instrumentation shape, not a variation the
+base should be stretched to cover.
 """
 
 from __future__ import annotations

@@ -4,15 +4,15 @@ Architecture-reset Step 2: the first real "old vs new" comparison in this
 project (everything in Step 1 was old-vs-old). Two modes, sharing one input
 reconstruction:
 
-- **Shadow mode** (``compare_scenario`` / ``_instrumented_gate``): the real
-  production ``_nat_vent_may_reactivate()`` runs and its answer drives the live
-  engine; the new pure ``decide_nat_vent_gate()`` is evaluated on the same
+- **Shadow mode** (``compare_scenario``): the real production
+  ``_nat_vent_may_reactivate()`` runs and its answer drives the live engine;
+  the new pure ``decide_nat_vent_gate()`` is evaluated on the same
   reconstructed inputs ONLY for comparison — it never affects behavior. Proves
   "would the new function have agreed," not "does the rest of the scenario
   unfold the same way if you let it decide."
-- **Substitution mode** (``substitute_new_gate`` / ``run_substituted_scenario``):
-  the new pure function's answer is what actually gets returned to the live
-  engine — it genuinely drives behavior. Used with ``tools.sim_harness.differential``'s
+- **Substitution mode** (``substitute_new_gate``): the new pure function's
+  answer is what actually gets returned to the live engine — it genuinely
+  drives behavior. Used with ``tools.sim_harness.differential``'s
   ``diff_runs(scenario, mutate_b=substitute_new_gate)`` to diff the ENTIRE
   resulting ``action_log``/``event_log`` against an untouched baseline, not just
   one function's boolean. This is what closes the "shadow-only, never
@@ -23,6 +23,15 @@ Both modes reconstruct the full set of raw inputs the call chain actually used
 ``_in_sleep_window()`` helper — not back-derived from already-resolved values),
 via the shared ``_reconstruct_inputs()`` helper, so there is exactly one place
 that logic lives (not duplicated between shadow and substitution modes).
+
+Instrumentation itself (the shadow-mode patch/compare loop, the
+``GateCall``/``GateComparisonRun`` shape, substitution-mode's patch) is now
+provided by ``tools.sim_harness.decision_compare_base`` (Issue #454) — this
+module supplies only what's specific to the reactivation gate: input
+reconstruction and which production method/pure function to wire together.
+``GateCall``/``GateComparisonRun`` are thin aliases of the base's
+``DecisionCall``/``DecisionComparisonRun`` kept for backward compatibility with
+existing callers (``tools/nat_vent_gate_diff.py``).
 
 Production integration follow-up: ``_nat_vent_may_reactivate()`` now calls
 ``decide_nat_vent_gate()`` directly (mirroring the same extraction done for
@@ -40,9 +49,22 @@ scenarios diverge).
 
 from __future__ import annotations
 
-import contextlib
-from dataclasses import dataclass, field
 from typing import Any
+
+from tools.sim_harness.decision_compare_base import (
+    DecisionCall as GateCall,
+)
+from tools.sim_harness.decision_compare_base import (
+    DecisionComparisonRun as GateComparisonRun,
+)
+from tools.sim_harness.decision_compare_base import (
+    compare_scenario as _base_compare_scenario,
+)
+from tools.sim_harness.decision_compare_base import (
+    substitute_new_decision,
+)
+
+__all__ = ["GateCall", "GateComparisonRun", "compare_scenario", "substitute_new_gate"]
 
 
 def _reconstruct_inputs(self: Any, kwargs: dict[str, Any]) -> Any:
@@ -78,92 +100,41 @@ def _reconstruct_inputs(self: Any, kwargs: dict[str, Any]) -> Any:
     )
 
 
-# ---------------------------------------------------------------------------
-# Shadow mode — compare only, never drives behavior
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class GateCall:
-    """One intercepted call to the real reactivation gate + the comparison result."""
-
-    scenario_name: str
-    real_kwargs: dict[str, Any]
-    real_result: bool
-    new_inputs: Any  # NatVentGateInputs
-    new_result: bool
-
-    @property
-    def agrees(self) -> bool:
-        return self.real_result == self.new_result
-
-
-@dataclass
-class GateComparisonRun:
-    calls: list[GateCall] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-
-    @property
-    def n_calls(self) -> int:
-        return len(self.calls)
-
-    @property
-    def n_agree(self) -> int:
-        return sum(1 for c in self.calls if c.agrees)
-
-    @property
-    def disagreements(self) -> list[GateCall]:
-        return [c for c in self.calls if not c.agrees]
-
-
-@contextlib.contextmanager
-def _instrumented_gate(run: GateComparisonRun, scenario_name: str):
-    """Wrap AutomationEngine._nat_vent_may_reactivate to intercept every call (shadow mode)."""
-    from unittest.mock import patch  # noqa: PLC0415
-
+def _engine_and_pure_fn():
     from custom_components.climate_advisor.automation import AutomationEngine  # noqa: PLC0415
     from custom_components.climate_advisor.nat_vent_gate import decide_nat_vent_gate  # noqa: PLC0415
 
-    original = AutomationEngine._nat_vent_may_reactivate
-
-    def _wrapped(self: Any, **kwargs: Any) -> bool:
-        real_result = original(self, **kwargs)
-
-        try:
-            new_inputs = _reconstruct_inputs(self, kwargs)
-            new_result = decide_nat_vent_gate(new_inputs)
-            run.calls.append(
-                GateCall(
-                    scenario_name=scenario_name,
-                    real_kwargs=dict(kwargs),
-                    real_result=real_result,
-                    new_inputs=new_inputs,
-                    new_result=new_result,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 — never let comparison-side errors break production
-            run.errors.append(f"{scenario_name}: comparator error: {type(exc).__name__}: {exc}")
-
-        return real_result
-
-    with patch.object(AutomationEngine, "_nat_vent_may_reactivate", _wrapped):
-        yield
+    return AutomationEngine, decide_nat_vent_gate
 
 
 def compare_scenario(scenario: dict, scenario_name: str, run: GateComparisonRun) -> None:
-    """Run one scenario through the real engine with the gate instrumented (shadow mode)."""
-    from tools.sim_harness.run_production import run_production_scenario  # noqa: PLC0415
+    """Run one scenario through the real engine with the gate instrumented (shadow mode).
 
-    with _instrumented_gate(run, scenario_name):
-        run_production_scenario(scenario)
+    Import order matters here: ``run_production`` must be imported (installing
+    the HA stubs as its own module-level side effect) BEFORE anything imports
+    ``custom_components.climate_advisor.automation`` — that module needs
+    ``homeassistant.core`` already present in ``sys.modules``. The original
+    (pre-#454) ``compare_scenario`` got this ordering right by accident (its
+    ``run_production`` import came first, textually, in the function body); a
+    first cut of this refactor broke it by resolving the engine class before
+    handing off to the shared base. Kept as an explicit, load-bearing import
+    here rather than relying on import order elsewhere staying accidentally
+    correct.
+    """
+    from tools.sim_harness.run_production import run_production_scenario  # noqa: F401,PLC0415
+
+    engine_cls, pure_fn = _engine_and_pure_fn()
+    _base_compare_scenario(
+        scenario,
+        scenario_name,
+        run,
+        engine_cls=engine_cls,
+        method_name="_nat_vent_may_reactivate",
+        reconstruct_inputs=_reconstruct_inputs,
+        pure_fn=pure_fn,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Substitution mode — the new function's answer actually drives behavior
-# ---------------------------------------------------------------------------
-
-
-@contextlib.contextmanager
 def substitute_new_gate():
     """Replace _nat_vent_may_reactivate's REAL return value with decide_nat_vent_gate()'s
     answer, reconstructed from the same inputs the real call would have used.
@@ -173,14 +144,10 @@ def substitute_new_gate():
     mutate_b=substitute_new_gate)`` so the FULL resulting action_log/event_log
     can be diffed against an untouched baseline, not just one function's boolean.
     """
-    from unittest.mock import patch  # noqa: PLC0415
-
-    from custom_components.climate_advisor.automation import AutomationEngine  # noqa: PLC0415
-    from custom_components.climate_advisor.nat_vent_gate import decide_nat_vent_gate  # noqa: PLC0415
-
-    def _substituted(self: Any, **kwargs: Any) -> bool:
-        new_inputs = _reconstruct_inputs(self, kwargs)
-        return decide_nat_vent_gate(new_inputs)
-
-    with patch.object(AutomationEngine, "_nat_vent_may_reactivate", _substituted):
-        yield
+    engine_cls, pure_fn = _engine_and_pure_fn()
+    return substitute_new_decision(
+        engine_cls,
+        "_nat_vent_may_reactivate",
+        _reconstruct_inputs,
+        pure_fn,
+    )

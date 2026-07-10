@@ -12,8 +12,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import (
+    AutomationEngine,
+    should_defer_to_occupancy_setback,
+)
 from custom_components.climate_advisor.classifier import DayClassification
+from custom_components.climate_advisor.const import (
+    OCCUPANCY_AWAY,
+    OCCUPANCY_GUEST,
+    OCCUPANCY_HOME,
+    OCCUPANCY_VACATION,
+)
 
 AUTOMATION_LOGGER = "custom_components.climate_advisor.automation"
 
@@ -467,3 +476,29 @@ class TestSetOccupancyMode:
         with caplog.at_level(logging.INFO, logger=AUTOMATION_LOGGER):
             engine.set_occupancy_mode("away")
         assert "home → away" in caplog.text
+
+
+class TestShouldDeferToOccupancySetback:
+    """Issue #460: should_defer_to_occupancy_setback() is the single source of
+    truth for the occupancy-defer gate, consolidating 3 formulations previously
+    scattered across _set_temperature_for_mode(), handle_bedtime(),
+    handle_pre_cool(), and handle_morning_wakeup() (the last phrased inverted)."""
+
+    def test_away_defers(self):
+        assert should_defer_to_occupancy_setback(OCCUPANCY_AWAY) is True
+
+    def test_vacation_defers(self):
+        assert should_defer_to_occupancy_setback(OCCUPANCY_VACATION) is True
+
+    def test_home_does_not_defer(self):
+        assert should_defer_to_occupancy_setback(OCCUPANCY_HOME) is False
+
+    def test_guest_does_not_defer(self):
+        assert should_defer_to_occupancy_setback(OCCUPANCY_GUEST) is False
+
+    def test_matches_inverted_formulation(self):
+        """The predicate must agree with handle_morning_wakeup()'s original
+        inverted form (`occupancy_mode not in (HOME, GUEST)`) for all 4 modes."""
+        for mode in (OCCUPANCY_HOME, OCCUPANCY_AWAY, OCCUPANCY_VACATION, OCCUPANCY_GUEST):
+            inverted_form = mode not in (OCCUPANCY_HOME, OCCUPANCY_GUEST)
+            assert should_defer_to_occupancy_setback(mode) == inverted_form

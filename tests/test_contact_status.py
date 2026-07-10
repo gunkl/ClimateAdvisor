@@ -40,48 +40,39 @@ def _states_getter(state_map: dict[str, MagicMock]):
     return lambda eid: state_map.get(eid)
 
 
-def _is_sensor_open(hass_states_get, entity_id: str, polarity_inverted: bool = False) -> bool:
-    """Check if a sensor is open, respecting polarity.
+def _make_real_coordinator(resolved_sensors: list[str], hass_states_get, polarity_inverted: bool = False):
+    """Build a bare ClimateAdvisorCoordinator bound to the real contact-status methods.
 
-    This mirrors ClimateAdvisorCoordinator._is_sensor_open().
+    Uses object.__new__() + types.MethodType() (the established pattern for
+    partially instantiating the coordinator in tests — see test_daily_record_accuracy.py)
+    rather than replicating the method bodies, so these tests exercise the real
+    ClimateAdvisorCoordinator._is_sensor_open/_compute_contact_status/_compute_contact_details.
     """
-    state = hass_states_get(entity_id)
-    if not state:
-        return False
-    if polarity_inverted:
-        return state.state == "off"
-    return state.state == "on"
+    import types
+
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord = object.__new__(ClimateAdvisorCoordinator)
+    coord.config = {"sensor_polarity_inverted": polarity_inverted}
+    coord._resolved_sensors = resolved_sensors
+    coord.hass = MagicMock()
+    coord.hass.states.get = hass_states_get
+    coord._is_sensor_open = types.MethodType(ClimateAdvisorCoordinator._is_sensor_open, coord)
+    coord._compute_contact_status = types.MethodType(ClimateAdvisorCoordinator._compute_contact_status, coord)
+    coord._compute_contact_details = types.MethodType(ClimateAdvisorCoordinator._compute_contact_details, coord)
+    return coord
 
 
 def _compute_contact_status(resolved_sensors: list[str], hass_states_get) -> str:
-    """Compute the contact sensor summary string.
-
-    This mirrors ClimateAdvisorCoordinator._compute_contact_status().
-    """
-    if not resolved_sensors:
-        return "no sensors"
-    open_count = sum(1 for s in resolved_sensors if _is_sensor_open(hass_states_get, s))
-    if open_count == 0:
-        return "all closed"
-    return f"{open_count} open"
+    """Call the real ClimateAdvisorCoordinator._compute_contact_status()."""
+    coord = _make_real_coordinator(resolved_sensors, hass_states_get)
+    return coord._compute_contact_status()
 
 
 def _compute_contact_details(resolved_sensors: list[str], hass_states_get) -> list[dict]:
-    """Return per-sensor details for contact status attributes.
-
-    This mirrors ClimateAdvisorCoordinator._compute_contact_details().
-    """
-    details = []
-    for sensor_id in resolved_sensors:
-        friendly = sensor_id.split(".")[-1].replace("_", " ").title()
-        details.append(
-            {
-                "entity_id": sensor_id,
-                "friendly_name": friendly,
-                "open": _is_sensor_open(hass_states_get, sensor_id),
-            }
-        )
-    return details
+    """Call the real ClimateAdvisorCoordinator._compute_contact_details()."""
+    coord = _make_real_coordinator(resolved_sensors, hass_states_get)
+    return coord._compute_contact_details()
 
 
 # ---------------------------------------------------------------------------

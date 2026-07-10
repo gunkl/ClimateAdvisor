@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.5": [
+        "Fix #452: no user-visible change. Continues the nat-vent architecture-reset"
+        " direction (v0.5.1) into the test suite — 14 test helpers that hand-copied"
+        " production logic (API view dispatch, sensor attributes, coordinator status"
+        " strings) because HomeAssistantView couldn't be instantiated in tests now"
+        " exercise the real classes directly. Along the way this caught and fixed a"
+        " stale test assertion that had silently drifted from production: the bedtime"
+        " status line's expected setpoint used an old comfort-temp-plus-delta formula"
+        " that stopped matching the real sleep_heat/sleep_cool config keys, so the old"
+        " test was passing against logic that no longer runs.",
+    ],
     "0.5.4": [
         "Fix #449: found the real reason a whole-house fan could stay off for hours"
         " overnight after being turned off outside of Climate Advisor (e.g. a wall"
@@ -889,6 +900,37 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    452: {
+        "version_fixed": "0.5.5",
+        "title": "HomeAssistantView test stub gap forced 14 test helpers to hand-replicate production logic",
+        "scope_covered": (
+            "tools/sim_harness/ha_stubs.py: added _MockHomeAssistantView + _MockJsonResponse, wired"
+            " into install_ha_stubs() the same way _MockSensorEntity/_MockCoordinatorEntity already"
+            " were — HomeAssistantView subclasses (the 23 api.py view classes) previously silently"
+            " became MagicMock instances on instantiation (not a hard error, so it went unnoticed) since"
+            " the base was an unconfigured MagicMock attribute. Deleted and rewrote the 14 test helpers"
+            " that hand-replicated production logic as a workaround: 3 API-view helpers now drive the"
+            " real ClimateAdvisorStatusView/LearningView/RespondSuggestionView/InvestigateView/"
+            " InvestigationReportsView; 3 sensor helpers now instantiate the real"
+            " ClimateAdvisorFanStatusSensor/ClimateAdvisorComplianceSensor (confirmed already"
+            " instantiable — the SensorEntity/CoordinatorEntity metaclass conflict this was blamed on"
+            " had already been resolved by an earlier pass and the docs were stale); 3 coordinator-method"
+            " helpers (_compute_contact_status/_details, _compute_automation_status,"
+            " _compute_next_automation_action) now use the established object.__new__() +"
+            " types.MethodType() partial-instantiation pattern instead of replicated bodies. Along the"
+            " way, rewriting _compute_next_automation_action's tests against the real method surfaced"
+            " and fixed a stale assertion: the old replicated helper's bedtime-setback formula"
+            " (comfort_heat - 4 + setback_modifier) predates the sleep_heat/sleep_cool config keys the"
+            " real method has read for some time, so two tests were passing against logic production no"
+            " longer runs."
+        ),
+        "scope_not_covered": (
+            "Does not touch any production behavior — this is test-infrastructure only. Does not convert"
+            " the remaining source-text-inspection tests (e.g. TestContactStatusSensorSource) or extend"
+            " coverage to the ~18 API view classes that still have no logic-level test at all; both are"
+            " separate follow-ups, not blocked by this fix."
+        ),
+    },
     449: {
         "version_fixed": "0.5.4",
         "title": "WHF control-entity command dedup silently drops reactivation in dual-entity setups",

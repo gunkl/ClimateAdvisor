@@ -20,12 +20,8 @@ from custom_components.climate_advisor.const import (
     API_SEND_BRIEFING,
     API_STATUS,
     API_TOGGLE_AUTOMATION,
-    ATTR_CONTACT_STATUS,
+    ATTR_CURRENT_SETPOINT,
     ATTR_DAY_TYPE,
-    ATTR_FAN_STATUS,
-    ATTR_NEXT_ACTION,
-    ATTR_NEXT_AUTOMATION_ACTION,
-    ATTR_NEXT_AUTOMATION_TIME,
     ATTR_TREND,
     ATTR_TREND_MAGNITUDE,
     CONF_AUTOMATION_GRACE_PERIOD,
@@ -262,91 +258,63 @@ class TestToggleAutomationView:
 # ---------------------------------------------------------------------------
 
 
-def _simulate_status_get(coordinator):
-    """Replicate ClimateAdvisorStatusView.get() response dict."""
-    from custom_components.climate_advisor.temperature import convert_delta, from_fahrenheit
+# ---------------------------------------------------------------------------
+# View-driving helpers — exercise the real HomeAssistantView subclasses
+# (HomeAssistantView is a real minimal base class as of Issue #452, so these
+# no longer need to hand-replicate the view's response dict).
+# ---------------------------------------------------------------------------
 
-    data = coordinator.data or {}
-    unit = coordinator.config.get("temp_unit", "fahrenheit")
-    indoor_temp = coordinator._get_indoor_temp()
-    outdoor_temp = coordinator._last_outdoor_temp
-    indoor_temp_display = round(from_fahrenheit(indoor_temp, unit), 1) if indoor_temp is not None else None
-    outdoor_temp_display = round(from_fahrenheit(outdoor_temp, unit), 1) if outdoor_temp is not None else None
-    trend_magnitude_display = round(convert_delta(data.get(ATTR_TREND_MAGNITUDE, 0), unit), 1)
-    return {
-        "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
-        "trend_direction": data.get(ATTR_TREND, "unknown"),
-        "trend_magnitude": trend_magnitude_display,
-        "hvac_mode": "off",
-        "indoor_temp": indoor_temp_display,
-        "outdoor_temp": outdoor_temp_display,
-        "current_setpoint": None,
-        "target_temp_low": None,
-        "target_temp_high": None,
-        "automation_status": data.get("automation_status", "unknown"),
-        "compliance_score": data.get("compliance_score", 1.0),
-        "next_action": data.get(ATTR_NEXT_ACTION, ""),
-        "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),
-        "next_automation_time": data.get(ATTR_NEXT_AUTOMATION_TIME, ""),
-        "automation_enabled": coordinator.automation_enabled,
-        "occupancy_mode": coordinator._occupancy_mode,
-        "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
-        "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
-        "contact_sensors": [],
-        "manual_override_active": False,
-        "fan_override_active": False,
-        "paused_by_door": False,
-        "unit": unit,
-    }
+
+def _make_view_request(coordinator, climate_state=None):
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"entry1": coordinator}}
+    hass.states.get.return_value = climate_state
+    req = MagicMock()
+    req.app = {"hass": hass}
+    return req
+
+
+def _simulate_status_get(coordinator, climate_state=None):
+    """Call the real ClimateAdvisorStatusView.get() and return its json body."""
+    import asyncio
+
+    from custom_components.climate_advisor.api import ClimateAdvisorStatusView
+
+    view = ClimateAdvisorStatusView()
+    request = _make_view_request(coordinator, climate_state)
+    resp = asyncio.run(view.get(request))
+    return resp.json_data
 
 
 def _simulate_learning_get(coordinator):
-    """Replicate ClimateAdvisorLearningView.get() response dict."""
-    from custom_components.climate_advisor.temperature import from_fahrenheit
+    """Call the real ClimateAdvisorLearningView.get() and return its json body."""
+    import asyncio
 
-    unit = coordinator.config.get("temp_unit", "fahrenheit")
-    return {
-        "today_record": None,
-        "yesterday_record": coordinator.yesterday_record,
-        "tomorrow_plan": coordinator.tomorrow_plan,
-        "suggestions": [],
-        "compliance": {},
-        "comfort_range_low": round(from_fahrenheit(coordinator.config.get("comfort_heat", 70), unit), 1),
-        "comfort_range_high": round(from_fahrenheit(coordinator.config.get("comfort_cool", 75), unit), 1),
-        "unit": unit,
-    }
+    from custom_components.climate_advisor.api import ClimateAdvisorLearningView
+
+    view = ClimateAdvisorLearningView()
+    request = _make_view_request(coordinator)
+    resp = asyncio.run(view.get(request))
+    return resp.json_data
 
 
-def _extract_setpoints(climate_state, hvac_mode):
-    """Replicate the api.py status setpoint extraction (Issue #266).
-
-    Single-setpoint modes (cool/heat) expose `temperature`; the heat_cool band exposes
-    `target_temp_low`/`target_temp_high`. Nothing is exposed when HVAC is off.
-    """
-    setpoint = target_temp_low = target_temp_high = None
-    if climate_state and hvac_mode != "off":
-        setpoint = climate_state.attributes.get("temperature")
-        target_temp_low = climate_state.attributes.get("target_temp_low")
-        target_temp_high = climate_state.attributes.get("target_temp_high")
-    return setpoint, target_temp_low, target_temp_high
-
-
-def _compute_ca_targets(config: dict, now) -> tuple[float | None, float | None]:
-    """Replicate the Issue #402 ca_target_heat/cool sleep-aware logic in api.py.
-
-    Before the fix, these were always the flat comfort_heat/comfort_cool values,
-    so the divergence check (both the pre-existing heat_cool one and the new
-    single-setpoint one, Issue #402) compared the real thermostat setpoint against
-    the wrong intended value throughout the sleep window.
-    """
-    from custom_components.climate_advisor.automation import _in_sleep_window
-
-    if _in_sleep_window(now, config):
-        return (
-            config.get("sleep_heat", config.get("comfort_heat")),
-            config.get("sleep_cool", config.get("comfort_cool")),
-        )
-    return config.get("comfort_heat"), config.get("comfort_cool")
+def _status_get_with_climate_state(config: dict, climate_state, indoor_temp=70.0, outdoor_temp=None):
+    """Build a minimal coordinator and drive the real status view, for setpoint/ca-target tests."""
+    coord = MagicMock()
+    coord.config = config
+    coord.data = {}
+    coord._get_indoor_temp.return_value = indoor_temp
+    coord._last_outdoor_temp = outdoor_temp
+    coord.automation_enabled = True
+    coord._occupancy_mode = "home"
+    ae = MagicMock()
+    ae._manual_override_active = False
+    ae._override_confirm_pending = False
+    ae._fan_override_active = False
+    ae.is_paused_by_door = False
+    coord.automation_engine = ae
+    coord._compute_contact_details.return_value = []
+    return _simulate_status_get(coord, climate_state)
 
 
 class TestCATargetSleepAware:
@@ -367,11 +335,24 @@ class TestCATargetSleepAware:
         "wake_time": "07:00",
     }
 
+    def _get_ca_targets(self, config: dict, now):
+        """Drive the real ClimateAdvisorStatusView.get(), patching dt_util.now()."""
+        from unittest.mock import patch
+
+        from homeassistant.util import dt as dt_util
+
+        state = MagicMock()
+        state.state = "heat"
+        state.attributes = {"temperature": 70, "target_temp_low": None, "target_temp_high": None}
+        with patch.object(dt_util, "now", return_value=now):
+            response = _status_get_with_climate_state(config, state)
+        return response["ca_target_heat"], response["ca_target_cool"]
+
     def test_daytime_uses_comfort_band(self):
         from datetime import datetime
 
         now = datetime(2026, 7, 21, 14, 0, 0)  # 14:00 — outside sleep window
-        heat, cool = _compute_ca_targets(self._CONFIG, now)
+        heat, cool = self._get_ca_targets(self._CONFIG, now)
         assert heat == 68.0
         assert cool == 74.0
 
@@ -379,7 +360,7 @@ class TestCATargetSleepAware:
         from datetime import datetime
 
         now = datetime(2026, 7, 21, 2, 0, 0)  # 02:00 — inside 22:30-07:00 sleep window
-        heat, cool = _compute_ca_targets(self._CONFIG, now)
+        heat, cool = self._get_ca_targets(self._CONFIG, now)
         assert heat == 64.0
         assert cool == 72.0
         assert heat != 68.0, "must not fall back to the flat daytime comfort_heat overnight"
@@ -390,7 +371,7 @@ class TestCATargetSleepAware:
 
         config = {"comfort_heat": 68.0, "comfort_cool": 74.0, "sleep_time": "22:30", "wake_time": "07:00"}
         now = datetime(2026, 7, 21, 2, 0, 0)
-        heat, cool = _compute_ca_targets(config, now)
+        heat, cool = self._get_ca_targets(config, now)
         assert heat == 68.0
         assert cool == 74.0
 
@@ -398,26 +379,32 @@ class TestCATargetSleepAware:
 class TestStatusSetpointExtraction:
     """Issue #266: the status endpoint must expose the dual band setpoints in heat_cool mode."""
 
+    _CONFIG = {"comfort_heat": 68.0, "comfort_cool": 74.0}
+
     def test_heat_cool_band_exposes_dual_setpoints(self):
         state = MagicMock()
+        state.state = "heat_cool"
         state.attributes = {"temperature": None, "target_temp_low": 64, "target_temp_high": 72}
-        setpoint, low, high = _extract_setpoints(state, "heat_cool")
-        assert setpoint is None  # single setpoint is absent in the heat_cool band
-        assert low == 64
-        assert high == 72
+        response = _status_get_with_climate_state(self._CONFIG, state)
+        assert response[ATTR_CURRENT_SETPOINT] is None  # single setpoint is absent in the heat_cool band
+        assert response["target_temp_low"] == 64
+        assert response["target_temp_high"] == 72
 
     def test_cool_mode_exposes_single_setpoint(self):
         state = MagicMock()
+        state.state = "cool"
         state.attributes = {"temperature": 74, "target_temp_low": None, "target_temp_high": None}
-        setpoint, low, high = _extract_setpoints(state, "cool")
-        assert setpoint == 74
-        assert low is None and high is None
+        response = _status_get_with_climate_state(self._CONFIG, state)
+        assert response[ATTR_CURRENT_SETPOINT] == 74
+        assert response["target_temp_low"] is None and response["target_temp_high"] is None
 
     def test_off_mode_exposes_no_setpoints(self):
         state = MagicMock()
+        state.state = "off"
         state.attributes = {"temperature": 74, "target_temp_low": 64, "target_temp_high": 72}
-        setpoint, low, high = _extract_setpoints(state, "off")
-        assert setpoint is None and low is None and high is None
+        response = _status_get_with_climate_state(self._CONFIG, state)
+        assert response[ATTR_CURRENT_SETPOINT] is None
+        assert response["target_temp_low"] is None and response["target_temp_high"] is None
 
 
 class TestStatusViewCelsiusUnit:

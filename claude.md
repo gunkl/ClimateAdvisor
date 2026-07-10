@@ -302,14 +302,13 @@ Reference: `TestPredIndoorIntegration::test_ode_cache_diverges_after_model_refre
 
 #### Testing Sensor Attributes and API Views
 
-**Sensor entity classes (`ClimateAdvisorBaseSensor` subclasses) CANNOT be directly instantiated in test files that use the lightweight HA module stubs** (e.g., `test_fan_control.py`, `test_contact_status.py`). Importing `sensor.py` in that environment causes a metaclass conflict:
-```
-TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases
-```
+**As of Issue #452, sensor entity classes and `HomeAssistantView` subclasses CAN both be directly instantiated in the lightweight HA stub environment.** `tools/sim_harness/ha_stubs.py` realifies the base classes each needs (`_MockSensorEntity`/`_MockCoordinatorEntity` for sensors, `_MockHomeAssistantView` + `_MockJsonResponse` for API views), so there is no more metaclass conflict for either. **Do not replicate `extra_state_attributes` or a view's `get()`/`post()` logic as a plain helper function** — instantiate the real class and exercise it directly.
 
-**Pattern to follow**: Replicate the `extra_state_attributes` logic as a plain helper function in the test file and test that directly. Reference implementations: `test_fan_control.py` (`_fan_sensor_extra_state_attributes` / `TestFanSensorAttributes`), `test_contact_status.py` (`_compute_contact_status`).
+**Sensor pattern**: build a `MagicMock()` (or partially-instantiated real) coordinator, set `.data`, then `SomeSensor(coordinator, entry).extra_state_attributes`. Reference: `test_fan_control.py` (`_fan_sensor_extra_state_attributes`), `test_status_sensors.py` (`_compliance_sensor_extra_state_attributes_with_thermal`).
 
-**`HomeAssistantView` subclasses (API views) have the same metaclass constraint.** Do NOT try to instantiate `ClimateAdvisorRespondSuggestionView` or similar view classes in tests. Instead, replicate the validation and dispatch logic as a plain `_simulate_post()` helper function in the test file and test that directly. Reference implementation: `test_api_respond_suggestion.py`.
+**API view pattern**: instantiate the view (`SomeView()`), build a `MagicMock()` request with `.app = {"hass": hass}` and (for POST) `.json = AsyncMock(return_value=body)`, then `await view.get(request)`/`await view.post(request)`. The response is a `_MockJsonResponse` exposing `.status` and `.json_data`. Reference: `test_api_respond_suggestion.py` (`_post`), `test_api.py` (`_simulate_status_get`), `test_ai_investigator.py` (`_post_investigate`).
+
+**Coordinator methods** (not sensor/view classes) still use the pre-existing `object.__new__(ClimateAdvisorCoordinator)` + `types.MethodType(RealMethod, instance)` partial-instantiation pattern (never metaclass-blocked — see below) — bind only the method(s) under test and set the specific `self.*` attributes that method reads. Reference: `test_contact_status.py` (`_make_real_coordinator`), `test_status_sensors.py` (`_compute_automation_status`/`_compute_next_automation_action`).
 
 #### Coordinator Class After test_occupancy.py Module Deletion
 

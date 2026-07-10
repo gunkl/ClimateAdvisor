@@ -875,26 +875,21 @@ class TestFanStatusComputation:
 
 
 def _fan_sensor_extra_state_attributes(data: dict) -> dict:
-    """Mirror of ClimateAdvisorFanStatusSensor.extra_state_attributes for unit testing.
+    """Build a real ClimateAdvisorFanStatusSensor over `data` and return its attributes."""
+    from custom_components.climate_advisor.sensor import ClimateAdvisorFanStatusSensor
 
-    Replicates the attribute computation without importing sensor.py
-    (which triggers a metaclass conflict in the HA stub environment).
-    """
-    if not data:
-        return {}
-    return {
-        "fan_runtime_minutes": round(data.get(ATTR_FAN_RUNTIME, 0.0), 1),
-        "fan_override_since": data.get(ATTR_FAN_OVERRIDE_SINCE),
-        "fan_running": data.get(ATTR_FAN_RUNNING, False),
-    }
+    coord = MagicMock()
+    coord.data = data
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    sensor = ClimateAdvisorFanStatusSensor(coord, entry)
+    return sensor.extra_state_attributes
 
 
 class TestFanSensorAttributes:
-    """Unit tests for ClimateAdvisorFanStatusSensor.extra_state_attributes (Issue #55).
+    """Unit tests for the real ClimateAdvisorFanStatusSensor.extra_state_attributes (Issue #55).
 
     Verifies fan_override_since and fan_running are exposed correctly.
-    Uses a replicated helper instead of importing sensor.py directly
-    (HA entity metaclass conflicts in test stubs prevent direct instantiation).
     """
 
     def test_attributes_include_runtime(self):

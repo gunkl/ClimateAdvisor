@@ -101,6 +101,36 @@ class _MockSensorEntity:
     """Minimal stand-in for homeassistant.components.sensor.SensorEntity."""
 
 
+class _MockJsonResponse:
+    """Minimal stand-in for the aiohttp.web.Response a real HomeAssistantView.json() returns.
+
+    Exposes ``status`` and ``json_data`` so tests can assert on both without
+    round-tripping through a real aiohttp response body.
+    """
+
+    def __init__(self, data, status_code: int = 200) -> None:
+        self.status = status_code
+        self.json_data = data
+
+
+class _MockHomeAssistantView:
+    """Minimal stand-in for homeassistant.components.http.HomeAssistantView.
+
+    Real subclasses in api.py set ``url``/``name``/``requires_auth`` as class
+    attributes and call ``self.json(data, status_code=...)`` from their
+    ``get``/``post`` handlers — this provides both without pulling in aiohttp.
+    """
+
+    requires_auth = True
+    cors_allowed = False
+
+    def json(self, result, status_code: int = 200, headers=None):
+        return _MockJsonResponse(result, status_code)
+
+    def json_message(self, message, status_code: int = 200, message_code=None, headers=None):
+        return _MockJsonResponse({"message": message}, status_code)
+
+
 class _SensorStateClass(_enum.StrEnum):
     MEASUREMENT = "measurement"
     TOTAL = "total"
@@ -154,6 +184,9 @@ def install_ha_stubs() -> None:
     sensor.SensorEntity = _MockSensorEntity
     sensor.SensorStateClass = _SensorStateClass
     sensor.SensorDeviceClass = _SensorDeviceClass
+
+    http = sys.modules["homeassistant.components.http"]
+    http.HomeAssistantView = _MockHomeAssistantView
 
     const = sys.modules["homeassistant.const"]
     const.UnitOfTemperature = _UnitOfTemperature

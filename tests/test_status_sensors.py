@@ -64,30 +64,63 @@ def _make_automation_engine(
     grace_active: bool = False,
     last_resume_source: str | None = None,
 ) -> MagicMock:
-    """Create a mock AutomationEngine with given state flags."""
+    """Create a mock AutomationEngine with given state flags.
+
+    Also defaults the newer gates _compute_automation_status() checks
+    (override-confirm pending, stuck-grace detection, resumed-from-pause) to
+    inactive so callers exercising the original 4-flag surface see the same
+    "active"/"disabled"/"paused"/"grace period" outcomes as before.
+    """
     ae = MagicMock()
     ae.is_paused_by_door = is_paused_by_door
     ae.natural_vent_active = natural_vent_active
     ae._grace_active = grace_active
     ae._last_resume_source = last_resume_source
+    ae._manual_override_active = False
+    ae._override_confirm_pending = False
+    ae._grace_end_time = None
+    ae._resumed_from_pause = False
+    ae._is_within_planned_window_period = MagicMock(return_value=False)
     return ae
 
 
-def _compute_automation_status(
-    automation_enabled: bool,
-    automation_engine,
-) -> str:
-    """Replicate _compute_automation_status from coordinator.py."""
-    if not automation_enabled:
-        return "disabled"
-    if automation_engine.natural_vent_active:
-        return "natural ventilation"
-    if automation_engine.is_paused_by_door:
-        return "paused — door/window open"
-    if automation_engine._grace_active:
-        source = automation_engine._last_resume_source or "automation"
-        return f"grace period ({source})"
-    return "active"
+def _make_real_coordinator(automation_enabled: bool, automation_engine, occupancy_mode: str = "home"):
+    """Build a bare ClimateAdvisorCoordinator bound to the real status-computation methods.
+
+    Uses object.__new__() + types.MethodType() (the established coordinator
+    partial-instantiation pattern — see test_daily_record_accuracy.py) rather than
+    replicating the method bodies, so these tests exercise the real
+    ClimateAdvisorCoordinator._compute_automation_status/_compute_next_automation_action.
+    """
+    import types
+
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord = object.__new__(ClimateAdvisorCoordinator)
+    coord._automation_enabled = automation_enabled
+    coord._startup_coalesce_active = False
+    coord._startup_coalesce_expiry = None
+    coord._startup_timer_fired = False
+    coord._current_classification = None
+    coord._occupancy_mode = occupancy_mode
+    coord.automation_engine = automation_engine
+    coord._any_sensor_open = MagicMock(return_value=False)
+    coord._door_open_timers = {}
+    coord._door_open_timer_expiry = {}
+    coord._pre_cool_trigger_dt = None
+    coord._pre_cool_target = None
+    coord.config = {}
+    coord._compute_automation_status = types.MethodType(ClimateAdvisorCoordinator._compute_automation_status, coord)
+    coord._compute_next_automation_action = types.MethodType(
+        ClimateAdvisorCoordinator._compute_next_automation_action, coord
+    )
+    return coord
+
+
+def _compute_automation_status(automation_enabled: bool, automation_engine) -> str:
+    """Call the real ClimateAdvisorCoordinator._compute_automation_status()."""
+    coord = _make_real_coordinator(automation_enabled, automation_engine)
+    return coord._compute_automation_status()
 
 
 def _compute_next_automation_action(
@@ -96,55 +129,26 @@ def _compute_next_automation_action(
     config: dict,
     now_time: time,
 ) -> tuple[str, str]:
-    """Replicate _compute_next_automation_action from coordinator.py."""
-    if c is None:
-        return ("Waiting for classification...", "")
+    """Call the real ClimateAdvisorCoordinator._compute_next_automation_action().
 
-    if automation_engine.is_paused_by_door:
-        return ("Waiting — HVAC paused (door/window open)", "")
+    now_time (a plain time-of-day) is combined with a fixed date and patched in
+    as dt_util.now()/as_local() — the real method now works in full datetimes
+    (to correctly order cross-midnight events like pre-cool), not bare times.
+    """
+    from datetime import date, datetime
+    from unittest.mock import patch
 
-    if automation_engine._grace_active:
-        source = automation_engine._last_resume_source or "automation"
-        return (f"Grace period active ({source})", "")
+    from custom_components.climate_advisor import coordinator as _coord_mod
 
-    wake_time = config.get("wake_time", "06:30:00")
-    sleep_time = config.get("sleep_time", "22:30:00")
-    briefing_time = config.get("briefing_time", "06:00:00")
+    coord = _make_real_coordinator(True, automation_engine)
+    coord.config = config
 
-    def _parse_time(t: str) -> time:
-        parts = t.split(":")
-        return time(int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0)
-
-    events: list[tuple[time, str]] = []
-
-    bt = _parse_time(briefing_time)
-    wt = _parse_time(wake_time)
-    st = _parse_time(sleep_time)
-
-    if now_time < bt:
-        events.append((bt, "Send daily briefing"))
-    if now_time < wt:
-        if c.hvac_mode in ("heat", "cool"):
-            events.append((wt, f"Morning wake-up — restore {c.hvac_mode} comfort"))
-        else:
-            events.append((wt, "Morning wake-up check"))
-    if now_time < st:
-        if c.hvac_mode == "heat":
-            bedtime_target = config.get("comfort_heat", 70) - 4 + c.setback_modifier
-            events.append((st, f"Bedtime — heat setback to {bedtime_target:.0f}°F"))
-        elif c.hvac_mode == "cool":
-            bedtime_target = config.get("comfort_cool", 75) + 3
-            events.append((st, f"Bedtime — cool setback to {bedtime_target:.0f}°F"))
-        else:
-            events.append((st, "Bedtime check"))
-
-    if not events:
-        return ("No more actions today", "")
-
-    events.sort(key=lambda e: e[0])
-    next_time, next_desc = events[0]
-    time_str = next_time.strftime("%I:%M %p").lstrip("0")
-    return (next_desc, time_str)
+    now_dt = datetime.combine(date(2026, 7, 10), now_time)
+    with (
+        patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+        patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+    ):
+        return coord._compute_next_automation_action(c)
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +248,16 @@ class TestComputeNextAutomationAction:
             "wake_time": "06:30:00",
             "sleep_time": "22:30:00",
             "comfort_cool": 75,
+            "sleep_cool": 72,
         }
         # Current time is 14:00 — after briefing and wakeup, before sleep
         action, t = _compute_next_automation_action(c, ae, config, time(14, 0))
         assert "Bedtime" in action
         assert "cool setback" in action
-        assert "78°F" in action  # 75 + 3
+        # The real method reads CONF_SLEEP_COOL directly (not a comfort_cool+delta
+        # formula) — matches select_comfort_band(in_sleep_window=True), see
+        # coordinator.py's _compute_next_automation_action() comment.
+        assert "72°F" in action
 
     def test_before_bedtime_heat_day_returns_heat_setback(self):
         """Time before bedtime on heat day → bedtime heat setback with correct temp."""
@@ -260,13 +268,15 @@ class TestComputeNextAutomationAction:
             "wake_time": "06:30:00",
             "sleep_time": "22:30:00",
             "comfort_heat": 70,
+            "sleep_heat": 64,
         }
         # Current time is 20:00 — before sleep at 22:30
         action, t = _compute_next_automation_action(c, ae, config, time(20, 0))
         assert "Bedtime" in action
         assert "heat setback" in action
-        # 70 - 4 + 2 = 68°F
-        assert "68°F" in action
+        # The real method reads CONF_SLEEP_HEAT directly, not a comfort_heat-4+modifier
+        # formula (that formula predates the sleep_heat/sleep_cool config keys).
+        assert "64°F" in action
 
     def test_after_all_events_returns_no_more_actions(self):
         """After all scheduled events have passed → 'No more actions today'."""
@@ -381,33 +391,20 @@ class TestNewConstants:
 
 
 def _compliance_sensor_extra_state_attributes_with_thermal(coordinator):
-    """Replicate ClimateAdvisorComplianceSensor.extra_state_attributes logic including thermal attrs."""
-    from custom_components.climate_advisor.const import (
-        ATTR_FORECAST_BIAS_CONFIDENCE,
-        ATTR_FORECAST_HIGH_BIAS,
-        ATTR_FORECAST_LOW_BIAS,
-        ATTR_THERMAL_CONFIDENCE,
-        ATTR_THERMAL_COOLING_RATE,
-        ATTR_THERMAL_HEATING_RATE,
-    )
-    from custom_components.climate_advisor.temperature import FAHRENHEIT, convert_delta
+    """Return the real ClimateAdvisorComplianceSensor.extra_state_attributes for `coordinator`.
 
-    unit = coordinator.config.get("temp_unit", FAHRENHEIT)
-    thermal = coordinator.learning.get_thermal_model()
-    heat_rate_f = thermal.get("heating_rate_f_per_hour")
-    cool_rate_f = thermal.get("cooling_rate_f_per_hour")
-    attrs = {}
-    attrs[ATTR_THERMAL_HEATING_RATE] = convert_delta(heat_rate_f, unit) if heat_rate_f is not None else None
-    attrs[ATTR_THERMAL_COOLING_RATE] = convert_delta(cool_rate_f, unit) if cool_rate_f is not None else None
-    attrs[ATTR_THERMAL_CONFIDENCE] = thermal.get("confidence", "none")
-    attrs["thermal_observation_count"] = thermal.get("observation_count_heat", 0) + thermal.get(
-        "observation_count_cool", 0
-    )
-    weather_bias = coordinator.learning.get_weather_bias()
-    attrs[ATTR_FORECAST_HIGH_BIAS] = convert_delta(weather_bias.get("high_bias", 0.0), unit)
-    attrs[ATTR_FORECAST_LOW_BIAS] = convert_delta(weather_bias.get("low_bias", 0.0), unit)
-    attrs[ATTR_FORECAST_BIAS_CONFIDENCE] = weather_bias.get("confidence", "none")
-    return attrs
+    coordinator is already a real ClimateAdvisorCoordinator instance (constructed
+    via _make_coordinator_with_learning), so the sensor can be instantiated directly —
+    no replication needed.
+    """
+    from unittest.mock import MagicMock
+
+    from custom_components.climate_advisor.sensor import ClimateAdvisorComplianceSensor
+
+    entry = MagicMock()
+    entry.entry_id = "test_entry"
+    sensor = ClimateAdvisorComplianceSensor(coordinator, entry)
+    return sensor.extra_state_attributes
 
 
 def _make_coordinator_with_learning(tmp_path):
@@ -436,6 +433,7 @@ def _make_coordinator_with_learning(tmp_path):
     }
 
     coordinator = ClimateAdvisorCoordinator(hass, config)
+    coordinator.data = {}
     coordinator.learning = LearningEngine(Path(tmp_path))
     coordinator.learning.load_state()
     coordinator.automation_engine = MagicMock()

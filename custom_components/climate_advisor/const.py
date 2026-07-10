@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.10"
+VERSION = "0.5.11"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.11": [
+        "Fix #464: no user-visible change. Starts Phase B of the architecture-"
+        " consolidation direction (coordinator single-source) by adding"
+        " coordinator.get_hvac_runtime_today() as the one place today's live HVAC"
+        " runtime is computed, replacing an identical formula that was copy-pasted"
+        " byte-for-byte in coordinator.py, ai_skills_context.py, and"
+        " ai_skills_activity.py. No drift had occurred yet, but any future change"
+        " to the formula (e.g. excluding paused/away time) would have needed to be"
+        " applied in 3 places to avoid the AI Activity Report and Investigator"
+        " silently diverging from the dashboard.",
+    ],
     "0.5.10": [
         "Fix #462: the dashboard's setpoint-divergence indicator (ca_target_heat/cool)"
         " could show the wrong intended target while the home was in away or vacation"
@@ -957,6 +968,28 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    464: {
+        "version_fixed": "0.5.11",
+        "title": "Add coordinator.get_hvac_runtime_today() to kill the 3x copy-pasted formula",
+        "scope_covered": (
+            "coordinator.py: new get_hvac_runtime_today() method — base runtime from today's"
+            " record plus elapsed minutes of any in-progress HVAC session, computed live (not"
+            " from the up-to-30-min-stale coordinator.data snapshot). Routed coordinator.py's own"
+            " _async_update_data() inline computation through it, plus the two AI-context copies"
+            " (ai_skills_context.py build_current_state_context(),"
+            " ai_skills_activity.py async_build_activity_context()) that previously reached into"
+            " coordinator._today_record/_hvac_on_since directly. Verified via unit tests covering"
+            " no-record/no-session, base-only, active-session, and rounding cases, plus updated 3"
+            " tests in test_ai_investigator.py that previously patched dt_util on the now-unused"
+            " ai_skills_context module directly instead of configuring the new method."
+        ),
+        "scope_not_covered": (
+            "Does not change the runtime formula itself (still base + elapsed session time, no"
+            " exclusion for paused/away time). Does not address Phase B's remaining sub-items"
+            " (setpoint fields on coordinator.data, learning_health threading, target-band-schedule"
+            " dedup) — those are separate issues."
+        ),
+    },
     462: {
         "version_fixed": "0.5.10",
         "title": "Route api.py's ca_target_heat/cool through the canonical select_comfort_band() resolver",

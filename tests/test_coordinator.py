@@ -1735,3 +1735,52 @@ class TestChartLogPredIndoorSource:
             hourly_forecast_temps=[55.0],
         )
         assert result["pred_indoor"] is None, f"Expected None when cache is empty, got {result['pred_indoor']!r}."
+
+
+class TestGetHvacRuntimeToday:
+    """Tests for get_hvac_runtime_today() (Issue #464) — the single source of truth
+    consolidating a formula previously copy-pasted in coordinator.py, ai_skills_context.py,
+    and ai_skills_activity.py."""
+
+    def _make_coord(self, hvac_runtime_minutes: float | None, hvac_on_since):
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        if hvac_runtime_minutes is None:
+            coord._today_record = None
+        else:
+            record = MagicMock()
+            record.hvac_runtime_minutes = hvac_runtime_minutes
+            coord._today_record = record
+        coord._hvac_on_since = hvac_on_since
+        return coord
+
+    def test_no_today_record_and_no_session_returns_zero(self):
+        coord = self._make_coord(None, None)
+        assert coord.get_hvac_runtime_today() == 0.0
+
+    def test_base_runtime_only_when_no_active_session(self):
+        coord = self._make_coord(42.0, None)
+        assert coord.get_hvac_runtime_today() == 42.0
+
+    def test_active_session_adds_elapsed_minutes_to_base(self):
+        """5.0 base + 20 min active session (elapsed at query time) = 25.0."""
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        now = datetime.datetime(2026, 4, 8, 12, 0, 0)
+        on_since = now - datetime.timedelta(minutes=20)
+        coord = self._make_coord(5.0, on_since)
+        with patch.object(_coord_mod.dt_util, "now", return_value=now):
+            assert coord.get_hvac_runtime_today() == 25.0
+
+    def test_result_is_rounded_to_one_decimal(self):
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor import coordinator as _coord_mod
+
+        now = datetime.datetime(2026, 4, 8, 12, 0, 0)
+        on_since = now - datetime.timedelta(seconds=100)  # 1.6667 min
+        coord = self._make_coord(0.0, on_since)
+        with patch.object(_coord_mod.dt_util, "now", return_value=now):
+            assert coord.get_hvac_runtime_today() == 1.7

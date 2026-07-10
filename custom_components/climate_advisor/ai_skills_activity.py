@@ -1170,14 +1170,8 @@ async def async_build_activity_context(
     day_type = data.get(ATTR_DAY_TYPE, "unknown")
     trend = data.get(ATTR_TREND, "unknown")
     hvac_action = data.get(ATTR_HVAC_ACTION, "unknown")
-    # Compute fresh runtime -- coordinator.data may be up to 30 min stale
-    _base_runtime = coordinator._today_record.hvac_runtime_minutes if coordinator._today_record is not None else 0.0
-    _session_elapsed = (
-        (dt_util.now() - coordinator._hvac_on_since).total_seconds() / 60.0
-        if coordinator._hvac_on_since is not None
-        else 0.0
-    )
-    hvac_runtime_today = round(_base_runtime + _session_elapsed, 1)
+    # Compute fresh runtime -- coordinator.data may be up to 30 min stale (Issue #464)
+    hvac_runtime_today = coordinator.get_hvac_runtime_today()
 
     climate_entity_id: str = options.get("climate_entity", "")
     hvac_mode = "unknown"

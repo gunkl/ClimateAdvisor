@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # ── HA module stubs must be in place before importing climate_advisor modules ──
 if "homeassistant" not in sys.modules:
@@ -1013,63 +1013,43 @@ class TestInvestigationReportPersistence:
 
 
 class TestFreshHvacRuntime:
-    """Tests for the fresh hvac_runtime_today calculation in context builders."""
+    """Tests for the fresh hvac_runtime_today calculation in context builders.
+
+    Issue #464: the live computation moved into coordinator.get_hvac_runtime_today()
+    (a single source of truth shared with ai_skills_activity.py and coordinator.py's
+    own _async_update_data()) — ai_skills_context.py now just calls it directly instead
+    of reaching into _today_record/_hvac_on_since and dt_util.now() itself.
+    """
 
     def test_investigator_context_uses_live_session_elapsed(self):
-        """Context includes accumulated runtime when an HVAC session is active.
-
-        Coordinator has _today_record.hvac_runtime_minutes=5.0 and
-        _hvac_on_since set to 20 minutes ago.  The context should report ~25 min,
-        not the stale coordinator.data value of 0.
-        """
+        """Context includes the live value from get_hvac_runtime_today(), not the
+        (possibly stale) coordinator.data value."""
         coord = _make_coordinator(data_overrides={"hvac_runtime_today": 0})
+        coord.get_hvac_runtime_today = MagicMock(return_value=25.0)
         hass = _make_hass()
 
-        # Set up the fresh-runtime fields
-        now = datetime.datetime.now(datetime.UTC)
-        on_since = now - datetime.timedelta(minutes=20)
-        coord._today_record = MagicMock()
-        coord._today_record.hvac_runtime_minutes = 5.0
-        coord._hvac_on_since = on_since
+        context = asyncio.run(async_build_investigator_context(hass, coord))
 
-        import custom_components.climate_advisor.ai_skills_context as _ctx_mod
-
-        with patch.object(_ctx_mod.dt_util, "now", return_value=now):
-            context = asyncio.run(async_build_investigator_context(hass, coord))
-
-        # Expected: 5.0 + 20.0 = 25.0 min
         assert "25.0" in context
 
     def test_investigator_context_no_active_session(self):
-        """When _hvac_on_since is None, only base runtime is used."""
+        """Base-runtime-only value from get_hvac_runtime_today() is used verbatim."""
         coord = _make_coordinator(data_overrides={"hvac_runtime_today": 0})
+        coord.get_hvac_runtime_today = MagicMock(return_value=42.0)
         hass = _make_hass()
 
-        now = datetime.datetime.now(datetime.UTC)
-        coord._today_record = MagicMock()
-        coord._today_record.hvac_runtime_minutes = 42.0
-        coord._hvac_on_since = None
-
-        import custom_components.climate_advisor.ai_skills_context as _ctx_mod
-
-        with patch.object(_ctx_mod.dt_util, "now", return_value=now):
-            context = asyncio.run(async_build_investigator_context(hass, coord))
+        context = asyncio.run(async_build_investigator_context(hass, coord))
 
         assert "42.0" in context
 
     def test_investigator_context_no_today_record(self):
-        """When _today_record is None, runtime defaults to 0.0."""
+        """When get_hvac_runtime_today() returns 0.0 (no record, no session), the
+        stale coordinator.data value must NOT be used instead."""
         coord = _make_coordinator(data_overrides={"hvac_runtime_today": 99})
+        coord.get_hvac_runtime_today = MagicMock(return_value=0.0)
         hass = _make_hass()
 
-        now = datetime.datetime.now(datetime.UTC)
-        coord._today_record = None
-        coord._hvac_on_since = None
-
-        import custom_components.climate_advisor.ai_skills_context as _ctx_mod
-
-        with patch.object(_ctx_mod.dt_util, "now", return_value=now):
-            context = asyncio.run(async_build_investigator_context(hass, coord))
+        context = asyncio.run(async_build_investigator_context(hass, coord))
 
         # Stale coordinator.data value (99) must NOT appear; fresh value (0.0) must appear
         assert "hvac_runtime_today:  0.0 min" in context

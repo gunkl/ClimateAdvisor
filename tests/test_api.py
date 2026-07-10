@@ -298,7 +298,37 @@ def _simulate_learning_get(coordinator):
     return resp.json_data
 
 
-def _status_get_with_climate_state(config: dict, climate_state, indoor_temp=70.0, outdoor_temp=None):
+def _make_classification(**overrides):
+    """Build a DayClassification bypassing __post_init__, for select_comfort_band() tests."""
+    from custom_components.climate_advisor.classifier import DayClassification
+
+    c = object.__new__(DayClassification)
+    defaults = {
+        "day_type": "mild",
+        "trend_direction": "stable",
+        "trend_magnitude": 0,
+        "today_high": 78,
+        "today_low": 58,
+        "tomorrow_high": 79,
+        "tomorrow_low": 59,
+        "hvac_mode": "heat",
+        "pre_condition": False,
+        "pre_condition_target": None,
+        "windows_recommended": False,
+        "window_open_time": None,
+        "window_close_time": None,
+        "setback_modifier": 0.0,
+        "window_opportunity_morning": False,
+        "window_opportunity_evening": False,
+    }
+    defaults.update(overrides)
+    c.__dict__.update(defaults)
+    return c
+
+
+def _status_get_with_climate_state(
+    config: dict, climate_state, indoor_temp=70.0, outdoor_temp=None, occupancy_mode="home", classification=None
+):
     """Build a minimal coordinator and drive the real status view, for setpoint/ca-target tests."""
     coord = MagicMock()
     coord.config = config
@@ -306,11 +336,13 @@ def _status_get_with_climate_state(config: dict, climate_state, indoor_temp=70.0
     coord._get_indoor_temp.return_value = indoor_temp
     coord._last_outdoor_temp = outdoor_temp
     coord.automation_enabled = True
-    coord._occupancy_mode = "home"
+    coord._occupancy_mode = occupancy_mode
+    coord.current_classification = classification if classification is not None else _make_classification()
     ae = MagicMock()
     ae._manual_override_active = False
     ae._override_confirm_pending = False
     ae._fan_override_active = False
+    ae._pre_condition_achieved = False
     ae.is_paused_by_door = False
     coord.automation_engine = ae
     coord._compute_contact_details.return_value = []
@@ -318,12 +350,13 @@ def _status_get_with_climate_state(config: dict, climate_state, indoor_temp=70.0
 
 
 class TestCATargetSleepAware:
-    """Issue #402: ca_target_heat/cool must reflect the sleep band during the sleep window,
-
-    not always the flat daytime comfort_heat/comfort_cool — otherwise both the heat_cool
-    and single-setpoint divergence indicators compare the real thermostat setpoint against
-    the wrong value all night, masking exactly the kind of stuck/frozen-target bug #402
-    covers.
+    """Issue #402/#462: ca_target_heat/cool must reflect the real live-setpoint band
+    (via select_comfort_band(), the same resolver every setpoint-writing code path
+    uses) during the sleep window and for away/vacation occupancy — not the flat
+    daytime comfort_heat/comfort_cool, and not the display-only sleep/day heuristic
+    that used to ignore occupancy mode entirely. Otherwise the divergence indicators
+    compare the real thermostat setpoint against the wrong value, masking exactly the
+    kind of stuck/frozen-target bug #402 covers.
     """
 
     _CONFIG = {
@@ -335,7 +368,7 @@ class TestCATargetSleepAware:
         "wake_time": "07:00",
     }
 
-    def _get_ca_targets(self, config: dict, now):
+    def _get_ca_targets(self, config: dict, now, occupancy_mode="home"):
         """Drive the real ClimateAdvisorStatusView.get(), patching dt_util.now()."""
         from unittest.mock import patch
 
@@ -345,7 +378,7 @@ class TestCATargetSleepAware:
         state.state = "heat"
         state.attributes = {"temperature": 70, "target_temp_low": None, "target_temp_high": None}
         with patch.object(dt_util, "now", return_value=now):
-            response = _status_get_with_climate_state(config, state)
+            response = _status_get_with_climate_state(config, state, occupancy_mode=occupancy_mode)
         return response["ca_target_heat"], response["ca_target_cool"]
 
     def test_daytime_uses_comfort_band(self):
@@ -366,14 +399,44 @@ class TestCATargetSleepAware:
         assert heat != 68.0, "must not fall back to the flat daytime comfort_heat overnight"
         assert cool != 74.0, "must not fall back to the flat daytime comfort_cool overnight"
 
-    def test_sleep_window_falls_back_to_comfort_when_sleep_not_configured(self):
+    def test_sleep_window_falls_back_to_default_sleep_temps_when_not_configured(self):
+        """Issue #462: select_comfort_band()'s sleep-branch fallback is DEFAULT_SLEEP_HEAT/
+        DEFAULT_SLEEP_COOL (64/72), not comfort_heat/comfort_cool (68/74) — the old inline
+        implementation's fallback didn't match the live setpoint resolver's actual default."""
         from datetime import datetime
 
         config = {"comfort_heat": 68.0, "comfort_cool": 74.0, "sleep_time": "22:30", "wake_time": "07:00"}
         now = datetime(2026, 7, 21, 2, 0, 0)
         heat, cool = self._get_ca_targets(config, now)
-        assert heat == 68.0
-        assert cool == 74.0
+        assert heat == 64.0
+        assert cool == 72.0
+
+    def test_away_mode_uses_setback_band_not_comfort_or_sleep(self):
+        """Issue #462 regression: the old inline branch ignored occupancy entirely, so
+        away mode showed the comfort/sleep band even though the thermostat was really
+        being held at the setback band."""
+        from datetime import datetime
+
+        now = datetime(2026, 7, 21, 14, 0, 0)  # daytime — old code would have shown comfort band
+        config = {**self._CONFIG, "setback_heat": 60.0, "setback_cool": 80.0}
+        heat, cool = self._get_ca_targets(config, now, occupancy_mode="away")
+        assert heat == 60.0
+        assert cool == 80.0
+        assert heat != 68.0
+        assert cool != 74.0
+
+    def test_vacation_mode_uses_deep_setback_band(self):
+        """Issue #462 regression: vacation mode must show the wider vacation setback
+        (setback ± VACATION_SETBACK_EXTRA), not the comfort/sleep band."""
+        from datetime import datetime
+
+        from custom_components.climate_advisor.const import VACATION_SETBACK_EXTRA
+
+        now = datetime(2026, 7, 21, 14, 0, 0)
+        config = {**self._CONFIG, "setback_heat": 60.0, "setback_cool": 80.0}
+        heat, cool = self._get_ca_targets(config, now, occupancy_mode="vacation")
+        assert heat == 60.0 - VACATION_SETBACK_EXTRA
+        assert cool == 80.0 + VACATION_SETBACK_EXTRA
 
 
 class TestStatusSetpointExtraction:

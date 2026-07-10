@@ -120,16 +120,44 @@ class ClimateAdvisorStatusView(HomeAssistantView):
         # single-setpoint divergence check below (and any heat_cool-mode consumer of these
         # fields) compares the real thermostat setpoint against the wrong intended value
         # all night, masking exactly the kind of stuck/frozen-target bug this issue covers.
+        #
+        # Issue #462: route through select_comfort_band() — the canonical resolver every
+        # real setpoint-writing code path (apply_classification, handle_bedtime,
+        # handle_pre_cool, handle_morning_wakeup, occupancy handlers) already uses — instead
+        # of a third independent inline implementation of this branch. Deliberately NOT
+        # compute_bedtime_setback() (the chart/briefing's adaptive resolver, a different,
+        # documented split — see const.py's #333 changelog): this field exists to detect
+        # divergence from what the thermostat is ACTUALLY being driven to, which is
+        # select_comfort_band()'s job. Routing through it also fixes a real gap the old
+        # inline branch had: it ignored occupancy mode entirely, so away/vacation setback
+        # was never reflected here even though the thermostat was really being held at the
+        # setback band — exactly the kind of divergence this field exists to catch.
         from homeassistant.util import dt as dt_util  # noqa: PLC0415
 
-        from .automation import _in_sleep_window  # noqa: PLC0415
+        from .automation import _in_sleep_window, select_comfort_band  # noqa: PLC0415
 
-        if _in_sleep_window(dt_util.now(), coordinator.config):
-            _ca_target_heat = coordinator.config.get("sleep_heat", coordinator.config.get("comfort_heat"))
-            _ca_target_cool = coordinator.config.get("sleep_cool", coordinator.config.get("comfort_cool"))
+        classification = coordinator.current_classification
+        if classification is not None:
+            _band = select_comfort_band(
+                classification,
+                coordinator.config,
+                occupancy_mode=coordinator._occupancy_mode,
+                in_sleep_window=_in_sleep_window(dt_util.now(), coordinator.config),
+                aggressive_savings=bool(coordinator.config.get("aggressive_savings", False)),
+                pre_condition_achieved=bool(getattr(ae, "_pre_condition_achieved", False)),
+            )
+            _ca_target_heat = _band.floor
+            _ca_target_cool = _band.ceiling
         else:
-            _ca_target_heat = coordinator.config.get("comfort_heat")
-            _ca_target_cool = coordinator.config.get("comfort_cool")
+            # No classification yet (e.g., right after HA restart, before the first
+            # classification cycle completes) — fall back to the old sleep/day-only
+            # heuristic so the field is never simply absent.
+            if _in_sleep_window(dt_util.now(), coordinator.config):
+                _ca_target_heat = coordinator.config.get("sleep_heat", coordinator.config.get("comfort_heat"))
+                _ca_target_cool = coordinator.config.get("sleep_cool", coordinator.config.get("comfort_cool"))
+            else:
+                _ca_target_heat = coordinator.config.get("comfort_heat")
+                _ca_target_cool = coordinator.config.get("comfort_cool")
 
         # Issue #402 follow-up: surface the WHF fan's actual on/off cycling band so the
         # Natural Vent status card can show it instead of a single static midpoint number

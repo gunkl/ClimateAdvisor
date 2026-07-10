@@ -443,7 +443,7 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] DailyRecord accumulated counters survive HA restart (#176)
 - [x] Predicted indoor evening drop fixed: ODE mode uses classification for today (#172)
 
-### Phase 3: Thermostat-as-Controller & Compatibility (v0.4.x) — Current
+### Phase 3: Thermostat-as-Controller & Compatibility (v0.4.x–v0.5.x) — Current
 - [x] Comfort band model — CA programs `[comfort_heat / comfort_cool]` and the thermostat holds it; HVAC is no longer micromanaged every 30 min (#249)
 - [x] Single-setpoint commands — every thermostat write is `climate.set_temperature` with mode + setpoint; `heat_cool` dual-setpoint mode dropped for compatibility (#301)
 - [x] Whole-house fan suppresses HVAC while active (#277)
@@ -483,7 +483,16 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] `_build_predicted_indoor_future` and chart data ODE computation offloaded to executor — eliminates event-loop blocking (#376)
 - [x] AI Investigator redesign — context registry of 11 independently-testable providers, focus-aware selection (~40% token reduction), 24h/30d GitHub issue cache, SSE streaming (#377)
 - [x] AI Investigator and Activity Report streaming UX — live text as chunks arrive instead of buffered-to-EOF (#380, #382)
-- [x] HACS compliance — `integration_type: helper` in manifest, dynamic README version badge, state file permissions hardened (0o600) (#384)
+- [x] HACS compliance — dynamic README version badge, state file permissions hardened (0o600) (#384)
+- [x] HACS compliance fix — `integration_type` corrected from `helper` back to `service`, restoring visibility in Settings → Devices & Services (#388)
+- [x] Fan mode "Both" removed (per-device redesign judged too risky on the existing fan-reconcile logic); existing configs auto-migrate to whole-house fan (#424)
+- [x] Whole-house fan "stuck unconfirmed" self-heals within ~10 min instead of requiring a restart (#423)
+- [x] "Your Next Action" no longer advises a window/fan that would make things worse when outdoor is already unfavorable, in either direction (#428)
+- [x] Nat-vent's sleep-aware floor/ceiling made consistent across every check that reads it (proactive floor exit, reactivation gate, tick-level stop, dashboard status) — root cause of six related overnight flapping/status incidents (#400, #402, #415, #417, #427)
+- [x] Overnight pre-cool banking fixed — the AC-ceiling clamp anchored to the wrong (daytime) temperature range and could silently no-op; chart and real setpoint can no longer disagree on the pre-cool target (#436, #437)
+- [x] Default comfort/setback/sleep temperatures reformatted to match a real tuned household, including the initial setup wizard (previously stuck on stale pre-reformat defaults) (#438, #439)
+- [x] Pre-cool's AC trigger now reacts when natural ventilation ends ahead of its scheduled window, instead of waiting out a stale schedule (#440)
+- [x] Nat-vent decision surface (reactivation gate, fan-thermostat stop check, drift reconciliation, reactivation lockout, grace, retry/verify, pre-cool) extracted into independently unit-tested pure functions with differential and positive-control validation, closing the repeated-drift bug class behind #400/#402/#417/#427/#429 (#429)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)
@@ -534,6 +543,12 @@ custom_components/climate_advisor/
 ├── ai_skills_context.py # Context providers for AI skills — focus-aware, independently testable
 ├── temperature.py       # Fahrenheit/Celsius conversion and formatting helpers
 ├── chart_log.py         # Persistent 1-year ring buffer of HVAC/fan/temperature data + event markers
+├── nat_vent_gate.py     # Pure decision: nat-vent reactivation gate (direction/floor/ceiling)
+├── fan_thermostat_decision.py  # Pure decision: tick-level fan stop check (free-cooling reversal, cooled-to-floor)
+├── fan_drift_reconciliation.py # Pure decision: physical fan-state drift self-healing
+├── nat_vent_reactivation_lockout.py  # Pure decision: post-exit reactivation lockout window
+├── setpoint_verify_decision.py # Pure decision: post-fan-on/off setpoint verify outcome
+├── desired_state.py     # Temporal-intention schema (grace, retry, revisit, notifications) + wired decisions
 ├── services.yaml        # Service definitions
 ├── frontend/
 │   └── index.html       # Built-in dashboard panel

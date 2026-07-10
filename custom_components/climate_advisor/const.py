@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.5"
+VERSION = "0.5.6"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.6": [
+        "Fix #454: no user-visible change. Extracted the shared shape behind the"
+        " nat-vent gate's old-vs-new differential comparator (shadow-mode instrumentation,"
+        " the Call/ComparisonRun result shape, substitution mode) into a reusable base so"
+        " each upcoming pure decide_*() extraction gets a comparator by supplying only"
+        " which production method and pure function to wire together, instead of a new"
+        " copy-pasted comparator file. A first cut of the refactor introduced an import-order"
+        " bug that broke the CLI comparator tool (resolving the production class before the"
+        " module that installs test HA stubs) — caught by running the tool directly, not"
+        " just the test suite, and fixed before merge.",
+    ],
     "0.5.5": [
         "Fix #452: no user-visible change. Continues the nat-vent architecture-reset"
         " direction (v0.5.1) into the test suite — 14 test helpers that hand-copied"
@@ -900,6 +911,33 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    454: {
+        "version_fixed": "0.5.6",
+        "title": "Extract shared differential-comparator base for pure decide_*() modules",
+        "scope_covered": (
+            "tools/sim_harness/decision_compare_base.py: new module providing the shape shared"
+            " by every differential comparator for a production method that RETURNS a value"
+            " (shadow-mode instrumentation, DecisionCall/DecisionComparisonRun result shape,"
+            " substitution mode). nat_vent_gate_compare.py refactored onto it, keeping its exact"
+            " public API (GateCall/GateComparisonRun/compare_scenario/substitute_new_gate)"
+            " unchanged for existing callers (tools/nat_vent_gate_diff.py,"
+            " tools/nat_vent_gate_substitution_diff.py, tests/test_nat_vent_gate_compare.py,"
+            " tests/test_nat_vent_gate_substitution.py). Verified behavior-preserving: 39/39 gate"
+            " calls agree (nat_vent_gate_diff.py) and 56/56 scenarios produce identical full"
+            " outcomes under substitution (nat_vent_gate_substitution_diff.py), matching pre-refactor"
+            " results exactly. fan_thermostat_decision_compare.py deliberately NOT refactored onto"
+            " the base — its production method returns nothing (outcome inferred from side-effect"
+            " calls) and requires pre-call input capture, a genuinely different instrumentation"
+            " shape; verified unaffected (228/228 calls still agree)."
+        ),
+        "scope_not_covered": (
+            "Does not add comparators for any of the four upcoming Phase A extractions (sleep-aware"
+            " floor resolver, fan-suppression predicate, occupancy-defer predicate, comfort-band"
+            " branch) — this issue only builds the reusable base those will consume. Does not touch"
+            " fan_thermostat_decision_compare.py's instrumentation (only its module docstring, to"
+            " cross-reference the new base and explain why it's excluded)."
+        ),
+    },
     452: {
         "version_fixed": "0.5.5",
         "title": "HomeAssistantView test stub gap forced 14 test helpers to hand-replicate production logic",

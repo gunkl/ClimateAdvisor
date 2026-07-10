@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.2": [
+        "Fix #444: the Activity Report could show the same 'Comfort band applied' line"
+        " 2-3 times in a row for the exact same setpoint — most visibly right after an"
+        " HA restart, when the startup sequence and the regular classification cycle"
+        " both independently re-announced the identical band within the same minute."
+        " The underlying thermostat command was always correct; only the notification"
+        " was duplicated. A short-window dedup now suppresses a redundant announcement"
+        " of an unchanged band, without ever skipping the actual setpoint command.",
+    ],
     "0.5.1": [
         "Fix #439: the initial setup wizard could write stale sleep-temperature"
         " defaults into a brand-new install — Fahrenheit sleep fields, and all six"
@@ -851,6 +860,33 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    444: {
+        "version_fixed": "0.5.2",
+        "title": "Duplicate 'Comfort band applied' Activity Report entries for the same setpoint",
+        "scope_covered": (
+            "automation.py: _apply_comfort_band() had no idempotency guard — it unconditionally"
+            " emitted a comfort_band_applied event on every call, even when the band (active edge,"
+            " mode, target temperature) was identical to the one just announced. At least 2"
+            " overlapping call paths independently invoke apply_classification() -> _apply_comfort_band()"
+            " back-to-back around a restart: _do_startup_coalesce() (coordinator.py) calls it directly,"
+            " then at the end of that same sequence schedules async_request_refresh(), which triggers a"
+            " second, independent _async_update_data() cycle whose regular-cycle path calls it again"
+            " within seconds. A grace-expiry re-application colliding with the regular cycle produces the"
+            " same duplicate pattern outside of a restart. Real telemetry (Issue #444) confirmed this on"
+            " both 0.4.74 and 0.5.1 — a pre-existing defect, not a regression from the architecture-reset"
+            " work. Fixed with a short (10 minute) time-windowed dedup on the ANNOUNCEMENT only:"
+            " COMFORT_BAND_EVENT_DEDUP_SECONDS in const.py; new _last_comfort_band_signature /"
+            " _last_comfort_band_event_at instance state on AutomationEngine. The underlying"
+            " _set_temperature() thermostat command is never suppressed — only the redundant event."
+        ),
+        "scope_not_covered": (
+            "Does not touch the overlapping-trigger structure itself (coalesce's own"
+            " async_request_refresh() call, or the grace-expiry/regular-cycle overlap) — the dedup is a"
+            " choke-point fix at the single emission site, not a change to when apply_classification()"
+            " is invoked. A genuine re-announcement of an unchanged band after the dedup window (e.g. the"
+            " next real 30-min cycle) still fires normally by design."
+        ),
+    },
     440: {
         "version_fixed": "0.5.1",
         "title": "Pre-cool AC trigger stuck on stale schedule when nat-vent exits ahead of its scheduled close",
@@ -3369,6 +3405,18 @@ DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS = 3600  # 60 minutes
 DEFAULT_OVERRIDE_CONFIRM_SECONDS = 600  # 10 minutes
 OCCUPANCY_SETBACK_MINUTES = 15
 MAX_CONTINUOUS_RUNTIME_HOURS = 3
+
+# Issue #444: _apply_comfort_band() has no source-of-truth "did the band actually
+# change" check, so overlapping triggers (startup coalesce + its own follow-on
+# refresh; grace-expiry re-application colliding with the regular cycle) each
+# unconditionally re-announce the identical band as a fresh comfort_band_applied
+# event. This window suppresses a redundant *announcement* of an unchanged band
+# within N seconds of the last one — the underlying _set_temperature() call is
+# NEVER suppressed (thermostat control must stay unconditional). Sized to
+# comfortably span the widest observed redundant-call gap in real telemetry
+# (~5-6 minutes) while staying well under the 30-minute regular classification
+# cycle, so a genuine re-announcement after a real cycle is never swallowed.
+COMFORT_BAND_EVENT_DEDUP_SECONDS = 600  # 10 minutes
 
 # Economizer (window cooling) threshold
 ECONOMIZER_TEMP_DELTA = 3  # °F — activate when outdoor temp within this delta of comfort_cool

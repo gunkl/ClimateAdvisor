@@ -493,6 +493,8 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Default comfort/setback/sleep temperatures reformatted to match a real tuned household, including the initial setup wizard (previously stuck on stale pre-reformat defaults) (#438, #439)
 - [x] Pre-cool's AC trigger now reacts when natural ventilation ends ahead of its scheduled window, instead of waiting out a stale schedule (#440)
 - [x] Nat-vent decision surface (reactivation gate, fan-thermostat stop check, drift reconciliation, reactivation lockout, grace, retry/verify, pre-cool) extracted into independently unit-tested pure functions with differential and positive-control validation, closing the repeated-drift bug class behind #400/#402/#417/#427/#429 (#429)
+- [x] Duplicate "Comfort band applied" Activity Report entries at restart and grace-expiry eliminated with a short-window announcement dedup — the thermostat command itself was always correct, only the notification repeated (#444)
+- [x] Automated fan physical-drift self-corrections no longer mislabeled as a manual grace period in the Activity Report; repeated "fan running without CA warrant" reconcile attempts rate-limited to once per 5 minutes (#446)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)

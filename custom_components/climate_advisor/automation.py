@@ -571,6 +571,8 @@ class AutomationEngine:
         self._last_classification_applied: tuple[str, str] | None = None
         # Issue #96: override event dedup — track last emission time
         self._last_override_detected_time: datetime | None = None
+        # Issue #446: unwarranted-fan reconcile-correction dedup — track last correction time
+        self._last_unwarranted_fan_correction_at: datetime | None = None
 
         # Resume-from-pause tracking (Issue #47)
         self._resumed_from_pause: bool = False
@@ -847,6 +849,7 @@ class AutomationEngine:
         reason: str,
         trigger_label: str = "fan_off",
         preserve_nat_vent_session: bool = False,
+        source: str = "manual",
     ) -> None:
         """Shared "fan confirmed off" flag-clearing + grace-period logic.
 
@@ -869,6 +872,10 @@ class AutomationEngine:
                 the session survives the correction (Issue #423 drift-correction case). When
                 False (the default, matching the original `on_fan_turned_off()` behavior), the
                 session ends — a genuine fan-off is a real end-of-session signal.
+            source: `source` field on the grace period — "manual" for a genuine user action,
+                "automation" for a CA-internal correction (Issue #446: the drift-correction
+                caller was previously hardcoded to "manual" here, making the Activity Report
+                claim the user turned the fan off when CA corrected itself).
         """
         self._fan_active = False
         self._fan_on_since = None
@@ -888,7 +895,7 @@ class AutomationEngine:
 
         # Start grace period to gate nat-vent re-activation — same duration as manual grace
         # but with a distinct trigger string so logs/events are distinguishable.
-        self._start_grace_period("manual", trigger=trigger_label)
+        self._start_grace_period(source, trigger=trigger_label)
 
     def clear_fan_override(self) -> None:
         """Clear the fan override flag (called at transition points, Issue #327).
@@ -3137,6 +3144,27 @@ class AutomationEngine:
                 archetype,
             )
             _turn_off_reason = "startup reconcile — fan running without CA warrant"
+
+            # Issue #446: reconcile_fan_on_startup() is called from 4 different sites
+            # (startup coalesce, 30-min backstop, thermostat state-change, post-grace-expiry)
+            # with no rate limit — a fan that keeps re-appearing as "unwarranted" (e.g. a
+            # thermostat's own circulation schedule CA cannot durably override with one
+            # command) previously triggered a full correction every single call, producing
+            # repeated near-identical Activity Report spam every few minutes. Cooldown
+            # mirrors the existing _last_override_detected_time dedup pattern above.
+            _cooldown_window = timedelta(minutes=5)
+            _now = dt_util.now()
+            _last_correction = self._last_unwarranted_fan_correction_at
+            if _last_correction is not None and (_now - _last_correction) < _cooldown_window:
+                _LOGGER.info(
+                    "Unwarranted-fan correction suppressed — already corrected at %s,"
+                    " within the 5-minute cooldown (likely a recurring condition CA cannot"
+                    " durably override with one command, e.g. a thermostat circulation schedule)",
+                    _last_correction.isoformat(),
+                )
+                return
+            self._last_unwarranted_fan_correction_at = _now
+
             # Ensure flags are correct before deactivating — _exit_nat_vent()'s internal
             # _deactivate_fan() call is a no-op unless _fan_active reads True.
             self._fan_active = True  # let _deactivate_fan see an owned fan
@@ -4396,6 +4424,24 @@ class AutomationEngine:
         ):
             physical_on = self._get_fan_physical_state_callback()
 
+        # Issue #446 instrumentation: log the raw inputs on EVERY tick, not just on confirmed
+        # drift, so a future recurrence has real evidence instead of inference. `physical_on`
+        # already reflects whatever entity the coordinator treats as ground truth (fan_state_entity
+        # when configured, else the command entity) — logged alongside the command entity's own
+        # reported state for direct comparison.
+        _command_state = self.hass.states.get(self.config.get(CONF_FAN_ENTITY, ""))
+        _LOGGER.debug(
+            "Fan drift tick: fan_active=%s fan_mode=%s recent_command=%s physical_available=%s"
+            " physical_on=%s command_entity_state=%s tick_count=%d",
+            self._fan_active,
+            fan_mode,
+            recent_fan_command,
+            physical_state_available,
+            physical_on,
+            _command_state.state if _command_state else "unavailable",
+            self._fan_drift_tick_count,
+        )
+
         inputs = FanDriftInputs(
             fan_active=self._fan_active,
             fan_mode=fan_mode,
@@ -4436,6 +4482,7 @@ class AutomationEngine:
             reason="physical-state drift confirmed over 2 backstop ticks",
             trigger_label="physical_drift_correction",
             preserve_nat_vent_session=True,
+            source="automation",
         )
 
     async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:

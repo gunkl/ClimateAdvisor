@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.3": [
+        "Fix #446: an automated self-correction (Issue #423's fan physical-drift check"
+        " fixing its own stale belief about whether the fan was on) was reported in the"
+        " Activity Report as 'Grace period started (manual)' — telling you that you"
+        " turned the fan off when nobody did. It's now correctly labeled as an"
+        " automation-triggered grace period.",
+        "Fix #446: after a restart, if a fan kept appearing as 'running without CA"
+        " warrant' (e.g. a thermostat's own circulation schedule CA can't durably"
+        " override with a single command), CA re-issued the same correction attempt"
+        " every few minutes for up to 45 minutes. It now waits 5 minutes between"
+        " correction attempts for the same condition, while still keeping a"
+        " persistently-stray fan visible in the logs.",
+    ],
     "0.5.2": [
         "Fix #444: the Activity Report could show the same 'Comfort band applied' line"
         " 2-3 times in a row for the exact same setpoint — most visibly right after an"
@@ -860,6 +873,40 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    446: {
+        "version_fixed": "0.5.3",
+        "title": "Automated fan drift-correction mislabeled as manual grace + repeated unwarranted-fan reconcile spam",
+        "scope_covered": (
+            "automation.py: _clear_fan_flags_and_start_grace() had exactly 2 callers"
+            " (on_fan_turned_off(), a genuine user action, and _reconcile_fan_physical_drift(),"
+            " Issue #423's automated self-healing correction) but both hit the same hardcoded"
+            " self._start_grace_period('manual', ...) — reporting an automated correction to"
+            " the user as if they had turned the fan off themselves. Added a source parameter"
+            " (default 'manual', preserving on_fan_turned_off()'s call unchanged) and pass"
+            " source='automation' from the drift-correction path; the codebase already had 3"
+            " precedent call sites using 'automation' for this field. Also added DEBUG-level"
+            " instrumentation logging the raw fan_entity/fan_state_entity read on every"
+            " backstop tick (not just confirmed drift) — the true root cause of why the"
+            " physical-state read repeatedly disagrees on an exact 10-minute cadence overnight"
+            " was investigated (ruled out: a tick-counter bug, command-only mode, a toggle-type"
+            " RF fan entity — all verified against the real code/config) but not conclusively"
+            " identified, since real incident logs were unavailable (rotated on restart)."
+            " Separately, reconcile_fan_on_startup()'s 'turn off unwarranted fan' branch had no"
+            " rate limit across its 4 call sites, so a recurring condition (e.g. a thermostat's"
+            " own fan circulation schedule) triggered a full correction attempt every few"
+            " minutes for up to 45 minutes. Added a 5-minute cooldown (reusing the existing"
+            " _last_override_detected_time dedup pattern) inside the function itself so it"
+            " applies regardless of which caller triggered it; a suppressed correction still"
+            " logs at INFO so a persistently-stray fan stays visible."
+        ),
+        "scope_not_covered": (
+            "The true root cause of the repeating 10-minute physical-state disagreement"
+            " (Finding 2b) is NOT fixed — only instrumented. The retry behavior itself (CA"
+            " keeps trying to reactivate the fan every cycle when conditions favor free"
+            " cooling) was deliberately left unchanged per explicit user direction — a"
+            " genuine free-cooling opportunity should keep being retried, not abandoned."
+        ),
+    },
     444: {
         "version_fixed": "0.5.2",
         "title": "Duplicate 'Comfort band applied' Activity Report entries for the same setpoint",

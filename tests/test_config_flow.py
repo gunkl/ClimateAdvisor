@@ -464,6 +464,87 @@ class TestConfigFlowStepUserFields:
         assert 75 <= DEFAULT_SETBACK_COOL <= 90
 
 
+class TestSetpointSliderRangesRegression:
+    """Regression guard (architecture-reset session, #438 follow-up): the initial
+    setup wizard's Fahrenheit sleep_heat/sleep_cool defaults, and ALL SIX Celsius
+    defaults, were hardcoded literals that silently went stale when
+    DEFAULT_SLEEP_HEAT/DEFAULT_SLEEP_COOL were reformatted from 66/78 to 64/72 —
+    every brand-new install got the OLD values explicitly written into its config,
+    bypassing the reformat entirely. setpoint_slider_ranges() now derives every
+    default from the DEFAULT_* constants directly, so this can't drift again.
+    """
+
+    def test_fahrenheit_defaults_match_named_constants_exactly(self):
+        from custom_components.climate_advisor.config_flow import setpoint_slider_ranges
+        from custom_components.climate_advisor.const import (
+            DEFAULT_COMFORT_COOL,
+            DEFAULT_COMFORT_HEAT,
+            DEFAULT_SETBACK_COOL,
+            DEFAULT_SETBACK_HEAT,
+            DEFAULT_SLEEP_COOL,
+            DEFAULT_SLEEP_HEAT,
+        )
+
+        ranges = setpoint_slider_ranges(is_celsius=False)
+        assert ranges["comfort_heat"][2] == DEFAULT_COMFORT_HEAT
+        assert ranges["comfort_cool"][2] == DEFAULT_COMFORT_COOL
+        assert ranges["setback_heat"][2] == DEFAULT_SETBACK_HEAT
+        assert ranges["setback_cool"][2] == DEFAULT_SETBACK_COOL
+        assert ranges["sleep_heat"][2] == DEFAULT_SLEEP_HEAT, (
+            "sleep_heat was the specific field found still hardcoded to the stale 66"
+        )
+        assert ranges["sleep_cool"][2] == DEFAULT_SLEEP_COOL, (
+            "sleep_cool was the specific field found still hardcoded to the stale 78"
+        )
+
+    def test_celsius_defaults_are_the_fahrenheit_defaults_converted(self):
+        """Each Celsius default must equal from_fahrenheit(DEFAULT_X, CELSIUS),
+        rounded to the nearest 0.5 — not an independently hand-picked literal that
+        can silently stop matching the Fahrenheit constant it's supposed to mirror."""
+        from custom_components.climate_advisor.config_flow import setpoint_slider_ranges
+        from custom_components.climate_advisor.const import (
+            DEFAULT_COMFORT_COOL,
+            DEFAULT_COMFORT_HEAT,
+            DEFAULT_SETBACK_COOL,
+            DEFAULT_SETBACK_HEAT,
+            DEFAULT_SLEEP_COOL,
+            DEFAULT_SLEEP_HEAT,
+        )
+        from custom_components.climate_advisor.temperature import CELSIUS, from_fahrenheit
+
+        ranges = setpoint_slider_ranges(is_celsius=True)
+        for key, f_default in (
+            ("comfort_heat", DEFAULT_COMFORT_HEAT),
+            ("comfort_cool", DEFAULT_COMFORT_COOL),
+            ("setback_heat", DEFAULT_SETBACK_HEAT),
+            ("setback_cool", DEFAULT_SETBACK_COOL),
+            ("sleep_heat", DEFAULT_SLEEP_HEAT),
+            ("sleep_cool", DEFAULT_SLEEP_COOL),
+        ):
+            expected = round(from_fahrenheit(f_default, CELSIUS) * 2) / 2
+            assert ranges[key][2] == expected, f"{key}: expected {expected}, got {ranges[key][2]}"
+
+    def test_celsius_sleep_cool_default_is_not_the_old_stale_26(self):
+        """Concrete regression pin: the old hardcoded Celsius sleep_cool default (26,
+        matching the pre-#438 78F) must not reappear."""
+        from custom_components.climate_advisor.config_flow import setpoint_slider_ranges
+
+        ranges = setpoint_slider_ranges(is_celsius=True)
+        assert ranges["sleep_cool"][2] != 26, "26C is the stale pre-#438 default (78F) — must not reappear"
+        assert ranges["sleep_cool"][2] == 22.0
+
+    def test_all_defaults_within_their_own_slider_bounds(self):
+        """Every default (both unit branches) must fall within its own (min, max)."""
+        from custom_components.climate_advisor.config_flow import setpoint_slider_ranges
+
+        for is_celsius in (False, True):
+            ranges = setpoint_slider_ranges(is_celsius)
+            for key, (mn, mx, default, _step) in ranges.items():
+                assert mn <= default <= mx, (
+                    f"{key} ({'C' if is_celsius else 'F'}): default {default} not in [{mn}, {mx}]"
+                )
+
+
 # ---------------------------------------------------------------------------
 # v1→v2 migration
 # ---------------------------------------------------------------------------

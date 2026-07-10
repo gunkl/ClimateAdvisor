@@ -161,6 +161,47 @@ def _entity_selector_for_source(source: str) -> selector.EntitySelector:
     return selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="temperature"))
 
 
+def setpoint_slider_ranges(is_celsius: bool) -> dict[str, tuple[float, float, float, float]]:
+    """Slider (min, max, default, step) for the 6 setpoints on the INITIAL setup wizard
+    (async_step_setpoints), keyed by field name.
+
+    Celsius defaults are derived from the same DEFAULT_* Fahrenheit constants (rounded
+    to the 0.5 step) rather than a second set of hand-picked literals, so the two unit
+    branches — and any future reformat of the DEFAULT_* constants — can never drift
+    apart again. This closes a real bug: DEFAULT_SLEEP_HEAT/DEFAULT_SLEEP_COOL were
+    reformatted from 66/78 to 64/72 (architecture-reset session, #438), but this
+    wizard's own hardcoded defaults were never updated, so every brand-new install
+    (Fahrenheit sleep fields, and ALL SIX Celsius fields) had the stale values
+    explicitly written into its config on first setup.
+
+    The options/edit flow (async_step_setpoints in ClimateAdvisorOptionsFlow) is
+    intentionally NOT built from this function — it displays the CURRENT configured
+    value (`current.get(key, DEFAULT_X)`), not a fresh-install default, so its ranges
+    dicts stay separate.
+    """
+
+    def _c_default(f_value: float) -> float:
+        return round(from_fahrenheit(f_value, CELSIUS) * 2) / 2
+
+    if is_celsius:
+        return {
+            "comfort_heat": (13, 27, _c_default(DEFAULT_COMFORT_HEAT), 0.5),
+            "comfort_cool": (20, 29, _c_default(DEFAULT_COMFORT_COOL), 0.5),
+            "setback_heat": (7, 18, _c_default(DEFAULT_SETBACK_HEAT), 0.5),
+            "setback_cool": (24, 32, _c_default(DEFAULT_SETBACK_COOL), 0.5),
+            "sleep_heat": (13, 26, _c_default(DEFAULT_SLEEP_HEAT), 0.5),
+            "sleep_cool": (21, 32, _c_default(DEFAULT_SLEEP_COOL), 0.5),
+        }
+    return {
+        "comfort_heat": (55, 80, DEFAULT_COMFORT_HEAT, 1),
+        "comfort_cool": (68, 85, DEFAULT_COMFORT_COOL, 1),
+        "setback_heat": (45, 65, DEFAULT_SETBACK_HEAT, 1),
+        "setback_cool": (75, 90, DEFAULT_SETBACK_COOL, 1),
+        "sleep_heat": (55, 79, DEFAULT_SLEEP_HEAT, 1),
+        "sleep_cool": (69, 89, DEFAULT_SLEEP_COOL, 1),
+    }
+
+
 class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Climate Advisor."""
 
@@ -245,27 +286,9 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._data.update(converted)
                 return await self.async_step_temperature_sources()
 
-        # Slider ranges and defaults depend on chosen unit
-        if is_celsius:
-            ranges = {
-                "comfort_heat": (13, 27, 21, 0.5),
-                "comfort_cool": (20, 29, 24, 0.5),
-                "setback_heat": (7, 18, 16, 0.5),
-                "setback_cool": (24, 32, 27, 0.5),
-                "sleep_heat": (13, 26, 19, 0.5),
-                "sleep_cool": (21, 32, 26, 0.5),
-            }
-            unit_label = "°C"
-        else:
-            ranges = {
-                "comfort_heat": (55, 80, DEFAULT_COMFORT_HEAT, 1),
-                "comfort_cool": (68, 85, DEFAULT_COMFORT_COOL, 1),
-                "setback_heat": (45, 65, DEFAULT_SETBACK_HEAT, 1),
-                "setback_cool": (75, 90, DEFAULT_SETBACK_COOL, 1),
-                "sleep_heat": (55, 79, 66, 1),
-                "sleep_cool": (69, 89, 78, 1),
-            }
-            unit_label = "°F"
+        # Slider ranges and defaults depend on chosen unit — see setpoint_slider_ranges().
+        ranges = setpoint_slider_ranges(is_celsius)
+        unit_label = "°C" if is_celsius else "°F"
 
         def _num(key: str) -> selector.NumberSelector:
             mn, mx, default, step = ranges[key]

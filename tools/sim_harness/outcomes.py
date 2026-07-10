@@ -553,6 +553,81 @@ def check_assertion(
         )
         return expect if not fired_this_cycle else False
 
+    # --- reconcile_fan_on_startup outcomes (Step 1 blind-spot closure) ---
+    # reconcile_fan_on_startup() had zero golden coverage before this. Its "adopt-on"
+    # and "turn-off" branches are distinguished by reason-string/event-type
+    # combinations no other function emits, scanned directly from event_log — purely
+    # additive. The third branch ("no-fan") is already exercised directly at the unit
+    # level in tests/test_fan_control.py — no golden-level check added for it.
+    if expect == "reconcile_adopted_fan":
+        at_str = assertion["at"]
+        for ev_type, ev_payload, ev_ts in result.event_log:
+            if (
+                ev_type == "fan_activated"
+                and ev_ts is not None
+                and _naive_iso(ev_ts) <= at_str
+                and str(ev_payload.get("reason", "")).startswith("startup reconcile — fan already running")
+            ):
+                return "reconcile_adopted_fan"
+        return False
+
+    if expect == "reconcile_turned_off_fan":
+        at_str = assertion["at"]
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type == "nat_vent_reconcile_exit" and ev_ts is not None and _naive_iso(ev_ts) <= at_str:
+                return "reconcile_turned_off_fan"
+        return False
+
+    # --- economizer_final_phase (Step 1 blind-spot closure) ---
+    # Some economizer phase transitions (e.g. cool-down -> maintain while the fan is
+    # ALREADY on) do not emit a fresh fan_activated event — _activate_fan()'s own
+    # idempotency guard (self._fan_active already True) returns before emitting,
+    # since physically nothing new needs to happen. economizer_phase (below) cannot
+    # see that transition since it only reads events. This checks the actual internal
+    # _economizer_phase attribute at the END of the scenario instead — only meaningful
+    # as the LAST assertion in a scenario (like nat_vent_still_active/not_active above).
+    # Payload: {"phase": "cool-down" | "maintain" | "inactive"}.
+    if expect == "economizer_final_phase":
+        if engine_state.get("_economizer_phase") == assertion.get("phase"):
+            return "economizer_final_phase"
+        return False
+
+    # --- economizer_phase (Step 1 blind-spot closure) ---
+    # check_window_cooling_opportunity()/_deactivate_economizer() never emit a
+    # dedicated decision event of their own — they reuse the generic fan_activated/
+    # fan_deactivated events also emitted by nat-vent, min-runtime cycling, etc.
+    # Mapping "fan_activated" generically into the decisions list would risk
+    # contaminating every OTHER golden's assertions at the same timestamp (the same
+    # hazard comfort_band_applied's own exclusion comment above documents) — instead
+    # this scans event_log directly for the economizer's own distinctive reason-string
+    # prefixes, purely additive, no existing outcome mapping touched.
+    # Payload: {"phase": "cool-down" | "maintain" | "inactive"}.
+    if expect == "economizer_phase":
+        expected_phase = assertion.get("phase")
+        at_str = assertion["at"]
+        last_phase: str | None = None
+        last_ts = ""
+        for ev_type, ev_payload, ev_ts in result.event_log:
+            if ev_ts is None:
+                continue
+            ts_naive = _naive_iso(ev_ts)
+            if ts_naive > at_str:
+                continue
+            reason = str(ev_payload.get("reason", ""))
+            if ev_type == "fan_activated" and reason.startswith("economizer cool-down"):
+                phase = "cool-down"
+            elif ev_type == "fan_activated" and reason.startswith("economizer maintain"):
+                phase = "maintain"
+            elif ev_type == "fan_deactivated" and reason.startswith("economizer off"):
+                phase = "inactive"
+            else:
+                continue
+            if ts_naive >= last_ts:
+                last_phase = phase
+                last_ts = ts_naive
+        computed_phase = last_phase if last_phase is not None else "inactive"
+        return "economizer_phase" if computed_phase == expected_phase else False
+
     # --- comfort_band_armed (Issue #249 P3) ---
     # Asserts that at least one comfort_band_applied event exists at or before the
     # assertion time.  Used by scenarios that want to verify the band was armed without

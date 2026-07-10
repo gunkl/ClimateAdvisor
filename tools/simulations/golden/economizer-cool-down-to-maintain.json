@@ -1,0 +1,72 @@
+{
+  "name": "economizer-cool-down-to-maintain",
+  "description": "Hot day, windows open in the morning economizer window: engages cool-down phase while indoor is above comfort, then transitions to maintain once indoor cools to comfort (Issue #429 blind-spot closure — check_window_cooling_opportunity had zero golden coverage before this scenario).",
+  "source": "synthetic",
+  "issue": 429,
+  "notes": [
+    "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: check_window_cooling_opportunity (the economizer) had zero golden coverage — a boundary bug here would have shipped undetected.",
+    "The cool-down -> maintain transition does NOT emit a fresh fan_activated event (the fan is already on; _activate_fan()'s own idempotency guard returns before emitting since nothing physically needs to happen) — this is why the maintain assertion uses the new economizer_final_phase state-based check (reads engine_state._economizer_phase directly) instead of the event-based economizer_phase check used for the initial cool-down engagement.",
+    "fan_mode must be configured (hvac_fan here) — the economizer's fan-assist calls are ALSO no-ops when fan_mode is disabled, the same class of gap Issue #435 found in nat_vent_temperature_check()."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "economizer_temp_delta": 3.0,
+    "natural_vent_delta": 3.0,
+    "aggressive_savings": false,
+    "fan_mode": "hvac_fan"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": true,
+      "note": "Hot day: hvac_mode=cool. Economizer eligibility requires this classification."
+    },
+    {
+      "time": "2026-07-10T07:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 72,
+      "indoor_temp": 78,
+      "windows_open": true,
+      "hour": 7,
+      "note": "hour=7 is in the morning window [6,9). outdoor=72 <= threshold(75+3=78). direction ok (72<78). indoor=78 > comfort_cool=75 -> cool-down phase."
+    },
+    {
+      "time": "2026-07-10T08:00:00",
+      "type": "economizer_check",
+      "outdoor_temp": 71,
+      "indoor_temp": 74,
+      "windows_open": true,
+      "hour": 8,
+      "note": "hour=8 still in morning window. Indoor cooled to 74F, at/below comfort_cool=75 -> transitions to maintain phase (fan stays on, no new activation event since it was already running)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Hot-day classification applied: hvac_mode=cool."
+    },
+    {
+      "at": "2026-07-10T07:00:00",
+      "expect": "economizer_phase",
+      "phase": "cool-down",
+      "reason": "Morning window, indoor 78F > comfort_cool 75F, direction favorable, outdoor within delta -> cool-down phase engages (fan assists the band's cooling)."
+    },
+    {
+      "at": "2026-07-10T08:00:00",
+      "expect": "economizer_final_phase",
+      "phase": "maintain",
+      "reason": "Indoor cooled to 74F (<= comfort_cool 75F) while still in the morning window -> transitions to maintain phase (ventilation holds, band stays armed). Checked via final engine state since no new fan_activated event fires for this sub-transition."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Economizer cool-down -> maintain phase transition, previously untested by any golden scenario",
+    "observed_behavior": "cool-down engages when hot + eligible + indoor above comfort; transitions to maintain once indoor reaches comfort, without re-triggering the fan",
+    "expected_behavior": "Two-phase economizer strategy per Issue #27/#264: fan-assist only (never overrides the comfort-band's own HVAC control)"
+  }
+}

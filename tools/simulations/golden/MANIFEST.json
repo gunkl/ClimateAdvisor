@@ -54,8 +54,8 @@
     "issue": 249
   },
   "cool_all_day_heat_all_day": {
-    "sha256": "c37017e8be21f9589a74dc8363314cfc6988e089958bd36f434e7e218e3b9e89",
-    "signed": "2026-06-10",
+    "sha256": "9b4b43685728056314028e83a66175fcc3e8860752bf8647b213dade518ac634",
+    "signed": "2026-07-10",
     "issue": 136
   },
   "hot_all_day_no_nat_vent_window": {
@@ -209,13 +209,13 @@
     "issue": 229
   },
   "overnight_with_adaptive_setback_and_wakeup": {
-    "sha256": "7c82f52639201eb51e2e183052af5c0c2ace9cd378111de2295b8e3bc8e95988",
-    "signed": "2026-06-13",
+    "sha256": "eb16f8b51a1450a022414445d45fc0dd06a7c7ebdf6a7b35300b130166c0562a",
+    "signed": "2026-07-10",
     "issue": 229
   },
   "strong_warming_trend_aggressive_setback": {
-    "sha256": "ee9b0fa28fd6ef91bfca8865369f7d14989995fcf56a55f38f43e9f12bfee406",
-    "signed": "2026-06-15",
+    "sha256": "e02c9c5d849cc6c39baaea2b3f417fbebfd8a879c69743f21d6106673a599784",
+    "signed": "2026-07-10",
     "issue": 229
   },
   "vacation_mode_full_lifecycle": {
@@ -224,8 +224,8 @@
     "issue": 229
   },
   "whole_house_fan_hvac_suppression": {
-    "sha256": "3e6b1adba47bbb96497b7383296240cf5726baf01513e63bc402c81c500e458e",
-    "signed": "2026-06-13",
+    "sha256": "076988910659e8552004754f5a9f1271c57f8a70fb7ec6a71c4eb0251cd2c54f",
+    "signed": "2026-07-09",
     "issue": 277
   },
   "window_close_stops_whole_house_fan": {
@@ -244,18 +244,43 @@
     "issue": 321
   },
   "warming_trend_pre_cool_applied": {
-    "sha256": "4c74ba82269948eac207694d54aeaab7bf2a51b24abc574850dab66b40fac1f6",
-    "signed": "2026-06-15",
+    "sha256": "1b98d73f4163b93673a2f9e8d170685fadbb6281530bb92109a2ccf6831f802c",
+    "signed": "2026-07-10",
     "issue": 258
   },
   "warming_trend_pre_cool_nat_vent_bypass": {
-    "sha256": "0ecee88989fb299e7a443f225be96cd1f85350749586e3aca833a0be2dcd6153",
-    "signed": "2026-06-15",
+    "sha256": "e24d63e60a07ed8d730a4025ae0b2c33ecc0c7053ae344e26497da8dd874e84e",
+    "signed": "2026-07-10",
     "issue": 258
   },
   "whf_reactivates_after_sleep_floor_exit": {
     "sha256": "1f006241b2d6b8dc11d04fdfa1da86a7bc43dd6d91626a86962b8ac10c6a13db",
     "signed": "2026-07-03",
     "issue": 402
+  },
+  "economizer-cool-down-to-maintain": {
+    "sha256": "24d89ce37f9792cb1f4ec08f337357bc0ea21d0fba2d3e9af99fc485fb1ebd3b",
+    "signed": "2026-07-09",
+    "issue": 429
+  },
+  "economizer-deactivates-outside-time-window": {
+    "sha256": "e606d290d7bedab570466979fb9c32b924d496ebd624054b6c53e5f73f1b0bce",
+    "signed": "2026-07-09",
+    "issue": 429
+  },
+  "grace-expiry-repause-sensor-still-open": {
+    "sha256": "95ead5ffd05872086bbc28bb84a9dd262d6b4210f7d28e04964e198d2e8ed66f",
+    "signed": "2026-07-09",
+    "issue": 429
+  },
+  "reconcile-adopts-running-fan-as-nat-vent": {
+    "sha256": "43c83578abe3a8d6c677dd01ad84f750bbca06c156d97d4172c586e164cc912f",
+    "signed": "2026-07-09",
+    "issue": 429
+  },
+  "reconcile-turns-off-unwarranted-fan": {
+    "sha256": "ef6028a26dcd55f2c91f7314aa357a7e167b0c04e4ba1aea375dce4ca954ebad",
+    "signed": "2026-07-09",
+    "issue": 429
   }
 }

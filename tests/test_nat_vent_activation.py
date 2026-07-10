@@ -442,6 +442,38 @@ class TestReactivationLockout:
         assert engine._natural_vent_active is True
 
 
+class TestReactivationLockoutLoadBearing:
+    """Architecture-reset Step 2: proves check_natural_vent_conditions() genuinely calls
+    is_reactivation_locked_out() to decide, not some other code path that happens to agree."""
+
+    def test_forcing_never_locked_out_allows_reactivation_within_the_real_window(self):
+        """Same setup as test_reactivation_blocked_within_lockout (10s after exit, well
+        within the real 300s lockout) — but with the lockout function forced to always
+        return False. Reactivation must now proceed, proving the real check is load-bearing."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+
+        exit_time = datetime(2026, 4, 20, 20, 0, 0)
+        engine._nat_vent_outdoor_exit_time = exit_time
+        check_time = exit_time + timedelta(seconds=10)  # well within the real 300s lockout
+
+        with (
+            patch(_DT_NOW_PATH, return_value=check_time),
+            patch(
+                "custom_components.climate_advisor.automation.is_reactivation_locked_out",
+                return_value=False,
+            ),
+        ):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True, (
+            "forcing is_reactivation_locked_out() to always return False should let reactivation "
+            "proceed even 10s after an outdoor-warm exit — the real lockout function is load-bearing"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Row 6 — hysteresis: re-activation requires outdoor < indoor - 1.0F
 # ---------------------------------------------------------------------------
@@ -1653,8 +1685,8 @@ class TestNatVentSleepWindowBand:
         """Nat-vent active + sleep window → _apply_comfort_band called once (sleep band only).
 
         Occupant experience: after the fix, the thermostat receives one setpoint write per
-        30-minute cycle overnight — the sleep ceiling (78°F by default) — not two competing
-        writes at 75°F and 78°F that make the thermostat history look like the integration
+        30-minute cycle overnight — the sleep ceiling (72°F by default) — not two competing
+        writes at 74°F and 72°F that make the thermostat history look like the integration
         is malfunctioning.
         """
         engine = self._make_sleep_engine()
@@ -1669,9 +1701,9 @@ class TestNatVentSleepWindowBand:
             f"Expected 1 _apply_comfort_band call during sleep window; got {engine._apply_comfort_band.call_count}"
         )
         band = engine._apply_comfort_band.call_args[0][0]
-        # Sleep band uses DEFAULT_SLEEP_HEAT=66 / DEFAULT_SLEEP_COOL=78, not comfort band 70/75
-        assert band.floor == 66.0, f"Sleep band floor must be sleep_heat=66. Got: {band.floor}"
-        assert band.ceiling == 78.0, f"Sleep band ceiling must be sleep_cool=78. Got: {band.ceiling}"
+        # Sleep band uses DEFAULT_SLEEP_HEAT=64 / DEFAULT_SLEEP_COOL=72, not comfort band 68/74
+        assert band.floor == 64.0, f"Sleep band floor must be sleep_heat=64. Got: {band.floor}"
+        assert band.ceiling == 72.0, f"Sleep band ceiling must be sleep_cool=72. Got: {band.ceiling}"
 
     def test_sleep_window_nat_vent_ac_assist_event_still_emitted(self):
         """nat_vent_ac_assist_armed event fires during sleep window despite skipped setpoint.
@@ -2078,7 +2110,7 @@ class TestNatVentMayReactivateDirect:
         """All four sub-conditions satisfied -> True."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=68.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is True
 
@@ -2086,7 +2118,7 @@ class TestNatVentMayReactivateDirect:
         """outdoor is None -> False (short-circuit before any other check)."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=None, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2094,7 +2126,7 @@ class TestNatVentMayReactivateDirect:
         """indoor is None -> False (short-circuit before any other check)."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=68.0, indoor=None, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2105,7 +2137,7 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=74.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2116,7 +2148,7 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0, hysteresis=1.0
+            outdoor=73.5, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0, hysteresis=1.0
         )
         assert result is False
 
@@ -2127,7 +2159,7 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=65.0, indoor=70.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2138,7 +2170,7 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=78.0, indoor=74.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2149,7 +2181,7 @@ class TestNatVentMayReactivateDirect:
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is False
 
@@ -2161,7 +2193,7 @@ class TestNatVentMayReactivateDirect:
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
         result = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, threshold=78.0
+            outdoor=65.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=3.0
         )
         assert result is True, (
             "WHF archetype: _ceiling_threshold() returns None, so indoor far past comfort_cool "
@@ -2177,7 +2209,7 @@ class TestNatVentMayReactivateDirect:
         engine = _make_engine(comfort_heat=70.0, comfort_cool=75.0)
         engine.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
         result = engine._nat_vent_may_reactivate(
-            outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, threshold=95.0
+            outdoor=91.0, indoor=90.0, comfort_heat=70.0, comfort_cool=75.0, nat_vent_delta=20.0
         )
         assert result is False, "WHF still requires outdoor < indoor - hysteresis"
 
@@ -2307,7 +2339,7 @@ class TestIssue402ClassOscillationPrevention:
 
         # Reactivation gate: must allow (ceiling exempt), pure direction-only.
         reactivate_ok = engine._nat_vent_may_reactivate(
-            outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, threshold=90.0
+            outdoor=80.0, indoor=90.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=16.0
         )
         assert reactivate_ok is True
 
@@ -2335,7 +2367,7 @@ class TestIssue402ClassOscillationPrevention:
         # Default fan_mode is HVAC-fan archetype (not WHF/BOTH) in _make_engine.
 
         reactivate_ok = engine._nat_vent_may_reactivate(
-            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, threshold=77.0
+            outdoor=65.0, indoor=76.0, comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0
         )
         assert reactivate_ok is False, "HVAC-fan archetype: ceiling exceeded must block reactivation"
 
@@ -2484,3 +2516,93 @@ class TestDecisionLockHolderTracking:
         asyncio.run(_run_both())
 
         assert seen_holder_while_waiting["holder"] == "first_method"
+
+
+# ---------------------------------------------------------------------------
+# Issue #435: nat_vent_temperature_check() must not report a fan transition
+# that didn't actually happen (fan_mode disabled — no device to control)
+# ---------------------------------------------------------------------------
+
+
+class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
+    """Issue #435: with fan_mode disabled (manual-window-only nat-vent, a supported
+    configuration), _activate_fan()/_deactivate_fan() correctly no-op — but the
+    cycling branches used to emit nat_vent_fan_on/nat_vent_fan_off unconditionally
+    anyway. _fan_device_label() returns "none" in this config, so the occupant's
+    activity report showed a nonsensical "Nat-vent fan on -- ... / none: auto->on"
+    line claiming a nonexistent device transitioned. Found via the architecture-reset
+    Step 2 sim-harness fidelity fix (tools/sim_harness/run_production.py) that let 3
+    golden scenarios finally exercise this code path.
+
+    Occupant experience: the activity report only shows a fan transition when CA
+    actually commanded a real device — no more phantom "device none" entries.
+    """
+
+    def test_no_fan_on_event_when_indoor_crosses_on_threshold_with_fan_disabled(self):
+        # comfort_heat=70, comfort_cool=74 -> midpoint 72, hysteresis 1.0 -> on_threshold=73
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine._natural_vent_active = True
+        engine._fan_active = False  # natural resting state with no fan device configured
+        engine._last_outdoor_temp = 60.0  # well below indoor -> outdoor-warm guard doesn't skip
+        engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            asyncio.run(engine.nat_vent_temperature_check(73.0))  # >= on_threshold
+
+        assert engine._fan_active is False, "no fan device configured -- _activate_fan() must stay a no-op"
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_fan_on" not in event_names, (
+            f"nat_vent_fan_on must not fire when _activate_fan() was a no-op (fan_mode disabled); "
+            f"got events: {event_names}"
+        )
+
+    def test_no_fan_off_event_when_indoor_crosses_off_threshold_with_fan_disabled(self):
+        # comfort_heat=70, comfort_cool=74 -> midpoint 72, hysteresis 1.0 -> off_threshold=71
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine._natural_vent_active = True
+        # Edge state: _fan_active=True with fan_mode disabled shouldn't occur naturally
+        # (fan_mode disabled means _activate_fan() never sets it), but guards the branch
+        # entry condition (`if self._fan_active and current_temp <= off_threshold`) directly.
+        engine._fan_active = True
+        engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            asyncio.run(engine.nat_vent_temperature_check(71.0))  # <= off_threshold
+
+        assert engine._fan_active is True, "no fan device configured -- _deactivate_fan() must stay a no-op"
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_fan_off" not in event_names, (
+            f"nat_vent_fan_off must not fire when _deactivate_fan() was a no-op (fan_mode disabled); "
+            f"got events: {event_names}"
+        )
+
+    def test_fan_on_event_still_fires_when_a_real_fan_is_configured(self):
+        """Regression guard for the opposite direction: don't over-correct into never
+        emitting. When a real fan_mode is configured, the transition really happens and
+        the event must still fire — this is the whole_house_fan_hvac_suppression golden's
+        real-cycling case, exercised here at the unit level."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config["fan_mode"] = "whole_house_fan"
+        engine.config["fan_entity"] = "fan.whole_house"
+        engine._natural_vent_active = True
+        engine._fan_active = False
+        engine._last_outdoor_temp = 60.0
+        engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            asyncio.run(engine.nat_vent_temperature_check(73.0))  # >= on_threshold
+
+        assert engine._fan_active is True, "a real fan device must actually activate"
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_fan_on" in event_names, (
+            f"nat_vent_fan_on must still fire when the fan really turned on; got events: {event_names}"
+        )

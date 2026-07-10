@@ -1,0 +1,61 @@
+{
+  "name": "reconcile-turns-off-unwarranted-fan",
+  "description": "HA restart / startup coalesce finds a fan physically running but nat-vent conditions do NOT warrant it (unfavorable direction) -- reconcile_fan_on_startup() must turn it off via the canonical exit path (Issue #429 blind-spot closure).",
+  "source": "synthetic",
+  "issue": 429,
+  "notes": [
+    "Closes one of the 3 Step-1 blind spots named in the architecture-reset plan: reconcile_fan_on_startup() had zero golden coverage.",
+    "Uses the reconcile_adopted_fan / reconcile_turned_off_fan custom assertion types added to outcomes.py for this closure -- purely additive.",
+    "The turn-off branch routes through the canonical _exit_nat_vent() choke point (Issue #411/#417) rather than hand-rolling pause/grace here -- this scenario only asserts the reconcile-specific event (nat_vent_reconcile_exit) and the resulting _natural_vent_active=False state, not _exit_nat_vent()'s own internal pause-vs-grace branching (already covered by other goldens).",
+    "The third branch (no-fan / thermostat_fan_running=False, including the stranded-HVAC-suppression release from Issue #405) is already exercised directly at the unit level in tests/test_fan_control.py (real, unmocked calls to reconcile_fan_on_startup()) -- not repeated here, since a meaningful end-to-end version needs a genuinely stranded _pre_fan_hvac_mode precondition (a real prior WHF activation + mid-session cycling-off) that would have diluted this scenario's focus on the two novel, previously-uncovered end-to-end branches."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T06:00:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: HVAC off."
+    },
+    {
+      "time": "2026-07-10T06:01:00",
+      "type": "reconcile_fan_on_startup",
+      "indoor_f": 74.0,
+      "outdoor_f": 80.0,
+      "thermostat_fan_running": true,
+      "any_sensor_open": true,
+      "note": "Fan physically running, a sensor is open, but outdoor 80F > indoor 74F -- unfavorable direction, nat-vent NOT eligible even though a sensor is open. reconcile_fan_on_startup() must turn the fan off (decision=turn-off), not adopt it."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-10T06:00:00",
+      "expect": "classification_applied",
+      "reason": "Mild-day classification applied: hvac_mode=off."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "reconcile_turned_off_fan",
+      "reason": "Fan physically running but outdoor 80F > indoor 74F (unfavorable direction) -- reconcile_fan_on_startup() turns the fan off via the canonical _exit_nat_vent() choke point (decision=turn-off), emitting nat_vent_reconcile_exit first since _exit_nat_vent() assumes the caller already recorded a specific event."
+    },
+    {
+      "at": "2026-07-10T06:01:00",
+      "expect": "nat_vent_not_active",
+      "reason": "Confirms the turn-off actually cleared _natural_vent_active, not just emitted the event."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "reconcile_fan_on_startup() turns off a physically-running but unwarranted fan via the canonical exit path, previously untested by any golden scenario",
+    "observed_behavior": "turn-off: nat_vent_reconcile_exit emitted, _exit_nat_vent() called, _natural_vent_active cleared",
+    "expected_behavior": "Per Issue #327: a fan found running at startup without nat-vent warrant must be turned off through the same canonical exit path every other nat-vent exit uses, not a bespoke one"
+  }
+}

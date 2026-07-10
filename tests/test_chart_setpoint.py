@@ -539,6 +539,33 @@ class TestComputePredictedActivity:
         )
         assert result[0]["fan_active"] is True
 
+    def test_natural_vent_delta_default_matches_automation_default(self) -> None:
+        """Architecture-reset latent-bug fix: when natural_vent_delta isn't explicitly
+        configured, the chart prediction's fallback must match DEFAULT_NATURAL_VENT_DELTA
+        (3.0F), the same default the real automation engine uses -- not a stray 5.0F that
+        would let the chart predict fan activity the real engine wouldn't actually produce.
+
+        band_upper=76, outdoor=78.5: with the old buggy 5.0F default, 78.5 < 76+5=81 is
+        True (fan predicted active); with the fixed 3.0F default, 78.5 < 76+3=79 is still
+        True but 79.5 would flip to False -- pinning the boundary at exactly the real
+        engine's threshold, not the wider stray one.
+        """
+        fn = self._import_helper()
+        ts = "2026-05-18T16:00:00+00:00"
+        config_without_delta = {"comfort_heat": 68.0, "comfort_cool": 76.0, "fan_mode": "auto"}
+        result = fn(
+            self._make_band(ts, lower=68.0, upper=76.0),
+            self._make_forecast(ts, 79.5),  # outdoor 79.5: below the buggy 81 threshold,
+            # ABOVE the fixed 79 threshold -- distinguishes the two defaults
+            self._make_predicted_indoor(ts, 85.0),  # indoor well above outdoor and band_upper
+            self._make_classification("off"),
+            config_without_delta,
+        )
+        assert result[0]["fan_active"] is False, (
+            "with the fixed 3.0F default (threshold=79), outdoor=79.5 must NOT predict fan "
+            "activity -- if this is True, the stray 5.0F default (threshold=81) regressed"
+        )
+
     def test_fan_not_active_when_outdoor_warmer_than_indoor(self) -> None:
         """Fan off when outdoor >= indoor (no benefit from ventilation)."""
         fn = self._import_helper()

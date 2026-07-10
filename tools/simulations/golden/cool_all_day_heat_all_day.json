@@ -6,7 +6,7 @@
   "notes": [
     "Covers the standard cold day pattern: heat on all day, no nat vent, setback at night.",
     "Outdoor never reaches indoor levels — no nat vent activation is possible.",
-    "Bedtime setback uses default depth (4F below comfort_heat) since no thermal model is configured.",
+    "Bedtime setback uses DEFAULT_SLEEP_HEAT (64F, a flat default reformatted to a real tuned installation's own value in the architecture-reset session) since no thermal model or explicit sleep_heat is configured.",
     "This is a gap-filling scenario: confirms heat mode is applied and maintained, setback fires correctly."
   ],
   "config": {
@@ -49,7 +49,7 @@
     {
       "time": "2026-01-15T22:00:00",
       "type": "bedtime",
-      "note": "Bedtime: heat setback fires. Default depth = comfort_heat(70) - 4F = 66F. Floor is setback_heat=62F so 66F is above floor."
+      "note": "Bedtime: heat setback fires. DEFAULT_SLEEP_HEAT=64F (no explicit sleep_heat configured). Floor is setback_heat=62F so 64F is above floor."
     }
   ],
   "assertions": [
@@ -67,14 +67,14 @@
     {
       "at": "2026-01-15T22:00:00",
       "expect": "setback_applied",
-      "expect_temp": 66.0,
-      "reason": "Bedtime setback: heat mode, default depth 4F below comfort_heat=70F → 66F. Above setback_heat=62F floor."
+      "expect_temp": 64.0,
+      "reason": "Bedtime setback: heat mode, DEFAULT_SLEEP_HEAT=64F (no explicit sleep_heat configured). Above setback_heat=62F floor."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Cold day applies heat at comfort target all day; bedtime setback fires at default depth",
-    "observed_behavior": "classification_applied (heat, 70F) at 6 AM → setback_applied (66F) at bedtime",
-    "expected_behavior": "Continuous heat mode all day; no nat vent (outdoor too cold); bedtime setback to 66F"
+    "summary": "Cold day applies heat at comfort target all day; bedtime setback fires at DEFAULT_SLEEP_HEAT",
+    "observed_behavior": "classification_applied (heat, 70F) at 6 AM → setback_applied (64F) at bedtime",
+    "expected_behavior": "Continuous heat mode all day; no nat vent (outdoor too cold); bedtime setback to 64F"
   }
 }

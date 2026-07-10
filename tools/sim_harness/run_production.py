@@ -18,27 +18,38 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
 
   temp_update             → engine.update_outdoor_temp(outdoor_f)
                             + inject indoor temp via climate entity attribute
-                            + asyncio.run(engine.check_natural_vent_conditions())
-  sensor_open             → asyncio.run(engine.handle_door_window_open(entity_id))
+                            + IF indoor changed: run_coro(engine.nat_vent_temperature_check())
+                              (if nat-vent active) + run_coro(engine.fan_thermostat_check())
+                              (if any CA fan active) — mirrors _async_thermostat_changed's
+                              state-listener dispatch (coordinator.py:2837-2862)
+                            + run_coro(engine.check_natural_vent_conditions())
+  sensor_open             → run_coro(engine.handle_door_window_open(entity_id))
   sensor_close            → update engine._sensor_check_callback
                             + if no sensors open:
-                              asyncio.run(engine.handle_all_doors_windows_closed())
+                              run_coro(engine.handle_all_doors_windows_closed())
   classification          → build DayClassification from event fields
-                            + asyncio.run(engine.apply_classification(classification))
+                            + run_coro(engine.apply_classification(classification))
   occupancy_away          → engine.set_occupancy_mode("away")
-                            + asyncio.run(engine.handle_occupancy_away())
+                            + run_coro(engine.handle_occupancy_away())
   occupancy_home          → engine.set_occupancy_mode("home")
-                            + asyncio.run(engine.handle_occupancy_home())
+                            + run_coro(engine.handle_occupancy_home())
   occupancy_vacation      → engine.set_occupancy_mode("vacation")
-                            + asyncio.run(engine.handle_occupancy_vacation())
+                            + run_coro(engine.handle_occupancy_vacation())
   occupancy_change        → dispatches to away/home/vacation by event["mode"]
   occupancy_change_with_override
                           → sets _manual_override_active=True then dispatches
-  bedtime                 → asyncio.run(engine.handle_bedtime())
-  wakeup                  → asyncio.run(engine.handle_morning_wakeup())
-  economizer_check        → asyncio.run(engine.check_window_cooling_opportunity(...))
+  bedtime                 → run_coro(engine.handle_bedtime())
+  wakeup                  → run_coro(engine.handle_morning_wakeup())
+  economizer_check        → run_coro(engine.check_window_cooling_opportunity(...))
   thermostat_state_changed
                           → inject thermostat state + engine.handle_manual_override(...)
+  activate_fan_min_runtime
+                          → run_coro(engine.start_min_fan_runtime_cycles()) — real public
+                            entry point, activates the fan without a nat-vent session
+  reconcile_fan_on_startup
+                          → inject indoor/outdoor + run_coro(engine.reconcile_fan_on_startup(
+                            thermostat_fan_running=, any_sensor_open=)) — mirrors the
+                            coordinator's startup-coalesce call
 
 No clean production entry points (FINDINGS):
   fan_cycle_on   — _fan_cycle_on() is private; production triggers it via
@@ -59,7 +70,6 @@ No clean production entry points (FINDINGS):
 
 from __future__ import annotations
 
-import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
@@ -72,6 +82,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from tools.sim_harness._loop import run_coro  # noqa: E402
 from tools.sim_harness.build_engine import _DEFAULT_CONFIG, build_headless_engine  # noqa: E402
 from tools.sim_harness.fake_hass import FakeHass, FakeState  # noqa: E402
 from tools.sim_harness.fake_scheduler import FakeScheduler  # noqa: E402
@@ -340,13 +351,13 @@ def _dispatch_event(
     elif etype == "sensor_open":
         entity_id = event.get("entity", "binary_sensor.window")
         tracker.open(entity_id)
-        asyncio.run(engine.handle_door_window_open(entity_id))
+        run_coro(engine.handle_door_window_open(entity_id))
 
     elif etype == "sensor_close":
         entity_id = event.get("entity", "binary_sensor.window")
         tracker.close(entity_id)
         if tracker.all_closed():
-            asyncio.run(engine.handle_all_doors_windows_closed())
+            run_coro(engine.handle_all_doors_windows_closed())
         # If sensors still open, production does nothing on partial close —
         # it waits for all_closed() to be called.
 
@@ -364,29 +375,29 @@ def _dispatch_event(
                     _cls_indoor_f = float(_cls_indoor_f)
                 except (TypeError, ValueError):
                     _cls_indoor_f = None
-        asyncio.run(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
+        run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
 
     elif etype == "occupancy_away":
         engine.set_occupancy_mode("away")
-        asyncio.run(engine.handle_occupancy_away())
+        run_coro(engine.handle_occupancy_away())
 
     elif etype == "occupancy_home":
         engine.set_occupancy_mode("home")
-        asyncio.run(engine.handle_occupancy_home())
+        run_coro(engine.handle_occupancy_home())
 
     elif etype == "occupancy_vacation":
         engine.set_occupancy_mode("vacation")
-        asyncio.run(engine.handle_occupancy_vacation())
+        run_coro(engine.handle_occupancy_vacation())
 
     elif etype == "occupancy_change":
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
         if mode == "away":
-            asyncio.run(engine.handle_occupancy_away())
+            run_coro(engine.handle_occupancy_away())
         elif mode == "vacation":
-            asyncio.run(engine.handle_occupancy_vacation())
+            run_coro(engine.handle_occupancy_vacation())
         else:
-            asyncio.run(engine.handle_occupancy_home())
+            run_coro(engine.handle_occupancy_home())
 
     elif etype == "occupancy_change_with_override":
         # Mirrors simulate.py: set override active, then dispatch occupancy
@@ -394,17 +405,17 @@ def _dispatch_event(
         mode = event.get("mode", "home")
         engine.set_occupancy_mode(mode)
         if mode == "away":
-            asyncio.run(engine.handle_occupancy_away())
+            run_coro(engine.handle_occupancy_away())
         elif mode == "vacation":
-            asyncio.run(engine.handle_occupancy_vacation())
+            run_coro(engine.handle_occupancy_vacation())
         else:
-            asyncio.run(engine.handle_occupancy_home())
+            run_coro(engine.handle_occupancy_home())
 
     elif etype == "bedtime":
-        asyncio.run(engine.handle_bedtime())
+        run_coro(engine.handle_bedtime())
 
     elif etype == "wakeup":
-        asyncio.run(engine.handle_morning_wakeup())
+        run_coro(engine.handle_morning_wakeup())
 
     elif etype == "economizer_check":
         outdoor_temp = float(event.get("outdoor_temp", event.get("outdoor_f", 70.0)))
@@ -415,7 +426,30 @@ def _dispatch_event(
         engine.update_outdoor_temp(outdoor_temp)
         windows_open = bool(event.get("windows_open", False))
         hour = int(event.get("hour", -1))
-        asyncio.run(engine.check_window_cooling_opportunity(outdoor_temp, indoor_temp, windows_open, hour))
+        run_coro(engine.check_window_cooling_opportunity(outdoor_temp, indoor_temp, windows_open, hour))
+
+    elif etype == "reconcile_fan_on_startup":
+        # Step-1 blind-spot closure: no golden previously exercised this coordinator
+        # startup-coalesce entry point at all. Mirrors coordinator._do_startup_coalesce's
+        # call, which passes an archetype-resolved thermostat_fan_running signal (real
+        # thermostat attrs for FAN_MODE_HVAC, the physical WHF entity state for
+        # FAN_MODE_WHOLE_HOUSE, per Issue #423) — the scenario supplies that already-
+        # resolved boolean directly, since resolving it from raw entity state is the
+        # coordinator's job, not this engine method's.
+        outdoor_f = event.get("outdoor_f")
+        if outdoor_f is not None:
+            engine.update_outdoor_temp(float(outdoor_f))
+        indoor_f = event.get("indoor_f")
+        if indoor_f is not None:
+            _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f))
+        run_coro(
+            engine.reconcile_fan_on_startup(
+                indoor=engine._get_indoor_temp_f(),
+                outdoor=engine._last_outdoor_temp,
+                thermostat_fan_running=bool(event.get("thermostat_fan_running", False)),
+                any_sensor_open=bool(event.get("any_sensor_open", False)),
+            )
+        )
 
     elif etype == "thermostat_state_changed":
         # Mirrors coordinator._async_thermostat_changed stale-clear + override detection.
@@ -447,12 +481,22 @@ def _dispatch_event(
         # via advance_to() before each event.
         pass
 
+    elif etype == "activate_fan_min_runtime":
+        # Real, public production entry point (start_min_fan_runtime_cycles(), called
+        # at coordinator startup / after override-clear) — NOT the internal timer-driven
+        # mid-cycle re-trigger the module docstring's fan_cycle_on/off FINDING refers to.
+        # Added for Step 2 fan_thermostat_check two-phase synthetic coverage: activates
+        # the fan (self._fan_active=True) WITHOUT a nat-vent session
+        # (self._natural_vent_active stays False), the precondition needed to reach
+        # Check 1's STOP_DEACTIVATE branch and Check 2's non-nat-vent floor stop.
+        run_coro(engine.start_min_fan_runtime_cycles())
+
     elif etype == "nat_vent_temperature_check":
         # Bug 3 (Issue #321): Dispatch midpoint-cycling re-evaluation to the production engine.
         # Used by nat_vent_thermostat_cycling pending scenario to assert cycling behavior.
         indoor_temp = float(event.get("indoor_temp", event.get("indoor_f", 70.0)))
         _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
-        asyncio.run(engine.nat_vent_temperature_check(indoor_temp))
+        run_coro(engine.nat_vent_temperature_check(indoor_temp))
 
     elif etype == "pre_cool":
         # Issue #258: Dispatch the pre-cool trigger to the production engine.
@@ -463,7 +507,7 @@ def _dispatch_event(
         if indoor_temp is not None:
             _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         nat_vent_just_closed = bool(event.get("nat_vent_just_closed", False))
-        asyncio.run(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
+        run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
 
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 
@@ -474,9 +518,26 @@ def _handle_temp_update(
     fake_hass: FakeHass,
     climate_entity: str,
 ) -> None:
-    """Handle temp_update: inject temperatures, then re-evaluate nat-vent conditions."""
+    """Handle temp_update: inject temperatures, then re-evaluate nat-vent conditions.
+
+    Mirrors TWO distinct real production triggers, not one:
+      1. ``_async_thermostat_changed`` (coordinator.py:2837-2862) — a state-listener
+         that fires on every indoor current_temperature ATTRIBUTE change and calls
+         ``nat_vent_temperature_check()`` (if nat-vent active) and
+         ``fan_thermostat_check()`` (if any CA fan active) directly. Until this fix,
+         this adapter never dispatched here at all — the fan-thermostat-check
+         shadow comparator (Step 2 slice 2) found zero calls across the entire
+         5809-scenario synthetic sweep because of exactly this gap, not because of
+         a missing enumerator dimension.
+      2. ``check_natural_vent_conditions()`` — the periodic ``_async_update_data``
+         cycle re-evaluation (docstring: "Called by coordinator on each
+         _async_update_data when sensors are open"), already dispatched below.
+    """
     outdoor_f = event.get("outdoor_f")
     indoor_f = event.get("indoor_f")
+
+    existing = fake_hass.states.get(climate_entity)
+    old_indoor = existing.attributes.get("current_temperature") if existing is not None else None
 
     if outdoor_f is not None:
         engine.update_outdoor_temp(float(outdoor_f))
@@ -484,9 +545,22 @@ def _handle_temp_update(
     if indoor_f is not None:
         _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f))
 
+    new_indoor = float(indoor_f) if indoor_f is not None else None
+    if new_indoor is not None and new_indoor != old_indoor:
+        if engine._natural_vent_active:
+            run_coro(engine.nat_vent_temperature_check(new_indoor))
+        if engine._fan_active or engine._natural_vent_active:
+            run_coro(
+                engine.fan_thermostat_check(
+                    indoor=engine._get_indoor_temp_f(),
+                    outdoor=engine._last_outdoor_temp,
+                    trigger="tick",
+                )
+            )
+
     # Production: coordinator calls check_natural_vent_conditions() on each update.
     # This is the correct re-evaluation entry point for temperature changes.
-    asyncio.run(engine.check_natural_vent_conditions())
+    run_coro(engine.check_natural_vent_conditions())
 
     # Issue #236 (ceiling-D): the ODE ceiling guard lives inside apply_classification,
     # which production re-runs every coordinator cycle. The harness models classification
@@ -497,7 +571,7 @@ def _handle_temp_update(
     if predicted and getattr(engine, "_current_classification", None) is not None:
         # Issue #295: pass current indoor temp so achievement gate is evaluated on cycle.
         _tu_indoor_f = float(indoor_f) if indoor_f is not None else None
-        asyncio.run(
+        run_coro(
             engine.apply_classification(
                 engine._current_classification,
                 predicted_indoor=predicted,
@@ -525,6 +599,7 @@ def _snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_occupancy_mode",
         "_override_confirm_pending",
         "_economizer_active",
+        "_economizer_phase",
         "_pre_condition_achieved",  # Issue #295
         "_pre_condition_achieved_date",  # Issue #295
     ):

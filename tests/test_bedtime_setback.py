@@ -466,8 +466,9 @@ class TestHandleBedtimeCoolApplied:
         asyncio.run(engine.handle_bedtime())
 
         assert engine._today_record.setback_cool_applied_f is not None
-        # Target must be above comfort_cool (75) — it's a setback
-        assert engine._today_record.setback_cool_applied_f > 75
+        # Overnight sleep target is a flat, cooler-than-daytime default (DEFAULT_SLEEP_COOL=72),
+        # below comfort_cool (75) — this household sleeps cooler, not warmer (Issue #435/#436).
+        assert engine._today_record.setback_cool_applied_f < 75
 
     def test_cool_writes_setback_depth_f(self):
         """cool mode: _today_record.setback_depth_f must be positive (target minus comfort)."""

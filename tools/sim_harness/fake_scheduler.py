@@ -21,6 +21,14 @@ Patching contract (applied via the ``installed()`` context manager):
   - ``custom_components.climate_advisor.automation.dt_util.as_local``
     → identity pass-through
 
+Issue #474 extended the same contract to ``custom_components.climate_advisor.
+coordinator`` — ``async_call_later``, ``async_track_time_change``,
+``async_track_time_interval``, ``async_track_point_in_time``,
+``async_track_state_change_event``, ``callback``, and ``dt_util.*`` — so a
+real ``ClimateAdvisorCoordinator`` can be driven headlessly with the same
+virtual clock that drives the ``AutomationEngine``. See ``installed()``'s
+docstring for the full patch list.
+
 The scheduler is NOT a context manager itself — install/uninstall is done via
 ``installed()`` which returns a context manager that patches the module and
 unpatches on exit.
@@ -102,14 +110,67 @@ class FakeScheduler:
 
     def _schedule(self, delay_seconds: float, callback: Any) -> Any:
         """Register a callback to fire after ``delay_seconds`` virtual seconds."""
-        entry = _ScheduledCallback(
-            fire_at=self._clock + timedelta(seconds=delay_seconds),
-            callback=callback,
-        )
+        return self._schedule_at(self._clock + timedelta(seconds=delay_seconds), callback)
+
+    def _schedule_at(self, fire_at: datetime, callback: Any) -> Any:
+        """Register a callback to fire at an absolute virtual datetime."""
+        entry = _ScheduledCallback(fire_at=fire_at, callback=callback)
         heapq.heappush(self._heap, entry)
 
         def _cancel() -> None:
             entry._cancelled = True
+
+        return _cancel
+
+    def _schedule_daily(self, hour: int | None, minute: int | None, second: int | None, callback: Any) -> Any:
+        """Fire ``callback`` when local time matches hour/minute/second, then reschedule +1 day.
+
+        Coordinator call sites always supply all three fields (briefing_time,
+        wake_time, sleep_time, midnight-finalize) — wildcard (``None``) fields
+        are not exercised by production and simply match the clock's current
+        value for that field, matching real ``async_track_time_change``
+        semantics closely enough for a fixed daily trigger.
+        """
+        cancelled = [False]
+
+        def _next_fire_at(after: datetime) -> datetime:
+            h = hour if hour is not None else after.hour
+            m = minute if minute is not None else after.minute
+            s = second if second is not None else after.second
+            candidate = after.replace(hour=h, minute=m, second=s, microsecond=0)
+            if candidate <= after:
+                candidate += timedelta(days=1)
+            return candidate
+
+        def _fire_and_reschedule(now: datetime) -> None:
+            if cancelled[0]:
+                return
+            callback(now)
+            if not cancelled[0]:
+                self._schedule_at(_next_fire_at(now), _fire_and_reschedule)
+
+        self._schedule_at(_next_fire_at(self._clock), _fire_and_reschedule)
+
+        def _cancel() -> None:
+            cancelled[0] = True
+
+        return _cancel
+
+    def _schedule_interval(self, interval: timedelta, callback: Any) -> Any:
+        """Fire ``callback`` every ``interval``, starting one interval from now."""
+        cancelled = [False]
+
+        def _fire_and_reschedule(now: datetime) -> None:
+            if cancelled[0]:
+                return
+            callback(now)
+            if not cancelled[0]:
+                self._schedule_at(now + interval, _fire_and_reschedule)
+
+        self._schedule_at(self._clock + interval, _fire_and_reschedule)
+
+        def _cancel() -> None:
+            cancelled[0] = True
 
         return _cancel
 
@@ -190,25 +251,55 @@ class FakeScheduler:
 
     @contextmanager
     def installed(self):
-        """Patch automation.py's timer/clock symbols to use this scheduler.
+        """Patch automation.py's AND coordinator.py's timer/clock symbols.
 
         Yields ``self`` for convenience.  All patches are removed on exit.
 
-        Patches applied:
+        Patches applied to ``automation`` (engine-level, pre-existing):
           - ``async_call_later``  → self._schedule
           - ``callback``          → identity
           - ``dt_util.now``       → self.now
           - ``dt_util.utcnow``    → self.now
           - ``dt_util.as_local``  → identity
+
+        Patches applied to ``coordinator`` (Issue #474 — coordinator-level
+        Tier A coverage), same clock/callback shape plus the additional
+        timer-registration helpers the coordinator uses that ``automation``
+        does not:
+          - ``async_call_later``            → self._schedule
+          - ``async_track_time_change``     → self._schedule_daily
+          - ``async_track_time_interval``   → self._schedule_interval
+          - ``async_track_point_in_time``   → self._schedule_at
+          - ``async_track_state_change_event`` → hass.add_state_listener
+          - ``callback``                    → identity
+          - ``dt_util.now``/``utcnow``/``as_local`` → same as automation
         """
-        # We need to patch the dt_util *object* that automation.py imported,
-        # not the original module.  automation.py does:
+        # We need to patch the dt_util *object* that automation.py/coordinator.py
+        # imported, not the original module.  Both modules do:
         #   from homeassistant.util import dt as dt_util
-        # so the name ``dt_util`` lives in automation's own namespace.
-        # We patch individual attributes on that object via the automation module.
+        # so the name ``dt_util`` lives in each module's own namespace.
+        # We patch individual attributes on that object via the module path.
 
         def _fake_async_call_later(hass: Any, delay: float, cb: Any) -> Any:
             return self._schedule(delay, cb)
+
+        def _fake_async_track_time_change(
+            hass: Any,
+            action: Any,
+            hour: int | None = None,
+            minute: int | None = None,
+            second: int | None = None,
+        ) -> Any:
+            return self._schedule_daily(hour, minute, second, action)
+
+        def _fake_async_track_time_interval(hass: Any, action: Any, interval: timedelta) -> Any:
+            return self._schedule_interval(interval, action)
+
+        def _fake_async_track_point_in_time(hass: Any, action: Any, point_in_time: datetime) -> Any:
+            return self._schedule_at(point_in_time, action)
+
+        def _fake_async_track_state_change_event(hass: Any, entity_ids: Any, action: Any) -> Any:
+            return hass.add_state_listener(entity_ids, action)
 
         with (
             patch(
@@ -229,6 +320,42 @@ class FakeScheduler:
             ),
             patch(
                 "custom_components.climate_advisor.automation.dt_util.as_local",
+                side_effect=lambda x: x,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.async_call_later",
+                side_effect=_fake_async_call_later,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.async_track_time_change",
+                side_effect=_fake_async_track_time_change,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.async_track_time_interval",
+                side_effect=_fake_async_track_time_interval,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.async_track_point_in_time",
+                side_effect=_fake_async_track_point_in_time,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.async_track_state_change_event",
+                side_effect=_fake_async_track_state_change_event,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.callback",
+                side_effect=lambda fn: fn,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.now",
+                side_effect=lambda: self._clock,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.utcnow",
+                side_effect=lambda: self._clock,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.as_local",
                 side_effect=lambda x: x,
             ),
         ):

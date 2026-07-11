@@ -84,10 +84,31 @@ class _MockDataUpdateCoordinator:
     """Minimal stand-in for homeassistant.helpers.update_coordinator.DataUpdateCoordinator."""
 
     def __init__(self, *args, **kwargs):
-        pass
+        # Real DataUpdateCoordinator.__init__(self, hass, logger, *, name, ...) — first
+        # positional arg is hass. Never previously captured here (pre-#474 gap): any
+        # coordinator method reading self.hass after full ClimateAdvisorCoordinator(hass,
+        # config) construction would hit AttributeError. Existing tests that use this
+        # pattern (test_occupancy.py, test_weather_bias.py, test_learning_toggle.py)
+        # happened not to exercise a method needing self.hass before this fix.
+        self.hass = args[0] if args else kwargs.get("hass")
+        self.data = None
+        self.last_update_success = False
 
     async def async_request_refresh(self):
         """Stub for triggering a data refresh."""
+        await self.async_config_entry_first_refresh()
+
+    async def async_config_entry_first_refresh(self):
+        """Run the first data fetch (Issue #474 — coordinator-level Tier A coverage).
+
+        Real HA's DataUpdateCoordinator calls ``_async_update_data()`` and
+        raises ConfigEntryNotReady on failure; the harness only needs the
+        success path since scenarios drive a synthetic, always-ready
+        environment (real weather/forecast entities are seeded before this
+        runs).
+        """
+        self.data = await self._async_update_data()
+        self.last_update_success = True
 
 
 class _MockCoordinatorEntity:

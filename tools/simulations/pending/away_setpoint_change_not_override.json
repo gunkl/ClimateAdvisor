@@ -1,0 +1,82 @@
+{
+  "name": "away_setpoint_change_not_override",
+  "description": "Setback re-application while away must not be misdetected as a manual override",
+  "source": "issue-report",
+  "issue": 221,
+  "notes": [
+    "Before Issue #221 fix, when the coordinator applied setback_cool (79F) on a classification",
+    "cycle while away, the thermostat_changed listener would see the setpoint change and flag it",
+    "as a manual override (manual_override_active=True). This would suppress all future setback",
+    "applications until the user returned home.",
+    "The root cause: coordinator's _async_thermostat_changed lacked an 'expected-state' guard",
+    "to distinguish CA-issued setpoint changes from user-initiated ones.",
+    "Issue #474 (coordinator-level Tier A coverage): migrated to use_coordinator=true. A real",
+    "ClimateAdvisorCoordinator is now constructed over dispatching FakeHass/FakeScheduler fakes,",
+    "so CA's own climate.set_temperature service call reaches the real _async_thermostat_changed",
+    "listener via the same state-feedback -> async_set() -> dispatch path a genuine HA round-trip",
+    "would take. Both assertions (setback_applied, override_not_detected) are evaluated for real",
+    "against the real coordinator, not skipped or approximated. Proving-slice scenario for #474.",
+    "skip_startup_coalesce=true is required: a freshly built coordinator has its real 5-minute",
+    "post-restart override-detection suppression window active (_startup_coalesce_active=True),",
+    "same as production. Without this flag, _async_thermostat_changed early-returns before ever",
+    "reaching the override-detection guard, and this scenario passes VACUOUSLY (found via a real",
+    "revert test: with the flag absent, disabling the actual guard in coordinator.py did NOT make",
+    "this scenario fail -- confirming it wasn't exercising the guard at all). With the flag present,",
+    "a revert test (temporarily stripping the guard conditions in _async_thermostat_changed's",
+    "elif branch, then restoring) confirmed override_detected correctly fires when the guard is",
+    "removed, and correctly does not fire with the guard intact -- this scenario is load-bearing.",
+    "Awaiting user review before promotion to golden/ per the Golden Simulation Test Policy."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 61,
+    "setback_cool": 79
+  },
+  "events": [
+    {
+      "time": "2026-06-10T08:00:00",
+      "type": "occupancy_change",
+      "mode": "away",
+      "note": "System is in away mode from the start of this scenario"
+    },
+    {
+      "time": "2026-06-10T08:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "note": "Hot day classification \u00e2\u20ac\u201d cool mode; away setback (79F) should be applied and must NOT trigger override detection"
+    },
+    {
+      "time": "2026-06-10T08:30:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 84.0,
+      "note": "Steady state check: system in away mode 30 min after setback was applied"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T08:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "integration",
+      "reason": "Classification while away applies setback_cool (79F) via the real coordinator + engine (Issue #474) \u2014 this is the CA-issued setpoint change that must NOT be detected as an override."
+    },
+    {
+      "at": "2026-06-10T08:00:00",
+      "expect": "override_not_detected",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "The coordinator's real _async_thermostat_changed must NOT set manual_override_active=True when CA itself issued the setback setpoint change. Evaluated for real (Issue #474 \u2014 coordinator constructed over dispatching fakes; CA's own set_temperature call reaches the real listener via async_set() dispatch, same as a genuine HA round-trip)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "CA-issued setback setpoint change while away is not flagged as a manual override",
+    "observed_behavior": "Both setback_applied (79F) and override_not_detected pass against the real coordinator's _async_thermostat_changed listener (Issue #474).",
+    "expected_behavior": "setback_applied (79F) at classification event; manual_override_active remains False after CA-issued setpoint change"
+  }
+}

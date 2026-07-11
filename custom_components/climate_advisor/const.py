@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.14"
+VERSION = "0.5.15"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.15": [
+        "Fix #474: no user-visible change. Adds coordinator-level Tier A test"
+        " harness coverage — a real ClimateAdvisorCoordinator can now be"
+        " constructed headlessly over dispatching FakeHass/FakeScheduler fakes"
+        " (real state-change events, real timers), closing a gap where"
+        " 12 scenarios covering override detection, away-setback correctness,"
+        " and grace-period behavior had no automated regression guard. Also"
+        " deletes an 18-line hand-approximation of the coordinator's real"
+        " override-detection state machine that had already drifted stale"
+        " (test-infrastructure only — tools/sim_harness/, tools/simulate.py;"
+        " no changes to the integration itself).",
+    ],
     "0.5.14": [
         "Fix #470: the chart's predicted-indoor curve could disagree with its own"
         " displayed target band overnight on nights where an adaptive sleep"
@@ -1001,6 +1013,43 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    474: {
+        "version_fixed": "0.5.15",
+        "title": "Coordinator-level Tier A test harness coverage (no production code change)",
+        "scope_covered": (
+            "tools/sim_harness/: FakeHass gained real state-change dispatch (states.async_set(),"
+            " an entity-keyed listener registry, a minimal bus) instead of silent state mutation;"
+            " FakeScheduler.installed() now also patches coordinator.py's async_call_later/"
+            " async_track_time_change/async_track_time_interval/async_track_point_in_time/"
+            " async_track_state_change_event/callback/dt_util.* (previously automation.py only);"
+            " ha_stubs.py's _MockDataUpdateCoordinator gained async_config_entry_first_refresh()"
+            " and now captures self.hass (a pre-existing gap silently tolerated by prior tests)."
+            " New tools/sim_harness/build_coordinator.py constructs a real ClimateAdvisorCoordinator"
+            " replicating __init__.py's exact startup sequence. Deleted run_production.py's"
+            " thermostat_state_changed override-detection mirror (an 18-line approximation of the"
+            " real ~552-line, 3-branch _async_thermostat_changed state machine, already proven stale"
+            " post-#249) — real dispatch now reaches the actual listener. Added a"
+            " skip_startup_coalesce scenario flag: a freshly built coordinator has its real 5-minute"
+            " post-restart override-detection suppression window active, same as production, and"
+            " scenarios testing steady-state behavior must opt out or every event vacuously"
+            " early-returns before reaching any guard (found via a real revert test: the proving-"
+            " slice scenario initially passed with the guard both present AND fully disabled, until"
+            " this flag was added — then it correctly passed with the guard intact and failed with"
+            " it removed). Migrated tools/simulations/unsupported/away_setpoint_change_not_override.json"
+            " to tools/simulations/pending/ as the proving-slice scenario (both assertions load-bearing,"
+            " verified via revert test)."
+        ),
+        "scope_not_covered": (
+            "No changes to coordinator.py or automation.py — this is test-infrastructure only."
+            " The remaining 11 unsupported/integration-tier scenarios (grace-period lifecycle,"
+            " override confirm/self-resolve, the 3 deferred integration-tier goldens) are not yet"
+            " migrated — tracked in #476, including a genuine production-behavior gap found in"
+            " override_self_resolve_transient.json (the confirm timer doesn't proactively cancel"
+            " on early return-to-expected-mode; it only re-checks at timer expiry) that must NOT be"
+            " closed by further harness changes. Tier B (Docker/real-HA) scope reduction tracked"
+            " separately in #475."
+        ),
+    },
     470: {
         "version_fixed": "0.5.14",
         "title": "Dedupe double _compute_target_band_schedule() invocation in get_chart_data()",

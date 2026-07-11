@@ -685,6 +685,22 @@ def check_assertion(
             return "nat_vent_fan_preserved"
         return False
 
+    # --- override_not_detected (Issue #474 — coordinator-level Tier A coverage) ---
+    # A CA-issued setpoint/mode change (e.g. an away-setback classification cycle)
+    # must NOT be misdetected as a manual override by the real coordinator's
+    # _async_thermostat_changed expected-confirmation guard. Verify the GUARANTEE:
+    # no override_detected/override_confirmed event was ever emitted, and the
+    # engine's manual_override_active flag never latched True. Only meaningful
+    # when the scenario was run with use_coordinator=True — the bare engine has
+    # no _async_thermostat_changed listener to trigger a false positive from.
+    if expect == "override_not_detected":
+        for event_type, _payload, _ts in result.event_log:
+            if event_type in ("override_detected", "override_confirmed"):
+                return False
+        if engine_state.get("_manual_override_active") is True:
+            return False
+        return "override_not_detected"
+
     # --- dual_setback_applied (Issue #236 C) ---
     # Legacy distinguishes dual-mode (heat_cool) setback; production applies both
     # setpoints but emits a generic setback event. Verify the GUARANTEE: a

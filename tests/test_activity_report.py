@@ -815,10 +815,21 @@ def _make_hass_with_setpoints(
 
 
 def _build_context_for_setpoint_test(hass: MagicMock) -> str:
-    """Call async_build_activity_context with the given hass mock."""
+    """Call async_build_activity_context with the given hass mock.
+
+    Issue #466: hvac_mode/target_temp/target_temp_low/target_temp_high are read
+    from coordinator.data now, not hass.states.get() — mirror the hass mock's
+    climate_state attributes onto coord.data so these tests still exercise the
+    scenario they were written for.
+    """
     import asyncio
 
     coord = _make_mock_coordinator_for_activity()
+    climate_state = hass.states.get.return_value
+    coord.data["hvac_mode"] = climate_state.state
+    coord.data["target_temp"] = climate_state.attributes.get("temperature")
+    coord.data["target_temp_low"] = climate_state.attributes.get("target_temp_low")
+    coord.data["target_temp_high"] = climate_state.attributes.get("target_temp_high")
     import custom_components.climate_advisor.ai_skills_activity as _act_mod
 
     now = datetime.now(tz=UTC)

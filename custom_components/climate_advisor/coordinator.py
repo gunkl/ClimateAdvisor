@@ -1790,6 +1790,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _cs = self.hass.states.get(_climate_entity_id) if _climate_entity_id else None
         hvac_action = _cs.attributes.get("hvac_action", "") if _cs else ""
         hvac_mode = _cs.state if _cs else ""
+        # Issue #466: setpoint fields, so consumers that don't need live sub-cycle
+        # freshness (ai_skills_activity.py/ai_skills_context.py) can read from
+        # coordinator.data instead of independently re-fetching hass.states.get().
+        # api.py's own status endpoint deliberately keeps its own live read — it
+        # powers the ca_target_heat/cool divergence check (#402/#462), which exists
+        # to compare CA's computed target against the REAL thermostat right now, not
+        # against a snapshot that can be up to ~30 min old.
+        _target_temp = _cs.attributes.get("temperature") if _cs else None
+        _target_temp_low = _cs.attributes.get("target_temp_low") if _cs else None
+        _target_temp_high = _cs.attributes.get("target_temp_high") if _cs else None
 
         # Issue #96 Root Cause D: Late-start thermal session for HVAC running at HA startup.
         # _hvac_on_since is only set via state transitions in _async_thermostat_changed.
@@ -2007,6 +2017,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_RUNNING: fan_running,
             ATTR_HVAC_ACTION: hvac_action,
             "hvac_mode": hvac_mode,
+            "target_temp": _target_temp,
+            "target_temp_low": _target_temp_low,
+            "target_temp_high": _target_temp_high,
             ATTR_HVAC_RUNTIME_TODAY: hvac_runtime_today,
             ATTR_CONTACT_STATUS: self._compute_contact_status(),
             ATTR_AI_STATUS: self.claude_client.get_status()["status"] if self.claude_client else "disabled",

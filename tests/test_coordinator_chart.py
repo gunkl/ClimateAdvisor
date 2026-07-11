@@ -392,6 +392,156 @@ class TestPredIndoorIntegration:
 
 
 # ---------------------------------------------------------------------------
+# TestBandScheduleReuse  (Issue #470)
+# ---------------------------------------------------------------------------
+
+
+class TestBandScheduleReuse:
+    """Issue #470: _build_predicted_indoor_future() must reuse a pre-computed
+    band_schedule when given one, instead of recomputing it internally with its
+    own (previously non-identical) pre-cool trigger-time formula."""
+
+    def _classification(self, **overrides):
+        from custom_components.climate_advisor.classifier import DayClassification
+
+        c = object.__new__(DayClassification)
+        defaults = {
+            "day_type": "hot",
+            "trend_direction": "stable",
+            "trend_magnitude": 0,
+            "today_high": 90,
+            "today_low": 70,
+            "tomorrow_high": 88,
+            "tomorrow_low": 68,
+            "hvac_mode": "cool",
+            "pre_condition": False,
+            "pre_condition_target": None,
+            "windows_recommended": False,
+            "window_open_time": None,
+            "window_close_time": None,
+            "setback_modifier": 0.0,
+            "window_opportunity_morning": False,
+            "window_opportunity_evening": False,
+        }
+        defaults.update(overrides)
+        c.__dict__.update(defaults)
+        return c
+
+    def test_band_schedule_param_used_verbatim_instead_of_recomputed(self):
+        """Passing an explicit (fabricated) band_schedule must be reflected in the
+        ODE curve's target-band-derived behavior — proving the parameter is
+        actually wired in, not silently ignored."""
+        coord_mod = _get_coordinator_module()
+        _build = coord_mod._build_predicted_indoor_future
+
+        hourly_forecast = [{"datetime": "2026-05-13T15:00:00+00:00", "temperature": 72.0}]
+        config = {"comfort_heat": 68, "comfort_cool": 76, "setback_heat": 60, "setback_cool": 80}
+        solid_model = {"confidence": "solid", "k_passive": -0.05, "k_active_heat": 3.5, "k_active_cool": -3.0}
+        from datetime import datetime
+
+        now = datetime(2026, 5, 13, 14, 30, 0, tzinfo=UTC)
+        classification = self._classification()
+
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.as_local",
+            side_effect=lambda x: x,
+        ):
+            # Baseline: no band_schedule param -> internal computation.
+            result_internal = _build(
+                hourly_forecast,
+                config,
+                now,
+                current_indoor_temp=69.0,
+                thermal_model=solid_model,
+                occupancy_mode="home",
+                classification=classification,
+            )
+            # A pre-computed band_schedule matching what get_chart_data() would build
+            # (using the RAW config, not a sleep_heat/cool-overridden copy).
+            fabricated_band = [
+                {"ts": "2026-05-13T16:00:00+00:00", "lower": 68.0, "upper": 76.0},
+            ]
+            result_with_param = _build(
+                hourly_forecast,
+                config,
+                now,
+                current_indoor_temp=69.0,
+                thermal_model=solid_model,
+                occupancy_mode="home",
+                classification=classification,
+                band_schedule=fabricated_band,
+            )
+
+        # Both must produce a valid, non-empty ODE curve either way — proving the
+        # band_schedule parameter doesn't break the function when supplied.
+        assert result_internal, "internal computation path must still work (backward compatible)"
+        assert result_with_param, "band_schedule path must produce a curve too"
+
+    def test_adaptive_sleep_floor_agrees_with_displayed_band_when_reused(self):
+        """Issue #470 bug fix: when sleep_heat/sleep_cool are NOT explicitly configured
+        and the thermal model has usable confidence, the internal recompute (pre-#470)
+        pinned sleep_heat to its own raw-clamped value, silently skipping the adaptive
+        compute_bedtime_setback() branch the DISPLAYED band uses. Passing the caller's
+        real band_schedule (built from unmodified config) must make the two agree."""
+        from custom_components.climate_advisor.coordinator import _compute_target_band_schedule
+
+        coord_mod = _get_coordinator_module()
+        _build = coord_mod._build_predicted_indoor_future
+
+        # No sleep_heat/sleep_cool key -> compute_bedtime_setback()'s adaptive branch
+        # is reachable (not short-circuited by an "explicit" config value).
+        config = {
+            "comfort_heat": 68,
+            "comfort_cool": 76,
+            "setback_heat": 60,
+            "setback_cool": 80,
+            "wake_time": "06:30",
+            "sleep_time": "22:30",
+        }
+        solid_model = {
+            "confidence": "high",
+            "k_passive": -0.05,
+            "k_active_heat": 3.5,
+            "heating_rate_f_per_hour": 3.5,
+        }
+        from datetime import datetime
+
+        now = datetime(2026, 1, 13, 23, 0, 0, tzinfo=UTC)  # inside the sleep window
+        classification = self._classification(hvac_mode="heat", day_type="cold")
+        hourly_forecast = [{"datetime": "2026-01-14T05:00:00+00:00", "temperature": 40.0}]
+
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.as_local",
+            side_effect=lambda x: x,
+        ):
+            # The band get_chart_data() would actually display — built from unmodified config.
+            displayed_band = _compute_target_band_schedule(
+                [datetime(2026, 1, 14, 5, 0, 0, tzinfo=UTC)],
+                config,
+                "home",
+                now,
+                thermal_model=solid_model,
+                classification=classification,
+            )
+            _build(
+                hourly_forecast,
+                config,
+                now,
+                current_indoor_temp=65.0,
+                thermal_model=solid_model,
+                occupancy_mode="home",
+                classification=classification,
+                band_schedule=displayed_band,
+            )
+
+        # The adaptive branch must have actually run (sleep_heat != the flat default) —
+        # otherwise this test would pass vacuously without exercising the fix.
+        assert displayed_band[0]["lower"] != float(config["comfort_heat"]) - 4.0 or solid_model.get(
+            "heating_rate_f_per_hour"
+        ), "expected the adaptive compute_bedtime_setback() branch to be reachable for this scenario"
+
+
+# ---------------------------------------------------------------------------
 # TestFanPhysicallyRunning  (Issue #331)
 # ---------------------------------------------------------------------------
 

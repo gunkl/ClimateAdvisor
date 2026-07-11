@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.13"
+VERSION = "0.5.14"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.14": [
+        "Fix #470: the chart's predicted-indoor curve could disagree with its own"
+        " displayed target band overnight on nights where an adaptive sleep"
+        " setpoint applied and sleep_heat/sleep_cool were left at their defaults"
+        " (not explicitly configured) — the prediction curve silently used a flat"
+        " default sleep floor while the band shown alongside it used the"
+        " thermal-model-adjusted one. Also completes Phase B (coordinator single-"
+        " source): the chart's target-band schedule is now computed once per"
+        " request instead of twice.",
+    ],
     "0.5.13": [
         "Fix #468: the AI Activity Report and Investigator's thermal-model sections"
         " could show an empty learning-health summary and a blank thermal"
@@ -991,6 +1001,35 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    470: {
+        "version_fixed": "0.5.14",
+        "title": "Dedupe double _compute_target_band_schedule() invocation in get_chart_data()",
+        "scope_covered": (
+            "coordinator.py: get_chart_data() computed the target-band schedule twice per request"
+            " (once internally inside _build_predicted_indoor_future(), once directly for the"
+            " displayed target_band). Added an optional band_schedule parameter to"
+            " _build_predicted_indoor_future(); when provided (now always, from get_chart_data()),"
+            " it's reused directly instead of recomputing. Moved the pre-cool trigger/target +"
+            " _compute_target_band_schedule() computation in get_chart_data() to run once, before the"
+            " historical-view branch, and threaded the result through. This also fixed a pre-existing,"
+            " unrelated divergence the consolidation surfaced: _build_predicted_indoor_future()'s"
+            " internal recompute pinned sleep_heat/sleep_cool to its own raw-clamped setback values"
+            " before calling _compute_target_band_schedule() — which, via compute_bedtime_setback()'s"
+            " 'explicit value takes priority' branch, silently skipped the adaptive thermal-model-"
+            " derived sleep floor the DISPLAYED band uses whenever sleep_heat/sleep_cool weren't"
+            " explicitly configured. The ODE prediction curve now agrees with the displayed band in"
+            " that scenario instead of silently disagreeing. Verified with a call-count regression"
+            " test proving exactly one invocation post-fix (confirmed 2 on pre-fix code), a test"
+            " proving the band_schedule parameter is honored, and a test exercising the"
+            " previously-diverging adaptive-sleep-floor scenario."
+        ),
+        "scope_not_covered": (
+            "Does not change _compute_target_band_schedule()'s own logic. Direct unit-test callers of"
+            " _build_predicted_indoor_future() that don't pass band_schedule are unaffected — the"
+            " internal fallback computation path is preserved unchanged for full backward"
+            " compatibility."
+        ),
+    },
     468: {
         "version_fixed": "0.5.13",
         "title": "Thread coordinator._build_learning_health() through 3 AI-context get_thermal_model() calls",

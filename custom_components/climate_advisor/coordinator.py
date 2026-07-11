@@ -6280,48 +6280,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         actual_outdoor = [{"time": p["time"], "temp": _conv(p["temp"])} for p in actual_outdoor]
         actual_indoor = [{"time": p["time"], "temp": _conv(p["temp"])} for p in actual_indoor]
 
-        # Historical views suppress forward-looking series (prediction + forecast).
-        # They are meaningless for a window anchored in the past and would confuse
-        # the chart by overlaying future data on a historical viewport.
-        if is_historical:
-            predicted_indoor = []
-            forecast_outdoor = []
-        else:
-            predicted_indoor = [
-                {"ts": p["ts"], "temp": _conv(p["temp"])}
-                for p in _build_predicted_indoor_future(
-                    self._hourly_forecast_temps,
-                    self.config,
-                    now,
-                    current_indoor_temp=self._get_indoor_temp(),
-                    thermal_model=thermal_model,
-                    occupancy_mode=self._occupancy_mode,
-                    classification=self._current_classification,
-                )
-            ]
-            forecast_outdoor = [
-                {"ts": p["ts"], "temp": _conv(p["temp"])}
-                for p in _build_future_forecast_outdoor(
-                    self._hourly_forecast_temps,
-                    classification=self._current_classification,
-                )
-            ]
-
-        def _conv_log_entry(e: dict) -> dict:
-            e = dict(e)
-            for k in ("pred_outdoor", "pred_indoor", "pred_outdoor_avg", "pred_indoor_avg"):
-                if e.get(k) is not None:
-                    e[k] = _conv(e[k])
-            # Back-compat: old entries written before Issue #331 lack these keys.
-            # Default to False so state_log always carries both fields.
-            e.setdefault("fan_running", False)
-            e.setdefault("nat_vent_active", False)
-            return e
-
-        log_entries = [_conv_log_entry(e) for e in log_entries]
-
         # Build timestamp list for _compute_target_band_schedule — same parse pattern
         # as _build_predicted_indoor_future.
+        #
+        # Issue #470: this block (timestamps, pre-cool trigger/target, and the band
+        # schedule itself) is computed once, HERE, and threaded into
+        # _build_predicted_indoor_future() below via its band_schedule= parameter —
+        # previously that function recomputed the same schedule internally, using its
+        # own independent (and not proven identical) inline pre-cool trigger-time
+        # formula rather than the canonical self._compute_pre_cool_trigger_time().
         _band_timestamps = []
         for _fc_entry in self._hourly_forecast_temps or []:
             _dt_str = _fc_entry.get("datetime") or _fc_entry.get("time")
@@ -6361,6 +6328,47 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         _hvac_mode = getattr(self._current_classification, "hvac_mode", None) if self._current_classification else None
         _conv_band = [{"ts": e["ts"], "lower": _conv(e["lower"]), "upper": _conv(e["upper"])} for e in _raw_band]
+
+        # Historical views suppress forward-looking series (prediction + forecast).
+        # They are meaningless for a window anchored in the past and would confuse
+        # the chart by overlaying future data on a historical viewport.
+        if is_historical:
+            predicted_indoor = []
+            forecast_outdoor = []
+        else:
+            predicted_indoor = [
+                {"ts": p["ts"], "temp": _conv(p["temp"])}
+                for p in _build_predicted_indoor_future(
+                    self._hourly_forecast_temps,
+                    self.config,
+                    now,
+                    current_indoor_temp=self._get_indoor_temp(),
+                    thermal_model=thermal_model,
+                    occupancy_mode=self._occupancy_mode,
+                    classification=self._current_classification,
+                    band_schedule=_raw_band,
+                )
+            ]
+            forecast_outdoor = [
+                {"ts": p["ts"], "temp": _conv(p["temp"])}
+                for p in _build_future_forecast_outdoor(
+                    self._hourly_forecast_temps,
+                    classification=self._current_classification,
+                )
+            ]
+
+        def _conv_log_entry(e: dict) -> dict:
+            e = dict(e)
+            for k in ("pred_outdoor", "pred_indoor", "pred_outdoor_avg", "pred_indoor_avg"):
+                if e.get(k) is not None:
+                    e[k] = _conv(e[k])
+            # Back-compat: old entries written before Issue #331 lack these keys.
+            # Default to False so state_log always carries both fields.
+            e.setdefault("fan_running", False)
+            e.setdefault("nat_vent_active", False)
+            return e
+
+        log_entries = [_conv_log_entry(e) for e in log_entries]
 
         return {
             "predicted_indoor": predicted_indoor,
@@ -7262,6 +7270,7 @@ def _build_predicted_indoor_future(
     thermal_model: dict | None = None,
     occupancy_mode: str = OCCUPANCY_HOME,
     classification: Any | None = None,
+    band_schedule: list[dict] | None = None,
 ) -> list[dict]:
     """Build future predicted indoor temps from the automation plan.
 
@@ -7273,6 +7282,14 @@ def _build_predicted_indoor_future(
     - heat days: sleep_heat (or comfort_heat−4°F default) overnight, comfort_heat waking
     - cool days: sleep_cool (or comfort_cool+3°F default) overnight, comfort_cool waking
     - off days: outdoor + 2°F buffer, floored at setback_heat
+
+    Args:
+        band_schedule: Pre-computed _compute_target_band_schedule() output (Issue #470).
+            When provided, reused directly instead of recomputing pre-cool trigger/target
+            and calling _compute_target_band_schedule() again — the caller (get_chart_data())
+            already computes it once via the canonical self._compute_pre_cool_trigger_time().
+            When omitted (e.g. direct unit tests of this function), falls back to computing
+            it internally as before, for full backward compatibility.
 
     Returns list of {"ts": ISO_str, "temp": float} for hours strictly after now.
     """
@@ -7452,51 +7469,67 @@ def _build_predicted_indoor_future(
 
     # B3: Pre-compute the full band schedule for all future timestamps in one call,
     # then look up per entry. Avoids re-parsing config + ramp math 24+ times.
-    _band_config = dict(config)
-    _band_config["sleep_heat"] = setback_temp_heat
-    _band_config["sleep_cool"] = setback_temp_cool
-    _future_timestamps_for_band: list = []
-    for _fc in hourly_forecast:
-        _dt_s = _fc.get("datetime") or _fc.get("time")
-        if not _dt_s:
-            continue
-        try:
-            _dt_o = datetime.fromisoformat(_dt_s)
-            _lts = dt_util.as_local(_dt_o) if _dt_o.tzinfo else _dt_o
-            if _lts > now:
-                _future_timestamps_for_band.append(_lts)
-        except (ValueError, TypeError):
-            pass
-    # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
-    _ode_pc_trigger_h: float | None = None
-    _ode_pc_target: float | None = None
-    _setback_mod = getattr(classification, "setback_modifier", None)
-    if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
-        from .const import (
-            PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
-            PRE_COOL_WAKE_OFFSET_HOURS,
+    #
+    # Issue #470: when the caller (get_chart_data()) already computed this schedule
+    # once via the canonical self._compute_pre_cool_trigger_time(), reuse it directly
+    # instead of recomputing it here via an independent (and not identical) inline
+    # pre-cool trigger-time formula. This also fixes a pre-existing, unrelated
+    # divergence: the internal recompute pinned sleep_heat/sleep_cool to this
+    # function's own raw-clamped setback_temp_heat/cool before calling
+    # _compute_target_band_schedule(), which — via compute_bedtime_setback()'s
+    # "explicit value takes priority" branch — silently skipped the adaptive
+    # thermal-model-derived sleep floor the DISPLAYED chart band uses whenever
+    # sleep_heat/sleep_cool weren't explicitly configured. Reusing the caller's
+    # schedule (built from the real, unmodified config) makes the ODE prediction
+    # curve agree with the displayed band in that case, instead of silently disagreeing.
+    if band_schedule is not None:
+        _band_lookup: dict[str, dict] = {b["ts"]: b for b in band_schedule}
+    else:
+        _band_config = dict(config)
+        _band_config["sleep_heat"] = setback_temp_heat
+        _band_config["sleep_cool"] = setback_temp_cool
+        _future_timestamps_for_band: list = []
+        for _fc in hourly_forecast:
+            _dt_s = _fc.get("datetime") or _fc.get("time")
+            if not _dt_s:
+                continue
+            try:
+                _dt_o = datetime.fromisoformat(_dt_s)
+                _lts = dt_util.as_local(_dt_o) if _dt_o.tzinfo else _dt_o
+                if _lts > now:
+                    _future_timestamps_for_band.append(_lts)
+            except (ValueError, TypeError):
+                pass
+        # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
+        _ode_pc_trigger_h: float | None = None
+        _ode_pc_target: float | None = None
+        _setback_mod = getattr(classification, "setback_modifier", None)
+        if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
+            from .const import (
+                PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
+                PRE_COOL_WAKE_OFFSET_HOURS,
+            )
+
+            _wct = getattr(classification, "window_close_time", None)
+            if _wct is not None:
+                _ode_pc_trigger_h = _wct.hour + _wct.minute / 60.0 + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES / 60.0
+            else:
+                _wake_str = config.get("wake_time", "06:30")
+                _wake_h_raw = int(_wake_str.split(":")[0]) + int(_wake_str.split(":")[1]) / 60.0
+                _ode_pc_trigger_h = _wake_h_raw - PRE_COOL_WAKE_OFFSET_HOURS
+            _ode_pc_target = compute_pre_cool_target(config, classification.setback_modifier)
+
+        _computed_band_schedule = _compute_target_band_schedule(
+            _future_timestamps_for_band,
+            _band_config,
+            occupancy_mode,
+            now,
+            thermal_model=thermal_model,
+            classification=classification,
+            pre_cool_trigger_h=_ode_pc_trigger_h,
+            pre_cool_target=_ode_pc_target,
         )
-
-        _wct = getattr(classification, "window_close_time", None)
-        if _wct is not None:
-            _ode_pc_trigger_h = _wct.hour + _wct.minute / 60.0 + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES / 60.0
-        else:
-            _wake_str = config.get("wake_time", "06:30")
-            _wake_h_raw = int(_wake_str.split(":")[0]) + int(_wake_str.split(":")[1]) / 60.0
-            _ode_pc_trigger_h = _wake_h_raw - PRE_COOL_WAKE_OFFSET_HOURS
-        _ode_pc_target = compute_pre_cool_target(config, classification.setback_modifier)
-
-    _band_schedule = _compute_target_band_schedule(
-        _future_timestamps_for_band,
-        _band_config,
-        occupancy_mode,
-        now,
-        thermal_model=thermal_model,
-        classification=classification,
-        pre_cool_trigger_h=_ode_pc_trigger_h,
-        pre_cool_target=_ode_pc_target,
-    )
-    _band_lookup: dict[str, dict] = {b["ts"]: b for b in _band_schedule}
+        _band_lookup = {b["ts"]: b for b in _computed_band_schedule}
 
     # Pre-compute window schedule for per-hour ventilation switching (Phase 2C).
     # k_vent_window is the total measured k during ventilated conditions — replacement

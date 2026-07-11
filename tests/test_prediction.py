@@ -774,6 +774,72 @@ def _mock_dt_util_fixed(hour: int = 12, minute: int = 0):
     return mock
 
 
+class TestBandScheduleComputedOnce:
+    """Issue #470: get_chart_data() must compute the target-band schedule exactly
+    once per call, not twice (previously: once internally inside
+    _build_predicted_indoor_future(), once directly for the displayed target_band).
+
+    Requires a real classification + non-empty hourly forecast, otherwise
+    _build_predicted_indoor_future() short-circuits before ever reaching its
+    internal band-schedule call — a fixture without these would pass vacuously
+    both before and after the fix.
+    """
+
+    def _make_classification(self, **overrides):
+        from custom_components.climate_advisor.classifier import DayClassification
+
+        c = object.__new__(DayClassification)
+        defaults = {
+            "day_type": "hot",
+            "trend_direction": "stable",
+            "trend_magnitude": 0,
+            "today_high": 90,
+            "today_low": 70,
+            "tomorrow_high": 88,
+            "tomorrow_low": 68,
+            "hvac_mode": "cool",
+            "pre_condition": False,
+            "pre_condition_target": None,
+            "windows_recommended": False,
+            "window_open_time": None,
+            "window_close_time": None,
+            "setback_modifier": 0.0,
+            "window_opportunity_morning": False,
+            "window_opportunity_evening": False,
+        }
+        defaults.update(overrides)
+        c.__dict__.update(defaults)
+        return c
+
+    def test_compute_target_band_schedule_called_once(self):
+        import custom_components.climate_advisor.coordinator as coord_mod
+
+        coord = _make_chart_coordinator(temp_unit="fahrenheit")
+        coord._current_classification = self._make_classification()
+        coord._hourly_forecast_temps = [
+            {"datetime": "2026-05-13T13:00:00+00:00", "temperature": 74.0 + i} for i in range(6)
+        ]
+        coord.config = {"comfort_heat": 68, "comfort_cool": 76, "setback_heat": 60, "setback_cool": 80}
+
+        # Non-historical path (no before_ts) exercises both the ODE prediction curve
+        # and the displayed target_band — the two call sites this issue deduplicates.
+        original = coord_mod._compute_target_band_schedule
+        wrapped = MagicMock(side_effect=original)
+
+        with (
+            patch.object(coord_mod, "_compute_target_band_schedule", wrapped),
+            patch.object(coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+            patch.object(coord_mod.dt_util, "now", return_value=datetime(2026, 5, 13, 12, 0, 0, tzinfo=UTC)),
+        ):
+            result = coord.get_chart_data()
+
+        assert result["predicted_indoor"], "fixture must actually reach the ODE prediction path"
+        assert wrapped.call_count == 1, (
+            f"_compute_target_band_schedule() must be called exactly once per get_chart_data() "
+            f"invocation, got {wrapped.call_count}"
+        )
+
+
 class TestGetChartDataThermalModel:
     """Tests verifying that get_chart_data() includes a correct thermal_model dict."""
 

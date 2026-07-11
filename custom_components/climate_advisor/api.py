@@ -182,46 +182,59 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             and not coordinator.config.get("aggressive_savings", False)
         )
 
-        return self.json(
-            {
-                "version": VERSION,
-                "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
-                "trend_direction": data.get(ATTR_TREND, "unknown"),
-                "trend_magnitude": trend_magnitude_display,
-                "hvac_mode": hvac_mode,
-                ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
-                ATTR_HVAC_RUNTIME_TODAY: data.get(ATTR_HVAC_RUNTIME_TODAY, 0),
-                ATTR_CURRENT_SETPOINT: setpoint,
-                "target_temp_low": target_temp_low,
-                "target_temp_high": target_temp_high,
-                ATTR_INDOOR_TEMP: indoor_temp_display,
-                "outdoor_temp": outdoor_temp_display,
-                "unit": unit,
-                "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
-                "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
-                "next_action": data.get(ATTR_NEXT_ACTION, ""),
-                "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),
-                "next_automation_time": data.get(ATTR_NEXT_AUTOMATION_TIME, ""),
-                "automation_enabled": coordinator.automation_enabled,
-                "occupancy_mode": coordinator._occupancy_mode,
-                "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
-                "whf_status": data.get(ATTR_WHF_STATUS),
-                "hvac_fan_status": data.get(ATTR_HVAC_FAN_STATUS),
-                "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
-                "contact_sensors": coordinator._compute_contact_details(),
-                "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
-                "fan_override_active": ae._fan_override_active,
-                "paused_by_door": ae.is_paused_by_door,
-                "ca_target_heat": _ca_target_heat,
-                "ca_target_cool": _ca_target_cool,
-                "nat_vent_active": _nat_vent_active,
-                "nat_vent_ac_assist": _nat_vent_ac_assist,
-                "nat_vent_target": _nat_vent_band["nat_vent_target"],
-                "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
-                "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
-                "pre_cool_status": data.get("pre_cool_status"),
-            }
-        )
+        # Issue #480: gate on coordinator.last_update_success instead of silently
+        # serving coordinator.data forever once updates start failing. HA's own
+        # DataUpdateCoordinator retains the last successful snapshot indefinitely
+        # after a failure — that's the correct behavior for entity state (avoids
+        # flapping to unknown), but this status endpoint was reading that frozen
+        # snapshot with zero indication anything was wrong. Same failure shape as
+        # the ca_target_heat/cool staleness Issue #466 fixed above, applied to the
+        # coordinator's overall health rather than those two fields specifically.
+        _coordinator_healthy = bool(coordinator.last_update_success)
+        _status_payload = {
+            "version": VERSION,
+            "day_type": data.get(ATTR_DAY_TYPE, "unknown"),
+            "trend_direction": data.get(ATTR_TREND, "unknown"),
+            "trend_magnitude": trend_magnitude_display,
+            "hvac_mode": hvac_mode,
+            ATTR_HVAC_ACTION: data.get(ATTR_HVAC_ACTION, ""),
+            ATTR_HVAC_RUNTIME_TODAY: data.get(ATTR_HVAC_RUNTIME_TODAY, 0),
+            ATTR_CURRENT_SETPOINT: setpoint,
+            "target_temp_low": target_temp_low,
+            "target_temp_high": target_temp_high,
+            ATTR_INDOOR_TEMP: indoor_temp_display,
+            "outdoor_temp": outdoor_temp_display,
+            "unit": unit,
+            "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
+            "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
+            "next_action": data.get(ATTR_NEXT_ACTION, ""),
+            "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),
+            "next_automation_time": data.get(ATTR_NEXT_AUTOMATION_TIME, ""),
+            "automation_enabled": coordinator.automation_enabled,
+            "occupancy_mode": coordinator._occupancy_mode,
+            "fan_status": data.get(ATTR_FAN_STATUS, "disabled"),
+            "whf_status": data.get(ATTR_WHF_STATUS),
+            "hvac_fan_status": data.get(ATTR_HVAC_FAN_STATUS),
+            "contact_status": data.get(ATTR_CONTACT_STATUS, "no sensors"),
+            "contact_sensors": coordinator._compute_contact_details(),
+            "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
+            "fan_override_active": ae._fan_override_active,
+            "paused_by_door": ae.is_paused_by_door,
+            "ca_target_heat": _ca_target_heat,
+            "ca_target_cool": _ca_target_cool,
+            "nat_vent_active": _nat_vent_active,
+            "nat_vent_ac_assist": _nat_vent_ac_assist,
+            "nat_vent_target": _nat_vent_band["nat_vent_target"],
+            "nat_vent_on_threshold": _nat_vent_band["nat_vent_on_threshold"],
+            "nat_vent_off_threshold": _nat_vent_band["nat_vent_off_threshold"],
+            "pre_cool_status": data.get("pre_cool_status"),
+            "coordinator_healthy": _coordinator_healthy,
+        }
+        if not _coordinator_healthy:
+            _status_payload["last_error"] = coordinator.last_update_error
+            _status_payload["stale_since"] = coordinator.last_update_error_time
+
+        return self.json(_status_payload)
 
 
 class ClimateAdvisorBriefingView(HomeAssistantView):

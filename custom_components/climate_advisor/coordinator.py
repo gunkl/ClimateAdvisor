@@ -401,6 +401,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_occupancy_listeners: list[Any] = []
         self._occupancy_away_timer_cancel: Any | None = None
 
+        # Coordinator health observability (Issue #480): durable record of the most
+        # recent _async_update_data() failure, persisted to survive HA restarts and
+        # Docker log rotation — see async_restore_state()/_build_state_dict() below.
+        # This is a side-channel record only; it does not replace HA's own
+        # last_update_success/UpdateFailed handling, which still governs entity
+        # availability.
+        self.last_update_error: str | None = None
+        self.last_update_error_time: str | None = None
+        self.consecutive_failure_count: int = 0
+
     @property
     def automation_enabled(self) -> bool:
         """Whether automation actions are enabled (False = observe-only)."""
@@ -699,6 +709,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if ai_stats and isinstance(ai_stats, dict):
                 self.claude_client.restore_persistent_stats(ai_stats)
 
+        # Coordinator health (Issue #480): restore regardless of date boundary, same
+        # reasoning as ai_stats above — a failure recorded just before an overnight
+        # restart is still the answer to "why did the dashboard freeze last night",
+        # and that question doesn't respect the day boundary the rest of this
+        # function gates on.
+        self.last_update_error = state.get("last_update_error")
+        self.last_update_error_time = state.get("last_update_error_time")
+        try:
+            self.consecutive_failure_count = int(state.get("consecutive_failure_count", 0) or 0)
+        except (TypeError, ValueError):
+            self.consecutive_failure_count = 0
+
         if state_date != today_str:
             _LOGGER.debug(
                 "Persisted state is from %s (today is %s) — starting fresh",
@@ -918,6 +940,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._last_solar_phase_fit_date.isoformat() if self._last_solar_phase_fit_date else None
             ),
             "event_log": list(self._event_log),
+            # Coordinator health (Issue #480). getattr() defaults, not direct
+            # attribute access: several existing tests build a coordinator via
+            # object.__new__() (bypassing __init__, which is where these are
+            # normally set) and call _build_state_dict() directly.
+            "last_update_error": getattr(self, "last_update_error", None),
+            "last_update_error_time": getattr(self, "last_update_error_time", None),
+            "consecutive_failure_count": getattr(self, "consecutive_failure_count", 0),
         }
 
     async def _async_save_state(self) -> None:
@@ -1455,6 +1484,62 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch forecast and update classification (runs every 30 min).
+
+        Thin wrapper around ``_async_update_data_impl()`` (Issue #480). HA's own
+        ``DataUpdateCoordinator`` already catches exceptions raised from this method
+        and marks entities unavailable (``last_update_success = False``) — that
+        behavior is preserved unchanged; this wrapper does not swallow the
+        exception, it only re-raises after recording a durable side-channel.
+
+        Without this, the *fact* and *cause* of a coordinator-wide failure lived
+        only in the HA core log tail, which rotates out within days — during the
+        Issue #478 investigation the 06:35 crash that took down every
+        ``climate_advisor_*`` entity was unrecoverable after the fact for exactly
+        this reason. Persisting ``last_update_error``/``last_update_error_time``/
+        ``consecutive_failure_count`` via ``_async_save_state()`` means the next
+        occurrence survives both an HA restart and log rotation.
+        """
+        # Defensive defaults: several existing tests partially instantiate the
+        # coordinator via object.__new__() (bypassing __init__) and bind only the
+        # methods under test. Falling back here (rather than requiring __init__ to
+        # have run) keeps this wrapper safe under that established test pattern
+        # without needing to touch every such test file.
+        if not hasattr(self, "consecutive_failure_count"):
+            self.consecutive_failure_count = 0
+        if not hasattr(self, "last_update_error"):
+            self.last_update_error = None
+        if not hasattr(self, "last_update_error_time"):
+            self.last_update_error_time = None
+
+        try:
+            result = await self._async_update_data_impl()
+        except Exception as err:
+            self.consecutive_failure_count += 1
+            self.last_update_error = f"{type(err).__name__}: {err}"
+            self.last_update_error_time = dt_util.now().isoformat()
+            _LOGGER.error(
+                "Coordinator update failed (consecutive_failure_count=%d): %s",
+                self.consecutive_failure_count,
+                self.last_update_error,
+            )
+            with contextlib.suppress(Exception):
+                await self._async_save_state()
+            raise
+        else:
+            if self.consecutive_failure_count or self.last_update_error:
+                _LOGGER.info(
+                    "Coordinator update recovered after %d consecutive failure(s); clearing last_update_error",
+                    self.consecutive_failure_count,
+                )
+                self.consecutive_failure_count = 0
+                self.last_update_error = None
+                self.last_update_error_time = None
+                with contextlib.suppress(Exception):
+                    await self._async_save_state()
+            return result
+
+    async def _async_update_data_impl(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
         # Re-resolve group membership in case it changed
         _LOGGER.debug("[coalesce-diag] _async_update_data: enter")

@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.16"
+VERSION = "0.5.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.17": [
+        "Fix #480: when Climate Advisor's coordinator update fails (the failure that took every"
+        " climate_advisor_* entity unavailable simultaneously during the Issue #478 incident),"
+        " the dashboard used to keep confidently showing the last-known automation/fan status with"
+        " zero indication anything was wrong — you'd have no way to know CA had silently stopped"
+        " working until you noticed the numbers looked stale. The Status card now shows"
+        " ⚠ Climate Advisor unavailable since HH:MM — <error> the moment an update fails, and the"
+        " underlying error/failure-count record is now written to disk, so it survives an HA"
+        " restart and is still readable even after HA's own log retention has rotated past the"
+        " event — the exact gap that made the original incident's root cause unrecoverable.",
+    ],
     "0.5.16": [
         "Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test"
         " scenarios (grace-period lifecycle, override detection/confirmation/self-resolve,"
@@ -1029,6 +1040,40 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    480: {
+        "version_fixed": "0.5.17",
+        "title": "Coordinator health observability: surface stale status instead of silently serving frozen data",
+        "scope_covered": (
+            "Added durable coordinator-health tracking: coordinator.py's _async_update_data() is now"
+            " a thin wrapper (_async_update_data) around the real update logic (renamed"
+            " _async_update_data_impl); any exception raised by the real logic is caught, recorded as"
+            " last_update_error (str)/last_update_error_time (ISO timestamp)/consecutive_failure_count"
+            " (int), persisted via _async_save_state() (state.py's existing atomic write-then-replace"
+            " pattern — same StatePersistence used for all other operational state), and then"
+            " re-raised unchanged so HA's own DataUpdateCoordinator still marks entities unavailable"
+            " exactly as before. On the next successful update the failure record is cleared and"
+            " re-persisted. async_restore_state() restores the three fields unconditionally (same"
+            " precedent as ai_stats — not gated on the same-day check the rest of that function uses),"
+            " so a failure recorded just before an overnight restart is still visible afterward."
+            " api.py's ClimateAdvisorStatusView.get() now reads coordinator.last_update_success and"
+            " adds coordinator_healthy to the response, plus last_error/stale_since (from the two"
+            " persisted fields) when unhealthy — purely additive, no existing fields changed or"
+            " removed. frontend/index.html's loadStatus() Status card now renders"
+            " '⚠ Climate Advisor unavailable since HH:MM — <error>' when coordinator_healthy is false,"
+            " using the existing status-item card (no new card added), following the same conditional-line"
+            " pattern already used for pause_suppressed_classification/nat_vent_active."
+        ),
+        "scope_not_covered": (
+            "tools/sim_harness/ has no failure-injection mechanism for _async_update_data() (confirmed"
+            " by inspection — the fake coordinator's async_config_entry_first_refresh() unconditionally"
+            " sets last_update_success=True after calling _async_update_data(), no try/except), so this"
+            " fix is covered by a pytest unit test (tests/test_coordinator_health.py) exercising the"
+            " wrapper's failure/recovery persistence and the api.py gating logic directly, rather than a"
+            " tools/simulations/pending/ scenario. The trigger for the original 06:35 coordinator crash"
+            " itself remains unknown — this only ensures the next occurrence is diagnosable, per the"
+            " Issue #478 investigation's Stage 1 scope."
+        ),
+    },
     476: {
         "version_fixed": "0.5.16",
         "title": "Migrate all 10 remaining scenarios to the coordinator-level Tier A harness",

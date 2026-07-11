@@ -42,7 +42,11 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
   wakeup                  → run_coro(engine.handle_morning_wakeup())
   economizer_check        → run_coro(engine.check_window_cooling_opportunity(...))
   thermostat_state_changed
-                          → inject thermostat state + engine.handle_manual_override(...)
+                          → (use_coordinator=True) states.async_set() — fires the real
+                            coordinator._async_thermostat_changed listener (full
+                            override-detection state machine, no approximation)
+                          → (use_coordinator=False) raw state injection only; no
+                            override-detection equivalent exists at the engine level
   activate_fan_min_runtime
                           → run_coro(engine.start_min_fan_runtime_cycles()) — real public
                             entry point, activates the fan without a nat-vent session
@@ -83,6 +87,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from tools.sim_harness._loop import run_coro  # noqa: E402
+from tools.sim_harness.build_coordinator import build_headless_coordinator  # noqa: E402
 from tools.sim_harness.build_engine import _DEFAULT_CONFIG, build_headless_engine  # noqa: E402
 from tools.sim_harness.fake_hass import FakeHass, FakeState  # noqa: E402
 from tools.sim_harness.fake_scheduler import FakeScheduler  # noqa: E402
@@ -173,12 +178,21 @@ def _build_classification_from_event(event: dict) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _inject_indoor_temp(fake_hass: FakeHass, climate_entity: str, indoor_f: float | None) -> None:
+def _inject_indoor_temp(
+    fake_hass: FakeHass, climate_entity: str, indoor_f: float | None, *, dispatch: bool = False
+) -> None:
     """Update the current_temperature attribute on the climate entity.
 
     The engine reads indoor temperature via ``_get_indoor_temp_f()`` which
     falls back to ``hass.states.get(climate_entity).attributes["current_temperature"]``
     when no indoor_temp_entity is configured (the default).
+
+    Args:
+        dispatch: When True (a coordinator is present — Issue #474), use
+            ``states.async_set()`` so the change reaches the coordinator's real
+            ``_async_thermostat_changed`` listener. When False (engine-only
+            scenarios), use the silent ``states.set()`` — no listeners are
+            registered anyway, since no coordinator's ``async_setup()`` ran.
     """
     if indoor_f is None:
         return
@@ -186,20 +200,31 @@ def _inject_indoor_temp(fake_hass: FakeHass, climate_entity: str, indoor_f: floa
     if existing is not None:
         attrs = dict(existing.attributes)
         attrs["current_temperature"] = indoor_f
-        fake_hass.states.set(climate_entity, FakeState(state=existing.state, attributes=attrs))
+        state_str = existing.state
     else:
         # No existing entity yet — create with "off" state to match SimState default
-        fake_hass.states.set(
-            climate_entity,
-            FakeState(state="off", attributes={"current_temperature": indoor_f, "fan_mode": "auto"}),
-        )
+        attrs = {"current_temperature": indoor_f, "fan_mode": "auto"}
+        state_str = "off"
+    if dispatch:
+        fake_hass.states.async_set(climate_entity, state_str, attrs)
+    else:
+        fake_hass.states.set(climate_entity, FakeState(state=state_str, attributes=attrs))
 
 
-def _inject_thermostat_mode(fake_hass: FakeHass, climate_entity: str, hvac_mode: str) -> None:
-    """Update the thermostat state string on the climate entity."""
+def _inject_thermostat_mode(
+    fake_hass: FakeHass, climate_entity: str, hvac_mode: str, *, dispatch: bool = False
+) -> None:
+    """Update the thermostat state string on the climate entity.
+
+    Args:
+        dispatch: see ``_inject_indoor_temp``.
+    """
     existing = fake_hass.states.get(climate_entity)
     attrs = dict(existing.attributes) if existing is not None else {}
-    fake_hass.states.set(climate_entity, FakeState(state=hvac_mode, attributes=attrs))
+    if dispatch:
+        fake_hass.states.async_set(climate_entity, hvac_mode, attrs)
+    else:
+        fake_hass.states.set(climate_entity, FakeState(state=hvac_mode, attributes=attrs))
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +272,21 @@ def _parse_event_time(time_str: str, default: datetime) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def run_production_scenario(scenario: dict) -> ProductionRunResult:
+def run_production_scenario(scenario: dict, *, use_coordinator: bool = False) -> ProductionRunResult:
     """Run a scenario dict through the REAL AutomationEngine and return results.
 
     Args:
         scenario: Parsed scenario JSON dict (as returned by json.load).
+        use_coordinator: When True (Issue #474), build a real
+            ``ClimateAdvisorCoordinator`` via ``build_headless_coordinator()``
+            instead of a bare engine via ``build_headless_engine()``. Event
+            types that need coordinator-listener fidelity
+            (``thermostat_state_changed``, indoor-temp ticks inside
+            ``temp_update``) dispatch through ``fake_hass.states.async_set()``
+            so the real ``_async_thermostat_changed`` listener runs, instead
+            of the old hand-approximated mirror. Required for any scenario
+            previously tagged ``track: "integration"`` /
+            ``simulator_support: false``.
 
     Returns:
         ProductionRunResult with event_log, action_log, engine_state, callback_errors.
@@ -277,13 +312,31 @@ def run_production_scenario(scenario: dict) -> ProductionRunResult:
     # Legacy simulator honours config["initial_thermostat_mode"] if present (simulate.py ~line 144).
     initial_thermostat_mode: str = merged_config.get("initial_thermostat_mode", "off")
 
-    # --- Build headless engine ---
-    engine, fake_hass, scheduler, event_log = build_headless_engine(
-        config=merged_config,
-        climate_entity=climate_entity,
-        climate_state=initial_thermostat_mode,
-        start_time=start_dt,
-    )
+    # --- Build headless engine (or real coordinator — Issue #474) ---
+    coordinator: Any | None = None
+    if use_coordinator:
+        # skip_startup_coalesce (scenario field, default False — the honest default,
+        # see build_headless_coordinator's docstring): a freshly built coordinator has
+        # its real 5-minute post-restart override-detection suppression window active,
+        # same as production. A scenario testing steady-state behavior (not startup
+        # itself) must opt out via "skip_startup_coalesce": true, or every dispatched
+        # event vacuously early-returns before reaching any override-detection guard —
+        # this was found and fixed for the #474 proving slice.
+        coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
+            config=merged_config,
+            climate_entity=climate_entity,
+            climate_state=initial_thermostat_mode,
+            start_time=start_dt,
+            skip_startup_coalesce=bool(scenario.get("skip_startup_coalesce", False)),
+        )
+        engine = coordinator.automation_engine
+    else:
+        engine, fake_hass, scheduler, event_log = build_headless_engine(
+            config=merged_config,
+            climate_entity=climate_entity,
+            climate_state=initial_thermostat_mode,
+            start_time=start_dt,
+        )
 
     # --- Sensor tracker — drives engine._sensor_check_callback ---
     tracker = _SensorTracker()
@@ -315,7 +368,17 @@ def run_production_scenario(scenario: dict) -> ProductionRunResult:
             scheduler.advance_to(event_dt)
 
             # 2. Dispatch event to production entry point
-            _dispatch_event(event, etype, engine, fake_hass, scheduler, tracker, climate_entity, merged_config)
+            _dispatch_event(
+                event, etype, engine, fake_hass, scheduler, tracker, climate_entity, merged_config, coordinator
+            )
+
+        # Final drain: a coroutine enqueued by the LAST event's dispatch (e.g. Issue #474 —
+        # a real coordinator listener like _async_thermostat_changed, scheduled via
+        # async_create_task rather than awaited inline — matches real HA's dispatch
+        # contract) has no subsequent advance_to() call to drain it via that call's
+        # trailing _drain_tasks(). Without this, such a coroutine is silently dropped
+        # (never awaited) instead of running.
+        scheduler._drain_tasks()
 
     # --- Capture final engine state snapshot ---
     engine_state = _snapshot_engine_state(engine)
@@ -342,11 +405,18 @@ def _dispatch_event(
     tracker: _SensorTracker,
     climate_entity: str,
     config: dict[str, Any],
+    coordinator: Any | None = None,
 ) -> None:
-    """Dispatch a single scenario event to the correct production engine method."""
+    """Dispatch a single scenario event to the correct production engine method.
+
+    ``coordinator`` (Issue #474) is non-None only when
+    ``run_production_scenario(..., use_coordinator=True)`` built a real
+    ``ClimateAdvisorCoordinator``. Event types that need coordinator-listener
+    fidelity check for it explicitly.
+    """
 
     if etype == "temp_update":
-        _handle_temp_update(event, engine, fake_hass, climate_entity)
+        _handle_temp_update(event, engine, fake_hass, climate_entity, coordinator)
 
     elif etype == "sensor_open":
         entity_id = event.get("entity", "binary_sensor.window")
@@ -375,6 +445,12 @@ def _dispatch_event(
                     _cls_indoor_f = float(_cls_indoor_f)
                 except (TypeError, ValueError):
                     _cls_indoor_f = None
+        # Issue #474: when a real coordinator is present, also set its own
+        # _current_classification — _async_thermostat_changed's override-detection
+        # branches read self._current_classification (coordinator's own copy, not
+        # engine._current_classification) to know what mode CA expects.
+        if coordinator is not None:
+            coordinator._current_classification = classification
         run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
 
     elif etype == "occupancy_away":
@@ -429,13 +505,17 @@ def _dispatch_event(
         run_coro(engine.check_window_cooling_opportunity(outdoor_temp, indoor_temp, windows_open, hour))
 
     elif etype == "reconcile_fan_on_startup":
-        # Step-1 blind-spot closure: no golden previously exercised this coordinator
-        # startup-coalesce entry point at all. Mirrors coordinator._do_startup_coalesce's
-        # call, which passes an archetype-resolved thermostat_fan_running signal (real
+        # Step-1 blind-spot closure: no golden previously exercised this real, public
+        # engine entry point at all. In production, coordinator._do_startup_coalesce()
+        # calls this with an archetype-resolved thermostat_fan_running signal (real
         # thermostat attrs for FAN_MODE_HVAC, the physical WHF entity state for
         # FAN_MODE_WHOLE_HOUSE, per Issue #423) — the scenario supplies that already-
         # resolved boolean directly, since resolving it from raw entity state is the
-        # coordinator's job, not this engine method's.
+        # coordinator's job, not this engine method's. This is NOT a coordinator-dispatch
+        # approximation (contrast the deleted thermostat_state_changed override-detection
+        # mirror, Issue #474) — it's a direct call to a real public AutomationEngine
+        # method with externally-supplied inputs, the same legitimate pattern as
+        # "classification"/"economizer_check"/"pre_cool" events.
         outdoor_f = event.get("outdoor_f")
         if outdoor_f is not None:
             engine.update_outdoor_temp(float(outdoor_f))
@@ -452,27 +532,26 @@ def _dispatch_event(
         )
 
     elif etype == "thermostat_state_changed":
-        # Mirrors coordinator._async_thermostat_changed stale-clear + override detection.
-        # Production path: coordinator calls handle_manual_override() when it detects
-        # divergence between thermostat state and classification.
+        # Issue #474: when a real coordinator is present, dispatch via
+        # states.async_set() — this fires the coordinator's actual
+        # _async_thermostat_changed listener (coordinator.py:2910-3461), which
+        # owns the full 3-branch override-detection state machine
+        # (door-pause / re-override-during-grace / normal), startup-coalesce
+        # suppression, the expected-confirmation guard, and HVAC-session
+        # tracking. There is no longer a hand-approximated substitute for any
+        # of that here — the 18-line override-detection mirror that used to
+        # live in this branch covered only the "normal" case and had already
+        # gone stale post-#249 (see override_detection_and_confirmation.json).
+        #
+        # When no coordinator is present (engine-only scenarios), only inject
+        # the raw state — there is no coordinator-equivalent override
+        # detection to approximate at the engine level; a scenario that needs
+        # override-detection fidelity must run with use_coordinator=True.
         new_hvac_mode = event.get("hvac_mode", "off")
-        _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode)
-        c = engine._current_classification
-        classification_mode = c.hvac_mode if c else None
-        if (
-            classification_mode is not None
-            and not engine._manual_override_active
-            and not engine._override_confirm_pending
-            and new_hvac_mode != classification_mode
-            and new_hvac_mode not in ("off",)
-        ):
-            engine.handle_manual_override(
-                source="normal",
-                old_mode=classification_mode,
-                new_mode=new_hvac_mode,
-                classification_mode=classification_mode,
-            )
-        # else: no override action needed (consistent with classification, or already pending)
+        if coordinator is not None:
+            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, dispatch=True)
+        else:
+            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode)
 
     elif etype in ("fan_cycle_on", "fan_cycle_off", "grace_start", "grace_end"):
         # FINDINGS: no clean production entry point — see module docstring.
@@ -517,21 +596,30 @@ def _handle_temp_update(
     engine: Any,
     fake_hass: FakeHass,
     climate_entity: str,
+    coordinator: Any | None = None,
 ) -> None:
     """Handle temp_update: inject temperatures, then re-evaluate nat-vent conditions.
 
-    Mirrors TWO distinct real production triggers, not one:
-      1. ``_async_thermostat_changed`` (coordinator.py:2837-2862) — a state-listener
+    Reflects TWO distinct real production triggers, not one:
+      1. ``_async_thermostat_changed`` (coordinator.py:2910-3461) — a state-listener
          that fires on every indoor current_temperature ATTRIBUTE change and calls
          ``nat_vent_temperature_check()`` (if nat-vent active) and
-         ``fan_thermostat_check()`` (if any CA fan active) directly. Until this fix,
-         this adapter never dispatched here at all — the fan-thermostat-check
-         shadow comparator (Step 2 slice 2) found zero calls across the entire
-         5809-scenario synthetic sweep because of exactly this gap, not because of
-         a missing enumerator dimension.
+         ``fan_thermostat_check()`` (if any CA fan active). Issue #474: when a real
+         coordinator is present, the indoor-temp injection dispatches via
+         ``states.async_set()``, so the real listener runs this logic itself —
+         no approximation needed. When no coordinator is present (engine-only
+         scenarios — the majority of the existing golden suite), this function
+         still calls ``nat_vent_temperature_check()``/``fan_thermostat_check()``
+         directly: unlike the old ``thermostat_state_changed`` override-detection
+         mirror (deleted — see that branch), this one isn't approximating a
+         multi-branch state machine prone to drift, it's a direct, unconditional
+         call guarded by the same two flags production reads — legitimate
+         engine-level Tier-A fidelity, not coordinator-dispatch duplication, and
+         it's what most existing golden scenarios rely on.
       2. ``check_natural_vent_conditions()`` — the periodic ``_async_update_data``
-         cycle re-evaluation (docstring: "Called by coordinator on each
-         _async_update_data when sensors are open"), already dispatched below.
+         cycle re-evaluation, dispatched unconditionally below regardless of mode
+         (it's a real, distinct production trigger, not a coordinator-listener
+         approximation).
     """
     outdoor_f = event.get("outdoor_f")
     indoor_f = event.get("indoor_f")
@@ -543,10 +631,10 @@ def _handle_temp_update(
         engine.update_outdoor_temp(float(outdoor_f))
 
     if indoor_f is not None:
-        _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f))
+        _inject_indoor_temp(fake_hass, climate_entity, float(indoor_f), dispatch=coordinator is not None)
 
     new_indoor = float(indoor_f) if indoor_f is not None else None
-    if new_indoor is not None and new_indoor != old_indoor:
+    if coordinator is None and new_indoor is not None and new_indoor != old_indoor:
         if engine._natural_vent_active:
             run_coro(engine.nat_vent_temperature_check(new_indoor))
         if engine._fan_active or engine._natural_vent_active:

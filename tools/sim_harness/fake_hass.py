@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -24,6 +25,19 @@ class FakeState:
 
     state: str = "unknown"
     attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class FakeEvent:
+    """Minimal stand-in for homeassistant.core.Event.
+
+    Coordinator listener callbacks (e.g. ``_async_thermostat_changed``) read
+    ``event.data.get("entity_id"/"old_state"/"new_state")`` — this is the only
+    shape that matters for dispatch fidelity.
+    """
+
+    event_type: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class _FakeServices:
@@ -68,44 +82,69 @@ class _FakeServices:
         self._apply_state_feedback(domain, service, data)
 
     def _apply_state_feedback(self, domain: str, service: str, data: dict) -> None:
-        """Reflect a command into the target entity's FakeState (real-HA behaviour)."""
+        """Reflect a command into the target entity's FakeState (real-HA behaviour).
+
+        Issue #474: dispatches via ``states.async_set()`` rather than mutating
+        the ``FakeState`` in place. In real HA, a CA-issued service call causes
+        the real thermostat integration to update its own state and fire a
+        real ``state_changed`` event — which DOES reach a coordinator's
+        ``_async_thermostat_changed`` listener. That round-trip is exactly
+        what the expected-confirmation guard (``_is_expected_confirmation`` /
+        ``_last_commanded_hvac_mode``) exists to filter out as "not a user
+        override." Silently mutating state in place (the old behavior) would
+        make that guard untestable — no listener would ever see CA's own
+        commands. For engine-only scenarios (no coordinator constructed, no
+        listeners registered), this dispatch is a no-op — same behavior as
+        before.
+        """
         entity_id = data.get("entity_id")
         if isinstance(entity_id, list):
             entity_id = entity_id[0] if entity_id else None
         if not entity_id:
             return
 
-        st = self._states.get(entity_id)
-        if st is None:
-            st = FakeState(state="off", attributes={})
-            self._states.set(entity_id, st)
+        existing = self._states.get(entity_id)
+        state_str = existing.state if existing is not None else "off"
+        attrs = dict(existing.attributes) if existing is not None else {}
 
         if domain == "climate":
             if service == "set_hvac_mode" and "hvac_mode" in data:
-                st.state = data["hvac_mode"]
+                state_str = data["hvac_mode"]
             elif service == "set_temperature":
                 if "hvac_mode" in data:
-                    st.state = data["hvac_mode"]
+                    state_str = data["hvac_mode"]
                 if "temperature" in data:
-                    st.attributes["temperature"] = data["temperature"]
+                    attrs["temperature"] = data["temperature"]
                 if "target_temp_low" in data:
-                    st.attributes["target_temp_low"] = data["target_temp_low"]
+                    attrs["target_temp_low"] = data["target_temp_low"]
                 if "target_temp_high" in data:
-                    st.attributes["target_temp_high"] = data["target_temp_high"]
+                    attrs["target_temp_high"] = data["target_temp_high"]
             elif service == "set_fan_mode" and "fan_mode" in data:
-                st.attributes["fan_mode"] = data["fan_mode"]
+                attrs["fan_mode"] = data["fan_mode"]
         elif domain in ("fan", "switch"):
             if service == "turn_on":
-                st.state = "on"
+                state_str = "on"
             elif service == "turn_off":
-                st.state = "off"
+                state_str = "off"
+
+        self._states.async_set(entity_id, state_str, attrs)
 
 
 class _FakeStates:
-    """Minimal state registry backed by an injected dict."""
+    """Minimal state registry backed by an injected dict.
 
-    def __init__(self) -> None:
+    ``set()``/``set_simple()`` mutate silently (engine-only fidelity — no
+    listener is invoked). ``async_set()`` additionally dispatches to any
+    listeners registered via ``FakeHass.add_state_listener()`` for this
+    entity_id, matching what real HA's ``async_track_state_change_event``
+    delivers. Scenario-seed code should use ``set()``; scenario *event*
+    injection that must reach a real coordinator listener should use
+    ``async_set()``.
+    """
+
+    def __init__(self, dispatch_fn: Any | None = None) -> None:
         self._states: dict[str, FakeState] = {}
+        self._dispatch_fn = dispatch_fn
 
     def get(self, entity_id: str) -> FakeState | None:
         return self._states.get(entity_id)
@@ -115,6 +154,56 @@ class _FakeStates:
 
     def set_simple(self, entity_id: str, state_str: str, attributes: dict | None = None) -> None:
         self._states[entity_id] = FakeState(state=state_str, attributes=attributes or {})
+
+    def async_set(self, entity_id: str, state_str: str, attributes: dict | None = None) -> None:
+        """Set a new state and dispatch a state-changed event to real listeners."""
+        old_state = self._states.get(entity_id)
+        new_state = FakeState(state=state_str, attributes=attributes or {})
+        self._states[entity_id] = new_state
+        if self._dispatch_fn is not None:
+            self._dispatch_fn(entity_id, old_state, new_state)
+
+
+class _FakeBus:
+    """Minimal event bus: ``async_listen`` / ``async_listen_once`` / ``async_fire``.
+
+    Covers the coordinator's two ``hass.bus.async_listen(...)`` registrations
+    (``EVENT_CALL_SERVICE``, ``EVENT_HOMEASSISTANT_STOP``) so
+    ``async_setup()`` doesn't raise ``AttributeError`` on construction, and
+    supports scenarios that want to fire those events directly.
+    """
+
+    def __init__(self, task_runner: Any | None = None) -> None:
+        self._listeners: dict[str, list[Any]] = {}
+        self._task_runner = task_runner  # optional FakeHass.async_create_task, for async listeners
+
+    def async_listen(self, event_type: str, callback: Any) -> Any:
+        self._listeners.setdefault(event_type, []).append(callback)
+
+        def _remove() -> None:
+            with contextlib.suppress(ValueError):
+                self._listeners[event_type].remove(callback)
+
+        return _remove
+
+    def async_listen_once(self, event_type: str, callback: Any) -> Any:
+        remove_holder: list[Any] = []
+
+        def _wrapped(event: Any) -> None:
+            if remove_holder:
+                remove_holder[0]()
+            callback(event)
+
+        remove_holder.append(self.async_listen(event_type, _wrapped))
+        return remove_holder[0]
+
+    def async_fire(self, event_type: str, event_data: dict | None = None) -> None:
+        """Fire event_type; async listeners are scheduled via task_runner (see _dispatch_state_change)."""
+        event = FakeEvent(event_type=event_type, data=event_data or {})
+        for cb in list(self._listeners.get(event_type, [])):
+            result = cb(event)
+            if inspect.iscoroutine(result) and self._task_runner is not None:
+                self._task_runner(result)
 
 
 class FakeHass:
@@ -139,8 +228,10 @@ class FakeHass:
         """
         self._clock_fn = clock_fn or datetime.now
         self.action_log: list[dict] = []
-        self.states = _FakeStates()
+        self._state_listeners: dict[str, list[Any]] = {}
+        self.states = _FakeStates(dispatch_fn=self._dispatch_state_change)
         self.services = _FakeServices(self.action_log, self._clock_fn, self.states)
+        self.bus = _FakeBus(task_runner=self.async_create_task)
         self._scheduler: Any | None = None  # set via set_scheduler()
 
         # Minimal config stub the engine reads via hass.config.config_dir
@@ -156,6 +247,48 @@ class FakeHass:
     def set_scheduler(self, scheduler: Any) -> None:
         """Wire in the FakeScheduler so async_create_task coroutines are driven."""
         self._scheduler = scheduler
+
+    # ------------------------------------------------------------------
+    # State-change listener registry (real dispatch, coordinator-fidelity)
+    # ------------------------------------------------------------------
+
+    def add_state_listener(self, entity_ids: str | list[str], callback: Any) -> Any:
+        """Register a state-change listener; mirrors async_track_state_change_event.
+
+        Returns a zero-arg cancel function, matching the real HA contract.
+        """
+        ids = [entity_ids] if isinstance(entity_ids, str) else list(entity_ids)
+        for eid in ids:
+            self._state_listeners.setdefault(eid, []).append(callback)
+
+        def _remove() -> None:
+            for eid in ids:
+                with contextlib.suppress(ValueError):
+                    self._state_listeners[eid].remove(callback)
+
+        return _remove
+
+    def _dispatch_state_change(self, entity_id: str, old_state: Any, new_state: Any) -> None:
+        """Invoke every listener registered for entity_id with a synthesized Event.
+
+        Coordinator listeners (e.g. ``_async_thermostat_changed``) are ``async
+        def`` — real HA's ``async_track_state_change_event`` dispatch does not
+        await an async listener inline; it schedules it via
+        ``hass.async_create_task()`` (HA's ``async_run_hass_job`` for a
+        coroutine-function job). Calling ``cb(event)`` on an async listener
+        only constructs the coroutine — it must be handed to
+        ``async_create_task()`` or it never runs (and Python warns about an
+        unawaited coroutine). Sync ``@callback``-decorated listeners run
+        immediately, matching real HA.
+        """
+        event = FakeEvent(
+            event_type="state_changed",
+            data={"entity_id": entity_id, "old_state": old_state, "new_state": new_state},
+        )
+        for cb in list(self._state_listeners.get(entity_id, [])):
+            result = cb(event)
+            if inspect.iscoroutine(result):
+                self.async_create_task(result)
 
     # ------------------------------------------------------------------
     # HA async helpers used by AutomationEngine

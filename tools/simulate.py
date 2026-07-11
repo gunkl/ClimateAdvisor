@@ -69,12 +69,19 @@ def _find_scenario(name: str) -> tuple[Path, str] | None:
 
 
 def run_scenario_production(scenario_file: Path, state: str | None = None) -> dict:
-    """Run a scenario through the real production AutomationEngine.
+    """Run a scenario through the real production AutomationEngine (or coordinator).
 
-    Drives the real ``AutomationEngine`` headless via ``tools/sim_harness``.
-    ``track: integration`` assertions are deferred to Tier B (HeadlessTarry)
-    and skipped here; ``simulator_support: false`` assertions are evaluated
-    (they are not skipped in the production engine path).
+    Drives the real ``AutomationEngine`` headless via ``tools/sim_harness``. By
+    default, ``track: integration`` assertions are deferred (skipped) since the
+    bare engine has no coordinator-listener layer to evaluate them against.
+
+    Issue #474: a scenario JSON may set ``"use_coordinator": true`` to build a
+    real ``ClimateAdvisorCoordinator`` (via ``build_headless_coordinator()``)
+    instead of a bare engine. When set, ``track: integration`` assertions are
+    evaluated for real — the coordinator's actual ``_async_thermostat_changed``
+    listener, timers, and startup lifecycle are running, not skipped.
+    (``simulator_support: false`` assertions are always evaluated — not skipped
+    in either mode.)
     """
     # Lazy imports: ensure the repo root is importable when run standalone
     # (python tools/simulate.py puts tools/ on sys.path, not the repo root).
@@ -87,18 +94,21 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
     with open(scenario_file) as f:
         scenario = json.load(f)
 
-    result = run_production_scenario(scenario)
+    use_coordinator = bool(scenario.get("use_coordinator", False))
+    result = run_production_scenario(scenario, use_coordinator=use_coordinator)
     decisions = _out.production_decisions(result)
 
     assertion_results: list[dict] = []
     any_real_assertion = False
     for a in scenario.get("assertions", []):
-        # Tier separation (issue #236): track:"integration" assertions need the
-        # coordinator's state-listener layer (e.g. _async_thermostat_changed), which
-        # neither Tier-A engine models — defer them to the Tier B (HeadlessTarry)
-        # harness. (simulator_support:false is NOT skipped — the real production
-        # engine CAN evaluate those, de-phantoming what the legacy sim could not.)
-        if a.get("track") == "integration":
+        # Tier separation (issue #236, narrowed by #474): track:"integration"
+        # assertions need the coordinator's state-listener layer (e.g.
+        # _async_thermostat_changed). When use_coordinator=True, that layer is
+        # now real (Issue #474 — coordinator-level Tier A coverage) and these
+        # assertions are evaluated like any other. Only skip them when running
+        # in bare-engine mode. (simulator_support:false is NEVER skipped — the
+        # real production engine/coordinator CAN evaluate those.)
+        if a.get("track") == "integration" and not use_coordinator:
             assertion_results.append(
                 {
                     "at": a["at"],
@@ -106,7 +116,7 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
                     "actual": None,
                     "pass": None,
                     "skipped": True,
-                    "reason": "integration-track assertion — deferred to Tier B",
+                    "reason": "integration-track assertion — needs use_coordinator=True",
                     "track": "integration",
                 }
             )

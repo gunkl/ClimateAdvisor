@@ -660,6 +660,22 @@ def _dispatch_event(
         nat_vent_just_closed = bool(event.get("nat_vent_just_closed", False))
         run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
 
+    elif etype == "coordinator_refresh" and coordinator is not None:
+        # Issue #481: dispatches the real periodic coordinator cycle
+        # (DataUpdateCoordinator.async_request_refresh() -> _async_update_data()) at a
+        # specific simulated time. Requires use_coordinator=True — there is no
+        # engine-only equivalent since _async_update_data() (and the incident detection
+        # it runs at its tail, _detect_and_emit_incidents()) is coordinator-owned.
+        # Production calls the equivalent (async_refresh()) every 30 minutes via
+        # update_interval; the harness's _MockDataUpdateCoordinator only auto-runs
+        # _async_update_data() once, at async_config_entry_first_refresh() during setup
+        # (tools/sim_harness/ha_stubs.py — the stub does not implement async_refresh()
+        # at all, only async_request_refresh()/async_config_entry_first_refresh()), so
+        # scenarios that need to exercise a LATER cycle (e.g. incident detection
+        # evaluated against a later-injected indoor temp) must dispatch it explicitly.
+        # Purely additive — no existing event type's semantics changed.
+        run_coro(coordinator.async_request_refresh())
+
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 
 

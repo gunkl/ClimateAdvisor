@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.16"
+VERSION = "0.5.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.17": [
+        "Fix #481: fixes a false-positive comfort log entry that could make it look like the"
+        " house was too cold overnight when it wasn't. The incident-detection subsystem that"
+        " powers compliance/history review was comparing live indoor temperature against the"
+        " flat daytime comfort band (e.g. 68°F) even during the overnight sleep window, where a"
+        " lower sleep-band floor (e.g. 64°F) is the real, actively-applied target — so indoor"
+        " temps that were genuinely comfortable within the sleep band (e.g. 66°F) could still"
+        " log a 'comfort_undertemp' incident. Incident detection now resolves the same"
+        " currently-active band (sleep/away/vacation-aware) that the dashboard's target-heat/cool"
+        " fields and every setpoint-writing automation handler already use, so the incident log"
+        " only reflects violations the occupant actually experienced.",
+    ],
     "0.5.16": [
         "Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test"
         " scenarios (grace-period lifecycle, override detection/confirmation/self-resolve,"
@@ -1029,6 +1041,54 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    481: {
+        "version_fixed": "0.5.17",
+        "title": (
+            "Incident detection now respects the currently-active comfort band"
+            " (sleep/away/vacation), not just the flat daytime band"
+        ),
+        "scope_covered": (
+            "coordinator.py: added _resolve_active_comfort_band(), which routes through"
+            " select_comfort_band() (automation.py) — the same canonical resolver api.py's"
+            " ca_target_heat/ca_target_cool fields and automation.py's setpoint-writing handlers"
+            " (apply_classification, handle_bedtime, handle_pre_cool, handle_morning_wakeup,"
+            " occupancy handlers) already use, per the Issue #402/#462 precedent. When"
+            " coordinator.current_classification is None (e.g. right after HA restart, before the"
+            " first classification cycle), falls back to the same sleep/day-only heuristic"
+            " api.py uses, for consistency. _detect_and_emit_incidents() now calls this once per"
+            " cycle and uses the result for both the comfort_violation/comfort_undertemp"
+            " threshold comparison AND the values passed into _is_nat_vent_tolerated_deviation()"
+            " (so the nat-vent hysteresis tolerance check also uses the correct active band, not"
+            " the static config values). _emit_incident() now accepts optional comfort_heat/"
+            " comfort_cool overrides and defaults to the resolved active band via the same"
+            " helper if not supplied, so every incident's persisted payload (comfort_heat/"
+            " comfort_cool fields) reflects the band that was actually active at emission time —"
+            " not always the flat daytime numbers — for anyone reviewing incident history later."
+            " Test infrastructure (tools/sim_harness/): added a new 'coordinator_refresh' harness"
+            " dispatch event type (run_production.py) so a scenario can explicitly trigger a"
+            " second DataUpdateCoordinator cycle (async_request_refresh() -> _async_update_data()"
+            " -> _detect_and_emit_incidents()) — previously nothing in the harness re-invoked"
+            " _async_update_data() after the coordinator's initial first-refresh at construction,"
+            " so this code path was untestable end-to-end via the coordinator harness. Also fixed"
+            " build_coordinator.py to additionally capture coordinator-originated events"
+            " (self._emit_event(), which _emit_incident()/_detect_and_emit_incidents() call"
+            " directly) into the flat scenario event_log the harness's assertions read — these"
+            " previously wrote only to the internal self._event_log ring buffer and were"
+            " invisible to any scenario assertion. Added a new negative assertion type,"
+            " no_comfort_undertemp_incident/no_comfort_violation_incident (outcomes.py), mirroring"
+            " the existing override_not_detected precedent. New golden-track scenario"
+            " (pending/issue-481-sleep-band-no-false-undertemp-incident.json) verified"
+            " load-bearing via a real revert test."
+        ),
+        "scope_not_covered": (
+            "Does not change any setpoint-writing/HVAC-control logic — strictly scoped to"
+            " incident *detection* (the diagnostic/telemetry event log), not automation"
+            " behavior. Does not address the other three findings from the Issue #478"
+            " investigation (coordinator health observability, WHF fan-off bookkeeping/"
+            " provenance, grace-period adopt-on-match) — those are separate, independently"
+            " tracked stages of that plan."
+        ),
+    },
     476: {
         "version_fixed": "0.5.16",
         "title": "Migrate all 10 remaining scenarios to the coordinator-level Tier A harness",

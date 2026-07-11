@@ -715,6 +715,24 @@ def check_assertion(
                     return "dual_setback_applied"
         return False
 
+    # --- no_comfort_undertemp_incident / no_comfort_violation_incident (Issue #481) ---
+    # incident_detected is in UNMAPPED_PRODUCTION_EVENTS (diagnostic/telemetry only, not
+    # a behavior decision — see module docstring) so it never appears in the decisions
+    # list. This is a negative GUARANTEE assertion, same shape as override_not_detected
+    # above: scan event_log directly for the absence of the named incident_class. Used to
+    # prove _detect_and_emit_incidents() does NOT fire a false-positive comfort incident
+    # when indoor temp is within the currently-ACTIVE band (e.g. the sleep band) even
+    # though it would be outside the static daytime comfort_heat/comfort_cool band — the
+    # exact false positive Issue #481 fixes. Scans the whole event_log unconditionally
+    # (not gated by assertion["at"]), matching override_not_detected's precedent, since
+    # the guarantee is "never fired during this scenario", not "hasn't fired yet by time T".
+    if expect in ("no_comfort_undertemp_incident", "no_comfort_violation_incident"):
+        target_class = "comfort_undertemp" if expect == "no_comfort_undertemp_incident" else "comfort_violation"
+        for event_type, payload, _ts in result.event_log:
+            if event_type == "incident_detected" and payload.get("incident_class") == target_class:
+                return False
+        return expect
+
     return False
 
 

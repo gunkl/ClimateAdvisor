@@ -32,7 +32,13 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback, compute_pre_cool_target
+from .automation import (
+    AutomationEngine,
+    _in_sleep_window,
+    compute_bedtime_setback,
+    compute_pre_cool_target,
+    select_comfort_band,
+)
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
@@ -5637,13 +5643,68 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._maybe_reschedule_pre_cool_on_nat_vent_exit()
         self._nat_vent_was_active = _nat_vent_active_now
 
-    def _emit_incident(self, incident_class: str, incident_id: str, extra: dict | None = None) -> None:
-        """Emit an incident_detected event into the event log."""
+    def _resolve_active_comfort_band(self) -> tuple[float | None, float | None]:
+        """Resolve the currently-active (comfort_heat, comfort_cool) band.
+
+        Issue #481: incident detection previously compared indoor temp against the static
+        daytime ``comfort_heat``/``comfort_cool`` config values, even during the sleep window
+        (or away/vacation setback) — producing false-positive ``comfort_undertemp`` incidents
+        when indoor was correctly within the active sleep band but below the (inapplicable)
+        daytime floor. Routes through ``select_comfort_band()`` — the same resolver
+        ``api.py``'s ``ca_target_heat``/``ca_target_cool`` fields and ``automation.py``'s
+        setpoint-writing handlers already use (Issue #402/#462) — instead of a third
+        independent inline implementation of this branch.
+
+        Falls back to the same sleep/day-only heuristic ``api.py`` uses when no classification
+        is available yet (e.g. right after HA restart, before the first classification cycle
+        completes), matching that precedent rather than inventing a new fallback.
+        """
+        classification = self.current_classification
+        if classification is not None:
+            band = select_comfort_band(
+                classification,
+                self.config,
+                occupancy_mode=(self.automation_engine._occupancy_mode if self.automation_engine else OCCUPANCY_HOME),
+                in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+                aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+                pre_condition_achieved=bool(getattr(self.automation_engine, "_pre_condition_achieved", False)),
+            )
+            return band.floor, band.ceiling
+        if _in_sleep_window(dt_util.now(), self.config):
+            comfort_heat = self.config.get("sleep_heat", self.config.get("comfort_heat"))
+            comfort_cool = self.config.get("sleep_cool", self.config.get("comfort_cool"))
+        else:
+            comfort_heat = self.config.get("comfort_heat")
+            comfort_cool = self.config.get("comfort_cool")
+        return comfort_heat, comfort_cool
+
+    def _emit_incident(
+        self,
+        incident_class: str,
+        incident_id: str,
+        extra: dict | None = None,
+        *,
+        comfort_heat: float | None = None,
+        comfort_cool: float | None = None,
+    ) -> None:
+        """Emit an incident_detected event into the event log.
+
+        ``comfort_heat``/``comfort_cool`` default to the currently-active band (Issue #481,
+        via ``_resolve_active_comfort_band()``) rather than the static daytime config values,
+        so the persisted incident record reflects the band that was actually active — not
+        always the flat daytime numbers — for anyone reviewing incident history later. Callers
+        that already resolved the active band (e.g. ``_detect_and_emit_incidents()``) may pass
+        it explicitly to avoid re-resolving it.
+        """
+        if comfort_heat is None or comfort_cool is None:
+            _resolved_heat, _resolved_cool = self._resolve_active_comfort_band()
+            comfort_heat = _resolved_heat if comfort_heat is None else comfort_heat
+            comfort_cool = _resolved_cool if comfort_cool is None else comfort_cool
         payload: dict = {
             "incident_class": incident_class,
             "incident_id": incident_id,
-            "comfort_cool": self.config.get("comfort_cool"),
-            "comfort_heat": self.config.get("comfort_heat"),
+            "comfort_cool": comfort_cool,
+            "comfort_heat": comfort_heat,
             "occupancy_mode": (self.automation_engine._occupancy_mode if self.automation_engine else None),
         }
         if extra:
@@ -5742,8 +5803,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         current_data = self.data or {}
         indoor = current_data.get("indoor_temp")
-        comfort_cool = self.config.get("comfort_cool")
-        comfort_heat = self.config.get("comfort_heat")
+        # Issue #481: resolve the currently-active band (sleep/away/vacation-aware) once,
+        # instead of reading the static daytime comfort_heat/comfort_cool config directly —
+        # used for both the violation-detection comparison below and the incident payload
+        # stamped by _emit_incident() so a reviewer sees the band that was actually active.
+        comfort_heat, comfort_cool = self._resolve_active_comfort_band()
         if (
             indoor
             and comfort_cool
@@ -5769,6 +5833,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             self.automation_engine._natural_vent_active if self.automation_engine else None
                         ),
                     },
+                    comfort_heat=comfort_heat,
+                    comfort_cool=comfort_cool,
                 )
         elif (
             indoor
@@ -5795,6 +5861,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             self.automation_engine._natural_vent_active if self.automation_engine else None
                         ),
                     },
+                    comfort_heat=comfort_heat,
+                    comfort_cool=comfort_cool,
                 )
 
     def _compute_automation_status(self) -> str:

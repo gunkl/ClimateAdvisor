@@ -93,6 +93,11 @@ class ClimateAdvisorStatusView(HomeAssistantView):
 
         data = coordinator.data or {}
         ae = coordinator.automation_engine
+        # Issue #466: deliberately NOT read from coordinator.data (which is only refreshed
+        # once per ~30-min update cycle) — this powers the ca_target_heat/cool divergence
+        # check (#402/#462), whose entire purpose is comparing CA's computed target against
+        # the REAL thermostat right now. Reading a stale cached setpoint here would mask
+        # exactly the kind of stuck/frozen-target bug that check exists to catch.
         climate_state = hass.states.get(coordinator.config.get("climate_entity", ""))
         hvac_mode = climate_state.state if climate_state else "unknown"
 

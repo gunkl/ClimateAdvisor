@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.11"
+VERSION = "0.5.12"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.12": [
+        "Fix #466: no user-visible change. Continues Phase B (coordinator single-"
+        " source): added target_temp/target_temp_low/target_temp_high to"
+        " coordinator.data so ai_skills_activity.py and ai_skills_context.py stop"
+        " independently re-fetching the thermostat entity to derive the same"
+        " values. api.py's dashboard status endpoint deliberately keeps its own"
+        " live read — it powers the ca_target_heat/cool divergence check (#402/"
+        " #462), whose entire purpose is comparing CA's computed target against"
+        " the real thermostat right now, not a snapshot that can be up to 30 min"
+        " old.",
+    ],
     "0.5.11": [
         "Fix #464: no user-visible change. Starts Phase B of the architecture-"
         " consolidation direction (coordinator single-source) by adding"
@@ -968,6 +979,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    466: {
+        "version_fixed": "0.5.12",
+        "title": "Add target_temp fields to coordinator.data; route AI-context sites through it",
+        "scope_covered": (
+            "coordinator.py: added target_temp/target_temp_low/target_temp_high to the"
+            " _async_update_data() return dict, read from the same climate-entity state (_cs) already"
+            " fetched there for hvac_mode/hvac_action. ai_skills_activity.py"
+            " (async_build_activity_context()) and ai_skills_context.py (build_hvac_entity_context())"
+            " now read hvac_mode/target_temp/target_temp_low/target_temp_high from coordinator.data"
+            " instead of independently calling hass.states.get() — each kept a minimal live"
+            " hass.states.get() call only for current_temperature, which is out of this issue's scope"
+            " and not exposed on coordinator.data. Explicit scope decision (confirmed with the project"
+            " owner, not a silent merge): api.py's status endpoint keeps its own live hass.states.get()"
+            " call unchanged — it powers the ca_target_heat/cool divergence check (#402/#462), whose"
+            " entire purpose is comparing CA's computed target against the REAL thermostat right now;"
+            " routing it through coordinator.data's ~30-min-stale cache would compare CA's belief"
+            " against CA's own stale snapshot of the thermostat, defeating the check."
+        ),
+        "scope_not_covered": (
+            "Does not touch current_temperature (out of scope — not one of the 3 setpoint fields, and"
+            " both AI-context sites still need a live read for it). Does not change api.py's setpoint"
+            " display behavior at all — deliberately left live."
+        ),
+    },
     464: {
         "version_fixed": "0.5.11",
         "title": "Add coordinator.get_hvac_runtime_today() to kill the 3x copy-pasted formula",

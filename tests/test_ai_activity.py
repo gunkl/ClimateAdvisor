@@ -53,10 +53,13 @@ def _make_coordinator(
     comfort_heat: float = 68.0,
     comfort_cool: float = 76.0,
     fan_status: str = "inactive",
+    hvac_mode: str = "heat",
 ) -> MagicMock:
     """Build a minimal coordinator mock."""
     coord = MagicMock()
-    coord.data = {ATTR_HVAC_ACTION: hvac_action, ATTR_FAN_STATUS: fan_status}
+    # Issue #466: hvac_mode is read from coordinator.data now, not hass.states.get() —
+    # must be set here to match the hvac_mode passed to _make_hass() for the same scenario.
+    coord.data = {ATTR_HVAC_ACTION: hvac_action, ATTR_FAN_STATUS: fan_status, "hvac_mode": hvac_mode}
     coord.config = {
         "climate_entity": "climate.thermostat",
         "comfort_heat": comfort_heat,
@@ -96,6 +99,7 @@ def _build_context(
         comfort_heat=comfort_heat,
         comfort_cool=comfort_cool,
         fan_status=fan_status,
+        hvac_mode=hvac_mode,
     )
     return asyncio.run(async_build_activity_context(hass, coord))
 
@@ -285,3 +289,36 @@ class TestActivityCrossValidationSection:
         idx_cv = ctx.index("## STATE CROSS-VALIDATION")
         idx_cl = ctx.index("## CLASSIFICATION")
         assert idx_cv < idx_cl
+
+
+class TestHvacModeAndSetpointsFromCoordinatorData:
+    """Issue #466: hvac_mode/target_temp/target_temp_low/target_temp_high are read
+    from coordinator.data now, not hass.states.get() — only current_temp still
+    needs a live read (it isn't one of the fields coordinator.data exposes)."""
+
+    def test_hvac_mode_read_from_coordinator_data_not_hass(self):
+        """hass.states.get()'s climate_state.state must be ignored for hvac_mode —
+        only coordinator.data['hvac_mode'] is authoritative."""
+        hass = _make_hass(hvac_mode="cool", current_temp=72.0)
+        coord = _make_coordinator(hvac_action="heating", hvac_mode="heat")
+        ctx = asyncio.run(async_build_activity_context(hass, coord))
+        # hvac_mode=heat + hvac_action=heating is CONSISTENT -> no contradiction warning,
+        # proving "heat" (from coordinator.data) was used, not "cool" (from hass mock).
+        assert "[WARNING]" not in ctx
+
+    def test_target_temps_appear_from_coordinator_data(self):
+        coord = _make_coordinator()
+        coord.data["target_temp"] = 71.0
+        coord.data["target_temp_low"] = 68.0
+        coord.data["target_temp_high"] = 76.0
+        hass = _make_hass()
+        ctx = asyncio.run(async_build_activity_context(hass, coord))
+        assert "71.0" in ctx or "68.0" in ctx or "76.0" in ctx
+
+    def test_only_one_hass_states_get_call_for_current_temp(self):
+        """Regression guard: hvac_mode/target_temp* must not silently reintroduce a
+        second independent hass.states.get() call."""
+        coord = _make_coordinator()
+        hass = _make_hass()
+        asyncio.run(async_build_activity_context(hass, coord))
+        assert hass.states.get.call_count == 1

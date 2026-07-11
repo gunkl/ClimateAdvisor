@@ -442,20 +442,27 @@ async def build_current_state_context(hass: Any, coordinator: Any, **kwargs: Any
 
 
 async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
-    """Build HVAC ENTITY section from HA state."""
+    """Build HVAC ENTITY section from HA state.
+
+    Issue #466: hvac_mode/target_temp_low/target_temp_high read from
+    coordinator.data (populated once per update cycle) instead of independently
+    re-fetching hass.states.get() here — this investigator context doesn't need
+    sub-cycle freshness. current_temp still needs a live read: it isn't one of
+    the fields coordinator.data exposes.
+    """
     try:
+        data: dict[str, Any] = coordinator.data or {}
         climate_entity_id: str = (coordinator.config or {}).get("climate_entity", "")
-        hvac_mode = "unknown"
+        hvac_mode = data.get("hvac_mode") or "unknown"
+        _target_temp_low = data.get("target_temp_low")
+        target_temp_low = "unknown" if _target_temp_low is None else _target_temp_low
+        _target_temp_high = data.get("target_temp_high")
+        target_temp_high = "unknown" if _target_temp_high is None else _target_temp_high
         current_temp = "unknown"
-        target_temp_low = "unknown"
-        target_temp_high = "unknown"
         if climate_entity_id:
             climate_state = hass.states.get(climate_entity_id)
             if climate_state is not None:
-                hvac_mode = climate_state.state
                 current_temp = climate_state.attributes.get("current_temperature", "unknown")
-                target_temp_low = climate_state.attributes.get("target_temp_low", "unknown")
-                target_temp_high = climate_state.attributes.get("target_temp_high", "unknown")
 
         lines = [
             "=== HVAC ENTITY ===",

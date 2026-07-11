@@ -1173,20 +1173,22 @@ async def async_build_activity_context(
     # Compute fresh runtime -- coordinator.data may be up to 30 min stale (Issue #464)
     hvac_runtime_today = coordinator.get_hvac_runtime_today()
 
+    # Issue #466: hvac_mode/target_temp* read from coordinator.data (populated once
+    # per update cycle in _async_update_data()) instead of independently re-fetching
+    # hass.states.get() here — this context doesn't need sub-cycle freshness (every
+    # other field in this function already reads from the same coordinator.data
+    # snapshot). current_temp still needs a live read: it isn't one of the fields
+    # coordinator.data exposes.
     climate_entity_id: str = options.get("climate_entity", "")
-    hvac_mode = "unknown"
+    hvac_mode = data.get("hvac_mode") or "unknown"
+    target_temp: float | None = data.get("target_temp")
+    target_temp_low: float | None = data.get("target_temp_low")
+    target_temp_high: float | None = data.get("target_temp_high")
     current_temp = "unknown"
-    target_temp: float | None = None
-    target_temp_low: float | None = None
-    target_temp_high: float | None = None
     if climate_entity_id:
         climate_state = hass.states.get(climate_entity_id)
         if climate_state is not None:
-            hvac_mode = climate_state.state
             current_temp = climate_state.attributes.get("current_temperature", "unknown")
-            target_temp = climate_state.attributes.get("temperature")
-            target_temp_low = climate_state.attributes.get("target_temp_low")
-            target_temp_high = climate_state.attributes.get("target_temp_high")
 
     # --- Automation state ---
     automation_status = data.get(ATTR_AUTOMATION_STATUS, "unknown")

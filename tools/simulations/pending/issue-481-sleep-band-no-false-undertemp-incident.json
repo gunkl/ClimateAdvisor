@@ -1,0 +1,75 @@
+{
+  "name": "issue-481-sleep-band-no-false-undertemp-incident",
+  "description": "Issue #481: _detect_and_emit_incidents() must compare indoor temp against the currently-ACTIVE comfort band (sleep_heat/sleep_cool during the sleep window), not the static daytime comfort_heat/comfort_cool config values — otherwise it fires a false-positive comfort_undertemp incident overnight even though the home is comfortably within the real, active sleep floor.",
+  "source": "production incident 2026-07-11 (Issue #478 investigation, Finding D)",
+  "issue": 481,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting the Issue #481 fix (routing _detect_and_emit_incidents()/_emit_incident() through select_comfort_band() via _resolve_active_comfort_band(), back to reading self.config.get('comfort_heat')/('comfort_cool') directly) causes the no_comfort_undertemp_incident assertion to FAIL — indoor=66°F < comfort_heat(68)-0.5=67.5 is true against the static daytime floor, so a comfort_undertemp incident fires even though the real active sleep floor (64°F) was never breached. Confirmed via revert test (see PR notes).",
+    "(b) Docs<->production alignment: this incident-detection code path is not separately documented outside CLAUDE.md's Occupancy-Aware Guards / select_comfort_band() references (§6a-adjacent, docs/08-COMPUTATION-REFERENCE.md) — no spec drift introduced; the fix makes incident detection consistent with the already-documented select_comfort_band() resolver every other real consumer (api.py's ca_target_heat/cool, automation.py's setpoint handlers) already uses.",
+    "(c) Occupant experience: without this fix, the household's own incident/compliance history falsely records 2.5+ hours of 'comfort_undertemp' overnight when the occupant was never actually cold — indoor stayed 2°F above the real sleep floor the whole time. Anyone reviewing comfort history (the occupant, or a future debugging session) is misled into thinking the automation failed to maintain comfort when it was working correctly. With the fix, no incident fires because indoor genuinely was within the active band.",
+    "use_coordinator=true is required: _detect_and_emit_incidents() is a coordinator method (reads self.data, self.current_classification, self.automation_engine) invoked at the tail of _async_update_data() — there is no bare-engine equivalent.",
+    "skip_startup_coalesce=true: not strictly required by the code path under test, but kept consistent with the project's coordinator-harness scenario precedent (away_setpoint_change_not_override.json) so an unrelated startup-suppression window can never mask a false pass.",
+    "A new 'coordinator_refresh' harness dispatch event (tools/sim_harness/run_production.py) and a build_coordinator.py capture fix were added alongside this scenario — see PR notes: _detect_and_emit_incidents() was previously untestable end-to-end at the Tier A coordinator-harness level because (1) nothing re-invoked _async_update_data() after the initial first-refresh, and (2) coordinator-originated events (self._emit_event(), used by _emit_incident()) wrote only to the internal self._event_log ring buffer, never to the flat scenario event_log the harness's assertions read. Both gaps are purely additive fixes to test infrastructure capture/dispatch, not to outcomes.py's assertion semantics.",
+    "Awaiting user review before promotion to golden/ per the Golden Simulation Test Policy."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "07:00"
+  },
+  "events": [
+    {
+      "time": "2026-07-10T20:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 60.0,
+      "note": "Evening, still awake: indoor=70°F, outdoor=60°F."
+    },
+    {
+      "time": "2026-07-10T20:01:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "Cold-day classification: hvac_mode=heat. Needed so coordinator.current_classification is non-None, which is the precondition for _resolve_active_comfort_band() to route through select_comfort_band() rather than its restart-fallback heuristic."
+    },
+    {
+      "time": "2026-07-11T05:08:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 48.0,
+      "note": "Overnight, well inside the sleep window (22:30-07:00 wraps past midnight): indoor=66°F. This is the exact production incident value (Issue #478 Finding D) — below the static daytime comfort_heat=68°F floor (68-0.5=67.5, so 66<67.5 was the old false-positive trigger) but comfortably above the real active sleep floor (sleep_heat=64°F, 64-0.5=63.5, so 66 is 2.5°F clear)."
+    },
+    {
+      "time": "2026-07-11T05:08:30",
+      "type": "coordinator_refresh",
+      "note": "First refresh cycle after the temp_update: _async_update_data() computes indoor_temp=66°F into its result dict, but self.data is only reassigned AFTER this coroutine returns — so _detect_and_emit_incidents(), called from INSIDE this same cycle, still reads the PRIOR self.data snapshot (from coordinator construction, before any indoor temp was set). This cycle exists only to advance self.data to indoor_temp=66°F for the next cycle to see."
+    },
+    {
+      "time": "2026-07-11T05:09:00",
+      "type": "coordinator_refresh",
+      "note": "Second refresh cycle: _detect_and_emit_incidents() now reads self.data.indoor_temp=66°F (the previous cycle's result, assigned after it returned) — this is the cycle whose comfort-band comparison the assertion below checks. Mirrors real production's DataUpdateCoordinator.data semantics (always one cycle behind the value being computed)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-11T05:09:00",
+      "expect": "no_comfort_undertemp_incident",
+      "reason": "THE FIX: indoor=66°F is within the currently-active sleep band [64/72] (66 > 64-0.5=63.5), so no comfort_undertemp incident should fire — even though 66°F is below the inapplicable static daytime floor comfort_heat=68 (66 < 68-0.5=67.5, the pre-fix false-positive condition). Before the fix, _detect_and_emit_incidents() compared against self.config.get('comfort_heat') directly and this assertion fails."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "No false-positive comfort_undertemp incident fires overnight when indoor is within the active sleep band but below the (inapplicable) daytime comfort floor",
+    "observed_behavior": "Classification sets hvac_mode=heat -> sleep-window temp_update to 66°F -> coordinator_refresh triggers _detect_and_emit_incidents() -> no comfort_undertemp incident emitted, because the resolved active band is the sleep band [64/72], not the daytime band [68/74]",
+    "expected_behavior": "CA's own incident/compliance log must never claim a comfort failure the occupant did not actually experience — indoor staying 2°F above the real, currently-active sleep floor is a working system, not a violation"
+  }
+}

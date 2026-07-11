@@ -117,16 +117,45 @@ class TestManualOverrideProtection:
     """Verify that manual override blocks classification and is cleared at transitions."""
 
     def test_apply_classification_skips_when_override_active(self):
-        """With override active, apply_classification must NOT call any service."""
+        """With override active AND still genuinely divergent from automation's decision,
+        apply_classification must NOT call any service.
+
+        Issue #483: override mode ("cool") deliberately differs from what classification
+        wants this cycle ("heat") so the adopt-on-match path (Issue #483) does not fire —
+        this test protects the "real disagreement still blocks" invariant. The adopt case
+        (override already matches) is covered by
+        test_apply_classification_adopts_when_override_matches_decision below.
+        """
         engine = _make_automation_engine()
         engine._manual_override_active = True
-        engine._manual_override_mode = "heat"
+        engine._manual_override_mode = "cool"
         engine._manual_override_time = "2026-03-19T14:00:00"
 
         c = _make_classification(day_type="cold", hvac_mode="heat")
         asyncio.run(engine.apply_classification(c))
 
         engine.hass.services.async_call.assert_not_called()
+
+    def test_apply_classification_adopts_when_override_matches_decision(self):
+        """Issue #483: if automation's current decision matches the override's mode (and
+        no live setpoint disagrees), apply_classification adopts it — ending the override/
+        grace period early and applying classification normally, instead of silently
+        skipping for the rest of the grace window.
+        """
+        engine = _make_automation_engine()
+        engine._manual_override_active = True
+        engine._manual_override_mode = "heat"
+        engine._manual_override_source = "normal"
+        engine._manual_override_time = "2026-03-19T14:00:00"
+        engine._grace_active = True
+
+        c = _make_classification(day_type="cold", hvac_mode="heat")
+        asyncio.run(engine.apply_classification(c))
+
+        # Adopted: classification applied normally (service call made), override cleared.
+        engine.hass.services.async_call.assert_called()
+        assert engine._manual_override_active is False
+        assert engine._grace_active is False
 
     def test_apply_classification_updates_classification_even_during_override(self):
         """Override skips HVAC changes but still stores the classification."""

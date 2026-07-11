@@ -32,7 +32,13 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .automation import AutomationEngine, _in_sleep_window, compute_bedtime_setback, compute_pre_cool_target
+from .automation import (
+    AutomationEngine,
+    _in_sleep_window,
+    compute_bedtime_setback,
+    compute_pre_cool_target,
+    select_comfort_band,
+)
 from .briefing import generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
@@ -401,6 +407,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_occupancy_listeners: list[Any] = []
         self._occupancy_away_timer_cancel: Any | None = None
 
+        # Coordinator health observability (Issue #480): durable record of the most
+        # recent _async_update_data() failure, persisted to survive HA restarts and
+        # Docker log rotation — see async_restore_state()/_build_state_dict() below.
+        # This is a side-channel record only; it does not replace HA's own
+        # last_update_success/UpdateFailed handling, which still governs entity
+        # availability.
+        self.last_update_error: str | None = None
+        self.last_update_error_time: str | None = None
+        self.consecutive_failure_count: int = 0
+
     @property
     def automation_enabled(self) -> bool:
         """Whether automation actions are enabled (False = observe-only)."""
@@ -699,6 +715,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if ai_stats and isinstance(ai_stats, dict):
                 self.claude_client.restore_persistent_stats(ai_stats)
 
+        # Coordinator health (Issue #480): restore regardless of date boundary, same
+        # reasoning as ai_stats above — a failure recorded just before an overnight
+        # restart is still the answer to "why did the dashboard freeze last night",
+        # and that question doesn't respect the day boundary the rest of this
+        # function gates on.
+        self.last_update_error = state.get("last_update_error")
+        self.last_update_error_time = state.get("last_update_error_time")
+        try:
+            self.consecutive_failure_count = int(state.get("consecutive_failure_count", 0) or 0)
+        except (TypeError, ValueError):
+            self.consecutive_failure_count = 0
+
         if state_date != today_str:
             _LOGGER.debug(
                 "Persisted state is from %s (today is %s) — starting fresh",
@@ -918,6 +946,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._last_solar_phase_fit_date.isoformat() if self._last_solar_phase_fit_date else None
             ),
             "event_log": list(self._event_log),
+            # Coordinator health (Issue #480). getattr() defaults, not direct
+            # attribute access: several existing tests build a coordinator via
+            # object.__new__() (bypassing __init__, which is where these are
+            # normally set) and call _build_state_dict() directly.
+            "last_update_error": getattr(self, "last_update_error", None),
+            "last_update_error_time": getattr(self, "last_update_error_time", None),
+            "consecutive_failure_count": getattr(self, "consecutive_failure_count", 0),
         }
 
     async def _async_save_state(self) -> None:
@@ -1455,6 +1490,62 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.hass.async_create_task(self.async_request_refresh())
 
     async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch forecast and update classification (runs every 30 min).
+
+        Thin wrapper around ``_async_update_data_impl()`` (Issue #480). HA's own
+        ``DataUpdateCoordinator`` already catches exceptions raised from this method
+        and marks entities unavailable (``last_update_success = False``) — that
+        behavior is preserved unchanged; this wrapper does not swallow the
+        exception, it only re-raises after recording a durable side-channel.
+
+        Without this, the *fact* and *cause* of a coordinator-wide failure lived
+        only in the HA core log tail, which rotates out within days — during the
+        Issue #478 investigation the 06:35 crash that took down every
+        ``climate_advisor_*`` entity was unrecoverable after the fact for exactly
+        this reason. Persisting ``last_update_error``/``last_update_error_time``/
+        ``consecutive_failure_count`` via ``_async_save_state()`` means the next
+        occurrence survives both an HA restart and log rotation.
+        """
+        # Defensive defaults: several existing tests partially instantiate the
+        # coordinator via object.__new__() (bypassing __init__) and bind only the
+        # methods under test. Falling back here (rather than requiring __init__ to
+        # have run) keeps this wrapper safe under that established test pattern
+        # without needing to touch every such test file.
+        if not hasattr(self, "consecutive_failure_count"):
+            self.consecutive_failure_count = 0
+        if not hasattr(self, "last_update_error"):
+            self.last_update_error = None
+        if not hasattr(self, "last_update_error_time"):
+            self.last_update_error_time = None
+
+        try:
+            result = await self._async_update_data_impl()
+        except Exception as err:
+            self.consecutive_failure_count += 1
+            self.last_update_error = f"{type(err).__name__}: {err}"
+            self.last_update_error_time = dt_util.now().isoformat()
+            _LOGGER.error(
+                "Coordinator update failed (consecutive_failure_count=%d): %s",
+                self.consecutive_failure_count,
+                self.last_update_error,
+            )
+            with contextlib.suppress(Exception):
+                await self._async_save_state()
+            raise
+        else:
+            if self.consecutive_failure_count or self.last_update_error:
+                _LOGGER.info(
+                    "Coordinator update recovered after %d consecutive failure(s); clearing last_update_error",
+                    self.consecutive_failure_count,
+                )
+                self.consecutive_failure_count = 0
+                self.last_update_error = None
+                self.last_update_error_time = None
+                with contextlib.suppress(Exception):
+                    await self._async_save_state()
+            return result
+
+    async def _async_update_data_impl(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min)."""
         # Re-resolve group membership in case it changed
         _LOGGER.debug("[coalesce-diag] _async_update_data: enter")
@@ -3497,8 +3588,53 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if new_state.state == old_state.state:
             return
 
-        # Skip if this change was initiated by us
-        if self.automation_engine._fan_command_pending:
+        # Issue #482: HA attaches the originating service call's Context to every
+        # state-changed Event. When CA itself issued the fan command (via
+        # automation.py's _call_fan_service_with_context), it stamps
+        # automation_engine._fan_command_context_id with that Context's id. If this
+        # event's own context.id (or its parent_id, for cases where the target
+        # integration wraps CA's context in a child context) matches, that is an
+        # authoritative "CA caused this" signal — logged here on EVERY change
+        # (matched or not) so a future investigation has direct evidence instead of
+        # needing cross-source timestamp archaeology (the gap this issue closes).
+        #
+        # This is treated as an ADDITIONAL/corroborating signal alongside the
+        # existing _fan_command_pending/timing checks below, not a replacement for
+        # them: context propagation through third-party fan/switch integrations
+        # (especially a one-way RF transmitter entity with no feedback of its own)
+        # is not guaranteed reliable by HA core, so a non-match here does not prove
+        # the change was external — it only fails to prove it was CA's. A match,
+        # however, is conclusive.
+        event_context = getattr(event, "context", None)
+        event_context_id = getattr(event_context, "id", None) if event_context is not None else None
+        event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
+        cmd_context_id = self.automation_engine._fan_command_context_id
+        context_confirms_ca = bool(
+            event_context_id is not None
+            and cmd_context_id is not None
+            and (event_context_id == cmd_context_id or event_context_parent_id == cmd_context_id)
+        )
+        _LOGGER.debug(
+            "fan_entity state change provenance: %s -> %s event_context_id=%s"
+            " event_context_parent_id=%s last_ca_command_context_id=%s context_confirms_ca=%s",
+            old_state.state,
+            new_state.state,
+            event_context_id,
+            event_context_parent_id,
+            cmd_context_id,
+            context_confirms_ca,
+        )
+
+        # Skip if this change was initiated by us — either the transient
+        # command-pending bookkeeping (existing guard) or a confirmed event.context
+        # match (Issue #482, additional signal).
+        if self.automation_engine._fan_command_pending or context_confirms_ca:
+            if context_confirms_ca and not self.automation_engine._fan_command_pending:
+                _LOGGER.info(
+                    "Fan entity change attributed to CA via event.context match (id=%s) —"
+                    " suppressing (would otherwise have been evaluated as external)",
+                    event_context_id,
+                )
             return
 
         # Skip if fan override is already active — but a physical-state confirmation
@@ -3530,7 +3666,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_state.state,
             )
             self.automation_engine.handle_fan_manual_override(
-                fan_before=str(old_state.state), fan_after=str(new_state.state)
+                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
             )
         elif not is_on and self.automation_engine._fan_active:
             # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
@@ -3541,7 +3677,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 old_state.state,
                 new_state.state,
             )
-            self.automation_engine.on_fan_turned_off(fan_before=str(old_state.state), fan_after=str(new_state.state))
+            self.automation_engine.on_fan_turned_off(
+                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+            )
 
     async def _async_reassert_setpoint_after_fan_off(self) -> None:
         """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).
@@ -5637,13 +5775,68 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._maybe_reschedule_pre_cool_on_nat_vent_exit()
         self._nat_vent_was_active = _nat_vent_active_now
 
-    def _emit_incident(self, incident_class: str, incident_id: str, extra: dict | None = None) -> None:
-        """Emit an incident_detected event into the event log."""
+    def _resolve_active_comfort_band(self) -> tuple[float | None, float | None]:
+        """Resolve the currently-active (comfort_heat, comfort_cool) band.
+
+        Issue #481: incident detection previously compared indoor temp against the static
+        daytime ``comfort_heat``/``comfort_cool`` config values, even during the sleep window
+        (or away/vacation setback) — producing false-positive ``comfort_undertemp`` incidents
+        when indoor was correctly within the active sleep band but below the (inapplicable)
+        daytime floor. Routes through ``select_comfort_band()`` — the same resolver
+        ``api.py``'s ``ca_target_heat``/``ca_target_cool`` fields and ``automation.py``'s
+        setpoint-writing handlers already use (Issue #402/#462) — instead of a third
+        independent inline implementation of this branch.
+
+        Falls back to the same sleep/day-only heuristic ``api.py`` uses when no classification
+        is available yet (e.g. right after HA restart, before the first classification cycle
+        completes), matching that precedent rather than inventing a new fallback.
+        """
+        classification = self.current_classification
+        if classification is not None:
+            band = select_comfort_band(
+                classification,
+                self.config,
+                occupancy_mode=(self.automation_engine._occupancy_mode if self.automation_engine else OCCUPANCY_HOME),
+                in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+                aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+                pre_condition_achieved=bool(getattr(self.automation_engine, "_pre_condition_achieved", False)),
+            )
+            return band.floor, band.ceiling
+        if _in_sleep_window(dt_util.now(), self.config):
+            comfort_heat = self.config.get("sleep_heat", self.config.get("comfort_heat"))
+            comfort_cool = self.config.get("sleep_cool", self.config.get("comfort_cool"))
+        else:
+            comfort_heat = self.config.get("comfort_heat")
+            comfort_cool = self.config.get("comfort_cool")
+        return comfort_heat, comfort_cool
+
+    def _emit_incident(
+        self,
+        incident_class: str,
+        incident_id: str,
+        extra: dict | None = None,
+        *,
+        comfort_heat: float | None = None,
+        comfort_cool: float | None = None,
+    ) -> None:
+        """Emit an incident_detected event into the event log.
+
+        ``comfort_heat``/``comfort_cool`` default to the currently-active band (Issue #481,
+        via ``_resolve_active_comfort_band()``) rather than the static daytime config values,
+        so the persisted incident record reflects the band that was actually active — not
+        always the flat daytime numbers — for anyone reviewing incident history later. Callers
+        that already resolved the active band (e.g. ``_detect_and_emit_incidents()``) may pass
+        it explicitly to avoid re-resolving it.
+        """
+        if comfort_heat is None or comfort_cool is None:
+            _resolved_heat, _resolved_cool = self._resolve_active_comfort_band()
+            comfort_heat = _resolved_heat if comfort_heat is None else comfort_heat
+            comfort_cool = _resolved_cool if comfort_cool is None else comfort_cool
         payload: dict = {
             "incident_class": incident_class,
             "incident_id": incident_id,
-            "comfort_cool": self.config.get("comfort_cool"),
-            "comfort_heat": self.config.get("comfort_heat"),
+            "comfort_cool": comfort_cool,
+            "comfort_heat": comfort_heat,
             "occupancy_mode": (self.automation_engine._occupancy_mode if self.automation_engine else None),
         }
         if extra:
@@ -5742,8 +5935,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         current_data = self.data or {}
         indoor = current_data.get("indoor_temp")
-        comfort_cool = self.config.get("comfort_cool")
-        comfort_heat = self.config.get("comfort_heat")
+        # Issue #481: resolve the currently-active band (sleep/away/vacation-aware) once,
+        # instead of reading the static daytime comfort_heat/comfort_cool config directly —
+        # used for both the violation-detection comparison below and the incident payload
+        # stamped by _emit_incident() so a reviewer sees the band that was actually active.
+        comfort_heat, comfort_cool = self._resolve_active_comfort_band()
         if (
             indoor
             and comfort_cool
@@ -5769,6 +5965,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             self.automation_engine._natural_vent_active if self.automation_engine else None
                         ),
                     },
+                    comfort_heat=comfort_heat,
+                    comfort_cool=comfort_cool,
                 )
         elif (
             indoor
@@ -5795,6 +5993,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             self.automation_engine._natural_vent_active if self.automation_engine else None
                         ),
                     },
+                    comfort_heat=comfort_heat,
+                    comfort_cool=comfort_cool,
                 )
 
     def _compute_automation_status(self) -> str:

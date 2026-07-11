@@ -4,9 +4,61 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.16"
+VERSION = "0.5.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.17": [
+        "Fix #480: when Climate Advisor's coordinator update fails (the failure that took every"
+        " climate_advisor_* entity unavailable simultaneously during the Issue #478 incident),"
+        " the dashboard used to keep confidently showing the last-known automation/fan status with"
+        " zero indication anything was wrong — you'd have no way to know CA had silently stopped"
+        " working until you noticed the numbers looked stale. The Status card now shows"
+        " ⚠ Climate Advisor unavailable since HH:MM — <error> the moment an update fails, and the"
+        " underlying error/failure-count record is now written to disk, so it survives an HA"
+        " restart and is still readable even after HA's own log retention has rotated past the"
+        " event — the exact gap that made the original incident's root cause unrecoverable.",
+        "Fix #481: fixes a false-positive comfort log entry that could make it look like the"
+        " house was too cold overnight when it wasn't. The incident-detection subsystem that"
+        " powers compliance/history review was comparing live indoor temperature against the"
+        " flat daytime comfort band (e.g. 68°F) even during the overnight sleep window, where a"
+        " lower sleep-band floor (e.g. 64°F) is the real, actively-applied target — so indoor"
+        " temps that were genuinely comfortable within the sleep band (e.g. 66°F) could still"
+        " log a 'comfort_undertemp' incident. Incident detection now resolves the same"
+        " currently-active band (sleep/away/vacation-aware) that the dashboard's target-heat/cool"
+        " fields and every setpoint-writing automation handler already use, so the incident log"
+        " only reflects violations the occupant actually experienced.",
+        "Fix #482: no user-visible change (latent-risk hardening). Closes two real gaps found"
+        " during Issue #478's investigation in the fan-off manual-vs-automation classification"
+        " path. (1) The fan physical-state drift-reconciliation self-correction"
+        " (_reconcile_fan_physical_drift()'s off-command) now stamps the same"
+        " _fan_command_pending/_fan_command_time bookkeeping every other WHF command site"
+        " already sets, matching the existing pattern, so coordinator._async_fan_entity_changed()"
+        " can suppress the resulting state-changed event as CA-caused instead of risking a"
+        " misclassification as a manual fan-off (which would start a spurious grace period and"
+        " temporarily block automated free cooling/HVAC control). (2) Every outgoing WHF"
+        " fan/switch service call now carries a real HA Context"
+        " (automation.py's new _call_fan_service_with_context()), and"
+        " coordinator._async_fan_entity_changed() checks event.context.id/parent_id against it as"
+        " an additional, authoritative CA-attribution signal alongside the existing"
+        " _fan_command_pending/30-second timing heuristic (kept as-is, not replaced — context"
+        " propagation through third-party fan/switch integrations, especially a one-way RF"
+        " transmitter with no feedback of its own, is not guaranteed reliable by HA core). Every"
+        " provenance decision (matched or not) is now logged at DEBUG so a future investigation"
+        " has direct evidence instead of needing cross-source timestamp archaeology, and a"
+        " genuinely external fan change's Context id is surfaced as diagnostic data in the"
+        " Activity Report payload.",
+        "Fix #483: if a manual thermostat override starts a grace period and Climate Advisor's"
+        " own automation decision independently converges on the same HVAC mode (and, for"
+        " heat/cool modes, the same effective setpoint) the override already produced, the"
+        " override is now adopted instead of silently sitting out the rest of the grace window."
+        " Checked both pre-expiry (inside apply_classification(), so convergence is recognized"
+        " as soon as the next classification cycle agrees — not just at the timer's natural"
+        " expiry) and at natural grace expiry (skips the misleading 'your override has expired'"
+        " notification when nothing was actually reverted). Deliberately conservative: only"
+        " HVAC-mode overrides are eligible; setpoint-only overrides and fan/door-window grace"
+        " types are unchanged (see KNOWN_FIXES[483] for the full scope boundary). New Activity"
+        " Report event 'override_adopted'.",
+    ],
     "0.5.16": [
         "Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test"
         " scenarios (grace-period lifecycle, override detection/confirmation/self-resolve,"
@@ -1029,6 +1081,210 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    480: {
+        "version_fixed": "0.5.17",
+        "title": "Coordinator health observability: surface stale status instead of silently serving frozen data",
+        "scope_covered": (
+            "Added durable coordinator-health tracking: coordinator.py's _async_update_data() is now"
+            " a thin wrapper (_async_update_data) around the real update logic (renamed"
+            " _async_update_data_impl); any exception raised by the real logic is caught, recorded as"
+            " last_update_error (str)/last_update_error_time (ISO timestamp)/consecutive_failure_count"
+            " (int), persisted via _async_save_state() (state.py's existing atomic write-then-replace"
+            " pattern — same StatePersistence used for all other operational state), and then"
+            " re-raised unchanged so HA's own DataUpdateCoordinator still marks entities unavailable"
+            " exactly as before. On the next successful update the failure record is cleared and"
+            " re-persisted. async_restore_state() restores the three fields unconditionally (same"
+            " precedent as ai_stats — not gated on the same-day check the rest of that function uses),"
+            " so a failure recorded just before an overnight restart is still visible afterward."
+            " api.py's ClimateAdvisorStatusView.get() now reads coordinator.last_update_success and"
+            " adds coordinator_healthy to the response, plus last_error/stale_since (from the two"
+            " persisted fields) when unhealthy — purely additive, no existing fields changed or"
+            " removed. frontend/index.html's loadStatus() Status card now renders"
+            " '⚠ Climate Advisor unavailable since HH:MM — <error>' when coordinator_healthy is false,"
+            " using the existing status-item card (no new card added), following the same conditional-line"
+            " pattern already used for pause_suppressed_classification/nat_vent_active."
+        ),
+        "scope_not_covered": (
+            "tools/sim_harness/ has no failure-injection mechanism for _async_update_data() (confirmed"
+            " by inspection — the fake coordinator's async_config_entry_first_refresh() unconditionally"
+            " sets last_update_success=True after calling _async_update_data(), no try/except), so this"
+            " fix is covered by a pytest unit test (tests/test_coordinator_health.py) exercising the"
+            " wrapper's failure/recovery persistence and the api.py gating logic directly, rather than a"
+            " tools/simulations/pending/ scenario. The trigger for the original 06:35 coordinator crash"
+            " itself remains unknown — this only ensures the next occurrence is diagnosable, per the"
+            " Issue #478 investigation's Stage 1 scope."
+        ),
+    },
+    481: {
+        "version_fixed": "0.5.17",
+        "title": (
+            "Incident detection now respects the currently-active comfort band"
+            " (sleep/away/vacation), not just the flat daytime band"
+        ),
+        "scope_covered": (
+            "coordinator.py: added _resolve_active_comfort_band(), which routes through"
+            " select_comfort_band() (automation.py) — the same canonical resolver api.py's"
+            " ca_target_heat/ca_target_cool fields and automation.py's setpoint-writing handlers"
+            " (apply_classification, handle_bedtime, handle_pre_cool, handle_morning_wakeup,"
+            " occupancy handlers) already use, per the Issue #402/#462 precedent. When"
+            " coordinator.current_classification is None (e.g. right after HA restart, before the"
+            " first classification cycle), falls back to the same sleep/day-only heuristic"
+            " api.py uses, for consistency. _detect_and_emit_incidents() now calls this once per"
+            " cycle and uses the result for both the comfort_violation/comfort_undertemp"
+            " threshold comparison AND the values passed into _is_nat_vent_tolerated_deviation()"
+            " (so the nat-vent hysteresis tolerance check also uses the correct active band, not"
+            " the static config values). _emit_incident() now accepts optional comfort_heat/"
+            " comfort_cool overrides and defaults to the resolved active band via the same"
+            " helper if not supplied, so every incident's persisted payload (comfort_heat/"
+            " comfort_cool fields) reflects the band that was actually active at emission time —"
+            " not always the flat daytime numbers — for anyone reviewing incident history later."
+            " Test infrastructure (tools/sim_harness/): added a new 'coordinator_refresh' harness"
+            " dispatch event type (run_production.py) so a scenario can explicitly trigger a"
+            " second DataUpdateCoordinator cycle (async_request_refresh() -> _async_update_data()"
+            " -> _detect_and_emit_incidents()) — previously nothing in the harness re-invoked"
+            " _async_update_data() after the coordinator's initial first-refresh at construction,"
+            " so this code path was untestable end-to-end via the coordinator harness. Also fixed"
+            " build_coordinator.py to additionally capture coordinator-originated events"
+            " (self._emit_event(), which _emit_incident()/_detect_and_emit_incidents() call"
+            " directly) into the flat scenario event_log the harness's assertions read — these"
+            " previously wrote only to the internal self._event_log ring buffer and were"
+            " invisible to any scenario assertion. Added a new negative assertion type,"
+            " no_comfort_undertemp_incident/no_comfort_violation_incident (outcomes.py), mirroring"
+            " the existing override_not_detected precedent. New golden-track scenario"
+            " (pending/issue-481-sleep-band-no-false-undertemp-incident.json) verified"
+            " load-bearing via a real revert test."
+        ),
+        "scope_not_covered": (
+            "Does not change any setpoint-writing/HVAC-control logic — strictly scoped to"
+            " incident *detection* (the diagnostic/telemetry event log), not automation"
+            " behavior. Does not address the other three findings from the Issue #478"
+            " investigation (coordinator health observability, WHF fan-off bookkeeping/"
+            " provenance, grace-period adopt-on-match) — those are separate, independently"
+            " tracked stages of that plan."
+        ),
+    },
+    482: {
+        "version_fixed": "0.5.17",
+        "title": "Fan-off bookkeeping gap + event.context provenance for manual-vs-automation classification",
+        "scope_covered": (
+            "automation.py: (1) _reconcile_fan_physical_drift()'s off-command"
+            " (self._command_whf_control_entity(False, ...) via a new internal"
+            " _do_drift_reconciliation_off_command() wrapper) now sets"
+            " self._fan_command_time/self._fan_command_pending synchronously BEFORE"
+            " self.hass.async_create_task(...) schedules the coroutine — matching the exact"
+            " pattern _activate_fan()/_deactivate_fan() already use — and clears"
+            " _fan_command_pending in the wrapper's own finally block once the command"
+            " completes. (2) Added _call_fan_service_with_context(), a shared funnel now used"
+            " by _command_whf_control_entity() (and therefore _activate_fan(), _deactivate_fan(),"
+            " and the drift-reconciliation off-command) that constructs a fresh"
+            " homeassistant.core.Context() per outgoing fan/switch service call, passes it as"
+            " services.async_call(..., context=cmd_context), and records cmd_context.id on"
+            " self._fan_command_context_id. coordinator.py's _async_fan_entity_changed() reads"
+            " event.context.id/parent_id and compares against automation_engine._fan_command_context_id"
+            " as an ADDITIONAL suppression signal (self._fan_command_pending OR context_confirms_ca),"
+            " logging the comparison at DEBUG on every fan-entity state change (matched or not) and"
+            " at INFO when context alone was the deciding signal. handle_fan_manual_override() and"
+            " on_fan_turned_off() gained an optional event_context_id parameter, surfaced in the"
+            " fan_manual_override/fan_cancel Activity Report event payloads as diagnostic data."
+            " tools/sim_harness/ha_stubs.py gained a _MockContext stand-in for"
+            " homeassistant.core.Context (id/parent_id/user_id) so the harness/tests construct real,"
+            " comparable context objects the same way production does against real HA."
+            " tools/sim_harness/fake_hass.py threads a context kwarg through"
+            " _FakeServices.async_call -> _apply_state_feedback -> _FakeStates.async_set -> the"
+            " dispatched FakeEvent, so a CA-issued command's context reaches the coordinator listener"
+            " exactly like real HA propagates the originating service call's context onto the"
+            " resulting state write; an externally-injected states.async_set() (no CA service call)"
+            " naturally carries context=None, correctly modeling 'no CA attribution available' for a"
+            " genuine external actor. New golden-harness assertion types in outcomes.py"
+            " (fan_ca_command_not_misclassified, fan_external_change_classified) and a new"
+            " external_fan_state_change scenario event type in run_production.py."
+        ),
+        "scope_not_covered": (
+            "Part 1 does not close every theoretically-reachable misclassification race — careful"
+            " tracing of the harness's scheduler task-queue ordering found that if a same-tick"
+            " nat-vent reactivation (_activate_fan(), itself a sibling command site) races the"
+            " still-queued drift-reconciliation off-command, _activate_fan()'s own pre-existing"
+            " unconditional finally-clear of _fan_command_pending can stomp the flag before the"
+            " queued off-command's own resulting event is evaluated. This is a deeper"
+            " single-shared-boolean reentrancy limitation common to EVERY existing WHF command site"
+            " (not unique to this fix, and pre-existing before this change), out of scope for the"
+            " literal 'match every other command site' fix requested — a proper fix would need a"
+            " reentrancy-safe scheme (e.g. a per-command token instead of one shared boolean) applied"
+            " uniformly across _activate_fan/_deactivate_fan/the drift-reconciliation path together,"
+            " tracked as a candidate follow-up issue, not attempted here. Part 2's event.context check"
+            " is corroborating only — a context MISMATCH or absent context does not prove a change was"
+            " external (never used to suppress evaluation), only a MATCH is treated as authoritative;"
+            " the pre-existing 30-second timing heuristic and _fan_command_pending flag are unchanged"
+            " and still evaluated for every fan-entity state change. Command-only mode"
+            " (_async_command_fan_entity() in coordinator.py, fan_state_feedback=False) is untouched —"
+            " confirmed out of scope, since _async_fan_entity_changed() already early-returns before"
+            " any bookkeeping/context check is reached whenever fan_state_feedback is disabled."
+        ),
+    },
+    483: {
+        "version_fixed": "0.5.17",
+        "title": "Adopt matching automation decision instead of continuing a grace period",
+        "scope_covered": (
+            "automation.py: new _override_matches_current_decision() helper, called from two"
+            " sites. (1) apply_classification() (pre-expiry): when _manual_override_active and"
+            " the override's HVAC mode matches the classification about to be applied, the grace"
+            " timer is cancelled (_cancel_grace_timers()), the override is cleared"
+            " (reason='adopted_matching_decision'), an 'override_adopted' event is emitted, and"
+            " execution falls through to apply the (now-agreeing) classification normally this"
+            " same cycle — instead of the pre-existing early return that silently skipped for the"
+            " rest of the grace window. (2) _on_grace_expired() (natural expiry, the safe minimum"
+            " bar): the same match check runs in the normal-expiry branch; on a match, the"
+            " misleading 'your manual thermostat override has expired' notification is skipped"
+            " (nothing was actually reverted) and 'override_adopted' fires instead of the generic"
+            " 'grace_expired' event. Eligibility is deliberately narrow: only overrides that flow"
+            " through _confirm_override() and set _manual_override_mode qualify (covers the mode-"
+            " change/'normal' and door/window-pause/'pause' override paths — both ultimately reach"
+            " _confirm_override()). Setpoint-only overrides (_manual_override_source == 'setpoint')"
+            " are excluded outright — matching HVAC mode alone is not evidence the user's chosen"
+            " temperature has converged with automation's. For heat/cool modes, a match additionally"
+            " requires the thermostat's LIVE setpoint to be within OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F"
+            " (1.0°F, const.py) of what select_comfort_band() would arm right now for that mode —"
+            " added after cold_day_heat_all_day_with_override.json (a pending regression scenario)"
+            " demonstrated that a compound override (mode changed AND a deliberately different"
+            " setpoint, e.g. heat at 74°F when comfort_heat=70°F) must not be silently adopted just"
+            " because the mode happens to agree. New pending scenario"
+            " override_adopted_on_matching_decision.json exercises the full adopt path (pre-expiry,"
+            " mode+setpoint match) and was revert-tested (temporarily forcing"
+            " _override_matches_current_decision() to always return False; the scenario's 14:30"
+            " assertion correctly failed with the un-adopted carried-forward 'override_confirmed'"
+            " outcome, then passed again after restoring). ai_skills_activity.py: new"
+            " 'override_adopted' event registered in EVENT_RENDERERS, _MANUAL_EVENT_TYPES, and"
+            " _NO_DEDUP. tools/sim_harness/run_production.py: thermostat_state_changed events may"
+            " now optionally carry a 'temperature' field alongside hvac_mode (models a real"
+            " thermostat UI where mode+setpoint change in one interaction); omitted is a no-op,"
+            " identical to prior behavior for every pre-existing scenario. tools/sim_harness/"
+            " outcomes.py: registered 'override_adopted' as a named production outcome (was"
+            " previously falling through to the generic 'unknown:<type>' fallback) — cosmetic only,"
+            " does not change production_outcome_at()'s existing same-timestamp last-decision-wins"
+            " tie-break semantics."
+        ),
+        "scope_not_covered": (
+            "Fan-on overrides (_fan_override_active, handle_fan_manual_override()) are NOT"
+            " eligible for adoption — they never set _manual_override_mode, and the only"
+            " comparable 'would automation want the fan on right now' check is"
+            " check_natural_vent_conditions(), which is async and mutates engine state as part of"
+            " its own evaluation (not a pure/side-effect-free predicate safe to call just for"
+            " comparison) — deliberately left out per the conservative-when-in-doubt directive."
+            " Fan-off grace (on_fan_turned_off()) is not an override at all (_fan_override_active is"
+            " explicitly NOT set for this path) — there is nothing to 'adopt', it is a re-activation"
+            " gate, not a disagreement. Door/window pause/resume grace"
+            " (handle_all_doors_windows_closed(), resume_from_pause()) is automation-sourced"
+            " (source='automation') or already restores _current_classification.hvac_mode directly"
+            " at resume time (resume_from_pause()) — by construction there is no divergence left to"
+            " adopt for these paths; the adopt check is gated on source=='manual' and never reached"
+            " for automation-sourced grace. The pre-expiry check in apply_classification() only"
+            " re-evaluates when apply_classification() itself is called (each classification cycle,"
+            " ~30 min, or an explicit re-classification trigger) — it is not a new polling loop"
+            " during an active grace period (matching docs/grace-periods-spec.md's documented"
+            " no-polling invariant); a match that occurs between classification cycles is only"
+            " picked up at the next cycle or at natural grace expiry, whichever comes first."
+        ),
+    },
     476: {
         "version_fixed": "0.5.16",
         "title": "Migrate all 10 remaining scenarios to the coordinator-level Tier A harness",
@@ -4895,6 +5151,16 @@ CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfor
 # the ceiling guard escalates nat-vent -> AC (savings homes accept a small overshoot before paying
 # for cooling; normal mode escalates at comfort_cool).
 CEILING_ESCALATION_SAVINGS_MARGIN_F: float = 2.0
+
+# ---------------------------------------------------------------------------
+# Grace-period adopt-on-match (Issue #483)
+# ---------------------------------------------------------------------------
+# How close the thermostat's live setpoint must be to the setpoint select_comfort_band()
+# would arm right now for a manual mode-override to be considered "matching" automation's
+# current decision and adopted early (see _override_matches_current_decision() in
+# automation.py). Deliberately tight -- this only exists to catch minor floating-point/
+# rounding noise, not to treat a genuinely different user-chosen temperature as a match.
+OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F: float = 1.0
 
 # Issue #249 — thermostat capability detection. Home Assistant's
 # ClimateEntityFeature.TARGET_TEMPERATURE_RANGE bit: when set in a climate entity's

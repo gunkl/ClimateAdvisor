@@ -59,6 +59,7 @@ Mapped (production → legacy):
   override_confirmed            → override_confirmed
   override_self_resolved        → override_self_resolved
   override_cleared              → override_cleared
+  override_adopted              → override_adopted (Issue #483)
 
 Issue #258 — overnight pre-cool:
   pre_cool_applied              → pre_cool_applied
@@ -407,6 +408,14 @@ def _map_event_to_outcome(
     if event_type == "override_cleared":
         return ProductionDecision(ts_str, event_type, "override_cleared")
 
+    if event_type == "override_adopted":
+        # Issue #483: automation's current decision converged on the same state the
+        # override already produced -- adopted instead of continuing/expiring the
+        # grace period unchanged. Registered as a named outcome (not "unknown:...")
+        # purely so it's readable in -v decision timelines; does not change
+        # production_outcome_at()'s existing last-decision-wins tie-break semantics.
+        return ProductionDecision(ts_str, event_type, "override_adopted")
+
     # --- Overnight pre-cool (Issue #258) ---
     if event_type == "pre_cool_applied":
         target = payload.get("target")
@@ -701,6 +710,45 @@ def check_assertion(
             return False
         return "override_not_detected"
 
+    # --- fan_ca_command_not_misclassified (Issue #482) ---
+    # A CA-issued WHF fan command (e.g. nat-vent adoption turning the fan on) must
+    # NOT be misclassified by the coordinator's real _async_fan_entity_changed()
+    # listener as a manual override/cancel. Verify the GUARANTEE: no
+    # fan_manual_override/fan_cancel event exists in the SAME scheduler-cycle
+    # minute as the assertion time (mirrors ceiling_guard_dormant's same-cycle
+    # scoping — a fan_cancel event from a much earlier/later, unrelated
+    # transition must not falsely fail this). Only meaningful with
+    # use_coordinator=True — the bare engine has no _async_fan_entity_changed
+    # listener to misclassify anything.
+    if expect == "fan_ca_command_not_misclassified":
+        at_str = assertion["at"]
+        at_minute = at_str[:16]
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if (
+                ev_type in ("fan_manual_override", "fan_cancel")
+                and ev_ts is not None
+                and _naive_iso(ev_ts)[:16] == at_minute
+            ):
+                return False
+        return "fan_ca_command_not_misclassified"
+
+    # --- fan_external_change_classified (Issue #482) ---
+    # A genuinely external fan state change (no CA context, not immediately
+    # preceded by a CA command) must STILL be correctly classified as
+    # manual — proving the Issue #482 event.context provenance check is
+    # additive/corroborating only, not a blanket suppression that would make
+    # CA blind to real user actions. Payload: {"expect_event": "fan_cancel" |
+    # "fan_manual_override"}. Checks for that event type at the assertion's
+    # same-minute window.
+    if expect == "fan_external_change_classified":
+        at_str = assertion["at"]
+        at_minute = at_str[:16]
+        expected_event = assertion.get("expect_event", "fan_cancel")
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type == expected_event and ev_ts is not None and _naive_iso(ev_ts)[:16] == at_minute:
+                return "fan_external_change_classified"
+        return False
+
     # --- dual_setback_applied (Issue #236 C) ---
     # Legacy distinguishes dual-mode (heat_cool) setback; production applies both
     # setpoints but emits a generic setback event. Verify the GUARANTEE: a
@@ -714,6 +762,24 @@ def check_assertion(
                 if "target_temp_low" in d and "target_temp_high" in d:
                     return "dual_setback_applied"
         return False
+
+    # --- no_comfort_undertemp_incident / no_comfort_violation_incident (Issue #481) ---
+    # incident_detected is in UNMAPPED_PRODUCTION_EVENTS (diagnostic/telemetry only, not
+    # a behavior decision — see module docstring) so it never appears in the decisions
+    # list. This is a negative GUARANTEE assertion, same shape as override_not_detected
+    # above: scan event_log directly for the absence of the named incident_class. Used to
+    # prove _detect_and_emit_incidents() does NOT fire a false-positive comfort incident
+    # when indoor temp is within the currently-ACTIVE band (e.g. the sleep band) even
+    # though it would be outside the static daytime comfort_heat/comfort_cool band — the
+    # exact false positive Issue #481 fixes. Scans the whole event_log unconditionally
+    # (not gated by assertion["at"]), matching override_not_detected's precedent, since
+    # the guarantee is "never fired during this scenario", not "hasn't fired yet by time T".
+    if expect in ("no_comfort_undertemp_incident", "no_comfort_violation_incident"):
+        target_class = "comfort_undertemp" if expect == "no_comfort_undertemp_incident" else "comfort_violation"
+        for event_type, payload, _ts in result.event_log:
+            if event_type == "incident_detected" and payload.get("incident_class") == target_class:
+                return False
+        return expect
 
     return False
 

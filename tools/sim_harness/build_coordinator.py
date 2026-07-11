@@ -151,6 +151,30 @@ def build_headless_coordinator(
     # don't need for scenario assertions) with the flat scenario event_log.
     coordinator.automation_engine._emit_event_callback = _emit_event
 
+    # 7b. Issue #481: coordinator-originated events (e.g. _emit_incident()'s
+    #     incident_detected, occupancy_transition/rapid_override_after_automation from
+    #     _detect_and_emit_incidents()) call self._emit_event() DIRECTLY — a bound
+    #     coordinator method, not routed through automation_engine._emit_event_callback
+    #     (that wiring only covers events the ENGINE emits). In real production both
+    #     paths funnel into the same self._event_log ring buffer (coordinator.py:280 wires
+    #     automation_engine._emit_event_callback = self._emit_event, so it's genuinely one
+    #     buffer there) — but here, step 7 above already redirected the engine's callback
+    #     to the flat scenario event_log directly, bypassing coordinator._emit_event
+    #     entirely for engine events. That left coordinator-originated events writing ONLY
+    #     to the internal self._event_log ring buffer, invisible to any scenario assertion
+    #     reading ProductionRunResult.event_log. Wrap coordinator._emit_event so it ALSO
+    #     feeds the flat list — purely additive (adds visibility for a class of real
+    #     production events the harness previously dropped silently); it does not change
+    #     what any existing event type is captured as, so it cannot make an existing
+    #     regression pass silently (CLAUDE.md §8).
+    _coordinator_emit_event = coordinator._emit_event
+
+    def _emit_event_and_capture(event_type: str, data: dict) -> None:
+        _coordinator_emit_event(event_type, data)
+        _emit_event(event_type, data)
+
+    coordinator._emit_event = _emit_event_and_capture
+
     # 8. Replicate __init__.py's exact startup sequence (__init__.py:396-405):
     #      coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data))
     #      await coordinator.async_restore_state()

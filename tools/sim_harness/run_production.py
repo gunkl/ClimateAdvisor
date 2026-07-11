@@ -221,15 +221,28 @@ def _inject_indoor_temp(
 
 
 def _inject_thermostat_mode(
-    fake_hass: FakeHass, climate_entity: str, hvac_mode: str, *, dispatch: bool = False
+    fake_hass: FakeHass,
+    climate_entity: str,
+    hvac_mode: str,
+    *,
+    dispatch: bool = False,
+    temperature: float | None = None,
 ) -> None:
     """Update the thermostat state string on the climate entity.
 
     Args:
         dispatch: see ``_inject_indoor_temp``.
+        temperature: Issue #483 — optional setpoint to set alongside the mode change,
+            for scenarios where the user changes mode AND setpoint in a single
+            thermostat interaction (e.g. a Nest/Ecobee "heat at 70" UI action).
+            When omitted (the default, all pre-existing scenarios), the entity's
+            existing ``temperature`` attribute is left untouched, matching the
+            prior behavior exactly.
     """
     existing = fake_hass.states.get(climate_entity)
     attrs = dict(existing.attributes) if existing is not None else {}
+    if temperature is not None:
+        attrs["temperature"] = temperature
     if dispatch:
         fake_hass.states.async_set(climate_entity, hvac_mode, attrs)
     else:
@@ -595,10 +608,13 @@ def _dispatch_event(
         # detection to approximate at the engine level; a scenario that needs
         # override-detection fidelity must run with use_coordinator=True.
         new_hvac_mode = event.get("hvac_mode", "off")
+        new_temperature = event.get("temperature")  # optional (Issue #483)
         if coordinator is not None:
-            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, dispatch=True)
+            _inject_thermostat_mode(
+                fake_hass, climate_entity, new_hvac_mode, dispatch=True, temperature=new_temperature
+            )
         else:
-            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode)
+            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, temperature=new_temperature)
 
     elif etype == "cancel_override":
         # Issue #476: replicates api.py's ClimateAdvisorCancelOverrideView.post()
@@ -649,6 +665,25 @@ def _dispatch_event(
         _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         run_coro(engine.nat_vent_temperature_check(indoor_temp))
 
+    elif etype == "external_fan_state_change":
+        # Issue #482: models a genuinely external actor changing the configured WHF
+        # fan_entity's HA state directly (e.g. someone flips a physical switch, or
+        # calls the fan.turn_on/off service from the HA UI outside of CA). Unlike
+        # CA's OWN commands (which route through automation.py's
+        # _call_fan_service_with_context via services.async_call and so carry a
+        # real Context — see _handle_temp_update-adjacent CA-driven paths above),
+        # this dispatches states.async_set() DIRECTLY with no context, exactly
+        # modeling "no CA attribution available" for a real external change. Only
+        # meaningful with use_coordinator=True — reaches the real
+        # _async_fan_entity_changed listener the same way sensor_open/thermostat_
+        # state_changed do.
+        entity_id = event.get("entity", config.get("fan_entity", "fan.whf"))
+        new_state = event.get("state", "off")
+        if coordinator is not None:
+            fake_hass.states.async_set(entity_id, new_state, {})
+        # No engine-only equivalent — command-only/bare-engine mode has no
+        # _async_fan_entity_changed listener to dispatch to at all.
+
     elif etype == "pre_cool":
         # Issue #258: Dispatch the pre-cool trigger to the production engine.
         # nat_vent_just_closed=True when the event marks the post-nat-vent trigger;
@@ -659,6 +694,22 @@ def _dispatch_event(
             _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         nat_vent_just_closed = bool(event.get("nat_vent_just_closed", False))
         run_coro(engine.handle_pre_cool(indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed))
+
+    elif etype == "coordinator_refresh" and coordinator is not None:
+        # Issue #481: dispatches the real periodic coordinator cycle
+        # (DataUpdateCoordinator.async_request_refresh() -> _async_update_data()) at a
+        # specific simulated time. Requires use_coordinator=True — there is no
+        # engine-only equivalent since _async_update_data() (and the incident detection
+        # it runs at its tail, _detect_and_emit_incidents()) is coordinator-owned.
+        # Production calls the equivalent (async_refresh()) every 30 minutes via
+        # update_interval; the harness's _MockDataUpdateCoordinator only auto-runs
+        # _async_update_data() once, at async_config_entry_first_refresh() during setup
+        # (tools/sim_harness/ha_stubs.py — the stub does not implement async_refresh()
+        # at all, only async_request_refresh()/async_config_entry_first_refresh()), so
+        # scenarios that need to exercise a LATER cycle (e.g. incident detection
+        # evaluated against a later-injected indoor temp) must dispatch it explicitly.
+        # Purely additive — no existing event type's semantics changed.
+        run_coro(coordinator.async_request_refresh())
 
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 

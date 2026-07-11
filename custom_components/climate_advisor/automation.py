@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
@@ -72,6 +72,7 @@ from .const import (
     OCCUPANCY_GUEST,
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
+    OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     REVISIT_DELAY_SECONDS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -518,6 +519,11 @@ class AutomationEngine:
         self._manual_override_active: bool = False
         self._manual_override_mode: str | None = None
         self._manual_override_time: str | None = None
+        # Issue #483: carries the confirming _override_confirm_source ("normal"/"pause"/
+        # "setpoint") forward onto the *active* override so the adopt-on-match check can
+        # exclude setpoint-only overrides (mode matching classification is not sufficient
+        # evidence of convergence when the user's real intent was a setpoint change).
+        self._manual_override_source: str | None = None
 
         # Fan state tracking (Issue #37)
         self._fan_active: bool = False
@@ -541,6 +547,16 @@ class AutomationEngine:
         self._write_seq: int = 0  # monotonic counter: validation callbacks skip if a newer write has superseded them
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
+        # Issue #482: id of the HA Context CA attached to its most recent outgoing WHF
+        # fan-entity service call (see _command_whf_control_entity). When the resulting
+        # state-changed Event's own event.context.id (or parent_id) matches this value,
+        # that is an authoritative "this transition was CA-issued" signal — used by
+        # coordinator._async_fan_entity_changed() as an additional provenance check
+        # alongside the existing _fan_command_pending/timing-heuristic guards. Real HA
+        # context propagation through third-party fan/switch integrations (especially
+        # one-way RF transmitter entities) is not guaranteed reliable, so this is treated
+        # as a corroborating signal, not a replacement for the existing checks.
+        self._fan_command_context_id: str | None = None
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -757,6 +773,7 @@ class AutomationEngine:
             )
             self._manual_override_active = False
             self._manual_override_mode = None
+            self._manual_override_source = None
             self._manual_override_time = None
         self._resumed_from_pause = False
         self.clear_fan_override()
@@ -781,7 +798,9 @@ class AutomationEngine:
         except Exception:
             return 0.0
 
-    def handle_fan_manual_override(self, fan_before: str = "", fan_after: str = "") -> None:
+    def handle_fan_manual_override(
+        self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None
+    ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
         Idempotent: safe to call even if an override is already active (re-stamps the
@@ -790,6 +809,10 @@ class AutomationEngine:
         Args:
             fan_before: Fan state before the manual change (e.g. "on", "auto").
             fan_after: Fan state after the manual change.
+            event_context_id: The HA Context id of the triggering state-changed event, if
+                any (Issue #482) — surfaced in the Activity Report payload as diagnostic
+                provenance data so a future investigation of a genuinely-external fan
+                event doesn't need cross-source timestamp archaeology.
         """
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
@@ -808,11 +831,12 @@ class AutomationEngine:
                     "fan_after": fan_after,
                     "override_active_since": self._fan_override_time,
                     "fan_device": _fan_device_label(self.config),
+                    "event_context_id": event_context_id,
                 },
             )
         self._start_grace_period("manual", trigger="fan_manual_override")
 
-    def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "") -> None:
+    def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None) -> None:
         """Handle the user turning the fan OFF — clears fan state and gates nat-vent re-activation (Issue #359).
 
         Unlike ``handle_fan_manual_override`` (which is for fan-ON and sets ``_fan_override_active``),
@@ -823,6 +847,9 @@ class AutomationEngine:
         Args:
             fan_before: Fan state before the change (e.g. "on", "auto").
             fan_after: Fan state after the change (e.g. "off", "auto").
+            event_context_id: The HA Context id of the triggering state-changed event, if
+                any (Issue #482) — surfaced in the Activity Report payload as diagnostic
+                provenance data.
         """
         _LOGGER.info(
             "Fan turned off by user: fan=%s->%s, trigger=fan_off",
@@ -851,6 +878,7 @@ class AutomationEngine:
                     "fan_after": fan_after,
                     "trigger": "fan_off",
                     "fan_device": _fan_device_label(self.config),
+                    "event_context_id": event_context_id,
                 },
             )
 
@@ -1087,7 +1115,7 @@ class AutomationEngine:
         )
         if _override_pending is None:
             # Confirmation disabled — accept override immediately (legacy behaviour)
-            self._confirm_override(detected_mode)
+            self._confirm_override(detected_mode, source=source)
             return
 
         # Cancel any existing pending confirmation (restart the window)
@@ -1154,7 +1182,7 @@ class AutomationEngine:
                 self._override_confirm_time = None
                 self._override_confirm_mode = None
                 self._override_confirm_source = None
-                self._confirm_override(current_mode)
+                self._confirm_override(current_mode, source=source)
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_confirmed",
@@ -1189,14 +1217,94 @@ class AutomationEngine:
 
         self._override_confirm_cancel = async_call_later(self.hass, confirm_seconds, _confirm_override_expired)
 
-    def _confirm_override(self, mode: str) -> None:
-        """Formally accept a manual override and start the grace period."""
+    def _override_matches_current_decision(self, classification: DayClassification | None) -> bool:
+        """Return True if the active manual override already matches what automation wants now.
+
+        Issue #483 ("adopt matching decision instead of continuing a grace period"): if
+        automation's current decision independently arrives at the same HVAC mode the
+        user's override already produced, the override and its grace period no longer
+        represent a real disagreement — the system should adopt the converged state
+        rather than continue treating it as an active override.
+
+        Scope (deliberately conservative — see docs/grace-periods-spec.md and Issue #483):
+        - Only HVAC *mode* overrides are eligible (the ones that flow through
+          ``_confirm_override()`` and set ``_manual_override_mode``). Fan-on overrides
+          (``_fan_override_active``), fan-off grace (``on_fan_turned_off``), and
+          door/window pause/resume grace do not set ``_manual_override_mode`` and are
+          therefore never eligible here — there is no automation-decision comparison of
+          the same shape for those triggers (fan eligibility requires re-evaluating live
+          nat-vent conditions through an async, state-mutating path; door/window grace is
+          about sensor state, not a "decision" at all).
+        - Setpoint-only overrides (``_manual_override_source == "setpoint"``) are
+          excluded outright. The HVAC mode may already match classification for these
+          (the user only changed the target temperature, not the mode) — matching mode
+          alone is not evidence the user's setpoint intent has converged with
+          automation's, and falsely adopting would silently drop the user's chosen
+          temperature.
+        - Mode-changing overrides (``source`` "normal"/"pause") still require the
+          thermostat's *current setpoint* to be within
+          ``OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F`` of the setpoint ``select_comfort_band()``
+          would arm right now for that mode. A compound override — the user both changed
+          the mode AND deliberately chose a different temperature (e.g. "heat" at 74°F
+          when automation's comfort_heat is 70°F) — must not be adopted just because the
+          *mode* happens to agree; the temperature disagreement is still a real, live
+          override of the user's intent. This mirrors the exact single-setpoint math
+          ``_apply_comfort_band()`` uses (``band.floor`` for heat, ``band.ceiling`` for
+          cool) so the comparison never drifts from what would actually be commanded.
+        """
+        if not self._manual_override_active or self._manual_override_mode is None:
+            return False
+        if self._manual_override_source == "setpoint":
+            return False
+        if classification is None:
+            return False
+        if self._manual_override_mode != classification.hvac_mode:
+            return False
+        if classification.hvac_mode not in ("heat", "cool"):
+            # "off" (or any other non-setpoint mode): no setpoint to compare — mode match
+            # is sufficient evidence of convergence.
+            return True
+
+        band = select_comfort_band(
+            classification,
+            self.config,
+            occupancy_mode=self._occupancy_mode,
+            in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            pre_condition_achieved=self._pre_condition_achieved,
+        )
+        target_f = band.floor if classification.hvac_mode == "heat" else band.ceiling
+
+        state = self.hass.states.get(self.climate_entity) if self.hass else None
+        raw_setpoint = state.attributes.get("temperature") if state else None
+        if raw_setpoint is None:
+            # No live setpoint to compare against — nothing more precise available;
+            # mode match is the best evidence we have.
+            return True
+        unit = self.config.get("temp_unit", "fahrenheit")
+        try:
+            current_f = to_fahrenheit(float(raw_setpoint), unit)
+        except (TypeError, ValueError):
+            return True
+        return abs(current_f - target_f) <= OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
+
+    def _confirm_override(self, mode: str, source: str | None = None) -> None:
+        """Formally accept a manual override and start the grace period.
+
+        Args:
+            mode: The confirmed HVAC mode string.
+            source: The originating ``_override_confirm_source`` ("normal", "pause",
+                or "setpoint"), carried forward so later adopt-on-match logic
+                (Issue #483) can exclude setpoint-only overrides from adoption.
+        """
         self._manual_override_active = True
         self._manual_override_mode = mode
+        self._manual_override_source = source
         self._manual_override_time = dt_util.now().isoformat()
         _LOGGER.warning(
-            "Manual override activated: mode=%s",
+            "Manual override activated: mode=%s source=%s",
             self._manual_override_mode,
+            self._manual_override_source or "unknown",
         )
         self._start_grace_period("manual", trigger="override_confirmed")
 
@@ -1263,12 +1371,40 @@ class AutomationEngine:
             self._current_classification = classification
 
             if self._manual_override_active:
-                _LOGGER.info(
-                    "Manual override active (mode=%s since %s) — skipping HVAC mode change",
-                    self._manual_override_mode,
-                    self._manual_override_time,
-                )
-                return
+                if self._override_matches_current_decision(classification):
+                    # Issue #483: automation's current decision already matches the
+                    # override the user set — adopt it now instead of waiting out the
+                    # rest of the grace period. Cancel the pending timer (no double-fire
+                    # later), clear override/grace flags, log+emit at INFO, then FALL
+                    # THROUGH to apply the (now-agreeing) classification normally below.
+                    _LOGGER.info(
+                        "Manual override adopted — automation decision now matches "
+                        "(pre-expiry): mode=%s source=%s override_since=%s",
+                        self._manual_override_mode,
+                        self._manual_override_source or "normal",
+                        self._manual_override_time,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "override_adopted",
+                            {
+                                "mode": self._manual_override_mode,
+                                "source": self._manual_override_source or "normal",
+                                "pre_expiry": True,
+                            },
+                        )
+                    self._cancel_grace_timers()
+                    self.clear_manual_override(reason="adopted_matching_decision")
+                    if self._post_grace_fan_check_callback:
+                        self._post_grace_fan_check_callback()
+                    # continue below — classification is applied normally this cycle
+                else:
+                    _LOGGER.info(
+                        "Manual override active (mode=%s since %s) — skipping HVAC mode change",
+                        self._manual_override_mode,
+                        self._manual_override_time,
+                    )
+                    return
 
             if self._override_confirm_pending:
                 _LOGGER.info(
@@ -3373,16 +3509,51 @@ class AutomationEngine:
             self.hass.async_create_task(self._re_pause_for_open_sensor())
             return
 
+        # Issue #483: at natural expiry, check whether automation's current decision has
+        # independently converged on the same HVAC mode the override already produced.
+        # If so, adopt it — this is the safe, minimum-bar location for this feature (see
+        # docs/grace-periods-spec.md and Issue #483's scope notes for why apply_classification()
+        # additionally carries the pre-expiry version of this same check). Adoption skips the
+        # "your override has expired" notification, which would otherwise misleadingly imply
+        # the user's setting was reverted when it in fact matches what automation wants anyway.
+        _adopted = source == "manual" and self._override_matches_current_decision(self._current_classification)
+        _adopted_mode: str | None = None
+        _adopted_source: str = "normal"
+        if _adopted:
+            # Capture before clear_manual_override() nulls these out below. getattr:
+            # some tests construct AutomationEngine via object.__new__() and populate
+            # only the attributes they need (mirrors the existing _apply_comfort_band
+            # defensive-read pattern) — _manual_override_source may not exist on older
+            # partial stubs that predate Issue #483.
+            _adopted_mode = self._manual_override_mode
+            _adopted_source = getattr(self, "_manual_override_source", None) or "normal"
+            _LOGGER.info(
+                "Manual override adopted — automation decision now matches (grace period ended "
+                "cleanly): mode=%s source=%s duration_seconds=%d",
+                _adopted_mode,
+                _adopted_source,
+                duration,
+            )
+
         self._grace_active = False
         self._last_resume_source = None
         self._grace_end_time = None
         self._manual_grace_cancel = None
         self._automation_grace_cancel = None
-        self.clear_manual_override(reason="grace_expired")
+        self.clear_manual_override(reason="adopted_matching_decision" if _adopted else "grace_expired")
         if self._request_refresh_callback:
             self._request_refresh_callback()
         if self._post_grace_fan_check_callback:
             self._post_grace_fan_check_callback()
+
+        if _adopted:
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "override_adopted",
+                    {"mode": _adopted_mode, "source": _adopted_source, "duration_seconds": duration},
+                )
+            return
+
         _LOGGER.info("%s grace period expired (%d seconds)", source, duration)
         if self._emit_event_callback:
             self._emit_event_callback("grace_expired", {"source": source, "re_paused": False})
@@ -4286,15 +4457,34 @@ class AutomationEngine:
                     reason,
                 )
                 opposite_service = "turn_off" if desired_on else "turn_on"
-                await self.hass.services.async_call(domain, opposite_service, {"entity_id": fan_entity})
+                await self._call_fan_service_with_context(domain, opposite_service, fan_entity)
                 await asyncio.sleep(5)
-                await self.hass.services.async_call(domain, desired_service, {"entity_id": fan_entity})
+                await self._call_fan_service_with_context(domain, desired_service, fan_entity)
                 return True
 
         # Not dual-entity mode, ground truth unavailable this tick, or control entity
         # doesn't yet match the desired state — a plain command is a genuine transition.
-        await self.hass.services.async_call(domain, desired_service, {"entity_id": fan_entity})
+        await self._call_fan_service_with_context(domain, desired_service, fan_entity)
         return True
+
+    async def _call_fan_service_with_context(self, domain: str, service: str, entity_id: str) -> None:
+        """Issue a fan/switch service call carrying a fresh HA Context (Issue #482).
+
+        HA attaches the originating service call's ``Context`` to the resulting
+        state-changed ``Event``. Stamping and recording our own context here lets
+        ``coordinator._async_fan_entity_changed()`` check ``event.context`` against
+        ``self._fan_command_context_id`` as an additional CA-attribution signal,
+        alongside the existing ``_fan_command_pending``/timing-heuristic guards.
+
+        Scope note: context propagation through third-party fan/switch integrations
+        (particularly a one-way RF transmitter entity with no feedback of its own) is
+        not guaranteed by HA core — some integrations do not carry the calling
+        context through to their own state write. This is why the context check is
+        additive/corroborating rather than a replacement for the existing checks.
+        """
+        cmd_context = Context()
+        self._fan_command_context_id = cmd_context.id
+        await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, context=cmd_context)
 
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
         """Activate fan based on configured fan_mode.
@@ -4587,9 +4777,27 @@ class AutomationEngine:
         # so the very next reactivation attempt (nat_vent_temperature_check()'s
         # immediate same-tick re-fire, since preserve_nat_vent_session=True above)
         # starts from a control entity that genuinely reads "off".
-        self.hass.async_create_task(
-            self._command_whf_control_entity(False, reason="physical-state drift confirmed over 2 backstop ticks")
-        )
+        #
+        # Issue #482: this off-command must set the same _fan_command_pending/
+        # _fan_command_time bookkeeping every other command site sets, so
+        # _async_fan_entity_changed() (coordinator.py) can suppress the resulting
+        # state-change event as CA-initiated instead of misclassifying it as manual
+        # (which would start a spurious grace period). The bookkeeping is stamped
+        # HERE, synchronously, before the task is scheduled — not inside the task body
+        # — so there is no window where the entity-changed listener could observe a
+        # stale/unset _fan_command_pending before the task actually runs.
+        self._fan_command_time = dt_util.now()
+        self._fan_command_pending = True
+
+        async def _do_drift_reconciliation_off_command() -> None:
+            try:
+                await self._command_whf_control_entity(
+                    False, reason="physical-state drift confirmed over 2 backstop ticks"
+                )
+            finally:
+                self._fan_command_pending = False
+
+        self.hass.async_create_task(_do_drift_reconciliation_off_command())
 
     async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:
         """Deactivate fan based on configured fan_mode.
@@ -4970,6 +5178,7 @@ class AutomationEngine:
         # blocks automation without any visible sign of an override.
         self._manual_override_active = False
         self._manual_override_mode = None
+        self._manual_override_source = None
         self._manual_override_time = None
         self._override_confirm_pending = False
         self._override_confirm_time = None

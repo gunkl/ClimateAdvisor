@@ -701,6 +701,45 @@ def check_assertion(
             return False
         return "override_not_detected"
 
+    # --- fan_ca_command_not_misclassified (Issue #482) ---
+    # A CA-issued WHF fan command (e.g. nat-vent adoption turning the fan on) must
+    # NOT be misclassified by the coordinator's real _async_fan_entity_changed()
+    # listener as a manual override/cancel. Verify the GUARANTEE: no
+    # fan_manual_override/fan_cancel event exists in the SAME scheduler-cycle
+    # minute as the assertion time (mirrors ceiling_guard_dormant's same-cycle
+    # scoping — a fan_cancel event from a much earlier/later, unrelated
+    # transition must not falsely fail this). Only meaningful with
+    # use_coordinator=True — the bare engine has no _async_fan_entity_changed
+    # listener to misclassify anything.
+    if expect == "fan_ca_command_not_misclassified":
+        at_str = assertion["at"]
+        at_minute = at_str[:16]
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if (
+                ev_type in ("fan_manual_override", "fan_cancel")
+                and ev_ts is not None
+                and _naive_iso(ev_ts)[:16] == at_minute
+            ):
+                return False
+        return "fan_ca_command_not_misclassified"
+
+    # --- fan_external_change_classified (Issue #482) ---
+    # A genuinely external fan state change (no CA context, not immediately
+    # preceded by a CA command) must STILL be correctly classified as
+    # manual — proving the Issue #482 event.context provenance check is
+    # additive/corroborating only, not a blanket suppression that would make
+    # CA blind to real user actions. Payload: {"expect_event": "fan_cancel" |
+    # "fan_manual_override"}. Checks for that event type at the assertion's
+    # same-minute window.
+    if expect == "fan_external_change_classified":
+        at_str = assertion["at"]
+        at_minute = at_str[:16]
+        expected_event = assertion.get("expect_event", "fan_cancel")
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type == expected_event and ev_ts is not None and _naive_iso(ev_ts)[:16] == at_minute:
+                return "fan_external_change_classified"
+        return False
+
     # --- dual_setback_applied (Issue #236 C) ---
     # Legacy distinguishes dual-mode (heat_cool) setback; production applies both
     # setpoints but emits a generic setback event. Verify the GUARANTEE: a

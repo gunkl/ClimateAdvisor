@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
@@ -541,6 +541,16 @@ class AutomationEngine:
         self._write_seq: int = 0  # monotonic counter: validation callbacks skip if a newer write has superseded them
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
+        # Issue #482: id of the HA Context CA attached to its most recent outgoing WHF
+        # fan-entity service call (see _command_whf_control_entity). When the resulting
+        # state-changed Event's own event.context.id (or parent_id) matches this value,
+        # that is an authoritative "this transition was CA-issued" signal — used by
+        # coordinator._async_fan_entity_changed() as an additional provenance check
+        # alongside the existing _fan_command_pending/timing-heuristic guards. Real HA
+        # context propagation through third-party fan/switch integrations (especially
+        # one-way RF transmitter entities) is not guaranteed reliable, so this is treated
+        # as a corroborating signal, not a replacement for the existing checks.
+        self._fan_command_context_id: str | None = None
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
@@ -781,7 +791,9 @@ class AutomationEngine:
         except Exception:
             return 0.0
 
-    def handle_fan_manual_override(self, fan_before: str = "", fan_after: str = "") -> None:
+    def handle_fan_manual_override(
+        self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None
+    ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
         Idempotent: safe to call even if an override is already active (re-stamps the
@@ -790,6 +802,10 @@ class AutomationEngine:
         Args:
             fan_before: Fan state before the manual change (e.g. "on", "auto").
             fan_after: Fan state after the manual change.
+            event_context_id: The HA Context id of the triggering state-changed event, if
+                any (Issue #482) — surfaced in the Activity Report payload as diagnostic
+                provenance data so a future investigation of a genuinely-external fan
+                event doesn't need cross-source timestamp archaeology.
         """
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
@@ -808,11 +824,12 @@ class AutomationEngine:
                     "fan_after": fan_after,
                     "override_active_since": self._fan_override_time,
                     "fan_device": _fan_device_label(self.config),
+                    "event_context_id": event_context_id,
                 },
             )
         self._start_grace_period("manual", trigger="fan_manual_override")
 
-    def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "") -> None:
+    def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None) -> None:
         """Handle the user turning the fan OFF — clears fan state and gates nat-vent re-activation (Issue #359).
 
         Unlike ``handle_fan_manual_override`` (which is for fan-ON and sets ``_fan_override_active``),
@@ -823,6 +840,9 @@ class AutomationEngine:
         Args:
             fan_before: Fan state before the change (e.g. "on", "auto").
             fan_after: Fan state after the change (e.g. "off", "auto").
+            event_context_id: The HA Context id of the triggering state-changed event, if
+                any (Issue #482) — surfaced in the Activity Report payload as diagnostic
+                provenance data.
         """
         _LOGGER.info(
             "Fan turned off by user: fan=%s->%s, trigger=fan_off",
@@ -851,6 +871,7 @@ class AutomationEngine:
                     "fan_after": fan_after,
                     "trigger": "fan_off",
                     "fan_device": _fan_device_label(self.config),
+                    "event_context_id": event_context_id,
                 },
             )
 
@@ -4286,15 +4307,34 @@ class AutomationEngine:
                     reason,
                 )
                 opposite_service = "turn_off" if desired_on else "turn_on"
-                await self.hass.services.async_call(domain, opposite_service, {"entity_id": fan_entity})
+                await self._call_fan_service_with_context(domain, opposite_service, fan_entity)
                 await asyncio.sleep(5)
-                await self.hass.services.async_call(domain, desired_service, {"entity_id": fan_entity})
+                await self._call_fan_service_with_context(domain, desired_service, fan_entity)
                 return True
 
         # Not dual-entity mode, ground truth unavailable this tick, or control entity
         # doesn't yet match the desired state — a plain command is a genuine transition.
-        await self.hass.services.async_call(domain, desired_service, {"entity_id": fan_entity})
+        await self._call_fan_service_with_context(domain, desired_service, fan_entity)
         return True
+
+    async def _call_fan_service_with_context(self, domain: str, service: str, entity_id: str) -> None:
+        """Issue a fan/switch service call carrying a fresh HA Context (Issue #482).
+
+        HA attaches the originating service call's ``Context`` to the resulting
+        state-changed ``Event``. Stamping and recording our own context here lets
+        ``coordinator._async_fan_entity_changed()`` check ``event.context`` against
+        ``self._fan_command_context_id`` as an additional CA-attribution signal,
+        alongside the existing ``_fan_command_pending``/timing-heuristic guards.
+
+        Scope note: context propagation through third-party fan/switch integrations
+        (particularly a one-way RF transmitter entity with no feedback of its own) is
+        not guaranteed by HA core — some integrations do not carry the calling
+        context through to their own state write. This is why the context check is
+        additive/corroborating rather than a replacement for the existing checks.
+        """
+        cmd_context = Context()
+        self._fan_command_context_id = cmd_context.id
+        await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, context=cmd_context)
 
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
         """Activate fan based on configured fan_mode.
@@ -4587,9 +4627,27 @@ class AutomationEngine:
         # so the very next reactivation attempt (nat_vent_temperature_check()'s
         # immediate same-tick re-fire, since preserve_nat_vent_session=True above)
         # starts from a control entity that genuinely reads "off".
-        self.hass.async_create_task(
-            self._command_whf_control_entity(False, reason="physical-state drift confirmed over 2 backstop ticks")
-        )
+        #
+        # Issue #482: this off-command must set the same _fan_command_pending/
+        # _fan_command_time bookkeeping every other command site sets, so
+        # _async_fan_entity_changed() (coordinator.py) can suppress the resulting
+        # state-change event as CA-initiated instead of misclassifying it as manual
+        # (which would start a spurious grace period). The bookkeeping is stamped
+        # HERE, synchronously, before the task is scheduled — not inside the task body
+        # — so there is no window where the entity-changed listener could observe a
+        # stale/unset _fan_command_pending before the task actually runs.
+        self._fan_command_time = dt_util.now()
+        self._fan_command_pending = True
+
+        async def _do_drift_reconciliation_off_command() -> None:
+            try:
+                await self._command_whf_control_entity(
+                    False, reason="physical-state drift confirmed over 2 backstop ticks"
+                )
+            finally:
+                self._fan_command_pending = False
+
+        self.hass.async_create_task(_do_drift_reconciliation_off_command())
 
     async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:
         """Deactivate fan based on configured fan_mode.

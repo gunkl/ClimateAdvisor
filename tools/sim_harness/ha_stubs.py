@@ -13,6 +13,7 @@ from __future__ import annotations
 import enum as _enum
 import os
 import sys
+import uuid
 from unittest.mock import MagicMock
 
 
@@ -78,6 +79,23 @@ class _MockRepairsFlow:
 
 class _MockConfirmRepairFlow(_MockRepairsFlow):
     """Minimal stand-in for homeassistant.components.repairs.ConfirmRepairFlow."""
+
+
+class _MockContext:
+    """Minimal stand-in for homeassistant.core.Context (Issue #482).
+
+    Real HA's Context carries an ``id`` (ulid), optional ``parent_id``, and
+    optional ``user_id``. Every real HA ``Event`` carries a ``Context`` — this
+    stub is attached to the mocked ``homeassistant.core`` module so production
+    code (``automation.py``) can do ``from homeassistant.core import Context``
+    and construct real, comparable id values in the test/sim environment, the
+    same way it would against real HA.
+    """
+
+    def __init__(self, user_id: str | None = None, parent_id: str | None = None, id: str | None = None) -> None:  # noqa: A002
+        self.id = id or uuid.uuid4().hex
+        self.parent_id = parent_id
+        self.user_id = user_id
 
 
 class _MockDataUpdateCoordinator:
@@ -200,6 +218,9 @@ def install_ha_stubs() -> None:
     duc = sys.modules["homeassistant.helpers.update_coordinator"]
     duc.DataUpdateCoordinator = _MockDataUpdateCoordinator
     duc.CoordinatorEntity = _MockCoordinatorEntity
+
+    core = sys.modules["homeassistant.core"]
+    core.Context = _MockContext
 
     sensor = sys.modules["homeassistant.components.sensor"]
     sensor.SensorEntity = _MockSensorEntity

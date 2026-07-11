@@ -3588,8 +3588,53 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if new_state.state == old_state.state:
             return
 
-        # Skip if this change was initiated by us
-        if self.automation_engine._fan_command_pending:
+        # Issue #482: HA attaches the originating service call's Context to every
+        # state-changed Event. When CA itself issued the fan command (via
+        # automation.py's _call_fan_service_with_context), it stamps
+        # automation_engine._fan_command_context_id with that Context's id. If this
+        # event's own context.id (or its parent_id, for cases where the target
+        # integration wraps CA's context in a child context) matches, that is an
+        # authoritative "CA caused this" signal — logged here on EVERY change
+        # (matched or not) so a future investigation has direct evidence instead of
+        # needing cross-source timestamp archaeology (the gap this issue closes).
+        #
+        # This is treated as an ADDITIONAL/corroborating signal alongside the
+        # existing _fan_command_pending/timing checks below, not a replacement for
+        # them: context propagation through third-party fan/switch integrations
+        # (especially a one-way RF transmitter entity with no feedback of its own)
+        # is not guaranteed reliable by HA core, so a non-match here does not prove
+        # the change was external — it only fails to prove it was CA's. A match,
+        # however, is conclusive.
+        event_context = getattr(event, "context", None)
+        event_context_id = getattr(event_context, "id", None) if event_context is not None else None
+        event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
+        cmd_context_id = self.automation_engine._fan_command_context_id
+        context_confirms_ca = bool(
+            event_context_id is not None
+            and cmd_context_id is not None
+            and (event_context_id == cmd_context_id or event_context_parent_id == cmd_context_id)
+        )
+        _LOGGER.debug(
+            "fan_entity state change provenance: %s -> %s event_context_id=%s"
+            " event_context_parent_id=%s last_ca_command_context_id=%s context_confirms_ca=%s",
+            old_state.state,
+            new_state.state,
+            event_context_id,
+            event_context_parent_id,
+            cmd_context_id,
+            context_confirms_ca,
+        )
+
+        # Skip if this change was initiated by us — either the transient
+        # command-pending bookkeeping (existing guard) or a confirmed event.context
+        # match (Issue #482, additional signal).
+        if self.automation_engine._fan_command_pending or context_confirms_ca:
+            if context_confirms_ca and not self.automation_engine._fan_command_pending:
+                _LOGGER.info(
+                    "Fan entity change attributed to CA via event.context match (id=%s) —"
+                    " suppressing (would otherwise have been evaluated as external)",
+                    event_context_id,
+                )
             return
 
         # Skip if fan override is already active — but a physical-state confirmation
@@ -3621,7 +3666,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_state.state,
             )
             self.automation_engine.handle_fan_manual_override(
-                fan_before=str(old_state.state), fan_after=str(new_state.state)
+                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
             )
         elif not is_on and self.automation_engine._fan_active:
             # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
@@ -3632,7 +3677,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 old_state.state,
                 new_state.state,
             )
-            self.automation_engine.on_fan_turned_off(fan_before=str(old_state.state), fan_after=str(new_state.state))
+            self.automation_engine.on_fan_turned_off(
+                fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+            )
 
     async def _async_reassert_setpoint_after_fan_off(self) -> None:
         """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).

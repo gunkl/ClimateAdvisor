@@ -1,0 +1,133 @@
+{
+  "name": "fan_off_provenance_context_and_bookkeeping",
+  "description": "A CA-issued WHF fan command is never misclassified as a manual override/cancel, while a genuinely external fan change is still correctly detected as manual (Issue #482)",
+  "source": "issue-report",
+  "issue": 482,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant impact if this regresses: a fan transition CA itself caused (e.g. turning the",
+    "whole-house fan on to adopt nat-vent free cooling) gets misread as the user manually",
+    "touching the fan, latching a spurious grace period that can block CA from re-engaging",
+    "free cooling or HVAC for the configured grace window (manual_grace_seconds) -- the",
+    "occupant loses automated comfort/energy control for no real reason. Conversely, if the",
+    "new provenance check were made too aggressive, a REAL external fan action could be",
+    "silently swallowed and CA would keep acting as if it still owns the fan -- this scenario",
+    "checks both directions.",
+    "",
+    "Covers Issue #482 Part 2 (event.context provenance) end-to-end through the real",
+    "coordinator: nat-vent adoption on sensor_open calls automation.py's _activate_fan(),",
+    "which now routes its fan.whf turn_on command through _call_fan_service_with_context()",
+    "-- a real HA Context is attached, FakeHass propagates it onto the resulting",
+    "state-changed event (tools/sim_harness/fake_hass.py), and coordinator._async_fan_entity_changed",
+    "reads event.context against automation_engine._fan_command_context_id, matching and",
+    "suppressing correctly (fan_ca_command_not_misclassified assertion).",
+    "",
+    "The external_fan_state_change event then dispatches a state change with NO context at",
+    "all (fake_hass.states.async_set() called directly, not through a CA service call) --",
+    "modeling a genuine external actor (e.g. someone flips the physical switch). This must",
+    "still be classified as manual (on_fan_turned_off -> fan_cancel, trigger=fan_off) --",
+    "proving the Issue #482 context check is corroborating/additive, not a blanket suppression.",
+    "",
+    "Part 1 (drift-reconciliation bookkeeping) is NOT independently exercisable end-to-end in",
+    "this harness -- confirmed via careful trace of the scheduler's task-queue interleaving",
+    "(FakeScheduler drains async_create_task coroutines strictly after the enclosing callback",
+    "returns): the misclassification only becomes reachable when a same-tick nat-vent",
+    "reactivation races the still-queued drift-reconciliation off-command, and _activate_fan()'s",
+    "own (pre-existing, sibling) unconditional finally-clear of _fan_command_pending stomps the",
+    "flag before the queued task's own event fires -- the single shared boolean is not",
+    "reentrant-safe against that specific interleaving, a deeper limitation shared by every",
+    "existing WHF command site, not unique to this fix, and out of scope for the literal",
+    "'match every other command site' fix this issue asked for. Part 1 is instead covered",
+    "precisely at the unit level (tests/test_fan_control.py::TestReconcileFanDriftBookkeeping),",
+    "which asserts the bookkeeping is stamped synchronously before the off-command task is",
+    "created and cleared after it completes -- see that file for the full analysis and the",
+    "revert-test proving it fails without the fix.",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: if automation.py's _call_fan_service_with_context stopped",
+    "    attaching a Context (or coordinator.py stopped checking it), this scenario would",
+    "    NOT independently catch a regression for the CA-command side, because",
+    "    _fan_command_pending already independently suppresses that same transition (this is",
+    "    the corroborating-signal design, not a replacement) -- so this scenario's real",
+    "    regression-catching value is the external_fan_state_change assertion: if the new",
+    "    context logic were ever changed to treat 'no context' as proof of CA-attribution",
+    "    (an inversion bug), fan_external_change_classified would fail. Effectiveness for",
+    "    the CA-side wiring itself (context flows through FakeHass, id comparison works, no",
+    "    exceptions) is proven by this scenario passing at all -- a wiring break (e.g. a typo",
+    "    in the attribute name) would surface as an exception in callback_errors.",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md's fan-off classification",
+    "    section should be updated to mention event.context as an additional corroborating",
+    "    signal alongside the existing timing heuristic (Scribe follow-up).",
+    "(c) User outcome: verified above in the occupant-impact note."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 75,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.front_door"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-07-12T07:00:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 60.0,
+      "note": "Morning: indoor=72F, outdoor=60F -- outdoor well below indoor, favorable for nat-vent."
+    },
+    {
+      "time": "2026-07-12T07:01:00",
+      "type": "classification",
+      "day_type": "mild",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Mild day: hvac_mode=off, nat-vent eligible once a sensor opens."
+    },
+    {
+      "time": "2026-07-12T08:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Sensor opens. outdoor=60F < indoor=72F, indoor > comfort_heat=70F, outdoor <= threshold 78F -- nat-vent activates. _activate_fan() commands fan.whf on via _call_fan_service_with_context (Issue #482), carrying a real HA Context all the way through to the resulting state-changed event the real coordinator listener sees."
+    },
+    {
+      "time": "2026-07-12T09:00:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "A genuinely external actor turns the fan off directly (no CA service call, no context) -- e.g. someone flips the physical switch. Must still be classified as manual (on_fan_turned_off -> fan_cancel, trigger=fan_off), proving the context check does not swallow real external actions."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T08:00:00",
+      "expect": "natural_ventilation",
+      "reason": "Sensor opened with favorable nat-vent conditions -- fan turns on, HVAC suppressed."
+    },
+    {
+      "at": "2026-07-12T08:00:00",
+      "expect": "fan_ca_command_not_misclassified",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "CA's own fan.whf turn_on command (issued via _call_fan_service_with_context, Issue #482) must not be misread by the real coordinator._async_fan_entity_changed listener as a manual fan-on -- no fan_manual_override/fan_cancel event may appear in this same cycle."
+    },
+    {
+      "at": "2026-07-12T09:00:00",
+      "expect": "fan_external_change_classified",
+      "expect_event": "fan_cancel",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "The external_fan_state_change event carries no CA context and was not preceded by a CA command -- the real coordinator listener must still classify it as manual (on_fan_turned_off -> fan_cancel, trigger=fan_off), proving Issue #482's context check is corroborating/additive only, not a blanket suppression that would leave CA blind to genuine user actions."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "CA-issued WHF commands carry event.context and are never misclassified as manual; genuinely external fan changes are still correctly detected (Issue #482)",
+    "observed_behavior": "sensor_open -> natural_ventilation (CA-issued fan-on via _call_fan_service_with_context, no misclassification) -> external_fan_state_change -> fan_cancel (correctly classified as manual, trigger=fan_off)",
+    "expected_behavior": "CA's own fan commands are attributed via event.context and never start a spurious grace period; real external fan actions are still detected as manual overrides"
+  }
+}

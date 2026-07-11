@@ -649,6 +649,25 @@ def _dispatch_event(
         _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
         run_coro(engine.nat_vent_temperature_check(indoor_temp))
 
+    elif etype == "external_fan_state_change":
+        # Issue #482: models a genuinely external actor changing the configured WHF
+        # fan_entity's HA state directly (e.g. someone flips a physical switch, or
+        # calls the fan.turn_on/off service from the HA UI outside of CA). Unlike
+        # CA's OWN commands (which route through automation.py's
+        # _call_fan_service_with_context via services.async_call and so carry a
+        # real Context — see _handle_temp_update-adjacent CA-driven paths above),
+        # this dispatches states.async_set() DIRECTLY with no context, exactly
+        # modeling "no CA attribution available" for a real external change. Only
+        # meaningful with use_coordinator=True — reaches the real
+        # _async_fan_entity_changed listener the same way sensor_open/thermostat_
+        # state_changed do.
+        entity_id = event.get("entity", config.get("fan_entity", "fan.whf"))
+        new_state = event.get("state", "off")
+        if coordinator is not None:
+            fake_hass.states.async_set(entity_id, new_state, {})
+        # No engine-only equivalent — command-only/bare-engine mode has no
+        # _async_fan_entity_changed listener to dispatch to at all.
+
     elif etype == "pre_cool":
         # Issue #258: Dispatch the pre-cool trigger to the production engine.
         # nat_vent_just_closed=True when the event marks the post-nat-vent trigger;

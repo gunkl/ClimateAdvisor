@@ -66,6 +66,23 @@ def _make_coordinator_stub(config: dict | None = None):
     coord._emit_event = types.MethodType(ClimateAdvisorCoordinator._emit_event, coord)
     coord._emit_incident = types.MethodType(ClimateAdvisorCoordinator._emit_incident, coord)
     coord._detect_and_emit_incidents = types.MethodType(ClimateAdvisorCoordinator._detect_and_emit_incidents, coord)
+    # Issue #481: _detect_and_emit_incidents()/_emit_incident() now resolve the active
+    # comfort band via _resolve_active_comfort_band() (which routes through
+    # select_comfort_band() when a real DayClassification is present). Since `coord` is a
+    # bare MagicMock (not a real coordinator), binding the REAL _resolve_active_comfort_band
+    # here would read coord.current_classification as an auto-generated MagicMock attribute
+    # (truthy, not None) and feed it into select_comfort_band() — exercising the real,
+    # wall-clock-dependent sleep-window branch these tests aren't about and were never
+    # written to control. These tests are specifically about _detect_and_emit_incidents()'s
+    # own threshold/dedup/tolerance logic, so stub this exact seam to return the static
+    # comfort_heat/comfort_cool this test file's config dicts already set — preserving the
+    # pre-#481 test semantics for the behavior under test here. select_comfort_band()'s own
+    # sleep/away/vacation-aware resolution is covered separately by
+    # tools/simulations/pending/issue-481-sleep-band-no-false-undertemp-incident.json.
+    coord._resolve_active_comfort_band = lambda: (
+        coord.config.get("comfort_heat"),
+        coord.config.get("comfort_cool"),
+    )
     # Issue #411: shared nat-vent-tolerance comfort-deviation gate, consumed by both
     # _detect_and_emit_incidents (above) and coordinator.py's comfort_violations_minutes
     # accumulation (tested separately below via direct calls on this same bound method).

@@ -3,13 +3,12 @@
   "description": "Cool day, HVAC in cool mode at comfort (74F). At 10:00 thermostat briefly reports heat mode (transient glitch). At 10:05 thermostat returns to cool before the 10-minute confirm window expires. Override self-resolves; no override is accepted; classification continues normally.",
   "source": "synthetic",
   "issue": 229,
-  "unsupported_reason": "Integration-tier: the override self-resolve path requires the coordinator's _async_thermostat_changed state listener to detect the thermostat returning to the expected mode before the async_call_later confirm timer fires — cancelling the pending override. In the Tier-A harness the confirm timer does not run; the engine's override_self_resolved decision is emitted at the wrong time (10:10 from the timer expiry rather than 10:05 from the thermostat returning), and subsequent classification assertions fail because the event-log cursor is misaligned. Additionally, expect_temp=74.0 assertions are stale post-#249 (engine sets dual-temp 70/74). Deferred to Tier-B HeadlessTarry harness (#236 follow-on) which wires the coordinator state-listener and timer-cancellation path.",
   "notes": [
     "Tests the 'transient glitch' vs 'real user change' distinction in the override confirmation window.",
-    "Gap 3 (override confirmation delay) is NOT yet in simulate.py — override_detected and override_self_resolved assertions are marked track:integration.",
-    "What the simulator CAN test today: after transient thermostat_state_changed (heat) + return to cool, the next classification cycle fires normally (not suppressed), because the simulator does not set manual_override_active from thermostat_state_changed events.",
-    "Logic-track assertion at 10:30 verifies classification continues normally (no override suppression).",
-    "Once Gap 3 is closed, the integration assertions can be promoted."
+    "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true, evaluated for real.",
+    "CORRECTED per #474/#476 investigation: the override_self_resolved assertion moved from 10:05 to 10:10. Tracing automation.py's start_override_confirmation()/_confirm_override_expired() shows the self-resolve check ONLY runs when the confirm timer itself fires (10:10 here — 10 minutes after detection, per override_confirm_seconds=600), reading whatever the current thermostat state is at THAT moment. There is no code path in _async_thermostat_changed that proactively cancels/re-evaluates the pending timer early when the thermostat returns to the expected mode before the window expires (confirmed by directly reading the guard chain — no such early-cancel branch exists). The scenario's original 10:05 assertion described aspirational behavior that was never implemented, not a harness dispatch-fidelity gap — do not 'fix' this by modifying automation.py/coordinator.py; that would be a production behavior change out of scope for a test-infra issue. The self-resolve genuinely happens, just at timer-expiry (10:10), not at the return-to-expected moment (10:05).",
+    "10:30's classification hvac_mode changed from 'cool' (same as 09:01) to 'off': the original, identical classification would be silently deduped by apply_classification()'s day_type/hvac_mode dedup (automation.py:1355-1356) regardless of whether the override genuinely self-resolved or incorrectly stuck — making the assertion pass vacuously either way. A different hvac_mode makes it discriminating: a genuine NEW classification_applied only fires if the override really did clear.",
+    "Revert test: temporarily forced _confirm_override_expired() (automation.py:1145) to always take PATH A (confirm) instead of checking current_mode != cls_mode — the 10:10 assertion correctly failed (override_confirmed instead of override_self_resolved). Restored; git diff confirmed clean."
   ],
   "config": {
     "comfort_heat": 70,
@@ -18,7 +17,9 @@
     "setback_cool": 80,
     "natural_vent_delta": 3.0,
     "override_confirm_seconds": 600,
-    "initial_thermostat_mode": "cool"
+    "initial_thermostat_mode": "cool",
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
   },
   "events": [
     {
@@ -59,9 +60,9 @@
       "time": "2026-07-15T10:30:00",
       "type": "classification",
       "day_type": "cool",
-      "hvac_mode": "cool",
+      "hvac_mode": "off",
       "windows_recommended": false,
-      "note": "30-min classification cycle. Override should NOT be active — classification should apply normally."
+      "note": "30-min classification cycle — deliberately a DIFFERENT hvac_mode (off, not cool) from the 09:01 classification, so the assertion below genuinely discriminates (see notes). Override should NOT be active — classification should apply normally."
     }
   ],
   "assertions": [
@@ -80,11 +81,11 @@
       "note": "Override detection fires in coordinator _async_thermostat_changed listener."
     },
     {
-      "at": "2026-07-15T10:05:00",
+      "at": "2026-07-15T10:10:00",
       "expect": "override_self_resolved",
-      "reason": "Thermostat returned to cool within 5 min (before override_confirm_seconds=600). Override pending window cancelled — no override accepted.",
+      "reason": "Confirm timer (override_confirm_seconds=600) fires at 10:10 — 10 minutes after detection at 10:00. Reads current thermostat state (still 'cool', set at 10:04:59) which matches classification.hvac_mode ('cool') — self-resolve path (PATH B in _confirm_override_expired), no override accepted. Corrected from 10:05 — see notes.",
       "track": "integration",
-      "note": "Self-resolve requires coordinator _async_thermostat_changed to cancel the pending confirm timer."
+      "note": "Self-resolve genuinely happens at real timer expiry, not proactively on return-to-expected."
     },
     {
       "at": "2026-07-15T10:30:00",
@@ -100,5 +101,7 @@
     "observed_behavior": "classification_applied → override_detected (10:00) → override_self_resolved (10:05) → classification_applied (10:30)",
     "expected_behavior": "CA distinguishes transient thermostat glitches from real user overrides using a 10-min confirmation window"
   },
-  "pending_issue": 245
+  "pending_issue": 245,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
 }

@@ -173,10 +173,11 @@ def build_headless_coordinator(
         run_coro(coordinator.async_restore_state())
         run_coro(coordinator.async_setup())
         run_coro(coordinator.async_config_entry_first_refresh())
-        # Drain any fire-and-forget hass.async_create_task() calls made during
-        # startup (e.g. notifications) before leaving the patched context —
-        # same reasoning as run_production.py's post-loop drain.
-        scheduler._drain_tasks()
+        # Settle any fire-and-forget hass.async_create_task() calls AND any
+        # heap entries (async_call_later) they schedule, before leaving the
+        # patched context — see run_production.py's matching fix for why a
+        # bare _drain_tasks() call is insufficient (Issue #476).
+        scheduler.advance_to(scheduler.now())
 
     if skip_startup_coalesce:
         coordinator._startup_coalesce_active = False

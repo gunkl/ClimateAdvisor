@@ -4,9 +4,25 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.15"
+VERSION = "0.5.16"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.16": [
+        "Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test"
+        " scenarios (grace-period lifecycle, override detection/confirmation/self-resolve,"
+        " bedtime+override interaction, cancel-override, restart behavior) to the coordinator-level"
+        " Tier A harness built in #474 — closing out the full scope of #472's original"
+        " investigation. Found and fixed 3 more real harness bugs along the way: a scheduler"
+        " ordering bug where a coordinator listener's own state dispatch didn't settle before the"
+        " next scenario event (silently misattributing timestamps to unrelated timers), an"
+        " unpatched dt_util.parse_datetime() returning a MagicMock and crashing thermal-observation"
+        " code, and async_track_time_change/interval callbacks (briefing/wakeup/bedtime) being"
+        " constructed as coroutines but never awaited. Also fixed engine._sensor_check_callback"
+        " being clobbered by an engine-only stub even in coordinator mode, breaking grace-expiry"
+        " re-pause detection. Every migrated scenario was verified load-bearing via a real revert"
+        " test (temporarily disabling the specific guard it protects, confirming failure, then"
+        " restoring) — test-infrastructure only, no changes to coordinator.py/automation.py.",
+    ],
     "0.5.15": [
         "Fix #474: no user-visible change. Adds coordinator-level Tier A test"
         " harness coverage — a real ClimateAdvisorCoordinator can now be"
@@ -1013,6 +1029,60 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    476: {
+        "version_fixed": "0.5.16",
+        "title": "Migrate all 10 remaining scenarios to the coordinator-level Tier A harness",
+        "scope_covered": (
+            "Migrated grace_full_lifecycle_clean_expiry, grace_full_lifecycle_sensor_still_open,"
+            " grace_window_period_no_repause, override_detection_and_confirmation,"
+            " bedtime_skipped_manual_override_active, cold_day_heat_all_day_with_override,"
+            " override_self_resolve_transient (all unsupported/ -> pending/), plus goldens"
+            " cancel_override_then_resume, grace_prevents_sensor_repause,"
+            " grace_timer_expired_on_restart (golden/ -> pending/, pending user re-review since"
+            " substantially rewritten). Added coordinator-aware sensor_open/sensor_close dispatch"
+            " (real state changes through _async_door_window_changed, not direct engine calls) and"
+            " a new cancel_override event type (mirrors api.py's ClimateAdvisorCancelOverrideView.post()"
+            " exactly). Fixed 4 real harness bugs found during migration, all in tools/sim_harness/ or"
+            " tools/simulate.py: (1) FakeScheduler's per-event dispatch didn't settle before the next"
+            " scenario event, so a coordinator listener's own async_create_task chain only drained as an"
+            " incidental side effect of whatever unrelated timer fired next, misattributing event"
+            " timestamps by minutes; (2) dt_util.parse_datetime() was never patched, returning a"
+            " MagicMock from the stubbed homeassistant.util.dt module and crashing"
+            " _check_hvac_stabilization and 18 other call sites including stuck-grace detection;"
+            " (3) async_track_time_change/interval callback wrappers (_schedule_daily/_schedule_interval)"
+            " discarded their inner callback's return value one level below where the coroutine check"
+            " happened, so async def callbacks like _async_send_briefing/_async_morning_wakeup were"
+            " constructed but never awaited; (4) run_production_scenario() unconditionally overwrote"
+            " engine._sensor_check_callback with an engine-only _SensorTracker stub, clobbering the real"
+            " coordinator._any_sensor_open wiring even in coordinator mode, breaking grace-expiry"
+            " re-pause detection. Also fixed tools/simulate.py's file-reading to use explicit UTF-8"
+            " (was crashing on pre-existing mojibake in 2 scenario files under Windows' cp1252 default)."
+            " Every migrated scenario's core assertion was verified genuinely load-bearing via a real"
+            " revert test — temporarily disabling the specific production guard it protects in a"
+            " throwaway edit, confirming the assertion fails, then restoring (git diff confirmed clean"
+            " after each). Several scenarios needed the 'no_action' legacy-simulator sentinel corrected"
+            " to the actual carried-forward outcome outcomes.py produces (no such sentinel exists in the"
+            " real harness), and grace/override-window config extended where the harness default"
+            " (300-900s) would auto-clear state before a later scenario event needed it still active."
+        ),
+        "scope_not_covered": (
+            "No changes to coordinator.py or automation.py — test-infrastructure only. The 3 golden"
+            " scenarios (cancel_override_then_resume, grace_prevents_sensor_repause,"
+            " grace_timer_expired_on_restart) were moved to pending/ rather than staying in golden/"
+            " because they were substantially rewritten (not just flag-added) and need fresh user"
+            " review per the Golden Simulation Test Policy before re-promotion."
+            " grace_timer_expired_on_restart's restart behavior could not be genuinely tested within"
+            " the standard single-coordinator JSON event-stream format (a fresh coordinator never had an"
+            " override to begin with) — verified separately via a standalone two-coordinator-instance"
+            " construction (documented in the scenario's notes), which also found the real mechanism is"
+            " an unconditional clean-slate wipe on every restart (Issue #282/#327), not the"
+            " grace_end_time-conditional check the scenario's original description claimed. Building"
+            " genuine JSON-scenario restart coverage (swapping coordinator/engine/scheduler references"
+            " mid-run) is separate future work, not done here. The 6 remaining unsupported/ scenarios"
+            " (ceiling_guard_*, nat_vent_restore_uses_dual_setpoint, warm-day-setback-*) were never in"
+            " #472/#476's scope and are untouched."
+        ),
+    },
     474: {
         "version_fixed": "0.5.15",
         "title": "Coordinator-level Tier A test harness coverage (no production code change)",

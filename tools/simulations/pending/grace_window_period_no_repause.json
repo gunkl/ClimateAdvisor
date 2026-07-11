@@ -1,0 +1,115 @@
+{
+  "name": "grace_window_period_no_repause",
+  "description": "Warm day with planned window period 06:00–10:00 (windows_recommended=True, hvac_mode=off). Sensor opens at 07:00 during window — planned window gate suppresses pause. Grace might start; sensor opens again at 07:05 during window → no re-pause (within window). No pause fires at any point during the window period.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests: planned window gate suppressing pause when sensor opens during window period.",
+    "_is_within_planned_window_period() requires classification.hvac_mode == 'off'; the warm-day",
+    "classification with windows_recommended uses hvac_mode='off'.",
+    "Contrast with non-window scenarios where sensor_open during warm day → nat vent or pause.",
+    "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true. sensor_open dispatches",
+    "via fake_hass.states.async_set() through the real _async_door_window_changed listener, reaching",
+    "handle_door_window_open()'s _is_within_planned_window_period() gate for real.",
+    "The 07:00/07:05 assertions were 'no_action' in the legacy-simulator version. outcomes.py's",
+    "production_outcome_at() has no 'no_action' sentinel — it carries forward the most recent real",
+    "decision. Corrected to 'classification_applied' (carried forward from 05:31) — if the window gate",
+    "failed to suppress the pause, a real sensor_opened/paused decision would fire at 07:00, and this",
+    "assertion would correctly fail.",
+    "wake_time/briefing_time moved to 04:00/04:15 (outside this scenario's 05:30-08:00 span): the",
+    "coordinator's default wake_time=06:30/briefing_time=06:00 fall INSIDE this range, and once the",
+    "async_track_time_change timer-callback bug (below) was fixed, the real _async_morning_wakeup()",
+    "correctly started firing at 06:30 — legitimately changing the carried-forward outcome to",
+    "comfort_restored, unrelated noise for a scenario specifically about the window-period gate.",
+    "Migrating this scenario found a second real harness bug beyond the sensor_check_callback one:",
+    "async_track_time_change/async_track_time_interval callbacks (_async_send_briefing,",
+    "_async_morning_wakeup — both async def) were constructed as coroutines by",
+    "FakeScheduler's heap-fire step but never awaited, because the coroutine was returned by an",
+    "inner _fire_and_reschedule wrapper, one level below where advance_to() checked for it. Fixed in",
+    "fake_scheduler.py: both _schedule_daily and _schedule_interval's wrappers now return the inner",
+    "callback's result so advance_to()'s existing coroutine check can see and enqueue it.",
+    "This was a real, previously-silent bug — any scenario spanning briefing_time/wake_time/",
+    "sleep_time/midnight would have silently dropped that callback's entire effect.",
+    "Revert test: temporarily disabled _is_within_planned_window_period()'s check in",
+    "handle_door_window_open (automation.py) — both 07:00/07:05 assertions correctly failed (fell",
+    "through to nat-vent activation instead of no-op). Restored; git diff confirmed clean."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "wake_time": "04:00",
+    "briefing_time": "04:15",
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 300,
+    "door_window_sensors": ["binary_sensor.living_room_window", "binary_sensor.bedroom_window"]
+  },
+  "events": [
+    {
+      "time": "2026-07-15T05:30:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 64.0,
+      "note": "Early morning. Indoor 72F, outdoor 64F. Conditions favorable for planned window ventilation."
+    },
+    {
+      "time": "2026-07-15T05:31:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "note": "Warm-day classification with planned window 06:00–10:00. hvac_mode=off during window."
+    },
+    {
+      "time": "2026-07-15T07:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.living_room_window",
+      "note": "Window opens at 07:00, within planned window period (06:00–10:00). Window gate should suppress pause."
+    },
+    {
+      "time": "2026-07-15T07:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Second window opens at 07:05. Still within window period — no pause, no change."
+    },
+    {
+      "time": "2026-07-15T08:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.5,
+      "outdoor_f": 66.0,
+      "note": "Mid-morning. Ventilation working, indoor cooling slightly. Still within window period."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T05:31:00",
+      "expect": "classification_applied",
+      "reason": "Warm-day classification applied: hvac_mode=off, windows_recommended=True, window 06:00–10:00.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T07:00:00",
+      "expect": "classification_applied",
+      "reason": "Sensor opens at 07:00, within planned window period 06:00–10:00. _is_within_planned_window_period() returns True (classification.hvac_mode='off', windows_recommended=True, 07:00 is in [06:00,10:00]) — no pause, no nat vent, so the outcome stays the carried-forward classification_applied from 05:31. Corrected from legacy 'no_action' — see notes.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T07:05:00",
+      "expect": "classification_applied",
+      "reason": "Second sensor opens at 07:05, still within window period. Already suppressed — same carried-forward outcome.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Planned window period gate suppresses pause when sensor opens during the scheduled window",
+    "observed_behavior": "classification_applied (off, windows_recommended) → no_action on sensor_open (07:00, within window) → no_action on second sensor_open (07:05)",
+    "expected_behavior": "During planned window hours, sensor openings are expected and do not trigger pause or nat-vent logic"
+  },
+  "pending_issue": 245
+}

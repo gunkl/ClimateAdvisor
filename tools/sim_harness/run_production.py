@@ -221,15 +221,28 @@ def _inject_indoor_temp(
 
 
 def _inject_thermostat_mode(
-    fake_hass: FakeHass, climate_entity: str, hvac_mode: str, *, dispatch: bool = False
+    fake_hass: FakeHass,
+    climate_entity: str,
+    hvac_mode: str,
+    *,
+    dispatch: bool = False,
+    temperature: float | None = None,
 ) -> None:
     """Update the thermostat state string on the climate entity.
 
     Args:
         dispatch: see ``_inject_indoor_temp``.
+        temperature: Issue #483 — optional setpoint to set alongside the mode change,
+            for scenarios where the user changes mode AND setpoint in a single
+            thermostat interaction (e.g. a Nest/Ecobee "heat at 70" UI action).
+            When omitted (the default, all pre-existing scenarios), the entity's
+            existing ``temperature`` attribute is left untouched, matching the
+            prior behavior exactly.
     """
     existing = fake_hass.states.get(climate_entity)
     attrs = dict(existing.attributes) if existing is not None else {}
+    if temperature is not None:
+        attrs["temperature"] = temperature
     if dispatch:
         fake_hass.states.async_set(climate_entity, hvac_mode, attrs)
     else:
@@ -595,10 +608,13 @@ def _dispatch_event(
         # detection to approximate at the engine level; a scenario that needs
         # override-detection fidelity must run with use_coordinator=True.
         new_hvac_mode = event.get("hvac_mode", "off")
+        new_temperature = event.get("temperature")  # optional (Issue #483)
         if coordinator is not None:
-            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, dispatch=True)
+            _inject_thermostat_mode(
+                fake_hass, climate_entity, new_hvac_mode, dispatch=True, temperature=new_temperature
+            )
         else:
-            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode)
+            _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, temperature=new_temperature)
 
     elif etype == "cancel_override":
         # Issue #476: replicates api.py's ClimateAdvisorCancelOverrideView.post()

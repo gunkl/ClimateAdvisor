@@ -69,6 +69,7 @@ def _minimal_engine() -> AutomationEngine:
             "_grace_duration_seconds": 0,
             "_manual_override_active": True,
             "_manual_override_mode": "cool",
+            "_manual_override_source": None,
             "_manual_override_time": None,
             "_last_override_detected_time": None,
             "_sensor_check_callback": None,

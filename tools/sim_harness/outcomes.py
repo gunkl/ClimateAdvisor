@@ -59,6 +59,7 @@ Mapped (production → legacy):
   override_confirmed            → override_confirmed
   override_self_resolved        → override_self_resolved
   override_cleared              → override_cleared
+  override_adopted              → override_adopted (Issue #483)
 
 Issue #258 — overnight pre-cool:
   pre_cool_applied              → pre_cool_applied
@@ -406,6 +407,14 @@ def _map_event_to_outcome(
 
     if event_type == "override_cleared":
         return ProductionDecision(ts_str, event_type, "override_cleared")
+
+    if event_type == "override_adopted":
+        # Issue #483: automation's current decision converged on the same state the
+        # override already produced -- adopted instead of continuing/expiring the
+        # grace period unchanged. Registered as a named outcome (not "unknown:...")
+        # purely so it's readable in -v decision timelines; does not change
+        # production_outcome_at()'s existing last-decision-wins tie-break semantics.
+        return ProductionDecision(ts_str, event_type, "override_adopted")
 
     # --- Overnight pre-cool (Issue #258) ---
     if event_type == "pre_cool_applied":

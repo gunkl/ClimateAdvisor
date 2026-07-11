@@ -1,0 +1,131 @@
+{
+  "name": "override_adopted_on_matching_decision",
+  "description": "Issue #483: cold morning heats to comfort_heat (70F). Midday warms and classification switches to cool. User (feeling chilly) manually overrides the thermostat back to heat mode at 70F while classification still wants cool — override detected and confirmed. A cold front then returns at the next 30-min classification cycle: classification independently decides heat mode at comfort_heat=70F too — exactly matching what the user's override already set. Instead of continuing to silently skip HVAC changes for the rest of the (long) grace window, the system adopts the now-agreeing decision immediately: the override/grace clear and classification is applied normally.",
+  "source": "synthetic",
+  "issue": 483,
+  "notes": [
+    "Occupant-first framing: without this fix, the user's already-satisfied preference (heat at 70F) is stuck behind up to `manual_grace_seconds` of automation silence even after the weather independently caught up with what the user wanted — automation just sits there doing nothing new, not actively fighting the user, but also not resuming normal supervision (e.g. the next legitimate classification change during that window would ALSO be silently dropped) until the grace timer happens to run out.",
+    "manual_grace_seconds is set deliberately long (3600s/1hr) so the natural grace-expiry path (_on_grace_expired) is NOT what produces the match at 14:30 — the adoption must come from the pre-expiry check inside apply_classification(), proving the shortcut actually cuts the wait short instead of just coinciding with a timer that was about to fire anyway.",
+    "The 14:00 thermostat_state_changed event carries an explicit temperature=70 (Issue #483 harness addition to _inject_thermostat_mode/run_production.py: optional temperature alongside a mode change, modeling a real thermostat UI where mode+setpoint are set in one interaction) — this is what makes the eventual match a genuine full match (mode AND setpoint), not just a coincidental mode-only match that _override_matches_current_decision() would correctly refuse to adopt (see cold_day_heat_all_day_with_override.json, which exercises exactly that refusal — mode matches but the user's real setpoint (74F) diverges from comfort_heat (70F), so adoption correctly does NOT fire there).",
+    "13:01's classification (cool/76F) exists purely to move the thermostat's leftover 'temperature' attribute to 76F before the override — proving the 14:00 override's own explicit temperature=70 is what the match is really keyed on at 14:30, not a stale setpoint nobody touched.",
+    "Revert-tested (see task investigation): with _override_matches_current_decision() force-disabled (early return False), the 14:30 outcome falls back to the carried-forward override_confirmed (matching cold_day_heat_all_day_with_override.json's un-adopted case) instead of override_adopted / classification_applied — confirming this scenario actually discriminates the fix."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 3600,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "off",
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-01-20T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 66.0,
+      "outdoor_f": 32.0,
+      "note": "Cold winter morning. Indoor below comfort_heat."
+    },
+    {
+      "time": "2026-01-20T06:01:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "Cold-morning classification: heat to comfort_heat=70F. Thermostat: mode=heat, temperature=70."
+    },
+    {
+      "time": "2026-01-20T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 78.0,
+      "note": "Midday warm-up."
+    },
+    {
+      "time": "2026-01-20T13:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Midday classification switches to cool at comfort_cool=76F. Thermostat: mode=cool, temperature=76 -- this leftover 76F is what proves the later match is keyed on the override's OWN explicit setpoint, not stale state."
+    },
+    {
+      "time": "2026-01-20T13:59:59",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "temperature": 70,
+      "note": "User feels chilly and manually sets the thermostat to heat at 70F -- diverges from the active 'cool' classification. Override detection fires."
+    },
+    {
+      "time": "2026-01-20T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.5,
+      "outdoor_f": 76.0,
+      "note": "Override detected at 14:00; 10-minute confirm window starts."
+    },
+    {
+      "time": "2026-01-20T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 75.0,
+      "note": "10 minutes elapsed, thermostat still at user-set heat/70F -- override confirmed. manual_grace_seconds=3600 keeps grace alive well past 14:30."
+    },
+    {
+      "time": "2026-01-20T14:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "A cold front returns: the scheduled 30-min classification cycle independently decides heat mode at comfort_heat=70F -- exactly what the user's override already set. This should be ADOPTED (override_adopted + classification applied normally), not silently skipped for the rest of the 1-hour grace window."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-20T06:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 70.0,
+      "reason": "Cold-morning classification applied: hvac_mode=heat, target=comfort_heat=70F.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T13:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 76.0,
+      "reason": "Midday classification applied: hvac_mode=cool, target=comfort_cool=76F -- moves the thermostat's leftover setpoint to 76F ahead of the override.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T14:00:00",
+      "expect": "override_detected",
+      "reason": "Thermostat manually set to heat/70F while classification says cool -- override detection fires.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T14:10:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes elapsed with thermostat still user-controlled at heat/70F -- override_confirm_seconds=600 expired -- override confirmed (mode=heat, source=normal).",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T14:30:00",
+      "expect": "classification_applied",
+      "expect_temp": 70.0,
+      "reason": "Issue #483: classification's new decision (heat, comfort_heat=70F) exactly matches the confirmed override (heat mode, thermostat already at 70F) -- _override_matches_current_decision() returns True inside apply_classification(), so 'override_adopted' + 'override_cleared' fire first in this same cycle (visible in the -v decision timeline / harness output), then apply_classification() falls through and applies classification normally -- producing a genuine NEW 'classification_applied' event this tick. production_outcome_at() resolves same-timestamp events to the LAST one (established, unchanged semantics -- see cold_day_heat_all_day_with_override.json's identical pattern), so 'classification_applied' is the correct outcome-at-14:30 assertion. This is the DISCRIMINATING result: without the fix, apply_classification() returns immediately when _manual_override_active=True (automation.py's override guard) and NO new event fires at all -- the outcome would stay the carried-forward 'override_confirmed' from 14:10, exactly like cold_day_heat_all_day_with_override.json's un-adopted case (there the override's real setpoint, 74F, diverges from comfort_heat=70F, so match correctly fails and suppression holds all day). Revert-tested: force _override_matches_current_decision() to always return False and this assertion fails with actual='override_confirmed' -- confirming the scenario actually exercises the adopt path, not just infrastructure.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Manual override is adopted mid-grace once automation's own decision independently converges on the same mode AND setpoint, instead of silently skipping HVAC changes for the rest of the grace window",
+    "observed_behavior": "classification_applied (heat, 70F) -> classification_applied (cool, 76F) -> override_detected (14:00) -> override_confirmed (14:10, heat/70F) -> override_adopted (14:30, heat/70F) -- grace ends early, classification resumes applying normally",
+    "expected_behavior": "Once a live manual override genuinely converges with what automation would independently decide (same mode, same effective setpoint), Climate Advisor should stop treating it as an active override and resume normal supervision immediately rather than waiting out the rest of the grace period",
+    "occupant_experience": "Before the fix: the user's own preference (heat at 70F) is already satisfied, but Climate Advisor keeps behaving as if it's fighting an active override for up to an hour more -- any further legitimate weather-driven classification change during that window is also silently dropped, not just the one that happened to match. After the fix: once automation and the user agree, Climate Advisor visibly resumes normal supervision right away (logged/reported as 'adopted', not a generic unexplained gap), so the Activity Report accurately reflects that there is no real disagreement left to protect the user from."
+  },
+  "pending_issue": 483
+}

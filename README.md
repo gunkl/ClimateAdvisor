@@ -496,6 +496,11 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Duplicate "Comfort band applied" Activity Report entries at restart and grace-expiry eliminated with a short-window announcement dedup — the thermostat command itself was always correct, only the notification repeated (#444)
 - [x] Automated fan physical-drift self-corrections no longer mislabeled as a manual grace period in the Activity Report; repeated "fan running without CA warrant" reconcile attempts rate-limited to once per 5 minutes (#446)
 - [x] Dual-entity whole-house-fan setups (separate control + power-detection sensor) no longer silently drop reactivation commands — a plain command can be absorbed once the control entity's HA state already agrees with what's being commanded, so CA now forces a real transition when a real incident's device history proved the control entity was stuck "on" for hours (#449)
+- [x] AI Activity Report no longer misreports the whole-house fan as a contradiction during the brief window CA self-corrects a stale on/off flag; a matching gap in the dashboard's own internal state-consistency check fixed too (#458)
+- [x] Dashboard's setpoint-divergence indicator now accounts for away/vacation occupancy and uses the correct default sleep temperatures, instead of silently showing the wrong intended target overnight or while away (#462)
+- [x] AI Activity Report and Investigator's thermal-model sections no longer show an empty learning-health summary when the dashboard's Comfort Score sensor has real data for the same moment (#468)
+- [x] Chart's predicted-indoor curve can no longer silently disagree with its own displayed target band overnight when sleep temperatures aren't explicitly configured (#470)
+- [x] Continued consolidating the natural-ventilation decision surface (#429) into the rest of the codebase — a nat-vent floor formula, a fan-status suppression check, an occupancy-defer gate, and the dashboard's target-band resolver each converged from 2-4 independent copies down to one tested implementation, plus supporting test-infrastructure and coordinator-data cleanup (#452, #454, #456, #460, #464, #466)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)

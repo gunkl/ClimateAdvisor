@@ -1267,7 +1267,10 @@ async def async_build_activity_context(
     _temp_unit = options.get("temp_unit", "fahrenheit")
     if hasattr(coordinator, "learning") and callable(getattr(coordinator.learning, "get_thermal_model", None)):
         try:
-            _thermal = coordinator.learning.get_thermal_model()
+            # Issue #468: pass learning_health so this call matches the canonical shape
+            # used everywhere else (coordinator.py, sensor.py) — otherwise the returned
+            # dict is structurally incomplete (learning_health always {}).
+            _thermal = coordinator.learning.get_thermal_model(learning_health=coordinator._build_learning_health())
             _swing_heat_f = _thermal.get("swing_heat_f_display", THERMAL_SWING_DEFAULT_F)
             _swing_cool_f = _thermal.get("swing_cool_f_display", THERMAL_SWING_DEFAULT_F)
             if _temp_unit == "celsius":

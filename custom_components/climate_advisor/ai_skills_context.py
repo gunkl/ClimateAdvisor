@@ -514,7 +514,15 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
 
         # Thermal model
         try:
-            thermal: dict[str, Any] = learning.get_thermal_model() or {}
+            # Issue #468: pass learning_health so this call matches the canonical shape
+            # used everywhere else (coordinator.py, sensor.py) — otherwise the returned
+            # dict is structurally incomplete (learning_health always {}).
+            _learning_health = (
+                coordinator._build_learning_health()
+                if callable(getattr(coordinator, "_build_learning_health", None))
+                else {}
+            )
+            thermal: dict[str, Any] = learning.get_thermal_model(learning_health=_learning_health) or {}
             section_lines += [
                 "=== LEARNING — THERMAL MODEL ===",
                 f"  heating_rate_f_per_hour:   {thermal.get('heating_rate_f_per_hour', 'unknown')}",
@@ -620,10 +628,13 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
     except Exception:
         health = {}
 
-    # Retrieve current thermal model so we can flag NEVER LEARNED parameters
+    # Retrieve current thermal model so we can flag NEVER LEARNED parameters.
+    # Issue #468: pass the `health` dict already computed above — this call previously
+    # omitted it entirely (computing the exact same value twice for no reason, once for
+    # display here and once discarded inside get_thermal_model()'s empty default).
     try:
         learning = getattr(coordinator, "learning", None)
-        thermal: dict = (learning.get_thermal_model() if learning is not None else {}) or {}
+        thermal: dict = (learning.get_thermal_model(learning_health=health) if learning is not None else {}) or {}
     except Exception:
         thermal = {}
 

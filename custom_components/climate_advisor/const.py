@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.12"
+VERSION = "0.5.13"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.13": [
+        "Fix #468: the AI Activity Report and Investigator's thermal-model sections"
+        " could show an empty learning-health summary and a blank thermal"
+        " equilibrium temperature even when the dashboard's Comfort Score sensor"
+        " showed real rejection/observation data for the same moment — three"
+        " AI-context call sites queried the thermal model without the"
+        " per-observation-type health data the dashboard already includes,"
+        " producing a structurally incomplete result for no reason. One of the"
+        " three had already computed that exact data a few lines above for its"
+        " own display and simply never passed it along. Now all three match what"
+        " the dashboard sees.",
+    ],
     "0.5.12": [
         "Fix #466: no user-visible change. Continues Phase B (coordinator single-"
         " source): added target_temp/target_temp_low/target_temp_high to"
@@ -979,6 +991,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    468: {
+        "version_fixed": "0.5.13",
+        "title": "Thread coordinator._build_learning_health() through 3 AI-context get_thermal_model() calls",
+        "scope_covered": (
+            "get_thermal_model(learning_health=...) is called two ways: canonically (coordinator.py's"
+            " 3 sites, sensor.py's ClimateAdvisorComplianceSensor) with learning_health passed, and"
+            " degraded (3 AI-context sites) with no arguments, producing learning_health: {} and"
+            " thermal_equilibrium_f: None always, per the function's own docstring. Fixed all 3:"
+            " ai_skills_activity.py's swing-acquisition call in async_build_activity_context(); "
+            " ai_skills_context.py's build_learning_context() THERMAL MODEL section; and"
+            " ai_skills_context.py's build_thermal_pipeline_context(), which already computed the exact"
+            " same health dict a few lines above for its own per-type display but never passed it to"
+            " the adjacent get_thermal_model() call. All three now receive the same"
+            " coordinator._build_learning_health() output the dashboard/sensor sees."
+        ),
+        "scope_not_covered": (
+            "Does not change get_thermal_model()'s own logic or return shape — only ensures callers"
+            " supply the same optional argument the canonical call sites already did. Does not add"
+            " outdoor_temp_f/solar_factor (the other two optional get_thermal_model() args) to these"
+            " 3 sites — thermal_equilibrium_f will populate once learning_health flows through, but"
+            " those two remaining args are a separate, not-yet-scoped concern."
+        ),
+    },
     466: {
         "version_fixed": "0.5.12",
         "title": "Add target_temp fields to coordinator.data; route AI-context sites through it",

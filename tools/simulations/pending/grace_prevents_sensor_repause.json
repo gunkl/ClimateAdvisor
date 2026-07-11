@@ -1,0 +1,86 @@
+{
+  "name": "grace_prevents_sensor_repause",
+  "description": "After user resumes from door/window pause, 90-min grace blocks immediate re-pause when same sensor opens again",
+  "source": "synthetic",
+  "issue": 227,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "automation_grace_seconds": 5400,
+    "door_window_sensors": [
+      "binary_sensor.front_door"
+    ],
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-06-10T14:00:00",
+      "type": "classification",
+      "hvac_mode": "cool",
+      "day_type": "warm",
+      "note": "Warm day, cooling active"
+    },
+    {
+      "time": "2026-06-10T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 85.0,
+      "note": "Hot outdoor — nat-vent not viable (above threshold)"
+    },
+    {
+      "time": "2026-06-10T14:31:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Door opens, automation pauses HVAC"
+    },
+    {
+      "time": "2026-06-10T14:45:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.front_door",
+      "note": "Door closes, automation resumes"
+    },
+    {
+      "time": "2026-06-10T14:46:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.front_door",
+      "note": "Door opens again 1 minute after resume, well within the 90-min grace window — grace should block re-pause."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T14:31:00",
+      "expect": "paused",
+      "track": "logic",
+      "reason": "Sensor open causes HVAC pause"
+    },
+    {
+      "at": "2026-06-10T14:45:00",
+      "expect": "resumed",
+      "track": "logic",
+      "reason": "Sensor closes, automation resumes from pause"
+    },
+    {
+      "at": "2026-06-10T14:46:00",
+      "expect": "resumed",
+      "track": "integration",
+      "reason": "If door opens again within the 90-min grace window, automation should NOT re-pause — outcome stays the carried-forward 'resumed' from 14:45 (no new pause decision). Corrected from legacy 'no_action'."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace period prevents immediate re-pause after user resumes from door/window pause",
+    "observed_behavior": "Door opens within grace → automation ignores sensor for grace duration",
+    "expected_behavior": "90-min grace prevents sensor chatter from causing repeated pause/resume cycles after user intervenes"
+  },
+  "notes": [
+    "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true, evaluated for real. The scenario was missing the actual sensor re-open event the 14:46 assertion refers to — added it. automation_grace_seconds set explicitly to 5400 (90 min) to match the scenario's own stated intent ('90-min grace' in the description) — the harness default (automation_grace_seconds=300/5min, which is what the sensor-closed-resume path actually reads, not manual_grace_seconds) would have made the '90-min' claim inaccurate, though the specific 14:45->14:46 (1 min) assertion timing would have passed with either duration.",
+    "The 14:46 assertion was 'no_action' in the legacy-simulator version. outcomes.py's production_outcome_at() has no 'no_action' sentinel — corrected to 'resumed' (carried forward from 14:45), the correct way to assert 'no NEW decision fired' — same pattern as grace_full_lifecycle_sensor_still_open.json's 13:12 assertion.",
+    "This scenario exercises the same grace-blocks-reopen guard (automation.py:2137-2150) already revert-tested with fresh evidence in grace_full_lifecycle_sensor_still_open.json — not re-run here to avoid redundant proof of the same guard."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

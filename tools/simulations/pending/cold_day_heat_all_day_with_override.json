@@ -1,0 +1,116 @@
+{
+  "name": "cold_day_heat_all_day_with_override",
+  "description": "Cold day (forecast high 48F). HVAC in heat mode at comfort_heat (70F). At 10:00, user bumps thermostat to 74F (override detected â†’ confirmed after 10 min). At 22:30, bedtime event fires — but override is active, so bedtime setback is cleared by _handle_bedtime() which calls clear_manual_override() then applies setback normally.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests cold day + override + bedtime interaction.",
+    "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true, evaluated for real.",
+    "CORRECTION: this scenario's original notes claimed handle_bedtime() 'clears override and applies setback normally — does NOT skip.' That is wrong. Directly tracing automation.py:3698-3708 (and confirming via a real revert test on bedtime_skipped_manual_override_active.json, migrated earlier in #476) shows handle_bedtime() DOES skip setback when _manual_override_active is True — it returns early and emits bedtime_setback_skipped, matching Issue #204's actual intent. The notes described stale/incorrect pre-#204 behavior; the ORIGINAL bedtime_setback_skipped assertion was actually correct all along and needed no change — only the notes text did.",
+    "manual_grace_seconds set to 50000 (~14 hours, covering 10:10 override-confirm to 22:30 bedtime): the harness default (900s/15min) would auto-clear the override via real grace expiry hours before bedtime, same class of premise gap fixed in override_detection_and_confirmation.json.",
+    "The 14:30 assertion was 'no_action' — corrected to 'override_confirmed' (the carried-forward outcome from 10:10; apply_classification() returns immediately without emitting an event when override is active, same as override_detection_and_confirmation.json).",
+    "This scenario exercises the same two guards already revert-tested with fresh, discriminating evidence in override_detection_and_confirmation.json (classification-suppression, automation.py:1265-1271) and bedtime_skipped_manual_override_active.json (bedtime-skip, automation.py:3698-3708) — not re-run here to avoid redundant proof of the same guards."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 76,
+    "setback_heat": 62,
+    "setback_cool": 82,
+    "natural_vent_delta": 3.0,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "off",
+    "manual_grace_seconds": 50000,
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-01-20T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 68.0,
+      "outdoor_f": 30.0,
+      "note": "Cold winter morning. Indoor 68F (below comfort_heat=70F), outdoor 30F."
+    },
+    {
+      "time": "2026-01-20T06:01:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Cold-day classification: hvac_mode=off (classifier says skip heating)."
+    },
+    {
+      "time": "2026-01-20T09:59:59",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "User bumps thermostat to heat mode — override detection fires"
+    },
+    {
+      "time": "2026-01-20T10:00:00",
+      "type": "temp_update",
+      "note": "User bumps thermostat to 74F in heat mode. Override detection fires; confirm window starts (10 min).",
+      "indoor_f": 70.0,
+      "outdoor_f": 35.0
+    },
+    {
+      "time": "2026-01-20T10:10:00",
+      "type": "temp_update",
+      "indoor_f": 70.5,
+      "outdoor_f": 35.0,
+      "note": "10 min elapsed. Thermostat still at user-set 74F â†’ override confirmed."
+    },
+    {
+      "time": "2026-01-20T14:30:00",
+      "type": "classification",
+      "day_type": "cold",
+      "hvac_mode": "heat",
+      "windows_recommended": false,
+      "note": "30-min classification cycle: deliberately a DIFFERENT hvac_mode (heat, not off) from the 06:01 classification, so that if override suppression were bypassed a genuinely NEW classification_applied event would fire (breaking the separate day_type/hvac_mode dedup in automation.py:1355-1356) — making the assertion below actually discriminating. Override should suppress this."
+    },
+    {
+      "time": "2026-01-20T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime event. _handle_bedtime() clears manual override first, then applies heat setback. Default depth = 4F below comfort_heat=70F â†’ 66F (above setback_heat=62F floor)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-01-20T06:01:00",
+      "expect": "classification_applied",
+      "reason": "Cold-day classification applied: hvac_mode=off.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T10:00:00",
+      "expect": "override_detected",
+      "reason": "User bumped thermostat while classification says heat at 70F — override detection pending.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T10:10:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes elapsed with thermostat still user-controlled â†’ override_confirm_seconds=600 expired â†’ override confirmed.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T14:30:00",
+      "expect": "override_confirmed",
+      "reason": "Classification cycle while override active: apply_classification() returns immediately (automation.py:1265-1271) without emitting an event, so the outcome stays the carried-forward override_confirmed from 10:10 — proving the cycle was genuinely suppressed. Corrected from legacy 'no_action'.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-01-20T22:30:00",
+      "expect": "bedtime_setback_skipped",
+      "reason": "Bedtime event while override active — bedtime setback skipped (mirrors production Issue #204).",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cold day override suppresses classification cycles; bedtime clears override and applies setback normally",
+    "observed_behavior": "classification_applied (heat, 70F) â†’ override_detected (10:00) â†’ override_confirmed (10:10) â†’ no_action on classification (14:30) â†’ setback_applied (22:30, 66F)",
+    "expected_behavior": "CA respects manual override during the day; bedtime event always clears override and applies setback regardless of override state"
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

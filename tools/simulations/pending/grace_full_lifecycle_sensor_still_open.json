@@ -1,0 +1,118 @@
+{
+  "name": "grace_full_lifecycle_sensor_still_open",
+  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). At 13:12 sensor opens again while grace is active — grace blocks re-pause. Grace expires at 13:15 with sensor still open → re-pause fires.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests the grace period full lifecycle: pause → grace → sensor opens during grace (blocked) → re-pause on grace expiry.",
+    "Issue #476: migrated to use_coordinator=true, same pattern as grace_full_lifecycle_clean_expiry.json.",
+    "sensor_open/sensor_close dispatch via fake_hass.states.async_set() through the real",
+    "_async_door_window_changed listener; synthetic grace_start marker removed (real grace flows from",
+    "the sensor_close dispatch's own async_call_later timer). grace_end is KEPT as a no-op dispatch —",
+    "its only remaining role is forcing scheduler.advance_to(13:15:00) so the real grace timer gets a",
+    "chance to fire; without an event at that time the scheduler never advances there.",
+    "The 13:12 assertion was 'no_action' in the legacy-simulator version. outcomes.py's",
+    "production_outcome_at() has no 'no_action' sentinel — it always carries forward the most recent",
+    "REAL decision at or before the timestamp (returns 'no_decision' only if there is none at all), so",
+    "'no_action' as a literal expected string could never match. Corrected to 'resumed' — the carried-",
+    "forward outcome from 13:10 — which is the correct way to assert 'no NEW decision fired here' against",
+    "this harness: if grace incorrectly failed to block the reopen and a new pause fired, the outcome at",
+    "13:12 would become 'paused', not 'resumed', and this assertion would correctly fail.",
+    "skip_startup_coalesce=true required (see away_setpoint_change_not_override.json).",
+    "Migrating this scenario found a real bug (fixed in run_production.py, not production code):",
+    "run_production_scenario() unconditionally overwrote engine._sensor_check_callback with a",
+    "_SensorTracker stub that coordinator-mode sensor dispatch never updates, clobbering the real",
+    "coordinator._any_sensor_open wiring set during __init__. This silently broke ANY check depending",
+    "on 'is a sensor still open' via the callback — specifically _on_grace_expired's re-pause decision",
+    "always saw 'nothing open' regardless of real sensor state. Fixed: only wire the tracker in",
+    "engine-only mode; coordinator-mode scenarios keep the real callback untouched.",
+    "Revert test: temporarily removed the _grace_active guard in handle_door_window_open",
+    "(automation.py) — the 13:12 assertion correctly failed (sensor_opened fired immediately,",
+    "outcome became 'paused' instead of the expected carried-forward 'resumed'). Restored; git diff",
+    "confirmed clean. Confirms this scenario genuinely exercises the grace-blocks-reopen guard."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 300,
+    "door_window_sensors": ["binary_sensor.back_door"]
+  },
+  "events": [
+    {
+      "time": "2026-07-15T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon. Indoor above comfort_cool=74F. Outdoor too warm for nat vent."
+    },
+    {
+      "time": "2026-07-15T12:31:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at 74F."
+    },
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Back door opens. Outdoor 88F > indoor 76F — nat vent not eligible. Automation pauses."
+    },
+    {
+      "time": "2026-07-15T13:10:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.back_door",
+      "note": "Door closes. All sensors closed — automation resumes and grace period begins (5 min = 300s)."
+    },
+    {
+      "time": "2026-07-15T13:12:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door opens again at 13:12, while grace is still active (expires at 13:15). Grace should block re-pause."
+    },
+    {
+      "time": "2026-07-15T13:15:00",
+      "type": "grace_end",
+      "note": "No-op dispatch (grace_end is not a real production event type) — kept purely to force scheduler.advance_to(13:15:00), the moment the REAL grace timer (started by the 13:10:00 sensor_close, manual_grace_seconds=300) is due. Without an event here the scheduler would never advance far enough for the real async_call_later callback to fire."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:00:00",
+      "expect": "paused",
+      "reason": "Sensor opens with outdoor (88F) > indoor (76F) — nat vent ineligible. Automation pauses.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:10:00",
+      "expect": "resumed",
+      "reason": "All sensors closed — automation resumes. Grace period begins.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:12:00",
+      "expect": "resumed",
+      "reason": "Sensor opens during active grace period — grace blocks re-pause, so the outcome at 13:12 is still the carried-forward 'resumed' from 13:10 (no new decision fired). Corrected from legacy 'no_action' — see notes.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:15:00",
+      "expect": "classification_suppressed_paused",
+      "reason": "Grace expires with sensor still open → real _on_grace_expired() re-pause fires (grace_expired event with re_paused=True, mapped to outcome 'paused'), which ALSO schedules _apply_current_scheduled_state() as a follow-up task (automation.py) — since the sensor is still open, this correctly suppresses re-applying classification and emits classification_suppressed_paused at the SAME timestamp, which is the last (and thus reported) decision. This is a stronger confirmation than the legacy simulator could produce: not just 'grace re-paused' but 'the re-pause genuinely blocks classification, verified via the real code path that runs after grace resolves.' Corrected from 'paused' during #476 migration once the actual last-decision tie was traced.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace period blocks re-pause during active window; grace expiry with open sensor triggers re-pause",
+    "observed_behavior": "paused (13:00) → resumed (13:10) → grace blocks re-pause (13:12) → re-paused on grace expiry (13:15)",
+    "expected_behavior": "Grace period prevents rapid pause/resume oscillation; re-pause fires if sensor is still open when grace expires"
+  },
+  "pending_issue": 245
+}

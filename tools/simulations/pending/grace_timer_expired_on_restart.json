@@ -1,0 +1,59 @@
+{
+  "name": "grace_timer_expired_on_restart",
+  "description": "Grace period expires during HA restart: override must auto-clear on startup without user clicking Resume (Issue #199 / #226)",
+  "source": "synthetic",
+  "issue": 227,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-06-10T10:00:00",
+      "type": "classification",
+      "hvac_mode": "cool",
+      "day_type": "warm",
+      "note": "Warm day, HVAC in cool mode"
+    },
+    {
+      "time": "2026-06-10T10:30:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 78.0,
+      "note": "Normal conditions before grace period"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T10:00:00",
+      "expect": "classification_applied",
+      "track": "integration",
+      "reason": "Warm-day classification applied on startup"
+    },
+    {
+      "at": "2026-06-10T10:30:00",
+      "expect": "classification_applied",
+      "track": "integration",
+      "reason": "This scenario cannot genuinely test restart behavior in the standard single-coordinator JSON format (see notes) — a fresh coordinator never had an override, so 'no override present' would be trivially true regardless. Corrected to assert the carried-forward classification_applied outcome instead, honestly reflecting what this scenario actually exercises: normal classification behavior with no interfering state. The real restart-clears-override behavior was separately verified via direct two-coordinator-instance construction — see notes for the full result, including a second, unplanned finding (the clear is unconditional, not grace_end_time-dependent as originally described)."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace expired during restart: coordinator auto-clears override on restore",
+    "observed_behavior": "Verified via standalone two-coordinator-instance test (not the JSON event stream): automation.restore_state() unconditionally clears _manual_override_active/_grace_active/_grace_end_time on every restart, regardless of whether grace had actually expired — confirmed by restarting both before and after grace_end_time with identical results (both cleared).",
+    "expected_behavior": "When HA restarts, any override/grace state is unconditionally cleared (clean-slate design, Issue #282/#327) — not conditional on _grace_end_time specifically, which is a correction to this scenario's original description."
+  },
+  "notes": [
+    "Issue #476 finding: this scenario's premise cannot be genuinely tested within the standard single-coordinator JSON event-stream format the harness runs. A freshly-built coordinator (build_headless_coordinator()) never had an override to begin with, so asserting 'no override active' after a single continuous run is trivially true regardless of whether restart-clearing logic works at all — it would pass even if that logic were completely broken.",
+    "Verified the REAL behavior directly via a standalone two-coordinator-instance test (not squeezed into this JSON format): built Coordinator A, drove it through classification -> thermostat_state_changed -> temp_update to establish a confirmed override + active grace (_manual_override_active=True, _grace_active=True, _grace_end_time set ~5 min out), persisted its state via _async_save_state(), then built a fresh Coordinator B over the SAME config_dir (config_dir is now an explicit build_headless_coordinator() parameter, added for this test) with the virtual clock set past _grace_end_time, simulating a restart after grace expired. Confirmed: Coordinator B's automation_engine._manual_override_active/_grace_active/_grace_end_time were all cleared (False/False/None) after construction (async_restore_state() runs automatically in the startup sequence).",
+    "IMPORTANT additional finding: also restarted Coordinator B at a clock time BEFORE grace_end_time (grace had NOT yet expired) — the override cleared there too, identically. This means the real mechanism is automation.restore_state()'s UNCONDITIONAL clean-slate wipe of ALL override/grace state on every restart (Issue #282/#327 design, confirmed by direct code read: automation.py ~4968-4981 clears these fields with no conditional check on grace_end_time at all), NOT the 'coordinator checks _grace_end_time vs now on restore' mechanism this scenario's original verdict text described. The observable behavior (no override survives restart) matches the scenario's assertion either way, but the underlying mechanism is simpler and more blunt than described — the override is wiped on EVERY restart, not specifically because grace had expired.",
+    "This JSON scenario is left representing what the standard event-stream harness CAN test today (single-coordinator classification behavior) — it is NOT a restart proof. The genuine restart proof above used a separate, standalone two-instance construction; the standard harness has no event type to represent 'HA restarted mid-scenario' within one continuous JSON event stream, and building that (swapping coordinator/engine/scheduler references mid-run) is a separate, real piece of future work if genuine JSON-scenario restart coverage is wanted — not implemented as part of this migration."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

@@ -23,10 +23,19 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                               (if any CA fan active) — mirrors _async_thermostat_changed's
                               state-listener dispatch (coordinator.py:2837-2862)
                             + run_coro(engine.check_natural_vent_conditions())
-  sensor_open             → run_coro(engine.handle_door_window_open(entity_id))
-  sensor_close            → update engine._sensor_check_callback
-                            + if no sensors open:
-                              run_coro(engine.handle_all_doors_windows_closed())
+  sensor_open             → (use_coordinator=True) states.async_set(entity_id, "on") — fires
+                              the real coordinator._async_door_window_changed listener
+                              (requires entity_id in config["door_window_sensors"]; owns
+                              debounce, pause, and starting the real grace timer)
+                            → (use_coordinator=False) run_coro(engine.handle_door_window_open(...))
+  sensor_close            → (use_coordinator=True) states.async_set(entity_id, "off") — same
+                              real listener, owns resume + all-closed grace-start
+                            → (use_coordinator=False) update engine._sensor_check_callback
+                              + if no sensors open: run_coro(engine.handle_all_doors_windows_closed())
+  cancel_override         → (use_coordinator=True only) replicates api.py's
+                              ClimateAdvisorCancelOverrideView.post(): clear_manual_override()
+                              + _cancel_grace_timers() synchronously, then a real 10s
+                              async_call_later before re-applying coordinator._current_classification
   classification          → build DayClassification from event fields
                             + run_coro(engine.apply_classification(classification))
   occupancy_away          → engine.set_occupancy_mode("away")
@@ -338,9 +347,20 @@ def run_production_scenario(scenario: dict, *, use_coordinator: bool = False) ->
             start_time=start_dt,
         )
 
-    # --- Sensor tracker — drives engine._sensor_check_callback ---
+    # --- Sensor tracker — drives engine._sensor_check_callback (engine-only mode) ---
+    # Issue #476: when a coordinator is present, its real __init__ already wired
+    # engine._sensor_check_callback = coordinator._any_sensor_open (production
+    # wiring, reads real fake_hass entity state). Overwriting it here with the
+    # _SensorTracker stub — which coordinator-mode sensor_open/sensor_close
+    # dispatch never updates (it dispatches via states.async_set() through the
+    # real listener instead) — silently breaks any check that depends on "is a
+    # sensor still open" via the engine's callback (e.g. _on_grace_expired's
+    # re-pause-on-expiry-with-sensor-open decision: found returning re_paused=False
+    # even with a sensor genuinely left open, because the callback always reported
+    # False). Only wire the tracker for engine-only scenarios.
     tracker = _SensorTracker()
-    engine._sensor_check_callback = tracker.any_open
+    if coordinator is None:
+        engine._sensor_check_callback = tracker.any_open
 
     # --- Optional ODE inputs (Issue #236 D — scenario schema extension) ---
     # A scenario may supply a learned thermal model and/or an hourly forecast so
@@ -372,13 +392,27 @@ def run_production_scenario(scenario: dict, *, use_coordinator: bool = False) ->
                 event, etype, engine, fake_hass, scheduler, tracker, climate_entity, merged_config, coordinator
             )
 
-        # Final drain: a coroutine enqueued by the LAST event's dispatch (e.g. Issue #474 —
-        # a real coordinator listener like _async_thermostat_changed, scheduled via
-        # async_create_task rather than awaited inline — matches real HA's dispatch
-        # contract) has no subsequent advance_to() call to drain it via that call's
-        # trailing _drain_tasks(). Without this, such a coroutine is silently dropped
-        # (never awaited) instead of running.
-        scheduler._drain_tasks()
+            # 3. Settle (Issue #476 — supersedes the #474 trailing-only fix, which
+            # only caught the LAST event). A coordinator-mode dispatch
+            # (fake_hass.states.async_set(...) in _dispatch_event) enqueues the
+            # real listener (e.g. _async_door_window_changed) as a task via
+            # async_create_task — it does NOT run synchronously. Without settling
+            # here, that task sits queued until the NEXT event's own
+            # advance_to(event_dt) call, which only drains it as an incidental
+            # side effect of firing whatever UNRELATED heap entry happens to be
+            # due first (found via a real scenario: a periodic 5-min thermal-
+            # sampler tick happened to be due mid-way to the next event, so the
+            # queued door/window listener ran at ITS fire time, not the actual
+            # dispatch time — sensor_opened was logged ~5 minutes late). Worse,
+            # if that listener itself schedules a NEW async_call_later() heap
+            # entry (e.g. the debounce timer), that entry is pushed AFTER
+            # advance_to()'s own heap-loop already exited, so it silently sits
+            # unfired for yet another event before it can fire.
+            # advance_to(scheduler.now()) re-enters the same heap-fire ->
+            # drain-tasks -> recheck-heap loop advance_to() already implements,
+            # settling arbitrarily deep chains to a fixed point at the ACTUAL
+            # dispatch time, before any more wall-clock time is allowed to pass.
+            scheduler.advance_to(scheduler.now())
 
     # --- Capture final engine state snapshot ---
     engine_state = _snapshot_engine_state(engine)
@@ -420,16 +454,29 @@ def _dispatch_event(
 
     elif etype == "sensor_open":
         entity_id = event.get("entity", "binary_sensor.window")
-        tracker.open(entity_id)
-        run_coro(engine.handle_door_window_open(entity_id))
+        if coordinator is not None:
+            # Issue #476: real state-change dispatch through the coordinator's
+            # actual _async_door_window_changed listener (registered via
+            # _subscribe_door_window_listeners() in async_setup(), requires the
+            # entity_id to be in the scenario's config["door_window_sensors"]).
+            # This owns debounce (harness default sensor_debounce_seconds=0, so
+            # effectively instant), pause/resume, and starting the real grace
+            # timer — none of that is approximated here.
+            fake_hass.states.async_set(entity_id, "on", {})
+        else:
+            tracker.open(entity_id)
+            run_coro(engine.handle_door_window_open(entity_id))
 
     elif etype == "sensor_close":
         entity_id = event.get("entity", "binary_sensor.window")
-        tracker.close(entity_id)
-        if tracker.all_closed():
-            run_coro(engine.handle_all_doors_windows_closed())
-        # If sensors still open, production does nothing on partial close —
-        # it waits for all_closed() to be called.
+        if coordinator is not None:
+            fake_hass.states.async_set(entity_id, "off", {})
+        else:
+            tracker.close(entity_id)
+            if tracker.all_closed():
+                run_coro(engine.handle_all_doors_windows_closed())
+            # If sensors still open, production does nothing on partial close —
+            # it waits for all_closed() to be called.
 
     elif etype == "classification":
         classification = _build_classification_from_event(event)
@@ -552,6 +599,31 @@ def _dispatch_event(
             _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode, dispatch=True)
         else:
             _inject_thermostat_mode(fake_hass, climate_entity, new_hvac_mode)
+
+    elif etype == "cancel_override":
+        # Issue #476: replicates api.py's ClimateAdvisorCancelOverrideView.post()
+        # exactly — clear_manual_override() + _cancel_grace_timers() synchronously,
+        # then a real 10-second async_call_later before re-applying the current
+        # classification. This is the production code path for the dashboard's
+        # "Cancel Override" button (cancel_override_then_resume.json). Requires a
+        # real coordinator — there is no engine-only equivalent since the delayed
+        # re-apply is coordinator-owned state (coordinator._current_classification).
+        if coordinator is not None:
+            import custom_components.climate_advisor.coordinator as _coord_mod  # noqa: PLC0415
+
+            ae = coordinator.automation_engine
+            if ae._manual_override_active:
+                ae.clear_manual_override()
+                ae._cancel_grace_timers()
+
+                @_coord_mod.callback
+                def _apply_after_delay(_now: Any, _coordinator: Any = coordinator, _ae: Any = ae) -> None:
+                    if _coordinator._current_classification:
+                        _coordinator.hass.async_create_task(
+                            _ae.apply_classification(_coordinator._current_classification)
+                        )
+
+                _coord_mod.async_call_later(coordinator.hass, 10, _apply_after_delay)
 
     elif etype in ("fan_cycle_on", "fan_cycle_off", "grace_start", "grace_end"):
         # FINDINGS: no clean production entry point — see module docstring.

@@ -1,0 +1,107 @@
+{
+  "name": "grace_full_lifecycle_clean_expiry",
+  "description": "Warm day. Sensor opens at 13:00 (pause). Sensor closes at 13:10 (grace starts, 5-min grace). Sensor stays closed. Grace expires at 13:15 with all sensors closed → automation resumes cleanly. Classification cycle at 13:30 applies normally.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests the normal (clean) grace expiry path: pause → sensor closes → grace expires cleanly → classification resumes.",
+    "Contrast with grace_full_lifecycle_sensor_still_open.json which tests the re-pause path.",
+    "Issue #476: migrated to use_coordinator=true. sensor_open/sensor_close now dispatch via",
+    "fake_hass.states.async_set() on the real door_window_sensors entity, reaching the coordinator's",
+    "actual _async_door_window_changed listener — real debounce (0s in the harness default),",
+    "real pause/resume, and a real async_call_later grace timer (manual_grace_seconds=300, fired via",
+    "scheduler.advance_to() at grace_expired). The synthetic grace_start/grace_end marker events are",
+    "removed — real grace now flows entirely from the sensor_close event's own dispatch chain.",
+    "skip_startup_coalesce=true required (see away_setpoint_change_not_override.json's notes for why).",
+    "Migrating this scenario surfaced two real harness bugs, both fixed as part of #476:",
+    "(1) dt_util.parse_datetime() was never patched by FakeScheduler.installed() — coordinator code",
+    "reading persisted ISO timestamps (including the stuck-grace detection at coordinator.py:1668,",
+    "6623-6624) got a MagicMock back, crashing on comparison. (2) A coordinator-mode state dispatch",
+    "(fake_hass.states.async_set) enqueues the real listener as an async task that does not run",
+    "synchronously — without a settle step after EVERY event dispatch (not just the last one), the",
+    "queued listener only ran when some UNRELATED heap entry happened to be due, at THAT entry's",
+    "time, not the actual dispatch time (confirmed via a ~5-minute timestamp drift caused by the",
+    "periodic 5-min thermal-sampler tick incidentally draining the queue). Both fixes live in",
+    "tools/sim_harness/ (fake_scheduler.py, run_production.py, build_coordinator.py), not production code.",
+    "Revert test: with config.door_window_sensors=[] (no listener registered for",
+    "binary_sensor.back_door), the sensor_open/sensor_close events still dispatch but no",
+    "_async_door_window_changed listener exists to react — event_log shows zero pause/resume/grace",
+    "events at all, correctly failing the paused (13:00) and resumed (13:10) assertions. Confirms this",
+    "scenario genuinely exercises the real coordinator listener, not a vacuous pass."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 300,
+    "door_window_sensors": ["binary_sensor.back_door"]
+  },
+  "events": [
+    {
+      "time": "2026-07-15T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon. Outdoor too warm for nat vent."
+    },
+    {
+      "time": "2026-07-15T12:31:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at 74F."
+    },
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door opens. Nat vent ineligible (outdoor too warm). Automation pauses."
+    },
+    {
+      "time": "2026-07-15T13:10:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.back_door",
+      "note": "Door closes. All sensors closed → automation resumes, real grace timer starts (5 min)."
+    },
+    {
+      "time": "2026-07-15T13:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "30-min classification cycle. Grace is gone, no sensors open — classification applies normally."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:00:00",
+      "expect": "paused",
+      "reason": "Sensor opens with outdoor (88F) > indoor (76F) — nat vent ineligible. Automation pauses.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:10:00",
+      "expect": "resumed",
+      "reason": "All sensors closed — automation resumes. Grace period begins.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T13:30:00",
+      "expect": "comfort_band_armed",
+      "reason": "Grace expired cleanly (sensors stayed closed). Classification cycle at 13:30 applies normally (not blocked by a stuck pause) — real apply_classification() runs and re-arms the comfort band. Corrected from 'classification_applied' during #476 migration: real apply_classification() dedupes (automation.py:1355-1356) and only emits classification_applied when (day_type, hvac_mode) differs from the last applied classification — since this scenario dispatches the SAME classification (warm/cool) both at 12:31 and 13:30, the second call correctly suppresses the redundant event while still re-arming the band (comfort_band_applied does fire). The legacy simulator apparently did not model this dedup. comfort_band_armed is the correct assertion for 'classification cycle ran, unblocked' without requiring a specific (possibly deduped) event.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Grace period expires cleanly when sensors stay closed; classification resumes normally",
+    "observed_behavior": "paused (13:00) → resumed (13:10) → grace expires cleanly (13:15) → comfort_band_armed (13:30, classification cycle unblocked)",
+    "expected_behavior": "When no sensor opens during the grace window, automation resumes without re-pause after grace expires"
+  },
+  "pending_issue": 245
+}

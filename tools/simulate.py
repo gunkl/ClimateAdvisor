@@ -91,7 +91,10 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
     from tools.sim_harness import outcomes as _out
     from tools.sim_harness.run_production import run_production_scenario
 
-    with open(scenario_file) as f:
+    # Issue #476: explicit UTF-8 — without it, open() uses the platform default
+    # encoding (cp1252 on Windows), which crashes on any scenario file containing
+    # non-ASCII characters (em-dashes are common in scenario notes/descriptions).
+    with open(scenario_file, encoding="utf-8") as f:
         scenario = json.load(f)
 
     use_coordinator = bool(scenario.get("use_coordinator", False))
@@ -381,7 +384,7 @@ def sign_scenario(name: str) -> int:
         print(f"Scenario not found in golden/: {name}.json")
         return 1
 
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         scenario = json.load(f)
 
     # Print human-readable card for review
@@ -649,7 +652,7 @@ def main() -> int:
                 print(f"\n{state.upper()} ({len(files)}):")
                 for f in files:
                     try:
-                        with open(f) as fh:
+                        with open(f, encoding="utf-8") as fh:
                             s = json.load(fh)
                         desc = s.get("description", "")[:70]
                         issue = f" [#{s['issue']}]" if s.get("issue") else ""

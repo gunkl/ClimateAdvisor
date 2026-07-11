@@ -1,0 +1,120 @@
+{
+  "name": "override_detection_and_confirmation",
+  "description": "Warm day, HVAC in cool mode at comfort_cool (74F). User bumps thermostat to heat mode at 14:00. After 10-minute confirm period passes (14:10), override is confirmed. Classification cycle at 14:30 is suppressed by active override.",
+  "source": "synthetic",
+  "issue": 229,
+  "notes": [
+    "Tests the full override detection → confirmation → classification suppression lifecycle.",
+    "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true. thermostat_state_changed",
+    "dispatches via fake_hass.states.async_set() through the real _async_thermostat_changed listener;",
+    "the 14:10 temp_update event forces scheduler.advance_to() past the real override_confirm_seconds=600",
+    "async_call_later timer, letting it genuinely fire.",
+    "The 14:30 assertion was 'no_action' in the legacy-simulator version. apply_classification() returns",
+    "immediately when _manual_override_active is True (automation.py:1265-1271) WITHOUT emitting any",
+    "event, so the correct outcome is the carried-forward previous decision (override_confirmed from",
+    "14:10), not a literal 'no_action' string outcomes.py has no sentinel for.",
+    "manual_grace_seconds set to 3600 (1 hour) explicitly: the harness default (900s/15min, from",
+    "build_engine.py's _DEFAULT_CONFIG) auto-clears the override via real grace expiry at 14:25 —",
+    "BEFORE this scenario's 14:30 classification event — contradicting the scenario's own stated intent",
+    "('Classification cycle at 14:30 is suppressed by ACTIVE override'). The legacy simulator never",
+    "modeled the grace timer here, so this premise gap was invisible until real timers ran. Extending",
+    "the grace window keeps the override genuinely active through 14:30, matching the designed narrative.",
+    "14:30's classification hvac_mode was changed from 'cool' (same as 13:01) to 'off': a first revert",
+    "test with the ORIGINAL identical classification passed even with the override-suppression guard",
+    "(automation.py:1265-1271) fully disabled — because apply_classification()'s SEPARATE",
+    "day_type/hvac_mode dedup (automation.py:1355-1356) coincidentally produced the same 'no new",
+    "decision' outcome regardless of whether suppression genuinely worked, making the assertion",
+    "vacuous. Using a different hvac_mode at 14:30 makes the two mechanisms distinguishable: with the",
+    "guard disabled, a genuine NEW classification_applied fires (confirmed); with it restored, nothing",
+    "new fires and the outcome correctly stays override_confirmed. git diff confirmed clean after both",
+    "revert-test passes."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 3600,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "cool",
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 85.0,
+      "note": "Warm summer afternoon. Indoor at comfort_cool=74F. HVAC holding cool mode."
+    },
+    {
+      "time": "2026-07-15T13:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at comfort_cool=74F."
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "User bumps thermostat to heat mode. Override detection fires. 10-minute confirm window starts."
+    },
+    {
+      "time": "2026-07-15T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 87.0,
+      "note": "10 minutes have elapsed. Thermostat still in heat mode → override confirmed."
+    },
+    {
+      "time": "2026-07-15T14:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Scheduled 30-min classification cycle — deliberately a DIFFERENT hvac_mode (off, not cool) from the 13:01 classification, so that if suppression were bypassed a genuinely NEW classification_applied event would fire (breaking the separate day_type/hvac_mode dedup in automation.py:1355-1356) — making the 14:30 assertion below actually discriminating rather than passing vacuously regardless of whether the override guard works. Override is active — should be suppressed."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Initial warm-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "override_detected",
+      "reason": "Thermostat state changed to heat mode while classification says cool — override detection fires.",
+      "track": "integration",
+      "note": "Override detection fires in coordinator _async_thermostat_changed listener."
+    },
+    {
+      "at": "2026-07-15T14:10:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes elapsed with thermostat still in heat mode → override_confirm_seconds=600 expired → override confirmed.",
+      "track": "integration",
+      "note": "Confirm timer is an async_call_later callback in the coordinator layer."
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "override_confirmed",
+      "reason": "Classification cycle while manual_override_active=True: apply_classification() returns immediately (automation.py:1265-1271) without emitting any event, so the outcome stays the carried-forward override_confirmed from 14:10 — proving the classification cycle was genuinely suppressed. Corrected from legacy 'no_action' — see notes.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Override detected on thermostat mode change, confirmed after 10-min delay, suppresses subsequent classification",
+    "observed_behavior": "classification_applied (cool, 74F) → override_detected (14:00) → override_confirmed (14:10) → classification cycle suppressed at 14:30 (no new decision)",
+    "expected_behavior": "CA respects user's manual override and stops re-applying classification until override clears"
+  },
+  "pending_issue": 245
+}

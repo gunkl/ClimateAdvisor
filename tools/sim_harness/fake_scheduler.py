@@ -37,6 +37,7 @@ unpatches on exit.
 from __future__ import annotations
 
 import heapq
+import inspect
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -142,12 +143,17 @@ class FakeScheduler:
                 candidate += timedelta(days=1)
             return candidate
 
-        def _fire_and_reschedule(now: datetime) -> None:
+        def _fire_and_reschedule(now: datetime) -> Any:
             if cancelled[0]:
-                return
-            callback(now)
+                return None
+            # Issue #476: return callback(now)'s result (rather than discarding it) so
+            # advance_to()'s coroutine check — which inspects THIS wrapper's return value,
+            # not the inner callback's — can detect and enqueue an async callback target
+            # (e.g. coordinator._async_send_briefing/_async_morning_wakeup, both async def).
+            result = callback(now)
             if not cancelled[0]:
                 self._schedule_at(_next_fire_at(now), _fire_and_reschedule)
+            return result
 
         self._schedule_at(_next_fire_at(self._clock), _fire_and_reschedule)
 
@@ -160,12 +166,14 @@ class FakeScheduler:
         """Fire ``callback`` every ``interval``, starting one interval from now."""
         cancelled = [False]
 
-        def _fire_and_reschedule(now: datetime) -> None:
+        def _fire_and_reschedule(now: datetime) -> Any:
             if cancelled[0]:
-                return
-            callback(now)
+                return None
+            # Issue #476: see matching comment in _schedule_daily's _fire_and_reschedule.
+            result = callback(now)
             if not cancelled[0]:
                 self._schedule_at(now + interval, _fire_and_reschedule)
+            return result
 
         self._schedule_at(self._clock + interval, _fire_and_reschedule)
 
@@ -226,7 +234,17 @@ class FakeScheduler:
             self._clock = entry.fire_at
             # Fire it — callbacks take a single ``_now`` positional arg
             try:
-                entry.callback(self._clock)
+                result = entry.callback(self._clock)
+                # Issue #476: some timer-registration targets (e.g. async_track_time_change
+                # callbacks like coordinator._async_send_briefing/_async_morning_wakeup/
+                # _async_bedtime) are ``async def`` methods, not @callback-decorated sync
+                # functions. Real HA's async_run_hass_job schedules a coroutine-function job
+                # via async_create_task rather than calling it inline — calling it directly
+                # here only constructs the coroutine without running it, silently dropping
+                # the callback's entire effect (confirmed via "coroutine ... was never
+                # awaited" warnings on a scenario spanning past the 06:00 briefing time).
+                if inspect.iscoroutine(result):
+                    self.enqueue_task(result)
             except Exception as exc:  # noqa: BLE001 — don't let one bad callback stop the clock
                 import traceback
 
@@ -273,6 +291,23 @@ class FakeScheduler:
           - ``async_track_state_change_event`` → hass.add_state_listener
           - ``callback``                    → identity
           - ``dt_util.now``/``utcnow``/``as_local`` → same as automation
+          - ``dt_util.parse_datetime``      → real ISO8601 parse (Issue #476)
+
+        Issue #476: ``dt_util.parse_datetime`` was NOT previously patched —
+        it comes from ``ha_stubs.py``'s mocked ``homeassistant.util.dt``
+        module, so any call returned a ``MagicMock``. Subtracting that from a
+        real ``dt_util.now()`` datetime silently produces another
+        ``MagicMock`` (Python tries ``MagicMock.__rsub__``), which then
+        crashes with ``TypeError: '>' not supported between instances of
+        'MagicMock' and 'int'`` the moment code compares the "elapsed"
+        result against a real number — found via
+        ``_check_hvac_stabilization`` crashing during a coordinator-mode
+        scenario. This function is called at 19+ sites in coordinator.py
+        alone, including the stuck-grace detection logic
+        (``coordinator.py:1668,6623-6624``) that grace-period scenarios
+        depend on directly — unpatched, any such scenario risks silently
+        wrong behavior or a swallowed exception (``FakeScheduler`` catches
+        broadly and records to ``callback_errors``), not just this one crash.
         """
         # We need to patch the dt_util *object* that automation.py/coordinator.py
         # imported, not the original module.  Both modules do:
@@ -282,6 +317,14 @@ class FakeScheduler:
 
         def _fake_async_call_later(hass: Any, delay: float, cb: Any) -> Any:
             return self._schedule(delay, cb)
+
+        def _fake_parse_datetime(dt_str: str | None) -> datetime | None:
+            if not dt_str:
+                return None
+            try:
+                return datetime.fromisoformat(dt_str)
+            except (ValueError, TypeError):
+                return None
 
         def _fake_async_track_time_change(
             hass: Any,
@@ -323,6 +366,10 @@ class FakeScheduler:
                 side_effect=lambda x: x,
             ),
             patch(
+                "custom_components.climate_advisor.automation.dt_util.parse_datetime",
+                side_effect=_fake_parse_datetime,
+            ),
+            patch(
                 "custom_components.climate_advisor.coordinator.async_call_later",
                 side_effect=_fake_async_call_later,
             ),
@@ -357,6 +404,10 @@ class FakeScheduler:
             patch(
                 "custom_components.climate_advisor.coordinator.dt_util.as_local",
                 side_effect=lambda x: x,
+            ),
+            patch(
+                "custom_components.climate_advisor.coordinator.dt_util.parse_datetime",
+                side_effect=_fake_parse_datetime,
             ),
         ):
             yield self

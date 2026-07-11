@@ -1,0 +1,94 @@
+{
+  "name": "cancel_override_then_resume",
+  "description": "User cancels manual override: classification fires immediately and warm-day setback is applied (Issue #226)",
+  "source": "synthetic",
+  "issue": 226,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "override_confirm_seconds": 5,
+    "manual_grace_seconds": 3600,
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-06-10T16:00:00",
+      "type": "occupancy_change",
+      "mode": "away",
+      "note": "Occupancy away — sets up the setback context this scenario needs."
+    },
+    {
+      "time": "2026-06-10T16:00:01",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 82.0,
+      "note": "Indoor comfortable, outdoor hot."
+    },
+    {
+      "time": "2026-06-10T16:00:02",
+      "type": "classification",
+      "hvac_mode": "cool",
+      "day_type": "warm",
+      "windows_recommended": false,
+      "note": "Baseline warm-day classification while away: apply_classification's away branch applies setback_cool=79F."
+    },
+    {
+      "time": "2026-06-10T16:30:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "User overrides thermostat to heat mode."
+    },
+    {
+      "time": "2026-06-10T16:30:06",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 82.0,
+      "note": "6s later (past override_confirm_seconds=5) — override confirms."
+    },
+    {
+      "time": "2026-06-10T16:31:00",
+      "type": "cancel_override",
+      "note": "User clicks 'Cancel Override' on the dashboard — real api.py-mirroring cancel flow fires: clear_manual_override() + _cancel_grace_timers() immediately, then a REAL 10s async_call_later before re-applying the classification."
+    },
+    {
+      "time": "2026-06-10T16:31:11",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 82.0,
+      "note": "11s after cancel — past the real 10s re-apply delay, forcing the scheduler to reach it."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-06-10T16:00:02",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "integration",
+      "reason": "Baseline: away-occupancy classification applies setback_cool=79F before any override exists."
+    },
+    {
+      "at": "2026-06-10T16:31:10",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
+      "track": "integration",
+      "reason": "11s after cancel_override (which mirrors api.py's ClimateAdvisorCancelOverrideView.post()): clear_manual_override() + _cancel_grace_timers() ran immediately at 16:31:00, then a REAL 10-second async_call_later fired at 16:31:10, re-applying coordinator._current_classification — restoring the away setback (79F) without the user needing to wait for the next 30-min classification cycle. This is the core behavior Issue #226 is about, and the assertion this scenario is actually named for. A separate classification_applied assertion was dropped: the classification is unchanged from 16:00:02 (still warm/away/cool), so apply_classification()'s day_type/hvac_mode dedup (automation.py:1355-1356) correctly suppresses a redundant classification_applied event on the reapply — asserting it here would be vacuous (the same 'no new decision' outcome would appear whether the reapply genuinely ran or not); setback_applied firing with the correct 79F target is the real, discriminating proof."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cancel override + resume: automation immediately restores warm-day setback",
+    "observed_behavior": "Four events at same timestamp (override_cleared, grace_started, classification_applied, setback_applied) from user clicking two dashboard buttons",
+    "expected_behavior": "Grace period does not suppress classification or setback — only blocks door/window sensor re-pause. User sees correct warm-day state restored immediately."
+  },
+  "notes": [
+    "Issue #476: migrated to use_coordinator=true, skip_startup_coalesce=true. Rebuilt to actually model the full cancel-override flow this scenario is named for (the original version only fired a bare classification event with a comment claiming 'after override cleared' — it never actually established or cancelled an override). Uses occupancy=away (the away_setpoint_change_not_override.json pattern, already proven) rather than a bare warm-day-off classification: apply_classification()'s warm-day-off path does not actually emit a distinct setback event in current production code (warm_day_setback_applied is referenced only by ai_skills_activity.py/ai_skills_context.py for AI report rendering, never emitted by automation.py itself — confirmed by grep, an incorrect initial assumption during migration). occupancy=away's apply_classification() branch reliably emits occupancy_setback (mapped to outcome 'setback_applied' by outcomes.py), matching setback_cool=79F.",
+    "override_confirm_seconds set low (5s) purely to keep the scenario's wall-clock span short; manual_grace_seconds set high (3600s) so the override doesn't auto-clear via grace before the explicit cancel_override event fires.",
+    "Revert test: re-ran with the cancel_override event removed entirely — manual_override_active stayed True and no second occupancy_setback/setback_applied fired at 16:31:10 (event_log ends at override_confirmed). Confirms the 16:31:10 assertion genuinely depends on the cancel_override dispatch, not a coincidental re-apply."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

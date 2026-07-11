@@ -322,3 +322,22 @@ class TestHvacModeAndSetpointsFromCoordinatorData:
         hass = _make_hass()
         asyncio.run(async_build_activity_context(hass, coord))
         assert hass.states.get.call_count == 1
+
+
+class TestSwingAcquisitionThreadsLearningHealth:
+    """Issue #468: the swing-acquisition get_thermal_model() call must pass
+    learning_health, matching the canonical shape used by coordinator.py/sensor.py."""
+
+    def test_get_thermal_model_called_with_learning_health(self):
+        _health = {"hvac_heat": {"attempts": 1, "committed": 1}}
+        coord = _make_coordinator()
+        coord._build_learning_health.return_value = _health
+        coord.learning.get_thermal_model.return_value = {
+            "swing_heat_f_display": 1.0,
+            "swing_cool_f_display": 1.0,
+        }
+        hass = _make_hass()
+
+        asyncio.run(async_build_activity_context(hass, coord))
+
+        coord.learning.get_thermal_model.assert_called_once_with(learning_health=_health)

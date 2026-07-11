@@ -34,10 +34,22 @@ class FakeEvent:
     Coordinator listener callbacks (e.g. ``_async_thermostat_changed``) read
     ``event.data.get("entity_id"/"old_state"/"new_state")`` — this is the only
     shape that matters for dispatch fidelity.
+
+    ``context`` (Issue #482) mirrors real HA's ``Event.context`` — every real
+    state-changed event carries one. When a scenario dispatches a state change
+    via ``_FakeServices.async_call(..., context=...)`` (i.e. production issued
+    the service call and passed its own ``Context``), that same context is
+    threaded through to the resulting ``FakeEvent`` so
+    ``_async_fan_entity_changed()``'s context-based provenance check can be
+    exercised faithfully. Externally-injected state changes (a scenario calling
+    ``states.async_set()`` directly to model a real user/manual action) have no
+    such context, so ``context`` defaults to ``None`` — correctly modeling "no
+    CA attribution available" for a genuine external actor.
     """
 
     event_type: str = ""
     data: dict[str, Any] = field(default_factory=dict)
+    context: Any = None
 
 
 class _FakeServices:
@@ -64,9 +76,18 @@ class _FakeServices:
         service: str,
         data: dict | None = None,
         blocking: bool = False,
+        context: Any = None,
         **kw: Any,
     ) -> None:
-        """Record the service call, then apply the state-feedback loop."""
+        """Record the service call, then apply the state-feedback loop.
+
+        ``context`` (Issue #482): when production passes its own ``Context``
+        (see ``automation.py``'s ``_call_fan_service_with_context``), it is
+        threaded through to the resulting state's dispatched ``FakeEvent`` so
+        the coordinator's context-based provenance check has real data to
+        compare against, matching real HA's behavior of carrying the
+        originating service call's context onto the entity's state write.
+        """
         data = dict(data or {})
         ts: datetime | None = None
         with contextlib.suppress(Exception):
@@ -77,11 +98,12 @@ class _FakeServices:
                 "service": service,
                 "data": data,
                 "ts": ts,
+                "context": context,
             }
         )
-        self._apply_state_feedback(domain, service, data)
+        self._apply_state_feedback(domain, service, data, context=context)
 
-    def _apply_state_feedback(self, domain: str, service: str, data: dict) -> None:
+    def _apply_state_feedback(self, domain: str, service: str, data: dict, context: Any = None) -> None:
         """Reflect a command into the target entity's FakeState (real-HA behaviour).
 
         Issue #474: dispatches via ``states.async_set()`` rather than mutating
@@ -127,7 +149,7 @@ class _FakeServices:
             elif service == "turn_off":
                 state_str = "off"
 
-        self._states.async_set(entity_id, state_str, attrs)
+        self._states.async_set(entity_id, state_str, attrs, context=context)
 
 
 class _FakeStates:
@@ -155,13 +177,19 @@ class _FakeStates:
     def set_simple(self, entity_id: str, state_str: str, attributes: dict | None = None) -> None:
         self._states[entity_id] = FakeState(state=state_str, attributes=attributes or {})
 
-    def async_set(self, entity_id: str, state_str: str, attributes: dict | None = None) -> None:
-        """Set a new state and dispatch a state-changed event to real listeners."""
+    def async_set(self, entity_id: str, state_str: str, attributes: dict | None = None, context: Any = None) -> None:
+        """Set a new state and dispatch a state-changed event to real listeners.
+
+        ``context`` (Issue #482): forwarded to the dispatched event so
+        listeners can exercise context-based provenance. Callers that model an
+        external/manual state change (not a CA-issued service call) should
+        omit it — ``None`` correctly represents "no CA attribution available."
+        """
         old_state = self._states.get(entity_id)
         new_state = FakeState(state=state_str, attributes=attributes or {})
         self._states[entity_id] = new_state
         if self._dispatch_fn is not None:
-            self._dispatch_fn(entity_id, old_state, new_state)
+            self._dispatch_fn(entity_id, old_state, new_state, context=context)
 
 
 class _FakeBus:
@@ -268,7 +296,7 @@ class FakeHass:
 
         return _remove
 
-    def _dispatch_state_change(self, entity_id: str, old_state: Any, new_state: Any) -> None:
+    def _dispatch_state_change(self, entity_id: str, old_state: Any, new_state: Any, context: Any = None) -> None:
         """Invoke every listener registered for entity_id with a synthesized Event.
 
         Coordinator listeners (e.g. ``_async_thermostat_changed``) are ``async
@@ -284,6 +312,7 @@ class FakeHass:
         event = FakeEvent(
             event_type="state_changed",
             data={"entity_id": entity_id, "old_state": old_state, "new_state": new_state},
+            context=context,
         )
         for cb in list(self._state_listeners.get(entity_id, [])):
             result = cb(event)

@@ -4,9 +4,31 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.16"
+VERSION = "0.5.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.17": [
+        "Fix #482: no user-visible change (latent-risk hardening). Closes two real gaps found"
+        " during Issue #478's investigation in the fan-off manual-vs-automation classification"
+        " path. (1) The fan physical-state drift-reconciliation self-correction"
+        " (_reconcile_fan_physical_drift()'s off-command) now stamps the same"
+        " _fan_command_pending/_fan_command_time bookkeeping every other WHF command site"
+        " already sets, matching the existing pattern, so coordinator._async_fan_entity_changed()"
+        " can suppress the resulting state-changed event as CA-caused instead of risking a"
+        " misclassification as a manual fan-off (which would start a spurious grace period and"
+        " temporarily block automated free cooling/HVAC control). (2) Every outgoing WHF"
+        " fan/switch service call now carries a real HA Context"
+        " (automation.py's new _call_fan_service_with_context()), and"
+        " coordinator._async_fan_entity_changed() checks event.context.id/parent_id against it as"
+        " an additional, authoritative CA-attribution signal alongside the existing"
+        " _fan_command_pending/30-second timing heuristic (kept as-is, not replaced — context"
+        " propagation through third-party fan/switch integrations, especially a one-way RF"
+        " transmitter with no feedback of its own, is not guaranteed reliable by HA core). Every"
+        " provenance decision (matched or not) is now logged at DEBUG so a future investigation"
+        " has direct evidence instead of needing cross-source timestamp archaeology, and a"
+        " genuinely external fan change's Context id is surfaced as diagnostic data in the"
+        " Activity Report payload.",
+    ],
     "0.5.16": [
         "Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test"
         " scenarios (grace-period lifecycle, override detection/confirmation/self-resolve,"
@@ -1029,6 +1051,64 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    482: {
+        "version_fixed": "0.5.17",
+        "title": "Fan-off bookkeeping gap + event.context provenance for manual-vs-automation classification",
+        "scope_covered": (
+            "automation.py: (1) _reconcile_fan_physical_drift()'s off-command"
+            " (self._command_whf_control_entity(False, ...) via a new internal"
+            " _do_drift_reconciliation_off_command() wrapper) now sets"
+            " self._fan_command_time/self._fan_command_pending synchronously BEFORE"
+            " self.hass.async_create_task(...) schedules the coroutine — matching the exact"
+            " pattern _activate_fan()/_deactivate_fan() already use — and clears"
+            " _fan_command_pending in the wrapper's own finally block once the command"
+            " completes. (2) Added _call_fan_service_with_context(), a shared funnel now used"
+            " by _command_whf_control_entity() (and therefore _activate_fan(), _deactivate_fan(),"
+            " and the drift-reconciliation off-command) that constructs a fresh"
+            " homeassistant.core.Context() per outgoing fan/switch service call, passes it as"
+            " services.async_call(..., context=cmd_context), and records cmd_context.id on"
+            " self._fan_command_context_id. coordinator.py's _async_fan_entity_changed() reads"
+            " event.context.id/parent_id and compares against automation_engine._fan_command_context_id"
+            " as an ADDITIONAL suppression signal (self._fan_command_pending OR context_confirms_ca),"
+            " logging the comparison at DEBUG on every fan-entity state change (matched or not) and"
+            " at INFO when context alone was the deciding signal. handle_fan_manual_override() and"
+            " on_fan_turned_off() gained an optional event_context_id parameter, surfaced in the"
+            " fan_manual_override/fan_cancel Activity Report event payloads as diagnostic data."
+            " tools/sim_harness/ha_stubs.py gained a _MockContext stand-in for"
+            " homeassistant.core.Context (id/parent_id/user_id) so the harness/tests construct real,"
+            " comparable context objects the same way production does against real HA."
+            " tools/sim_harness/fake_hass.py threads a context kwarg through"
+            " _FakeServices.async_call -> _apply_state_feedback -> _FakeStates.async_set -> the"
+            " dispatched FakeEvent, so a CA-issued command's context reaches the coordinator listener"
+            " exactly like real HA propagates the originating service call's context onto the"
+            " resulting state write; an externally-injected states.async_set() (no CA service call)"
+            " naturally carries context=None, correctly modeling 'no CA attribution available' for a"
+            " genuine external actor. New golden-harness assertion types in outcomes.py"
+            " (fan_ca_command_not_misclassified, fan_external_change_classified) and a new"
+            " external_fan_state_change scenario event type in run_production.py."
+        ),
+        "scope_not_covered": (
+            "Part 1 does not close every theoretically-reachable misclassification race — careful"
+            " tracing of the harness's scheduler task-queue ordering found that if a same-tick"
+            " nat-vent reactivation (_activate_fan(), itself a sibling command site) races the"
+            " still-queued drift-reconciliation off-command, _activate_fan()'s own pre-existing"
+            " unconditional finally-clear of _fan_command_pending can stomp the flag before the"
+            " queued off-command's own resulting event is evaluated. This is a deeper"
+            " single-shared-boolean reentrancy limitation common to EVERY existing WHF command site"
+            " (not unique to this fix, and pre-existing before this change), out of scope for the"
+            " literal 'match every other command site' fix requested — a proper fix would need a"
+            " reentrancy-safe scheme (e.g. a per-command token instead of one shared boolean) applied"
+            " uniformly across _activate_fan/_deactivate_fan/the drift-reconciliation path together,"
+            " tracked as a candidate follow-up issue, not attempted here. Part 2's event.context check"
+            " is corroborating only — a context MISMATCH or absent context does not prove a change was"
+            " external (never used to suppress evaluation), only a MATCH is treated as authoritative;"
+            " the pre-existing 30-second timing heuristic and _fan_command_pending flag are unchanged"
+            " and still evaluated for every fan-entity state change. Command-only mode"
+            " (_async_command_fan_entity() in coordinator.py, fan_state_feedback=False) is untouched —"
+            " confirmed out of scope, since _async_fan_entity_changed() already early-returns before"
+            " any bookkeeping/context check is reached whenever fan_state_feedback is disabled."
+        ),
+    },
     476: {
         "version_fixed": "0.5.16",
         "title": "Migrate all 10 remaining scenarios to the coordinator-level Tier A harness",

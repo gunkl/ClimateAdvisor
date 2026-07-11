@@ -21,6 +21,7 @@ import importlib
 import sys
 import types
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 # Ensure HA stubs are installed before any coordinator import.
@@ -58,6 +59,7 @@ def _make_mock_engine() -> MagicMock:
     ae._override_confirm_pending = False
     ae._last_commanded_hvac_mode = None
     ae._fan_command_time = None
+    ae._fan_command_context_id = None  # Issue #482: event.context provenance
     ae.on_fan_turned_off = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
     ae.reconcile_fan_on_startup = AsyncMock()
@@ -72,11 +74,27 @@ def _make_fake_state(state_str: str, attributes: dict | None = None) -> MagicMoc
     return s
 
 
-def _make_fake_event(old_state, new_state) -> MagicMock:
-    """Build a fake HA state_changed event."""
+def _make_fake_event(old_state, new_state, context: Any = None) -> MagicMock:
+    """Build a fake HA state_changed event.
+
+    ``context`` (Issue #482): pass a fake Context-like object (anything with
+    ``.id``/``.parent_id``) to exercise the event.context provenance check in
+    ``_async_fan_entity_changed()``. Defaults to None to match a genuine external
+    state change (no CA attribution available) — the pre-#482 behavior.
+    """
     ev = MagicMock()
     ev.data = {"old_state": old_state, "new_state": new_state}
+    ev.context = context
     return ev
+
+
+def _make_fake_context(context_id: str, parent_id: str | None = None) -> MagicMock:
+    """Build a minimal fake HA Context (Issue #482) — just .id/.parent_id/.user_id."""
+    ctx = MagicMock()
+    ctx.id = context_id
+    ctx.parent_id = parent_id
+    ctx.user_id = None
+    return ctx
 
 
 def _make_coordinator_stub(config: dict | None = None) -> MagicMock:
@@ -374,4 +392,155 @@ class TestFanEntityDirectionDispatch:
         asyncio.run(method(event))
 
         ae.handle_fan_manual_override.assert_not_called()
+        ae.on_fan_turned_off.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestFanEntityContextProvenance (Issue #482 Part 2)
+# ---------------------------------------------------------------------------
+
+
+class TestFanEntityContextProvenance:
+    """event.context-based provenance in _async_fan_entity_changed() (Issue #482 Part 2).
+
+    Occupant impact: without this, CA can only tell "did I just issue this fan
+    command?" via a 30-second timing heuristic and a transient pending flag — both
+    of which can be fooled by timing edge cases (see Part 1's bookkeeping-gap
+    tests). HA's authoritative event.context lets CA definitively confirm a
+    transition it caused, without waiting on/trusting fragile timing.
+
+    Scope actually landed (see automation.py's _call_fan_service_with_context and
+    coordinator.py's _async_fan_entity_changed for the full rationale): a
+    event.context.id/parent_id match is treated as an ADDITIONAL, authoritative
+    "yes, this was CA" signal layered on top of (not replacing) the existing
+    _fan_command_pending/timing checks — because context propagation through
+    third-party fan/switch integrations (especially a one-way RF transmitter with
+    no feedback of its own) is not guaranteed reliable by HA core. A context
+    MISMATCH or absent context does not prove the change was external; it simply
+    falls through to the pre-existing checks unchanged.
+    """
+
+    def test_context_id_match_suppresses_even_without_pending_flag(self):
+        """A direct event.context.id match against automation_engine's last
+        recorded outgoing command context is authoritative — must suppress even
+        when _fan_command_pending happens to already be False (e.g. the command's
+        own finally block already ran by the time this event is processed)."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+        ae._fan_active = True  # CA believes fan is on
+        ae._fan_command_pending = False  # already cleared — context is the ONLY signal here
+        ae._fan_command_context_id = "ctx-ca-issued-123"
+
+        coord._is_recent_fan_command = MagicMock(return_value=False)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("off")
+        event = _make_fake_event(old_state, new_state, context=_make_fake_context("ctx-ca-issued-123"))
+
+        asyncio.run(method(event))
+
+        ae.on_fan_turned_off.assert_not_called()
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_context_parent_id_match_suppresses(self):
+        """A child context whose parent_id matches CA's issued context id is also
+        an authoritative match (HA sometimes wraps the calling context in a child
+        context as it propagates through a service handler)."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+        ae._fan_active = True
+        ae._fan_command_pending = False
+        ae._fan_command_context_id = "ctx-ca-issued-456"
+
+        coord._is_recent_fan_command = MagicMock(return_value=False)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("off")
+        event = _make_fake_event(
+            old_state, new_state, context=_make_fake_context("ctx-child-789", parent_id="ctx-ca-issued-456")
+        )
+
+        asyncio.run(method(event))
+
+        ae.on_fan_turned_off.assert_not_called()
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_context_mismatch_does_not_suppress_genuine_external_change(self):
+        """A non-matching context id must NOT prove the change was external by
+        itself, but it also must not incorrectly suppress a real external change —
+        the mismatch simply falls through to the existing checks, which (with no
+        pending flag and no recent command) correctly classify this as manual."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+        ae._fan_active = False  # CA believes fan is off
+        ae._fan_command_pending = False
+        ae._fan_command_context_id = "ctx-ca-issued-999"  # CA's last command, unrelated
+
+        coord._is_recent_fan_command = MagicMock(return_value=False)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("off")
+        new_state = _make_fake_state("on")
+        event = _make_fake_event(old_state, new_state, context=_make_fake_context("ctx-someone-else-111"))
+
+        asyncio.run(method(event))
+
+        ae.handle_fan_manual_override.assert_called_once()
+        ae.on_fan_turned_off.assert_not_called()
+
+    def test_no_context_falls_through_to_existing_checks(self):
+        """A genuinely external actor's state change typically carries no CA
+        context at all (context=None) — must fall through unaffected to the
+        pre-#482 checks, not be treated as suspicious or suppressed."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+        ae._fan_active = False
+        ae._fan_command_pending = False
+        ae._fan_command_context_id = None  # CA has never issued a command yet
+
+        coord._is_recent_fan_command = MagicMock(return_value=False)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("off")
+        new_state = _make_fake_state("on")
+        event = _make_fake_event(old_state, new_state, context=None)
+
+        asyncio.run(method(event))
+
+        ae.handle_fan_manual_override.assert_called_once()
+        ae.on_fan_turned_off.assert_not_called()
+
+    def test_context_match_suppresses_the_race_pending_flag_alone_would_miss(self):
+        """Reproduces the exact motivating scenario from Issue #482's investigation:
+        _fan_command_pending was already cleared (e.g. a sibling command's finally
+        block ran first) by the time the CA-issued command's own echo arrives, but
+        event.context still proves definitively that CA caused it — context is the
+        one signal that survives that specific bookkeeping race."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+        ae._fan_active = True
+        ae._fan_command_pending = False  # simulates the bookkeeping race from Part 1's investigation
+        ae._fan_command_context_id = "ctx-race-survivor"
+
+        coord._is_recent_fan_command = MagicMock(return_value=False)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("on")
+        new_state = _make_fake_state("off")
+        event = _make_fake_event(old_state, new_state, context=_make_fake_context("ctx-race-survivor"))
+
+        asyncio.run(method(event))
+
         ae.on_fan_turned_off.assert_not_called()

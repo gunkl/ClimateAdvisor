@@ -3026,3 +3026,140 @@ class TestCommandWhfControlEntityWiring:
             f"Expected exactly one turn_off reconcile command among scheduled tasks, got: "
             f"{engine.hass.services.async_call.call_args_list}"
         )
+
+
+class TestReconcileFanDriftBookkeeping:
+    """Issue #482 Part 1 — drift-reconciliation off-command must set the same
+    _fan_command_pending/_fan_command_time bookkeeping every other WHF command site
+    sets, so coordinator._async_fan_entity_changed() can suppress the resulting
+    state-changed event as CA-initiated instead of misclassifying it as manual
+    (which would start a spurious grace period).
+
+    Occupant impact if this regresses: a self-correcting drift-reconciliation
+    off-command gets misread as the user manually turning the fan off, starting an
+    unwanted 90-minute (or however configured) manual-override grace period that
+    blocks CA from re-engaging free cooling or HVAC when it otherwise should.
+    """
+
+    def _engine_with_confirmed_drift(self) -> tuple[AutomationEngine, list]:
+        """Build an engine primed so _reconcile_fan_physical_drift() confirms drift
+        on the 2nd call and schedules the off-command reconcile task (mirrors
+        TestCommandWhfControlEntityWiring.test_drift_correction_schedules_control_entity_reconcile).
+        """
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        state_mock = MagicMock()
+        state_mock.state = "on"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        engine._get_fan_physical_state_callback = MagicMock(return_value=False)
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._fan_active = True
+
+        scheduled: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()  # 2nd tick confirms drift -> CORRECT
+        return engine, scheduled
+
+    def test_bookkeeping_stamped_synchronously_before_task_runs(self):
+        """The core Issue #482 Part 1 assertion: _fan_command_pending/_fan_command_time
+        must already be set the instant _reconcile_fan_physical_drift() returns —
+        BEFORE the scheduled off-command coroutine has actually been awaited/run.
+        This is the exact window coordinator._async_fan_entity_changed() checks.
+
+        Revert-test: reverting the Issue #482 Part 1 fix (removing the sync stamp
+        before self.hass.async_create_task(...)) makes this assertion fail — the old
+        code left _fan_command_pending=False and _fan_command_time unchanged through
+        this whole window, matching every other unset-bookkeeping WHF command gap.
+        """
+        engine, scheduled = self._engine_with_confirmed_drift()
+
+        try:
+            assert scheduled, "Expected _reconcile_fan_physical_drift to schedule the reconcile task"
+            # Bookkeeping must already be set — the task has NOT been run yet at this point.
+            assert engine._fan_command_pending is True, (
+                "_fan_command_pending must be stamped synchronously before the off-command "
+                "task is created, matching _activate_fan()/_deactivate_fan()'s pattern"
+            )
+            assert engine._fan_command_time is not None, "_fan_command_time must be stamped synchronously"
+        finally:
+            # Close every scheduled-but-never-run coroutine to avoid an unraisable
+            # "coroutine was never awaited" RuntimeWarning at cross-test GC time
+            # (CLAUDE.md Testing Requirements — async mock hygiene).
+            for coro in scheduled:
+                coro.close()
+
+    def test_bookkeeping_cleared_after_task_completes(self):
+        """After the scheduled off-command coroutine actually runs to completion,
+        _fan_command_pending must return to False — mirroring the finally-block
+        pattern _activate_fan()/_deactivate_fan() already use, so the flag doesn't
+        stay stuck True and wrongly suppress a later, genuinely-external fan change.
+        """
+        engine, scheduled = self._engine_with_confirmed_drift()
+
+        for coro in scheduled:
+            asyncio.run(coro)
+
+        assert engine._fan_command_pending is False, (
+            "_fan_command_pending must be cleared once the reconcile off-command completes"
+        )
+
+    def test_fan_command_context_id_stamped_for_reconcile_off_command(self):
+        """Issue #482 Part 2: the reconcile off-command routes through
+        _call_fan_service_with_context (the same funnel _activate_fan/_deactivate_fan
+        use), so it also stamps _fan_command_context_id — giving the resulting
+        state-changed event a real HA Context to be attributed against."""
+        engine, scheduled = self._engine_with_confirmed_drift()
+
+        for coro in scheduled:
+            asyncio.run(coro)
+
+        assert engine._fan_command_context_id is not None, (
+            "Drift-reconciliation off-command must stamp _fan_command_context_id "
+            "via _call_fan_service_with_context, same as every other WHF command site"
+        )
+
+
+class TestCallFanServiceWithContext:
+    """Issue #482 Part 2 — every outgoing WHF fan/switch service call carries a
+    fresh HA Context, and _fan_command_context_id records its id so
+    coordinator._async_fan_entity_changed() can check event.context against it."""
+
+    def test_context_kwarg_passed_to_service_call(self):
+        """The service call must include a context= kwarg (a real Context instance,
+        not None) — required for HA to propagate it onto the resulting state write."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+
+        asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+
+        call = engine.hass.services.async_call.call_args_list[0]
+        assert call.args == ("fan", "turn_on", {"entity_id": "fan.whf"})
+        assert call.kwargs.get("context") is not None
+
+    def test_fan_command_context_id_recorded(self):
+        """_fan_command_context_id must be updated to the issued Context's id, so the
+        provenance check in coordinator.py has something real to compare against."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        assert engine._fan_command_context_id is None
+
+        asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+
+        call = engine.hass.services.async_call.call_args_list[0]
+        issued_context = call.kwargs["context"]
+        assert engine._fan_command_context_id == issued_context.id
+
+    def test_each_call_gets_a_distinct_context(self):
+        """Two separate commands must not share a context id — otherwise a stale
+        context from an earlier command could wrongly confirm attribution for a
+        later, unrelated event."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+
+        asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+        first_id = engine._fan_command_context_id
+
+        asyncio.run(engine._call_fan_service_with_context("fan", "turn_off", "fan.whf"))
+        second_id = engine._fan_command_context_id
+
+        assert first_id is not None
+        assert second_id is not None
+        assert first_id != second_id

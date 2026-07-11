@@ -172,6 +172,7 @@ _MANUAL_EVENT_TYPES = frozenset(
         "override_confirmed",
         "override_cleared",
         "override_self_resolved",
+        "override_adopted",
         "fan_manual_override",
     }
 )
@@ -440,6 +441,16 @@ def _render_override_self_resolved(p: dict, unit: str) -> tuple[str, str]:
     if detected and current:
         return f"Override self-resolved: {detected}->{current} (transient)", ""
     return "Override self-resolved (transient)", ""
+
+
+def _render_override_adopted(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    src = p.get("source", "")
+    pre_expiry = p.get("pre_expiry", False)
+    label = f"Override adopted ({mode} mode)" if mode else "Override adopted"
+    label = f"{label} -- automation agrees" + (", ended grace early" if pre_expiry else ", grace ended cleanly")
+    settings = f"trigger: {src}" if src else ""
+    return label, settings
 
 
 _GRACE_TRIGGER_LABELS: dict[str, str] = {
@@ -866,6 +877,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "override_cleared": _render_override_cleared,
     "override_confirmed": _render_override_confirmed,
     "override_self_resolved": _render_override_self_resolved,
+    "override_adopted": _render_override_adopted,
     "grace_started": _render_grace_started,
     "grace_expired": _render_grace_expired,
     "nat_vent_fan_on": _render_nat_vent_fan_on,
@@ -955,6 +967,7 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "override_detected",
         "override_confirmed",
         "override_cleared",
+        "override_adopted",
         "ceiling_guard_fired",
         "incident_detected",
         "setpoint_rejected",

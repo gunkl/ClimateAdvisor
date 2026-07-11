@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.16"
+VERSION = "0.5.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.17": [
+        "Fix #483: if a manual thermostat override starts a grace period and Climate Advisor's"
+        " own automation decision independently converges on the same HVAC mode (and, for"
+        " heat/cool modes, the same effective setpoint) the override already produced, the"
+        " override is now adopted instead of silently sitting out the rest of the grace window."
+        " Checked both pre-expiry (inside apply_classification(), so convergence is recognized"
+        " as soon as the next classification cycle agrees — not just at the timer's natural"
+        " expiry) and at natural grace expiry (skips the misleading 'your override has expired'"
+        " notification when nothing was actually reverted). Deliberately conservative: only"
+        " HVAC-mode overrides are eligible; setpoint-only overrides and fan/door-window grace"
+        " types are unchanged (see KNOWN_FIXES[483] for the full scope boundary). New Activity"
+        " Report event 'override_adopted'.",
+    ],
     "0.5.16": [
         "Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test"
         " scenarios (grace-period lifecycle, override detection/confirmation/self-resolve,"
@@ -1029,6 +1042,70 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    483: {
+        "version_fixed": "0.5.17",
+        "title": "Adopt matching automation decision instead of continuing a grace period",
+        "scope_covered": (
+            "automation.py: new _override_matches_current_decision() helper, called from two"
+            " sites. (1) apply_classification() (pre-expiry): when _manual_override_active and"
+            " the override's HVAC mode matches the classification about to be applied, the grace"
+            " timer is cancelled (_cancel_grace_timers()), the override is cleared"
+            " (reason='adopted_matching_decision'), an 'override_adopted' event is emitted, and"
+            " execution falls through to apply the (now-agreeing) classification normally this"
+            " same cycle — instead of the pre-existing early return that silently skipped for the"
+            " rest of the grace window. (2) _on_grace_expired() (natural expiry, the safe minimum"
+            " bar): the same match check runs in the normal-expiry branch; on a match, the"
+            " misleading 'your manual thermostat override has expired' notification is skipped"
+            " (nothing was actually reverted) and 'override_adopted' fires instead of the generic"
+            " 'grace_expired' event. Eligibility is deliberately narrow: only overrides that flow"
+            " through _confirm_override() and set _manual_override_mode qualify (covers the mode-"
+            " change/'normal' and door/window-pause/'pause' override paths — both ultimately reach"
+            " _confirm_override()). Setpoint-only overrides (_manual_override_source == 'setpoint')"
+            " are excluded outright — matching HVAC mode alone is not evidence the user's chosen"
+            " temperature has converged with automation's. For heat/cool modes, a match additionally"
+            " requires the thermostat's LIVE setpoint to be within OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F"
+            " (1.0°F, const.py) of what select_comfort_band() would arm right now for that mode —"
+            " added after cold_day_heat_all_day_with_override.json (a pending regression scenario)"
+            " demonstrated that a compound override (mode changed AND a deliberately different"
+            " setpoint, e.g. heat at 74°F when comfort_heat=70°F) must not be silently adopted just"
+            " because the mode happens to agree. New pending scenario"
+            " override_adopted_on_matching_decision.json exercises the full adopt path (pre-expiry,"
+            " mode+setpoint match) and was revert-tested (temporarily forcing"
+            " _override_matches_current_decision() to always return False; the scenario's 14:30"
+            " assertion correctly failed with the un-adopted carried-forward 'override_confirmed'"
+            " outcome, then passed again after restoring). ai_skills_activity.py: new"
+            " 'override_adopted' event registered in EVENT_RENDERERS, _MANUAL_EVENT_TYPES, and"
+            " _NO_DEDUP. tools/sim_harness/run_production.py: thermostat_state_changed events may"
+            " now optionally carry a 'temperature' field alongside hvac_mode (models a real"
+            " thermostat UI where mode+setpoint change in one interaction); omitted is a no-op,"
+            " identical to prior behavior for every pre-existing scenario. tools/sim_harness/"
+            " outcomes.py: registered 'override_adopted' as a named production outcome (was"
+            " previously falling through to the generic 'unknown:<type>' fallback) — cosmetic only,"
+            " does not change production_outcome_at()'s existing same-timestamp last-decision-wins"
+            " tie-break semantics."
+        ),
+        "scope_not_covered": (
+            "Fan-on overrides (_fan_override_active, handle_fan_manual_override()) are NOT"
+            " eligible for adoption — they never set _manual_override_mode, and the only"
+            " comparable 'would automation want the fan on right now' check is"
+            " check_natural_vent_conditions(), which is async and mutates engine state as part of"
+            " its own evaluation (not a pure/side-effect-free predicate safe to call just for"
+            " comparison) — deliberately left out per the conservative-when-in-doubt directive."
+            " Fan-off grace (on_fan_turned_off()) is not an override at all (_fan_override_active is"
+            " explicitly NOT set for this path) — there is nothing to 'adopt', it is a re-activation"
+            " gate, not a disagreement. Door/window pause/resume grace"
+            " (handle_all_doors_windows_closed(), resume_from_pause()) is automation-sourced"
+            " (source='automation') or already restores _current_classification.hvac_mode directly"
+            " at resume time (resume_from_pause()) — by construction there is no divergence left to"
+            " adopt for these paths; the adopt check is gated on source=='manual' and never reached"
+            " for automation-sourced grace. The pre-expiry check in apply_classification() only"
+            " re-evaluates when apply_classification() itself is called (each classification cycle,"
+            " ~30 min, or an explicit re-classification trigger) — it is not a new polling loop"
+            " during an active grace period (matching docs/grace-periods-spec.md's documented"
+            " no-polling invariant); a match that occurs between classification cycles is only"
+            " picked up at the next cycle or at natural grace expiry, whichever comes first."
+        ),
+    },
     476: {
         "version_fixed": "0.5.16",
         "title": "Migrate all 10 remaining scenarios to the coordinator-level Tier A harness",
@@ -4895,6 +4972,16 @@ CEILING_BRIDGE_TOLERANCE_F: float = 1.0  # bridge homes: require breach > comfor
 # the ceiling guard escalates nat-vent -> AC (savings homes accept a small overshoot before paying
 # for cooling; normal mode escalates at comfort_cool).
 CEILING_ESCALATION_SAVINGS_MARGIN_F: float = 2.0
+
+# ---------------------------------------------------------------------------
+# Grace-period adopt-on-match (Issue #483)
+# ---------------------------------------------------------------------------
+# How close the thermostat's live setpoint must be to the setpoint select_comfort_band()
+# would arm right now for a manual mode-override to be considered "matching" automation's
+# current decision and adopted early (see _override_matches_current_decision() in
+# automation.py). Deliberately tight -- this only exists to catch minor floating-point/
+# rounding noise, not to treat a genuinely different user-chosen temperature as a match.
+OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F: float = 1.0
 
 # Issue #249 — thermostat capability detection. Home Assistant's
 # ClimateEntityFeature.TARGET_TEMPERATURE_RANGE bit: when set in a climate entity's

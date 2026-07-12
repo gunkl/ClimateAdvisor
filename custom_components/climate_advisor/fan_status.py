@@ -14,6 +14,8 @@ dependency-free utility module imported by both ``coordinator.py`` and
 
 from __future__ import annotations
 
+from .const import REMOTE_TIMER_EVENT_HOURS
+
 FAN_STATUS_ACTIVE_VALUES: frozenset[str] = frozenset(
     {
         "active",
@@ -39,3 +41,24 @@ def is_ca_fan_running(fan_status: str) -> bool:
     in that state to be misreported as a contradiction.
     """
     return fan_status in FAN_STATUS_ACTIVE_VALUES
+
+
+def parse_remote_timer_event(event_type: str | None) -> tuple[bool, float | None]:
+    """Parse a QuietCool RF remote ``event_type`` token into a timer decision.
+
+    `event_type` is read from an ``event.*`` entity's
+    ``attributes["event_type"]`` (see docs/fan-remote-spec.md for the firmware
+    contract — ``gunkl/quietcool-house-fan``). This is the single source of
+    truth for the token-to-hours mapping (``const.REMOTE_TIMER_EVENT_HOURS``);
+    callers must not re-implement the mapping inline (Issue #486, following the
+    "sibling threshold drift" lesson from #400/#402/#417/#456/#458).
+
+    Returns ``(is_timer_event, hours)``:
+    - Recognized timer token (``timer_1h``..``timer_12h``) -> ``(True, <hours>)``
+    - ``timer_none`` -> ``(True, None)`` (use CA's configured grace duration)
+    - Any other token (``on``, ``off``, speed tokens, unknown, ``None``) ->
+      ``(False, None)`` — out of scope for this feature; caller should ignore.
+    """
+    if event_type not in REMOTE_TIMER_EVENT_HOURS:
+        return False, None
+    return True, REMOTE_TIMER_EVENT_HOURS[event_type]

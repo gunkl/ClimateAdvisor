@@ -82,6 +82,7 @@ from .const import (
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
+    CONF_FAN_REMOTE_ENTITY,
     CONF_FAN_STATE_ENTITY,
     CONF_FAN_STATE_FEEDBACK,
     CONF_GUEST_TOGGLE,
@@ -217,7 +218,7 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
-from .fan_status import is_ca_fan_running
+from .fan_status import is_ca_fan_running, parse_remote_timer_event
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
@@ -533,6 +534,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     self.hass,
                     _fan_state_entity,
                     self._async_fan_entity_changed,
+                )
+            )
+
+        # Listeners: fan RF remote event entity (Issue #486). Optional — when unset, no
+        # subscription is created and behavior is byte-for-byte unchanged from before this
+        # feature existed. See docs/fan-remote-spec.md for the firmware event contract.
+        fan_remote_entity = self.config.get(CONF_FAN_REMOTE_ENTITY)
+        if fan_remote_entity:
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    fan_remote_entity,
+                    self._async_fan_remote_changed,
                 )
             )
 
@@ -3681,6 +3695,43 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
             )
 
+    async def _async_fan_remote_changed(self, event: Event) -> None:
+        """Handle a QuietCool RF wall remote event (Issue #486).
+
+        `event` is a state-changed event for the configured ``fan_remote_entity`` (an
+        HA ``event.*`` entity — each remote press fires as a state change to a new
+        timestamp, with the decoded command in ``attributes['event_type']``). See
+        docs/fan-remote-spec.md for the firmware contract
+        (gunkl/quietcool-house-fan).
+
+        Only timer tokens are acted on this cut (timer_1h..timer_12h, timer_none);
+        everything else (on/off/speed, unknown, unavailable) is ignored — deliberately
+        not routed through a separate entry point (see handle_fan_manual_override()'s
+        docstring for why).
+        """
+        new_state = event.data.get("new_state")
+        if not new_state or new_state.state in ("unknown", "unavailable"):
+            return
+
+        event_type = new_state.attributes.get("event_type")
+        is_timer_event, hours = parse_remote_timer_event(event_type)
+        if not is_timer_event:
+            return
+
+        duration_seconds = hours * 3600 if hours is not None else None
+        _LOGGER.info(
+            "Fan RF remote timer event: event_type=%s -> duration=%s",
+            event_type,
+            f"{hours}h" if hours is not None else "configured default",
+        )
+        self.automation_engine.handle_fan_manual_override(
+            fan_before="?",
+            fan_after="on",
+            duration_override=duration_seconds,
+            remote_timer_hours=hours,
+        )
+        await self.async_request_refresh()
+
     async def _async_reassert_setpoint_after_fan_off(self) -> None:
         """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).
 
@@ -6790,6 +6841,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "fan_runtime_minutes": ae._get_fan_runtime_minutes(),
             "fan_override_active": ae._fan_override_active,
             "fan_override_time": ae._fan_override_time,
+            # Issue #486: QuietCool RF remote timer selection, for status-card display only.
+            "fan_remote_timer_hours": ae._fan_remote_timer_hours,
+            "fan_remote_timer_ends": (ae._grace_end_time if ae._fan_remote_timer_hours is not None else None),
             "fan_mode_config": ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
             "economizer_active": ae._economizer_active,
             "economizer_phase": ae._economizer_phase,

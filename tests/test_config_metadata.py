@@ -34,6 +34,7 @@ EXPECTED_KEYS = {
     "fan_entity",
     "fan_state_entity",
     "fan_state_feedback",
+    "fan_remote_entity",
     "fan_min_runtime_per_hour",
     "wake_time",
     "sleep_time",

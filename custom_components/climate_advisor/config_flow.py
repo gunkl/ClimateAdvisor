@@ -38,6 +38,7 @@ from .const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MIN_RUNTIME_PER_HOUR,
     CONF_FAN_MODE,
+    CONF_FAN_REMOTE_ENTITY,
     CONF_FAN_STATE_ENTITY,
     CONF_FAN_STATE_FEEDBACK,
     CONF_GITHUB_REPO,
@@ -481,6 +482,10 @@ class ClimateAdvisorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         description={"suggested_value": False},
                     ): selector.BooleanSelector(),
                     vol.Optional(
+                        CONF_FAN_REMOTE_ENTITY,
+                        description={"suggested_value": None},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="event")),
+                    vol.Optional(
                         CONF_FAN_MIN_RUNTIME_PER_HOUR,
                         default=DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
                     ): selector.NumberSelector(
@@ -863,7 +868,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
-            self._apply_step_input(user_input, (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY))
+            self._apply_step_input(user_input, (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY))
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -962,6 +967,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                             )
                         },
                     ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_FAN_REMOTE_ENTITY,
+                        description={"suggested_value": current.get(CONF_FAN_REMOTE_ENTITY)},
+                    ): selector.EntitySelector(selector.EntitySelectorConfig(domain="event")),
                     vol.Optional(
                         CONF_FAN_MIN_RUNTIME_PER_HOUR,
                         default=current.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR),

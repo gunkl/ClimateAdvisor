@@ -99,6 +99,7 @@ Supports whole-house fan and/or HVAC fan mode integration:
 - **Dual-entity WHF support**: An optional separate `fan_state_entity` lets CA read ground-truth physical state independently of the command entity (Type 2 installations)
 - **Command-only mode** (`fan_state_feedback` off, default): CA asserts the desired fan state idempotently without reading back entity state, avoiding false override detection on command-echo entities. Turn on `fan_state_feedback` for installations with a dedicated state sensor.
 - Integrated with the economizer two-phase cooling strategy (cool-down with AC, maintain with ventilation)
+- **QuietCool RF remote timer support** (optional, `fan_remote_entity`): if you flash your QuietCool whole-house fan's ESP32 controller with the [`gunkl/quietcool-house-fan`](https://github.com/gunkl/quietcool-house-fan) firmware, CA can hear physical wall-remote timer presses (1/2/4/8/12 hours) via an HA event entity and honor them as the fan's manual-override grace duration — see [docs/fan-remote-spec.md](docs/fan-remote-spec.md) (Issue #486). Leave the field blank if you don't use this hardware; nothing changes.
 
 ### Learning Engine
 
@@ -501,6 +502,7 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] AI Activity Report and Investigator's thermal-model sections no longer show an empty learning-health summary when the dashboard's Comfort Score sensor has real data for the same moment (#468)
 - [x] Chart's predicted-indoor curve can no longer silently disagree with its own displayed target band overnight when sleep temperatures aren't explicitly configured (#470)
 - [x] Continued consolidating the natural-ventilation decision surface (#429) into the rest of the codebase — a nat-vent floor formula, a fan-status suppression check, an occupancy-defer gate, and the dashboard's target-band resolver each converged from 2-4 independent copies down to one tested implementation, plus supporting test-infrastructure and coordinator-data cleanup (#452, #454, #456, #460, #464, #466)
+- [x] QuietCool RF wall-remote timer selections (1/2/4/8/12 hours) can now set the fan manual-override grace duration, so a physical remote timer press is honored instead of being overridden by CA's own automation partway through — optional, requires the `gunkl/quietcool-house-fan` firmware and a configured `fan_remote_entity` (#486)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)

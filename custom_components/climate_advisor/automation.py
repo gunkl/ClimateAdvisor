@@ -530,6 +530,10 @@ class AutomationEngine:
         self._fan_on_since: str | None = None  # ISO timestamp
         self._fan_override_active: bool = False
         self._fan_override_time: str | None = None
+        # RF remote timer selection in hours, for observability only (Issue #486).
+        # None when the active override wasn't started by a remote timer, or the
+        # remote selected "no timer" (falls back to configured manual_grace_seconds).
+        self._fan_remote_timer_hours: float | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
         # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
         # Restored when the whole-house fan deactivates so AC/heat resumes.
@@ -799,12 +803,25 @@ class AutomationEngine:
             return 0.0
 
     def handle_fan_manual_override(
-        self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None
+        self,
+        fan_before: str = "",
+        fan_after: str = "",
+        event_context_id: str | None = None,
+        duration_override: float | None = None,
+        remote_timer_hours: float | None = None,
     ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
         Idempotent: safe to call even if an override is already active (re-stamps the
         time and restarts the grace period so the timer is always fresh).
+
+        This is also the single entry point for QuietCool RF remote timer selections
+        (Issue #486, coordinator._async_fan_remote_changed) — a remote timer press is a
+        manual fan override just like any other, it just supplies its own grace
+        duration instead of using the configured default. Deliberately NOT a separate
+        method: the two callers must share the same override/grace bookkeeping so a
+        future change to one path can't silently stop covering the other (the
+        "sibling threshold drift" failure mode from #400/#402/#417/#456/#458).
 
         Args:
             fan_before: Fan state before the manual change (e.g. "on", "auto").
@@ -813,15 +830,24 @@ class AutomationEngine:
                 any (Issue #482) — surfaced in the Activity Report payload as diagnostic
                 provenance data so a future investigation of a genuinely-external fan
                 event doesn't need cross-source timestamp archaeology.
+            duration_override: When set (seconds), the grace period lasts exactly this
+                long instead of the configured manual_grace_seconds. Supplied by an RF
+                remote timer selection; None means "use the configured default"
+                (also the case for a plain physical fan-on with no timer info).
+            remote_timer_hours: The RF remote's selected timer duration in hours, for
+                observability only (dashboard/status display + serialized state). None
+                for a non-remote-triggered override, or when the remote picked "no timer".
         """
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_time = dt_util.now().isoformat()
+        self._fan_remote_timer_hours = remote_timer_hours
         _LOGGER.info(
-            "Fan override: set — manual fan change detected %s->%s, override active since %s, grace period starting",
+            "Fan override: set — manual fan change detected %s->%s, override active since %s, grace period starting%s",
             fan_before or "?",
             fan_after or "?",
             self._fan_override_time,
+            f" (RF remote timer: {remote_timer_hours}h)" if remote_timer_hours is not None else "",
         )
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -832,9 +858,10 @@ class AutomationEngine:
                     "override_active_since": self._fan_override_time,
                     "fan_device": _fan_device_label(self.config),
                     "event_context_id": event_context_id,
+                    "remote_timer_hours": remote_timer_hours,
                 },
             )
-        self._start_grace_period("manual", trigger="fan_manual_override")
+        self._start_grace_period("manual", trigger="fan_manual_override", duration_override=duration_override)
 
     def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None) -> None:
         """Handle the user turning the fan OFF — clears fan state and gates nat-vent re-activation (Issue #359).
@@ -869,6 +896,7 @@ class AutomationEngine:
             )
             self._fan_override_active = False
             self._fan_override_time = None
+            self._fan_remote_timer_hours = None
 
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -956,6 +984,7 @@ class AutomationEngine:
             )
             self._fan_override_active = False
             self._fan_override_time = None
+            self._fan_remote_timer_hours = None
             # Restart the min-runtime cycle that was suspended when override was set
             self.hass.async_create_task(self.start_min_fan_runtime_cycles())
 
@@ -3056,13 +3085,27 @@ class AutomationEngine:
             return
 
         if self._fan_override_active:
-            _LOGGER.debug(
-                "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
-                trigger,
-                f"{indoor:.1f}" if indoor is not None else "unavailable",
-                f"{outdoor:.1f}" if outdoor is not None else "unavailable",
-                True,
-            )
+            if self._fan_remote_timer_hours is not None:
+                # Issue #486: this is the second suppression choke point (fan_thermostat_check
+                # never reaches _deactivate_fan() when overridden — it returns "keep" directly),
+                # so it needs its own WARNING mirroring the one in _deactivate_fan() for the
+                # absolute-timer behavior to be observable regardless of which guard fires.
+                _LOGGER.warning(
+                    "Fan thermostat cycle-off suppressed by active RF remote timer (%sh):"
+                    " trigger=%s indoor=%s outdoor=%s",
+                    self._fan_remote_timer_hours,
+                    trigger,
+                    f"{indoor:.1f}" if indoor is not None else "unavailable",
+                    f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                )
+            else:
+                _LOGGER.debug(
+                    "Fan thermostat check: trigger=%s indoor=%s outdoor=%s active=%s decision=keep",
+                    trigger,
+                    f"{indoor:.1f}" if indoor is not None else "unavailable",
+                    f"{outdoor:.1f}" if outdoor is not None else "unavailable",
+                    True,
+                )
             return
 
         comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
@@ -3406,12 +3449,17 @@ class AutomationEngine:
         self._start_grace_period("manual", trigger="dashboard_resume")
         return restore_mode
 
-    def _start_grace_period(self, source: str, trigger: str = "") -> None:
+    def _start_grace_period(self, source: str, trigger: str = "", duration_override: float | None = None) -> None:
         """Start a grace period after HVAC is resumed.
 
         Args:
             source: "manual" for user-initiated overrides,
                     "automation" for Climate Advisor resumptions.
+            duration_override: When set (seconds), bypasses the configured manual
+                grace duration and uses this value instead. Used by RF-remote timer
+                selections (Issue #486) to make the grace period last exactly as
+                long as the user asked at the physical remote. Only meaningful when
+                source == "manual"; ignored otherwise.
 
         Architecture-reset Step 2 (session state machine slice): the
         duration/should_notify RESOLUTION now lives in
@@ -3424,9 +3472,14 @@ class AutomationEngine:
         self._cancel_grace_timers()
 
         now = dt_util.now()
+        manual_duration = (
+            duration_override
+            if (source == "manual" and duration_override is not None)
+            else self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS)
+        )
         grace = decide_grace_start(
             source=source,
-            manual_duration_seconds=self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS),
+            manual_duration_seconds=manual_duration,
             manual_should_notify=self.config.get(CONF_MANUAL_GRACE_NOTIFY, True),
             automation_duration_seconds=self.config.get(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS),
             automation_should_notify=self.config.get(CONF_AUTOMATION_GRACE_NOTIFY, True),
@@ -4818,7 +4871,18 @@ class AutomationEngine:
             return
 
         if self._fan_override_active:
-            _LOGGER.info("Fan override active — skipping fan deactivation")
+            if self._fan_remote_timer_hours is not None:
+                # Issue #486: the override is absolute while an RF remote timer is active —
+                # this shutoff (nat-vent exit, comfort-floor breach, cycle-off, etc.) is
+                # suppressed and logged as a WARNING (not silently dropped at INFO) so the
+                # "log-only" absolute-timer behavior is observable in HA logs.
+                _LOGGER.warning(
+                    "Fan deactivation suppressed by active RF remote timer (%sh) — reason: %s",
+                    self._fan_remote_timer_hours,
+                    reason,
+                )
+            else:
+                _LOGGER.info("Fan override active — skipping fan deactivation")
             return
 
         # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
@@ -5192,6 +5256,9 @@ class AutomationEngine:
         # reconcile_fan_on_startup() runs shortly after and decides adopt-on / turn-off.
         self._fan_override_active = False
         self._fan_override_time = None
+        # Issue #486: an RF remote timer selection is part of the override it started —
+        # not persisted/restored, same as the rest of the override/grace clean slate above.
+        self._fan_remote_timer_hours = None
         _LOGGER.info(
             "Fan override: restart clean-slate — _fan_override_active and _fan_override_time "
             "cleared (Issue #327); reconcile will decide fan disposition"
@@ -5229,6 +5296,9 @@ class AutomationEngine:
             "fan_on_since": self._fan_on_since,
             "fan_override_active": self._fan_override_active,
             "fan_override_time": self._fan_override_time,
+            # Issue #486: RF remote timer hours, for observability only — like the two
+            # fields above, always cleared on restore() (clean-slate policy), not restored.
+            "fan_remote_timer_hours": self._fan_remote_timer_hours,
             "fan_min_runtime_active": self._fan_min_runtime_active,
             "pre_fan_hvac_mode": self._pre_fan_hvac_mode,
             "last_welcome_home_notified": (

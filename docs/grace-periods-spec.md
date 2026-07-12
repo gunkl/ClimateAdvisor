@@ -92,8 +92,9 @@ the fan's current state (command tracking vs. physical state read).
 2. User manually changes fan state — `handle_fan_manual_override()` calls `_start_grace_period("manual")` directly.
 3. User presses "Resume" on the dashboard — `resume_from_pause()` clears the pause and calls `_start_grace_period("manual")`.
 4. A manual thermostat override is confirmed after the `CONF_OVERRIDE_CONFIRM_PERIOD` window — `_confirm_override()` calls `_start_grace_period("manual")`.
+5. **(Issue #486)** User selects a timer duration on the QuietCool RF wall remote — `coordinator._async_fan_remote_changed()` calls the SAME `handle_fan_manual_override()` as trigger #2, but with an optional `duration_override` (seconds) that makes the grace period last exactly as long as the remote's selected timer instead of the configured default. See [fan-remote-spec.md](fan-remote-spec.md) for the full firmware event contract and mapping.
 
-**Duration:** Configurable via `CONF_MANUAL_GRACE_PERIOD` (`manual_grace_seconds`). Default: `DEFAULT_MANUAL_GRACE_SECONDS = 1800` seconds (30 minutes). A configured value of 0 disables manual grace entirely (timer is not started, `_grace_active` remains `False`).
+**Duration:** Configurable via `CONF_MANUAL_GRACE_PERIOD` (`manual_grace_seconds`). Default: `DEFAULT_MANUAL_GRACE_SECONDS = 1800` seconds (30 minutes). A configured value of 0 disables manual grace entirely (timer is not started, `_grace_active` remains `False`). **Exception:** an RF remote timer (trigger #5 above) overrides this with its own duration via `_start_grace_period(duration_override=...)`.
 
 **What it suppresses:** During active manual grace, `handle_door_window_open()` checks `self._grace_active` early (L1053–L1066). If grace is active AND outdoor temperature is at or above `nat_vent_threshold` (i.e., outdoor is NOT cool enough for natural ventilation), the method returns immediately without pausing HVAC. If outdoor is cool enough for natural ventilation, execution falls through to the nat-vent path — grace does not suppress nat-vent activation.
 

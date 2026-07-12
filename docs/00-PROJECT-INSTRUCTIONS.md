@@ -37,6 +37,7 @@ You are helping David build, iterate on, and improve **Climate Advisor**, a cust
 | How does the production simulation harness work — what replaced the old ClimateSimulator, and what are Tier A vs Tier B? | Issue #236 eliminated the standalone simulator. `tools/sim_harness/` drives the real `AutomationEngine` headless (FakeHass + FakeScheduler). Tier A runs every commit; Tier B (HeadlessTarry) covers coordinator state-listener timing and restart behavior. | [Sim Harness Brief](sim-harness-brief.md) |
 | What are the harness modules — FakeHass, FakeScheduler, build_engine, run_production, outcomes — and how do they fit together? | FakeHass intercepts service calls → action_log; FakeScheduler is a virtual clock priority queue; build_engine assembles the headless engine; run_production dispatches scenario events; outcomes maps event_log to legacy assertion vocab. | [Sim Harness Spec](sim-harness-spec.md) |
 | hacs-compliance | HACS compliance requirements, manifest fields, review process, maintenance rules | [docs/hacs-compliance.md](hacs-compliance.md) |
+| How does CA hear a QuietCool RF wall remote timer selection, and what does it do? | Optional `fan_remote_entity` (HA `event.*` entity from the `gunkl/quietcool-house-fan` firmware). A timer press calls the SAME `handle_fan_manual_override()` as physical fan-on detection, with an optional duration override — no new predicate, absolute/log-only suppression via the existing override guard. | [Fan Remote Spec](fan-remote-spec.md) |
 
 ## Context
 

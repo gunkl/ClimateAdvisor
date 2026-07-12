@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.18"
+VERSION = "0.5.19"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.19": [
+        "Feat #486: Climate Advisor can now hear the QuietCool whole-house fan's physical RF"
+        " wall remote (via the gunkl/quietcool-house-fan ESPHome firmware's event entity) and"
+        " honor a timer selection made at the remote. Previously, pressing '8 hours' on the"
+        " remote had no effect on CA's own automatic fan-off timing — CA would still shut the"
+        " fan off on its usual ~30-90 minute grace period, contradicting what the person just"
+        " told the fan to do. Now, when an optional Fan RF Remote Event Entity is configured,"
+        " a 1/2/4/8/12-hour remote timer selection sets the duration of CA's fan manual-override"
+        " grace period, so CA backs off for exactly as long as the user asked. Fully optional and"
+        " non-breaking: leave the field blank and nothing changes. See docs/fan-remote-spec.md"
+        " for the firmware event contract and mapping.",
+    ],
     "0.5.18": [
         "Fix #434: optional entity settings can now actually be cleared. Previously, if you'd set"
         " a Home/Away toggle, Vacation toggle, Guest toggle, fan entity, fan-state entity, or a"
@@ -1090,6 +1102,45 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    486: {
+        "version_fixed": "0.5.19",
+        "title": "QuietCool RF remote timer events set the fan manual-override grace duration",
+        "scope_covered": (
+            "Adds an optional CONF_FAN_REMOTE_ENTITY ('fan_remote_entity') config field (an HA"
+            " event entity, e.g. event.quietcool_remote from the gunkl/quietcool-house-fan"
+            " firmware). When set, coordinator._async_fan_remote_changed subscribes via"
+            " async_track_state_change_event and parses attributes['event_type'] with the new"
+            " pure helper fan_status.parse_remote_timer_event() against the single-source mapping"
+            " const.REMOTE_TIMER_EVENT_HOURS. Recognized timer tokens (timer_1h/2h/4h/8h/12h,"
+            " timer_none) call the EXISTING automation.handle_fan_manual_override(), extended with"
+            " an optional duration_override parameter (seconds) that is threaded through to the"
+            " existing _start_grace_period(); when set it bypasses decide_grace_start() and uses"
+            " the RF-supplied duration instead of the configured manual_grace_seconds. No new"
+            " override predicate or new suppression guard was added — the RF timer is a manual"
+            " override, so all existing suppression already funnels through the existing"
+            " _fan_override_active guard in _deactivate_fan() (nat-vent exit, comfort-floor"
+            " breach, standard cycle-off, min-runtime cycle-off all covered for free). A WARNING"
+            " is now logged at that guard when the suppressed reason is a comfort/hard-floor exit,"
+            " so absolute-timer behavior is observable. timer_none uses the configured grace"
+            " duration (no new default constant). Non-recognized event_type tokens (on/off/speed)"
+            " are explicitly out of scope for this feature and are ignored. Clearing/expiry rides"
+            " entirely on the existing physical fan-off detection and grace-expiry paths — no new"
+            " persistence; the RF timer state does not survive an HA restart, consistent with the"
+            " existing clean-slate override/grace reset in restore_state() (Issue #327/#282)."
+        ),
+        "scope_not_covered": (
+            "Speed tokens (low/medium/high) and explicit on/off event handling are NOT decoded or"
+            " acted on in this feature — only the timer_* family. The off/clear path depends on"
+            " fan_entity/fan_state_entity already being configured for physical fan-off detection;"
+            " if the WHF entity isn't configured, an RF-started override will only clear via grace"
+            " expiry, never via the remote's own hardware timer completing early. Because firmware"
+            " events are edge-triggered, a bare power-on that does not also change the timer field"
+            " may not emit timer_none, so CA may not start a grace period from a plain 'on' press"
+            " until an explicit timer token is sent. No safety-exception path was added: the"
+            " timer is fully absolute per the locked #486 decision — genuine safety conditions are"
+            " not modeled here and will log-only, same as any other manual fan override today."
+        ),
+    },
     434: {
         "version_fixed": "0.5.18",
         "title": "Optional entity config fields can be cleared (leaving a field blank now unsets it)",
@@ -4349,6 +4400,19 @@ DEFAULT_FAN_MODE = FAN_MODE_DISABLED
 CONF_FAN_MIN_RUNTIME_PER_HOUR = "fan_min_runtime_per_hour"
 DEFAULT_FAN_MIN_RUNTIME_PER_HOUR = 0  # minutes; 0 = disabled
 
+# QuietCool RF remote timer events (Issue #486)
+# Optional `event.*` entity from the gunkl/quietcool-house-fan ESPHome firmware.
+# See docs/fan-remote-spec.md for the full firmware event contract.
+CONF_FAN_REMOTE_ENTITY = "fan_remote_entity"
+REMOTE_TIMER_EVENT_HOURS = {
+    "timer_1h": 1.0,
+    "timer_2h": 2.0,
+    "timer_4h": 4.0,
+    "timer_8h": 8.0,
+    "timer_12h": 12.0,
+    "timer_none": None,  # remote's default: use configured manual_grace_seconds
+}
+
 # Natural ventilation mode (door/window open + outdoor air within comfort range)
 CONF_NATURAL_VENT_DELTA = "natural_vent_delta"
 # Ceiling tolerance above comfort_cool for nat vent.
@@ -4623,6 +4687,18 @@ CONFIG_METADATA = {
             "The fan or switch entity to control for whole-house ventilation."
             " Only used when fan mode is 'whole_house_fan' or 'both'."
         ),
+        "category": "fan",
+    },
+    "fan_remote_entity": {
+        "label": "Fan RF Remote Event Entity",
+        "description": (
+            "Optional event entity (e.g. from the gunkl/quietcool-house-fan ESPHome firmware) that"
+            " fires when the physical RF wall remote is pressed. When set, a remote timer selection"
+            " (1/2/4/8/12 hours) sets the duration of the fan manual-override grace period, so CA"
+            " honors the user's chosen runtime instead of the configured default. Leave blank to"
+            " disable — no subscription is created and behavior is unchanged."
+        ),
+        "sensitive": False,
         "category": "fan",
     },
     "fan_state_entity": {

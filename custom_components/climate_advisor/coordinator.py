@@ -2922,6 +2922,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state:
             return
 
+        # Issue #489: refresh immediately on every raw transition (open or closed) so
+        # contact_status/contact_sensors reflect live sensor state right away. This is
+        # display-only — it does not affect the debounce below, which still exclusively
+        # gates the HVAC pause/resume and nat-vent decision.
+        self.hass.async_create_task(self.async_request_refresh())
+
         if self._is_sensor_open(entity_id):
             # Sensor transitioned to open — start debounce timer if not already running
             if entity_id in self._door_open_timers:
@@ -2982,8 +2988,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
             cancel = async_call_later(self.hass, debounce_sec, _debounce_expired)
             self._door_open_timers[entity_id] = cancel
-            # Trigger coordinator refresh so next_automation sensor shows debounce pending state
-            self.hass.async_create_task(self.async_request_refresh())
         else:
             # Sensor transitioned to closed — cancel any pending debounce timer
             cancel = self._door_open_timers.pop(entity_id, None)
@@ -3010,6 +3014,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ):
                     self._today_record.window_physical_close_time = dt_util.now().isoformat()
                 await self.automation_engine.handle_all_doors_windows_closed()
+                # Issue #489: post-decision refresh, mirroring the open path's
+                # post-handle_door_window_open refresh above — covers the real-pause-
+                # resume case (HVAC mode/temp restored, grace started), not just the
+                # display-only case already handled by the top-of-function refresh.
+                self.hass.async_create_task(self.async_request_refresh())
                 await self._async_save_state()
 
     async def _async_thermostat_changed(self, event: Event) -> None:

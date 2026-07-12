@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.19"
+VERSION = "0.5.20"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.20": [
+        "Fix #489: the Doors/Windows status card could show a stale 'N open' reading for"
+        " up to 30 minutes after a monitored door or window was actually closed again."
+        " Brief real door use (a few seconds) was always detected correctly, but closing"
+        " it back up didn't force the dashboard to refresh — only opening did. Now every"
+        " sensor transition, open or closed, refreshes the status display immediately."
+        " Automation timing is unaffected: the existing debounce still exclusively"
+        " governs when HVAC actually pauses or resumes for a door/window event.",
+    ],
     "0.5.19": [
         "Feat #486: Climate Advisor can now hear the QuietCool whole-house fan's physical RF"
         " wall remote (via the gunkl/quietcool-house-fan ESPHome firmware's event entity) and"
@@ -1102,6 +1111,33 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    489: {
+        "version_fixed": "0.5.20",
+        "title": "Doors/Windows status card refreshes immediately on sensor close, not just open",
+        "scope_covered": (
+            "coordinator._async_door_window_changed() now requests an immediate coordinator"
+            " refresh (async_request_refresh) at the top of the function on every raw sensor"
+            " transition — open or closed — so contact_status/contact_sensors reflect live"
+            " state right away regardless of debounce. This is purely a display refresh;"
+            " it does not change CONF_SENSOR_DEBOUNCE timing or the _paused_by_door /"
+            " _natural_vent_active decision logic, which are unaffected. Previously only the"
+            " open branch requested an immediate refresh (line ~2986 pre-fix); the close"
+            " branch had none, so a stale 'N open' reading could persist until the next"
+            " 30-minute coordinator update_interval. Also added a post-decision refresh"
+            " after handle_all_doors_windows_closed() in the close branch, mirroring the"
+            " existing post-handle_door_window_open() refresh in the open branch — covers"
+            " a real, debounce-confirmed pause/resume cycle (HVAC mode/temp restored, grace"
+            " started) getting reflected promptly too, not just the raw contact reading."
+        ),
+        "scope_not_covered": (
+            "Does not touch CONF_SENSOR_DEBOUNCE, pause/resume decision timing, nat-vent"
+            " logic, or any HVAC command behavior. Does not address the separate, confirmed"
+            " pre-existing test-order-dependent flakiness in"
+            " TestGracePeriodDuration/TestGracePeriodExpiry in test_door_window.py (fails"
+            " when that file is run in isolation, passes in the full suite) — unrelated to"
+            " this fix, reproduces identically on main before this change."
+        ),
+    },
     486: {
         "version_fixed": "0.5.19",
         "title": "QuietCool RF remote timer events set the fan manual-override grace duration",

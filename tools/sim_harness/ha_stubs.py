@@ -170,6 +170,59 @@ class _MockHomeAssistantView:
         return _MockJsonResponse({"message": message}, status_code)
 
 
+class _MockConfigFlow:
+    """Minimal stand-in for homeassistant.config_entries.ConfigFlow.
+
+    Real ``ConfigFlow`` subclasses pass ``domain=DOMAIN`` as a class keyword
+    argument (e.g. ``class ClimateAdvisorConfigFlow(ConfigFlow, domain=DOMAIN)``).
+    ``object.__init_subclass__`` rejects keyword arguments, so a plain base class
+    would raise ``TypeError`` at import time — this swallows them. Realifying this
+    base (instead of leaving it a ``MagicMock`` attribute) is what lets the flow
+    subclass become a *real* class whose methods can be exercised directly in
+    tests (mirrors the SensorEntity/HomeAssistantView realification, Issue #452).
+    """
+
+    def __init_subclass__(cls, **kwargs):  # noqa: ANN001, ANN003
+        # Consume HA's ``domain=`` (and any future) class kwargs.
+        super().__init_subclass__()
+
+    # Flow-result helpers — return simple sentinel dicts mirroring the shape of
+    # HA's FlowResult so real step handlers can call them without aiohttp/HA.
+    def async_show_form(self, **kwargs):  # noqa: ANN003
+        return {"type": "form", **kwargs}
+
+    def async_show_menu(self, **kwargs):  # noqa: ANN003
+        return {"type": "menu", **kwargs}
+
+    def async_create_entry(self, **kwargs):  # noqa: ANN003
+        return {"type": "create_entry", **kwargs}
+
+    def async_abort(self, **kwargs):  # noqa: ANN003
+        return {"type": "abort", **kwargs}
+
+
+class _MockOptionsFlow:
+    """Minimal stand-in for homeassistant.config_entries.OptionsFlow.
+
+    Provides the same FlowResult helpers as :class:`_MockConfigFlow`. ``hass`` and
+    ``config_entry`` are left as plain instance attributes (set by the flow
+    manager in production, set directly by tests here) rather than properties, so
+    tests can assign them on a partially-instantiated instance.
+    """
+
+    def async_show_form(self, **kwargs):  # noqa: ANN003
+        return {"type": "form", **kwargs}
+
+    def async_show_menu(self, **kwargs):  # noqa: ANN003
+        return {"type": "menu", **kwargs}
+
+    def async_create_entry(self, **kwargs):  # noqa: ANN003
+        return {"type": "create_entry", **kwargs}
+
+    def async_abort(self, **kwargs):  # noqa: ANN003
+        return {"type": "abort", **kwargs}
+
+
 class _SensorStateClass(_enum.StrEnum):
     MEASUREMENT = "measurement"
     TOTAL = "total"
@@ -229,6 +282,18 @@ def install_ha_stubs() -> None:
 
     http = sys.modules["homeassistant.components.http"]
     http.HomeAssistantView = _MockHomeAssistantView
+
+    # Realify the flow base classes so config_flow.py's ConfigFlow/OptionsFlow
+    # subclasses become *real* classes (a MagicMock base makes the subclass a
+    # MagicMock, forcing mirror-logic tests). See _MockConfigFlow docstring.
+    config_entries = sys.modules["homeassistant.config_entries"]
+    config_entries.ConfigFlow = _MockConfigFlow
+    config_entries.OptionsFlow = _MockOptionsFlow
+    # config_flow.py uses ``from homeassistant import config_entries`` (parent +
+    # attribute), which otherwise binds an auto-generated child MagicMock instead
+    # of the patched submodule above. Pin the parent attribute to the real
+    # sys.modules entry so the realified bases are actually seen.
+    sys.modules["homeassistant"].config_entries = config_entries
 
     const = sys.modules["homeassistant.const"]
     const.UnitOfTemperature = _UnitOfTemperature

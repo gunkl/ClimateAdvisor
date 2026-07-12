@@ -582,6 +582,28 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     def __init__(self) -> None:
         """Initialize the options flow."""
         self._updates: dict[str, Any] = {}
+        # Keys that a step owns but that came back cleared (omitted from the
+        # submitted input). Applied as deletions in async_step_save so optional
+        # entity fields can actually be emptied (Issue #434).
+        self._removed: set[str] = set()
+
+    def _apply_step_input(self, user_input: dict[str, Any], clearable_keys: tuple[str, ...]) -> None:
+        """Merge a step's input; treat any omitted clearable optional-entity key as an explicit clear.
+
+        Optional entity fields are declared with ``suggested_value`` and no
+        ``default=``. When the user clears one, voluptuous drops the key from
+        ``user_input`` entirely — so a plain ``self._updates.update(user_input)``
+        would silently keep the old stored value (Issue #434). For each key the
+        step owns: if present, it's a set/update; if absent, it's a clear, which
+        we record for removal at save time.
+        """
+        for key in clearable_keys:
+            if key in user_input:
+                self._removed.discard(key)
+            else:
+                self._removed.add(key)
+                self._updates.pop(key, None)
+        self._updates.update(user_input)
 
     # ---- Menu ----
 
@@ -783,7 +805,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         """Temperature source selection."""
         if user_input is not None:
-            self._updates.update(user_input)
+            self._apply_step_input(user_input, ("outdoor_temp_entity", "indoor_temp_entity"))
             _LOGGER.debug(
                 "Options — outdoor_source=%s, indoor_source=%s",
                 user_input.get("outdoor_temp_source"),
@@ -841,7 +863,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
-            self._updates.update(user_input)
+            self._apply_step_input(user_input, (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY))
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -957,7 +979,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             if CONF_WELCOME_HOME_DEBOUNCE in user_input:
                 user_input[CONF_WELCOME_HOME_DEBOUNCE] = int(user_input[CONF_WELCOME_HOME_DEBOUNCE] * 60)
-            self._updates.update(user_input)
+            self._apply_step_input(user_input, (CONF_HOME_TOGGLE, CONF_VACATION_TOGGLE, CONF_GUEST_TOGGLE))
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -1515,10 +1537,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_save(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Merge all updates and save."""
+        data = {**self.config_entry.data, **self._updates}
+        # Apply explicit clears (Issue #434): keys a step owned but that came back
+        # empty are removed so optional entity fields can actually be unset.
+        for key in self._removed:
+            data.pop(key, None)
         self.hass.config_entries.async_update_entry(
             self.config_entry,
-            data={**self.config_entry.data, **self._updates},
+            data=data,
         )
         await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        _LOGGER.info("Options updated — reload triggered")
+        _LOGGER.info("Options updated — reload triggered (cleared=%d)", len(self._removed))
         return self.async_create_entry(title="", data={})

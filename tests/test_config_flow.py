@@ -43,6 +43,54 @@ def _make_hass() -> MagicMock:
     return hass
 
 
+def _make_options_flow(entry_data: dict):
+    """Instantiate the REAL options flow for direct invocation.
+
+    Enabled by the ha_stubs realification of ``config_entries.OptionsFlow``
+    (same pattern as SensorEntity/HomeAssistantView, Issue #452). Returns
+    ``(flow, captured)`` where ``captured['data']`` is the dict persisted by
+    ``async_step_save``.
+
+    DOCTRINE: options-flow tests must exercise the production step handlers and
+    save path — never re-implement the merge in the test body. A mirror of the
+    merge embeds the same logic it claims to test and cannot catch a bug in it
+    (this is exactly how Issue #434 shipped despite green tests).
+    """
+    from unittest.mock import AsyncMock
+
+    from custom_components.climate_advisor.config_flow import ClimateAdvisorOptionsFlow
+
+    flow = object.__new__(ClimateAdvisorOptionsFlow)
+    flow._updates = {}
+    flow._removed = set()
+    flow.config_entry = _make_config_entry(entry_data)
+
+    captured: dict = {}
+    hass = MagicMock()
+    hass.config_entries.async_update_entry = MagicMock(
+        side_effect=lambda entry, data: captured.__setitem__("data", data)
+    )
+    hass.config_entries.async_reload = AsyncMock()
+    flow.hass = hass
+    return flow, captured
+
+
+def _run_options_flow(entry_data: dict, steps: list[tuple[str, dict]]) -> dict:
+    """Drive the REAL flow: apply each (step_method_name, user_input), then save.
+
+    Returns the dict actually persisted by ``async_step_save``.
+    """
+    flow, captured = _make_options_flow(entry_data)
+
+    async def _drive() -> None:
+        for method_name, user_input in steps:
+            await getattr(flow, method_name)(user_input)
+        await flow.async_step_save()
+
+    asyncio.run(_drive())
+    return captured["data"]
+
+
 FULL_CONFIG = {
     "weather_entity": "weather.forecast_home",
     "climate_entity": "climate.living_room",
@@ -1818,14 +1866,15 @@ class TestOptionsFlowMenu:
         assert "save" in OPTIONS_MENU_OPTIONS
 
     def test_save_merges_updates(self):
-        """Simulate the save step merging accumulated updates."""
-        original = dict(FULL_CONFIG)
-        updates = {"comfort_heat": 72, "learning_enabled": False}
-        merged = {**original, **updates}
-        assert merged["comfort_heat"] == 72
-        assert merged["learning_enabled"] is False
+        """The REAL save step merges accumulated updates and preserves untouched fields."""
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [("async_step_advanced", {"learning_enabled": False, "aggressive_savings": True})],
+        )
+        assert data["learning_enabled"] is False
+        assert data["aggressive_savings"] is True
         # Untouched fields preserved
-        assert merged["weather_entity"] == "weather.forecast_home"
+        assert data["weather_entity"] == "weather.forecast_home"
 
 
 # ---------------------------------------------------------------------------
@@ -1866,17 +1915,19 @@ class TestNotificationsStep:
         assert config.get("email_briefing", True) is True
 
     def test_notifications_saves_to_updates(self):
-        """Submitted notification values accumulate in _updates dict."""
-        updates: dict = {}
-        user_input = {
-            "push_briefing": False,
-            "email_grace_expired": False,
-            "manual_grace_notify": True,
-        }
-        updates.update(user_input)
-        assert updates["push_briefing"] is False
-        assert updates["email_grace_expired"] is False
-        assert updates["manual_grace_notify"] is True
+        """Submitted notification values persist through the REAL save step."""
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [
+                (
+                    "async_step_notifications",
+                    {"push_briefing": False, "email_grace_expired": False, "manual_grace_notify": True},
+                )
+            ],
+        )
+        assert data["push_briefing"] is False
+        assert data["email_grace_expired"] is False
+        assert data["manual_grace_notify"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1888,125 +1939,93 @@ class TestOptionsFlowMultiStep:
     """Test that the multi-step options flow merges data correctly."""
 
     def test_step_core_merges_core_settings(self):
-        """Core step collects entity and temperature settings."""
-        original = dict(FULL_CONFIG)
-        step1_input = {
-            "weather_entity": "weather.home",
-            "climate_entity": "climate.living_room",
-            "comfort_heat": 72,
-            "comfort_cool": 76,
-            "setback_heat": 60,
-            "setback_cool": 80,
-            "notify_service": "notify.notify",
-        }
-        merged = {**original, **step1_input}
-        assert merged["weather_entity"] == "weather.home"
-        assert merged["comfort_heat"] == 72
-        assert merged["setback_heat"] == 60
-        assert merged["setback_cool"] == 80
-        assert merged["notify_service"] == "notify.notify"
+        """Core step collects entity and temperature settings (via the REAL handler + save)."""
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [
+                (
+                    "async_step_core",
+                    {
+                        "weather_entity": "weather.home",
+                        "climate_entity": "climate.living_room",
+                        "comfort_heat": 72,
+                        "comfort_cool": 76,
+                        "setback_heat": 60,
+                        "setback_cool": 80,
+                        "notify_service": "notify.notify",
+                    },
+                )
+            ],
+        )
+        assert data["weather_entity"] == "weather.home"
+        assert data["comfort_heat"] == 72
+        assert data["setback_heat"] == 60
+        assert data["setback_cool"] == 80
+        assert data["notify_service"] == "notify.notify"
 
     def test_multi_step_accumulation(self):
-        """All menu sections accumulate into a single merged result."""
-        original = dict(FULL_CONFIG)
-        updates = {}
-
-        # Core
-        updates.update(
-            {
-                "weather_entity": "weather.home",
-                "climate_entity": "climate.living_room",
-                "comfort_heat": 72,
-                "comfort_cool": 76,
-                "setback_heat": 60,
-                "setback_cool": 80,
-                "notify_service": "notify.notify",
-            }
+        """All menu sections accumulate into a single merged result (REAL flow)."""
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [
+                (
+                    "async_step_core",
+                    {
+                        "weather_entity": "weather.home",
+                        "climate_entity": "climate.living_room",
+                        "comfort_heat": 72,
+                        "comfort_cool": 76,
+                        "setback_heat": 60,
+                        "setback_cool": 80,
+                        "notify_service": "notify.notify",
+                    },
+                ),
+                (
+                    "async_step_temperature_sources",
+                    {
+                        "outdoor_temp_source": "sensor",
+                        "outdoor_temp_entity": "sensor.outdoor_temp",
+                        "indoor_temp_source": "climate_fallback",
+                    },
+                ),
+                (
+                    "async_step_schedule",
+                    {"wake_time": "07:00:00", "sleep_time": "23:00:00", "briefing_time": "06:30:00"},
+                ),
+                (
+                    "async_step_notifications",
+                    {"push_briefing": False, "email_briefing": False, "manual_grace_notify": True},
+                ),
+                ("async_step_advanced", {"learning_enabled": False, "aggressive_savings": True}),
+            ],
         )
-
-        # Temperature sources
-        updates.update(
-            {
-                "outdoor_temp_source": "sensor",
-                "outdoor_temp_entity": "sensor.outdoor_temp",
-                "indoor_temp_source": "climate_fallback",
-            }
-        )
-
-        # Sensors
-        updates.update(
-            {
-                "door_window_sensors": ["binary_sensor.back_door"],
-                "sensor_polarity_inverted": True,
-                "sensor_debounce_seconds": 600,
-                "manual_grace_seconds": 900,
-                "automation_grace_seconds": 1800,
-            }
-        )
-
-        # Schedule
-        updates.update(
-            {
-                "wake_time": "07:00:00",
-                "sleep_time": "23:00:00",
-                "briefing_time": "06:30:00",
-            }
-        )
-
-        # Notifications
-        updates.update(
-            {
-                "push_briefing": False,
-                "email_briefing": False,
-                "manual_grace_notify": True,
-                "automation_grace_notify": False,
-            }
-        )
-
-        # Advanced
-        updates.update(
-            {
-                "learning_enabled": False,
-                "aggressive_savings": True,
-            }
-        )
-
-        merged = {**original, **updates}
-
-        # Verify all updated fields
-        assert merged["weather_entity"] == "weather.home"
-        assert merged["comfort_heat"] == 72
-        assert merged["setback_heat"] == 60
-        assert merged["outdoor_temp_source"] == "sensor"
-        assert merged["outdoor_temp_entity"] == "sensor.outdoor_temp"
-        assert merged["door_window_sensors"] == ["binary_sensor.back_door"]
-        assert merged["sensor_polarity_inverted"] is True
-        assert merged["sensor_debounce_seconds"] == 600
-        assert merged["wake_time"] == "07:00:00"
-        assert merged["sleep_time"] == "23:00:00"
-        assert merged["briefing_time"] == "06:30:00"
-        assert merged["push_briefing"] is False
-        assert merged["email_briefing"] is False
-        assert merged["learning_enabled"] is False
-        assert merged["aggressive_savings"] is True
+        assert data["weather_entity"] == "weather.home"
+        assert data["comfort_heat"] == 72
+        assert data["setback_heat"] == 60
+        assert data["outdoor_temp_source"] == "sensor"
+        assert data["outdoor_temp_entity"] == "sensor.outdoor_temp"
+        assert data["wake_time"] == "07:00:00"
+        assert data["sleep_time"] == "23:00:00"
+        assert data["briefing_time"] == "06:30:00"
+        assert data["push_briefing"] is False
+        assert data["email_briefing"] is False
+        assert data["learning_enabled"] is False
+        assert data["aggressive_savings"] is True
 
     def test_fields_not_in_updates_are_preserved(self):
-        """Fields not touched across any step retain their original values."""
-        original = dict(FULL_CONFIG)
-        updates = {
-            "comfort_heat": 72,
-            "learning_enabled": False,
-        }
-        merged = {**original, **updates}
-        # Updated fields
-        assert merged["comfort_heat"] == 72
-        assert merged["learning_enabled"] is False
+        """Fields not touched across any step retain their original values (REAL flow)."""
+        data = _run_options_flow(
+            dict(FULL_CONFIG),
+            [("async_step_advanced", {"learning_enabled": False})],
+        )
+        # Updated field
+        assert data["learning_enabled"] is False
         # Preserved fields
-        assert merged["weather_entity"] == "weather.forecast_home"
-        assert merged["notify_service"] == "notify.mobile_app_phone"
-        assert merged["setback_heat"] == 62
-        assert merged["wake_time"] == "06:30:00"
-        assert merged["door_window_sensors"] == ["binary_sensor.front_door"]
+        assert data["weather_entity"] == "weather.forecast_home"
+        assert data["notify_service"] == "notify.mobile_app_phone"
+        assert data["setback_heat"] == 62
+        assert data["wake_time"] == "06:30:00"
+        assert data["door_window_sensors"] == ["binary_sensor.front_door"]
 
     def test_new_fields_have_defaults_for_old_entries(self):
         """Config entries created before new fields were added get safe defaults."""
@@ -2031,6 +2050,69 @@ class TestOptionsFlowMultiStep:
         assert defaults["notify_service"] == "notify.notify"
         assert defaults["wake_time"] == "06:30:00"
         assert defaults["learning_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# Options flow — clearing optional entity fields (Issue #434)
+# ---------------------------------------------------------------------------
+
+
+class TestOptionsFlowClearing:
+    """Issue #434 — optional entity fields must actually clear when left blank.
+
+    These tests INVOKE the real options flow (the production step handlers plus
+    async_step_save), not a re-implementation of the merge. The bug shipped
+    because the prior tests mirrored the merge in the test body and only ever
+    supplied values — never an omitted (cleared) key. A cleared optional entity
+    field is dropped from user_input by voluptuous, so the fix must record it for
+    removal at save time.
+    """
+
+    # (owning step handler, config key) for every clearable optional-entity field.
+    CLEARABLE = [
+        ("async_step_occupancy", "home_toggle_entity"),
+        ("async_step_occupancy", "vacation_toggle_entity"),
+        ("async_step_occupancy", "guest_toggle_entity"),
+        ("async_step_sensors", "fan_entity"),
+        ("async_step_sensors", "fan_state_entity"),
+        ("async_step_temperature_sources", "outdoor_temp_entity"),
+        ("async_step_temperature_sources", "indoor_temp_entity"),
+    ]
+
+    @pytest.mark.parametrize("step,key", CLEARABLE)
+    def test_cleared_field_is_removed(self, step, key):
+        """A field set in the entry, then submitted OMITTED, must be removed from saved data."""
+        entry_data = {**FULL_CONFIG, key: "domain.some_entity"}
+        # Empty user_input for the owning step == every clearable picker cleared.
+        data = _run_options_flow(entry_data, [(step, {})])
+        assert key not in data, f"{key} should be removed from entry.data when cleared"
+
+    @pytest.mark.parametrize("step,key", CLEARABLE)
+    def test_set_field_is_stored(self, step, key):
+        """Regression guard: clearing logic must not drop a value that WAS provided."""
+        entry_data = {**FULL_CONFIG, key: None}
+        data = _run_options_flow(entry_data, [(step, {key: "domain.new_entity"})])
+        assert data[key] == "domain.new_entity"
+
+    def test_ai_api_key_preserved_when_blank(self):
+        """Exclusion guard: ai_api_key uses preserve-when-blank, not clear-when-blank."""
+        entry_data = {**FULL_CONFIG_V12, "ai_enabled": False, "ai_api_key": "sk-existing-key"}
+        data = _run_options_flow(
+            entry_data,
+            [
+                (
+                    "async_step_ai_settings",
+                    {
+                        "ai_enabled": False,
+                        "ai_api_key": "",
+                        "ai_temperature": 0.5,
+                        "ai_max_tokens": 1024,
+                        "ai_investigator_max_tokens": 4096,
+                    },
+                )
+            ],
+        )
+        assert data["ai_api_key"] == "sk-existing-key"
 
 
 # ---------------------------------------------------------------------------

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.17"
+VERSION = "0.5.18"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.18": [
+        "Fix #434: optional entity settings can now actually be cleared. Previously, if you'd set"
+        " a Home/Away toggle, Vacation toggle, Guest toggle, fan entity, fan-state entity, or a"
+        " custom outdoor/indoor temperature-source entity and later wanted to stop using it,"
+        " clearing the picker and hitting Save & Close did nothing — Climate Advisor kept reacting"
+        " to the old entity even though the UI says 'leave blank if you don't use that feature'."
+        " The options flow now removes a field you've emptied, so leaving it blank truly unsets it"
+        " (occupancy falls back to Home; vacation/guest default to off).",
+    ],
     "0.5.17": [
         "Fix #480: when Climate Advisor's coordinator update fails (the failure that took every"
         " climate_advisor_* entity unavailable simultaneously during the Issue #478 incident),"
@@ -1081,6 +1090,42 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    434: {
+        "version_fixed": "0.5.18",
+        "title": "Optional entity config fields can be cleared (leaving a field blank now unsets it)",
+        "scope_covered": (
+            "Fixes the options flow (ClimateAdvisorOptionsFlow in config_flow.py) so that clearing an"
+            " optional entity picker and saving actually removes the stored value. Root cause: the 7"
+            " affected fields are declared vol.Optional(KEY, description={'suggested_value': ...}) with"
+            " no default=, so when cleared voluptuous omits the key from user_input; async_step_save"
+            " merged {**entry.data, **self._updates} with existing data as the base, so an omitted key"
+            " fell through to the old value and nothing could ever delete it. Fix adds a _removed set"
+            " and a _apply_step_input(user_input, clearable_keys) helper: for each key a step owns, a"
+            " present key is a set/update and an absent key is recorded for removal; async_step_save now"
+            " pops _removed keys from the merged dict before persisting. Applied to all 7 clearable"
+            " optional-entity fields: home_toggle_entity, vacation_toggle_entity, guest_toggle_entity"
+            " (occupancy step); fan_entity, fan_state_entity (sensors step); outdoor_temp_entity,"
+            " indoor_temp_entity (temperature_sources step). Downstream consumers already read these via"
+            " config.get(KEY) with truthiness guards, so a cleared field yields the correct defaults"
+            " (occupancy → Home; vacation/guest → off). Also closes the test-coverage gap that let this"
+            " ship: tools/sim_harness/ha_stubs.py now realifies config_entries.ConfigFlow/OptionsFlow"
+            " (previously bare MagicMocks), so tests invoke the REAL step handlers + async_step_save"
+            " instead of mirroring the merge; new TestOptionsFlowClearing parametrizes all 7 fields for"
+            " both clear-when-blank and store-when-set, and the prior mirror-style option-flow tests were"
+            " converted to real invocation."
+        ),
+        "scope_not_covered": (
+            "The initial setup flow (ClimateAdvisorConfigFlow) is unaffected — there is no prior value to"
+            " clear during first-time setup, so the bug does not manifest there and it was not modified."
+            " Preserve-when-blank secret fields (ai_api_key, github_token, github_repo) intentionally keep"
+            " their existing value when submitted blank and are NOT made clearable. No cross-field"
+            " validation was added to block clearing outdoor/indoor temperature-source entities when the"
+            " paired source dropdown is set to a custom-entity option — clearing them while that source"
+            " requires an entity remains a pre-existing user misconfiguration risk (already possible at"
+            " first setup); consumers fall back gracefully. door_window_sensors was already clearable"
+            " (multi-select returns [] on clear) and is unchanged."
+        ),
+    },
     480: {
         "version_fixed": "0.5.17",
         "title": "Coordinator health observability: surface stale status instead of silently serving frozen data",

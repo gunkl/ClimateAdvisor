@@ -2184,6 +2184,7 @@ This is the definitive reference for expected system behavior across all classif
 | E6 | Classification changes (e.g., warm→hot) |
 | E7 | User clicks "Resume HVAC (override pause)" |
 | E8 | HA restart — coalesce reconciliation fires (Issue #327) |
+| E9 | QuietCool RF remote timer event received (Issue #486) |
 
 ### Expected Outcomes
 
@@ -2206,6 +2207,8 @@ This is the definitive reference for expected system behavior across all classif
 **Thermostatic fan loop (Issue #327, §9e):** In all C1–C7 contexts, once the fan is CA-owned and running, `fan_thermostat_check()` re-evaluates on every indoor or outdoor temperature change. The fan is turned off immediately when `outdoor ≥ indoor` — it does not wait for the next 30-minute coordinator poll. See §9e for the full exit hierarchy and trigger-source table.
 
 **Restart reconciliation (E8, Issue #327, §9e):** `_fan_override_active` is always cleared on restart; `_do_startup_coalesce` decides adopt-on, turn-off, or no-fan based on live thermostat state. E8 applies uniformly to all contexts — the decision depends on current physical conditions, not the day classification.
+
+**RF remote timer event (E9, Issue #486):** Applies uniformly to all C1–C7 contexts — like E8, the decision does not depend on day classification. A recognized `timer_*` token calls the same `handle_fan_manual_override()` as E5 (fan manual change), with an optional `duration_override` that makes the grace period last exactly the remote-selected duration instead of the configured `manual_grace_seconds`. While that override is active, suppression is absolute (log-only WARNING) at both existing choke points (`_deactivate_fan()`, `fan_thermostat_check()`) — E1/E2/E3/E6's fan-off outcomes in every context above are suppressed exactly as they are for any other active manual fan override. See [fan-remote-spec.md](fan-remote-spec.md) for the full event contract.
 
 **Archetype-aware nat-vent ceiling and structural WHF/AC exclusion (Issue #392):** In C2/C3/C5, E1/E3 (reactivation) now consistently apply the archetype-aware ceiling threshold from §6c/§17 across all four reactivation gate sites (`handle_door_window_open()`, `check_natural_vent_conditions()`, `nat_vent_temperature_check()`, `_re_pause_for_open_sensor()`) — `FAN_MODE_HVAC` blocks reactivation once indoor exceeds `comfort_cool` (unchanged from before #392); `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH` reactivates purely on outdoor/indoor direction. In E5/E6, `apply_classification()` now short-circuits before the comfort-band write when a WHF session owns the thermostat (§9), and the `_whf_owns_hvac()` choke-point guard in `_set_hvac_mode()`/`_set_temperature()` (§9) makes WHF/AC mutual exclusion structural for every cell in this table, not just the ones exercised by nat-vent. All six automation entry points relevant to this table (`apply_classification`, `handle_door_window_open`, `handle_all_doors_windows_closed`, `check_natural_vent_conditions`, `_re_pause_for_open_sensor`, `nat_vent_temperature_check`) are additionally serialized by `self._decision_lock` (§9g) so that concurrent E1/E3/E5/E6 triggers cannot interleave on shared engine state.
 
@@ -2236,6 +2239,12 @@ This logic table MUST be kept current for any changes to automation behavior.
 | All×E1/E2/E3/E5/E6 (idempotent `_activate_fan()`/`_deactivate_fan()`; no duplicate `fan_activated`/`fan_deactivated` on redundant calls) | test_fan_control.py | Issue #392 Fix 1c — function names pending as of this doc pass |
 | All×E1/E2/E3/E5/E6 (`_decision_lock` serializes the six entry points; no interleaved execution under `asyncio.gather()`) | test_nat_vent_activation.py | Issue #392 Fix 3 — function names pending as of this doc pass |
 | Fan archetype activity-log labels (`fan_activated`/`fan_deactivated`/`fan_manual_override`/`fan_cancel` render `fan_device`) | test_activity_renderers.py | Issue #392 Fix 2 — function names pending as of this doc pass |
+| All×E9 (`event_type` → hours parse, all timer tokens + non-timer ignored) | test_fan_remote.py | TestParseRemoteTimerEvent |
+| All×E9 (`duration_override` sets exact grace duration; `timer_none`/physical path use configured default) | test_fan_remote.py | TestDurationWiring |
+| C1/C6/C7×E1/E3/E5/E6 (`_deactivate_fan`/`fan_thermostat_check` suppressed + WARNING while E9 timer active) | test_fan_remote.py | TestSuppressionAbsoluteWithRemoteTimer |
+| All×E9 (last-wins refresh; grace expiry clears override and resumes) | test_fan_remote.py | TestLastWinsRefresh, TestGraceExpiryResumes |
+| All×E8/E9 (RF timer does not survive restart — clean-slate) | test_fan_remote.py | TestRestartCleanSlate |
+| All×E9 (coordinator dispatch: event → shared `handle_fan_manual_override()`) | test_fan_remote.py | TestCoordinatorFanRemoteDispatch |
 
 ---
 

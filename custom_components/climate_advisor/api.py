@@ -219,6 +219,10 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             "contact_sensors": coordinator._compute_contact_details(),
             "manual_override_active": ae._manual_override_active or ae._override_confirm_pending,
             "fan_override_active": ae._fan_override_active,
+            # Issue #486: QuietCool RF remote timer selection, null unless a timer set the
+            # active fan override's grace duration.
+            "fan_remote_timer_hours": data.get("fan_remote_timer_hours"),
+            "fan_remote_timer_ends": data.get("fan_remote_timer_ends"),
             "paused_by_door": ae.is_paused_by_door,
             "ca_target_heat": _ca_target_heat,
             "ca_target_cool": _ca_target_cool,

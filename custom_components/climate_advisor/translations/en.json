@@ -73,6 +73,7 @@
           "fan_entity": "Fan Entity",
           "fan_state_entity": "Fan State Entity",
           "fan_state_feedback": "Fan state feedback reliable",
+          "fan_remote_entity": "Fan RF Remote Event Entity",
           "fan_min_runtime_per_hour": "Fan Minimum Runtime Per Hour"
         },
         "data_description": {
@@ -86,6 +87,7 @@
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
           "fan_state_entity": "Optional separate sensor to read the physical fan state (for dual-entity whole-house fans). Leave blank to use the Fan Entity for state as well.",
           "fan_state_feedback": "Turn ON if your fan entity or state sensor reports actual motor state (not just the last command sent). Leave OFF if unsure \u2014 CA will command the fan to the desired state on each cycle.",
+          "fan_remote_entity": "Optional event entity that fires when the physical RF wall remote is pressed (e.g. from the gunkl/quietcool-house-fan firmware). A remote timer selection (1/2/4/8/12 hours) sets the fan override grace duration. Leave blank to disable.",
           "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned \u00e2\u20ac\u201d it offsets naturally based on when HA started."
         }
       },
@@ -216,6 +218,7 @@
           "fan_entity": "Fan Entity",
           "fan_state_entity": "Fan State Entity",
           "fan_state_feedback": "Fan state feedback reliable",
+          "fan_remote_entity": "Fan RF Remote Event Entity",
           "fan_min_runtime_per_hour": "Fan Minimum Runtime Per Hour",
           "natural_vent_delta": "Natural ventilation window (\u00c2\u00b0F above comfort)"
         },
@@ -230,6 +233,7 @@
           "fan_entity": "The fan or switch entity to control (only needed for whole house fan mode).",
           "fan_state_entity": "Optional separate sensor to read the physical fan state (for dual-entity whole-house fans). Leave blank to use the Fan Entity for state as well.",
           "fan_state_feedback": "Turn ON if your fan entity or state sensor reports actual motor state (not just the last command sent). Leave OFF if unsure \u2014 CA will command the fan to the desired state on each cycle.",
+          "fan_remote_entity": "Optional event entity that fires when the physical RF wall remote is pressed (e.g. from the gunkl/quietcool-house-fan firmware). A remote timer selection (1/2/4/8/12 hours) sets the fan override grace duration. Leave blank to disable.",
           "fan_min_runtime_per_hour": "Minutes of fan runtime per hour (0 = disabled, 60 = always on). The cycle is not clock-aligned \u00e2\u20ac\u201d it offsets naturally based on when HA started.",
           "natural_vent_delta": "When a door or window opens and outdoor temperature is within this many degrees above your cooling comfort setpoint, Climate Advisor uses the fan for natural ventilation instead of pausing HVAC. Default is 3\u00c2\u00b0F."
         }

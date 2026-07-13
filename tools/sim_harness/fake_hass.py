@@ -337,6 +337,29 @@ class FakeHass:
                 loop = asyncio.get_event_loop()
                 loop.create_task(coro)
 
-    async def async_add_executor_job(self, fn: Any, *args: Any) -> Any:
-        """Run a blocking function synchronously (no thread pool needed in tests)."""
-        return fn(*args)
+    def async_add_executor_job(self, fn: Any, *args: Any) -> asyncio.Future:
+        """Run a blocking function synchronously and return an already-resolved Future.
+
+        Issue #497 follow-up: real HA's ``hass.async_add_executor_job`` submits the
+        job to the executor immediately when called — the work happens whether or
+        not the caller awaits the result — and returns an awaitable. The previous
+        ``async def`` version deferred everything (including this method's own
+        work) until awaited, so a deliberate fire-and-forget call (e.g.
+        coordinator.py's Issue #491 comment: wrapping this in ``async_create_task``
+        previously crashed on restart, so production intentionally does not await
+        it in that one path) silently never ran ``fn`` in tests at all, and the
+        unawaited coroutine object triggered a "coroutine was never awaited"
+        RuntimeWarning on garbage collection. Returning a resolved
+        ``asyncio.Future`` instead of a bare coroutine fixes both: ``fn`` always
+        runs synchronously at call time (matching real executor-submission
+        semantics), and a resolved Future left un-awaited produces no warning
+        (unlike a coroutine), matching real ``asyncio.Future`` behavior.
+        """
+        result = fn(*args)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        future: asyncio.Future = loop.create_future()
+        future.set_result(result)
+        return future

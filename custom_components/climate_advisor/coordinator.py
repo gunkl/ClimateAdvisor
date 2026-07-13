@@ -287,6 +287,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Issue #423: physical fan ground-truth callbacks for _reconcile_fan_physical_drift()
         self.automation_engine._get_fan_physical_state_callback = self._get_fan_physical_state
         self.automation_engine._is_recent_fan_command_callback = self._is_recent_fan_command
+        # Issue #495: reclassify callback — called by _release_whf_and_reclassify() when a
+        # manual/remote WHF session ends, reusing the existing fan-off reassert path (Issue
+        # #359 Fix A) so the thermostat converges on CA's current classification rather than
+        # a blindly-restored, potentially hours-stale captured mode.
+        self.automation_engine._reclassify_callback = self._on_whf_release_reclassify
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -382,6 +387,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
         self._last_commanded_fan_state: bool | None = None  # Issue #361: command-only mode — last on/off commanded
+        # Issue #495: last QuietCool RF remote event.* state (== the event's own timestamp)
+        # that was actually acted on — dedups a stale unavailable->restore re-announcing an
+        # old event as if it were a fresh press. Not persisted: a stale restore right after
+        # restart is already covered by _suppress_during_startup_coalescing.
+        self._last_fan_remote_event_ts: str | None = None
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -3738,6 +3748,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state or new_state.state in ("unknown", "unavailable"):
             return
 
+        # Issue #495: dedup on the event's own timestamp (the entity's `state` field IS the
+        # firmware event timestamp — confirmed via live history: e.g. state=
+        # "2026-07-13T03:48:40.960+00:00"). The QuietCool event.* entity flaps to
+        # `unavailable` at arbitrary times (observed independent of restart — 08:13, 08:46,
+        # 16:58, 17:40, 18:03, 19:05 in one day) and restores its STALE last event_type with
+        # the SAME timestamp. Without this guard, that restore is processed as a fresh press:
+        # confirmed live — a phantom 2h override (`fan_manual_override
+        # {remote_timer_hours: 2.0}`) fired at 16:58:02 with zero user action, exactly when
+        # the entity restored to its stale timer_2h (frozen since 06:41). This generalizes
+        # Issue #491's restart-only stale-event guard to every unavailable->restore flap.
+        if new_state.state == self._last_fan_remote_event_ts:
+            _LOGGER.debug(
+                "Fan RF remote event ignored — already acted on this event (ts=%s, stale unavailable->restore)",
+                new_state.state,
+            )
+            return
+
         event_type = new_state.attributes.get("event_type")
         is_timer_event, hours = parse_remote_timer_event(event_type)
         if not is_timer_event:
@@ -3749,6 +3776,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._suppress_during_startup_coalescing(f"fan remote event_type={event_type}"):
             return
 
+        self._last_fan_remote_event_ts = new_state.state
         duration_seconds = hours * 3600 if hours is not None else None
         _LOGGER.info(
             "Fan RF remote timer event: event_type=%s -> duration=%s",
@@ -3760,6 +3788,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             fan_after="on",
             duration_override=duration_seconds,
             remote_timer_hours=hours,
+            is_remote_event=True,
         )
         await self.async_request_refresh()
 
@@ -3791,6 +3820,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Setpoint re-assertion after fan-off failed — thermostat left as-is",
                 exc_info=True,
             )
+
+    @callback
+    def _on_whf_release_reclassify(self) -> None:
+        """Called by the engine when a manual/remote WHF session releases HVAC suppression
+        (Issue #495, ``AutomationEngine._release_whf_and_reclassify``).
+
+        Reuses ``_async_reassert_setpoint_after_fan_off`` (Issue #359 Fix A) rather than a
+        separate reclassify path — both scenarios are "a WHF-related HVAC suppression just
+        ended, push CA's current classification back to the thermostat" and share the same
+        5s-settle-then-reclassify mechanics.
+        """
+        self.hass.async_create_task(self._async_reassert_setpoint_after_fan_off())
 
     @callback
     def _on_post_grace_fan_check(self) -> None:
@@ -5713,6 +5754,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # than a scheduled reminder that ignores it (see plan's "Guard ordering"
         # decision, Issue #428).
         if ae is not None:
+            # Issue #495: _override_confirm_pending (the 10-min setpoint-override confirm
+            # window) and _grace_active (the fan-override grace) are independent tracks that
+            # can legitimately overlap — a manual WHF-on starts its grace immediately while a
+            # concurrent setpoint override is still only pending confirmation. Without this
+            # branch, a pending-confirm setpoint override with no fan override active fell
+            # through silently to no guard at all, and one WITH a concurrent fan-override
+            # grace fell through to the grace_active branch below, which then described the
+            # fan's grace as if it were the (still-unconfirmed) setpoint override's own —
+            # narrating two different overrides as one. This mirrors
+            # _compute_automation_status()'s "override pending (confirming...)" check
+            # (checked ahead of its own grace_active check there too) so the two dashboard
+            # status lines agree instead of contradicting each other.
+            if ae._override_confirm_pending:
+                if ae._grace_active:
+                    return _decide(
+                        "Confirming your thermostat change; whole-house fan override also active.",
+                        fan_override_active=ae._fan_override_active,
+                    )
+                return _decide("Confirming your thermostat change before automation resumes.")
             if ae._manual_override_active:
                 return _decide("Manual override active — automation is standing by.")
             if ae._grace_active:

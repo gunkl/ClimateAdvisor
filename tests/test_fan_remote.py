@@ -323,10 +323,41 @@ class TestLastWinsRefresh:
             patch(_PATCH_DT_NOW, return_value=_FIXED_NOW),
         ):
             mock_call_later.return_value = MagicMock()
-            engine.handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0)
-            engine.handle_fan_manual_override(duration_override=None, remote_timer_hours=None)
+            engine.handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0, is_remote_event=True)
+            # Issue #495: a genuine remote "no timer" (timer_none) press must be marked
+            # is_remote_event=True to distinguish it from a plain non-remote re-detection —
+            # the latter now preserves an already-active remote timer instead of clobbering it.
+            engine.handle_fan_manual_override(duration_override=None, remote_timer_hours=None, is_remote_event=True)
         assert engine._grace_duration_seconds == 1800
         assert engine._fan_remote_timer_hours is None
+
+    def test_non_remote_restamp_preserves_active_remote_timer(self):
+        """Issue #495: a plain (non-remote) re-stamp of an already-active override — e.g.
+        the WHF fan entity re-reporting "on" after a brief unavailable flap — must NOT
+        clobber an active remote timer to None.
+
+        Confirmed live: the status API returned fan_remote_timer_hours=None seconds after
+        an 8h remote press while the persisted engine state still held 8.0 — the fan
+        entity's own re-detection (is_remote_event=False, remote_timer_hours=None) had
+        nulled it, so the dashboard's remote-timer card showed nothing during an active
+        8h override.
+        """
+        engine = _make_automation_engine()
+        with (
+            patch(_PATCH_CALL_LATER) as mock_call_later,
+            patch(_PATCH_CALLBACK, side_effect=lambda f: f),
+            patch(_PATCH_DT_NOW, return_value=_FIXED_NOW),
+        ):
+            mock_call_later.return_value = MagicMock()
+            engine.handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0, is_remote_event=True)
+            assert engine._fan_remote_timer_hours == 8.0
+
+            # Plain fan-entity re-detection: NOT a remote event, supplies no timer info.
+            engine.handle_fan_manual_override(fan_before="?", fan_after="on")
+
+        assert engine._fan_remote_timer_hours == 8.0, (
+            "A non-remote re-stamp must preserve the active remote timer, not clobber it to None"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +446,7 @@ class TestCoordinatorFanRemoteDispatch:
         asyncio.run(method(event))
 
         ae.handle_fan_manual_override.assert_called_once_with(
-            fan_before="?", fan_after="on", duration_override=28800.0, remote_timer_hours=8.0
+            fan_before="?", fan_after="on", duration_override=28800.0, remote_timer_hours=8.0, is_remote_event=True
         )
 
     def test_timer_none_event_drives_shared_override_with_none_duration(self):
@@ -431,7 +462,7 @@ class TestCoordinatorFanRemoteDispatch:
         asyncio.run(method(event))
 
         ae.handle_fan_manual_override.assert_called_once_with(
-            fan_before="?", fan_after="on", duration_override=None, remote_timer_hours=None
+            fan_before="?", fan_after="on", duration_override=None, remote_timer_hours=None, is_remote_event=True
         )
 
     def test_non_timer_event_is_a_noop(self):
@@ -475,7 +506,62 @@ class TestCoordinatorFanRemoteDispatch:
 
 
 # ---------------------------------------------------------------------------
-# 8. Feature-off regression: subscription gate condition
+# 8. Issue #495: dedup on stale unavailable->restore re-announcing an old event
+# ---------------------------------------------------------------------------
+
+
+class TestStaleRemoteEventDedup:
+    """The QuietCool event.* entity's `state` field IS the firmware event timestamp.
+    The entity flaps to `unavailable` at arbitrary times (not just at restart) and
+    restores its STALE last event_type with the SAME timestamp — confirmed live: a
+    phantom fan_manual_override(remote_timer_hours=2.0) fired with zero user action,
+    exactly when the entity restored to a timer_2h state frozen from hours earlier.
+
+    Occupant effect: without this dedup, a flapping remote entity can spuriously start
+    (and, since every flap re-stamps the grace, indefinitely extend) a fan override that
+    suppresses CA's own fan control — with no user action at all.
+    """
+
+    def test_same_timestamp_resent_is_deduped(self):
+        """A genuine press is processed once; the SAME state re-announced (the
+        unavailable->stale-restore pattern) must NOT re-trigger the override."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
+
+        new_state = _make_fake_state("2026-07-12T13:41:10.440+00:00", {"event_type": "timer_2h"})
+        asyncio.run(method(_make_fake_event(new_state)))
+        assert ae.handle_fan_manual_override.call_count == 1
+
+        # Same entity `state` (== timestamp) re-announced, e.g. after an unavailable
+        # flap restores the stale last value — must be ignored.
+        stale_restore = _make_fake_state("2026-07-12T13:41:10.440+00:00", {"event_type": "timer_2h"})
+        asyncio.run(method(_make_fake_event(stale_restore)))
+        assert ae.handle_fan_manual_override.call_count == 1, (
+            "A re-announced identical event timestamp must not trigger a second override"
+        )
+
+    def test_two_genuinely_different_timestamps_both_fire(self):
+        """Two real presses at different times must both be processed — the dedup guard
+        must not become a blanket suppressor."""
+        coord = _make_coordinator_stub()
+        ae = coord.automation_engine
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
+
+        first = _make_fake_state("2026-07-12T20:45:32.622+00:00", {"event_type": "timer_2h"})
+        asyncio.run(method(_make_fake_event(first)))
+        second = _make_fake_state("2026-07-12T20:48:40.960+00:00", {"event_type": "timer_8h"})
+        asyncio.run(method(_make_fake_event(second)))
+
+        assert ae.handle_fan_manual_override.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# 9. Feature-off regression: subscription gate condition
 # ---------------------------------------------------------------------------
 
 

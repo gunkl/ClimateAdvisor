@@ -93,6 +93,11 @@ def _make_ae_stub(**overrides):
     ae._manual_override_active = False
     ae._grace_active = False
     ae.is_paused_by_door = False
+    # Issue #495: _compute_next_action() added an _override_confirm_pending branch (with a
+    # _fan_override_active read inside it) — both must default False here for the same
+    # reason as the flags above.
+    ae._override_confirm_pending = False
+    ae._fan_override_active = False
     for key, value in overrides.items():
         setattr(ae, key, value)
     return ae

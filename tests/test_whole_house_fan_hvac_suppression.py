@@ -782,3 +782,176 @@ class TestFanActivateDeactivateIdempotency:
         assert hvac_calls_after_second.count("cool") == 1, (
             f"Expected exactly 1 HVAC restore write across both calls; got {hvac_calls_after_second}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #495: manual/remote-detected WHF-on must suppress HVAC too
+# ---------------------------------------------------------------------------
+
+
+def _run_scheduled_suppress(engine) -> None:
+    """Capture and run the coroutine handle_fan_manual_override() schedules via
+    hass.async_create_task() for HVAC suppression (Issue #495).
+
+    handle_fan_manual_override() is sync but suppression is async
+    (_suppress_hvac_for_whf() awaits _set_hvac_mode()), so it is dispatched via
+    hass.async_create_task() rather than awaited directly — mirrors the existing
+    "capture coro, then asyncio.run() it" pattern used elsewhere in this suite for
+    other @callback-scheduled async work (see test_nat_vent_activation.py).
+    """
+    captured: list = []
+    engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
+    return captured
+
+
+class TestManualWhfOnSuppressesHvac:
+    """Issue #495: a manually or remotely detected whole-house-fan-on must suppress HVAC,
+    exactly like CA-initiated activation (_activate_fan()) already does — previously only
+    the CA-initiated path did this, leaving the AC armed for the life of a manual override.
+
+    Occupant effect: without this fix, a user opening windows and turning on the WHF (by
+    hand, or via a QuietCool RF remote timer) could have the AC fire mid-session, wasting
+    energy and fighting the whole-house fan's outdoor-air exchange — the exact failure
+    mode nat-vent exists to prevent.
+    """
+
+    def test_manual_whole_house_fan_on_sets_hvac_off(self):
+        """handle_fan_manual_override() with FAN_MODE_WHOLE_HOUSE -> set_hvac_mode('off')."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_manual_override(fan_before="off", fan_after="on")
+
+        assert len(captured) == 1, "Expected _suppress_hvac_for_whf() to be scheduled"
+        asyncio.run(captured[0])
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "off" in hvac_calls, f"Expected HVAC to be set to 'off' after manual WHF-on; got calls: {hvac_calls}"
+        assert engine._pre_fan_hvac_mode == "cool"
+
+    def test_manual_both_fan_on_sets_hvac_off(self):
+        """handle_fan_manual_override() with FAN_MODE_BOTH -> set_hvac_mode('off') too."""
+        engine = _make_engine(fan_mode=FAN_MODE_BOTH, current_hvac_mode="heat")
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_manual_override(fan_before="off", fan_after="on")
+        asyncio.run(captured[0])
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "off" in hvac_calls, f"Expected HVAC to be set to 'off' for FAN_MODE_BOTH; got: {hvac_calls}"
+
+    def test_manual_hvac_fan_on_does_not_suppress_hvac(self):
+        """handle_fan_manual_override() with FAN_MODE_HVAC must NOT suppress HVAC —
+        the thermostat's own blower coexists with the compressor by design."""
+        engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_manual_override(fan_before="off", fan_after="on")
+
+        assert len(captured) == 0, "FAN_MODE_HVAC must not schedule HVAC suppression on a manual fan-on detection"
+        assert engine._pre_fan_hvac_mode is None
+
+    def test_two_rapid_manual_overrides_do_not_reclobber_pre_fan_hvac_mode(self):
+        """Two manual-override calls in quick succession (the live incident: a physical
+        fan-on at 20:45:32 followed by an RF remote press at 20:48:40) must not re-capture
+        _pre_fan_hvac_mode from a possibly-already-suppressed thermostat read."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_manual_override(fan_before="off", fan_after="on")
+        asyncio.run(captured[0])
+        assert engine._pre_fan_hvac_mode == "cool"
+
+        # Thermostat now reads "off" (already suppressed) — a naive second capture
+        # would clobber _pre_fan_hvac_mode with "off".
+        engine.hass.states.get = MagicMock(return_value=_make_thermostat_state("off"))
+        captured.clear()
+        engine.handle_fan_manual_override(fan_before="?", fan_after="on", remote_timer_hours=8.0, is_remote_event=True)
+        asyncio.run(captured[0])
+
+        assert engine._pre_fan_hvac_mode == "cool", (
+            f"Idempotency guard must prevent re-capture on the second override; got {engine._pre_fan_hvac_mode!r}"
+        )
+
+    def test_apply_classification_does_not_rearm_cool_during_manual_whf_session(self):
+        """A manual (non-nat-vent) WHF session sets _pre_fan_hvac_mode but NOT
+        _natural_vent_active — apply_classification()'s nat-vent branch must still gate
+        on it via _whf_owns_hvac(), or select_comfort_band() would compute a write that
+        the low-level choke-point guard then silently drops."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"  # manual session owns HVAC
+        assert engine._natural_vent_active is False, "Precondition: not a nat-vent session"
+        engine._apply_nat_vent_hvac_state = AsyncMock()
+
+        classification = _make_classification()
+
+        with patch("custom_components.climate_advisor.automation.select_comfort_band") as mock_select:
+            asyncio.run(engine.apply_classification(classification))
+            mock_select.assert_not_called()
+
+
+class TestManualWhfOffReleasesAndReclassifies:
+    """Issue #495: ending a manual WHF session must release _pre_fan_hvac_mode and
+    reclassify (NOT blindly restore the mode captured at activation) — a manual session
+    can run for hours (an 8h QuietCool RF remote timer), so the captured mode is often
+    stale by exit (e.g. the session spanned a sleep-setback transition).
+    """
+
+    def test_fan_turned_off_releases_pre_fan_hvac_mode_and_reclassifies(self):
+        """on_fan_turned_off() with _pre_fan_hvac_mode set -> releases it and invokes
+        the reclassify callback (the fan is confirmed off by the very event)."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"
+        engine._fan_override_active = True
+        engine._emit_event_callback = MagicMock()
+        engine._reclassify_callback = MagicMock()
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._pre_fan_hvac_mode is None
+        engine._reclassify_callback.assert_called_once()
+
+    def test_clear_fan_override_releases_pre_fan_hvac_mode_and_reclassifies(self):
+        """clear_fan_override() (grace expiry / user cancel) releases suppression and
+        reclassifies when the fan is not physically running (default: no ground-truth
+        callback configured -> command-only mode -> proceeds)."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"
+        engine._fan_override_active = True
+        engine._reclassify_callback = MagicMock()
+
+        engine.clear_fan_override()
+
+        assert engine._pre_fan_hvac_mode is None
+        engine._reclassify_callback.assert_called_once()
+
+    def test_clear_fan_override_does_not_release_while_fan_still_physically_on(self):
+        """When the WHF is still physically running (grace/timer expired but the fan
+        hasn't actually stopped), release-and-reclassify must NOT fire — the post-grace
+        fan reconcile owns that case, and releasing here would race it."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "cool"
+        engine._fan_override_active = True
+        engine._reclassify_callback = MagicMock()
+        engine._get_fan_physical_state_callback = MagicMock(return_value=True)  # confirmed still on
+
+        engine.clear_fan_override()
+
+        assert engine._pre_fan_hvac_mode == "cool", "Must not release suppression while fan is still on"
+        engine._reclassify_callback.assert_not_called()
+
+    def test_clear_fan_override_no_op_when_no_suppression_session(self):
+        """clear_fan_override() with no _pre_fan_hvac_mode set (e.g. FAN_MODE_HVAC override,
+        or override cleared with nothing to release) must not touch the reclassify callback."""
+        engine = _make_engine(fan_mode=FAN_MODE_HVAC, current_hvac_mode="cool")
+        engine._fan_override_active = True
+        engine._reclassify_callback = MagicMock()
+        assert engine._pre_fan_hvac_mode is None
+
+        engine.clear_fan_override()
+
+        engine._reclassify_callback.assert_not_called()

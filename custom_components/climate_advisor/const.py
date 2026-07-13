@@ -4,9 +4,25 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.22"
+VERSION = "0.5.23"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.23": [
+        "Fix #495: manually or remotely turning on the whole-house fan (WHF) — by hand, or"
+        " via a QuietCool RF remote timer press — left the AC armed for the entire session,"
+        " fighting the fan and wasting energy while windows were open. Only Climate"
+        " Advisor's own fan activation suppressed HVAC; a user-initiated fan-on did not."
+        " Fixed: both paths now share one HVAC-suppression helper, and ending a manual"
+        " session reclassifies (rather than blindly restoring a potentially hours-stale"
+        " captured mode — an RF-remote-timer session can run up to 12 hours). Also fixes"
+        " two QuietCool remote bugs found while investigating: (1) the remote's status"
+        " entity can flap unavailable and re-announce a stale timer selection with no user"
+        " action, which was previously processed as a fresh press — confirmed live as a"
+        " phantom 2-hour override with zero button presses; (2) the dashboard's remote-timer"
+        " display could go blank within seconds of a real press. And: the dashboard could"
+        " show two contradicting status lines at once when a fan override and a pending"
+        " thermostat-override confirmation overlapped — now reconciled.",
+    ],
     "0.5.22": [
         "Fix #493: found while verifying #491's restart fix on a real HA restart —"
         " learning.save_state() could occasionally log 'Failed to save learning state:"
@@ -1138,6 +1154,71 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    495: {
+        "version_fixed": "0.5.23",
+        "title": "Manual/remote whole-house-fan-on left HVAC armed; QuietCool remote reliability + status display",
+        "scope_covered": (
+            "(1) HVAC suppression on WHF-on (the core bug): _pre_fan_hvac_mode capture +"
+            " _set_hvac_mode('off') previously lived only in the CA-initiated _activate_fan()"
+            " path. New shared automation.AutomationEngine._suppress_hvac_for_whf() helper is"
+            " now called by BOTH _activate_fan() (refactored to use it, no behavior change)"
+            " AND handle_fan_manual_override() (new — scoped to FAN_MODE_WHOLE_HOUSE/BOTH"
+            " only; FAN_MODE_HVAC is unaffected by design). Idempotent: a second override call"
+            " while a suppression session is already active does not re-capture the mode."
+            " (2) Exit is reclassify, not restore: new _release_whf_and_reclassify() releases"
+            " _pre_fan_hvac_mode and reuses the existing coordinator fan-off reassert path"
+            " (_async_reassert_setpoint_after_fan_off, Issue #359 Fix A) instead of blindly"
+            " restoring the mode captured at activation — a manual/RF-remote-timer session can"
+            " run up to 12 hours, so the captured mode is often stale by exit. Wired into"
+            " on_fan_turned_off() (fan confirmed off by the triggering event) and"
+            " clear_fan_override() (grace expiry / user cancel — first checks physical fan"
+            " state via the existing _get_fan_physical_state_callback ground truth used by"
+            " _reconcile_fan_physical_drift(), and no-ops if the fan is still running, so it"
+            " does not race the post-grace fan reconcile). (3) apply_classification()'s"
+            " nat-vent early-return now also checks _whf_owns_hvac() (additive OR, not a"
+            " replacement for _natural_vent_active) so a manual WHF session — which sets"
+            " _pre_fan_hvac_mode but not _natural_vent_active — is covered without weakening"
+            " the pre-existing reconcile_fan_on_startup()-adopted-session case."
+            " (4) QuietCool remote stale-event dedup: the event.* entity flaps to unavailable"
+            " at arbitrary times (not just restart) and re-announces its stale last"
+            " event_type with the SAME state (the entity's state field IS the event"
+            " timestamp) — confirmed live as a phantom 2-hour override with zero user action."
+            " New coordinator._last_fan_remote_event_ts tracks the last acted-on timestamp;"
+            " _async_fan_remote_changed() ignores a re-announced identical value. Generalizes"
+            " the Issue #491 restart-only guard to every unavailable-then-restore flap."
+            " (5) Remote-timer display durability: handle_fan_manual_override() previously"
+            " unconditionally overwrote _fan_remote_timer_hours on every call, including a"
+            " plain non-remote re-stamp (e.g. the fan entity re-reporting 'on') — nulling an"
+            " active remote timer within seconds of a genuine press (confirmed live via the"
+            " status API). New is_remote_event parameter disambiguates a genuine remote call"
+            " (including a deliberate timer_none 'no timer' press, which correctly clears the"
+            " value) from a non-remote re-stamp, which now preserves the existing value."
+            " (6) Dashboard status reconciliation: _compute_next_action() gained an"
+            " _override_confirm_pending branch (checked before _grace_active, mirroring"
+            " _compute_automation_status()'s existing ordering) so a concurrent setpoint-"
+            " override-confirm and fan-override-grace no longer produce two contradictory"
+            " status lines — display-only, the two override mechanisms remain independent."
+        ),
+        "scope_not_covered": (
+            "Does not change _deactivate_fan()'s restore-mode behavior for the short"
+            " CA-initiated nat-vent cycle — only the NEW manual-path exit uses reclassify;"
+            " unifying _deactivate_fan() onto the same reclassify pattern is a reasonable but"
+            " separate, test-heavy follow-up (30+ existing tests assert restore-mode"
+            " semantics for that path). Does not fix a genuinely dropped remote press (the RF"
+            " link/entity never producing an HA event at all) — confirmed via live remote"
+            " event history as a device/firmware reliability issue outside CA's scope; CA"
+            " cannot act on an event it never receives. Does not persist _fan_remote_timer_hours"
+            " across HA restart — this remains intentionally cleared on restart per the"
+            " existing clean-slate policy (Issue #327/#282); only in-session durability"
+            " (surviving unrelated re-stamps) was fixed. Does not address the unrelated"
+            " ecobee/HomeKit presence-driven comfort-program setpoint conflict observed"
+            " during the originating investigation (CA sleep-band 72°F vs. ecobee 'Home'"
+            " comfort-program 77°F) — investigated and confirmed external to CA and any HA"
+            " automation, deliberately left out of scope for this fix; turning HVAC off"
+            " during the WHF session (this fix) makes that setpoint conflict moot regardless"
+            " of which value wins."
+        ),
+    },
     493: {
         "version_fixed": "0.5.22",
         "title": "learning.save_state() race on shared .tmp filename under concurrent calls",

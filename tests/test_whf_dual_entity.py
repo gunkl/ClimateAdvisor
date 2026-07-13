@@ -74,6 +74,10 @@ def _make_coord_stub(config: dict) -> MagicMock:
 
     coord._is_recent_fan_command = MagicMock(return_value=False)
     coord.async_request_refresh = AsyncMock()
+    # Issue #491: _async_fan_entity_changed now calls the real
+    # _suppress_during_startup_coalescing() guard; coord being a bare MagicMock would
+    # otherwise return a truthy MagicMock and silently suppress dispatch tests below.
+    coord._suppress_during_startup_coalescing = MagicMock(return_value=False)
 
     return coord
 

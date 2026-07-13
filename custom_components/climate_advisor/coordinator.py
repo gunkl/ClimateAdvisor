@@ -3021,6 +3021,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.hass.async_create_task(self.async_request_refresh())
                 await self._async_save_state()
 
+    def _suppress_during_startup_coalescing(self, description: str) -> bool:
+        """Return True (and log why) if the caller should bail due to active startup
+        coalescing.
+
+        Issue #321 established this suppression for _async_thermostat_changed; Issue
+        #491 generalizes it to every override-detection listener via a single shared
+        implementation, so a future new listener can't independently forget it — the
+        exact gap that let #491 ship (neither fan listener had this guard).
+        """
+        if not self._startup_coalesce_active:
+            return False
+        _LOGGER.debug("Startup coalescing active — suppressing %s", description)
+        return True
+
     async def _async_thermostat_changed(self, event: Event) -> None:
         """Track thermostat changes for learning (detect manual overrides)."""
         new_state = event.data.get("new_state")
@@ -3029,11 +3043,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         # Bug 1 (Issue #321): Suppress override detection during startup coalescing window
-        if self._startup_coalesce_active:
-            _LOGGER.debug(
-                "Startup coalescing active — suppressing thermostat override detection for %s",
-                new_state.state if new_state else "unknown",
-            )
+        if self._suppress_during_startup_coalescing(f"thermostat override detection for {new_state.state}"):
             return
 
         # Bug 3 (Issue #321): Per-temperature-tick nat-vent cycling re-evaluation.
@@ -3608,6 +3618,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if not new_state or not old_state:
             return
 
+        # Issue #491: suppress fan-entity override detection during startup coalescing —
+        # a real WHF entity can report a transient state blip while HA is still settling
+        # right after restart, which was previously misread as a fresh manual override.
+        if self._suppress_during_startup_coalescing(f"fan override detection for {new_state.state}"):
+            return
+
         if new_state.state == old_state.state:
             return
 
@@ -3725,6 +3741,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         event_type = new_state.attributes.get("event_type")
         is_timer_event, hours = parse_remote_timer_event(event_type)
         if not is_timer_event:
+            return
+
+        # Issue #491: suppress during startup coalescing — the QuietCool remote's event.*
+        # entity can re-announce its last retained event_type (a stale timer press) while
+        # HA is still settling right after restart, indistinguishable from a fresh press.
+        if self._suppress_during_startup_coalescing(f"fan remote event_type={event_type}"):
             return
 
         duration_seconds = hours * 3600 if hours is not None else None
@@ -5402,7 +5424,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             bucket.pop(0)
         # Sync to LearningState so rejection_log is persisted by save_state()
         self.learning._state.rejection_log = self._rejection_log
-        self.hass.async_create_task(self.hass.async_add_executor_job(self.learning.save_state))
+        # Issue #491: async_add_executor_job() already returns a scheduled awaitable —
+        # wrapping it in async_create_task() (which requires a coroutine, not a Future)
+        # raised "TypeError: a coroutine was expected, got <Future ...>" on every restart
+        # that hit this abandonment path, crashing the whole coordinator update.
+        self.hass.async_add_executor_job(self.learning.save_state)
 
     def _build_learning_health(self) -> dict:
         """Aggregate _rejection_log into a per-obs-type health dict for get_thermal_model().

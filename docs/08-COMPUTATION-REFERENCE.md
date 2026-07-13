@@ -1493,6 +1493,16 @@ The occupant experienced this as: a fan running through the night while outdoor 
 
 There is no fourth state. Any post-coalesce `fan_mode="on"` or fan-entity change that CA did not command is detected as a manual override (§9b) → timed, not indefinite. A post-coalesce `hvac_action="fan"` (thermostat-autonomous fan-on between AC cycles) is reconciled by `reconcile_fan_on_startup` via the post-startup detection path (Issue #347) → adopt-on or turn-off, never indefinite limbo.
 
+"Post-coalesce" is enforced by `_suppress_during_startup_coalescing()` (Issue #491), a
+single shared guard called from `_async_thermostat_changed()`, `_async_fan_entity_changed()`,
+and `_async_fan_remote_changed()` — every listener capable of detecting a manual override
+bails out while `_startup_coalesce_active` is True. Before #491, the two fan listeners had
+no such guard, so a device re-announcing its last retained state during HA's restart/
+reconnect sequence (confirmed for the QuietCool RF remote's `event.*` entity) could be
+misread as a fresh manual override within the coalescing window, contradicting this
+section's claim. Verify this claim against `_suppress_during_startup_coalescing()`'s call
+sites directly if it is ever suspected of drifting again.
+
 #### A. Restart = Clean Fan Slate
 
 `restore_state()` now clears `_fan_override_active` and `_fan_override_time` on restart, matching the clean-slate treatment of HVAC override/grace state (§11). Fan ownership is fully reconsidered by the coalesce reconciliation step rather than reconstructed from stale persisted flags.

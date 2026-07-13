@@ -88,8 +88,20 @@ def _make_v3_coord(
 
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
 
-    async def _exec_job(fn, *args):
-        return fn(*args)
+    def _exec_job(fn, *args):
+        # Issue #491: mirrors real HA semantics for both calling conventions used in
+        # coordinator.py — some call sites `await hass.async_add_executor_job(...)`
+        # (needs an awaitable Future), others (_abandon_observation, sync, fire-and-
+        # forget) call it with no running loop at all. asyncio.get_running_loop()
+        # tells us which context we are in; Python 3.14 removed the implicit event
+        # loop, so this cannot unconditionally use get_event_loop().
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return fn(*args)
+        fut = loop.create_future()
+        fut.set_result(fn(*args))
+        return fut
 
     hass.async_add_executor_job = _exec_job
 

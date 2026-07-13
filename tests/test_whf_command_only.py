@@ -104,6 +104,14 @@ def _make_coord_stub(config: dict | None = None) -> MagicMock:
         mod.ClimateAdvisorCoordinator._fan_state_feedback_enabled, coord
     )
 
+    # Issue #491: same reasoning — bind the real _suppress_during_startup_coalescing()
+    # guard rather than let a bare MagicMock return a truthy value and silently
+    # suppress every dispatch test. Tests exercise post-coalescing (normal) dispatch.
+    coord._startup_coalesce_active = False
+    coord._suppress_during_startup_coalescing = types.MethodType(
+        mod.ClimateAdvisorCoordinator._suppress_during_startup_coalescing, coord
+    )
+
     return coord
 
 

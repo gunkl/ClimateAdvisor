@@ -7,6 +7,7 @@ callers must explicitly invoke load_state() / save_state().
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -142,6 +143,71 @@ class TestSaveState:
         engine = LearningEngine(tmp_path)
         engine.accept_suggestion("frequent_overrides")
         assert not db_path.exists()
+
+    def test_concurrent_saves_use_distinct_tmp_paths(self, tmp_path: Path):
+        """Each save_state() call must stage to a distinct tmp path (Issue #493).
+
+        This is the causal property that eliminates the race: two concurrent
+        calls writing to the SAME tmp path can have one's os.replace() find it
+        already consumed by the other's, raising ENOENT (confirmed on a real
+        HA restart, 3 concurrent calls, 1 failed). A real threading race is
+        inherently flaky to provoke reliably in a fast local test environment
+        — a threading.Barrier-synchronized version of this test still passed
+        against the pre-fix code every time it was tried, since both the
+        write and the replace complete faster than genuine thread contention
+        materializes on local SSD/NTFS. Testing the property that structurally
+        prevents the race (uniqueness) is deterministic and mirrors why
+        state.py's save() (already using tempfile.mkstemp()) doesn't have
+        this bug.
+        """
+        engine = LearningEngine(tmp_path)
+        engine.record_day(_make_record())
+
+        seen_tmp_paths: list[str] = []
+        real_replace = os.replace
+
+        def _capture_replace(src, dst):
+            seen_tmp_paths.append(str(src))
+            return real_replace(src, dst)
+
+        with patch("custom_components.climate_advisor.learning.os.replace", side_effect=_capture_replace):
+            for _ in range(5):
+                engine.save_state()
+
+        assert len(seen_tmp_paths) == 5
+        assert len(set(seen_tmp_paths)) == 5, (
+            f"save_state() reused a tmp path across calls — the exact defect class that"
+            f" caused Issue #493's ENOENT race: {seen_tmp_paths}"
+        )
+
+    def test_concurrent_saves_no_enoent(self, tmp_path: Path):
+        """Overlapping save_state() calls must not raise ENOENT (Issue #493).
+
+        Best-effort integration-style companion to
+        test_concurrent_saves_use_distinct_tmp_paths above (which is the
+        reliable, deterministic regression guard) — real thread contention on
+        a fast local disk doesn't reliably reproduce the original race, but
+        this still exercises the real threading path end-to-end.
+        """
+        import concurrent.futures
+
+        db_path = tmp_path / LEARNING_DB_FILE
+        engine = LearningEngine(tmp_path)
+        engine.record_day(_make_record())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            futures = [pool.submit(engine.save_state) for _ in range(16)]
+            for f in concurrent.futures.as_completed(futures):
+                f.result()  # raises if save_state() raised
+
+        assert db_path.exists()
+
+    def test_save_is_atomic_no_tmp_left(self, tmp_path: Path):
+        """No leftover *_*.tmp staging file after a successful save."""
+        engine = LearningEngine(tmp_path)
+        engine.record_day(_make_record())
+        engine.save_state()
+        assert list(tmp_path.glob(f"{LEARNING_DB_FILE.removesuffix('.json')}_*.tmp")) == []
 
 
 class TestRoundTrip:

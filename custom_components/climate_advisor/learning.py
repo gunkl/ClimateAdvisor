@@ -6,10 +6,12 @@ environmental outcomes to generate adaptive improvement suggestions.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import sys
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -757,17 +759,36 @@ class LearningEngine:
         self._state = LearningState()
 
     def save_state(self) -> None:
-        """Persist learning state to disk (blocking I/O — run via executor)."""
+        """Persist learning state to disk (blocking I/O — run via executor).
+
+        Issue #493: uses tempfile.mkstemp() for a unique per-call temp filename,
+        mirroring state.py's save() — a fixed, shared ".tmp" path let concurrent
+        calls (9 call sites in coordinator.py, one of them fire-and-forget from
+        _abandon_observation) race on os.replace(), raising ENOENT for whichever
+        call lost the race.
+        """
         try:
             serialized = json.dumps(asdict(self._state), indent=2)
-            tmp_path = self._db_path.with_suffix(".tmp")
-            tmp_path.write_text(serialized)
+        except (TypeError, ValueError) as err:
+            _LOGGER.error("Failed to serialize learning state: %s", err)
+            return
+
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            dir=self._db_path.parent,
+            prefix=f"{self._db_path.stem}_",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(serialized)
+            os.replace(tmp_path_str, self._db_path)
             if sys.platform != "win32":
-                os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, self._db_path)
+                os.chmod(self._db_path, 0o600)
             _LOGGER.debug("Saved learning state — %d records", len(self._state.records))
         except OSError as err:
             _LOGGER.error("Failed to save learning state: %s", err)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path_str)
 
     def record_day(self, record: DailyRecord) -> None:
         """Record a day's data for learning.

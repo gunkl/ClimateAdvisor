@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.21"
+VERSION = "0.5.22"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.22": [
+        "Fix #493: found while verifying #491's restart fix on a real HA restart —"
+        " learning.save_state() could occasionally log 'Failed to save learning state:"
+        " No such file or directory' when two saves happened to run at the same moment"
+        " (common at restart). It wrote to a shared, fixed staging filename, so one save"
+        " could find the file already consumed by another. Non-fatal (the error was"
+        " already caught and logged; nothing was corrupted), but one save's data could be"
+        " silently skipped for that cycle. Each save now stages to its own uniquely-named"
+        " temp file, the same pattern already used by CA's other state file — eliminating"
+        " the collision entirely.",
+    ],
     "0.5.21": [
         "Fix #491: two restart-time bugs found immediately after the 0.5.20 deploy, both"
         " pre-existing and unrelated to #489. (1) The dashboard could show a false"
@@ -1127,6 +1138,35 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    493: {
+        "version_fixed": "0.5.22",
+        "title": "learning.save_state() race on shared .tmp filename under concurrent calls",
+        "scope_covered": (
+            "learning.LearningEngine.save_state() now stages its atomic write via"
+            " tempfile.mkstemp(dir=self._db_path.parent, prefix=f'{self._db_path.stem}_',"
+            " suffix='.tmp') instead of a fixed self._db_path.with_suffix('.tmp') path,"
+            " mirroring the already-proven pattern in state.py's save(). Each call now gets"
+            " a guaranteed-unique staging file, eliminating the ENOENT race where two"
+            " concurrent calls (9 call sites in coordinator.py, 8 awaited + 1"
+            " fire-and-forget from _abandon_observation) could both target the same tmp"
+            " path and one's os.replace() would find it already consumed by the other's."
+            " Found while verifying #491's fix on a real HA restart — that fix let"
+            " _abandon_observation()'s previously-crashing (TypeError) background save"
+            " actually execute for the first time, exposing this pre-existing race. On"
+            " OSError the orphaned unique tmp file is now cleaned up (os.unlink, errors"
+            " suppressed), matching state.py's failure-path behavior. Serialization"
+            " failures (TypeError/ValueError from json.dumps) are now caught separately"
+            " before any tmp file is created, also matching state.py."
+        ),
+        "scope_not_covered": (
+            "Does not add locking/synchronization to serialize concurrent save_state()"
+            " calls — under genuine concurrency, the last os.replace() to run still wins"
+            " (whichever save started last determines the final on-disk state), matching"
+            " state.py's existing accepted behavior for the same scenario. This fix"
+            " eliminates the crash/lost-save failure mode, not the (already accepted,"
+            " lower-severity) last-write-wins ordering under true concurrency."
+        ),
+    },
     491: {
         "version_fixed": "0.5.21",
         "title": "False WHF manual-override/grace-period + coordinator crash at HA restart",

@@ -122,6 +122,11 @@ def _make_coordinator_stub(config: dict | None = None) -> MagicMock:
     coord._get_indoor_temp = MagicMock(return_value=71.0)
     coord._last_outdoor_temp = 57.0
     coord._fan_state_entity_unavailable_warned = False
+    # Issue #491: _async_fan_entity_changed now calls the real
+    # _suppress_during_startup_coalescing() guard; coord being a bare MagicMock would
+    # otherwise return a truthy MagicMock and silently suppress every dispatch test
+    # below. These tests exercise post-coalescing (normal) dispatch behavior.
+    coord._suppress_during_startup_coalescing = MagicMock(return_value=False)
 
     return coord
 

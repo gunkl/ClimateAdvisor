@@ -158,6 +158,17 @@ active RF timer does **not** survive an HA restart:
 - After a restart, `reconcile_fan_on_startup()` (unchanged) decides the fan's disposition
   from physical state, the same as it always has.
 
+**Incoming device-originated events are also suppressed during the restart window (Issue
+#491).** The above covers CA's *own* override/grace state resetting cleanly — but the
+QuietCool remote's underlying `event.*` entity can independently re-announce its last
+retained `event_type` (e.g. a stale `timer_2h`) while HA is still settling right after
+restart, as the ESPHome device reconnects. `_async_fan_remote_changed()` cannot tell that
+apart from a fresh button press by inspecting the event alone, so it now calls
+`_suppress_during_startup_coalescing()` before processing any timer token — the same
+5-minute window `_async_thermostat_changed()` already used (Issue #321), now shared. A
+real remote press in the first 5 minutes after a restart is not acted on during that
+window — an accepted tradeoff, consistent with the existing thermostat-override behavior.
+
 ---
 
 ## Clearing

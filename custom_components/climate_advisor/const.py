@@ -4,9 +4,25 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.20"
+VERSION = "0.5.21"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.21": [
+        "Fix #491: two restart-time bugs found immediately after the 0.5.20 deploy, both"
+        " pre-existing and unrelated to #489. (1) The dashboard could show a false"
+        " 'Fan manual override' and a bogus multi-hour manual grace period right after"
+        " every HA restart — the whole-house fan never turned on and nobody touched the"
+        " remote; the QuietCool RF remote's device entity can re-announce its last"
+        " retained state while HA is still settling after restart, and neither fan"
+        " listener had the same 5-minute startup-suppression guard the thermostat"
+        " listener already had (Issue #321). Both fan listeners now share that guard."
+        " (2) A 'Climate Advisor unavailable' error banner could appear after routine"
+        " restarts/deploys with nothing actually wrong — a plumbing bug in the thermal"
+        " observation pipeline (present since April) crashed the coordinator update"
+        " whenever a pending thermal observation was abandoned right as HVAC started,"
+        " which is common at restart. Fixed; no HVAC or automation timing behavior"
+        " changed by either fix.",
+    ],
     "0.5.20": [
         "Fix #489: the Doors/Windows status card could show a stale 'N open' reading for"
         " up to 30 minutes after a monitored door or window was actually closed again."
@@ -1111,6 +1127,44 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    491: {
+        "version_fixed": "0.5.21",
+        "title": "False WHF manual-override/grace-period + coordinator crash at HA restart",
+        "scope_covered": (
+            "Two independent restart-time bugs, both pre-existing (not introduced by #489)"
+            " and both diagnosed from a real restart after the 0.5.20 deploy. (1) New shared"
+            " coordinator._suppress_during_startup_coalescing() helper, used by"
+            " _async_thermostat_changed() (refactored from its Issue #321 inline check),"
+            " _async_fan_entity_changed(), and _async_fan_remote_changed() — all three"
+            " override-detection listeners now suppress detection for the same 5-minute"
+            " startup-coalescing window (_startup_coalesce_active). Before this fix, only the"
+            " thermostat listener had this guard; a QuietCool RF remote event.* entity"
+            " re-announcing its last retained event_type during HA's restart/reconnect"
+            " sequence was misread by _async_fan_remote_changed() as a fresh timer press,"
+            " producing a false 'Fan manual override: whf: ?->on' and a real (but bogus)"
+            " manual grace period — confirmed via live HA logs showing the fan status as"
+            " 'off (manual override)' (override flag set, _fan_active=False — no real command"
+            " was ever issued, matching the fact the WHF never physically ran)."
+            " _async_fan_entity_changed() had the identical gap and is fixed for the same"
+            " reason (no incident confirmed for that specific path, but the defect class"
+            " already shipped one). (2) coordinator._abandon_observation() no longer wraps"
+            " hass.async_add_executor_job(self.learning.save_state) — already a scheduled"
+            " awaitable — in hass.async_create_task() (which requires a coroutine); the"
+            " double-wrap raised 'TypeError: a coroutine was expected, got <Future ...>' on"
+            " every restart that hit this HVAC-started thermal-observation-abandonment path,"
+            " crashing the coordinator update and surfacing as the '⚠ Climate Advisor"
+            " unavailable' status banner (added by Fix #480/0.5.17, which is what made this"
+            " 2.5-month-old bug, from Issue #121, visible for the first time)."
+        ),
+        "scope_not_covered": (
+            "Does not change CONF_SENSOR_DEBOUNCE, grace-period duration semantics, or any"
+            " HVAC command/decision logic — both fixes are restart-timing/plumbing-only."
+            " A real remote press or real manual fan/thermostat use in the first 5 minutes"
+            " after a restart is still not detected as an override during that window — the"
+            " same accepted tradeoff Issue #321 established for the thermostat listener,"
+            " now applied consistently instead of partially."
+        ),
+    },
     489: {
         "version_fixed": "0.5.20",
         "title": "Doors/Windows status card refreshes immediately on sensor close, not just open",

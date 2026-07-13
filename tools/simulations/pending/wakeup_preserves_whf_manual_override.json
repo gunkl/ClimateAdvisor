@@ -1,0 +1,74 @@
+{
+  "name": "wakeup_preserves_whf_manual_override",
+  "description": "Related to the reported production bug (Issue #498): WHF manually overridden via the coordinator's real fan-entity listener, morning wake-up fires — the AC must never arm while the WHF session still owns HVAC.",
+  "source": "production",
+  "issue": 498,
+  "simulator_support": true,
+  "track": "integration",
+  "notes": [
+    "Occupant outcome: the user manually turns on the whole-house fan overnight. At 06:30 wake-up, CA previously killed the fan and armed the AC even though the user's override meant free cooling should keep winning — the AC ran briefly before an unrelated nat-vent re-evaluation corrected it a cycle later. This scenario proves the AC-arming half of that fix at the production-coordinator level: the low-level _whf_owns_hvac() guard blocks wake-up's attempted comfort-band write while the WHF session holds.",
+    "Scope note (be precise about what this scenario does and does not cover): the reported bug's OTHER half — handle_morning_wakeup()'s `not self._fan_override_active` guard on the _deactivate_fan() call itself — is NOT exercised end-to-end here. Coordinator._async_fan_entity_changed() only classifies an entity change as a manual override when `is_on and not automation_engine._fan_active` (coordinator.py ~3710); a manual override detected this way therefore never has _fan_active=True, so the fan-deactivation call's `self._fan_active and not _fan_was_overridden` guard is never actually reached — it's a no-op regardless of whether the guard is correct. Confirmed by deliberately reverting the guard to its pre-fix unconditional form and re-running this scenario: it still passed, unchanged, proving this assertion does NOT discriminate that specific line. The realistic path to get _fan_active=True and _fan_override_active=True simultaneously (nat-vent already running the fan for real, then a QuietCool RF remote timer press layered on top via handle_fan_manual_override(), which does not gate on current _fan_active) needs an RF-remote-timer driving event type the harness does not yet support. That exact guard IS covered — directly and effectively (verified failing before the fix, passing after) — by tests/test_bedtime_override.py::TestMorningWakeupFanOverrideGuard at the unit level, which sets both flags directly on the engine.",
+    "Two-way alignment: handle_morning_wakeup() calls the shared desired_state.decide_scheduled_band_gate() and separately snapshots _fan_override_active BEFORE calling clear_manual_override() (which unconditionally clears that flag as a side effect via clear_fan_override()) — the deactivation guard reads the snapshot, not the already-cleared live attribute. That snapshot logic is what test_bedtime_override.py's unit tests exercise directly.",
+    "User outcome if the _whf_owns_hvac() guard this scenario DOES cover regresses: the compressor arms every morning a WHF session (of any kind — manual override, RF remote timer, or CA's own nat-vent) is still active at wake_time, fighting the fan and wasting energy.",
+    "Config note: fan_mode MUST be the real constant value 'whole_house_fan' (not 'whole_house' — a typo that silently no-ops the WHF archetype entirely, found while building this scenario). fan_state_feedback MUST be true: _async_fan_entity_changed() early-returns for every fan-entity state change when fan_state_feedback is false (command-only mode, Issue #361 — entity changes are treated as CA's own command echoes, never as a user action), so command-only mode can never detect this override at all. manual_grace_seconds is set well past the 30-minute gap between the override (06:00) and wake_time (06:30) — an earlier draft used exactly 1800s, which expired at the identical instant as wake-up and let the grace-expiry callback's own post-grace reconcile race ahead of wakeup's logic, masking the intended check."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "sleep_heat": 64,
+    "sleep_cool": 72,
+    "sleep_time": "22:30",
+    "wake_time": "06:30",
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.attic",
+    "fan_state_feedback": true,
+    "manual_grace_seconds": 3600,
+    "initial_thermostat_mode": "off"
+  },
+  "events": [
+    {
+      "time": "2026-07-13T22:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Evening classification — warm day, comfort band armed at [68/74]."
+    },
+    {
+      "time": "2026-07-13T23:05:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.attic",
+      "state": "off",
+      "note": "Establishes a prior 'off' state for the fan entity so the 06:00 change below is a real observed transition, not a first-ever state with no prior value."
+    },
+    {
+      "time": "2026-07-14T06:00:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.attic",
+      "state": "on",
+      "note": "User manually turns on the whole-house fan via the real HA entity. The coordinator's real _async_fan_entity_changed listener classifies this as a manual override: sets _fan_override_active=True, starts a manual grace period, and suppresses HVAC via _suppress_hvac_for_whf() (_pre_fan_hvac_mode captured, _whf_owns_hvac() now True)."
+    },
+    {
+      "time": "2026-07-14T06:30:00",
+      "type": "wakeup",
+      "note": "Wake-up fires while the WHF session (grace started 06:00, 1hr duration) still owns HVAC."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-14T06:30:00",
+      "expect": "hvac_write_blocked_whf_active",
+      "reason": "Wake-up computes and attempts to arm the daytime comfort band as always, but the low-level _whf_owns_hvac() choke-point guard blocks the actual write while the WHF session holds — proving no AC command reaches the thermostat."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The AC never arms at wake-up while an active WHF session (manual override or otherwise) owns HVAC (Issue #498, partial coverage — see scope note)",
+    "observed_behavior": "external_fan_state_change (06:00, WHF on, override detected, HVAC suppressed) → wakeup (06:30, comfort-band write blocked by _whf_owns_hvac())",
+    "expected_behavior": "The AC never arms while the WHF session holds ownership of HVAC, matching free-cooling-should-win intent."
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

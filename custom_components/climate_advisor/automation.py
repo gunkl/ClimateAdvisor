@@ -81,6 +81,7 @@ from .const import (
 )
 from .desired_state import (
     FanCycleOutcome,
+    ScheduledBandGate,
     SetpointRetryAction,
     decide_fan_cycle_off,
     decide_fan_cycle_on,
@@ -88,6 +89,7 @@ from .desired_state import (
     decide_grace_start,
     decide_override_confirm,
     decide_revisit,
+    decide_scheduled_band_gate,
     decide_scheduled_write_seq_current,
     decide_setpoint_retry_action,
 )
@@ -1491,17 +1493,29 @@ class AutomationEngine:
                 )
                 return
 
+            # Issue #498: occupancy/paused/nat-vent checks below now route through the single
+            # shared gate (desired_state.decide_scheduled_band_gate()) also used by
+            # handle_bedtime()/handle_morning_wakeup()/handle_pre_cool() — pure extraction of
+            # this exact check order, no behavior change for this call site.
+            _gate = decide_scheduled_band_gate(
+                occupancy_mode=self._occupancy_mode,
+                manual_override_active=self._manual_override_active,
+                paused_by_door=self._paused_by_door,
+                natural_vent_active=self._natural_vent_active,
+                whf_owns_hvac=self._whf_owns_hvac(),
+            )
+
             # Issue #85: respect occupancy mode — don't overwrite setback with comfort
-            if self._occupancy_mode == OCCUPANCY_VACATION:
-                _LOGGER.info("Vacation mode — skipping classification temp change (deep setback preserved)")
-                return
-            if self._occupancy_mode == OCCUPANCY_AWAY:
+            if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
+                if self._occupancy_mode == OCCUPANCY_VACATION:
+                    _LOGGER.info("Vacation mode — skipping classification temp change (deep setback preserved)")
+                    return
                 _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
                 await self.handle_occupancy_away()
                 return
 
             # Issue #337: while paused by open door/window, suppress the band and hold HVAC off.
-            if self._paused_by_door:
+            if _gate == ScheduledBandGate.DEFER_PAUSED:
                 _LOGGER.warning(
                     "apply_classification: door/window open (_paused_by_door=True) — "
                     "suppressing band, ensuring HVAC off; day_type=%s",
@@ -1531,18 +1545,16 @@ class AutomationEngine:
             # With savings off, call the helper to keep the full band current, then continue so the
             # ODE ceiling guard can still fire as a safety backstop if a breach is predicted.
             #
-            # Issue #495: OR in _whf_owns_hvac() so a manually/remotely-detected WHF session
-            # (which sets _pre_fan_hvac_mode via _suppress_hvac_for_whf() but does NOT set
-            # _natural_vent_active — a manual override isn't a nat-vent decision) is also
-            # gated here, not just left to the low-level _set_hvac_mode()/_set_temperature()
-            # write-guard. The write-guard alone would still block the write, but silently —
-            # this ORs the same condition apply_classification already checks for the
-            # CA-initiated case so a manual session doesn't compute select_comfort_band()/run
-            # the ODE ceiling guard just to have the result dropped (Issue #392 Fix 1b's own
-            # rationale). _whf_owns_hvac() is additive here, not a replacement: the reconcile-
-            # adopted case (reconcile_fan_on_startup() sets _natural_vent_active without
-            # setting _pre_fan_hvac_mode) still needs the original _natural_vent_active check.
-            if self._natural_vent_active or self._whf_owns_hvac():
+            # Issue #495: whf_owns_hvac is OR'd with natural_vent_active inside the shared gate
+            # (decide_scheduled_band_gate) so a manually/remotely-detected WHF session (which sets
+            # _pre_fan_hvac_mode via _suppress_hvac_for_whf() but does NOT set _natural_vent_active
+            # — a manual override isn't a nat-vent decision) is also gated here, not just left to
+            # the low-level _set_hvac_mode()/_set_temperature() write-guard. The write-guard alone
+            # would still block the write, but silently — this catches the same condition apply_
+            # classification already checked for the CA-initiated case so a manual session doesn't
+            # compute select_comfort_band()/run the ODE ceiling guard just to have the result
+            # dropped (Issue #392 Fix 1b's own rationale).
+            if _gate == ScheduledBandGate.DEFER_NAT_VENT:
                 _aggressive = bool(self.config.get("aggressive_savings", False))
                 _LOGGER.info(
                     "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s day_type=%s",
@@ -3966,9 +3978,28 @@ class AutomationEngine:
             _LOGGER.debug("handle_bedtime: skipping — setpoint write within last 30s (startup dedup guard)")
             return
 
+        # Issue #498: occupancy/override/paused/nat-vent checks below now route through the
+        # single shared gate (desired_state.decide_scheduled_band_gate()) also used by
+        # apply_classification()/handle_morning_wakeup()/handle_pre_cool() — see that
+        # function's docstring for the full rationale. Two behavior corrections land with
+        # this refactor: (1) bedtime no longer has its own outdoor-vs-sleep_cool comparison
+        # to decide whether nat-vent should keep running — that comparison could hand off to
+        # AC prematurely even while outdoor was still well below indoor and the fan was doing
+        # useful, cheaper work (finding #7); the engine's own per-tick
+        # check_natural_vent_conditions() already manages the session correctly (outdoor-
+        # reversal exit, sleep-aware cycling target), so bedtime just defers entirely while
+        # nat-vent/WHF is active. (2) bedtime now also defers when paused by an open door/
+        # window, which it never checked before (finding #11).
+        _gate = decide_scheduled_band_gate(
+            occupancy_mode=self._occupancy_mode,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
         # Issue #85: vacation/away already has a setback — don't override it with sleep temps.
-        # Gate unified via should_defer_to_occupancy_setback() (Issue #460).
-        if should_defer_to_occupancy_setback(self._occupancy_mode):
+        if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
             _LOGGER.info("Bedtime skipped — %s mode (setback already active)", self._occupancy_mode)
             if self._emit_event_callback:
                 self._emit_event_callback(
@@ -3979,7 +4010,7 @@ class AutomationEngine:
                 self._today_record.setback_skipped_reason = "occupancy"
             return
 
-        if self._manual_override_active:
+        if _gate == ScheduledBandGate.DEFER_OVERRIDE:
             _LOGGER.info(
                 "Bedtime setback skipped — manual override active (mode=%s since %s)",
                 self._manual_override_mode,
@@ -3991,6 +4022,25 @@ class AutomationEngine:
                 self._today_record.setback_skipped_reason = "manual_override"
             return
 
+        if _gate == ScheduledBandGate.DEFER_PAUSED:
+            _LOGGER.info("Bedtime setback skipped — paused by open door/window")
+            if self._emit_event_callback:
+                self._emit_event_callback("bedtime_setback_skipped", {"reason": "paused_by_door"})
+            if self._today_record is not None:
+                self._today_record.setback_skipped_reason = "paused_by_door"
+            return
+
+        # Issue #498: capture whether the fan is user-overridden BEFORE clear_manual_
+        # override() runs. clear_manual_override() unconditionally calls
+        # clear_fan_override(), which resets _fan_override_active to False as a side
+        # effect — reading self._fan_override_active AFTER that call always sees it
+        # already cleared, silently defeating the "not self._fan_override_active" guard
+        # below (this was true of handle_bedtime()'s guard even before this fix; it was
+        # never actually exercised because it read a flag clear_manual_override() had
+        # just zeroed). Same capture-before-clear pattern already used at :3648 for
+        # _manual_override_mode/_manual_override_source.
+        _fan_was_overridden = self._fan_override_active
+
         _LOGGER.warning("Bedtime setback: clearing any pending override state before applying sleep setback")
         self.clear_manual_override(reason="bedtime")
 
@@ -3998,15 +4048,14 @@ class AutomationEngine:
         if not c:
             if self._today_record is not None:
                 self._today_record.setback_skipped_reason = "no_classification"
-            # No sleep target available — deactivate fan unconditionally
-            if self._fan_active and not self._fan_override_active:
+            # No sleep target available — deactivate fan unless nat-vent/WHF owns it.
+            if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
                 await self._deactivate_fan(reason="bedtime — no classification")
                 self._natural_vent_active = False
             if self._economizer_active:
                 await self._deactivate_economizer(outdoor_temp=0)
             return
 
-        # Compute sleep band first — needed for the nat-vent continuation gate below.
         _sleep_band = select_comfort_band(
             c,
             self.config,
@@ -4015,30 +4064,23 @@ class AutomationEngine:
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
 
-        # Issue #370: Nat-vent continuation gate — if nat-vent is actively running and
-        # outdoor air is below the sleep ceiling, allow free cooling to continue to the
-        # sleep target instead of deactivating the fan and handing off to the compressor.
-        # Applies to all fan archetypes (WHF, HVAC fan, BOTH).
-        _outdoor_370 = self._last_outdoor_temp
-        _nat_vent_can_reach = (
-            self._natural_vent_active
-            and self._fan_active
-            and not self._fan_override_active
-            and _outdoor_370 is not None
-            and _outdoor_370 < _sleep_band.ceiling
-        )
-        if _nat_vent_can_reach:
-            _LOGGER.info(
-                "Nat-vent continues at bedtime: outdoor=%.1f°F below sleep_cool=%.1f°F — fan runs to sleep target",
-                _outdoor_370,
-                _sleep_band.ceiling,
-            )
+        # Issue #498: bedtime no longer decides for itself whether nat-vent/WHF "can still
+        # reach" the sleep target — it just leaves an active session alone (skips fan
+        # deactivation) and always still computes/emits the sleep band exactly as before.
+        # The low-level _whf_owns_hvac() choke-point guard inside _set_temperature() (used by
+        # _apply_comfort_band() below) continues to silently no-op the actual write for
+        # WHF/BOTH — same as it always has; FAN_MODE_HVAC coexists with the compressor so its
+        # write goes through normally. This is deliberately NOT a second copy of that
+        # archetype decision — bedtime only decides "touch the fan or not."
+        if _gate == ScheduledBandGate.DEFER_NAT_VENT:
+            _LOGGER.info("Bedtime: nat-vent/WHF session active — leaving fan alone")
         else:
-            if self._fan_active and not self._fan_override_active:
-                await self._deactivate_fan(reason="bedtime — nat-vent not favorable for continuation")
+            if self._fan_active and not _fan_was_overridden:
+                await self._deactivate_fan(reason="bedtime — nat-vent not active")
                 self._natural_vent_active = False
         if self._economizer_active:
             await self._deactivate_economizer(outdoor_temp=0)
+
         if self._emit_event_callback:
             self._emit_event_callback(
                 "bedtime_setback",
@@ -4050,14 +4092,10 @@ class AutomationEngine:
                     "modifier": c.setback_modifier,
                 },
             )
-        if _nat_vent_can_reach and self._emit_event_callback:
+        if _gate == ScheduledBandGate.DEFER_NAT_VENT and self._emit_event_callback:
             self._emit_event_callback(
                 "nat_vent_bedtime_continue",
-                {
-                    "outdoor_temp": _outdoor_370,
-                    "sleep_cool": _sleep_band.ceiling,
-                    "fan_device": _fan_device_label(self.config),
-                },
+                {"fan_device": _fan_device_label(self.config)},
             )
         if self._today_record is not None:
             # Issue #402: key off _sleep_band.active (the edge _apply_comfort_band() actually
@@ -4096,18 +4134,57 @@ class AutomationEngine:
             )
             return "skipped: no warming trend"
 
-        # Gate unified via should_defer_to_occupancy_setback() (Issue #460).
-        if should_defer_to_occupancy_setback(self._occupancy_mode):
+        # Issue #498: occupancy/override/paused/nat-vent checks below now route through the
+        # single shared gate (desired_state.decide_scheduled_band_gate()) also used by
+        # apply_classification()/handle_bedtime()/handle_morning_wakeup() — see that
+        # function's docstring for the full rationale. Pre-cool previously had ZERO nat-vent/
+        # WHF awareness of its own, relying entirely on the low-level _whf_owns_hvac() choke-
+        # point guard inside _set_temperature() to silently no-op the write — this makes that
+        # deferral explicit and observable, and also adds a paused-by-door check it never had
+        # (finding #11). Deferring to an active nat-vent/WHF session loses nothing: pre-cool's
+        # own compute_pre_cool_target() floors at sleep_heat + hysteresis, the exact anchor
+        # nat_vent_temperature_check() already cycles the fan around during the sleep window —
+        # free cooling is already doing at least as much work as pre-cool's own AC ceiling
+        # would (Issue #498 finding #8a).
+        _gate = decide_scheduled_band_gate(
+            occupancy_mode=self._occupancy_mode,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
+        if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
             _LOGGER.info("Pre-cool skipped — %s mode (setback already active)", self._occupancy_mode)
             return f"skipped: {self._occupancy_mode}"
 
-        if self._manual_override_active:
+        if _gate == ScheduledBandGate.DEFER_OVERRIDE:
             _LOGGER.info(
                 "Pre-cool skipped — manual override active (mode=%s since %s)",
                 self._manual_override_mode,
                 self._manual_override_time,
             )
             return "skipped: manual override"
+
+        if _gate == ScheduledBandGate.DEFER_PAUSED:
+            _LOGGER.info("Pre-cool skipped — paused by open door/window")
+            return "skipped: paused_by_door"
+
+        if _gate == ScheduledBandGate.DEFER_NAT_VENT:
+            _fan_cfg_pc = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+            _LOGGER.info(
+                "Pre-cool deferred — nat-vent/WHF session active (fan_mode=%s); free cooling already"
+                " chasing at least as cold a target",
+                _fan_cfg_pc,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "pre_cool_suppressed_nat_vent",
+                    {"modifier": c.setback_modifier, "reason": "active_session"},
+                )
+            if _fan_cfg_pc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+                return "suppressed: nat-vent/WHF session active"
+            # FAN_MODE_HVAC: fall through and arm the pre-cool ceiling, fan keeps running.
 
         sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
         sleep_heat_floor = float(self.config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
@@ -4145,7 +4222,12 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "pre_cool_suppressed_nat_vent",
-                    {"indoor": indoor_temp, "target": pre_cool_target, "modifier": c.setback_modifier},
+                    {
+                        "indoor": indoor_temp,
+                        "target": pre_cool_target,
+                        "modifier": c.setback_modifier,
+                        "reason": "achieved",
+                    },
                 )
             return f"suppressed: nat-vent achieved {indoor_temp:.1f}°F (target {pre_cool_target:.1f}°F)"
 
@@ -4190,19 +4272,33 @@ class AutomationEngine:
 
     async def handle_morning_wakeup(self, indoor_temp: float | None = None) -> None:
         """Restore comfort for morning wake-up."""
-        # Issue #85: skip comfort restore when nobody is home. Gate unified via
-        # should_defer_to_occupancy_setback() (Issue #460) — this call site's original
-        # inverted form (`not in (HOME, GUEST)`) is logically equivalent to the
-        # predicate's `in (AWAY, VACATION)`, since occupancy_mode is always one of
-        # exactly those 4 values.
-        if should_defer_to_occupancy_setback(self._occupancy_mode):
+        # Issue #498: occupancy/override/paused/nat-vent checks below now route through the
+        # single shared gate (desired_state.decide_scheduled_band_gate()) also used by
+        # apply_classification()/handle_bedtime()/handle_pre_cool() — see that function's
+        # docstring for the full rationale. This closes the 06:30 wake-up bug directly: the
+        # fan-deactivation call below now skips whenever nat-vent/WHF owns HVAC (previously
+        # unconditional — confirmed live: "Fan deactivated -- morning wakeup" -> "Comfort
+        # band applied (cool)" -> nat-vent had to re-engage a minute later to correct it) and
+        # skips whenever the user is overriding the fan (previously missing that check
+        # entirely, unlike handle_bedtime()). It also now defers when paused by an open door/
+        # window, which it never checked before (finding #11).
+        _gate = decide_scheduled_band_gate(
+            occupancy_mode=self._occupancy_mode,
+            manual_override_active=self._manual_override_active,
+            paused_by_door=self._paused_by_door,
+            natural_vent_active=self._natural_vent_active,
+            whf_owns_hvac=self._whf_owns_hvac(),
+        )
+
+        # Issue #85: skip comfort restore when nobody is home.
+        if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
             _LOGGER.info(
                 "Morning wakeup skipped — occupancy mode is '%s'",
                 self._occupancy_mode,
             )
             return
 
-        if self._manual_override_active:
+        if _gate == ScheduledBandGate.DEFER_OVERRIDE:
             _LOGGER.info(
                 "Morning wakeup skipped — manual override active (mode=%s since %s)",
                 self._manual_override_mode,
@@ -4212,11 +4308,27 @@ class AutomationEngine:
                 self._emit_event_callback("morning_wakeup_skipped", {"reason": "manual_override"})
             return
 
+        if _gate == ScheduledBandGate.DEFER_PAUSED:
+            _LOGGER.info("Morning wakeup skipped — paused by open door/window")
+            if self._emit_event_callback:
+                self._emit_event_callback("morning_wakeup_skipped", {"reason": "paused_by_door"})
+            return
+
+        # Issue #498: capture whether the fan is user-overridden BEFORE clear_manual_
+        # override() runs — it unconditionally calls clear_fan_override(), which resets
+        # _fan_override_active to False as a side effect. Reading self._fan_override_active
+        # after that call would always see it already cleared, silently defeating the "not
+        # overridden" guard below (this is precisely how the reported 06:30 bug's fix could
+        # have looked complete while still doing nothing — same capture-before-clear
+        # pattern already used at :3648 and now in handle_bedtime()).
+        _fan_was_overridden = self._fan_override_active
+
         _LOGGER.warning("Morning wakeup: clearing any pending override state before restoring comfort")
         self.clear_manual_override(reason="morning_wakeup")
 
-        # Deactivate fan if still running from overnight
-        if self._fan_active:
+        # Deactivate fan if still running from overnight — unless the user is overriding it
+        # or nat-vent/WHF currently owns HVAC (Issue #498 fix — see docstring note above).
+        if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
             await self._deactivate_fan(reason="morning wakeup — resetting fan state")
 
         c = self._current_classification
@@ -4244,6 +4356,15 @@ class AutomationEngine:
                     _current_indoor,
                     _comfort_heat,
                 )
+
+        # Issue #498: wakeup doesn't decide the WHF-vs-HVAC-fan archetype question itself —
+        # it just leaves an active nat-vent/WHF session's fan alone (handled above) and
+        # always still computes/emits the daytime band exactly as it did before this fix.
+        # The low-level _whf_owns_hvac() choke-point guard inside _set_temperature() (used
+        # by _apply_comfort_band() below) silently no-ops the actual write for WHF/BOTH;
+        # FAN_MODE_HVAC coexists with the compressor so its write goes through normally.
+        if _gate == ScheduledBandGate.DEFER_NAT_VENT:
+            _LOGGER.info("Morning wakeup: nat-vent/WHF session active — leaving fan alone")
 
         # Arm the daytime comfort band — waking up exits the sleep window.
         _wakeup_band = select_comfort_band(

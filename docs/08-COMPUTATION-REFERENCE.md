@@ -1389,18 +1389,20 @@ The grace-period trigger in the same block also now compares against `ae._last_c
 
 Fan override is **separate** from HVAC override. The two override states are tracked independently and do not interfere with each other. Fan override uses the same grace period duration as manual HVAC override (`DEFAULT_MANUAL_GRACE_SECONDS`), but the timers run independently.
 
-Fan override is **cleared** at transition points where the integration takes deliberate control of the fan (bedtime, morning wakeup — see Section 9c).
+Fan override **bookkeeping** is cleared at transition points where the integration takes deliberate control of the fan (bedtime, morning wakeup — see Section 9c) — but the *fan itself* is only deactivated when the user wasn't actively overriding it and nat-vent/WHF doesn't currently own HVAC (Issue #498).
 
-### 9c. Fan Behavior at Transitions
+### 9c. Fan Behavior at Transitions (updated Issue #498)
 
-| Transition | Fan action | Override cleared? |
+| Transition | Fan action | Override bookkeeping cleared? |
 |---|---|---|
-| Bedtime | `_deactivate_fan()` called; economizer also deactivated | Yes — `_fan_override_active` reset to `False` |
-| Morning wakeup | `_deactivate_fan()` called | Yes — `_fan_override_active` reset to `False` |
+| Bedtime | `_deactivate_fan()` called **only if** the fan wasn't being actively overridden and nat-vent/WHF doesn't currently own HVAC (`decide_scheduled_band_gate()` != `DEFER_NAT_VENT`); economizer also deactivated in that case | Yes — `_fan_override_active` reset to `False` regardless (via `clear_manual_override()` → `clear_fan_override()`) |
+| Morning wakeup | `_deactivate_fan()` called under the same condition as bedtime — this guard was **missing entirely** before Issue #498 (the reported 06:30 production bug: wake-up unconditionally killed a manually-overridden whole-house fan and armed AC) | Yes — same as bedtime |
 
-At bedtime, both the fan and the economizer are explicitly shut down before the bedtime setpoints are applied. This ensures the overnight period starts with a clean fan state regardless of what the economizer was doing during the evening window. At morning wakeup, the fan is deactivated before comfort temperatures are restored, preventing carryover of an economizer fan session into the occupied-home daytime period.
+At bedtime, the fan and economizer are shut down before the bedtime setpoints are applied — but only when there is no active nat-vent/WHF session and no active fan override to respect (Issue #498 deleted bedtime's own bespoke outdoor-vs-sleep_cool comparison; it now just defers to the shared gate). At morning wakeup, the same logic applies before comfort temperatures are restored.
 
-Clearing the override flag at these transitions means the integration will not skip fan activation during the next economizer cycle just because the user had manually adjusted the fan during the previous day.
+**Capture-before-clear hazard (Issue #498):** both handlers must snapshot `_fan_override_active` into a local variable *before* calling `clear_manual_override()` — that call unconditionally clears the flag as a side effect via `clear_fan_override()`, so reading the live attribute afterward would always see it already cleared, silently defeating the override guard regardless of whether the code checks it correctly. See `docs/grace-periods-spec.md#shared-scheduled-band-gate-issue-498` for the full mechanism.
+
+Clearing the override bookkeeping flag at these transitions means the integration will not skip fan activation during the next economizer cycle just because the user had manually adjusted the fan during the previous day — this bookkeeping reset is independent of whether the fan itself was touched during this same transition.
 
 ### 9c-i. Fan-ON and Fan-OFF Decision Table (Issue #359)
 

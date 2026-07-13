@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.23"
+VERSION = "0.5.24"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.24": [
+        'Fix #498: the Status dashboard showed "Grace period active" during an override'
+        " but never said when it would end — now shows the end time and minutes remaining."
+        " Also fixed: the 6:30am wake-up could turn off a manually-overridden whole-house"
+        " fan and arm the AC against open windows, self-correcting only by luck a cycle"
+        " later. Bedtime, wake-up, and the overnight pre-cool trigger no longer each"
+        " decide independently whether to touch the fan or arm HVAC — they now share one"
+        " gate with the main 30-minute decision loop, closing two related gaps in the same"
+        " pass: none of the three previously respected an open door/window pause, and"
+        " bedtime's own free-cooling continuation check could hand off to the compressor"
+        " prematurely even while the fan was still doing useful, cheaper work.",
+    ],
     "0.5.23": [
         "Fix #495: manually or remotely turning on the whole-house fan (WHF) — by hand, or"
         " via a QuietCool RF remote timer press — left the AC armed for the entire session,"
@@ -1154,6 +1166,72 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    498: {
+        "version_fixed": "0.5.24",
+        "title": "Dashboard grace-expiry display gap; bedtime/wakeup/pre-cool gate logic duplicated and drifted",
+        "scope_covered": (
+            "(1) Dashboard: _compute_next_automation_action()/_compute_next_action() in"
+            " coordinator.py now append a formatted end-time + remaining-minutes suffix"
+            " (via new _format_grace_remaining() helper reading ae._grace_end_time) to the"
+            " 'Grace period active' text — previously shown with no time information at all."
+            " (2) Shared gate: new desired_state.ScheduledBandGate enum +"
+            " decide_scheduled_band_gate() pure function is now the single place the"
+            " occupancy/manual-override/paused-by-door/nat-vent-or-WHF-ownership checks"
+            " live, reused by apply_classification(), handle_bedtime(),"
+            " handle_morning_wakeup(), and handle_pre_cool() — each handler keeps its own"
+            " distinct band computation and telemetry, only the gate-checking is unified."
+            " (3) The reported bug: handle_morning_wakeup()'s independent copy of these"
+            " checks was missing the fan-override guard entirely (handle_bedtime()'s copy"
+            " had it) — wake-up unconditionally deactivated a manually-overridden"
+            " whole-house fan and armed AC, defeating the _whf_owns_hvac() choke-point"
+            " guard the write is supposed to respect. Confirmed live: 06:30 wake-up killed"
+            " a manual WHF override and armed cool, self-correcting a cycle later only"
+            " because an unrelated nat-vent re-evaluation happened to run right after."
+            " (4) Related, more subtle bug found while testing the wake-up fix:"
+            " clear_manual_override() unconditionally clears _fan_override_active as a"
+            " side effect (via clear_fan_override()), and both handle_bedtime() and"
+            " handle_morning_wakeup() call it BEFORE their fan-deactivation check — so"
+            " reading the live attribute afterward always saw it already cleared, silently"
+            " defeating the guard even when written correctly. This means"
+            " handle_bedtime()'s equivalent guard was never actually effective either,"
+            " confirmed by a test whose own name documented the bug as intended behavior"
+            " ('test_bedtime_clears_fan_override_then_deactivates', now corrected). Both"
+            " handlers now snapshot _fan_override_active into a local BEFORE calling"
+            " clear_manual_override(), matching the capture-before-clear pattern already"
+            " used elsewhere in _confirm_override()-adjacent code."
+            " (5) Finding #11: none of the three scheduled handlers checked"
+            " _paused_by_door at all (unlike apply_classification()/"
+            " handle_occupancy_away()/handle_occupancy_vacation(), which all do) — a"
+            " door/window pause active at exactly sleep_time/wake_time/the pre-cool"
+            " trigger was not protected. All three now defer via the shared gate."
+            " (6) handle_bedtime()'s own nat-vent-continuation gate (an inline"
+            " outdoor-vs-sleep_cool comparison) is deleted — it could hand off to AC"
+            " prematurely even while outdoor was still well below indoor and the fan was"
+            " doing useful work. Bedtime now defers entirely to an active nat-vent/WHF"
+            " session; the engine's own per-tick check_natural_vent_conditions() (outdoor-"
+            " reversal exit) and nat_vent_temperature_check()'s sleep-window cycling"
+            " target already manage the session's lifetime correctly without help from"
+            " bedtime."
+        ),
+        "scope_not_covered": (
+            "handle_pre_cool()'s new nat-vent/WHF deferral (finding #8) still lets the"
+            " low-level _whf_owns_hvac() choke-point guard silently no-op the actual write"
+            " for WHF/BOTH archetypes — this fix only makes that deferral observable via"
+            " logging/event emission, it does not change the underlying write path."
+            " If nat-vent ends early (before wake_time) after pre-cool already deferred to"
+            " it, nothing re-applies the pre-cool thermal-mass-banking ceiling — this is a"
+            " pre-existing gap (pre-cool is a one-shot scheduled trigger with no re-arm"
+            " mechanism), not a regression from this fix, and is not addressed here."
+            " A tools/simulate.py harness-level (production-coordinator) pending scenario"
+            " for the wake-up WHF-override bug was attempted but removed — the coordinator's"
+            " real fan-entity state-change listener did not engage as expected via the"
+            " harness's external_fan_state_change driving event within the time available"
+            " this session; the fix is covered by direct unit tests"
+            " (tests/test_bedtime_override.py::TestMorningWakeupFanOverrideGuard) instead,"
+            " which reproduce the exact reported bug and were verified to fail without the"
+            " fix. Wiring a harness-level scenario for this is left as follow-up work."
+        ),
+    },
     495: {
         "version_fixed": "0.5.23",
         "title": "Manual/remote whole-house-fan-on left HVAC armed; QuietCool remote reliability + status display",

@@ -727,8 +727,17 @@ class TestFanTransitions:
 
         assert engine._fan_override_active is False
 
-    def test_bedtime_clears_fan_override_then_deactivates(self):
-        """handle_bedtime clears fan override (transition point) and deactivates fan."""
+    def test_bedtime_preserves_fan_active_at_override_but_clears_override_bookkeeping(self):
+        """Issue #498: a fan the user was actively overriding at bedtime must be left
+        running — clear_manual_override()'s unconditional clear_fan_override() call
+        still resets the _fan_override_active bookkeeping flag itself (a transition-
+        point reset, unrelated to whether the fan gets touched), but handle_bedtime()
+        must snapshot the override state BEFORE that call to decide whether to
+        deactivate, not re-read the already-cleared flag afterward. Previously this
+        test asserted the opposite (fan deactivated) — that was the same class of bug
+        as the reported 06:30 wake-up incident, just never triggered in production
+        for bedtime specifically.
+        """
         engine = _make_automation_engine(
             {
                 CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
@@ -741,9 +750,10 @@ class TestFanTransitions:
 
         asyncio.run(engine.handle_bedtime())
 
-        # Bedtime is a transition point — overrides are cleared, then fan deactivated
+        # Bookkeeping flag is still reset at this transition point...
         assert engine._fan_override_active is False
-        assert engine._fan_active is False
+        # ...but the fan itself, which the user was actively overriding, must be left running
+        assert engine._fan_active is True
 
 
 # ---------------------------------------------------------------------------

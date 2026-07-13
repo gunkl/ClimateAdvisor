@@ -13,9 +13,11 @@
 | Is grace state persisted across HA restarts? | No (Issue #282 — clean slate). Override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) is NOT restored on restart. Pause state (`_paused_by_door`, `_pre_pause_mode`) IS preserved. CA always starts in clean automation mode after restart. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage) |
 | What happens to an active grace period when occupancy changes? | The engine has no explicit occupancy-triggered grace cancellation. Grace timers run to expiry regardless of occupancy transitions; occupancy handlers (`handle_occupancy_away`, `handle_occupancy_home`) do not call `_cancel_grace_timers()`. | [§ Occupancy Interaction](#occupancy-interaction) |
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
-| What are all the callsites that clear a manual override, and under what conditions? | Seven callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
+| What are all the callsites that clear a manual override, and under what conditions? | Seven callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. Note (Issue #498): both scheduled handlers must snapshot `_fan_override_active` *before* calling `clear_manual_override()` — that call unconditionally clears the fan-override flag as a side effect via `clear_fan_override()`, so reading the live attribute afterward always sees it already cleared. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
 | Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
 | What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
+| Where can the user see how much longer an active grace period will run? | The Status dashboard's next-action text (`_compute_next_automation_action()`/`_compute_next_action()` in coordinator.py) appends a formatted end-time + remaining-minutes suffix, e.g. "Grace period active (manual) — ends 7:14 AM (18 min left)", via `_format_grace_remaining()` reading `_grace_end_time` (Issue #498 — previously shown with no time at all). | [§ Timer Lifecycle](#timer-lifecycle) |
+| Do bedtime/wakeup/pre-cool implement their own copies of the occupancy/override/paused/nat-vent gate checks? | No (Issue #498). All four scheduled/cyclical call sites — `apply_classification()`, `handle_bedtime()`, `handle_morning_wakeup()`, `handle_pre_cool()` — call one shared pure function, `desired_state.decide_scheduled_band_gate()`, instead of hand-copying the checks. This fixed a real bug: `handle_morning_wakeup()`'s copy was missing the fan-override guard entirely, and none of the three scheduled handlers checked paused-by-door at all. | [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
 
 ---
 
@@ -432,3 +434,59 @@ Away/vacation setback setpoint changes are guarded by `_is_recent_temp_command(3
 ### Invariant
 
 After Issue #204: no scheduled timer (bedtime, wakeup) may call `clear_manual_override()` while `_manual_override_active=True`. Only grace expiry (callsites 1–3) and the explicit service call (callsite 6) may unconditionally clear an active override. All other callsites must check the flag first.
+
+---
+
+## Shared Scheduled-Band Gate (Issue #498)
+
+**Problem:** `apply_classification()` (the real 30-min decision loop) has always had the
+correct full gate stack — occupancy dispatch, manual-override adopt-or-skip, paused-by-door
+suppression, and `_natural_vent_active`/`_whf_owns_hvac()` deferral. `handle_bedtime()`,
+`handle_morning_wakeup()`, and `handle_pre_cool()` each hand-rolled their own partial,
+independently-drifted copy of a subset of these checks instead of reusing it — the same
+"duplicate parallel gate logic" failure class previously seen in nat-vent threshold bugs
+(#400/#402). Two concrete production bugs came from this drift:
+
+1. `handle_morning_wakeup()`'s copy never checked `_fan_override_active` at all (only
+   `handle_bedtime()`'s did) — wake-up unconditionally deactivated a manually-overridden
+   whole-house fan and armed AC, defeating the `_whf_owns_hvac()` choke-point guard that
+   write is supposed to respect. Confirmed in production: 06:30 wake-up killed a manual WHF
+   override and armed cool, self-correcting a cycle later only because an unrelated nat-vent
+   re-evaluation happened to run right after.
+2. None of the three scheduled handlers checked `_paused_by_door` at all — a door/window
+   pause active at exactly sleep_time/wake_time/the pre-cool trigger was not protected; only
+   `apply_classification()`, `handle_occupancy_away()`, and `handle_occupancy_vacation()` did.
+
+**Fix:** one shared, pure function, `desired_state.decide_scheduled_band_gate()`, is now the
+single place these four checks live (occupancy, manual override, paused-by-door, nat-vent/WHF
+ownership — in that order, matching `apply_classification()`'s original inline order). All
+four call sites — `apply_classification()`, `handle_bedtime()`, `handle_morning_wakeup()`, and
+`handle_pre_cool()` — call this one function for their "may I proceed" decision, then map each
+outcome (`PROCEED`, `DEFER_OCCUPANCY`, `DEFER_OVERRIDE`, `DEFER_PAUSED`, `DEFER_NAT_VENT`) to
+their own existing telemetry/DailyRecord/skip-event behavior — no handler lost its distinct
+event names or bookkeeping; only the boolean gate-checking is unified.
+
+**Also fixed as part of the same change (bedtime's nat-vent-continuation logic):**
+`handle_bedtime()` previously had its own inline check — `outdoor < sleep_band.ceiling` — to
+decide whether an active nat-vent/WHF session should keep running through bedtime instead of
+handing off to AC. This was a real, separate correctness bug, not just duplication: it could
+hand off to AC prematurely even while outdoor was still well below indoor and the fan was
+doing useful, cheaper cooling. Bedtime now just defers entirely whenever
+`decide_scheduled_band_gate()` returns `DEFER_NAT_VENT` — no outdoor comparison of its own.
+The engine's own per-tick `check_natural_vent_conditions()` (outdoor-reversal exit) and
+`nat_vent_temperature_check()`'s sleep-window cycling target (`sleep_heat + hysteresis`, active
+the instant `_in_sleep_window()` flips true) already manage the session's lifetime correctly
+without any help from the scheduled handler.
+
+**Capture-before-clear hazard (found while testing the wake-up fix):** `clear_manual_override()`
+unconditionally calls `clear_fan_override()`, which resets `_fan_override_active = False` as a
+side effect — regardless of whether a fan override was active moments before. Both
+`handle_bedtime()` and `handle_morning_wakeup()` call `clear_manual_override()` *before* their
+fan-deactivation check, so reading `self._fan_override_active` at that point always sees it
+already cleared. This means the guard's *live-attribute* form is silently defeated even when
+written correctly — confirmed by a test (`test_bedtime_clears_fan_override_then_deactivates`,
+now corrected) whose own name documented the bug as intended behavior. Both handlers now
+snapshot `_fan_was_overridden = self._fan_override_active` *before* calling
+`clear_manual_override()`, and use that snapshot for the deactivation decision — the same
+capture-before-clear pattern already used in `_confirm_override()` (automation.py:~3648) for
+`_manual_override_mode`/`_manual_override_source`.

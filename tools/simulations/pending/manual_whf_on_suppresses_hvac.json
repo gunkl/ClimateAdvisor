@@ -1,0 +1,119 @@
+{
+  "name": "manual_whf_on_suppresses_hvac",
+  "description": "A manually/externally detected whole-house-fan-on (not CA-initiated, not nat-vent-eligible) must suppress HVAC exactly like CA-initiated activation already does — previously only _activate_fan() did this, leaving the AC armed for the life of a manual override (Issue #495).",
+  "source": "issue-report",
+  "issue": 495,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Reproduces the live incident (2026-07-12): a user opened windows and turned on the",
+    "whole-house fan to cool with outside air while the AC was actively armed in cool mode.",
+    "CA left the AC running the entire session because HVAC suppression (_pre_fan_hvac_mode",
+    "capture + set_hvac_mode('off')) previously lived ONLY in the CA-initiated _activate_fan()",
+    "path -- handle_fan_manual_override() (the manual/remote detection path) set the override",
+    "flag and grace timer but never touched HVAC. AC + whole-house fan + open windows running",
+    "simultaneously wastes energy and fights the fan's outdoor-air exchange -- the exact",
+    "failure mode nat-vent exists to prevent.",
+    "",
+    "This scenario deliberately makes outdoor (82F) WARMER than indoor (78F) so the fan-on is",
+    "NOT nat-vent-eligible -- it must be classified as a manual override, exercising the fixed",
+    "code path (handle_fan_manual_override -> _suppress_hvac_for_whf) rather than the",
+    "already-covered nat-vent-adoption path (whole_house_fan_hvac_suppression.json).",
+    "",
+    "external_fan_state_change dispatches states.async_set() directly with no HA Context --",
+    "modeling a genuine external actor (physical switch, or a QuietCool RF remote press,",
+    "which reaches the same handle_fan_manual_override() entry point via a different",
+    "coordinator listener -- see docs/fan-remote-spec.md) -- through the REAL coordinator",
+    "_async_fan_entity_changed listener.",
+    "",
+    "Scope note -- release/reclassify NOT exercised here: once _fan_override_active is True,",
+    "_async_fan_entity_changed()'s pre-existing 'override already active' guard",
+    "(coordinator.py, well above this fix) intercepts EVERY subsequent state change on the",
+    "fan entity -- including the fan turning back off -- and only requests a status refresh;",
+    "it never reaches on_fan_turned_off() for a command-only entity. That guard is not part",
+    "of Issue #495 and reproducing the release path end-to-end through the coordinator would",
+    "require untangling separate, pre-existing dispatch behavior outside this fix's scope.",
+    "The release/reclassify half of Issue #495 (_release_whf_and_reclassify(), including the",
+    "physical-fan-still-running guard) is instead covered directly and thoroughly at the unit",
+    "level: tests/test_whole_house_fan_hvac_suppression.py::TestManualWhfOffReleasesAndReclassifies",
+    "(4 tests, revert-verified).",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: if _suppress_hvac_for_whf() were removed from",
+    "    handle_fan_manual_override()'s call, or the archetype guard were reversed, the",
+    "    whf_hvac_suppressed assertion at 07:05 would fail (no such event fires) -- this is",
+    "    the exact regression the live incident exposed, and the assertion targets the new",
+    "    event Issue #495 added specifically to make this action observable (matching this",
+    "    project's Observability Requirements -- 'silent drops are made visible', the same",
+    "    principle behind the pre-existing hvac_write_blocked_whf_active event).",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md Sec 9 (Fan Archetype",
+    "    Behavioral Contract) and docs/fan-remote-spec.md (HVAC Suppression on Manual/Remote",
+    "    Fan-On) were updated in the same change describing exactly this suppress-then-",
+    "    reclassify behavior.",
+    "(c) User outcome: without this fix, the occupant runs AC and a whole-house fan",
+    "    simultaneously with windows open -- maximally wasteful, and the two systems",
+    "    physically fight. With the fix, the AC turns off the moment the fan is detected on."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 75,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.front_door"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-07-12T07:00:00",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 82.0,
+      "note": "Warm morning: indoor=78F, outdoor=82F -- outdoor WARMER than indoor, so a fan-on here is not nat-vent-eligible."
+    },
+    {
+      "time": "2026-07-12T07:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day: hvac_mode=cool. apply_classification() arms the comfort-cool ceiling (75F) -- AC is actively commanded to cool."
+    },
+    {
+      "time": "2026-07-12T07:02:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seed the fan entity's initial state. _async_fan_entity_changed() requires BOTH old_state and new_state to process a transition -- without this seed event, the very first state.async_set() on a never-before-seen entity has old_state=None and the listener silently no-ops."
+    },
+    {
+      "time": "2026-07-12T07:05:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "User turns on the whole-house fan directly (no CA context, no nat-vent eligibility -- outdoor 82F > indoor 78F). Real coordinator._async_fan_entity_changed routes to handle_fan_manual_override(), which now also suppresses HVAC (Issue #495) via the shared _suppress_hvac_for_whf() helper."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-12T07:01:00",
+      "expect": "classification_applied",
+      "reason": "Hot-day classification applied: hvac_mode=cool, comfort ceiling armed at 75F."
+    },
+    {
+      "at": "2026-07-12T07:05:00",
+      "expect": "whf_hvac_suppressed",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "A manually-detected whole-house-fan-on (not nat-vent-eligible, outdoor > indoor) must suppress HVAC -- the core Issue #495 fix. Before the fix, no such event fires and the AC stays armed in cool mode for the life of the override."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Manually/externally detected whole-house-fan-on suppresses HVAC exactly like CA-initiated activation (Issue #495)",
+    "observed_behavior": "classification_applied (cool @ 75F) -> external fan-on (not nat-vent-eligible) -> whf_hvac_suppressed (HVAC off)",
+    "expected_behavior": "AC never stays armed while a manually-controlled whole-house fan runs, regardless of whether the fan-on was CA-initiated or user/remote-initiated"
+  }
+}

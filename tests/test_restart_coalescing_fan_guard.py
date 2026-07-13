@@ -186,6 +186,9 @@ def _make_fan_remote_coord(*, startup_coalesce_active: bool) -> object:
 
     coord._startup_coalesce_active = startup_coalesce_active
     coord.async_request_refresh = AsyncMock()
+    # Issue #495: _async_fan_remote_changed() now dedups on the last acted-on event
+    # timestamp — object.__new__() skips __init__, so this must be set explicitly.
+    coord._last_fan_remote_event_ts = None
 
     coord._suppress_during_startup_coalescing = types.MethodType(
         ClimateAdvisorCoordinator._suppress_during_startup_coalescing, coord
@@ -227,7 +230,7 @@ class TestFanRemoteChangedCoalescingGuard:
         asyncio.run(coord._async_fan_remote_changed(event))
 
         coord.automation_engine.handle_fan_manual_override.assert_called_once_with(
-            fan_before="?", fan_after="on", duration_override=7200.0, remote_timer_hours=2.0
+            fan_before="?", fan_after="on", duration_override=7200.0, remote_timer_hours=2.0, is_remote_event=True
         )
 
 

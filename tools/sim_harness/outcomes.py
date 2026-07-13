@@ -424,6 +424,16 @@ def _map_event_to_outcome(
     if event_type == "pre_cool_suppressed_nat_vent":
         return ProductionDecision(ts_str, event_type, "pre_cool_suppressed_nat_vent")
 
+    # --- WHF HVAC suppression (Issue #495) ---
+    # Purely additive, same pattern as nat_vent_fan_off/nat_vent_fan_on above (no legacy
+    # equivalent — these events did not exist before Issue #495). Cannot silently pass a
+    # real regression because no pre-#495 scenario asserts these strings.
+    if event_type == "whf_hvac_suppressed":
+        return ProductionDecision(ts_str, event_type, "whf_hvac_suppressed")
+
+    if event_type == "whf_hvac_released":
+        return ProductionDecision(ts_str, event_type, "whf_hvac_released")
+
     # --- Unmapped (FINDINGS) — documented, silently skip ---
     if event_type in UNMAPPED_PRODUCTION_EVENTS:
         return None

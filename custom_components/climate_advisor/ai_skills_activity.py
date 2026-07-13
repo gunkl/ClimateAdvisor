@@ -537,6 +537,27 @@ def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[str, str]
     return label, settings
 
 
+def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #495: HVAC suppressed for a whole-house-fan session — CA-initiated OR a
+    manual/remote fan-on detection (both now route through the same suppress helper).
+    """
+    prior_mode = str(p.get("prior_mode", "")).strip()
+    reason = str(p.get("reason", "")).strip()
+    label = f"HVAC suppressed (whole-house fan) -- {reason}" if reason else "HVAC suppressed (whole-house fan)"
+    settings = f"hvac: {prior_mode}->off" if prior_mode else "hvac: ->off"
+    return label, settings
+
+
+def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #495: a manual/remote WHF session ended — HVAC suppression released and CA's
+    current classification reasserted (not a blind restore of the mode captured at activation,
+    since a remote-timer session can span hours).
+    """
+    reason = str(p.get("reason", "")).strip()
+    label = f"HVAC suppression released -- {reason}" if reason else "HVAC suppression released"
+    return label, "hvac: reclassifying"
+
+
 def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
     fan_before = str(p.get("fan_before", "")).strip()
     fan_after = str(p.get("fan_after", "")).strip()
@@ -886,6 +907,8 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_deactivated": _render_fan_deactivated,
     "fan_manual_override": _render_fan_manual_override,
     "hvac_write_blocked_whf_active": _render_hvac_write_blocked_whf_active,
+    "whf_hvac_suppressed": _render_whf_hvac_suppressed,
+    "whf_hvac_released": _render_whf_hvac_released,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,
     "fan_cancel": _render_fan_cancel,

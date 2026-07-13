@@ -601,6 +601,14 @@ class AutomationEngine:
         # Set by coordinator after construction.
         self._post_grace_fan_check_callback: Callable[[], None] | None = None
 
+        # Reclassify callback — called by _release_whf_and_reclassify() when a manual/remote
+        # WHF session ends, so the coordinator re-runs apply_classification() with its own
+        # current classification/predicted-indoor state (Issue #495). AutomationEngine has no
+        # direct handle on that coordinator-owned state, so this mirrors the existing
+        # callback-injection pattern above rather than reaching into the coordinator directly.
+        # Set by coordinator after construction.
+        self._reclassify_callback: Callable[[], None] | None = None
+
         # Today's DailyRecord — set by coordinator; used for bedtime setback tracking
         self._today_record: Any | None = None
 
@@ -809,6 +817,7 @@ class AutomationEngine:
         event_context_id: str | None = None,
         duration_override: float | None = None,
         remote_timer_hours: float | None = None,
+        is_remote_event: bool = False,
     ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
 
@@ -837,17 +846,36 @@ class AutomationEngine:
             remote_timer_hours: The RF remote's selected timer duration in hours, for
                 observability only (dashboard/status display + serialized state). None
                 for a non-remote-triggered override, or when the remote picked "no timer".
+            is_remote_event: True when this call originates from the RF remote (Issue #495)
+                — disambiguates a genuine "no timer" remote selection (``remote_timer_hours=
+                None`` from a real ``timer_none`` press, which SHOULD revert the stored value
+                to None) from a plain non-remote fan-on re-detection also passing
+                ``remote_timer_hours=None`` (which should NOT clobber an already-active
+                remote timer — see the preserve-on-restamp comment below).
         """
+        was_override_active = self._fan_override_active
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
         self._fan_override_time = dt_util.now().isoformat()
-        self._fan_remote_timer_hours = remote_timer_hours
+        # Issue #495: only overwrite the remote-timer value when the caller has a genuine
+        # opinion about it. This method is the SHARED entry point for both remote-timer
+        # presses and plain (non-remote) fan-on detections; a plain re-stamp of an
+        # already-active override (e.g. the WHF fan entity re-reporting "on" after a brief
+        # unavailable flap) must not clobber an active remote timer to None. Confirmed live:
+        # the status API returned fan_remote_timer_hours=None seconds after an 8h remote
+        # press while the persisted state still held 8.0 — the fan entity's own
+        # re-detection had nulled it. `is_remote_event` covers the one case that would
+        # otherwise be indistinguishable from that non-remote re-detection: a deliberate
+        # `timer_none` remote press, which also passes remote_timer_hours=None but SHOULD
+        # clear the stored value (revert to the configured default duration).
+        if is_remote_event or remote_timer_hours is not None or not was_override_active:
+            self._fan_remote_timer_hours = remote_timer_hours
         _LOGGER.info(
             "Fan override: set — manual fan change detected %s->%s, override active since %s, grace period starting%s",
             fan_before or "?",
             fan_after or "?",
             self._fan_override_time,
-            f" (RF remote timer: {remote_timer_hours}h)" if remote_timer_hours is not None else "",
+            f" (RF remote timer: {self._fan_remote_timer_hours}h)" if self._fan_remote_timer_hours is not None else "",
         )
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -862,6 +890,17 @@ class AutomationEngine:
                 },
             )
         self._start_grace_period("manual", trigger="fan_manual_override", duration_override=duration_override)
+
+        # Issue #495: whole-house fan and HVAC are mutually exclusive — this was previously
+        # only enforced for CA-initiated activation (_activate_fan()). A manually/remotely
+        # detected WHF-on left the AC armed for the life of the override. Scoped to
+        # WHOLE_HOUSE/BOTH; FAN_MODE_HVAC coexists with the compressor by design.
+        if self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            self.hass.async_create_task(
+                self._suppress_hvac_for_whf(
+                    reason="whole-house fan manually turned on — suppressing HVAC to prevent AC/fan fighting"
+                )
+            )
 
     def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None) -> None:
         """Handle the user turning the fan OFF — clears fan state and gates nat-vent re-activation (Issue #359).
@@ -915,6 +954,10 @@ class AutomationEngine:
             trigger_label="fan_off",
             preserve_nat_vent_session=False,
         )
+        # Issue #495: release any WHF HVAC suppression this session was holding (manual
+        # override OR a nat-vent session the user stopped physically) and reclassify —
+        # the fan is confirmed off by the very event that triggered this method.
+        self._release_whf_and_reclassify(reason=f"fan turned off by user ({fan_before or '?'}->{fan_after or '?'})")
 
     def _clear_fan_flags_and_start_grace(
         self,
@@ -987,6 +1030,11 @@ class AutomationEngine:
             self._fan_remote_timer_hours = None
             # Restart the min-runtime cycle that was suspended when override was set
             self.hass.async_create_task(self.start_min_fan_runtime_cycles())
+            # Issue #495: release any WHF HVAC suppression this override was holding.
+            # _release_whf_and_reclassify() itself checks physical fan state and no-ops
+            # if the WHF is still running (e.g. grace expired but the timer hasn't) —
+            # the post-grace fan reconcile owns that case instead.
+            self._release_whf_and_reclassify(reason="fan override cleared")
 
     async def start_min_fan_runtime_cycles(self) -> None:
         """Start rolling minimum fan runtime cycles (not clock-aligned).
@@ -1482,7 +1530,19 @@ class AutomationEngine:
             # 30-minute cycle cannot re-arm the ceiling (compressor) through open windows.
             # With savings off, call the helper to keep the full band current, then continue so the
             # ODE ceiling guard can still fire as a safety backstop if a breach is predicted.
-            if self._natural_vent_active:
+            #
+            # Issue #495: OR in _whf_owns_hvac() so a manually/remotely-detected WHF session
+            # (which sets _pre_fan_hvac_mode via _suppress_hvac_for_whf() but does NOT set
+            # _natural_vent_active — a manual override isn't a nat-vent decision) is also
+            # gated here, not just left to the low-level _set_hvac_mode()/_set_temperature()
+            # write-guard. The write-guard alone would still block the write, but silently —
+            # this ORs the same condition apply_classification already checks for the
+            # CA-initiated case so a manual session doesn't compute select_comfort_band()/run
+            # the ODE ceiling guard just to have the result dropped (Issue #392 Fix 1b's own
+            # rationale). _whf_owns_hvac() is additive here, not a replacement: the reconcile-
+            # adopted case (reconcile_fan_on_startup() sets _natural_vent_active without
+            # setting _pre_fan_hvac_mode) still needs the original _natural_vent_active check.
+            if self._natural_vent_active or self._whf_owns_hvac():
                 _aggressive = bool(self.config.get("aggressive_savings", False))
                 _LOGGER.info(
                     "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s day_type=%s",
@@ -4367,6 +4427,63 @@ class AutomationEngine:
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._pre_fan_hvac_mode is not None
 
+    async def _suppress_hvac_for_whf(self, *, reason: str) -> None:
+        """Capture current HVAC mode and turn it off for a whole-house-fan session (Issue #495).
+
+        Scoped to WHOLE_HOUSE/BOTH only — FAN_MODE_HVAC coexists with the compressor by
+        design (that fan IS the thermostat's own blower). Idempotent: a session that already
+        owns HVAC (``_pre_fan_hvac_mode is not None``) is not re-captured, so a repeated call
+        (e.g. two manual-override re-stamps in quick succession — the live incident showed a
+        physical fan-on at 20:45:32 followed by an RF remote press at 20:48:40) never clobbers
+        the captured mode with "off".
+
+        Shared by ``_activate_fan()`` (CA-initiated) and ``handle_fan_manual_override()``
+        (manual/remote-detected) so the WHF/HVAC mutual-exclusion rule has exactly one
+        suppression path — see the #400/#402/#417/#456/#458 "sibling threshold drift" history
+        for why a second copy of this rule is the wrong move.
+        """
+        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+        if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+            return
+        if self._pre_fan_hvac_mode is not None:
+            return
+        _cs = self.hass.states.get(self.climate_entity)
+        prior_mode = _cs.state if _cs else None
+        self._pre_fan_hvac_mode = prior_mode
+        await self._set_hvac_mode("off", reason=reason)
+        if self._emit_event_callback:
+            self._emit_event_callback("whf_hvac_suppressed", {"prior_mode": prior_mode, "reason": reason})
+
+    def _release_whf_and_reclassify(self, *, reason: str) -> None:
+        """End a WHF HVAC-suppression session: release ownership, then reclassify (Issue #495).
+
+        A manual/remote WHF session can run for hours (an 8h QuietCool RF remote timer
+        selection), so the HVAC mode captured in ``_pre_fan_hvac_mode`` at activation time is
+        often stale by exit — the session can span a sleep-setback transition. Rather than
+        blindly restoring that captured mode (what ``_deactivate_fan()`` does for the short
+        CA-initiated nat-vent cycle), this releases ownership and lets classification compute
+        the correct current mode AND setpoint in one shot, via the coordinator's existing
+        fan-off reassert path (``_async_reassert_setpoint_after_fan_off``, Issue #359 Fix A).
+
+        Guard: no-op if the WHF is still physically running, checked via the same ground-truth
+        callback ``_reconcile_fan_physical_drift()`` already uses
+        (``_get_fan_physical_state_callback`` — returns True/False when feedback is available,
+        None in command-only mode). The post-grace fan reconcile
+        (``_on_post_grace_fan_check`` -> ``reconcile_fan_on_startup``) owns the "still running"
+        case; releasing here too would race it.
+        """
+        if self._pre_fan_hvac_mode is None:
+            return  # no suppression session to release
+        if self._get_fan_physical_state_callback and self._get_fan_physical_state_callback():
+            _LOGGER.debug("WHF release-and-reclassify skipped (%s) — fan still physically on", reason)
+            return
+        self._pre_fan_hvac_mode = None  # release _whf_owns_hvac() BEFORE the reclassify write
+        _LOGGER.info("WHF session ended (%s) — releasing HVAC suppression, reclassifying current state", reason)
+        if self._emit_event_callback:
+            self._emit_event_callback("whf_hvac_released", {"reason": reason})
+        if self._reclassify_callback:
+            self._reclassify_callback()
+
     async def _apply_nat_vent_hvac_state(self) -> None:
         """Apply the correct HVAC state when nat-vent is active.
 
@@ -4571,14 +4688,10 @@ class AutomationEngine:
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-                # Capture current HVAC mode before suppressing it (Issue #277 Fix C).
                 # Whole-house fan exchanges outdoor air directly — running AC/heat
-                # simultaneously fights the fan and wastes energy.
-                _cs = self.hass.states.get(self.climate_entity)
-                self._pre_fan_hvac_mode = _cs.state if _cs else None
-                await self._set_hvac_mode(
-                    "off",
-                    reason="whole-house fan active — suppressing HVAC to prevent fighting outdoor air exchange",
+                # simultaneously fights the fan and wastes energy (Issue #277 Fix C).
+                await self._suppress_hvac_for_whf(
+                    reason="whole-house fan active — suppressing HVAC to prevent fighting outdoor air exchange"
                 )
 
                 fan_entity = self.config.get(CONF_FAN_ENTITY)

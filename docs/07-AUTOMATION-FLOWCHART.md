@@ -274,7 +274,9 @@ graph TD
 
 Fan state changes are monitored by two listeners. A dedicated fan entity listener watches for direct on/off changes. The existing thermostat listener in `_async_thermostat_changed()` also detects `fan_mode` attribute changes. Both paths call `handle_fan_manual_override()` in the automation engine.
 
-Fan override is tracked separately from HVAC override — `_fan_override_active` is independent of `_manual_override_active`. Both can be active simultaneously.
+Fan override is tracked separately from HVAC override — `_fan_override_active` is independent of `_manual_override_active`. Both can be active simultaneously — this independence is also why the two could previously produce contradictory-looking dashboard status text at once (fixed in `_compute_next_action()`, Issue #495 — see [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md)).
+
+**HVAC suppression on manual fan-on (Issue #495):** for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` now also suppresses HVAC — the same `_suppress_hvac_for_whf()` helper `_activate_fan()` (CA-initiated activation) uses. Before this fix, only CA-initiated activation suppressed HVAC; a manually or remotely detected fan-on left the AC armed for the life of the override. `FAN_MODE_HVAC` is unaffected (the thermostat's own blower coexists with the compressor by design). See [fan-remote-spec.md § HVAC Suppression on Manual/Remote Fan-On](fan-remote-spec.md#hvac-suppression-on-manualremote-fan-on).
 
 ```mermaid
 graph TD
@@ -287,13 +289,21 @@ graph TD
     F -->|Yes| D
 
     D --> H[_fan_override_active = True\nRecord override time]
-    H --> I[Start fan grace period\ndefault manual_grace_seconds]
+    H --> H2{fan_mode WHOLE_HOUSE\nor BOTH?}
+    H2 -->|Yes| H3[_suppress_hvac_for_whf\nHVAC set off, mode captured]
+    H2 -->|No| I
+    H3 --> I[Start fan grace period\ndefault manual_grace_seconds]
     I --> J[Fan automation skips\nfan activation until cleared]
-    J --> K[Fan override cleared at:\nBedtime or Wakeup schedule boundary\nvia clear_fan_override]
+    J --> K[Fan override cleared at:\nBedtime/Wakeup boundary, physical\nfan-off, or grace expiry]
 
     L[clear_manual_override called\nat schedule boundary] --> M[clear_fan_override]
     M --> N[_fan_override_active = False]
+    M --> O{Suppression session\nactive AND fan not\nphysically running?}
+    O -->|Yes| P[_release_whf_and_reclassify\nrelease + reclassify, not blind restore]
+    O -->|No, fan still on| Q[Left suppressed — post-grace\nfan reconcile owns this case]
 ```
+
+`on_fan_turned_off()` (physical fan confirmed off by the triggering event) reaches the same `_release_whf_and_reclassify()` unconditionally — no physical-state re-check needed there, since the event itself confirms the fan is off.
 
 ---
 

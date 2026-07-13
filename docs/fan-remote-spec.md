@@ -13,6 +13,9 @@
 | What happens to an active RF timer across an HA restart? | Nothing survives — it is not persisted. This matches CA's existing clean-slate policy for all override/grace state (Issue #327/#282); `restore_state()` resets `_fan_remote_timer_hours` to `None` alongside `_fan_override_active`. | [§ Restart Behavior](#restart-behavior) |
 | What clears an RF-timer-driven override? | The same two paths that clear any manual fan override: (1) the fan physically turns off (detected via `fan_entity`/`fan_state_entity`, routed to `on_fan_turned_off()`), or (2) the grace timer naturally expires (`_on_grace_expired()`). There is no separate "remote timer expired" detection — CA relies on the fan's own physical state. | [§ Clearing](#clearing) |
 | What is out of scope for this feature? | Speed tokens (`low`/`medium`/`high`) and explicit `on`/`off` event handling are not decoded or acted on. Only the `timer_*` family drives behavior. | [§ Scope](#scope) |
+| Does an RF timer press also suppress HVAC? | Yes, as of Issue #495 — for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` schedules `_suppress_hvac_for_whf()`, the same helper `_activate_fan()` uses. Previously ONLY CA-initiated activation suppressed HVAC; a manual/remote fan-on left the AC armed for the life of the override. | [§ HVAC Suppression on Manual/Remote Fan-On](#hvac-suppression-on-manualremote-fan-on) |
+| Can a stale/repeated remote event trigger a false override? | It used to. The `event.*` entity flaps to `unavailable` at arbitrary times (not just restart) and re-announces its STALE last `event_type` with the SAME state (the entity's `state` field IS the event timestamp). Issue #495 added a dedup guard (`_last_fan_remote_event_ts`) that ignores a re-announced identical timestamp — confirmed live: without it, a phantom 2h override fired with zero user action when the entity restored a 6-hour-stale `timer_2h`. | [§ Stale-Event Dedup](#stale-event-dedup) |
+| Does the dashboard's remote-timer display stay accurate? | As of Issue #495, yes. Previously `handle_fan_manual_override()` unconditionally overwrote `_fan_remote_timer_hours` on every call — including plain non-remote re-stamps (e.g. the WHF fan entity re-reporting "on") — which nulled an active remote timer within seconds of a genuine press. Fixed by only overwriting when the caller is the remote itself (`is_remote_event=True`) or supplies a genuine value. | [§ Timer Value Durability](#timer-value-durability) |
 
 ---
 
@@ -21,8 +24,8 @@
 **Files:**
 - `custom_components/climate_advisor/fan_status.py` — `parse_remote_timer_event()`, the single source of truth for the event-token → hours mapping
 - `custom_components/climate_advisor/const.py` — `CONF_FAN_REMOTE_ENTITY`, `REMOTE_TIMER_EVENT_HOURS`
-- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler
-- `custom_components/climate_advisor/automation.py` — `handle_fan_manual_override(duration_override=...)`, `_start_grace_period(duration_override=...)`, the suppression WARNING at `_deactivate_fan()` and `fan_thermostat_check()`
+- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup)
+- `custom_components/climate_advisor/automation.py` — `handle_fan_manual_override(duration_override=..., is_remote_event=...)`, `_start_grace_period(duration_override=...)`, the suppression WARNING at `_deactivate_fan()` and `fan_thermostat_check()`, `_suppress_hvac_for_whf()`/`_release_whf_and_reclassify()` (Issue #495 HVAC suppression + reclassify-on-exit)
 
 **Out of scope for this spec** (see [grace-periods-spec.md](grace-periods-spec.md) for the general grace-period mechanics this feature reuses):
 - Speed tokens (`low`/`medium`/`high`) — firmware decodes and emits these, CA does not act on them this cut
@@ -124,6 +127,38 @@ Remote press (event.quietcool_remote fires, event_type=timer_8h)
 
 ---
 
+## HVAC Suppression on Manual/Remote Fan-On (Issue #495)
+
+A remote timer press (or any manual fan-on detection) is a whole-house-fan-on event, and
+WHF/AC mutual exclusion is a structural rule (see
+[08-COMPUTATION-REFERENCE.md § Structural WHF/AC Mutual Exclusion](08-COMPUTATION-REFERENCE.md)),
+not something specific to CA-initiated activation. Before Issue #495, only `_activate_fan()`
+(the CA-initiated path) suppressed HVAC on WHF-on — `handle_fan_manual_override()` set the
+override flag and started the grace timer, but never touched `_pre_fan_hvac_mode` or
+`_set_hvac_mode`. A user manually turning on the fan (or pressing an RF timer) left the AC
+armed for the entire override duration — up to 12 hours for a `timer_12h` press.
+
+**Fix — reuse, don't duplicate:** `handle_fan_manual_override()` now schedules the same
+`_suppress_hvac_for_whf()` helper `_activate_fan()` calls, scoped to `FAN_MODE_WHOLE_HOUSE`/
+`BOTH` (never `FAN_MODE_HVAC` — the thermostat's own blower coexists with the compressor by
+design). Because `handle_fan_manual_override()` is sync and `_suppress_hvac_for_whf()` is
+async (it awaits `_set_hvac_mode()`), it is dispatched via `hass.async_create_task()` rather
+than awaited directly.
+
+**Exit is reclassify, not restore.** `_activate_fan()`'s counterpart, `_deactivate_fan()`,
+restores the HVAC mode captured at activation time. That is appropriate for CA's own short
+nat-vent cycles, but a manual/remote WHF session can run for hours — the captured mode is
+often stale by exit (e.g. the session spans a sleep-setback transition). Ending a manual
+session instead calls `_release_whf_and_reclassify()`, which releases `_pre_fan_hvac_mode`
+and reuses the existing fan-off reassert path (`_async_reassert_setpoint_after_fan_off`,
+Issue #359 Fix A) so the thermostat converges on CA's *current* classification. This fires
+from `on_fan_turned_off()` (fan confirmed off by the triggering event) and
+`clear_fan_override()` (grace expiry / user cancel) — the latter first checks the same
+physical-fan-state ground truth `_reconcile_fan_physical_drift()` uses, and no-ops if the
+fan is still running, so it doesn't race the post-grace fan reconcile.
+
+---
+
 ## Suppression Is Absolute
 
 Per the locked decision (2026-07-12), while an RF timer is active, hard comfort-floor and
@@ -171,6 +206,61 @@ window — an accepted tradeoff, consistent with the existing thermostat-overrid
 
 ---
 
+## Stale-Event Dedup (Issue #495)
+
+The `unavailable`-during-restart flap above turned out to be a special case of a broader
+problem: **the QuietCool `event.*` entity flaps to `unavailable` at arbitrary times, not
+just at restart**, and restores its stale last `event_type` with the SAME `state` value
+(the entity's `state` field IS the firmware event's own timestamp — e.g.
+`"2026-07-13T03:48:40.960+00:00"`). The Issue #491 guard only covers the restart window;
+outside it, nothing previously distinguished a genuine new press from a stale re-announce.
+
+**Confirmed live:** a real install's remote entity flapped `unavailable`→restore six times
+in one day at unrelated times (08:13, 08:46, 16:58, 17:40, 18:03, 19:05 — no restart
+involved), each restoring a `timer_2h` state frozen from an earlier press at 06:41. At
+16:58:02, this produced a `fan_manual_override(remote_timer_hours=2.0)` + a 2-hour grace
+period with **zero user action** — CA's own fan control was spuriously suppressed for 2
+hours, and because the grace re-stamps on every flap, a sufficiently flaky entity could
+keep an override alive indefinitely.
+
+**Fix:** the coordinator tracks `_last_fan_remote_event_ts` — the `state` (timestamp) of
+the last event actually acted on. `_async_fan_remote_changed()` compares the incoming
+`new_state.state` against it before doing anything else; an identical value is ignored
+(DEBUG-logged) as a re-announce, not a fresh press. This generalizes the Issue #491
+restart-only guard to every `unavailable`→restore flap, using the entity's own timestamp
+rather than a time-window heuristic. Not persisted — a stale restore immediately after a
+restart is already covered by `_suppress_during_startup_coalescing()`.
+
+---
+
+## Timer Value Durability (Issue #495)
+
+`_fan_remote_timer_hours` (the value the dashboard's "remote timer: Xh" line reads) used to
+get silently clobbered to `None` while a remote-timer override was still active.
+`handle_fan_manual_override()` is the single shared entry point for BOTH remote-timer
+presses AND plain non-remote fan-on detections (the WHF fan entity re-reporting `"on"`
+after its own brief `unavailable` flap, or the thermostat's `fan_mode` attribute changing)
+— and it unconditionally overwrote `_fan_remote_timer_hours = remote_timer_hours` on every
+call. A non-remote re-stamp always passes `remote_timer_hours=None`, so it nulled an active
+remote timer within seconds.
+
+**Confirmed live:** querying the status API and the persisted engine state within seconds
+of each other, during an active 8-hour RF timer override, showed the API returning
+`fan_remote_timer_hours: null` while the persisted state still held `8.0` — the value was
+oscillating, present only in the brief window between a remote press and the next
+unrelated fan-entity re-detection.
+
+**Fix:** `handle_fan_manual_override()` gained `is_remote_event: bool = False`. The stored
+value is only overwritten when the call is a genuine remote event (`is_remote_event=True`
+— covers both a real timer selection AND a deliberate `timer_none` "no timer" press, which
+correctly clears the value), when a genuine non-`None` value is supplied, or when there was
+no prior active override (the very first press, where `None` is the correct initial value).
+A plain non-remote re-stamp of an already-active override now preserves whatever remote
+timer was already recorded. `_async_fan_remote_changed()` passes `is_remote_event=True` on
+every dispatch; the pre-existing physical-fan-on and thermostat `fan_mode` callers do not.
+
+---
+
 ## Clearing
 
 There is no dedicated "remote timer expired" detection. An RF-timer-driven override clears
@@ -203,9 +293,11 @@ via the same two paths as any other manual fan override:
 
 - [`parse_remote_timer_event`](../custom_components/climate_advisor/fan_status.py) — token → hours mapping (pure)
 - [`REMOTE_TIMER_EVENT_HOURS`](../custom_components/climate_advisor/const.py) — the single-source mapping table
-- [`_async_fan_remote_changed`](../custom_components/climate_advisor/coordinator.py) — event dispatch
-- [`handle_fan_manual_override`](../custom_components/climate_advisor/automation.py) — shared entry point (RF + physical paths)
+- [`_async_fan_remote_changed`](../custom_components/climate_advisor/coordinator.py) — event dispatch; `_last_fan_remote_event_ts` dedup guard (Issue #495)
+- [`handle_fan_manual_override`](../custom_components/climate_advisor/automation.py) — shared entry point (RF + physical paths); `is_remote_event` (Issue #495)
+- [`_suppress_hvac_for_whf`](../custom_components/climate_advisor/automation.py) — shared HVAC-off helper, CA-initiated AND manual/remote (Issue #495)
+- [`_release_whf_and_reclassify`](../custom_components/climate_advisor/automation.py) — manual-session exit: release + reclassify, not blind restore (Issue #495)
 - [`_start_grace_period`](../custom_components/climate_advisor/automation.py) — `duration_override` resolution
 - [`_deactivate_fan`](../custom_components/climate_advisor/automation.py) — primary suppression choke point + WARNING
 - [`fan_thermostat_check`](../custom_components/climate_advisor/automation.py) — secondary suppression choke point + WARNING
-- Tests: `tests/test_fan_remote.py`
+- Tests: `tests/test_fan_remote.py`, `tests/test_whole_house_fan_hvac_suppression.py` (`TestManualWhfOnSuppressesHvac`, `TestManualWhfOffReleasesAndReclassifies`)

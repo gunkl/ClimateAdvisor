@@ -54,6 +54,7 @@ The automation logic table and all threshold constants in this document are expr
 | Which nat-vent exit sites still bypass the `_exit_nat_vent()` choke point, and what changed when the last two were fixed? | None remain. `handle_all_doors_windows_closed()` (Priority 1 sensor-all-close) and `fan_thermostat_check()`'s fast-loop Check 1 (outdoor-rise mirror of Priority 3) were the last two, unified in Issue #418. The fast-loop site had a live bug (set `_paused_by_door=True` but still restored HVAC via the default `restore_hvac=True`); the sensor-all-close site traded an instant classification-aware re-arm for the same eventual state via a grace period, an accepted tradeoff. | [Exit Hierarchy — Unified exit handoff](08-COMPUTATION-REFERENCE.md#exit-hierarchy) |
 | Why did a whole-house fan stay "adopted" (`_fan_active=True`) for 3.5+ hours while physically off, showing `"active (unconfirmed)"` all night? | `reconcile_fan_on_startup()`'s callers derived "is a fan running" from the thermostat's own attributes even for `FAN_MODE_WHOLE_HOUSE` — a physically separate device. A thermostat-internal fan blip got "adopted" as the WHF without ever checking the real fan entity's state, and nothing ever compared belief against reality to self-correct (only the dashboard status computation did that comparison, purely for display). Fixed by an archetype-aware ground-truth signal (Issue #423 Fix A) plus a new 2-tick self-healing check in the 5-min backstop (Issue #423 Fix B). | [§9e-B and §9e-E](08-COMPUTATION-REFERENCE.md#9e-thermostatic-fan-loop-and-startup-reconciliation-issue-327) |
 | Why did an overnight nat-vent session get torn down and re-adopted every 5-15 minutes for hours, showing "fan running (untracked)" and repeated "startup reconcile" adoptions with no window ever closing? | `check_natural_vent_conditions()`'s Phase 2 proactive floor exit (a prediction from the thermal model, distinct from the Issue #417 reactivation gates) still read the flat daytime `comfort_heat` instead of the sleep-aware `_nat_vent_reactivation_floor()`. Overnight, indoor between `sleep_heat` and `comfort_heat` made its `time_to_floor` go negative — which always satisfied the exit threshold — tearing the session down every ~5 min; the physical fan kept running independently and got "adopted" as a brand-new session each time, which Phase 2 then re-exited on the next tick. Fixed by reading the canonical floor and guarding the block to only fire when `time_to_floor >= 0`. | [Exit Hierarchy — Issue #427](08-COMPUTATION-REFERENCE.md#exit-hierarchy) |
+| Why did the AC stay armed the whole time a user manually ran the whole-house fan, fighting it while windows were open? | HVAC suppression (`_pre_fan_hvac_mode` capture + `_set_hvac_mode("off")`) previously lived only in the CA-initiated `_activate_fan()` path. `handle_fan_manual_override()` (manual fan-entity or QuietCool RF remote detection) set the override flag and grace timer but never suppressed HVAC. Fixed by routing both through a shared `_suppress_hvac_for_whf()` helper (Issue #495); exit reclassifies rather than blindly restoring the potentially hours-stale captured mode. | [§9 Fan Archetype Behavioral Contract](08-COMPUTATION-REFERENCE.md#fan-archetype-behavioral-contract-issue-277) · [§9d Setpoint/Fan Status Reconciliation](08-COMPUTATION-REFERENCE.md#9d-reconciling-the-setpoint-override-and-fan-override-status-lines-issue-495) |
 
 ## 1. Day Classification
 
@@ -1205,8 +1206,8 @@ The whole-house fan is a dedicated appliance (e.g., `fan.*` or `switch.*` entity
 
 | Behavior | Detail |
 |---|---|
-| On activation | Fan entity turned on; **HVAC set to `off`**; current thermostat mode captured in `_pre_fan_hvac_mode` |
-| On deactivation | Fan entity turned off; HVAC mode restored from `_pre_fan_hvac_mode` (then `_pre_fan_hvac_mode` cleared) |
+| On activation | Fan entity turned on; **HVAC set to `off`**; current thermostat mode captured in `_pre_fan_hvac_mode`. Applies whether CA initiated the activation (`_activate_fan()`) **or** a manual/remote fan-on was detected (`handle_fan_manual_override()`, Issue #495) — both funnel through the shared `_suppress_hvac_for_whf()` helper, so the mutual-exclusion rule has exactly one suppression path. |
+| On deactivation | Fan entity turned off; HVAC mode restored from `_pre_fan_hvac_mode` (then `_pre_fan_hvac_mode` cleared) for a CA-initiated session (`_deactivate_fan()`). A manual/remote session instead **reclassifies** (`_release_whf_and_reclassify()`, Issue #495) rather than blindly restoring the captured mode — an RF-remote-timer session can span hours (up to 12h), so the mode captured at activation is often stale by exit (e.g. it can straddle a sleep-setback transition). |
 | Stops when windows close? | **Yes** — when ALL monitored sensors close, the fan deactivates and HVAC is restored, regardless of `_natural_vent_active` value |
 | HVAC mode captured? | Yes — `_pre_fan_hvac_mode: str \| None` holds the thermostat mode at activation time (e.g., `"heat_cool"`, `"cool"`) |
 
@@ -1246,7 +1247,7 @@ if mode != "off" and self._whf_owns_hvac():
 Key properties:
 - **`mode == "off"` is never blocked** — the guard only intercepts attempts to arm an *active* mode (`heat`, `cool`, `heat_cool`) while WHF owns the thermostat. Turning HVAC off is always allowed (it's what a WHF session wants anyway).
 - **Silent drops are made visible.** A blocked write logs a `WARNING` and emits `hvac_write_blocked_whf_active` (payload: `attempted_mode`, `reason`) so the Activity Log shows the interception rather than the write simply vanishing — per this project's Observability Requirements.
-- **`apply_classification()` also short-circuits before reaching the guard.** For `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`, the nat-vent branch (`if self._natural_vent_active:`) returns immediately after `_apply_nat_vent_hvac_state()` — the same early-return pattern already used for `aggressive_savings=True` — so the classification cycle does not even attempt (and log) a band-arm the choke-point guard would silently drop, and does not waste a cycle computing `select_comfort_band()` or running the ODE ceiling guard while WHF owns the thermostat. `FAN_MODE_HVAC` keeps falling through to the comfort-band write exactly as before, because fan and compressor coexist for that archetype (see §6c).
+- **`apply_classification()` also short-circuits before reaching the guard.** For `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH`, the nat-vent branch — as of Issue #495, `if self._natural_vent_active or self._whf_owns_hvac():` — returns immediately after `_apply_nat_vent_hvac_state()` — the same early-return pattern already used for `aggressive_savings=True` — so the classification cycle does not even attempt (and log) a band-arm the choke-point guard would silently drop, and does not waste a cycle computing `select_comfort_band()` or running the ODE ceiling guard while WHF owns the thermostat. The `_whf_owns_hvac()` disjunct is additive, not a replacement: it covers a manual/remote WHF session (which sets `_pre_fan_hvac_mode` via `_suppress_hvac_for_whf()` but is not a nat-vent decision, so `_natural_vent_active` stays `False`) without weakening coverage for the pre-existing `reconcile_fan_on_startup()` adopted-session case, which sets `_natural_vent_active` directly without touching `_pre_fan_hvac_mode`. `FAN_MODE_HVAC` keeps falling through to the comfort-band write exactly as before, because fan and compressor coexist for that archetype (see §6c).
 
 **This closes Root Cause #2 of Issue #392 directly.** Because both writer functions share this one choke point, no future caller — however it decides to call `_set_hvac_mode()` or `_set_temperature()` — can bypass WHF/AC mutual exclusion. The answer to "can WHF and AC ever both be on" is now enforced at exactly one place, not re-derived correctly (or incorrectly) at every call site.
 
@@ -1408,8 +1409,8 @@ This table enumerates the six key fan lifecycle scenarios, including the new `on
 | Scenario | Trigger | CA decision | Flags / state change | Event emitted | Test ref |
 |---|---|---|---|---|---|
 | Fan-ON + nat-vent eligible | User turns fan on; `outdoor < indoor`, sensors open, gate passes | Adopt as nat-vent — do NOT set override | `_fan_active = True`, `_natural_vent_active = True`, `_fan_override_active` stays `False` | `fan_activated` (nat-vent adoption) | `test_fan_control.py` |
-| Fan-ON + nat-vent ineligible | User turns fan on; conditions gate does not pass | Manual override — start grace timer | `_fan_override_active = True`, `_fan_override_time = now()` | `fan_manual_override` | `test_fan_control.py` |
-| Fan-OFF (user) | User physically turns the fan off (fan_mode → auto) | `on_fan_turned_off()`: clear fan flags, start fan-off grace — **no** `_fan_override_active` set | `_fan_active = False`, `_natural_vent_active = False`, `_fan_override_active = False`; fan-off grace timer starts | `fan_cancel` | `test_fan_cancel.py` |
+| Fan-ON + nat-vent ineligible | User turns fan on; conditions gate does not pass | Manual override — start grace timer. **Issue #495:** for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, also suppresses HVAC (`_suppress_hvac_for_whf()`) — previously only the CA-initiated (`_activate_fan()`) path did this, leaving the AC armed for the life of a manual/remote override | `_fan_override_active = True`, `_fan_override_time = now()`; `_pre_fan_hvac_mode` captured + `set_hvac_mode("off")` for WHF/BOTH | `fan_manual_override` | `test_fan_control.py`, `test_whole_house_fan_hvac_suppression.py::TestManualWhfOnSuppressesHvac` |
+| Fan-OFF (user) | User physically turns the fan off (fan_mode → auto) | `on_fan_turned_off()`: clear fan flags, start fan-off grace — **no** `_fan_override_active` set. **Issue #495:** if a WHF suppression session was active (`_pre_fan_hvac_mode is not None`, from either the nat-vent-adopted OR the manual-override case above), release it and reclassify (`_release_whf_and_reclassify()`) rather than leaving HVAC suppressed indefinitely | `_fan_active = False`, `_natural_vent_active = False`, `_fan_override_active = False`; fan-off grace timer starts; `_pre_fan_hvac_mode` released if set | `fan_cancel` | `test_fan_cancel.py`, `test_whole_house_fan_hvac_suppression.py::TestManualWhfOffReleasesAndReclassifies` |
 | Fan-OFF + ecobee setpoint echo | Ecobee or cloud thermostat echoes setpoint change within 5 s of fan-off | Setpoint suppressed; re-assertion fires after 5 s delay | `_setpoint_reassert_pending = True`; scheduled callback re-applies commanded setpoint | _(none — suppression is silent)_ | `test_fan_cancel.py` |
 | Post-grace reconciliation | Fan-off grace period expires | `reconcile_fan_on_startup()` called; re-evaluate physical state | Adopt fan as nat-vent (eligible) or confirm fan is off (ineligible) | `fan_activated` or _(no event if off)_ | `test_fan_cancel.py` |
 | Periodic backstop (`_async_update_data()`) | 30-min coordinator poll fires while fan is `"running (untracked)"` and no override or grace active | Same reconciliation path — adopt-on or turn-off | `_fan_active` and `_natural_vent_active` updated accordingly | `fan_activated` or `fan_deactivated` | `test_fan_cancel.py` |
@@ -1723,6 +1724,34 @@ See `_compute_automation_status()` in `coordinator.py`.
 **Test coverage:** `tests/test_nat_vent_activation.py::TestDecisionLockHolderTracking` — holder set
 during a pass and cleared after, cleared even when the pass body raises, and a second (waiting) pass
 can see the first pass's holder name while blocked.
+
+---
+
+### 9d. Reconciling the Setpoint-Override and Fan-Override Status Lines (Issue #495)
+
+`_compute_automation_status()` and `_compute_next_action()` read two **independent** flags:
+the setpoint-override confirmation window (`_override_confirm_pending`, set immediately on a
+detected setpoint change, cleared only once PATH A's 10-minute confirm timer elapses) and the
+fan-override grace (`_grace_active`, started immediately on a detected manual/remote WHF-on).
+These can legitimately overlap — e.g. a user opens windows (triggering an external setpoint
+change CA flags as pending confirmation) and then turns on the whole-house fan (starting its
+own grace immediately, no confirmation delay).
+
+Before this fix, `_compute_automation_status()` checked `_override_confirm_pending` (returning
+`"override pending (confirming...)"`) but `_compute_next_action()` had no equivalent branch —
+during the overlap window it fell through to the `_grace_active` check and returned `"Grace
+period active — automation will resume shortly."`, describing the *fan's* grace as if it were
+the still-unconfirmed setpoint override's own. The two dashboard lines then narrated two
+different overrides as one. Fix: `_compute_next_action()` gained an `_override_confirm_pending`
+branch, checked before `_grace_active` (mirroring `_compute_automation_status()`'s ordering),
+that names a concurrent fan override honestly rather than conflating the two.
+
+Display-only — the two override mechanisms (setpoint-confirm and fan-grace) remain independent;
+this only makes what's already true readable on the dashboard.
+
+**Test coverage:** `tests/test_coordinator.py::TestComputeNextAction` (`_make_ae_stub()` now also
+defaults `_override_confirm_pending`/`_fan_override_active` to `False`, per the MagicMock-truthy
+pitfall this project has hit before — see CLAUDE.md's async-mock testing rules).
 
 ---
 

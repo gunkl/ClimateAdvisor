@@ -264,6 +264,136 @@ class TestMorningWakeupOverrideGuard:
 
 
 # ---------------------------------------------------------------------------
+# TestMorningWakeupFanOverrideGuard (Issue #498 — the reported production bug)
+# ---------------------------------------------------------------------------
+
+
+class TestMorningWakeupFanOverrideGuard:
+    """Issue #498: handle_morning_wakeup() must not stomp a manually-overridden fan.
+
+    Production log (user-reported): at 06:30 wake-up, the WHF was running under an
+    active manual override with windows open. handle_morning_wakeup() unconditionally
+    deactivated the fan (missing the `not self._fan_override_active` guard
+    handle_bedtime() already had), which cleared the WHF's ownership of HVAC right
+    before arming a cool comfort band — momentarily arming AC against open windows
+    until an unrelated nat-vent re-evaluation corrected it a cycle later.
+    """
+
+    def test_fan_override_active_skips_fan_deactivation(self):
+        """The exact reported bug: fan_override_active=True must preserve the fan."""
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._fan_active = True
+        engine._fan_override_active = True
+
+        engine._deactivate_fan = AsyncMock()
+
+        with patch.object(engine, "_set_temperature", new_callable=AsyncMock):
+            asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_fan.assert_not_called()
+
+    def test_fan_active_without_override_still_deactivates(self):
+        """No user override → wakeup still resets a stale overnight fan as before."""
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._fan_active = True
+        engine._fan_override_active = False
+
+        engine._deactivate_fan = AsyncMock()
+
+        with patch.object(engine, "_set_temperature", new_callable=AsyncMock):
+            asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_fan.assert_called_once()
+
+    def test_natural_vent_active_skips_fan_deactivation(self):
+        """A CA-managed nat-vent session must also be left alone at wake-up."""
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._fan_active = True
+        engine._fan_override_active = False
+        engine._natural_vent_active = True
+
+        engine._deactivate_fan = AsyncMock()
+
+        with patch.object(engine, "_set_temperature", new_callable=AsyncMock):
+            asyncio.run(engine.handle_morning_wakeup())
+
+        engine._deactivate_fan.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestScheduledHandlersPausedByDoor (Issue #498 finding #11)
+# ---------------------------------------------------------------------------
+
+
+class TestScheduledHandlersPausedByDoor:
+    """Issue #498 finding #11: none of handle_bedtime()/handle_morning_wakeup() checked
+    _paused_by_door before this fix — a door/window pause active at exactly sleep_time/
+    wake_time could still get a comfort-band write commanded into an open window.
+    """
+
+    def test_bedtime_skips_when_paused_by_door(self):
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="heat")
+        engine._paused_by_door = True
+
+        with patch.object(engine, "_set_temperature", new_callable=AsyncMock) as set_temp:
+            asyncio.run(engine.handle_bedtime())
+
+        set_temp.assert_not_called()
+        # Paused override must not be cleared by a scheduled handler skipping past it
+        assert engine._paused_by_door is True
+
+    def test_bedtime_emits_paused_skip_event(self):
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="heat")
+        engine._paused_by_door = True
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        asyncio.run(engine.handle_bedtime())
+
+        assert any(
+            name == "bedtime_setback_skipped" and payload.get("reason") == "paused_by_door" for name, payload in events
+        ), f"Expected bedtime_setback_skipped/paused_by_door in {events}"
+
+    def test_morning_wakeup_skips_when_paused_by_door(self):
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._paused_by_door = True
+
+        with patch.object(engine, "_set_temperature", new_callable=AsyncMock) as set_temp:
+            asyncio.run(engine.handle_morning_wakeup())
+
+        set_temp.assert_not_called()
+        assert engine._paused_by_door is True
+
+    def test_morning_wakeup_emits_paused_skip_event(self):
+        engine = _make_engine()
+        engine._occupancy_mode = OCCUPANCY_HOME
+        engine._current_classification = _make_classification(hvac_mode="cool")
+        engine._paused_by_door = True
+
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+
+        asyncio.run(engine.handle_morning_wakeup())
+
+        assert any(
+            name == "morning_wakeup_skipped" and payload.get("reason") == "paused_by_door" for name, payload in events
+        ), f"Expected morning_wakeup_skipped/paused_by_door in {events}"
+
+
+# ---------------------------------------------------------------------------
 # TestClearManualOverrideReason
 # ---------------------------------------------------------------------------
 

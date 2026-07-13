@@ -591,16 +591,20 @@ def _make_nat_vent_engine(config_overrides: dict | None = None) -> AutomationEng
 
 
 class TestNatVentBedtimeContinuation:
-    """Issue #370: nat-vent continuation gate in handle_bedtime().
+    """Issue #370 (superseded by Issue #498): nat-vent continuation at bedtime.
 
-    When nat-vent is actively running and outdoor air is below the sleep ceiling,
-    handle_bedtime() must NOT deactivate the fan — free cooling should run until
-    indoor reaches the sleep target. The check_natural_vent_conditions() sleep-ceiling
-    exit (Priority 0) then handles the fan deactivation.
+    Issue #498 finding #7: the original outdoor-vs-sleep_cool comparison here could
+    hand off to AC prematurely even while outdoor was still well below indoor and the
+    fan was doing useful, cheaper cooling. handle_bedtime() now defers to the shared
+    decide_scheduled_band_gate() instead — while nat-vent/WHF is active, bedtime never
+    touches the fan, full stop, regardless of the outdoor/sleep_cool comparison. The
+    engine's own per-tick check_natural_vent_conditions() (outdoor-reversal exit,
+    sleep-aware cycling target) is what actually manages the session's lifetime.
 
     Occupant experience: on a mild evening, the fan keeps running quietly to cool the
-    house to the sleep temperature instead of shutting off and handing off to the
-    compressor — saving energy and reducing HVAC cycling noise.
+    house toward the sleep temperature instead of shutting off and handing off to the
+    compressor — saving energy and reducing HVAC cycling noise — for as long as the
+    nat-vent session the engine is already tracking stays active.
     """
 
     def test_nat_vent_continues_when_outdoor_below_sleep_cool(self):
@@ -637,30 +641,42 @@ class TestNatVentBedtimeContinuation:
         # Fan state preserved
         assert engine._fan_active is True
 
-    def test_fan_deactivated_when_outdoor_above_sleep_cool(self):
-        """Gate fails: outdoor 74°F >= sleep_cool 72°F → fan deactivated.
+    def test_nat_vent_continues_regardless_of_outdoor_vs_sleep_cool(self):
+        """Issue #498 finding #7 regression: outdoor above sleep_cool no longer matters.
 
-        Occupant experience: at bedtime, outdoor air is too warm to cool the house
-        further — the fan shuts off and the thermostat takes over with the sleep band.
+        Previously, outdoor 74°F >= sleep_cool 72°F would deactivate the fan even
+        though nat-vent was still active and doing useful work. Now bedtime defers
+        to the active session unconditionally — the outdoor/sleep_cool comparison
+        is gone entirely.
+
+        Occupant experience: the fan keeps running at bedtime instead of prematurely
+        handing off to the compressor just because outdoor crossed the tighter sleep
+        ceiling — free cooling continues for as long as the session is genuinely active.
         """
         engine = _make_nat_vent_engine()
         engine._natural_vent_active = True
         engine._fan_active = True
         engine._fan_override_active = False
-        engine._last_outdoor_temp = 74.0  # >= sleep_cool=72
+        engine._last_outdoor_temp = 74.0  # above sleep_cool=72 — irrelevant now
         engine._last_indoor_temp = 73.0
 
         engine._deactivate_fan = AsyncMock()
         engine._async_save_state = AsyncMock()
+
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
         engine.set_occupancy_mode(OCCUPANCY_HOME)
 
         asyncio.run(engine.handle_bedtime())
 
-        # Fan MUST have been deactivated
-        engine._deactivate_fan.assert_called_once()
+        # Fan must NOT have been deactivated — nat-vent is still active
+        engine._deactivate_fan.assert_not_called()
+        assert engine._natural_vent_active is True
 
-        # _natural_vent_active must be cleared (state consistency fix)
-        assert engine._natural_vent_active is False
+        event_names = [e[0] for e in emitted]
+        assert "nat_vent_bedtime_continue" in event_names, (
+            f"Expected 'nat_vent_bedtime_continue' event; got: {event_names}"
+        )
 
     def test_fan_deactivated_when_nat_vent_not_active(self):
         """Gate fails: nat-vent flag False → fan deactivated at bedtime as before.
@@ -683,30 +699,14 @@ class TestNatVentBedtimeContinuation:
         # Without nat-vent active, the gate cannot pass — fan is deactivated
         engine._deactivate_fan.assert_called_once()
 
-    def test_nat_vent_active_flag_cleared_on_bedtime_deactivation(self):
-        """State consistency: _natural_vent_active=False after gate-fails deactivation.
-
-        Before Issue #370, the fan was deactivated but _natural_vent_active was left
-        True — causing the engine to believe nat-vent was still running after bedtime.
-
-        Occupant experience: without this fix, the next classification cycle would
-        incorrectly suppress HVAC as if nat-vent was providing free cooling.
-        """
-        engine = _make_nat_vent_engine()
-        engine._natural_vent_active = True
-        engine._fan_active = True
-        engine._fan_override_active = False
-        engine._last_outdoor_temp = 74.0  # gate fails: outdoor >= sleep_cool=72
-        engine._last_indoor_temp = 73.0
-
-        engine._deactivate_fan = AsyncMock()
-        engine._async_save_state = AsyncMock()
-        engine.set_occupancy_mode(OCCUPANCY_HOME)
-
-        asyncio.run(engine.handle_bedtime())
-
-        # State must be cleared — not left True after fan deactivation
-        assert engine._natural_vent_active is False
+    # test_nat_vent_active_flag_cleared_on_bedtime_deactivation removed (Issue #498):
+    # its premise — bedtime deactivating the fan while _natural_vent_active is True
+    # because outdoor crossed sleep_cool — is now structurally unreachable.
+    # decide_scheduled_band_gate() returns DEFER_NAT_VENT whenever _natural_vent_active
+    # (or _whf_owns_hvac()) is True, and that check now gates handle_bedtime()'s fan-
+    # deactivation call directly, so _natural_vent_active is always already False by
+    # the time _deactivate_fan() is reached from bedtime. Covered by
+    # test_nat_vent_continues_regardless_of_outdoor_vs_sleep_cool above.
 
     def test_hvac_fan_archetype_also_continues(self):
         """Gate works for FAN_MODE_HVAC too — all archetypes are eligible.

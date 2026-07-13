@@ -5776,7 +5776,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if ae._manual_override_active:
                 return _decide("Manual override active — automation is standing by.")
             if ae._grace_active:
-                return _decide("Grace period active — automation will resume shortly.")
+                return _decide(
+                    f"Grace period active — automation will resume shortly.{self._format_grace_remaining(ae)}"
+                )
             if ae.is_paused_by_door:
                 return _decide("Automation paused — a door or window is open.")
 
@@ -6385,6 +6387,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
         return details
 
+    def _format_grace_remaining(self, ae: AutomationEngine) -> str:
+        """Format ``ae._grace_end_time`` as an ' — ends H:MM AM (N min left)' suffix.
+
+        Returns "" if the timestamp is missing, unparseable, or already in the past —
+        never raises (Issue #498: dashboard showed grace was active but never said when
+        it would end, the single most useful piece of information during an override).
+        """
+        end_iso = getattr(ae, "_grace_end_time", None)
+        # isinstance guard: tests frequently stub the automation engine as a bare
+        # MagicMock() without setting _grace_end_time — an unset MagicMock attribute is
+        # truthy, so `if not end_iso` alone wouldn't catch it. Treat anything that isn't a
+        # real string as "no timestamp", matching the existing defensive pattern used for
+        # mocked dt_util elsewhere in this codebase (never raise on test doubles).
+        if not isinstance(end_iso, str) or not end_iso:
+            return ""
+        end_dt = dt_util.parse_datetime(end_iso)
+        if not isinstance(end_dt, datetime):
+            return ""
+        now = dt_util.now()
+        if not isinstance(now, datetime):
+            return ""
+        remaining_s = (end_dt - now).total_seconds()
+        if remaining_s <= 0:
+            return ""
+        end_str = dt_util.as_local(end_dt).strftime("%I:%M %p").lstrip("0")
+        remaining_min = max(1, round(remaining_s / 60))
+        return f" — ends {end_str} ({remaining_min} min left)"
+
     def _compute_next_automation_action(self, c: DayClassification | None) -> tuple[str, str]:
         """Compute the next scheduled automation action and its time.
 
@@ -6415,7 +6445,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if self.automation_engine._grace_active:
             source = self.automation_engine._last_resume_source or "automation"
-            return (f"Grace period active ({source})", "")
+            return (f"Grace period active ({source}){self._format_grace_remaining(self.automation_engine)}", "")
 
         # If a contact sensor debounce is pending, that is the soonest upcoming action
         if self._door_open_timers and self._door_open_timer_expiry:

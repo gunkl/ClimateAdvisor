@@ -420,3 +420,67 @@ def decide_scheduled_write_seq_current(*, current_write_seq: int, target_write_s
     site has no nudge/reject_streak branching of its own to combine it with.
     """
     return current_write_seq == target_write_seq
+
+
+_OCCUPANCY_AWAY = "away"  # mirrors const.OCCUPANCY_AWAY
+_OCCUPANCY_VACATION = "vacation"  # mirrors const.OCCUPANCY_VACATION
+# Same import-independence convention as _FAN_MODE_DISABLED above.
+
+
+class ScheduledBandGate(Enum):
+    """Whether a scheduled/cyclical caller may (re)arm its comfort band right now.
+
+    Issue #498: `apply_classification()` (the real 30-min decision loop) already
+    gets this right; `handle_bedtime()`, `handle_morning_wakeup()`, and
+    `handle_pre_cool()` each hand-rolled their own partial, drifted copy of the
+    same four checks — wakeup's copy was missing the fan-override guard entirely
+    (the 06:30 wake-up bug), and none of the three checked paused-by-door at all.
+    One shared pure gate, reused by all four call sites, so the checks can't
+    drift apart again.
+    """
+
+    PROCEED = "proceed"  # safe to compute and arm this handler's band
+    DEFER_OCCUPANCY = "defer_occupancy"  # away/vacation setback owns temperature right now
+    DEFER_OVERRIDE = "defer_override"  # manual override active, not adopting
+    DEFER_PAUSED = "defer_paused"  # paused by an open door/window
+    DEFER_NAT_VENT = "defer_nat_vent"  # nat-vent/WHF session currently owns HVAC
+
+
+def decide_scheduled_band_gate(
+    *,
+    occupancy_mode: str,
+    manual_override_active: bool,
+    paused_by_door: bool,
+    natural_vent_active: bool,
+    whf_owns_hvac: bool,
+) -> ScheduledBandGate:
+    """Pure gate shared by apply_classification()/handle_bedtime()/handle_morning_wakeup()/
+    handle_pre_cool() (Issue #498).
+
+    Check order mirrors apply_classification()'s original inline order (occupancy,
+    override, paused-by-door, nat-vent/WHF) so behavior is unchanged for the caller
+    that already had all four checks — this is a pure extraction, not a reordering.
+
+    `DEFER_OCCUPANCY` covers both AWAY and VACATION identically: the gate only
+    answers "may band-arming proceed?". apply_classification()'s AWAY branch has
+    an *additional* action beyond deferring (it calls handle_occupancy_away() to
+    reapply the away setback) — that stays the caller's own responsibility, not
+    something this gate does, since VACATION has no equivalent extra action and
+    the two must not be conflated into one piece of caller logic.
+
+    `whf_owns_hvac` is OR'd with `natural_vent_active` for the same reason
+    apply_classification()'s original inline check did (Issue #495): a manually/
+    remotely-detected WHF session sets `_pre_fan_hvac_mode` via
+    `_suppress_hvac_for_whf()` without setting `_natural_vent_active` (a manual
+    override isn't a nat-vent decision), so both flags must be checked to catch
+    every case where the whole-house fan currently owns the thermostat.
+    """
+    if occupancy_mode in (_OCCUPANCY_AWAY, _OCCUPANCY_VACATION):
+        return ScheduledBandGate.DEFER_OCCUPANCY
+    if manual_override_active:
+        return ScheduledBandGate.DEFER_OVERRIDE
+    if paused_by_door:
+        return ScheduledBandGate.DEFER_PAUSED
+    if natural_vent_active or whf_owns_hvac:
+        return ScheduledBandGate.DEFER_NAT_VENT
+    return ScheduledBandGate.PROCEED

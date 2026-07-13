@@ -434,6 +434,11 @@ def _map_event_to_outcome(
     if event_type == "whf_hvac_released":
         return ProductionDecision(ts_str, event_type, "whf_hvac_released")
 
+    # Issue #498: 1:1 mapping so a scheduled handler's blocked write is directly
+    # assertable at-time, same pattern as whf_hvac_suppressed/whf_hvac_released above.
+    if event_type == "hvac_write_blocked_whf_active":
+        return ProductionDecision(ts_str, event_type, "hvac_write_blocked_whf_active")
+
     # --- Unmapped (FINDINGS) — documented, silently skip ---
     if event_type in UNMAPPED_PRODUCTION_EVENTS:
         return None

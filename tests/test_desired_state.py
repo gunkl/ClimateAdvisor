@@ -30,6 +30,7 @@ from custom_components.climate_advisor.desired_state import (
     NotificationRequest,
     OverrideConfirmPending,
     PendingSetpointRetry,
+    ScheduledBandGate,
     ScheduledReevaluation,
     SetpointRetryAction,
     SetpointVerify,
@@ -39,6 +40,7 @@ from custom_components.climate_advisor.desired_state import (
     decide_grace_start,
     decide_override_confirm,
     decide_revisit,
+    decide_scheduled_band_gate,
     decide_scheduled_write_seq_current,
     decide_setpoint_retry_action,
     decide_setpoint_retry_schedule,
@@ -319,6 +321,65 @@ class TestDecideFanCycleOff:
         a negative wait."""
         _, wait_seconds = decide_fan_cycle_off(fan_min_runtime_active=True, min_runtime_minutes=90.0)
         assert wait_seconds == 0.0
+
+
+class TestDecideScheduledBandGate:
+    """Issue #498: shared gate reused by apply_classification()/handle_bedtime()/
+    handle_morning_wakeup()/handle_pre_cool() so none of them can drift from another
+    by hand-copying a partial, inconsistent subset of these four checks.
+    """
+
+    _BASE = {
+        "occupancy_mode": "home",
+        "manual_override_active": False,
+        "paused_by_door": False,
+        "natural_vent_active": False,
+        "whf_owns_hvac": False,
+    }
+
+    def _inputs(self, **overrides):
+        return {**self._BASE, **overrides}
+
+    def test_proceed_when_nothing_gates(self):
+        assert decide_scheduled_band_gate(**self._inputs()) == ScheduledBandGate.PROCEED
+
+    def test_defer_occupancy_when_away(self):
+        assert decide_scheduled_band_gate(**self._inputs(occupancy_mode="away")) == ScheduledBandGate.DEFER_OCCUPANCY
+
+    def test_defer_occupancy_when_vacation(self):
+        result = decide_scheduled_band_gate(**self._inputs(occupancy_mode="vacation"))
+        assert result == ScheduledBandGate.DEFER_OCCUPANCY
+
+    def test_defer_override_when_manual_override_active(self):
+        result = decide_scheduled_band_gate(**self._inputs(manual_override_active=True))
+        assert result == ScheduledBandGate.DEFER_OVERRIDE
+
+    def test_defer_paused_when_paused_by_door(self):
+        result = decide_scheduled_band_gate(**self._inputs(paused_by_door=True))
+        assert result == ScheduledBandGate.DEFER_PAUSED
+
+    def test_defer_nat_vent_when_natural_vent_active(self):
+        result = decide_scheduled_band_gate(**self._inputs(natural_vent_active=True))
+        assert result == ScheduledBandGate.DEFER_NAT_VENT
+
+    def test_defer_nat_vent_when_whf_owns_hvac_without_natural_vent_flag(self):
+        """Issue #495: a manually/remotely-detected WHF session sets _pre_fan_hvac_mode
+        without setting _natural_vent_active — whf_owns_hvac must independently gate."""
+        result = decide_scheduled_band_gate(**self._inputs(whf_owns_hvac=True))
+        assert result == ScheduledBandGate.DEFER_NAT_VENT
+
+    def test_check_order_occupancy_before_override(self):
+        """Mirrors apply_classification()'s original inline order — occupancy checked first."""
+        result = decide_scheduled_band_gate(**self._inputs(occupancy_mode="away", manual_override_active=True))
+        assert result == ScheduledBandGate.DEFER_OCCUPANCY
+
+    def test_check_order_override_before_paused(self):
+        result = decide_scheduled_band_gate(**self._inputs(manual_override_active=True, paused_by_door=True))
+        assert result == ScheduledBandGate.DEFER_OVERRIDE
+
+    def test_check_order_paused_before_nat_vent(self):
+        result = decide_scheduled_band_gate(**self._inputs(paused_by_door=True, natural_vent_active=True))
+        assert result == ScheduledBandGate.DEFER_PAUSED
 
 
 class TestDecideSetpointRetrySchedule:

@@ -87,10 +87,46 @@ def build_headless_coordinator(
     # 1. Install HA stubs — idempotent, safe to call multiple times
     install_ha_stubs()
 
-    # 2. Import ClimateAdvisorCoordinator AFTER stubs are installed
+    # 2. Import ClimateAdvisorCoordinator AFTER stubs are installed.
+    #
+    #    Issue #497 follow-up: some test files (test_occupancy.py) temporarily
+    #    swap homeassistant.helpers.update_coordinator.DataUpdateCoordinator for
+    #    a minimal stand-in — missing real methods like
+    #    async_config_entry_first_refresh — to force-reimport the coordinator
+    #    module for their own narrow purposes, and never restore it. Because
+    #    Python binds a class's bases at class-statement time (not on later
+    #    attribute lookup), once that's happened for this process,
+    #    ClimateAdvisorCoordinator stays bound to the crippled stand-in for
+    #    the rest of the session — install_ha_stubs() resetting the attribute
+    #    above doesn't retroactively change it.
+    #
+    #    Deliberately NOT fixed by deleting/reimporting the coordinator module
+    #    here: other test files (test_thermal_predictions.py) hold module-level
+    #    references to functions from this module captured at collection time
+    #    and patch it by string path at test-run time — forcing a second
+    #    reimport mid-session makes those two resolve to different module
+    #    objects and silently breaks their patches (found via full-suite run
+    #    after trying that approach). Patch the specific missing method
+    #    directly onto the class instead — additive only, doesn't touch
+    #    sys.modules identity, so no other test's cached references shift.
     from custom_components.climate_advisor.coordinator import (  # noqa: PLC0415
         ClimateAdvisorCoordinator,
     )
+
+    # coordinator.py's __init__ calls super().__init__(hass, _LOGGER, name=...,
+    # update_interval=...) — that resolves via the base bound at class-statement
+    # time, not a name lookup fixed up by patching individual methods. If the
+    # base is the crippled stand-in, super().__init__() never sets self.data/
+    # self.last_update_success either (confirmed: patching just the two async
+    # methods alone still left self.data missing at runtime). __bases__
+    # reassignment is layout-compatible here — both candidates are plain
+    # single-inheritance-from-object classes with no __slots__ — so this fixes
+    # __init__ and every other inherited method in one place instead of
+    # patching methods one at a time as gaps are discovered.
+    from tools.sim_harness.ha_stubs import _MockDataUpdateCoordinator  # noqa: PLC0415
+
+    if not issubclass(ClimateAdvisorCoordinator, _MockDataUpdateCoordinator):
+        ClimateAdvisorCoordinator.__bases__ = (_MockDataUpdateCoordinator,)
 
     # 3. Build merged config (same defaults as the engine harness)
     merged_config: dict[str, Any] = {**_DEFAULT_CONFIG}

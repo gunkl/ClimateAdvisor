@@ -179,8 +179,8 @@
     "issue": 229
   },
   "cancel_override_then_resume": {
-    "sha256": "e4fd293b37b41d15ba2a1ecb0ffa08e6333bdd7ee3dd63f12696eb632ea67475",
-    "signed": "2026-06-13",
+    "sha256": "dcc8681836fd26b0bf18d7e8183e95b178c7de7e02b9288b7cf8a61ac414b291",
+    "signed": "2026-07-12",
     "issue": 226
   },
   "ceiling_guard_dormancy_nat_vent_active_in_band": {
@@ -194,13 +194,13 @@
     "issue": 229
   },
   "grace_prevents_sensor_repause": {
-    "sha256": "d5cc199a9a1b7344afb38ee57353f4a7044f578ac785c869e37a4d8174397f7f",
-    "signed": "2026-06-13",
+    "sha256": "e97a66351304c5ffb0d3409e17c0221b09215973bebe91cb8eaf7a82130b330b",
+    "signed": "2026-07-12",
     "issue": 227
   },
   "grace_timer_expired_on_restart": {
-    "sha256": "e2c4e8226585232cd36d76501c0b8327ee4350f3010b8e3cee8151bcc7795720",
-    "signed": "2026-06-13",
+    "sha256": "07cb69727e3aefece2d6204b33d2821e5ab16eb2b519bad76f936bc1f224bfaa",
+    "signed": "2026-07-12",
     "issue": 227
   },
   "guest_mode_maintains_comfort": {
@@ -282,5 +282,95 @@
     "sha256": "ef6028a26dcd55f2c91f7314aa357a7e167b0c04e4ba1aea375dce4ca954ebad",
     "signed": "2026-07-09",
     "issue": 429
+  },
+  "away_setpoint_change_not_override": {
+    "sha256": "5957fbaeb4f2d1a5b8cbae06428af0b020f9d376c772113cb74b636f69719bea",
+    "signed": "2026-07-12",
+    "issue": 221
+  },
+  "bedtime_natvent_continuation": {
+    "sha256": "5fc6d2ceef28e6ca691f279c86635a503972cddd6a03aa1f92fdc622c98682e7",
+    "signed": "2026-07-12",
+    "issue": 371
+  },
+  "cold_day_heat_all_day_with_override": {
+    "sha256": "b1b08e9449852285f5afd2995ba0d20331ed80f90e8d98dc28e4668580a414e3",
+    "signed": "2026-07-12",
+    "issue": 229
+  },
+  "fan_fast_stop_on_outdoor_rise": {
+    "sha256": "42949b0c8fa39e0f33785a09376282c0fa7e0acddedeff745f3019e0fb810129",
+    "signed": "2026-07-12",
+    "issue": 327
+  },
+  "fan_off_provenance_context_and_bookkeeping": {
+    "sha256": "1e06df652d529709eef40583d5e47882e6c0e6ec076d02be841dfa6d8fed513f",
+    "signed": "2026-07-12",
+    "issue": 482
+  },
+  "grace_full_lifecycle_clean_expiry": {
+    "sha256": "cb39f3b877fa4376254830ac3ff4878b37b77aa43f27dec73d4208fd360390a2",
+    "signed": "2026-07-12",
+    "issue": 229
+  },
+  "grace_full_lifecycle_sensor_still_open": {
+    "sha256": "4ea37885eb9f152a2d9b6a4073e58b62f747a5bd954840ad867190d81f904a37",
+    "signed": "2026-07-12",
+    "issue": 229
+  },
+  "grace_window_period_no_repause": {
+    "sha256": "33d4b570ca7a6d6f74e08ea0df9ee03aec84b6154909dfed23f81c775da252b4",
+    "signed": "2026-07-12",
+    "issue": 229
+  },
+  "issue-359-fan-state-machine": {
+    "sha256": "3d16b68b3008476ffe02d35a9fd955103a6cb2fccd04a341362be0aef3cc2c8d",
+    "signed": "2026-07-12",
+    "issue": 359
+  },
+  "issue-392-natvent-ceiling-oscillation": {
+    "sha256": "cf17610449d7d74ab3815db379611ec71a77515263fb05e5cf6c87489868e590",
+    "signed": "2026-07-12",
+    "issue": 392
+  },
+  "issue-411-natvent-floor-exit-consistency": {
+    "sha256": "7d0468d61b48765f219c44d59e781765a5e695bc32ea8fcb2bcae2267e32604b",
+    "signed": "2026-07-12",
+    "issue": 411
+  },
+  "issue-427-natvent-sleep-floor-churn": {
+    "sha256": "a7b0f85a177be3507a7e361307344a0390e937c52be4af3852b8b08bc5cb958d",
+    "signed": "2026-07-12",
+    "issue": 427
+  },
+  "issue-481-sleep-band-no-false-undertemp-incident": {
+    "sha256": "1ed203989ef38f29790e9ed30e3a84404f4415d7e9c98525996d53d5f91f6acb",
+    "signed": "2026-07-12",
+    "issue": 481
+  },
+  "manual_whf_on_suppresses_hvac": {
+    "sha256": "11eb2b8792e554c65c9130254dd28afca42718861f539cade511e94a74260fd1",
+    "signed": "2026-07-12",
+    "issue": 495
+  },
+  "natvent_exit_hvac_shutoff": {
+    "sha256": "7f6834c4812922c7ab67426aac84e199bb8b56ea1dcac045f70d65390e06e090",
+    "signed": "2026-07-12",
+    "issue": 337
+  },
+  "override_adopted_on_matching_decision": {
+    "sha256": "0e1c37131a4a63375a5398a5f12d7eb8473a4f0ecff33011217a0c7bb4245844",
+    "signed": "2026-07-12",
+    "issue": 483
+  },
+  "override_detection_and_confirmation": {
+    "sha256": "3f50bfab1a81469dbc64f0325e94d201618cd555d64b6d5fd5cbf0d9fdbe14cf",
+    "signed": "2026-07-12",
+    "issue": 229
+  },
+  "override_self_resolve_transient": {
+    "sha256": "5c940c360f5da74bbac528a9412549af5f6ae01455bf1a066c51c7d8a20cf17e",
+    "signed": "2026-07-12",
+    "issue": 229
   }
 }

@@ -244,6 +244,61 @@ class TestBuildEventTimelineTable:
             f"Found {row_count} rows. Table:\n{table}"
         )
 
+    def test_consecutive_occupancy_setback_events_collapse(self):
+        """#485: repeated identical occupancy_setback (away) events collapse to xN.
+
+        Reported symptom: the automation engine re-asserts an unchanged away setback
+        every ~5 minutes (revisit loop), and occupancy_setback had no dedup — unlike
+        comfort_band_applied (#444) — so 11 identical rows showed up in the Activity
+        Record for a single unbroken away period. occupancy_setback was removed from
+        _NO_DEDUP so it uses the same collapse-consecutive-rows mechanism proven by
+        test_dedup_preserves_settings_cell.
+        """
+        events = [
+            _make_event(
+                "occupancy_setback",
+                hours_ago=1.0 - float(i) * 0.05,
+                mode="away",
+                occupancy="away",
+                floor=63,
+                ceiling=79,
+            )
+            for i in range(11)
+        ]
+        table = _build_table(events)
+
+        row_count = table.count("Occupancy setback")
+        assert row_count == 1, (
+            f"#485: 11 identical occupancy_setback events must collapse to a single row. "
+            f"Found {row_count} rows. Table:\n{table}"
+        )
+        assert "x11" in table or "×11" in table, f"#485: collapsed row must show the x11 repeat count. Table:\n{table}"
+        assert "setpoint:" in table, (
+            f"#485: collapsed occupancy_setback row must still show the setpoint. Table:\n{table}"
+        )
+
+    def test_occupancy_setback_breaks_run_on_mode_change(self):
+        """#485: an occupancy_setback for a DIFFERENT mode (e.g. vacation after away) must
+
+        not be silently merged into the prior run — two distinct rows, not one xN row,
+        because the underlying event_type is the same but this proves collapsing is
+        still based on consecutive same-type events only, matching every other
+        dedup-eligible type (e.g. nat_vent_fan_on) rather than payload equality.
+        """
+        events = [
+            _make_event("occupancy_setback", hours_ago=2.0, mode="away", occupancy="away", floor=63, ceiling=79),
+            _make_event(
+                "occupancy_comfort_restored", hours_ago=1.5, mode="cool", target_f=74
+            ),  # in _NO_DEDUP -- breaks any run
+            _make_event(
+                "occupancy_setback", hours_ago=1.0, mode="vacation", occupancy="vacation", floor=60, ceiling=85
+            ),
+        ]
+        table = _build_table(events)
+
+        assert "Occupancy setback (away)" in table
+        assert "Occupancy setback (vacation)" in table
+
     def test_single_fan_activated_event_shows_full_reason_in_event_column(self):
         """Issue #402 follow-up: a single (non-repeated) fan_activated event must show its
 

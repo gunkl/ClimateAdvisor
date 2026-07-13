@@ -94,10 +94,10 @@ fields. Settings = `_format_band_setpoint(floor, ceiling, active, unit)`.
 
 | Event type | Emitter | Key payload fields | Event-column text | Settings-column rule |
 |---|---|---|---|---|
-| `comfort_band_applied` | `automation.py` `_apply_comfort_band` | `floor`, `ceiling`, `active`, `mode`, `reason` | "Comfort band applied" | `_format_band_setpoint(floor, ceiling, active, unit)` |
-| `bedtime_setback` | `automation.py` `handle_bedtime` | `mode`, `floor`, `ceiling`, `active`, `modifier` | "Bedtime setback — sleep band" | `_format_band_setpoint(floor, ceiling, active, unit)` |
-| `morning_wakeup` | `automation.py` `handle_morning_wakeup` | `mode`, `floor`, `ceiling`, `active` | "Morning wake-up — daytime band" | `_format_band_setpoint(floor, ceiling, active, unit)` |
-| `occupancy_setback` | `automation.py` `handle_occupancy_away` / `handle_occupancy_vacation` | `mode` (away/vacation), `floor`, `ceiling`, `occupancy` | "Occupancy setback — {occupancy} mode" | `_format_band_setpoint(floor, ceiling, active="ceiling", unit)` (ceiling preferred; floor used when active is explicit) |
+| `comfort_band_applied` | `automation.py` `_apply_comfort_band` | `floor`, `ceiling`, `active`, `mode`, `reason` | "Comfort band applied" | `_format_band_setpoint(floor, ceiling, active, unit)` — **excluded from dedup** (`_NO_DEDUP`): each application carries a distinct setpoint payload (#330). |
+| `bedtime_setback` | `automation.py` `handle_bedtime` | `mode`, `floor`, `ceiling`, `active`, `modifier` | "Bedtime setback — sleep band" | `_format_band_setpoint(floor, ceiling, active, unit)` — **excluded from dedup** (`_NO_DEDUP`). |
+| `morning_wakeup` | `automation.py` `handle_morning_wakeup` | `mode`, `floor`, `ceiling`, `active` | "Morning wake-up — daytime band" | `_format_band_setpoint(floor, ceiling, active, unit)` — **excluded from dedup** (`_NO_DEDUP`). |
+| `occupancy_setback` | `automation.py` `handle_occupancy_away` / `handle_occupancy_vacation` | `mode` (away/vacation), `floor`, `ceiling`, `occupancy` | "Occupancy setback — {occupancy} mode" | `_format_band_setpoint(floor, ceiling, active="ceiling", unit)` (ceiling preferred; floor used when active is explicit) — **dedup-eligible** (not in `_NO_DEDUP`, Issue #485): the emitter has no dedup of its own (unlike `comfort_band_applied`'s #444 time-windowed dedup), and re-fires every automation cycle while occupancy stays away/vacation, so consecutive identical rows collapse to `×N` per the [Dedup Contract](#dedup-contract). |
 | `occupancy_comfort_restored` | `automation.py` `handle_occupancy_home` | `mode`, `target_f` | "Occupancy — comfort restored" | `setpoint: {target_f} {mode.title()}` |
 | `pre_cool_applied` | `automation.py` `handle_pre_cool` | `target`, `modifier`, `sleep_cool`, `floor`, `indoor`, `nat_vent_suppressed` | "Pre-cool — thermal mass banking" | `setpoint: {target}°F Cool (sleep floor {floor}°F Heat)` |
 

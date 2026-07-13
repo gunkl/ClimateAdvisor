@@ -1129,13 +1129,20 @@ class TestOccupancyAwayDelay:
 
     # ── Test 8 ────────────────────────────────────────────────────
 
-    def test_timer_cancelled_on_shutdown(self):
+    def test_timer_cancelled_on_shutdown(self, tmp_path):
         """async_shutdown cancels a pending occupancy away timer."""
         coord = _make_coordinator(
             config_overrides={CONF_HOME_TOGGLE: "input_boolean.home_mode"},
             state_map={"input_boolean.home_mode": "off"},
         )
         coord._occupancy_mode = OCCUPANCY_HOME
+        # Issue #493: learning.save_state() now uses tempfile.mkstemp(dir=...), which
+        # requires the directory to actually exist — unlike the old code, whose broad
+        # except OSError silently swallowed a write to a nonexistent directory. The
+        # mocked hass.config.config_dir (a bare MagicMock attribute) was never a real
+        # path; point _db_path at a real tmp_path directory so save_state() below
+        # exercises real disk I/O the way it does in production.
+        coord.learning._db_path = tmp_path / "climate_advisor_learning.json"
 
         cancel_mock = MagicMock()
 

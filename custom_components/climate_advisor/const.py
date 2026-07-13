@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.24"
+VERSION = "0.5.25"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.25": [
+        'Fix #485: the Activity Report showed the same "Occupancy setback (away)" entry'
+        " repeated every ~5 minutes for hours at a time while nobody was home, drowning out"
+        " everything else in the log. The setpoint itself was never actually changing —"
+        " Climate Advisor just wasn't collapsing the repeats the way it already does for"
+        " other frequently-repeated entries. Now it shows one entry with a repeat count and"
+        " time range, and still shows a new entry right away whenever something real"
+        " changes (you come home, leave for vacation, etc.).",
+    ],
     "0.5.24": [
         'Fix #498: the Status dashboard showed "Grace period active" during an override'
         " but never said when it would end — now shows the end time and minutes remaining."
@@ -1166,6 +1175,44 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    485: {
+        "version_fixed": "0.5.25",
+        "title": "occupancy_setback Activity Report entries spammed every ~5 minutes while occupancy was unchanged",
+        "scope_covered": (
+            "Removed 'occupancy_setback' from ai_skills_activity.py's _NO_DEDUP exclusion"
+            " set, so build_event_timeline_table()'s existing consecutive-same-type-row"
+            " collapse mechanism (already used for nat_vent_fan_on/off,"
+            " occupancy_setback_suppressed_paused, etc.) now applies to it — repeated"
+            " identical occupancy_setback rows collapse to a single '×N (first-last)' row"
+            " with the last event's Settings cell preserved. Root cause traced: occupancy"
+            " transitions are already correctly event-driven"
+            " (coordinator._async_occupancy_toggle_changed, fires once per real transition"
+            " and no-ops otherwise) — the repeats came from apply_classification()'s"
+            " occupancy-defer gate (automation.py) unconditionally re-calling"
+            " handle_occupancy_away()/handle_occupancy_vacation() on every automation"
+            " cycle, which runs far more often than the documented 30-min interval due to"
+            " a self-perpetuating revisit chain (any HVAC action schedules a 5-min"
+            " revisit with no idempotency check). handle_occupancy_away/vacation() emit"
+            " occupancy_setback on every call with no dedup of their own — unlike"
+            " comfort_band_applied, which got a 10-min time-windowed dedup in #444."
+            " Confirmed via the cancel_override_then_resume golden scenario (which relies"
+            " on a genuine second occupancy_setback firing while occupancy mode is"
+            " unchanged, separated by intervening override events) that the fix does not"
+            " suppress legitimate re-applies — only truly consecutive identical rows"
+            " collapse."
+        ),
+        "scope_not_covered": (
+            "The underlying 5-minute revisit-after-any-action loop and the unconditional"
+            " climate.set_temperature re-assertion inside _apply_comfort_band() are"
+            " unchanged — both are deliberate, documented, shared design (revisit"
+            " plumbing is needed for nat-vent/pre-cool eligibility re-checks even while"
+            " away; free cooling is not occupancy-gated) and were explicitly scoped out"
+            " by the user. The real thermostat still receives a redundant"
+            " climate.set_temperature call roughly every 5-10 minutes while occupancy"
+            " stays away/vacation with nothing else changing; this fix only stops the"
+            " Activity Report from showing every one of those as a separate row."
+        ),
+    },
     498: {
         "version_fixed": "0.5.24",
         "title": "Dashboard grace-expiry display gap; bedtime/wakeup/pre-cool gate logic duplicated and drifted",

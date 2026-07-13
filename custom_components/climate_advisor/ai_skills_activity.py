@@ -997,7 +997,6 @@ _NO_DEDUP: frozenset[str] = frozenset(
         "comfort_band_applied",
         "bedtime_setback",
         "morning_wakeup",
-        "occupancy_setback",
         "occupancy_comfort_restored",
         "pre_cool_applied",
         "classification_applied",

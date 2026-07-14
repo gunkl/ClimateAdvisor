@@ -4,6 +4,11 @@
 Uses `ha core logs` on the remote (reads Docker log files from disk on HAOS).
 Reuses the SSH connection config from .deploy.env.
 
+The remote `ha core logs` command defaults to only its last 100 lines when no
+`--lines` is given, so every SSH-mode call here explicitly passes `--lines` to
+the remote command — a generous raw depth (DEFAULT_RAW_LINES) when filtering
+locally with grep/tail, or the user's requested count directly for --full.
+
 SSH mode (default):
     python3 tools/ha_logs.py                        # Last 500 climate_advisor lines
     python3 tools/ha_logs.py --all                   # Last 500 lines of full HA log
@@ -40,6 +45,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = REPO_ROOT / ".deploy.env"
 LOG_DIR = REPO_ROOT / "logs"
+
+# Raw line depth requested from the remote `ha core logs --lines N` call before local
+# grep/tail filtering. Must be generous — grep/tail can only find matches within whatever
+# the remote command actually returned, and `ha core logs` defaults to just 100 lines
+# with no --lines flag. At current DEBUG-level log volume, 100000 lines is needed to
+# reach back roughly 3 days (verified live against a production HAOS install); smaller
+# values (e.g. 20000) only reached back ~1 day. SSH round-trip at this depth is ~15s.
+DEFAULT_RAW_LINES = 100000
 
 # Regex to strip ANSI color codes from ha core logs output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -312,19 +325,25 @@ def fetch_logs(
     component_filter: str = "climate_advisor",
     extra_filter: str = "",
     full_dump: bool = False,
+    raw_lines: int = DEFAULT_RAW_LINES,
 ) -> str:
-    """Fetch logs from HA via SSH using `ha core logs`. Returns cleaned log text."""
-    # ha core logs reads Docker log files from disk on HAOS; retention is typically days, not just a few hours.
-    # The command streams the full log, so we pipe through grep/tail on the remote side.
+    """Fetch logs from HA via SSH using `ha core logs`. Returns cleaned log text.
+
+    `ha core logs` defaults to only its last 100 lines when no `--lines` is given, so we
+    always pass `--lines` explicitly to the remote command. When filtering locally with
+    grep/tail, we pull `raw_lines` from the remote (a generous depth so grep can find
+    matches spread across days) and then trim to `lines` after filtering. For a full
+    dump (no filtering), the user's requested `lines` count is the raw pull size directly.
+    """
     if full_dump:
-        remote_cmd = "ha core logs"
+        remote_cmd = f"ha core logs --lines {lines}"
     elif component_filter:
-        remote_cmd = f"ha core logs 2>/dev/null | grep -i {shlex.quote(component_filter)}"
+        remote_cmd = f"ha core logs --lines {raw_lines} 2>/dev/null | grep -i {shlex.quote(component_filter)}"
         if extra_filter:
             remote_cmd += f" | grep -i {shlex.quote(extra_filter)}"
         remote_cmd += f" | tail -n {lines}"
     else:
-        remote_cmd = "ha core logs 2>/dev/null"
+        remote_cmd = f"ha core logs --lines {raw_lines} 2>/dev/null"
         if extra_filter:
             remote_cmd += f" | grep -i {shlex.quote(extra_filter)}"
         remote_cmd += f" | tail -n {lines}"
@@ -453,7 +472,12 @@ def main() -> None:
         if args.thermal:
             thermal_lines = args.lines if args.lines != 500 else 2000  # use 2000 unless user overrode --lines
             raw = fetch_logs(
-                config, lines=thermal_lines, component_filter="climate_advisor", extra_filter="", full_dump=False
+                config,
+                lines=thermal_lines,
+                component_filter="climate_advisor",
+                extra_filter="",
+                full_dump=False,
+                raw_lines=max(thermal_lines, DEFAULT_RAW_LINES),
             )
             thermal_keywords = re.compile(
                 r"Thermal|thermal|rolling window|keeping alive|max_window|commit|abandon|reject|pending obs|pipeline",
@@ -467,13 +491,19 @@ def main() -> None:
             output = "\n".join(lines_out)
         else:
             component = "" if args.all else "climate_advisor"
-            output = fetch_logs(
-                config,
-                lines=args.lines,
-                component_filter=component,
-                extra_filter=args.filter,
-                full_dump=args.full,
-            )
+            if args.full:
+                # Bare --full with no explicit --lines should dump a large window, not argparse's 500 default.
+                full_lines = args.lines if args.lines != 500 else DEFAULT_RAW_LINES
+                output = fetch_logs(config, lines=full_lines, component_filter=component, full_dump=True)
+            else:
+                output = fetch_logs(
+                    config,
+                    lines=args.lines,
+                    component_filter=component,
+                    extra_filter=args.filter,
+                    full_dump=False,
+                    raw_lines=max(args.lines, DEFAULT_RAW_LINES),
+                )
 
         if not output.strip():
             print("(no matching log lines found)")

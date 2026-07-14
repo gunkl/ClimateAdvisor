@@ -207,13 +207,18 @@ class TestShellSanitization:
 
     @patch("ha_logs.subprocess.run")
     def test_no_filter_no_grep(self, mock_run):
-        """full_dump=True must produce a bare 'ha core logs' command with no grep."""
+        """full_dump=True must produce an unfiltered 'ha core logs --lines N' command with no grep.
+
+        Issue #502: `ha core logs` with no `--lines` silently defaults to only its last
+        100 lines on HAOS, so full_dump must always pass an explicit `--lines` — a bare
+        `ha core logs` is not actually a full dump.
+        """
         mock_run.return_value = MagicMock(returncode=0, stdout="lots of logs", stderr="")
 
-        fetch_logs(_MOCK_SSH_CONFIG, full_dump=True)
+        fetch_logs(_MOCK_SSH_CONFIG, lines=50, full_dump=True)
 
         cmd = mock_run.call_args[0][0]
         remote_cmd = cmd[-1]
 
-        assert remote_cmd.strip() == "ha core logs", f"Expected bare 'ha core logs', got: {remote_cmd!r}"
+        assert remote_cmd.strip() == "ha core logs --lines 50", f"Expected explicit --lines, got: {remote_cmd!r}"
         assert "grep" not in remote_cmd, f"Expected no grep in full_dump mode, got: {remote_cmd!r}"

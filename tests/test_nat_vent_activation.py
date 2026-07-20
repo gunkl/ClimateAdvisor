@@ -2011,6 +2011,75 @@ class TestCeilingGateArchetypeAllFourSites:
 
     # -- Site 3: handle_door_window_open() --------------------------------------
 
+
+class TestIssue504DebounceGatesIdleOpen:
+    """Issue #504: a bouncing/still-settling sensor must not instantly re-trigger the
+    idle_open reactivation path in check_natural_vent_conditions(). A sensor real
+    incident showed a monitored contact sensor group transitioning 7 times in 28
+    seconds, and each open transition independently re-armed the whole-house fan
+    before the very next close tore it back down — an audible on/off flap with zero
+    settle time, even though CONF_SENSOR_DEBOUNCE was configured.
+
+    The fix reuses the coordinator's existing per-entity debounce-timer tracking
+    (_door_open_timers) via a new _sensor_debounce_pending_callback: idle_open only
+    reactivates once no currently-open monitored sensor still has a pending debounce
+    timer — i.e. once it's genuinely settled open, not mid-bounce.
+    """
+
+    def test_idle_open_does_not_reactivate_while_debounce_pending(self):
+        """Sensor open + HVAC idle + conditions favorable, but debounce still pending
+        (sensor hasn't settled) — must NOT reactivate nat-vent."""
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=72.0)
+        engine._paused_by_door = False
+        engine._natural_vent_active = False
+        engine._grace_active = False
+        engine._sensor_check_callback = lambda: True
+        engine._sensor_debounce_pending_callback = lambda: True
+        engine._last_outdoor_temp = 68.0
+        engine.hass.states.get.return_value.state = "off"
+        engine._activate_fan = AsyncMock()
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False
+        engine._activate_fan.assert_not_awaited()
+
+    def test_idle_open_reactivates_once_debounce_resolved(self):
+        """Same conditions, but the sensor has settled (debounce no longer pending) —
+        idle_open must still reactivate, preserving Issue #244's original scenario."""
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=72.0)
+        engine._paused_by_door = False
+        engine._natural_vent_active = False
+        engine._grace_active = False
+        engine._sensor_check_callback = lambda: True
+        engine._sensor_debounce_pending_callback = lambda: False
+        engine._last_outdoor_temp = 68.0
+        engine.hass.states.get.return_value.state = "off"
+        engine._activate_fan = AsyncMock()
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        engine._activate_fan.assert_awaited()
+
+    def test_idle_open_reactivates_when_debounce_callback_unset(self):
+        """No coordinator wired (callback left None, as in most existing unit tests) —
+        must default to 'not pending' so pre-#504 idle_open behavior is unchanged."""
+        engine = _make_engine(comfort_heat=68.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=72.0)
+        engine._paused_by_door = False
+        engine._natural_vent_active = False
+        engine._grace_active = False
+        engine._sensor_check_callback = lambda: True
+        assert engine._sensor_debounce_pending_callback is None
+        engine._last_outdoor_temp = 68.0
+        engine.hass.states.get.return_value.state = "off"
+        engine._activate_fan = AsyncMock()
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        engine._activate_fan.assert_awaited()
+
     def test_site3_door_open_hvac_fan_blocked_past_ceiling(self):
         """FAN_MODE_HVAC: sensor opens, indoor > ceiling -> activation blocked, falls to pause."""
         engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0, indoor_f=76.0)

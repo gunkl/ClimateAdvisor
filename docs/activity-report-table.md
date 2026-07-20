@@ -140,7 +140,7 @@ These events signal a mode or setpoint change triggered by automation logic.
 | `nat_vent_sleep_ceiling_reached` | `automation.py` `check_natural_vent_conditions` | `indoor_temp`, `sleep_cool` | "Nat-vent sleep ceiling reached" | `indoor: {indoor_temp}°F ≤ sleep target: {sleep_cool}°F; fan deactivated, sleep band retained` |
 | `nat_vent_ceiling_escalation` | `automation.py` `apply_classification` | `indoor`, `outdoor`, `comfort_cool` | "Nat-vent escalated to AC — ceiling breached" | `indoor: {indoor}°F > ceiling: {comfort_cool}°F; nat-vent ended, AC armed` |
 | `sensor_opened` | `automation.py` `handle_door_window_opened` | `entity`, `result` (natural_ventilation / paused), `hvac_mode_change`, optionally `fan_mode_change` | "Sensor opened — {entity}" with result label | `result: {result}; mode: {hvac_mode_change}` (+ `fan: {fan_mode_change}` if present) |
-| `sensor_all_closed` | `automation.py` `handle_all_doors_windows_closed` | `was_paused`, `was_nat_vent` | "All sensors closed" | `was paused: {was_paused}, was nat-vent: {was_nat_vent}` |
+| `sensor_all_closed` | `automation.py` `handle_all_doors_windows_closed` | `was_paused`, `was_nat_vent`, `fan_device` (Issue #504) | "All sensors closed" if neither flag set; "All sensors closed -- ending nat-vent" if `was_nat_vent`; "All sensors closed -- resuming HVAC" if `was_paused` | Blank if neither flag; blank if `was_paused`; `{fan_device}: on->off` if `was_nat_vent` (Issue #504 — previously blank even though `_exit_nat_vent()` really did turn the fan off; `fan_deactivated`'s own event is intentionally suppressed here via `emit_event=False` per Issue #411, so this is the only place that transition can surface) |
 
 ### Skip / Advisory
 

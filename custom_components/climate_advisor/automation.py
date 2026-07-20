@@ -624,6 +624,10 @@ class AutomationEngine:
         # Resume-from-pause tracking (Issue #47)
         self._resumed_from_pause: bool = False
         self._sensor_check_callback: Any | None = None  # Set by coordinator: returns True if any sensor open
+        # Issue #504: Set by coordinator: returns True if any currently-open monitored sensor
+        # is still within its CONF_SENSOR_DEBOUNCE settle window. None/unset (e.g. tests that
+        # don't wire a coordinator) is treated as "not pending", matching pre-#504 behavior.
+        self._sensor_debounce_pending_callback: Any | None = None
 
         # Issue #423: physical fan ground-truth callbacks — set by coordinator after
         # construction, mirroring _sensor_check_callback/_emit_event_callback above.
@@ -2569,7 +2573,15 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "sensor_all_closed",
-                    {"was_paused": was_paused, "was_nat_vent": was_nat_vent},
+                    {
+                        "was_paused": was_paused,
+                        "was_nat_vent": was_nat_vent,
+                        # Issue #504: lets the Activity Report show the whf:on->off transition
+                        # on this row — _exit_nat_vent() suppresses _deactivate_fan()'s own
+                        # event (Issue #411) since this event is its "caller emits its own
+                        # specific event" contract, but it never carried the fan device label.
+                        "fan_device": _fan_device_label(self.config),
+                    },
                 )
 
             # Handle natural ventilation mode cleanup (sensors closed while in nat vent).
@@ -2653,7 +2665,22 @@ class AutomationEngine:
                     or getattr(_hvac_state_244, "state", "off") == "off"
                     or _hvac_action_244 in ("", "off", "idle")
                 )
-                _idle_open = bool(self._sensor_check_callback and self._sensor_check_callback()) and _hvac_off_244
+                # Issue #504: re-read of #244 confirmed it was about a sensor open ALL DAY
+                # never getting re-evaluated once outdoor cools later — not about reacting
+                # within milliseconds of a fresh open. Gate on the same CONF_SENSOR_DEBOUNCE
+                # settle window that already governs the pause decision (handle_door_window_open),
+                # instead of the raw instantaneous sensor state. A sensor that's been open long
+                # enough for #244's scenario to matter has long since cleared its debounce timer,
+                # so this is a no-op for #244 — it only blocks reacting to a sensor still
+                # bouncing/settling (was previously indistinguishable from a real, stable open).
+                _debounce_pending = bool(
+                    self._sensor_debounce_pending_callback and self._sensor_debounce_pending_callback()
+                )
+                _idle_open = (
+                    bool(self._sensor_check_callback and self._sensor_check_callback())
+                    and _hvac_off_244
+                    and not _debounce_pending
+                )
                 if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
                     return
 

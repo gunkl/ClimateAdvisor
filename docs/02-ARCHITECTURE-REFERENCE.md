@@ -8,7 +8,7 @@
 | What are the 16 source files and what does each own? | Every module has a single responsibility: `coordinator.py` orchestrates, `classifier.py` classifies, `automation.py` executes HVAC calls, `learning.py` persists and analyses behavior, etc. | [§File Structure](02-ARCHITECTURE-REFERENCE.md#file-structure) |
 | How does data flow from the weather entity to an HVAC service call? | Weather entity → coordinator (every 30 min) → `classify_day()` → `DayClassification` → `apply_classification()` in the automation engine → `climate.set_temperature` / `climate.set_hvac_mode`. | [§Data Flow](02-ARCHITECTURE-REFERENCE.md#data-flow) |
 | What are the five coordinator-scheduled daily events and when do they fire? | Briefing (default 6:00 AM), morning wakeup (6:30 AM), bedtime setback (10:30 PM), end-of-day save (11:59 PM), and the 30-minute forecast refresh loop. | [§Coordinator Scheduled Events](02-ARCHITECTURE-REFERENCE.md#coordinator-scheduled-events) |
-| What is the debounce / grace period system and how do the three timers interact? | Debounce delays a pause until a sensor stays open for the configured time. Manual grace (default 30 min) blocks new pauses after a user override. Automation grace (default 5 min) blocks re-pause after system resumes. Manual override always wins. | [§Debounce and Grace Period System](02-ARCHITECTURE-REFERENCE.md#debounce-and-grace-period-system) |
+| What is the debounce / grace period system and how do the three timers interact? | Debounce (default 10 min as of Issue #504) delays *any* reaction to a sensor state change until it holds steady for the configured time — pause/resume HVAC, and, since #504, nat-vent/WHF/HVAC-fan engage/exit. Manual grace (default 30 min) blocks new pauses after a user override. Automation grace (default 5 min) blocks re-pause after system resumes. Manual override always wins. | [§Debounce and Grace Period System](02-ARCHITECTURE-REFERENCE.md#debounce-and-grace-period-system) |
 | What sensors does Climate Advisor expose and what do their attributes carry? | Eight sensor entities: day type, trend, next action, daily briefing, comfort score, status, occupancy mode, and AI status — each with diagnostic attributes. | [§Sensors Exposed](02-ARCHITECTURE-REFERENCE.md#sensors-exposed) |
 | How does the thermal state machine (v3) work and which methods own each phase? | Ten coordinator methods drive six concurrent observation types in `_pending_observations` (Issue #121); HVAC observations survive HA restarts via `LearningState.pending_thermal_event`. | [§Coordinator Thermal State Machine Methods](02-ARCHITECTURE-REFERENCE.md#coordinator-thermal-state-machine-methods) |
 | How does state persistence work — what is stored, where, and in what format? | Two JSON files: `climate_advisor_state.json` (runtime coordinator state, atomic write) and `climate_advisor_learning.json` (thermal model + observation history). State version mismatch discards and resets; no migration chain. | [§State Persistence Brief](state-persistence.md) |
@@ -184,7 +184,7 @@ setback_cool: 80 (°F)
 notify_service: notify.mobile_app_phone
 door_window_sensors: [binary_sensor.back_door, binary_sensor.all_windows, ...]  # any binary_sensor, including groups
 sensor_polarity_inverted: false  # true if sensors report on=closed instead of on=open
-sensor_debounce_seconds: 300    # how long a door/window must stay open before HVAC pauses (default 5 min, UI: 0–60 min)
+sensor_debounce_seconds: 600    # how long a door/window sensor's state must hold steady before Climate Advisor reacts — pause/resume HVAC or nat-vent/WHF/HVAC-fan engage/exit (default 10 min as of Issue #504, was 5 min; UI: 0–60 min)
 manual_grace_seconds: 1800      # hands-off window after user manually turns HVAC on (default 30 min, UI: 0–240 min)
 manual_grace_notify: false      # send notification when manual grace period expires
 automation_grace_seconds: 300   # settling period after Climate Advisor auto-resumes HVAC (default 5 min, UI: 0–240 min)
@@ -203,7 +203,7 @@ occupancy_guest_inverted: false
 
 ### Debounce and Grace Period System
 
-**Debounce** (`sensor_debounce_seconds`): A door or window must remain open for this duration before HVAC is paused. Quick pass-throughs that close within the window have no effect. Default: 5 minutes.
+**Debounce** (`sensor_debounce_seconds`): A door or window sensor's state must hold steady for this duration before Climate Advisor reacts to it. This applies to every controlled device, not just HVAC — pausing/resuming HVAC (`handle_door_window_open()`), and, as of Issue #504, engaging/exiting natural-ventilation fan control (`check_natural_vent_conditions()`'s idle_open reactivation, gated on the same coordinator-tracked debounce timers via `_sensor_debounce_pending_callback`). Quick pass-throughs or a flaky sensor bouncing open/closed within the window have no effect on either. Default: 10 minutes (was 5 minutes prior to Issue #504).
 
 **Manual grace period** (`manual_grace_seconds`): After the user manually turns HVAC back on during a door/window pause, Climate Advisor stays hands-off for this duration. Door/window sensors cannot trigger another pause during this window — the user just overrode the system and should not be immediately overridden back. Default: 30 minutes. Notification on expiry: off by default.
 

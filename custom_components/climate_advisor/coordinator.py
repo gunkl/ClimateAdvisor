@@ -278,6 +278,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self.automation_engine._revisit_callback = self.async_request_refresh
         self.automation_engine._sensor_check_callback = self._any_sensor_open
+        # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell whether
+        # any currently-open monitored sensor is still within its CONF_SENSOR_DEBOUNCE
+        # settle window (i.e. still tracked in _door_open_timers) — reused as-is rather than
+        # introducing a second debounce/lockout concept.
+        self.automation_engine._sensor_debounce_pending_callback = lambda: bool(self._door_open_timers)
         self.automation_engine._emit_event_callback = self._emit_event
         self.automation_engine._request_refresh_callback = lambda: self.hass.async_create_task(
             self.async_request_refresh()

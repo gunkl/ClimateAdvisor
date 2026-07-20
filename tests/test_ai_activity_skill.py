@@ -603,6 +603,40 @@ class TestEventSourceLabelSensorEvents:
         assert _event_source_label("warm_day_setback_applied", {}) == "automation"
         assert _event_source_label("warm_day_state_confirmed", {}) == "automation"
 
+
+class TestRenderSensorAllClosedFanDevice:
+    """Issue #504: the nat-vent-ending row must show the whf on->off transition in
+    Settings, matching every other fan-transition row (_render_fan_deactivated etc.) —
+    previously blank even though _exit_nat_vent() really did turn the fan off.
+    """
+
+    def test_was_nat_vent_shows_fan_device_off(self):
+        label, settings = _act_mod._render_sensor_all_closed(
+            {"was_paused": False, "was_nat_vent": True, "fan_device": "whf"}, "F"
+        )
+        assert label == "All sensors closed -- ending nat-vent"
+        assert settings == "whf: on->off"
+
+    def test_was_nat_vent_defaults_fan_device_label_when_missing(self):
+        """Payload without fan_device (e.g. an older persisted event) still renders
+        something reasonable instead of erroring."""
+        label, settings = _act_mod._render_sensor_all_closed({"was_paused": False, "was_nat_vent": True}, "F")
+        assert label == "All sensors closed -- ending nat-vent"
+        assert settings == "fan: on->off"
+
+    def test_was_paused_unaffected(self):
+        """The resuming-HVAC case is unrelated to fan_device and must stay unchanged."""
+        label, settings = _act_mod._render_sensor_all_closed(
+            {"was_paused": True, "was_nat_vent": False, "fan_device": "whf"}, "F"
+        )
+        assert label == "All sensors closed -- resuming HVAC"
+        assert settings == ""
+
+    def test_neither_flag_unaffected(self):
+        label, settings = _act_mod._render_sensor_all_closed({"was_paused": False, "was_nat_vent": False}, "F")
+        assert label == "All sensors closed"
+        assert settings == ""
+
     def test_manual_event_returns_manual(self):
         """A known manual event type → 'manual'."""
         assert _event_source_label("override_detected", {}) == "manual"

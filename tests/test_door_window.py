@@ -293,8 +293,8 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
 class TestSensorDebounceConfig:
     """Tests for debounce configuration defaults and values."""
 
-    def test_default_debounce_is_five_minutes(self):
-        assert DEFAULT_SENSOR_DEBOUNCE_SECONDS == 300
+    def test_default_debounce_is_ten_minutes(self):
+        assert DEFAULT_SENSOR_DEBOUNCE_SECONDS == 600
 
     def test_config_key_name(self):
         assert CONF_SENSOR_DEBOUNCE == "sensor_debounce_seconds"
@@ -306,7 +306,7 @@ class TestSensorDebounceConfig:
     def test_engine_uses_default_when_not_configured(self):
         engine = _make_automation_engine()
         debounce = engine.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS)
-        assert debounce == 300
+        assert debounce == 600
 
 
 # ---------------------------------------------------------------------------
@@ -1208,7 +1208,7 @@ class TestConfigMigrationV3ToV4:
         new_data.setdefault(CONF_AUTOMATION_GRACE_PERIOD, DEFAULT_AUTOMATION_GRACE_SECONDS)
         new_data.setdefault(CONF_AUTOMATION_GRACE_NOTIFY, True)
 
-        assert new_data[CONF_SENSOR_DEBOUNCE] == 300
+        assert new_data[CONF_SENSOR_DEBOUNCE] == 600
         assert new_data[CONF_MANUAL_GRACE_PERIOD] == 1800
         assert new_data[CONF_MANUAL_GRACE_NOTIFY] is False
         assert new_data[CONF_AUTOMATION_GRACE_PERIOD] == 300

@@ -65,7 +65,7 @@
         "data": {
           "door_window_sensors": "Door/Window Sensors",
           "sensor_polarity_inverted": "Invert sensor polarity (on = closed instead of open)",
-          "sensor_debounce_seconds": "Open delay before pausing HVAC (minutes)",
+          "sensor_debounce_seconds": "Sensor debounce before automation reacts (minutes)",
           "manual_grace_seconds": "Pause after manual thermostat change (minutes)",
           "automation_grace_seconds": "Cooldown after automated change (minutes)",
           "override_confirm_seconds": "Override confirmation delay (minutes)",
@@ -79,7 +79,7 @@
         "data_description": {
           "door_window_sensors": "Select any binary sensor entities to monitor, including binary sensor groups that bundle multiple sensors together.",
           "sensor_polarity_inverted": "Enable this if your sensors report 'on' when closed and 'off' when open, which is the opposite of the Home Assistant standard.",
-          "sensor_debounce_seconds": "How long a door/window must stay open before HVAC is paused. Prevents brief openings (like walking through a door) from triggering a pause.",
+          "sensor_debounce_seconds": "How long a door/window sensor's state must hold steady before Climate Advisor reacts to it -- pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control (whole-house fan or HVAC fan). Prevents brief openings (like walking through a door) or a flaky sensor bounce from triggering a reaction.",
           "manual_grace_seconds": "How long to wait after you manually adjust the thermostat before Climate Advisor resumes automation. Gives you time to enjoy your chosen temperature.",
           "automation_grace_seconds": "How long to wait after Climate Advisor makes an automated change before allowing another one. Prevents rapid back-to-back adjustments.",
           "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",
@@ -210,7 +210,7 @@
         "data": {
           "door_window_sensors": "Door/Window Sensors",
           "sensor_polarity_inverted": "Invert sensor polarity (on = closed instead of open)",
-          "sensor_debounce_seconds": "Open delay before pausing HVAC (minutes)",
+          "sensor_debounce_seconds": "Sensor debounce before automation reacts (minutes)",
           "manual_grace_seconds": "Pause after manual thermostat change (minutes)",
           "automation_grace_seconds": "Cooldown after automated change (minutes)",
           "override_confirm_seconds": "Override confirmation delay (minutes)",
@@ -225,7 +225,7 @@
         "data_description": {
           "door_window_sensors": "Select any binary sensor entities to monitor, including binary sensor groups that bundle multiple sensors together.",
           "sensor_polarity_inverted": "Enable this if your sensors report 'on' when closed and 'off' when open, which is the opposite of the Home Assistant standard.",
-          "sensor_debounce_seconds": "How long a door/window must stay open before HVAC is paused. Prevents brief openings from triggering a pause.",
+          "sensor_debounce_seconds": "How long a door/window sensor's state must hold steady before Climate Advisor reacts to it -- pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control. Prevents brief openings or a flaky sensor bounce from triggering a reaction.",
           "manual_grace_seconds": "How long to wait after you manually adjust the thermostat before Climate Advisor resumes automation.",
           "automation_grace_seconds": "How long to wait after Climate Advisor makes an automated change before allowing another one.",
           "override_confirm_seconds": "Time between system changes and confirmation of manual override. Transient events (thermostat restart, fan cycles) that resolve within this window are ignored automatically. Set to 0 to confirm overrides immediately.",

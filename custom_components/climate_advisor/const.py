@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.25"
+VERSION = "0.5.26"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.26": [
+        "Fix #504: a monitored door/window sensor bouncing open/closed rapidly (flaky"
+        " contact hardware, or a quick open-close-open) could snap the whole-house fan on"
+        " and back off within the same minute — an audible burst with no settle time, even"
+        " though a sensor debounce period was configured. The debounce now also governs"
+        " when free-cooling fan control reacts to a sensor change, not just HVAC"
+        " pause/resume, so a bounce no longer instantly re-triggers the fan. The default"
+        " debounce is also now 10 minutes (was 5) for new installs. Also fixed: the"
+        " Activity Report row for nat-vent ending because a sensor closed now shows the"
+        " fan's on->off transition, matching every other fan-transition row.",
+    ],
     "0.5.25": [
         'Fix #485: the Activity Report showed the same "Occupancy setback (away)" entry'
         " repeated every ~5 minutes for hours at a time while nobody was home, drowning out"
@@ -1175,6 +1186,52 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    504: {
+        "version_fixed": "0.5.26",
+        "title": "Rapid door/window sensor bounce instantly re-triggered nat-vent/WHF reactivation with no settle time",
+        "scope_covered": (
+            "check_natural_vent_conditions()'s idle_open reactivation branch (automation.py,"
+            " Issue #244, widened #402) reacted to a monitored sensor's raw instantaneous"
+            " open state with zero debounce — verified via real HA logs that a single"
+            " contact sensor group genuinely bounced open/closed 7 times in 28 seconds,"
+            " and each open transition independently re-armed the whole-house fan before"
+            " the very next close tore it back down via _exit_nat_vent(), producing"
+            " duplicate 'Fan activated' Activity Report rows and an audible on/off flap."
+            " CONF_SENSOR_DEBOUNCE was configured but only ever gated the pause decision"
+            " (handle_door_window_open(), which only runs once its debounce timer actually"
+            " expires) — never this reactivation path. Fix reuses the coordinator's"
+            " existing per-entity debounce-timer tracking (_door_open_timers) via a new"
+            " _sensor_debounce_pending_callback: idle_open now only reactivates once no"
+            " currently-open monitored sensor still has a pending debounce timer, i.e."
+            " once it has genuinely settled open. No second debounce/lockout concept was"
+            " added (would repeat the #402 duplication failure mode). Re-read Issue #244"
+            " directly and confirmed its actual scenario (a sensor open all day, outdoor"
+            " cooling later) is unaffected: that sensor's debounce timer has long since"
+            " resolved by the time #244's case occurs. Default CONF_SENSOR_DEBOUNCE bumped"
+            " 300s to 600s for new installs (existing installs with an explicit value are"
+            " untouched); its config description rewritten to describe governing pause/resume"
+            " and nat-vent/WHF/HVAC-fan engage/exit, not just 'HVAC pauses'. Also fixed:"
+            " sensor_all_closed's payload now carries fan_device so"
+            " _render_sensor_all_closed() can show 'whf: on->off' on the nat-vent-ending"
+            " row (previously blank, even though the fan really did turn off — Issue #411's"
+            " emit_event=False suppression on _exit_nat_vent()'s own fan_deactivated event"
+            " meant this was the only place that transition could surface, and it wasn't"
+            " being passed through)."
+        ),
+        "scope_not_covered": (
+            "An initial pass of this investigation incorrectly attributed the bug to PR"
+            " #489 (Doors/Windows status card refresh-on-close) based on a still-truncated"
+            " ha_logs.py fetch and the coarser HA sensor-history REST endpoint; re-fetching"
+            " real logs after merging #503 (the truncation fix) showed #489 plays no role."
+            " No changes were made there. Does not touch the other 4"
+            " _nat_vent_may_reactivate() call sites (handle_door_window_open(), the"
+            " paused-by-door reactivation block, reconcile_fan_on_startup()) — none share"
+            " this bug, each already only runs post-debounce or in a different (startup"
+            " adoption) context. Does not address the root cause of the physical sensor"
+            " bounce itself (flaky hardware/wiring) — only prevents the automation from"
+            " reacting to it as if it were a stable, real state change."
+        ),
+    },
     485: {
         "version_fixed": "0.5.25",
         "title": "occupancy_setback Activity Report entries spammed every ~5 minutes while occupancy was unchanged",
@@ -4667,7 +4724,7 @@ CONF_EMAIL_OCCUPANCY_HOME = "email_occupancy_home"
 STARTUP_COALESCE_SECONDS: int = 300  # 5 minutes (Issue #321)
 
 # Debounce and grace period defaults (seconds)
-DEFAULT_SENSOR_DEBOUNCE_SECONDS = 300  # 5 minutes
+DEFAULT_SENSOR_DEBOUNCE_SECONDS = 600  # 10 minutes (Issue #504 — was 5 min)
 DEFAULT_MANUAL_GRACE_SECONDS = 1800  # 30 minutes
 DEFAULT_AUTOMATION_GRACE_SECONDS = 300  # 5 minutes
 DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS = 3600  # 60 minutes
@@ -4958,8 +5015,11 @@ CONFIG_METADATA = {
     "sensor_debounce_seconds": {
         "label": "Sensor Debounce (minutes)",
         "description": (
-            "How long a door/window must stay open before HVAC pauses."
-            " Short values react faster but may cause unnecessary pauses for quick trips through a door."
+            "How long a door/window sensor's state must hold steady before Climate Advisor acts on"
+            " it — pausing/resuming HVAC, or engaging/exiting natural-ventilation fan control"
+            " (whole-house fan or HVAC fan). Applies to every controlled device, not just HVAC."
+            " Short values react faster but are more exposed to quick trips through a door or a"
+            " flaky sensor bounce; longer values are steadier but slower to respond to a genuine change."
         ),
         "category": "sensors",
         "display_transform": "seconds_to_minutes",

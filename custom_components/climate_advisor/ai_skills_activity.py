@@ -719,8 +719,12 @@ def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
 def _render_sensor_all_closed(p: dict, unit: str) -> tuple[str, str]:
     was_paused = p.get("was_paused", False)
     was_nat_vent = p.get("was_nat_vent", False)
+    fan_device = p.get("fan_device", "fan")
     if was_nat_vent:
-        return "All sensors closed -- ending nat-vent", ""
+        # Issue #504: the fan really did turn off here (via _exit_nat_vent(), whose own
+        # fan_deactivated event is intentionally suppressed per Issue #411) — show that
+        # transition in Settings instead of leaving it blank.
+        return "All sensors closed -- ending nat-vent", f"{fan_device}: on->off"
     if was_paused:
         return "All sensors closed -- resuming HVAC", ""
     return "All sensors closed", ""

@@ -198,7 +198,7 @@ class TestConfigViewDisplayTransform:
     def test_seconds_to_minutes_conversion_values(self):
         """Default seconds values should convert to expected minutes."""
         cases = [
-            (DEFAULT_SENSOR_DEBOUNCE_SECONDS, 5),
+            (DEFAULT_SENSOR_DEBOUNCE_SECONDS, 10),
             (DEFAULT_MANUAL_GRACE_SECONDS, 30),
             (DEFAULT_AUTOMATION_GRACE_SECONDS, 5),
             (DEFAULT_OVERRIDE_CONFIRM_SECONDS, 10),

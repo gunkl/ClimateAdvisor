@@ -162,8 +162,15 @@ class TestApplyClassificationOccupancy:
         # Away band active='ceiling'; thermostat has cool → set_temperature(setback_cool=80).
         assert set_temp == 80  # setback_cool (away ceiling), not setback_heat (60)
 
-    def test_vacation_skips_classification_entirely(self):
-        """When on vacation, classification should not change temperature at all."""
+    def test_vacation_reapplies_deep_setback_not_comfort(self):
+        """Issue #505: on vacation, classification must reapply the deep vacation
+        setback (setback_cool=80 + VACATION_SETBACK_EXTRA=3 = 83), not comfort temps
+        and not a no-op. Previously this asserted NO service call at all — that
+        encoded the exact bug (the deep setback was armed once at vacation entry and
+        never re-armed again) as expected behavior. A real 5-day vacation incident
+        confirmed the thermostat stays at whatever temperature it happened to be
+        holding, indefinitely, under the old behavior.
+        """
         engine = _make_engine()
         c = _make_classification(hvac_mode="cool")
         engine._current_classification = c
@@ -171,8 +178,9 @@ class TestApplyClassificationOccupancy:
 
         asyncio.run(engine.apply_classification(c))
 
-        # No service calls should have been made
-        engine.hass.services.async_call.assert_not_called()
+        engine.hass.services.async_call.assert_called_once()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 83
 
     def test_home_applies_comfort_normally(self):
         """When home, classification arms the daytime comfort band (ceiling=comfort_cool for cool day).
@@ -291,7 +299,11 @@ class TestBedtimeOccupancy:
     """handle_bedtime should skip during vacation."""
 
     def test_bedtime_skipped_when_vacation(self):
-        """Vacation deep setback should not be overwritten by bedtime setback."""
+        """Bedtime-specific sleep temps are skipped for vacation — the setback wins
+        instead. Issue #505 sibling fix: unlike before, that setback must now be
+        actively reapplied here too (grace expiry landing inside the sleep window
+        routes to handle_bedtime() instead of apply_classification(), so the same
+        "already active" assumption must not silently do nothing)."""
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
@@ -299,10 +311,13 @@ class TestBedtimeOccupancy:
 
         asyncio.run(engine.handle_bedtime())
 
-        engine.hass.services.async_call.assert_not_called()
+        engine.hass.services.async_call.assert_called_once()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 83  # vacation ceiling, not bedtime heat temps
 
     def test_bedtime_skipped_when_away(self):
-        """Issue #101: Away setback is already active — bedtime should not override it."""
+        """Issue #101/#505: bedtime-specific sleep temps are skipped when AWAY, but
+        the away setback must be actively reapplied here too, not just assumed."""
         engine = _make_engine()
         c = _make_classification(hvac_mode="heat", day_type="cold")
         engine._current_classification = c
@@ -310,8 +325,9 @@ class TestBedtimeOccupancy:
 
         asyncio.run(engine.handle_bedtime())
 
-        # Bedtime is skipped when AWAY — away setback wins
-        engine.hass.services.async_call.assert_not_called()
+        engine.hass.services.async_call.assert_called_once()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 80  # away ceiling, not bedtime heat temps
 
     def test_bedtime_runs_when_home(self):
         """Bedtime arms the sleep band — needs thermostat capabilities to produce a service call.

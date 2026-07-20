@@ -8,7 +8,8 @@
     "The simulator _handle_occupancy_vacation() produces 'setback_applied' (not 'deep_setback_applied').",
     "Classification cycles while vacation call _handle_occupancy_vacation() → 'setback_applied' each time.",
     "comfort_restored fires on occupancy_home with comfort_cool=74F.",
-    "Covers Priority 4 vacation lifecycle from plan abundant-mapping-clarke.md."
+    "Covers Priority 4 vacation lifecycle from plan abundant-mapping-clarke.md.",
+    "Issue #505 test-integrity correction: the three mid-vacation assertions' `reason` text previously claimed to verify that classification cycles 'reapply' the setback — they don't, and never could, given production_outcome_at()'s most-recent-decision-at-or-before lookup semantics. Nothing in this scenario ever perturbs the setpoint away from the single occupancy_setback event fired at vacation entry, so these assertions passed identically whether or not apply_classification()'s vacation branch did anything on each cycle. This is exactly how issue #505 (vacation's deep setback was armed once at mode-entry and never re-applied for the rest of a real 5-day vacation) shipped despite this scenario's name. Reworded to state what is actually verified (no drift); the new vacation_occupancy_override_cleared.json pending scenario is what proves active reapplication, by perturbing the setpoint with a manual override before asserting the setback returns."
   ],
   "config": {
     "comfort_heat": 70,
@@ -79,19 +80,19 @@
       "at": "2026-07-15T10:30:00",
       "expect": "setback_applied",
       "expect_temp": 82.0,
-      "reason": "Classification while vacation reapplies vacation setback (82F) — comfort NOT restored"
+      "reason": "Issue #505 accuracy note: this and the next two assertions check that the setpoint REMAINS at the vacation setback (82F) through classification cycles — comfort is NOT restored. They do NOT prove the cycle actively re-wrote the setpoint (production_outcome_at() returns the most-recent decision at-or-before the assertion time, so this passes whether or not a fresh write happened, as long as nothing else perturbed the setpoint first). vacation_occupancy_override_cleared.json is the scenario that actually exercises and proves active reapplication, by perturbing the setpoint with a manual override first."
     },
     {
       "at": "2026-07-15T11:00:00",
       "expect": "setback_applied",
       "expect_temp": 82.0,
-      "reason": "Second classification cycle while vacation — setback maintained at 82F"
+      "reason": "Setback still holds at 82F (see the accuracy note on the previous assertion — this is a no-drift check, not proof of a fresh reapply)."
     },
     {
       "at": "2026-07-15T11:30:00",
       "expect": "setback_applied",
       "expect_temp": 82.0,
-      "reason": "Third classification cycle while vacation — setback maintained at 82F"
+      "reason": "Setback still holds at 82F (see the accuracy note two assertions up — this is a no-drift check, not proof of a fresh reapply)."
     },
     {
       "at": "2026-07-15T16:00:00",

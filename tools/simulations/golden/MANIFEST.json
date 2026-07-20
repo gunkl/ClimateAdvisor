@@ -159,13 +159,13 @@
     "issue": 229
   },
   "away_morning_wakeup_skipped_assertion": {
-    "sha256": "2ea261feff910e67b949b8efc06c03479f09cfe106564af4945d42a8a7925131",
-    "signed": "2026-06-10",
+    "sha256": "5c5aa27b6de12700ee7f3219faee80b113d3d0a7d5d118d8c88f167d53c7356c",
+    "signed": "2026-07-20",
     "issue": 229
   },
   "morning_wakeup_skipped_away_occupancy": {
-    "sha256": "f577212489dfad85c6c23232b3177bbd7ef0a8431b0069b41d044957f78cb9cc",
-    "signed": "2026-06-10",
+    "sha256": "e013ef1001712ceae649c71fbccb8d72d8a71751c12b12f26f43cd6c28f1a934",
+    "signed": "2026-07-20",
     "issue": 229
   },
   "away_natvent_activates_free_cooling": {
@@ -219,8 +219,8 @@
     "issue": 229
   },
   "vacation_mode_full_lifecycle": {
-    "sha256": "5dfe1f15ba040fe24fd5483b31445683d88b443b145991f34f12fba91e598615",
-    "signed": "2026-06-13",
+    "sha256": "29de99c31b0d1f7ee87a85559dae4968f19290294554a846ee1f6a861b142e99",
+    "signed": "2026-07-20",
     "issue": 229
   },
   "whole_house_fan_hvac_suppression": {

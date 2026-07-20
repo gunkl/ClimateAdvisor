@@ -1510,9 +1510,13 @@ class AutomationEngine:
             )
 
             # Issue #85: respect occupancy mode — don't overwrite setback with comfort
+            # Issue #505: vacation must actively reapply the deep setback the same way away
+            # does — "deep setback preserved" was never actually guaranteed once a manual
+            # override (or anything else) has moved the thermostat off the setback value.
             if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
                 if self._occupancy_mode == OCCUPANCY_VACATION:
-                    _LOGGER.info("Vacation mode — skipping classification temp change (deep setback preserved)")
+                    _LOGGER.info("Vacation mode — reapplying deep setback instead of comfort temps")
+                    await self.handle_occupancy_vacation()
                     return
                 _LOGGER.info("Away mode — reapplying setback instead of comfort temps")
                 await self.handle_occupancy_away()
@@ -4026,8 +4030,15 @@ class AutomationEngine:
         )
 
         # Issue #85: vacation/away already has a setback — don't override it with sleep temps.
+        # Issue #505: bedtime-specific sleep temps are still skipped, but the setback itself
+        # must be actively reapplied here too — grace expiry landing inside the sleep window
+        # routes here instead of apply_classification(), and the same "already active"
+        # assumption can be false (e.g. a manual override cleared moments earlier).
         if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
-            _LOGGER.info("Bedtime skipped — %s mode (setback already active)", self._occupancy_mode)
+            _LOGGER.info(
+                "Bedtime skipped — %s mode (reapplying setback instead of sleep temps)",
+                self._occupancy_mode,
+            )
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "bedtime_setback_skipped",
@@ -4035,6 +4046,10 @@ class AutomationEngine:
                 )
             if self._today_record is not None:
                 self._today_record.setback_skipped_reason = "occupancy"
+            if self._occupancy_mode == OCCUPANCY_VACATION:
+                await self.handle_occupancy_vacation()
+            else:
+                await self.handle_occupancy_away()
             return
 
         if _gate == ScheduledBandGate.DEFER_OVERRIDE:
@@ -4181,8 +4196,17 @@ class AutomationEngine:
             whf_owns_hvac=self._whf_owns_hvac(),
         )
 
+        # Issue #505: reapply the setback here too, same rationale as apply_classification()/
+        # handle_bedtime() — "already active" is not guaranteed once an override has cleared.
         if _gate == ScheduledBandGate.DEFER_OCCUPANCY:
-            _LOGGER.info("Pre-cool skipped — %s mode (setback already active)", self._occupancy_mode)
+            _LOGGER.info(
+                "Pre-cool skipped — %s mode (reapplying setback instead of pre-cool)",
+                self._occupancy_mode,
+            )
+            if self._occupancy_mode == OCCUPANCY_VACATION:
+                await self.handle_occupancy_vacation()
+            else:
+                await self.handle_occupancy_away()
             return f"skipped: {self._occupancy_mode}"
 
         if _gate == ScheduledBandGate.DEFER_OVERRIDE:

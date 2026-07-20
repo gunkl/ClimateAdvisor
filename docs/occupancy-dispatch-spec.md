@@ -25,7 +25,7 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
 - **Approximate line ranges:**
   - `coordinator.py`: L763–L896 (toggle listener + priority resolver + away timer)
   - `coordinator.py`: L287–L290 (instance variables), L525–L532 (state restore), L600–L601 (state persist)
-  - `automation.py`: L281 (default mode), L306–L315 (`set_occupancy_mode`), L653–L684 (`apply_classification` guards), L925–L939 (`_set_temperature_for_mode` safety net), L1615–L1648 (`handle_occupancy_away`), L1650–L1694 (`handle_occupancy_home`), L1696–L1725 (`handle_occupancy_vacation`), L1727–L1732 (`handle_bedtime` guard), L1768–L1776 (`handle_morning_wakeup` guard)
+  - `automation.py`: L1432 (`apply_classification`, DEFER_OCCUPANCY guard ~L1513), L2249 (`_set_temperature_for_mode` safety net), L3852 (`handle_occupancy_away`), L3899 (`handle_occupancy_home`), L3951 (`handle_occupancy_vacation`), L4001 (`handle_bedtime`, DEFER_OCCUPANCY guard ~L4033), L4149 (`handle_pre_cool`, DEFER_OCCUPANCY guard ~L4199), L4324 (`handle_morning_wakeup`). Line numbers drift with unrelated commits — treat as approximate; verify with `grep -n "async def " automation.py` before citing.
   - `const.py`: L130, L155–L161 (constants)
 
 **Out of scope:**
@@ -150,7 +150,7 @@ Invoked after the 15-minute grace timer expires, and also called by `apply_class
    - Any other HVAC mode (off, fan only): log info, no temperature change
 4. **No notification sent.**
 
-### `handle_occupancy_vacation()` (`automation.py:L1696`)
+### `handle_occupancy_vacation()` (`automation.py:3951`)
 
 Invoked immediately (no grace) when VACATION mode is detected.
 
@@ -177,33 +177,36 @@ Invoked immediately (no grace) when VACATION mode is detected.
 
 ## 30-Minute Poll Guards (`apply_classification`)
 
-`apply_classification()` runs every 30 minutes when the coordinator refreshes. Occupancy guards execute **after** the manual override check and **after** the override-confirm-pending check (`automation.py:L653–L684`).
+`apply_classification()` (`automation.py:1432`) runs every 30 minutes when the coordinator refreshes, and also on grace-period expiry outside the sleep window (via `_apply_current_scheduled_state()`) and on manual-override cancellation (via the dashboard's Cancel Override button, ~10s delayed). Occupancy guards execute **after** the manual override check and **after** the override-confirm-pending check, then route through the shared `desired_state.decide_scheduled_band_gate()` (Issue #498).
 
 **Evaluation order inside `apply_classification()`:**
 
-1. **Manual override active** (L661) → log and return. Override wins; occupancy is not evaluated.
-2. **Override confirm pending** (L669) → log and return.
-3. **VACATION mode** (L678) → log and return. Deep setback is preserved; no temperature change.
-4. **AWAY mode** (L681) → call `handle_occupancy_away()` to reapply setback, then return.
-5. **HOME or GUEST** → proceed to normal comfort application.
+1. **Manual override active** → log and return. Override wins; occupancy is not evaluated.
+2. **Override confirm pending** → log and return.
+3. **Gate resolves `DEFER_OCCUPANCY`** (occupancy is AWAY or VACATION):
+   - **AWAY** → call `handle_occupancy_away()` to actively reapply the setback band, then return.
+   - **VACATION** → call `handle_occupancy_vacation()` to actively reapply the deep setback band, then return. *(Issue #505: prior to this fix, VACATION just logged "deep setback preserved" and returned without ever re-arming the band — this was an original design gap from Issue #85, not caught by any existing test, that let vacation's setback go unenforced for the rest of a real trip once anything — most commonly a manual override — moved the thermostat off it. `handle_occupancy_vacation()` already existed and already did the correct thing; it was simply never called from this path.)*
+4. **HOME or GUEST** → proceed to normal comfort application (never reaches the occupancy gate — `decide_scheduled_band_gate()` only routes AWAY/VACATION through `DEFER_OCCUPANCY`).
 
-The manual-override-first ordering means: if both `_manual_override_active` and `_occupancy_mode == VACATION` are true, the override check fires first and the function returns before the vacation guard is ever evaluated. The effect is the same (no temperature change), but the log message differs.
+The manual-override-first ordering means: if both `_manual_override_active` and `_occupancy_mode == VACATION` are true, the override check fires first and the function returns before the occupancy gate is ever evaluated. Once the override later clears (confirm or cancel), the next `apply_classification()` pass reaches the gate and actively reapplies the correct setback — it does not merely assume it's already there.
 
 ## Bedtime and Wakeup Guards
 
-**`handle_bedtime()` (`automation.py:L1727`):**
+**`handle_bedtime()` (`automation.py:4001`):**
 
-- If `_occupancy_mode` is `OCCUPANCY_VACATION` or `OCCUPANCY_AWAY`: log info and return. Setback is already active; applying sleep temps would move the thermostat in the wrong direction.
+- If the gate resolves `DEFER_OCCUPANCY` (VACATION or AWAY): bedtime-specific sleep temps are still skipped (applying them would move the thermostat in the wrong direction), but as of Issue #505 the away/vacation setback is now **actively reapplied** here too — `handle_occupancy_vacation()`/`handle_occupancy_away()` is called before returning, exactly mirroring `apply_classification()`'s branch above. This matters because grace-period expiry landing *inside* the sleep window routes here instead of to `apply_classification()` (see `_apply_current_scheduled_state()`), so the same "setback already active" assumption would otherwise be exposed to the same staleness bug on a narrower (≤30 min, until the next backstop cycle) but still real window.
 - For HOME/GUEST: clears manual override, deactivates fan if running, applies adaptive bedtime setback via `compute_bedtime_setback()`.
 
-**`handle_morning_wakeup()` (`automation.py:L1768`):**
+**`handle_morning_wakeup()` (`automation.py:4324`):**
 
-- If `_occupancy_mode` is NOT `OCCUPANCY_HOME` or `OCCUPANCY_GUEST`: log info and return. No comfort restore while away.
+- If `_occupancy_mode` is NOT `OCCUPANCY_HOME` or `OCCUPANCY_GUEST`: log info and return. No comfort restore while away — this path is unaffected by Issue #505 (a silent no-op here is correct; the away/vacation setback is the intended active state and gets actively reconfirmed elsewhere, not restored to comfort).
 - For HOME/GUEST: clears manual override, deactivates fan if still running, restores comfort temperatures.
+
+**`handle_pre_cool()`:** has the same `DEFER_OCCUPANCY` shape as `handle_bedtime()` and received the identical Issue #505 fix — reapplies the away/vacation setback before returning "skipped" rather than assuming it's already active.
 
 ## `_set_temperature_for_mode()` Safety Net
 
-`_set_temperature_for_mode()` (`automation.py:L925`) is the common comfort-application path called by most HVAC-setting code within the engine. It acts as a last-resort occupancy guard:
+`_set_temperature_for_mode()` (`automation.py:2249`) is the common comfort-application path called by most HVAC-setting code within the engine. It acts as a last-resort occupancy guard:
 
 1. If `_occupancy_mode == OCCUPANCY_AWAY`: log info, `await handle_occupancy_away()`, return.
 2. If `_occupancy_mode == OCCUPANCY_VACATION`: log info, `await handle_occupancy_vacation()`, return.
@@ -258,7 +261,7 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 2. The coordinator's `self._occupancy_mode` and the engine's `_occupancy_mode` are always in sync at the end of any transition. `set_occupancy_mode()` is called in the same transaction as the coordinator's own assignment (`coordinator.py:L864–L867`).
 3. At most one away timer is pending at any time. `_cancel_occupancy_away_timer()` is always called before starting a new timer, and before dispatching VACATION, HOME, or GUEST handlers.
 4. `handle_occupancy_away()` is never called directly by the coordinator — it is always routed through either the timer callback or `apply_classification()`. This preserves the 15-minute grace guarantee.
-5. `handle_occupancy_vacation()` is always called immediately (no grace). There is no equivalent grace timer for vacation mode.
+5. `handle_occupancy_vacation()` is always called immediately on the vacation toggle (no grace). There is no equivalent grace timer for vacation mode. As of Issue #505, it is also called from `apply_classification()`/`handle_bedtime()`/`handle_pre_cool()`'s `DEFER_OCCUPANCY` branches on every subsequent cycle while vacation mode is active — not just once at toggle time.
 6. GUEST mode is functionally identical to HOME at the automation handler level. The distinction is tracked in `_occupancy_mode` for reporting and briefing, but `handle_occupancy_home()` is the only handler invoked for both.
 7. Away duration (`_today_record.occupancy_away_minutes`) is only incremented on return from a non-home mode. If HA restarts mid-departure, the duration from `_occupancy_away_since` to restart is not counted (timer is not re-armed, so the next toggle change that returns to HOME accumulates from `_occupancy_away_since` which was persisted).
 8. The `_set_temperature_for_mode()` safety net cannot recurse: away and vacation handlers call `_set_temperature()` directly, not `_set_temperature_for_mode()`.
@@ -281,7 +284,7 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 - [`_set_temperature_for_mode`](../custom_components/climate_advisor/automation.py#L925) — comfort-application safety net
 - [`handle_occupancy_away`](../custom_components/climate_advisor/automation.py#L1615) — away setback handler
 - [`handle_occupancy_home`](../custom_components/climate_advisor/automation.py#L1650) — home/guest comfort restore + notification
-- [`handle_occupancy_vacation`](../custom_components/climate_advisor/automation.py#L1696) — deep vacation setback handler
+- [`handle_occupancy_vacation`](../custom_components/climate_advisor/automation.py#L3951) — deep vacation setback handler
 - [`handle_bedtime` (occupancy guard)](../custom_components/climate_advisor/automation.py#L1727) — skips sleep setback when away/vacation
 - [`handle_morning_wakeup` (occupancy guard)](../custom_components/climate_advisor/automation.py#L1768) — skips comfort restore when not home/guest
 - [`_is_toggle_on`](../custom_components/climate_advisor/coordinator.py#L763) — reads toggle entity state with unavailable=OFF and XOR invert

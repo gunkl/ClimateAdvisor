@@ -1,0 +1,92 @@
+{
+  "name": "vacation_occupancy_override_cleared",
+  "description": "Vacation-mode mirror of cancel_override_then_resume: a manual override set during vacation (e.g. cleaners visiting) must have the deep vacation setback restored the moment it's cancelled, not left at the override's setpoint until the next unrelated event (Issue #505)",
+  "source": "synthetic",
+  "issue": 505,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "override_confirm_seconds": 5,
+    "manual_grace_seconds": 3600,
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T08:00:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Morning classification at home, before vacation begins — needed so handle_occupancy_vacation() has a classification to arm a band against."
+    },
+    {
+      "time": "2026-07-15T10:00:00",
+      "type": "occupancy_vacation",
+      "note": "User leaves for a multi-day vacation — deep cool setback: setback_cool(79) + VACATION_SETBACK_EXTRA(3) = 82F"
+    },
+    {
+      "time": "2026-07-15T10:00:01",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 82.0,
+      "note": "Indoor still cooling toward the setback, outdoor hot."
+    },
+    {
+      "time": "2026-07-16T12:43:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "temperature": 75.0,
+      "note": "Cleaners bump the thermostat to 75F cool while the home is on vacation — mid-afternoon, unambiguously outside any sleep window (mirrors issue #505's real Activity Record's second, unambiguous override episode)."
+    },
+    {
+      "time": "2026-07-16T12:43:06",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 87.0,
+      "note": "6s later (past override_confirm_seconds=5) — override confirms."
+    },
+    {
+      "time": "2026-07-16T13:54:00",
+      "type": "cancel_override",
+      "note": "Cleaners' visit ends and the override is cancelled from the dashboard — real api.py-mirroring cancel flow: clear_manual_override() + _cancel_grace_timers() immediately, then a REAL 10s async_call_later before re-applying the classification."
+    },
+    {
+      "time": "2026-07-16T13:54:11",
+      "type": "temp_update",
+      "indoor_f": 75.0,
+      "outdoor_f": 90.0,
+      "note": "11s after cancel — past the real 10s re-apply delay, forcing the scheduler to reach it."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T10:00:00",
+      "expect": "setback_applied",
+      "expect_temp": 82.0,
+      "reason": "Vacation entry: setback_cool(79) + VACATION_SETBACK_EXTRA(3) = 82F."
+    },
+    {
+      "at": "2026-07-16T13:54:10",
+      "expect": "setback_applied",
+      "expect_temp": 82.0,
+      "track": "integration",
+      "reason": "Issue #505 root-cause fix: 11s after cancel_override, apply_classification()'s DEFER_OCCUPANCY branch for VACATION must call handle_occupancy_vacation() (mirroring the AWAY branch's handle_occupancy_away()) and restore the 82F deep setback — not leave the thermostat at the cleaners' 75F override setpoint. Live production logs for the real issue #505 incident showed this never happened: 'Vacation mode — skipping classification temp change (deep setback preserved)' repeated unchanged for the rest of the 5-day vacation."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Cancel override during vacation: automation immediately restores the deep vacation setback",
+    "observed_behavior": "setback_applied (82F) fires 11s after cancel_override, from apply_classification()'s DEFER_OCCUPANCY branch calling handle_occupancy_vacation()",
+    "expected_behavior": "Vacation's deep setback is restored on override-clear exactly like away mode already does — occupant leaves for vacation, a temporary override never leaves the home at normal comfort temperature for the rest of the trip"
+  },
+  "notes": [
+    "Direct vacation-mode mirror of tools/simulations/golden/cancel_override_then_resume.json (the AWAY-mode version of this exact sequence, which already passes). There was no vacation equivalent prior to Issue #505 — the coverage gap tracked the code gap exactly.",
+    "Revert test: with the automation.py:1513 DEFER_OCCUPANCY-VACATION branch reverted to its pre-fix log-and-return form, the 07:43:10 assertion fails (no setback_applied event fires — event_log ends at override cleared/grace expired). Confirms this assertion genuinely depends on the fix, not a coincidental re-apply.",
+    "override_confirm_seconds/manual_grace_seconds mirror cancel_override_then_resume.json's values for the same reason (short wall-clock span; grace long enough that the explicit cancel_override event — not an auto-expiry — is what's under test)."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true
+}

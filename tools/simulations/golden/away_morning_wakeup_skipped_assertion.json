@@ -1,17 +1,25 @@
 {
   "name": "away_morning_wakeup_skipped_assertion",
-  "description": "Away mode with bedtime setback active (79F). Bedtime fires while away (setback also skipped). Wakeup event fires at 07:00 while still away. Production handle_morning_wakeup() returns silently with no event when occupancy is not home/guest. The last observable decision at 07:00 is bedtime_setback_skipped from the prior cycle.",
+  "description": "Away mode with setback active (79F). Bedtime fires while away — bedtime-specific sleep temps are skipped but the away setback is actively reapplied (Issue #505). Wakeup event fires at 07:00 while still away. Production handle_morning_wakeup() returns silently with no event when occupancy is not home/guest. The last observable decision at 07:00 is the setback_applied from the 22:30 bedtime-time reapply.",
   "source": "synthetic",
   "issue": 229,
   "notes": [
     "Production handle_morning_wakeup(): if occupancy not in (home, guest), returns silently (no event emitted).",
     "The 07:00 wakeup call produces no new event log entry.",
-    "production_outcome_at uses last-decision-at-or-before lookup, so it returns bedtime_setback_skipped",
+    "production_outcome_at uses last-decision-at-or-before lookup, so it returns the last decision",
     "from 22:30 as the 'current' observable state at 07:00.",
     "This correctly documents: (1) away setback stays active, (2) wakeup comfort restore is suppressed.",
     "The existing away-mode-classification-cycle golden mentions this behavior in notes but has no",
     "explicit wakeup event — this scenario adds that explicit coverage.",
-    "Covers Priority 6b away_morning_wakeup from plan abundant-mapping-clarke.md."
+    "Covers Priority 6b away_morning_wakeup from plan abundant-mapping-clarke.md.",
+    "Issue #505 update: handle_bedtime()'s DEFER_OCCUPANCY branch previously only emitted",
+    "bedtime_setback_skipped and did nothing else — that was itself part of the #505 bug class",
+    "(a sibling of the vacation gap: if grace expires inside the sleep window instead of at 22:30's",
+    "scheduled bedtime, the same 'setback already active' assumption could be false). The fix makes",
+    "handle_bedtime() actively reapply the away/vacation setback in addition to skipping sleep temps,",
+    "so the 22:30 event is now setback_applied (79F) rather than a bare bedtime_setback_skipped with",
+    "no accompanying write. The wakeup-is-silent-while-away behavior this scenario is actually named",
+    "for is unchanged; only the setpoint-facing outcome of the prior bedtime cycle improved."
   ],
   "config": {
     "comfort_heat": 70,
@@ -53,15 +61,16 @@
     },
     {
       "at": "2026-07-16T07:00:00",
-      "expect": "bedtime_setback_skipped",
+      "expect": "setback_applied",
+      "expect_temp": 79.0,
       "track": "logic",
-      "reason": "Wakeup fires while away — handle_morning_wakeup() returns silently with no event (occupancy not home/guest). production_outcome_at returns bedtime_setback_skipped from the prior 22:30 cycle as the last observable decision. Away setback maintained; no comfort restore."
+      "reason": "Wakeup fires while away — handle_morning_wakeup() returns silently with no event (occupancy not home/guest). production_outcome_at returns the setback_applied (79F) from the prior 22:30 bedtime-time reapply (Issue #505) as the last observable decision. Away setback maintained; no comfort restore."
     }
   ],
   "verdict": {
     "type": "positive",
-    "summary": "Morning wakeup produces no event while away — last observable decision is bedtime_setback_skipped; setback maintained",
-    "observed_behavior": "setback_applied (79F) on away → bedtime_setback_skipped at 22:30 → wakeup at 07:00 silent; last decision stays bedtime_setback_skipped",
-    "expected_behavior": "Wakeup event skipped when occupancy=away; away setback remains active until user returns"
+    "summary": "Morning wakeup produces no event while away — last observable decision is the away setback reapplied at bedtime; setback maintained",
+    "observed_behavior": "setback_applied (79F) on away → setback_applied (79F) again at 22:30 bedtime reapply → wakeup at 07:00 silent; last decision stays setback_applied",
+    "expected_behavior": "Wakeup event skipped when occupancy=away; away setback remains active (and is actively reconfirmed at bedtime, Issue #505) until user returns"
   }
 }

@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.26"
+VERSION = "0.5.27"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.27": [
+        "Fix #505: vacation mode's deep energy-saving setback was armed once when you"
+        " turned vacation mode on, and never enforced again for the rest of the trip —"
+        " confirmed against real logs from a 5-day vacation where the home ran at normal"
+        " comfort temperature almost the entire time. A temporary override (e.g. for"
+        " cleaners) that was later cancelled left the thermostat at the override's"
+        " setpoint indefinitely instead of returning to the deep setback, the same way"
+        " away mode already correctly does. Away mode itself, home mode, and guest mode"
+        " were not affected. Also fixed the same gap for the bedtime and pre-cool"
+        " triggers, which had the identical assumption.",
+    ],
     "0.5.26": [
         "Fix #504: a monitored door/window sensor bouncing open/closed rapidly (flaky"
         " contact hardware, or a quick open-close-open) could snap the whole-house fan on"
@@ -1186,6 +1197,65 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    505: {
+        "version_fixed": "0.5.27",
+        "title": "Vacation deep setback armed once at mode-entry, never re-applied for the rest of the trip",
+        "scope_covered": (
+            "apply_classification()'s ScheduledBandGate.DEFER_OCCUPANCY branch"
+            " (automation.py) special-cased VACATION to log 'deep setback preserved' and"
+            " return, never calling handle_occupancy_vacation() — unlike the AWAY branch,"
+            " which already called handle_occupancy_away() to actively re-arm the setback"
+            " every 30-minute cycle. Confirmed via live production logs from a real"
+            " 5-day vacation (2026-07-14 to 2026-07-19): the 82F deep setback"
+            " (Set temperature to 82F — vacation mode — deep setback band) fired exactly"
+            " once, at mode entry, and never again — indoor temp sampled throughout the"
+            " trip held at 73-75F (normal comfort), not the setback ceiling, the entire"
+            " time. A manual override (e.g. for cleaners) that later cleared left the"
+            " thermostat at the override's setpoint indefinitely rather than restoring"
+            " the vacation setback. Original design gap from Issue #85 (commit 0959140),"
+            " unaffected by the #498 gate-sharing refactor. Fix calls the existing,"
+            " already-correct handle_occupancy_vacation() from the same branch, mirroring"
+            " AWAY exactly — net reduction in special-cased logic, no new functions."
+            " Same fix applied to two sibling gaps with the identical shape:"
+            " handle_bedtime() and handle_pre_cool()'s own DEFER_OCCUPANCY branches"
+            " previously skipped for both AWAY and VACATION with no re-push at all,"
+            " relying on apply_classification()'s 30-min cycle as an implicit backstop —"
+            " a grace-period expiry landing inside the sleep window routes to"
+            " handle_bedtime() instead, so that backstop didn't apply there (affecting"
+            " AWAY too, not just vacation, in that narrower window). Home and guest mode"
+            " were never affected — decide_scheduled_band_gate() only routes AWAY/"
+            "VACATION through DEFER_OCCUPANCY; guest has no handle_occupancy_guest() at"
+            " all and flows through the normal comfort-band path every cycle like home."
+            " Two existing golden simulation scenarios"
+            " (away_morning_wakeup_skipped_assertion.json,"
+            " morning_wakeup_skipped_away_occupancy.json) had their bedtime-cycle"
+            " assertion updated from bedtime_setback_skipped to setback_applied(79F) to"
+            " reflect the bedtime sibling fix genuinely re-confirming the away setback"
+            " at bedtime now, not just skipping. vacation_mode_full_lifecycle.json's"
+            " mid-vacation assertion reason text was corrected: it was worded as if it"
+            " proved active reapplication, but the harness's most-recent-decision-at-or-"
+            "before lookup semantics meant it could only ever prove no-drift, which is"
+            " why this scenario didn't catch the bug despite its name — the new"
+            " vacation_occupancy_override_cleared.json pending scenario is what actually"
+            " proves active reapplication, by perturbing the setpoint with a manual"
+            " override before asserting the setback returns."
+        ),
+        "scope_not_covered": (
+            "The status card's simultaneous display of contradictory values during the"
+            " stale window (reported alongside the setpoint bug) was not independently"
+            " investigated as a separate display bug — it is expected to self-resolve as"
+            " a consequence of the automation converging within one 30-minute cycle (or"
+            " ~10s via the dashboard cancel-override button) instead of staying stale for"
+            " hours or days, matching the margin AWAY mode already operates within."
+            " handle_pre_cool()'s reapply path has unit-test coverage"
+            " (test_grace_convergence.py) but no dedicated golden simulation scenario —"
+            " it is a single optional pre-dawn trigger backstopped by the same"
+            " apply_classification() cycle as everything else. incident-classes.md was"
+            " not given a new detection-code-backed incident class for this failure"
+            " pattern; doing so accurately would require new coordinator.py detection"
+            " logic (a distinct feature), not just a documentation row."
+        ),
+    },
     504: {
         "version_fixed": "0.5.26",
         "title": "Rapid door/window sensor bounce instantly re-triggered nat-vent/WHF reactivation with no settle time",

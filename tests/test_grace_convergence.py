@@ -21,6 +21,8 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
+    OCCUPANCY_AWAY,
+    OCCUPANCY_VACATION,
 )
 
 # Provide a base dt_util.now — individual tests override this via patch
@@ -37,6 +39,24 @@ _PATCH_DT_NOW = "custom_components.climate_advisor.automation.dt_util.now"
 # ---------------------------------------------------------------------------
 
 
+def _make_thermostat_state(mode: str = "cool") -> MagicMock:
+    """Return a mock thermostat state with heat+cool capabilities.
+
+    Issue #505: apply_classification()/handle_bedtime()/handle_pre_cool() now call
+    _apply_comfort_band() (via handle_occupancy_vacation()/handle_occupancy_away())
+    on the DEFER_OCCUPANCY path — that reads hvac_modes/supported_features to decide
+    whether it can arm the band. Without these the band no-ops and no service call
+    is emitted.
+    """
+    s = MagicMock()
+    s.state = mode
+    s.attributes = {
+        "hvac_modes": ["off", "heat", "cool"],
+        "supported_features": 1,
+    }
+    return s
+
+
 def _make_automation_engine(config_overrides: dict | None = None) -> AutomationEngine:
     """Create an AutomationEngine with mocked HA dependencies."""
     hass = MagicMock()
@@ -49,6 +69,7 @@ def _make_automation_engine(config_overrides: dict | None = None) -> AutomationE
 
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
     hass.states = MagicMock()
+    hass.states.get.return_value = _make_thermostat_state("cool")
 
     config = {
         "comfort_heat": 70,
@@ -232,6 +253,85 @@ class TestGraceConvergence:
         assert apply_classification_called, "apply_classification() should be called when no sleep/wake config"
         assert apply_classification_called[0] is classification
 
+
+class TestOccupancyReapplyOnDeferOccupancy:
+    """Issue #505: vacation mode never re-armed its deep setback after the initial
+    mode-entry — apply_classification()/handle_bedtime()/handle_pre_cool() must all
+    actively reapply the away/vacation setback on DEFER_OCCUPANCY, not just log and
+    return on the (sometimes false) assumption that it's "already active"."""
+
+    def test_apply_classification_vacation_reapplies_setback(self):
+        """A vacation-mode classification cycle must re-arm the 83°F deep setback
+        (setback_cool=80 + VACATION_SETBACK_EXTRA=3), matching the live-log evidence
+        that this never happened for issue #505's real 5-day vacation."""
+        engine = _make_automation_engine()
+        engine._occupancy_mode = OCCUPANCY_VACATION
+        classification = _make_classification(hvac_mode="cool")
+
+        asyncio.run(engine.apply_classification(classification))
+
+        engine.hass.services.async_call.assert_called()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[0] == "climate"
+        assert args[1] == "set_temperature"
+        assert args[2]["temperature"] == 83.0
+        assert args[2]["hvac_mode"] == "cool"
+
+    def test_apply_classification_away_still_reapplies_setback(self):
+        """Regression guard: away mode's existing correct reapply behavior (via
+        handle_occupancy_away()) must be unchanged by the vacation fix."""
+        engine = _make_automation_engine()
+        engine._occupancy_mode = OCCUPANCY_AWAY
+        classification = _make_classification(hvac_mode="cool")
+
+        asyncio.run(engine.apply_classification(classification))
+
+        engine.hass.services.async_call.assert_called()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 80.0
+
+    def test_handle_bedtime_vacation_reapplies_setback_in_sleep_window(self):
+        """Grace expiry landing inside the sleep window routes to handle_bedtime()
+        instead of apply_classification() — that path must also reapply vacation's
+        setback rather than silently assuming it's already active."""
+        engine = _make_automation_engine({"sleep_time": "22:30", "wake_time": "07:00"})
+        engine._occupancy_mode = OCCUPANCY_VACATION
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine.hass.services.async_call.assert_called()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 83.0
+
+    def test_handle_bedtime_away_reapplies_setback_in_sleep_window(self):
+        """Same sibling gap, away mode: grace expiry inside the sleep window must
+        also reapply away's setback, not just vacation's."""
+        engine = _make_automation_engine({"sleep_time": "22:30", "wake_time": "07:00"})
+        engine._occupancy_mode = OCCUPANCY_AWAY
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        asyncio.run(engine.handle_bedtime())
+
+        engine.hass.services.async_call.assert_called()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 80.0
+
+    def test_handle_pre_cool_vacation_reapplies_setback(self):
+        """handle_pre_cool()'s DEFER_OCCUPANCY branch must also reapply the setback."""
+        engine = _make_automation_engine()
+        engine._occupancy_mode = OCCUPANCY_VACATION
+        classification = _make_classification(hvac_mode="cool", setback_modifier=-2.0)
+        engine._current_classification = classification
+
+        asyncio.run(engine.handle_pre_cool(indoor_temp=78.0, nat_vent_just_closed=False))
+
+        engine.hass.services.async_call.assert_called()
+        args, _ = engine.hass.services.async_call.call_args
+        assert args[2]["temperature"] == 83.0
+
+
+class TestGraceNormalExpirySchedulesConvergence:
     def test_grace_normal_expiry_schedules_convergence_task(self):
         """Normal grace expiry (sensors closed) schedules _apply_current_scheduled_state via async_create_task."""
         engine = _make_automation_engine(

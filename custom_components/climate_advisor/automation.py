@@ -796,6 +796,42 @@ class AutomationEngine:
         self._resumed_from_pause = False
         self.clear_fan_override()
 
+    def cancel_override(self, reason: str = "user_cancel") -> bool:
+        """User/system deliberately ends an override and its grace protection right now (Issue #508).
+
+        Mirrors the post-processing ``_on_grace_expired()`` performs at natural expiry (fan
+        reconcile, coordinator refresh) but on-demand instead of waiting for the grace timer.
+        ``clear_manual_override()`` unconditionally clears the fan-override flag too, so this one
+        method is the entry point for both dashboard "Cancel..." buttons — there is no separate
+        "kind" of cancellation, just one operation with two entry points.
+
+        Returns:
+            True if an override and/or grace period was actually cancelled; False if there was
+            nothing active (safe no-op — callers can use this to choose their response message).
+        """
+        had_manual = self._manual_override_active
+        had_fan = self._fan_override_active
+        had_grace = self._grace_active
+        if not (had_manual or had_fan or had_grace):
+            return False
+
+        self.clear_manual_override(reason=reason)
+        self._cancel_grace_timers()
+
+        # clear_manual_override() only emits "override_cleared" when a thermostat-mode override
+        # was active (guarded on _manual_override_active); a fan-only override cleared here would
+        # otherwise leave zero trace in the Activity Report.
+        if had_fan and not had_manual and self._emit_event_callback:
+            self._emit_event_callback("override_cleared", {"was_mode": None, "old_setpoint_f": None})
+
+        # Force the same reconciliation a natural grace expiry always performs, instead of
+        # relying on the next incidental event or the next 30-min classification cycle.
+        if self._post_grace_fan_check_callback:
+            self._post_grace_fan_check_callback()
+        if self._request_refresh_callback:
+            self._request_refresh_callback()
+        return True
+
     def _get_fan_runtime_minutes(self) -> float:
         """Return how many minutes the fan has been running, or 0.0 if inactive."""
         if not self._fan_active or not self._fan_on_since:
@@ -1476,8 +1512,7 @@ class AutomationEngine:
                                 "pre_expiry": True,
                             },
                         )
-                    self._cancel_grace_timers()
-                    self.clear_manual_override(reason="adopted_matching_decision")
+                    self.cancel_override(reason="adopted_matching_decision")
                     if self._post_grace_fan_check_callback:
                         self._post_grace_fan_check_callback()
                     # continue below — classification is applied normally this cycle
@@ -3632,11 +3667,7 @@ class AutomationEngine:
                 "%s grace expired during planned window period — sensors open as expected, clearing grace",
                 source,
             )
-            self._grace_active = False
-            self._last_resume_source = None
-            self._grace_end_time = None
-            self._manual_grace_cancel = None
-            self._automation_grace_cancel = None
+            self._cancel_grace_timers()
             self.clear_manual_override(reason="grace_expired")
             if self._request_refresh_callback:
                 self._request_refresh_callback()
@@ -3650,11 +3681,7 @@ class AutomationEngine:
                 "%s grace expired but sensor(s) still open — re-pausing HVAC",
                 source,
             )
-            self._grace_active = False
-            self._last_resume_source = None
-            self._grace_end_time = None
-            self._manual_grace_cancel = None
-            self._automation_grace_cancel = None
+            self._cancel_grace_timers()
             self.clear_manual_override(reason="grace_expired")
             if self._request_refresh_callback:
                 self._request_refresh_callback()
@@ -3691,11 +3718,7 @@ class AutomationEngine:
                 duration,
             )
 
-        self._grace_active = False
-        self._last_resume_source = None
-        self._grace_end_time = None
-        self._manual_grace_cancel = None
-        self._automation_grace_cancel = None
+        self._cancel_grace_timers()
         self.clear_manual_override(reason="adopted_matching_decision" if _adopted else "grace_expired")
         if self._request_refresh_callback:
             self._request_refresh_callback()

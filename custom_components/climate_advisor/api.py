@@ -7,6 +7,7 @@ import json
 import logging
 from dataclasses import asdict
 from datetime import timedelta
+from typing import Any
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -543,6 +544,26 @@ class ClimateAdvisorConfigView(HomeAssistantView):
         return self.json({"settings": settings})
 
 
+def _schedule_reclassify_after_cancel(hass: HomeAssistant, coordinator: Any, ae: Any) -> None:
+    """Re-run the full decision path shortly after a user cancels an override (Issue #508).
+
+    HVAC-mode-level counterpart to ``AutomationEngine.cancel_override()``'s fan-check/refresh
+    calls — mirrors what a natural grace expiry converges on, via ``apply_classification()``.
+    Shared by both cancel views so this scheduling logic can't drift between them a second time
+    (it previously existed only in ``ClimateAdvisorCancelOverrideView``, never in the fan-cancel
+    sibling).
+    """
+    from homeassistant.core import callback
+    from homeassistant.helpers.event import async_call_later
+
+    @callback
+    def _apply_after_delay(_now):
+        if coordinator._current_classification:
+            hass.async_create_task(ae.apply_classification(coordinator._current_classification))
+
+    async_call_later(hass, 10, _apply_after_delay)
+
+
 class ClimateAdvisorCancelOverrideView(HomeAssistantView):
     """Cancel manual override and resume automated HVAC control."""
 
@@ -557,23 +578,11 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
         ae = coordinator.automation_engine
-        if not ae._manual_override_active:
+        cancelled = ae.cancel_override(reason="user_cancel_override")
+        if not cancelled:
             return self.json({"status": "ok", "message": "No active override to cancel"})
 
-        # Clear override and cancel grace timers
-        ae.clear_manual_override()
-        ae._cancel_grace_timers()
-
-        # Schedule re-application of current classification after 10 seconds
-        from homeassistant.core import callback
-        from homeassistant.helpers.event import async_call_later
-
-        @callback
-        def _apply_after_delay(_now):
-            if coordinator._current_classification:
-                hass.async_create_task(ae.apply_classification(coordinator._current_classification))
-
-        async_call_later(hass, 10, _apply_after_delay)
+        _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
         return self.json(
             {
@@ -624,7 +633,12 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
         ae = coordinator.automation_engine
-        ae.clear_fan_override()
+        cancelled = ae.cancel_override(reason="user_cancel_fan_override")
+        if not cancelled:
+            return self.json({"status": "ok", "message": "No active fan override to cancel."})
+
+        _schedule_reclassify_after_cancel(hass, coordinator, ae)
+
         return self.json({"status": "ok", "message": "Fan override cleared."})
 
 

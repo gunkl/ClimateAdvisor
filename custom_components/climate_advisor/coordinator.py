@@ -1518,6 +1518,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         _LOGGER.info("Startup coalescing complete — startup grace period ended")
         self.hass.async_create_task(self.async_request_refresh())
 
+    def _check_orphaned_grace(self) -> None:
+        """Self-heal a grace period left active with no override to protect (Issue #508).
+
+        Mirror of the Issue #321 stuck-grace check (grace_end_time in the past while
+        grace_active=False) but the opposite shape: here grace_end_time is typically still in
+        the future — the timer would fire correctly on its own — but no override (thermostat or
+        fan) is currently active to justify keeping it. Defense-in-depth for anything that clears
+        an override without going through AutomationEngine.cancel_override() (e.g. an exception
+        mid-cancel, or a future third endpoint that bypasses it). Runs every regular update cycle
+        (~30s), so any residual inconsistency self-heals within one cycle instead of persisting
+        for hours.
+        """
+        ae = self.automation_engine
+        if not (ae._grace_active and not ae._manual_override_active and not ae._fan_override_active):
+            return
+        _LOGGER.error(
+            "Stuck grace detected: grace_active=True but no override is active — force-cancelling grace (Issue #508)."
+        )
+        _grace_end = ae._grace_end_time
+        ae._cancel_grace_timers()
+        self._emit_event(
+            "stuck_grace_recovered",
+            {"grace_end_time": _grace_end, "reason": "grace_without_override"},
+        )
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast and update classification (runs every 30 min).
 
@@ -1795,6 +1820,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
                     _ae.clear_manual_override(reason="stuck_grace_recovery")
                     self._emit_event("stuck_grace_recovered", {"grace_end_time": _ae._grace_end_time})
+
+            self._check_orphaned_grace()
 
             _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
             await self.automation_engine.apply_classification(

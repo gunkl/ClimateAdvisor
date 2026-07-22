@@ -831,6 +831,10 @@ def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
     grace_end = p.get("grace_end_time", "")
+    if p.get("reason") == "grace_without_override":
+        # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
+        # (the timer would have fired correctly on its own) — "expired" would be misleading.
+        return "Stuck grace recovered (no override was active to protect it)", ""
     return f"Stuck grace recovered (expired {grace_end})", ""
 
 

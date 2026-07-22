@@ -366,3 +366,96 @@ class TestStuckGraceDetection:
 
         coord.automation_engine.clear_manual_override.assert_not_called()
         coord._emit_event.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestOrphanedGraceDetection: coordinator._check_orphaned_grace() (Issue #508)
+#
+# Mirror shape of Issue #321's stuck-grace check, but the opposite condition:
+# grace_active=True with no override active (rather than grace_active=False with
+# an override stuck true past its own due grace_end_time). Unlike the tests above,
+# these invoke the REAL coordinator._check_orphaned_grace() method directly instead
+# of re-implementing its logic in the test — see CLAUDE.md's "never mirror the logic
+# under test" doctrine (Issue #434).
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedGraceDetection:
+    """coordinator._check_orphaned_grace() self-heals a grace period protecting nothing."""
+
+    def test_orphaned_grace_is_cancelled(self):
+        """grace_active=True with no override active — grace is force-cancelled.
+
+        Occupant impact: this is Issue #508's actual bug shape — a user cancelled a fan
+        override via the dashboard but the endpoint (before the fix) never cancelled grace.
+        This watchdog is the defense-in-depth backstop for any future path that reproduces
+        that gap.
+        """
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=False,
+            grace_active=True,
+            grace_end_time="2026-06-12T21:53:00+00:00",
+        )
+        coord.automation_engine._fan_override_active = False
+        coord.automation_engine._cancel_grace_timers = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers.assert_called_once()
+        coord._emit_event.assert_called_once()
+        event_name, event_data = coord._emit_event.call_args[0]
+        assert event_name == "stuck_grace_recovered"
+        assert event_data["reason"] == "grace_without_override"
+        assert event_data["grace_end_time"] == "2026-06-12T21:53:00+00:00"
+
+    def test_orphaned_grace_not_cancelled_when_manual_override_active(self):
+        """grace_active=True WITH a manual override active — must NOT fire.
+
+        A false-positive here would kill a legitimate in-progress override's grace period.
+        """
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=True,
+            grace_active=True,
+            grace_end_time="2026-06-12T21:53:00+00:00",
+        )
+        coord.automation_engine._fan_override_active = False
+        coord.automation_engine._cancel_grace_timers = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord._emit_event.assert_not_called()
+
+    def test_orphaned_grace_not_cancelled_when_fan_override_active(self):
+        """grace_active=True WITH a fan override active — must NOT fire.
+
+        This is the fan-only-override shape (Root cause #1 of Issue #508): _manual_override_
+        active is False even though a real, legitimate override is in progress.
+        """
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=False,
+            grace_active=True,
+            grace_end_time="2026-06-12T21:53:00+00:00",
+        )
+        coord.automation_engine._fan_override_active = True
+        coord.automation_engine._cancel_grace_timers = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord._emit_event.assert_not_called()
+
+    def test_no_orphaned_grace_when_grace_inactive(self):
+        """grace_active=False — nothing to do regardless of override state."""
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=False,
+            grace_active=False,
+            grace_end_time=None,
+        )
+        coord.automation_engine._fan_override_active = False
+        coord.automation_engine._cancel_grace_timers = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord._emit_event.assert_not_called()

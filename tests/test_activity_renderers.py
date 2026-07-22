@@ -1003,3 +1003,31 @@ class TestFanOwnershipAnnotations:
         ]
         for row in nat_vent_fan_off_rows:
             assert "NOTE" not in row, f"nat_vent_fan_off when CA owns fan must NOT show NOTE. Row: {row!r}"
+
+
+class TestStuckGraceRecoveredRenderer:
+    """Issue #508: stuck_grace_recovered renders differently by `reason`.
+
+    The original Issue #321 call site (grace_end_time in the past, timer never fired) and
+    the new Issue #508 mirror call site (grace_active with no override, timer still pending)
+    are different failure shapes and must not share a misleading "(expired ...)" label.
+    """
+
+    def test_original_issue_321_shape_unchanged(self):
+        """No `reason` key (the pre-existing Issue #321 call site) → original 'expired' wording."""
+        ev, st = _act_mod.EVENT_RENDERERS["stuck_grace_recovered"](
+            {"grace_end_time": "2026-06-12T13:00:00+00:00"},
+            "fahrenheit",
+        )
+        assert "expired" in ev
+        assert "2026-06-12T13:00:00+00:00" in ev
+        assert st == ""
+
+    def test_grace_without_override_shape(self):
+        """reason=grace_without_override → distinct wording, no misleading 'expired' claim."""
+        ev, st = _act_mod.EVENT_RENDERERS["stuck_grace_recovered"](
+            {"grace_end_time": "2026-07-22T20:53:00+00:00", "reason": "grace_without_override"},
+            "fahrenheit",
+        )
+        assert "expired" not in ev
+        assert "no override" in ev.lower()

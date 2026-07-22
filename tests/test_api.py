@@ -579,3 +579,133 @@ class TestLearningViewCelsiusUnit:
         coord = self._make_coordinator(temp_unit="fahrenheit")
         response = _simulate_learning_get(coord)
         assert "unit" in response  # KeyError before fix
+
+
+class TestCancelViewsGraceCancellation:
+    """Issue #508: both Cancel-override API views must cancel grace, not just the override flag.
+
+    Regression guardrail — a future third cancel-style endpoint that composes primitives by
+    hand instead of calling ``AutomationEngine.cancel_override()`` is now the only way to
+    reintroduce this bug, and it would need its own omitted test to slip through silently.
+
+    Uses a real AutomationEngine (not a MagicMock) so the real cancel_override() logic runs
+    end-to-end through the view, per the "never mirror the logic under test" doctrine.
+    """
+
+    def _make_engine(self):
+        from unittest.mock import AsyncMock
+
+        from custom_components.climate_advisor.automation import AutomationEngine
+        from custom_components.climate_advisor.const import CONF_OVERRIDE_CONFIRM_PERIOD
+
+        hass = MagicMock()
+        hass.services = MagicMock()
+        hass.services.async_call = AsyncMock()
+        hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+        hass.states = MagicMock()
+        state = MagicMock()
+        state.state = "cool"
+        state.attributes = {"hvac_modes": ["off", "heat", "cool"], "supported_features": 1}
+        hass.states.get.return_value = state
+
+        config = {
+            "comfort_heat": 70,
+            "comfort_cool": 75,
+            "notify_service": "notify.notify",
+            CONF_OVERRIDE_CONFIRM_PERIOD: 0,
+        }
+        return AutomationEngine(
+            hass=hass,
+            climate_entity="climate.thermostat",
+            weather_entity="weather.forecast_home",
+            door_window_sensors=[],
+            notify_service=config["notify_service"],
+            config=config,
+        )
+
+    def _make_request(self, coordinator) -> MagicMock:
+        hass = MagicMock()
+        hass.data = {DOMAIN: {"entry1": coordinator}}
+        hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
+        req = MagicMock()
+        req.app = {"hass": hass}
+        return req
+
+    def _post(self, view_cls, coordinator):
+        import asyncio
+
+        request = self._make_request(coordinator)
+        view = view_cls()
+        return asyncio.run(view.post(request))
+
+    def test_cancel_override_view_cancels_grace_for_thermostat_override(self):
+        from custom_components.climate_advisor.api import ClimateAdvisorCancelOverrideView
+
+        ae = self._make_engine()
+        ae.handle_manual_override()
+        assert ae._grace_active is True
+
+        coordinator = MagicMock()
+        coordinator.automation_engine = ae
+        coordinator._current_classification = None
+
+        self._post(ClimateAdvisorCancelOverrideView, coordinator)
+
+        assert ae._manual_override_active is False
+        assert ae._grace_active is False
+
+    def test_cancel_fan_override_view_cancels_grace(self):
+        """The Issue #508 regression: cancelling a FAN-only override must also cancel grace.
+
+        Before the fix, ClimateAdvisorCancelFanOverrideView.post() called only
+        clear_fan_override(), leaving _grace_active stuck True for the rest of the original
+        (potentially 8-hour, RF-remote-timer) grace duration.
+        """
+        from custom_components.climate_advisor.api import ClimateAdvisorCancelFanOverrideView
+
+        ae = self._make_engine()
+        ae.handle_fan_manual_override(fan_before="auto", fan_after="on")
+        assert ae._manual_override_active is False  # fan overrides never set this flag
+        assert ae._fan_override_active is True
+        assert ae._grace_active is True
+
+        coordinator = MagicMock()
+        coordinator.automation_engine = ae
+        coordinator._current_classification = None
+
+        response = self._post(ClimateAdvisorCancelFanOverrideView, coordinator)
+
+        assert ae._fan_override_active is False
+        assert ae._grace_active is False
+        assert response.json_data["status"] == "ok"
+        assert "cleared" in response.json_data["message"].lower()
+
+    def test_cancel_fan_override_view_noop_message_when_nothing_active(self):
+        from custom_components.climate_advisor.api import ClimateAdvisorCancelFanOverrideView
+
+        ae = self._make_engine()
+        coordinator = MagicMock()
+        coordinator.automation_engine = ae
+        coordinator._current_classification = None
+
+        response = self._post(ClimateAdvisorCancelFanOverrideView, coordinator)
+
+        assert response.json_data["status"] == "ok"
+        assert "no active fan override" in response.json_data["message"].lower()
+
+    def test_cancel_fan_override_view_schedules_reclassify(self):
+        """Root cause #2: cancelling the fan override must schedule a reclassify, not just clear flags."""
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor.api import ClimateAdvisorCancelFanOverrideView
+
+        ae = self._make_engine()
+        ae.handle_fan_manual_override(fan_before="auto", fan_after="on")
+
+        coordinator = MagicMock()
+        coordinator.automation_engine = ae
+        coordinator._current_classification = None
+
+        with patch("homeassistant.helpers.event.async_call_later") as mock_call_later:
+            self._post(ClimateAdvisorCancelFanOverrideView, coordinator)
+            mock_call_later.assert_called_once()

@@ -195,6 +195,105 @@ class TestCancelOverride:
         assert engine._manual_grace_cancel is None
 
 
+class TestCancelOverrideMethod:
+    """Issue #508: AutomationEngine.cancel_override() — the single canonical
+
+    "deliberate cancel" operation both dashboard "Cancel..." buttons use, replacing
+    hand-composed clear_manual_override()/_cancel_grace_timers() call pairs that had
+    drifted out of sync between the two API views.
+    """
+
+    def test_cancel_override_clears_thermostat_override_and_grace(self):
+        """Thermostat override active → cancel_override() clears everything, returns True."""
+        engine = _make_automation_engine()
+        state = MagicMock()
+        state.state = "cool"
+        engine.hass.states.get.return_value = state
+        engine.handle_manual_override()
+        assert engine._manual_override_active is True
+        assert engine._grace_active is True
+
+        result = engine.cancel_override(reason="user_cancel_override")
+
+        assert result is True
+        assert engine._manual_override_active is False
+        assert engine._fan_override_active is False
+        assert engine._grace_active is False
+
+    def test_cancel_override_clears_fan_only_override_and_grace(self):
+        """Fan-only override (never sets _manual_override_active) — the Issue #508 regression case.
+
+        Before the fix, the dashboard's "Cancel Fan Override" button called only
+        clear_fan_override(), leaving _grace_active stuck True for the rest of the original
+        grace duration (up to 8 hours for an RF-remote timer) even though the override it
+        protected was gone.
+        """
+        engine = _make_automation_engine()
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on")
+        assert engine._manual_override_active is False  # fan overrides never set this flag
+        assert engine._fan_override_active is True
+        assert engine._grace_active is True
+
+        events: list[tuple[str, dict]] = []
+        engine._emit_event_callback = lambda etype, payload: events.append((etype, payload))
+
+        result = engine.cancel_override(reason="user_cancel_fan_override")
+
+        assert result is True
+        assert engine._fan_override_active is False
+        assert engine._grace_active is False
+        assert any(etype == "override_cleared" for etype, _ in events), (
+            "cancel_override() must emit an activity-log event even for a fan-only override"
+        )
+
+    def test_cancel_override_noop_when_nothing_active(self):
+        """No override, no grace — safe no-op, returns False, no event emitted."""
+        engine = _make_automation_engine()
+        emitted = MagicMock()
+        engine._emit_event_callback = emitted
+
+        result = engine.cancel_override()
+
+        assert result is False
+        assert engine._manual_override_active is False
+        assert engine._grace_active is False
+        emitted.assert_not_called()
+
+    def test_cancel_override_triggers_fan_reconcile_and_refresh(self):
+        """cancel_override() forces the same post-processing a natural grace expiry performs.
+
+        Without this, resuming automation after a deliberate cancel depended on an incidental
+        unrelated event (e.g. a door/window debounce) firing shortly after — Root cause #2
+        of Issue #508.
+        """
+        engine = _make_automation_engine()
+        engine.handle_fan_manual_override(fan_before="auto", fan_after="on")
+
+        fan_check = MagicMock()
+        refresh = MagicMock()
+        engine._post_grace_fan_check_callback = fan_check
+        engine._request_refresh_callback = refresh
+
+        engine.cancel_override()
+
+        fan_check.assert_called_once()
+        refresh.assert_called_once()
+
+    def test_cancel_override_does_not_trigger_reconcile_on_noop(self):
+        """No wasted work / noise when there is nothing to cancel."""
+        engine = _make_automation_engine()
+        fan_check = MagicMock()
+        refresh = MagicMock()
+        engine._post_grace_fan_check_callback = fan_check
+        engine._request_refresh_callback = refresh
+
+        result = engine.cancel_override()
+
+        assert result is False
+        fan_check.assert_not_called()
+        refresh.assert_not_called()
+
+
 class TestDebugStateOverrideFields:
     """Verify get_debug_state() includes override time and grace duration."""
 

@@ -13,7 +13,9 @@
 | Is grace state persisted across HA restarts? | No (Issue #282 — clean slate). Override state (`_manual_override_active`, `_grace_active`, `_override_confirm_pending`) is NOT restored on restart. Pause state (`_paused_by_door`, `_pre_pause_mode`) IS preserved. CA always starts in clean automation mode after restart. | [§ Pre-Pause Mode Storage — HA Restart](#pre-pause-mode-storage) |
 | What happens to an active grace period when occupancy changes? | The engine has no explicit occupancy-triggered grace cancellation. Grace timers run to expiry regardless of occupancy transitions; occupancy handlers (`handle_occupancy_away`, `handle_occupancy_home`) do not call `_cancel_grace_timers()`. | [§ Occupancy Interaction](#occupancy-interaction) |
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
-| What are all the callsites that clear a manual override, and under what conditions? | Seven callsites: three in `_grace_expired()` branches (always clear — intended), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), one explicit service call (always clears), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. Note (Issue #498): both scheduled handlers must snapshot `_fan_override_active` *before* calling `clear_manual_override()` — that call unconditionally clears the fan-override flag as a side effect via `clear_fan_override()`, so reading the live attribute afterward always sees it already cleared. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
+| What are all the callsites that clear a manual override, and under what conditions? | Eight callsites: three in `_grace_expired()` branches (always clear — intended, one of them via `cancel_override()` as of Issue #508), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), the two dashboard cancel buttons (always clear, via `cancel_override()` as of Issue #508), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. Note (Issue #498): both scheduled handlers must snapshot `_fan_override_active` *before* calling `clear_manual_override()` — that call unconditionally clears the fan-override flag as a side effect via `clear_fan_override()`, so reading the live attribute afterward always sees it already cleared. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
+| What is the difference between `clear_manual_override()` and `cancel_override()`, and which should a new callsite use? | `clear_manual_override()` clears override flags only — used by scheduled handlers (bedtime/wakeup/occupancy) that supersede an override without touching its grace timer, by design. `cancel_override()` (Issue #508) additionally cancels grace and forces the same fan-reconcile + coordinator-refresh a natural grace expiry performs — it is the single entry point for "user/system deliberately ends this override right now" (both dashboard "Cancel..." buttons, and the `adopted_matching_decision` path). A new callsite meaning deliberate cancellation must call `cancel_override()`, not compose the primitives by hand. | [§ Deliberate Cancellation — `cancel_override()` (Issue #508)](#deliberate-cancellation-cancel_override-issue-508) |
+| What happens if grace is left active with no override behind it (e.g. a future callsite bypasses `cancel_override()`)? | `coordinator._check_orphaned_grace()` (Issue #508), run every regular update cycle (~30s), self-heals: if `_grace_active=True` and neither `_manual_override_active` nor `_fan_override_active` is set, it force-cancels grace and emits `stuck_grace_recovered` with `reason="grace_without_override"`. This is the mirror of the pre-existing Issue #321 stuck-grace check (which catches the opposite shape — an override stuck active past its own due grace-end-time); the two checks are independent and cannot both fire on the same state. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
 | Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
 | What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
 | Where can the user see how much longer an active grace period will run? | The Status dashboard's next-action text (`_compute_next_automation_action()`/`_compute_next_action()` in coordinator.py) appends a formatted end-time + remaining-minutes suffix, e.g. "Grace period active (manual) — ends 7:14 AM (18 min left)", via `_format_grace_remaining()` reading `_grace_end_time` (Issue #498 — previously shown with no time at all). | [§ Timer Lifecycle](#timer-lifecycle) |
@@ -28,23 +30,32 @@
 - `custom_components/climate_advisor/coordinator.py` — door/window state listeners, debounce timer scheduling, manual override detection during pause
 
 **Line ranges (automation.py):**
-- `_is_within_planned_window_period()`: L321–L340
-- `handle_door_window_open()`: L1045–L1186
-- `handle_all_doors_windows_closed()`: L1188–L1232
-- `handle_manual_override_during_pause()`: L1404–L1427
-- `resume_from_pause()`: L1429–L1460
-- `_start_grace_period()`: L1462–L1548
-- `_cancel_grace_timers()`: L1550–L1559
-- `_re_pause_for_open_sensor()`: L1561–L1613
-- `restore_state()`: L2038–L2079
-- `get_serializable_state()`: L2081–L2116
+- `_is_within_planned_window_period()`: L706
+- `clear_manual_override()`: L764–L797
+- `cancel_override()`: L799–L831 (Issue #508 — see [§ Deliberate Cancellation](#deliberate-cancellation-cancel_override-issue-508))
+- `clear_fan_override()`: L1058
+- `handle_door_window_open()`: L2408
+- `handle_all_doors_windows_closed()`: L2607
+- `handle_manual_override_during_pause()`: L3532
+- `resume_from_pause()`: L3557
+- `_start_grace_period()`: L3590
+- `_on_grace_expired()`: L3658 (its three branches now call `_cancel_grace_timers()` for the grace-flag
+  reset instead of inlining it — deduped in Issue #508)
+- `_cancel_grace_timers()`: L3781
+- `_re_pause_for_open_sensor()`: L3793
+- `restore_state()`: L5503
+- `get_serializable_state()`: L5588
 
 **Line ranges (coordinator.py):**
-- `_subscribe_door_window_listeners()`: L744
-- `_cancel_all_debounce_timers()`: L900–L914
-- `_any_sensor_open()`: L933–L935
-- `_async_door_window_changed()`: L1798–L1888
-- `_async_thermostat_changed()` (pause-override detection): L1890–L1926
+- `_subscribe_door_window_listeners()`: L1146
+- `_cancel_all_debounce_timers()`: L1302
+- `_any_sensor_open()`: L1350
+- `_check_orphaned_grace()`: L1521 (Issue #508 — see [§ Orphaned Grace Self-Heal](#orphaned-grace-self-heal-issue-508))
+- `_async_door_window_changed()`: L2960
+- `_async_thermostat_changed()` (pause-override detection): L3080
+
+**Note on line-number drift:** these are exact as of Issue #508 (v0.5.28) but will drift with future edits —
+treat them as a navigation aid, not a contract; if a line doesn't match, search for the function name.
 
 **Out of scope for this spec:**
 - Natural ventilation internal logic (see `check_natural_vent_conditions()`, `_re_evaluate_nat_vent()`)
@@ -192,10 +203,14 @@ Confirmed from code:
 
 **Start:** `async_call_later(self.hass, duration, _grace_expired)` at L1540. Returns a cancel callable stored in either `_manual_grace_cancel` (source=`"manual"`) or `_automation_grace_cancel` (source=`"automation"`). `_grace_active` is set to `True` before the timer starts (L1481). `_grace_end_time` is set to an ISO timestamp of `now + duration` (L1483).
 
-**Cancel:** `_cancel_grace_timers()` (L1550–L1559) invokes both cancel callables if present, then sets `_grace_active = False` and `_last_resume_source = None`. Called in:
+**Cancel:** `_cancel_grace_timers()` (L3781) invokes both cancel callables if present, then sets `_grace_active = False`, `_grace_end_time = None`, and `_last_resume_source = None`. Called in:
 - `_start_grace_period()` — beginning of every new grace (replaces previous timer)
-- `cleanup()` — coordinator/engine teardown (L2120)
-- Implicitly: any new call to `_start_grace_period()` cancels the previous via `_cancel_grace_timers()` at L1469
+- `cleanup()` — coordinator/engine teardown
+- `cancel_override()` (Issue #508) — the deliberate-cancellation entry point, see below
+- `coordinator._check_orphaned_grace()` (Issue #508) — the self-heal watchdog, see below
+- Each of `_on_grace_expired()`'s three branches (Issue #508 dedup — previously each branch
+  hand-inlined the same 5-field reset instead of calling this shared helper)
+- Implicitly: any new call to `_start_grace_period()` cancels the previous via `_cancel_grace_timers()`
 
 **Extend:** There is no explicit "extend" operation. A new `_start_grace_period()` call cancels the previous and starts a fresh full-duration timer. This is the effective extension mechanism, but it is not named or documented as such in code.
 
@@ -210,6 +225,87 @@ Confirmed from code:
 **`_re_pause_for_open_sensor()` (L1561–L1613):** Async method scheduled via `async_create_task`. Re-checks planned window period first (if within window, skips re-pause). Otherwise evaluates nat-vent conditions — if outdoor is cool enough for natural ventilation, activates nat-vent mode instead of re-pausing. Falls through to re-pause: captures `state.state` into `_pre_pause_mode`, sets `_paused_by_door = True`, calls HVAC off (unless already off), sends `grace_repause` notification.
 
 **`_sensor_check_callback`:** Set by the coordinator after engine construction. Points to `coordinator._any_sensor_open()` which reads live HA sensor states for all `_resolved_sensors`. If `None` (e.g., in unit tests), the re-pause branch is skipped and grace expires normally.
+
+---
+
+## Deliberate Cancellation — `cancel_override()` (Issue #508)
+
+**Problem:** Both dashboard "Cancel..." buttons ("Cancel Override" for a thermostat-mode override,
+"Cancel Fan Override" for a fan-only override) mean the same domain action — "stop protecting this
+override, hand control back to automation now" — but each API view composed
+`clear_manual_override()` + `_cancel_grace_timers()` by hand. `ClimateAdvisorCancelOverrideView`
+(Issue #41) got the pairing right from its first commit; `ClimateAdvisorCancelFanOverrideView`
+(Issue #79, added 11 days later) never called `_cancel_grace_timers()` at all, in any version —
+confirmed via `git log -p` to be an original design gap, not a regression. A user cancelling a
+fan-only override via the dashboard saw `_grace_active` stay `True` for the rest of the original
+grace duration (up to 8 hours for a QuietCool RF-remote timer selection), even though the override
+it protected was already gone.
+
+**Fix:** `AutomationEngine.cancel_override(reason: str = "user_cancel") -> bool`
+(`automation.py:799`) is now the single entry point for deliberate cancellation:
+
+1. No-op guard: if none of `_manual_override_active`, `_fan_override_active`, `_grace_active` is
+   set, returns `False` immediately — nothing to do.
+2. Calls `clear_manual_override(reason=reason)` (which unconditionally clears the fan-override
+   flag too via `clear_fan_override()`).
+3. Calls `_cancel_grace_timers()`.
+4. Activity-log parity: `clear_manual_override()` only emits `"override_cleared"` when
+   `_manual_override_active` was `True` — a fan-only cancellation would otherwise leave zero trace
+   in the Activity Report. `cancel_override()` emits `"override_cleared"` itself in that case
+   (`was_mode=None`, gracefully rendered by the existing `_render_override_cleared()`).
+5. Forces the same post-processing a *natural* grace expiry always performs (see the "Normal
+   expiry" row in the Timer Lifecycle table above), instead of relying on an incidental unrelated
+   event or the next 30-minute classification cycle: calls `_post_grace_fan_check_callback()` (→
+   `reconcile_fan_on_startup()`, re-evaluating live indoor/outdoor/sensor state) and
+   `_request_refresh_callback()` (immediate coordinator refresh).
+6. Returns `True` if something was actually cancelled.
+
+Both `ClimateAdvisorCancelOverrideView.post()` and `ClimateAdvisorCancelFanOverrideView.post()`
+(`api.py`) call `cancel_override()` with a distinct `reason` string
+(`"user_cancel_override"` / `"user_cancel_fan_override"`) and then call the shared
+`_schedule_reclassify_after_cancel()` helper, which schedules `apply_classification()` after a 10s
+settle delay — the HVAC-mode-level counterpart to `cancel_override()`'s fan-reconcile call. This
+scheduling logic previously existed only on the thermostat-cancel view; the fan-cancel view had no
+equivalent at all, so cancelling a fan override never forced reconciliation of anything.
+
+The internal `adopted_matching_decision` path inside `_on_grace_expired()`'s normal-expiry branch
+also now calls `cancel_override(reason="adopted_matching_decision")` instead of hand-composing
+`_cancel_grace_timers()` + `clear_manual_override()` in that order — the two existing call sites
+had drifted to opposite call orders, more evidence neither treated this as one canonical operation.
+
+**Not folded into `clear_manual_override()` itself:** `clear_manual_override()` remains the
+low-level primitive used by `handle_bedtime()`, `handle_morning_wakeup()`, and the occupancy
+handlers — none of which should cancel grace (see [§ Occupancy Interaction](#occupancy-interaction)
+and the "What Clears a Manual Override" callsite table below; this is deliberate, documented
+behavior, not a gap). `cancel_override()` sits one level above, composing the primitive plus grace
+cancellation plus reconciliation, only for callers that mean deliberate, immediate cancellation.
+
+---
+
+## Orphaned Grace Self-Heal (Issue #508)
+
+**Shape of the problem:** the opposite of the pre-existing Issue #321 stuck-grace check (below).
+Issue #321 catches `_grace_active=False` with `_grace_end_time` in the past (a timer that should
+have fired but didn't — override stuck active). This new check catches `_grace_active=True` with
+no override active at all — `_grace_end_time` is typically still validly in the future (the timer
+will fire correctly on its own), but nothing is being protected. Defense-in-depth for any path that
+clears an override without going through `cancel_override()` — an exception mid-cancel, or a future
+third endpoint that composes the primitives by hand again.
+
+**Implementation:** `coordinator._check_orphaned_grace()` (`coordinator.py:1521`), called once per
+regular `_async_update_data()` cycle (~30s). Condition: `ae._grace_active and not
+ae._manual_override_active and not ae._fan_override_active`. On match: logs an ERROR, calls
+`ae._cancel_grace_timers()`, and emits `"stuck_grace_recovered"` with
+`{"grace_end_time": ..., "reason": "grace_without_override"}`.
+
+**Renderer note:** `_render_stuck_grace_recovered()` (`ai_skills_activity.py`) branches on the
+`reason` field — the pre-existing Issue #321 call site never sets it and keeps its original
+`"Stuck grace recovered (expired {grace_end})"` label; this new call site renders `"Stuck grace
+recovered (no override was active to protect it)"` instead, since `grace_end` is misleadingly
+labeled "expired" when it's actually still in the future.
+
+**These two watchdog checks are mutually exclusive** — one requires `_grace_active=False`, the
+other requires `_grace_active=True` — and run independently in the same update cycle.
 
 ---
 
@@ -424,8 +520,9 @@ This makes every clear event attributable in `python tools/ha_logs.py --full` wi
 | 3 | `_grace_expired()` — normal expiry branch | `automation.py:~1520` | Grace timer fires; all sensors closed | Always clears — intended; grace window has elapsed normally |
 | 4 | `handle_bedtime_setback()` | `automation.py:1926` | Configured `sleep_time` fires | **Skips entirely if `_manual_override_active=True`** — emits `bedtime_setback_skipped` event; logs skip at INFO. Clears only if override is not active. |
 | 5 | `handle_morning_wakeup()` | `automation.py:2025` | Configured `wake_time` fires | **Skips entirely if `_manual_override_active=True`** — emits `morning_wakeup_skipped` event; logs skip at INFO. Clears only if override is not active. |
-| 6 | `clear_manual_override` HA service call | `automation.py` service handler | User explicitly calls the service from UI or automation | Always clears — explicit user intent |
-| 7 | `handle_occupancy_away()` / `handle_occupancy_vacation()` | `automation.py` occupancy handlers | Occupancy transitions to away/vacation while `_manual_override_active=True` | Calls `clear_manual_override(reason="occupancy_away")` / `clear_manual_override(reason="occupancy_vacation")` before applying setback. Fixed in staging (issue #220). Note: `handle_occupancy_home()` does **NOT** call `clear_manual_override()` — returning home restores comfort via `_set_temperature_for_mode()` without touching the override flag. |
+| 6 | Dashboard "Cancel Override" / "Cancel Fan Override" buttons | `api.py` `ClimateAdvisorCancelOverrideView` / `ClimateAdvisorCancelFanOverrideView` | User explicitly presses either dashboard button | Always clears — explicit user intent. As of Issue #508 both views call `cancel_override(reason="user_cancel_override"\|"user_cancel_fan_override")`, not `clear_manual_override()` directly — see [§ Deliberate Cancellation](#deliberate-cancellation-cancel_override-issue-508) for why this additionally cancels grace and forces reconciliation, which bare `clear_manual_override()` does not. |
+| 7 | `handle_occupancy_away()` / `handle_occupancy_vacation()` | `automation.py` occupancy handlers | Occupancy transitions to away/vacation while `_manual_override_active=True` | Calls `clear_manual_override(reason="occupancy_away")` / `clear_manual_override(reason="occupancy_vacation")` before applying setback. Fixed in staging (issue #220). Note: `handle_occupancy_home()` does **NOT** call `clear_manual_override()` — returning home restores comfort via `_set_temperature_for_mode()` without touching the override flag. Deliberately does NOT cancel grace (see [§ Occupancy Interaction](#occupancy-interaction)) — this is why occupancy handlers still call the bare primitive, not `cancel_override()`. |
+| 8 | `adopted_matching_decision` path inside `_on_grace_expired()`'s normal-expiry branch | `automation.py` `_on_grace_expired()` | Grace timer fires naturally and automation's current decision already matches the override | As of Issue #508, calls `cancel_override(reason="adopted_matching_decision")` (previously hand-composed `_cancel_grace_timers()` + `clear_manual_override()` in that order — the two pre-508 callsites had drifted to opposite call orders). |
 
 ### Note — Away/vacation setback and override detection (Issue #221)
 

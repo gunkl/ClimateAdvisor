@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.27"
+VERSION = "0.5.28"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.28": [
+        "Fix #508: pressing 'Cancel Fan Override' on the dashboard cleared the fan override"
+        " but left the grace-period countdown running for its full original duration — up to"
+        " 8 hours for a QuietCool RF remote timer — so the dashboard kept saying 'Grace period"
+        " active' long after you'd already cancelled it. The fan/HVAC state also had no"
+        " guaranteed way to re-sync immediately; it only worked today because an unrelated"
+        " door/window event happened to fire a minute later. Both dashboard 'Cancel...'"
+        " buttons now share one cancellation path that clears grace, re-checks the fan, and"
+        " logs the cancellation to the Activity Report every time. A background safety check"
+        " also self-heals any grace period left with no override behind it.",
+    ],
     "0.5.27": [
         "Fix #505: vacation mode's deep energy-saving setback was armed once when you"
         " turned vacation mode on, and never enforced again for the rest of the trip —"
@@ -1197,6 +1208,53 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    508: {
+        "version_fixed": "0.5.28",
+        "title": (
+            "Cancelling a fan override from the dashboard didn't cancel grace, didn't"
+            " force reconciliation, and left no activity trail"
+        ),
+        "scope_covered": (
+            "Three root causes traced to a real production incident (RF-remote WHF override,"
+            " cancelled 7 minutes in). (1) ClimateAdvisorCancelFanOverrideView.post() (api.py)"
+            " called only clear_fan_override(), never _cancel_grace_timers() — confirmed via"
+            " git log to be an original design gap from Issue #79 (2026-03-30), not a"
+            " regression; the sibling ClimateAdvisorCancelOverrideView (Issue #41) has always"
+            " called both. _grace_active stayed True for the rest of the original grace"
+            " duration (up to 8 hours for an RF-remote timer), so the dashboard's next-action"
+            " text kept saying 'Grace period active' long after the override was gone."
+            " (2) Neither cancel view forced the same reconciliation a natural grace expiry"
+            " always performs (_post_grace_fan_check_callback -> reconcile_fan_on_startup(),"
+            " _request_refresh_callback()); the fan-cancel view additionally never scheduled"
+            " apply_classification() the way the thermostat-cancel view already did — resuming"
+            " automation depended on an incidental unrelated event (a door/window debounce)"
+            " firing shortly after, which is what made the production incident look like it"
+            " 'worked' by luck. (3) clear_fan_override() never emitted an activity-log event,"
+            " so a fan-only cancellation was invisible in the Activity Report. Fix: a single"
+            " new AutomationEngine.cancel_override() method is the canonical 'deliberate"
+            " cancel' operation (clear override + cancel grace + fan-reconcile + coordinator"
+            " refresh + activity event) used by both dashboard buttons and the internal"
+            " adopted_matching_decision path, replacing hand-composed call pairs that had"
+            " already drifted out of sync once. _on_grace_expired()'s three inline 5-line"
+            " grace-flag resets were deduped to call the existing _cancel_grace_timers()."
+            " coordinator._check_orphaned_grace() (extended from the existing Issue #321"
+            " stuck-grace watchdog, same ~30s cycle) self-heals the mirror condition"
+            " (grace_active=True with no override active) as defense-in-depth beyond the two"
+            " known call sites. _render_stuck_grace_recovered() now distinguishes the two"
+            " watchdog shapes so the new condition doesn't render a misleading 'expired' label"
+            " when the grace timer was actually still validly scheduled in the future."
+        ),
+        "scope_not_covered": (
+            "handle_bedtime()/handle_morning_wakeup()/occupancy handlers' existing behavior of"
+            " clearing an override without cancelling its grace timer is unchanged by design —"
+            " docs/grace-periods-spec.md documents this as intentional (grace runs to natural"
+            " expiry regardless of occupancy transitions), not a gap. No frontend change was"
+            " required or made; index.html's cancelFanOverride() calling loadStatus() (not"
+            " loadAutomationState()) means the Debug tab's own grace-period row may lag the"
+            " Status tab's next-action text by one manual refresh — cosmetic, not investigated"
+            " further here."
+        ),
+    },
     505: {
         "version_fixed": "0.5.27",
         "title": "Vacation deep setback armed once at mode-entry, never re-applied for the rest of the trip",

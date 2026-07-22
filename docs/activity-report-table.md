@@ -116,7 +116,7 @@ These events signal a mode or setpoint change triggered by automation logic.
 
 | Event type | Emitter | Key payload fields | Event-column text | Settings-column rule |
 |---|---|---|---|---|
-| `override_cleared` | `automation.py` `clear_manual_override` | `was_mode`, `active_since`, `old_setpoint_f` | "Manual override cleared" | `was: {was_mode} since {active_since HH:MM}` |
+| `override_cleared` | `automation.py` `clear_manual_override` (thermostat-mode override was active) OR `automation.py` `cancel_override` (Issue #508 — fan-only override cancelled, `was_mode`/`old_setpoint_f` both `None`) | `was_mode`, `active_since`, `old_setpoint_f` | "Manual override cleared" | `was: {was_mode} since {active_since HH:MM}` (blank fields render gracefully when `was_mode` is `None`) |
 | `override_confirmed` | `automation.py` inner callback `_confirm_override_expired` (PATH A) | `mode`, `confirm_delay_seconds` | "Override confirmed — {mode}" | `grace: {confirm_delay_seconds//60} min delay elapsed` |
 | `override_self_resolved` | `automation.py` inner callback (PATH B) | `detected_mode`, `current_mode` | "Override self-resolved (transient)" | blank |
 | `grace_started` | `automation.py` `_start_grace_period` | `source`, `duration_seconds`, `trigger` | "Grace period started — {source}" | `duration: {duration_seconds//60} min, trigger: {trigger}` |
@@ -161,7 +161,7 @@ These events carry no HVAC action — Settings is blank.
 |---|---|---|---|---|
 | `system_restarted` | `coordinator.py` `async_restore_state` | `recovered_events` | "System restarted — HA restart boundary" | `{recovered_events} events recovered` |
 | `startup_coalesced` | `coordinator.py` `_complete_startup_coalesce` | `nat_vent_activated`, `hvac_commanded`, `sensors_open_count` | "Startup coalescing complete" | `nat-vent: {nat_vent_activated}, HVAC: {hvac_commanded}, open sensors: {sensors_open_count}` |
-| `stuck_grace_recovered` | `coordinator.py` `_async_update_data` | `grace_end_time` | "Stuck grace recovered — force-cleared" | `grace expired at: {grace_end_time}` |
+| `stuck_grace_recovered` | `coordinator.py` `_async_update_data` (original: override stuck active past its own due grace-end-time — Issue #321) OR `coordinator.py` `_check_orphaned_grace` (mirror: grace active with no override behind it — Issue #508) | `grace_end_time`, `reason` (only set by the Issue #508 call site, value `"grace_without_override"`) | "Stuck grace recovered — force-cleared" (no `reason`) or "Stuck grace recovered (no override was active to protect it)" (`reason="grace_without_override"`) | `grace expired at: {grace_end_time}` |
 | `state_contradiction_warning` | `coordinator.py` `_async_update_data` | `hvac_mode`, `hvac_action` | "State contradiction — mode/action mismatch" | `mode: {hvac_mode}, action: {hvac_action}` |
 | `thermal_learning_no_observations` | `coordinator.py` `_handle_end_of_day` | `hvac_runtime_minutes` | "Thermal learning — no observations today" | `HVAC ran {hvac_runtime_minutes} min with zero thermal observations` |
 | `incident_detected` | `automation.py` `_set_temperature` / `coordinator.py` `_emit_incident` | `incident_class`, `incident_id`, and class-specific fields | "Incident — {incident_class}" | class-specific fields formatted as `key: value` pairs |

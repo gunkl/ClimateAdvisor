@@ -170,6 +170,7 @@ def _make_update_data_coord(
     coord._resolve_monitored_sensors = MagicMock(return_value=[])
     coord._unsubscribe_door_window_listeners = MagicMock()
     coord._subscribe_door_window_listeners = MagicMock()
+    coord._fan_remote_speed_sensor_eid = None  # Issue #524: read by _compute_fan_remote_status_fields()
 
     # Forecast — use a real ForecastSnapshot so classify_day() runs cleanly.
     # When forecast_returns_none=True, skip the whole if-forecast block.

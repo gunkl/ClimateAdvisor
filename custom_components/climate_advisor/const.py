@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.32"
+VERSION = "0.5.33"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.33": [
+        "Fix #524: the dashboard's whole-house-fan status card never showed the QuietCool"
+        " remote's reported speed, even though the underlying detection (#519) was working"
+        " correctly — the value was computed but never reached the dashboard. It now shows"
+        " promptly after any remote press. Also, the Activity Report's fan-override entries"
+        " now note when a remote speed or timer selection armed the override, instead of"
+        " looking identical to a generic detected toggle.",
+    ],
     "0.5.32": [
         "Fix #518: the warm/windows-day briefing could contradict itself — the header's"
         " window-close time didn't match the body's, an AC-start message ignored whether"
@@ -1261,6 +1269,40 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    524: {
+        "version_fixed": "0.5.33",
+        "title": (
+            "WHF status card never showed remote speed; Activity Report couldn't tell a"
+            " remote-armed override from a generic toggle"
+        ),
+        "scope_covered": (
+            "coordinator.py: fan_remote_speed/fan_remote_timer_hours/fan_remote_timer_ends"
+            " existed only inside get_debug_state() (a debug-endpoint-only method, never"
+            " called by _async_update_data_impl()) — so coordinator.data, and therefore"
+            " api.py's main status view and the dashboard's WHF card, never had these keys"
+            " in production, regardless of firmware/remote activity. Extracted the"
+            " computation into _compute_fan_remote_status_fields(), called from both"
+            " get_debug_state() and _async_update_data_impl(), following the exact"
+            " precedent compute_nat_vent_cycling_band() established for this same class of"
+            " bug (Issue #400/#402). ai_skills_activity.py: _render_fan_manual_override()"
+            " now appends the remote speed/timer context when"
+            " automation.py::handle_fan_manual_override()'s remote_speed/remote_timer_hours"
+            " kwargs are present, instead of silently dropping them; a plain"
+            " thermostat-detected override (neither field set) renders unchanged."
+            " docs/activity-report-table.md gained catalog rows for fan_manual_override and"
+            " fan_speed_observed (both previously undocumented despite being registered"
+            " EVENT_RENDERERS entries)."
+        ),
+        "scope_not_covered": (
+            "No new automated test exercises the full _async_update_data_impl() pipeline"
+            " end-to-end for this field — consistent with this codebase's existing test"
+            " granularity for that ~700-line method (no other field in it has one either);"
+            " the extracted helper's own logic is directly unit-tested, and"
+            " get_debug_state()'s continued correctness is covered via the same coordinator"
+            " stub test_nat_vent_dashboard_target.py already uses for"
+            " compute_nat_vent_cycling_band()."
+        ),
+    },
     518: {
         "version_fixed": "0.5.32",
         "title": "Warm/windows-day briefing text could contradict itself in several places",

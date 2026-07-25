@@ -275,3 +275,29 @@ class TestComputeAutomationStatusNatVentTarget:
             status = coord._compute_automation_status()
 
         assert "windows open" not in status
+
+
+class TestGetDebugStateSharesFanRemoteHelper:
+    """get_debug_state() must delegate to _compute_fan_remote_status_fields() (Issue #524),
+    the same "extract once, call from both places" fix compute_nat_vent_cycling_band()
+    already established for this exact class of bug (#400/#402). Reuses this file's
+    coordinator stub since it's the only existing fixture able to run the real
+    get_debug_state() end-to-end without constructing the full update pipeline."""
+
+    def test_debug_state_surfaces_live_speed_and_timer_fields(self):
+        coord = _make_nat_vent_coord_stub(
+            config={"comfort_heat": 68, "comfort_cool": 74, "sleep_time": "22:00", "wake_time": "07:00"}
+        )
+        coord.automation_engine._fan_remote_speed = "high"
+        coord.automation_engine._fan_remote_timer_hours = 2.0
+        coord.automation_engine._grace_end_time = "2026-07-02T16:00:00"
+
+        with patch(_PATCH_DT_NOW, return_value=datetime(2026, 7, 2, 14, 0, 0)):
+            state = coord.get_debug_state()
+
+        # No fan_remote_entity configured in this stub -- live read degrades to None,
+        # falling back to the engine's last press-derived value (the auto-detect + fallback
+        # mechanism, unchanged by this refactor).
+        assert state["fan_remote_speed"] == "high"
+        assert state["fan_remote_timer_hours"] == 2.0
+        assert state["fan_remote_timer_ends"] == "2026-07-02T16:00:00"

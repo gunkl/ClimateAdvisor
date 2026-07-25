@@ -2367,6 +2367,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Detect and emit post-cycle incidents
         self._detect_and_emit_incidents()
 
+        # Issue #524: fan_remote_speed/fan_remote_timer_hours/fan_remote_timer_ends previously
+        # only existed inside get_debug_state() (debug endpoint + diagnostics download), never in
+        # this method's result -- which is what becomes coordinator.data and what api.py's main
+        # status view actually reads. The dashboard's WHF card was unconditionally dark as a
+        # result. See _compute_fan_remote_status_fields()'s docstring.
+        result.update(self._compute_fan_remote_status_fields())
+
         return result
 
     def _get_outdoor_temp(self, weather_attrs: dict) -> float:
@@ -7283,6 +7290,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "nat_vent_off_threshold": target - hysteresis,
         }
 
+    def _compute_fan_remote_status_fields(self) -> dict[str, Any]:
+        """Return the QuietCool RF remote's timer/speed status-display fields (Issue #519).
+
+        Single source of truth for `fan_remote_timer_hours`/`fan_remote_timer_ends`/
+        `fan_remote_speed` — extracted so `_async_update_data_impl()` (the real path
+        `coordinator.data` and the dashboard actually read) and `get_debug_state()` (debug
+        endpoint + diagnostics download only) can't drift apart, following the exact
+        precedent `compute_nat_vent_cycling_band()` set for this same class of bug
+        (Issue #400/#402: fix one duplicate implementation, miss the sibling). Before this
+        extraction, these fields existed only inside `get_debug_state()` and never reached
+        `coordinator.data` at all, so the dashboard's WHF card never showed a remote speed
+        (Issue #524).
+        """
+        ae = self.automation_engine
+        return {
+            # Issue #486: QuietCool RF remote timer selection, for status-card display only.
+            "fan_remote_timer_hours": ae._fan_remote_timer_hours,
+            "fan_remote_timer_ends": (ae._grace_end_time if ae._fan_remote_timer_hours is not None else None),
+            # Issue #519: live ambient speed read wins (always current); falls back to the
+            # engine's last press-derived value so the card isn't blank between beacons on
+            # installs where the ambient sensor isn't discoverable (older firmware).
+            "fan_remote_speed": self._read_fan_remote_speed() or ae._fan_remote_speed,
+        }
+
     def get_debug_state(self) -> dict[str, Any]:
         """Return serializable debug state for the dashboard."""
         ae = self.automation_engine
@@ -7298,6 +7329,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             }
 
         _nat_vent_band = self.compute_nat_vent_cycling_band()
+        _fan_remote_fields = self._compute_fan_remote_status_fields()
 
         return {
             "automation_enabled": self._automation_enabled,
@@ -7360,13 +7392,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "fan_runtime_minutes": ae._get_fan_runtime_minutes(),
             "fan_override_active": ae._fan_override_active,
             "fan_override_time": ae._fan_override_time,
-            # Issue #486: QuietCool RF remote timer selection, for status-card display only.
-            "fan_remote_timer_hours": ae._fan_remote_timer_hours,
-            "fan_remote_timer_ends": (ae._grace_end_time if ae._fan_remote_timer_hours is not None else None),
-            # Issue #519: live ambient speed read wins (always current); falls back to the
-            # engine's last press-derived value so the card isn't blank between beacons on
-            # installs where the ambient sensor isn't discoverable (older firmware).
-            "fan_remote_speed": self._read_fan_remote_speed() or ae._fan_remote_speed,
+            "fan_remote_timer_hours": _fan_remote_fields["fan_remote_timer_hours"],
+            "fan_remote_timer_ends": _fan_remote_fields["fan_remote_timer_ends"],
+            "fan_remote_speed": _fan_remote_fields["fan_remote_speed"],
             "fan_mode_config": ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
             "economizer_active": ae._economizer_active,
             "economizer_phase": ae._economizer_phase,

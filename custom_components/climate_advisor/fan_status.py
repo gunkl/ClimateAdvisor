@@ -14,7 +14,7 @@ dependency-free utility module imported by both ``coordinator.py`` and
 
 from __future__ import annotations
 
-from .const import REMOTE_TIMER_EVENT_HOURS
+from .const import REMOTE_SPEED_TOKENS, REMOTE_TIMER_EVENT_HOURS
 
 FAN_STATUS_ACTIVE_VALUES: frozenset[str] = frozenset(
     {
@@ -57,8 +57,23 @@ def parse_remote_timer_event(event_type: str | None) -> tuple[bool, float | None
     - Recognized timer token (``timer_1h``..``timer_12h``) -> ``(True, <hours>)``
     - ``timer_none`` -> ``(True, None)`` (use CA's configured grace duration)
     - Any other token (``on``, ``off``, speed tokens, unknown, ``None``) ->
-      ``(False, None)`` — out of scope for this feature; caller should ignore.
+      ``(False, None)`` — not a timer token; caller should check
+      ``parse_remote_speed_event()`` next (Issue #519) before giving up on it.
     """
     if event_type not in REMOTE_TIMER_EVENT_HOURS:
         return False, None
     return True, REMOTE_TIMER_EVENT_HOURS[event_type]
+
+
+def parse_remote_speed_event(event_type: str | None) -> str | None:
+    """Parse a QuietCool RF remote ``event_type`` token into a speed selection (Issue #519).
+
+    Mirrors ``parse_remote_timer_event()``'s shape for this module's other token family —
+    the firmware already emits ``low``/``medium``/``high`` on an explicit speed-select
+    press; this is the single place that recognizes them, so no caller re-implements the
+    token set inline (the same "sibling threshold drift" concern documented above).
+
+    Returns the speed token verbatim (``"low"``/``"medium"``/``"high"``) if `event_type` is
+    a speed press, else ``None``.
+    """
+    return event_type if event_type in REMOTE_SPEED_TOKENS else None

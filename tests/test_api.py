@@ -470,6 +470,42 @@ class TestStatusSetpointExtraction:
         assert response["target_temp_low"] is None and response["target_temp_high"] is None
 
 
+class TestStatusFanRemoteSpeed:
+    """Issue #519: the status endpoint exposes the current QuietCool remote-reported speed,
+    null when unknown — mirrors the existing fan_remote_timer_hours field exactly."""
+
+    def test_fan_remote_speed_present_when_known(self):
+        state = MagicMock()
+        state.state = "cool"
+        state.attributes = {"temperature": 74, "target_temp_low": None, "target_temp_high": None}
+        coord = MagicMock()
+        coord.config = {"comfort_heat": 68.0, "comfort_cool": 74.0}
+        coord.data = {"fan_remote_speed": "high"}
+        coord._get_indoor_temp.return_value = 70.0
+        coord._last_outdoor_temp = None
+        coord.automation_enabled = True
+        coord._occupancy_mode = "home"
+        coord.current_classification = _make_classification()
+        ae = MagicMock()
+        ae._manual_override_active = False
+        ae._override_confirm_pending = False
+        ae._fan_override_active = False
+        ae._pre_condition_achieved = False
+        ae.is_paused_by_door = False
+        coord.automation_engine = ae
+        coord._compute_contact_details.return_value = []
+
+        response = _simulate_status_get(coord, state)
+        assert response["fan_remote_speed"] == "high"
+
+    def test_fan_remote_speed_null_when_unknown(self):
+        state = MagicMock()
+        state.state = "cool"
+        state.attributes = {"temperature": 74, "target_temp_low": None, "target_temp_high": None}
+        response = _status_get_with_climate_state({"comfort_heat": 68.0, "comfort_cool": 74.0}, state)
+        assert response["fan_remote_speed"] is None
+
+
 class TestStatusViewCelsiusUnit:
     """Status API must convert temperatures and include 'unit' when temp_unit=celsius."""
 

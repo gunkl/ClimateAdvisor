@@ -43,7 +43,10 @@ from custom_components.climate_advisor.const import (  # noqa: E402
     CONF_MANUAL_GRACE_PERIOD,
     DEFAULT_MANUAL_GRACE_SECONDS,
 )
-from custom_components.climate_advisor.fan_status import parse_remote_timer_event  # noqa: E402
+from custom_components.climate_advisor.fan_status import (  # noqa: E402
+    parse_remote_speed_event,
+    parse_remote_timer_event,
+)
 
 _PATCH_CALL_LATER = "custom_components.climate_advisor.automation.async_call_later"
 _PATCH_CALLBACK = "custom_components.climate_advisor.automation.callback"
@@ -105,7 +108,9 @@ def _make_mock_engine() -> MagicMock:
     ae._manual_override_active = False
     ae._override_confirm_pending = False
     ae._fan_remote_timer_hours = None
+    ae._fan_remote_speed = None
     ae.handle_fan_manual_override = MagicMock()
+    ae.handle_fan_speed_observed = MagicMock()
     return ae
 
 
@@ -122,8 +127,15 @@ def _make_fake_event(new_state) -> MagicMock:
     return ev
 
 
-def _make_coordinator_stub(config: dict | None = None) -> MagicMock:
-    """Minimal coordinator stub sufficient for _async_fan_remote_changed (mirrors test_fan_cancel.py)."""
+def _make_coordinator_stub(config: dict | None = None, *, physical_on: bool | None = None) -> MagicMock:
+    """Minimal coordinator stub sufficient for _async_fan_remote_changed (mirrors test_fan_cancel.py).
+
+    Issue #519: binds the REAL burst-combining methods (not auto-mocked) so dispatch tests
+    exercise the actual combine/classify logic, not a mock stand-in — per this project's
+    "never mirror the logic under test" doctrine. `physical_on` seeds
+    `_get_fan_physical_state()`, which the burst-open snapshot reads to classify a bare
+    speed press as override vs. comfort-only.
+    """
     config = config or {CONF_FAN_REMOTE_ENTITY: "event.quietcool_remote"}
     hass = MagicMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
@@ -138,7 +150,25 @@ def _make_coordinator_stub(config: dict | None = None) -> MagicMock:
     # otherwise return a truthy MagicMock and silently suppress every dispatch test
     # below. These tests exercise post-coalescing (normal) dispatch behavior.
     coord._suppress_during_startup_coalescing = MagicMock(return_value=False)
+    coord._last_fan_remote_event_ts = None
+    coord._fan_remote_burst = None
+    coord._fan_remote_burst_cancel = None
+    coord._get_fan_physical_state = MagicMock(return_value=physical_on)
+
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    coord._async_fan_remote_changed = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
+    coord._arm_fan_remote_burst = types.MethodType(mod.ClimateAdvisorCoordinator._arm_fan_remote_burst, coord)
+    coord._cancel_fan_remote_burst = types.MethodType(mod.ClimateAdvisorCoordinator._cancel_fan_remote_burst, coord)
+    coord._flush_fan_remote_burst = types.MethodType(mod.ClimateAdvisorCoordinator._flush_fan_remote_burst, coord)
     return coord
+
+
+async def _dispatch_and_flush(coord: MagicMock, event: MagicMock) -> None:
+    """Issue #519: run dispatch then force the burst window to elapse immediately, instead
+    of waiting out the real async_call_later timer — mirrors the pattern used in
+    test_restart_coalescing_fan_guard.py."""
+    await coord._async_fan_remote_changed(event)
+    await coord._flush_fan_remote_burst()
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +197,24 @@ class TestParseRemoteTimerEvent:
         assert parse_remote_timer_event("junk") == (False, None)
         assert parse_remote_timer_event("") == (False, None)
         assert parse_remote_timer_event(None) == (False, None)
+
+
+class TestParseRemoteSpeedEvent:
+    """fan_status.parse_remote_speed_event() — single source of truth for speed tokens (Issue #519)."""
+
+    def test_all_speed_tokens(self):
+        assert parse_remote_speed_event("low") == "low"
+        assert parse_remote_speed_event("medium") == "medium"
+        assert parse_remote_speed_event("high") == "high"
+
+    def test_non_speed_tokens_ignored(self):
+        for token in ("on", "off", "timer_1h", "timer_none"):
+            assert parse_remote_speed_event(token) is None
+
+    def test_unknown_and_missing_tokens_ignored(self):
+        assert parse_remote_speed_event("junk") is None
+        assert parse_remote_speed_event("") is None
+        assert parse_remote_speed_event(None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -437,44 +485,49 @@ class TestCoordinatorFanRemoteDispatch:
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
         new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_8h"})
         event = _make_fake_event(new_state)
 
-        asyncio.run(method(event))
+        asyncio.run(_dispatch_and_flush(coord, event))
 
         ae.handle_fan_manual_override.assert_called_once_with(
-            fan_before="?", fan_after="on", duration_override=28800.0, remote_timer_hours=8.0, is_remote_event=True
+            fan_before="?",
+            fan_after="on",
+            duration_override=28800.0,
+            remote_timer_hours=8.0,
+            remote_speed=None,
+            is_remote_event=True,
         )
 
     def test_timer_none_event_drives_shared_override_with_none_duration(self):
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
         new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_none"})
         event = _make_fake_event(new_state)
 
-        asyncio.run(method(event))
+        asyncio.run(_dispatch_and_flush(coord, event))
 
         ae.handle_fan_manual_override.assert_called_once_with(
-            fan_before="?", fan_after="on", duration_override=None, remote_timer_hours=None, is_remote_event=True
+            fan_before="?",
+            fan_after="on",
+            duration_override=None,
+            remote_timer_hours=None,
+            remote_speed=None,
+            is_remote_event=True,
         )
 
     def test_non_timer_event_is_a_noop(self):
+        """Issue #519: "low"/"high" are deliberately NOT covered here anymore — they now
+        open/extend a burst instead of being ignored outright (see
+        TestFanRemoteBurstClassification for their real behavior). Only tokens that remain
+        genuinely inert at the coordinator-dispatch level are covered here."""
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
-        for event_type in ("on", "off", "low", "high", None, "garbage"):
+        for event_type in ("on", "off", None, "garbage"):
             new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": event_type})
-            asyncio.run(method(_make_fake_event(new_state)))
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
 
         ae.handle_fan_manual_override.assert_not_called()
 
@@ -482,12 +535,9 @@ class TestCoordinatorFanRemoteDispatch:
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
         for state_str in ("unavailable", "unknown"):
             new_state = _make_fake_state(state_str, {"event_type": "timer_8h"})
-            asyncio.run(method(_make_fake_event(new_state)))
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
 
         ae.handle_fan_manual_override.assert_not_called()
 
@@ -495,14 +545,183 @@ class TestCoordinatorFanRemoteDispatch:
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
         ev = MagicMock()
         ev.data = {"new_state": None}
-        asyncio.run(method(ev))
+        asyncio.run(_dispatch_and_flush(coord, ev))
 
         ae.handle_fan_manual_override.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 7b. Issue #519: burst classification — override vs. comfort-only
+# ---------------------------------------------------------------------------
+
+
+class TestFanRemoteBurstClassification:
+    """The full decision table from _flush_fan_remote_burst() (Issue #519):
+    1. Timer selected (with or without speed) -> always override.
+    2. Bare speed press, fan was OFF/unknown before this press -> override.
+    3. Bare speed press, fan was ALREADY running before this press -> comfort-only.
+    """
+
+    def test_timer_alone_is_override(self):
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_4h"})
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=14400.0,
+            remote_timer_hours=4.0,
+            remote_speed=None,
+            is_remote_event=True,
+        )
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_timer_and_speed_together_is_one_override_call(self):
+        """A single physical interaction carrying both fields (speed + timer, transmitted
+        as separate packets moments apart) must produce exactly ONE decision, not two."""
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        speed_state = _make_fake_state("2026-07-12T20:00:00.100+00:00", {"event_type": "high"})
+        timer_state = _make_fake_state("2026-07-12T20:00:00.300+00:00", {"event_type": "timer_4h"})
+
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(speed_state)))
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(timer_state)))
+        ae.handle_fan_manual_override.assert_not_called()  # still combining — window not elapsed
+        asyncio.run(coord._flush_fan_remote_burst())
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=14400.0,
+            remote_timer_hours=4.0,
+            remote_speed="high",
+            is_remote_event=True,
+        )
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_bare_speed_press_fan_was_off_is_override(self):
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "high"})
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=None,
+            remote_timer_hours=None,
+            remote_speed="high",
+            is_remote_event=True,
+        )
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_bare_speed_press_fan_was_unknown_is_override(self):
+        """physical_state unavailable (command-only mode) -> defaults to override, the
+        safe/conservative direction, never less protective than pre-#519 behavior."""
+        coord = _make_coordinator_stub(physical_on=None)
+        coord.automation_engine._fan_active = False
+        ae = coord.automation_engine
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "low"})
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_called_once()
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_bare_speed_press_fan_already_running_is_comfort_only(self):
+        coord = _make_coordinator_stub(physical_on=True)
+        ae = coord.automation_engine
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "medium"})
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_not_called()
+        ae.handle_fan_speed_observed.assert_called_once_with("medium", is_remote_event=True)
+
+    def test_timing_bug_regression_fan_turns_on_mid_burst_still_classifies_as_override(self):
+        """Issue #519 self-review catch: the classification MUST use the fan's state at
+        burst-OPEN time, not a fresh read at flush time. Simulates the fan actually turning
+        on partway through the interaction (the physical entity catching up) — a flush-time
+        re-read would wrongly see "already running" and misclassify a genuine override as
+        comfort-only."""
+        coord = _make_coordinator_stub(physical_on=False)  # off when the burst opens
+        ae = coord.automation_engine
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "high"})
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(new_state)))
+
+        # Fan has now turned on, mid-burst, before the window elapses.
+        coord._get_fan_physical_state = MagicMock(return_value=True)
+
+        asyncio.run(coord._flush_fan_remote_burst())
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=None,
+            remote_timer_hours=None,
+            remote_speed="high",
+            is_remote_event=True,
+        )
+        ae.handle_fan_speed_observed.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 7c. Issue #519: burst window combining/cancellation mechanics
+# ---------------------------------------------------------------------------
+
+
+class TestFanRemoteBurstWindow:
+    def test_mid_window_event_extends_without_double_flushing(self):
+        """A second event within the window must extend the burst, not flush the first
+        one prematurely — flushing happens exactly once, when explicitly triggered."""
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        first = _make_fake_state("2026-07-12T20:00:00.100+00:00", {"event_type": "high"})
+        second = _make_fake_state("2026-07-12T20:00:00.300+00:00", {"event_type": "timer_2h"})
+
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(first)))
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(second)))
+        ae.handle_fan_manual_override.assert_not_called()
+
+        asyncio.run(coord._flush_fan_remote_burst())
+        ae.handle_fan_manual_override.assert_called_once()
+
+    def test_off_mid_burst_cancels_without_flushing(self):
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        speed_state = _make_fake_state("2026-07-12T20:00:00.100+00:00", {"event_type": "high"})
+        off_state = _make_fake_state("2026-07-12T20:00:00.300+00:00", {"event_type": "off"})
+
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(speed_state)))
+        assert coord._fan_remote_burst is not None
+        asyncio.run(coord._async_fan_remote_changed(_make_fake_event(off_state)))
+        assert coord._fan_remote_burst is None
+
+        # Nothing left to flush — a late-firing timer callback must be a no-op.
+        asyncio.run(coord._flush_fan_remote_burst())
+        ae.handle_fan_manual_override.assert_not_called()
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_timer_none_in_burst_passes_none_hours_correctly(self):
+        """A real timer_none press must still pass remote_timer_hours=None with
+        is_remote_event=True (clears any previously-stored value) — not be confused with
+        "no timer packet arrived at all" (which must NOT clear a stored value, per
+        handle_fan_manual_override's own guarded-overwrite logic)."""
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_none"})
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=None,
+            remote_timer_hours=None,
+            remote_speed=None,
+            is_remote_event=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -528,17 +747,14 @@ class TestStaleRemoteEventDedup:
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
         new_state = _make_fake_state("2026-07-12T13:41:10.440+00:00", {"event_type": "timer_2h"})
-        asyncio.run(method(_make_fake_event(new_state)))
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
         assert ae.handle_fan_manual_override.call_count == 1
 
         # Same entity `state` (== timestamp) re-announced, e.g. after an unavailable
         # flap restores the stale last value — must be ignored.
         stale_restore = _make_fake_state("2026-07-12T13:41:10.440+00:00", {"event_type": "timer_2h"})
-        asyncio.run(method(_make_fake_event(stale_restore)))
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(stale_restore)))
         assert ae.handle_fan_manual_override.call_count == 1, (
             "A re-announced identical event timestamp must not trigger a second override"
         )
@@ -549,13 +765,10 @@ class TestStaleRemoteEventDedup:
         coord = _make_coordinator_stub()
         ae = coord.automation_engine
 
-        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
-        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
-
         first = _make_fake_state("2026-07-12T20:45:32.622+00:00", {"event_type": "timer_2h"})
-        asyncio.run(method(_make_fake_event(first)))
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(first)))
         second = _make_fake_state("2026-07-12T20:48:40.960+00:00", {"event_type": "timer_8h"})
-        asyncio.run(method(_make_fake_event(second)))
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(second)))
 
         assert ae.handle_fan_manual_override.call_count == 2
 
@@ -579,3 +792,121 @@ class TestFeatureOffRegression:
     def test_gate_is_true_when_configured(self):
         config = {CONF_FAN_REMOTE_ENTITY: "event.quietcool_remote"}
         assert bool(config.get(CONF_FAN_REMOTE_ENTITY)) is True
+
+
+# ---------------------------------------------------------------------------
+# 10. Issue #519: ambient speed-sensor discovery via entity/device registry
+# ---------------------------------------------------------------------------
+
+
+class TestFanRemoteSpeedSensorDiscovery:
+    """coordinator._resolve_fan_remote_speed_sensor()/_read_fan_remote_speed() (Issue #519).
+
+    Auto-discovery via HA's entity/device registry, keyed off the already-configured
+    fan_remote_entity — no new user-facing config. This is the first feature in this
+    codebase needing entity/device registry stubs (see tools/sim_harness/ha_stubs.py).
+    """
+
+    def _make_coord(self, *, remote_entity: str | None = "event.quietcool_remote") -> MagicMock:
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = MagicMock()
+        coord.config = {CONF_FAN_REMOTE_ENTITY: remote_entity} if remote_entity else {}
+        coord.hass = MagicMock()
+        coord._fan_remote_speed_sensor_eid = None
+        coord._resolve_fan_remote_speed_sensor = types.MethodType(
+            mod.ClimateAdvisorCoordinator._resolve_fan_remote_speed_sensor, coord
+        )
+        coord._read_fan_remote_speed = types.MethodType(mod.ClimateAdvisorCoordinator._read_fan_remote_speed, coord)
+        return coord
+
+    def test_no_remote_entity_configured_returns_none(self):
+        coord = self._make_coord(remote_entity=None)
+        assert coord._resolve_fan_remote_speed_sensor() is None
+
+    def test_remote_entity_not_in_registry_returns_none(self):
+        coord = self._make_coord()
+        er_mod = sys.modules["homeassistant.helpers.entity_registry"]
+        mock_registry = MagicMock()
+        er_mod.async_get = MagicMock(return_value=mock_registry)
+        mock_registry.async_get = MagicMock(return_value=None)
+
+        assert coord._resolve_fan_remote_speed_sensor() is None
+
+    def test_sibling_sensor_discovered_and_cached(self):
+        coord = self._make_coord()
+        er_mod = sys.modules["homeassistant.helpers.entity_registry"]
+        mock_registry = MagicMock()
+        er_mod.async_get = MagicMock(return_value=mock_registry)
+        remote_entry = MagicMock()
+        remote_entry.device_id = "device123"
+        mock_registry.async_get = MagicMock(return_value=remote_entry)
+        sibling = MagicMock()
+        sibling.domain = "sensor"
+        sibling.entity_id = "sensor.basement_quietcool_speed"
+        er_mod.async_entries_for_device = MagicMock(return_value=[sibling])
+
+        result = coord._resolve_fan_remote_speed_sensor()
+        assert result == "sensor.basement_quietcool_speed"
+
+        # Cached: a second call must NOT re-scan the registry.
+        er_mod.async_entries_for_device.reset_mock()
+        assert coord._resolve_fan_remote_speed_sensor() == "sensor.basement_quietcool_speed"
+        er_mod.async_entries_for_device.assert_not_called()
+
+    def test_non_matching_sibling_ignored(self):
+        coord = self._make_coord()
+        er_mod = sys.modules["homeassistant.helpers.entity_registry"]
+        mock_registry = MagicMock()
+        er_mod.async_get = MagicMock(return_value=mock_registry)
+        remote_entry = MagicMock()
+        remote_entry.device_id = "device123"
+        mock_registry.async_get = MagicMock(return_value=remote_entry)
+        unrelated = MagicMock()
+        unrelated.domain = "sensor"
+        unrelated.entity_id = "sensor.basement_quietcool_uptime"
+        er_mod.async_entries_for_device = MagicMock(return_value=[unrelated])
+
+        assert coord._resolve_fan_remote_speed_sensor() is None
+
+    def test_miss_is_not_cached_self_corrects_on_later_call(self):
+        """A miss (e.g. registry not yet populated at startup) must NOT be cached
+        permanently — a later call, once the sibling appears, must succeed."""
+        coord = self._make_coord()
+        er_mod = sys.modules["homeassistant.helpers.entity_registry"]
+        mock_registry = MagicMock()
+        er_mod.async_get = MagicMock(return_value=mock_registry)
+        remote_entry = MagicMock()
+        remote_entry.device_id = "device123"
+        mock_registry.async_get = MagicMock(return_value=remote_entry)
+        er_mod.async_entries_for_device = MagicMock(return_value=[])
+
+        assert coord._resolve_fan_remote_speed_sensor() is None
+
+        sibling = MagicMock()
+        sibling.domain = "sensor"
+        sibling.entity_id = "sensor.basement_quietcool_speed"
+        er_mod.async_entries_for_device = MagicMock(return_value=[sibling])
+        assert coord._resolve_fan_remote_speed_sensor() == "sensor.basement_quietcool_speed"
+
+    def test_read_returns_none_when_sensor_unknown_or_unavailable(self):
+        coord = self._make_coord()
+        coord._fan_remote_speed_sensor_eid = "sensor.basement_quietcool_speed"
+        for bad_state in ("unknown", "unavailable"):
+            state = MagicMock()
+            state.state = bad_state
+            coord.hass.states.get = MagicMock(return_value=state)
+            assert coord._read_fan_remote_speed() is None
+
+    def test_read_returns_none_when_sensor_missing_entirely(self):
+        coord = self._make_coord()
+        coord._fan_remote_speed_sensor_eid = "sensor.basement_quietcool_speed"
+        coord.hass.states.get = MagicMock(return_value=None)
+        assert coord._read_fan_remote_speed() is None
+
+    def test_read_returns_live_value_when_known(self):
+        coord = self._make_coord()
+        coord._fan_remote_speed_sensor_eid = "sensor.basement_quietcool_speed"
+        state = MagicMock()
+        state.state = "high"
+        coord.hass.states.get = MagicMock(return_value=state)
+        assert coord._read_fan_remote_speed() == "high"

@@ -47,6 +47,7 @@ def _make_nat_vent_coord_stub(*, config: dict) -> object:
     coord._current_classification = None
     coord._automation_enabled = True
     coord._occupancy_mode = "home"
+    coord._fan_remote_speed_sensor_eid = None  # Issue #519: resolved lazily by get_debug_state()
     coord._occupancy_away_timer_cancel = None
     coord._startup_coalesce_active = False
     coord._startup_coalesce_expiry = None

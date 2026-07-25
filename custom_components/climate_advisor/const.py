@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.30"
+VERSION = "0.5.31"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.31": [
+        "Feat #519: Climate Advisor now detects and respects QuietCool remote speed changes"
+        " (low/medium/high), not just timer presses. If you adjust speed while the fan was"
+        " already running, that's treated as a comfort preference — it's just recorded, not"
+        " treated as taking manual control (no grace period or HVAC suppression armed). If"
+        " you select a speed while the fan was off, or select a timer (with or without a"
+        " speed), that's still treated as an override exactly like before. If your remote's"
+        " firmware has been updated to the latest gunkl/quietcool-house-fan, the dashboard"
+        " also shows the fan's current remote-reported speed. Fully auto-detected — no new"
+        " setting to configure, and installs without the firmware update behave exactly as"
+        " they do today.",
+    ],
     "0.5.30": [
         "Fix #510: the dashboard WHF status card could show 'nat-vent active, fan idle' for"
         " hours while the whole-house fan was genuinely, physically running — confirmed via"
@@ -1238,6 +1250,68 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    519: {
+        "version_fixed": "0.5.31",
+        "title": ("Climate Advisor now detects and respects QuietCool remote speed changes, not just timer presses"),
+        "scope_covered": (
+            "Designed via a shaping (ontology-first) session followed by three review passes"
+            " (consolidation/dedup, blast-radius/scope, behavioral refinement + observability"
+            " audit), all at the user's explicit request. Firmware"
+            " (gunkl/quietcool-house-fan, component.yaml): new purely-additive"
+            " text_sensor.quietcool_speed reporting the firmware's already-internally-tracked"
+            " current speed, fed from all three status-beacon byte families (speed/timer/power)"
+            " that carry the embedded 0x20 speed-context bit — chosen over a companion-event"
+            " design because a press (event.quietcool_remote) and a reading (ambient state) are"
+            " different kinds of information, and firing synthetic companion events risked"
+            " landing on the same HA state timestamp as a genuine confirmation, which the"
+            " existing _last_fan_remote_event_ts dedup guard (Issue #495) could silently"
+            " swallow. CA-side (fan_status.py, automation.py, coordinator.py): new"
+            " parse_remote_speed_event(); handle_fan_manual_override() gains an optional"
+            " remote_speed kwarg (same guarded-overwrite idiom as remote_timer_hours); new"
+            " handle_fan_speed_observed() for the comfort-only path (deliberately a separate"
+            " function, not a flag inside handle_fan_manual_override(), since that function's"
+            " whole contract is 'arm an override'); coordinator burst-combining"
+            " (_PendingFanRemoteBurst, REMOTE_BURST_WINDOW_SECONDS=1.5s grounded in the"
+            " firmware's own documented protocol timing, not an arbitrary guess) so a single"
+            " physical interaction touching both speed and timer fields (transmitted as"
+            " separate packets moments apart) produces ONE decision, not two. Classification:"
+            " a timer selection (with or without speed) is always an override; a bare speed"
+            " press is an override only if the fan was NOT already running BEFORE the"
+            " interaction started (was_running_before, snapshotted once at burst-open time —"
+            " a self-review catch during implementation found and fixed a real timing bug"
+            " where an earlier draft would have re-read physical state at flush time instead,"
+            " which would misclassify nearly every genuine off->on override as comfort-only"
+            " once the fan had already turned on mid-burst; the fix and the regression it"
+            " catches are both covered by a dedicated test). Ambient speed-sensor discovery"
+            " (_resolve_fan_remote_speed_sensor) uses HA's entity/device registry, keyed off"
+            " the already-configured fan_remote_entity — zero new user-facing config; this is"
+            " the first feature in this codebase using entity/device registry, which also"
+            " required fixing a real ha_stubs.py gap (the entity_registry/device_registry"
+            " submodules weren't pinned onto the homeassistant.helpers parent mock, the same"
+            " failure mode already documented for homeassistant.config_entries). A negative"
+            " discovery result is never cached (registry can populate asynchronously at"
+            " startup). Dashboard (index.html) shows the current speed only when known,"
+            " omitted (never 'unknown speed') otherwise, per this project's existing"
+            " status-card conventions. New ai_skills_activity.py renderer for the"
+            " fan_speed_observed event (required by the #330 event-renderer-coverage"
+            " guardrail)."
+        ),
+        "scope_not_covered": (
+            "No CA-initiated speed-SETTING capability was implemented — this is purely"
+            " detect-and-respect. The discovery/read methods, _fan_remote_speed, and"
+            " handle_fan_speed_observed() are the seam a future speed-comfort feature would"
+            " build on; fan:'s on_speed_set already transmits the needed RF commands"
+            " (0x1f/0x3f) in the firmware, so no firmware work would be needed for that"
+            " future feature either. The medium-speed byte families (0xA_) remain speculative"
+            " in the firmware, inferred from the confirmed low/high pattern, never"
+            " independently captured (the reference fan is 2-speed). REMOTE_BURST_WINDOW_"
+            "SECONDS is a provisional value pending live-hardware confirmation after the"
+            " firmware ships — flagged for tuning against real capture data, not a final"
+            " number. The POWER-family (0xBF/0xB0) speed-context extraction in the firmware is"
+            " an extrapolation from the confirmed TIMER-family pattern, not independently"
+            " verified via a dedicated capture."
+        ),
+    },
     510: {
         "version_fixed": "0.5.30",
         "title": (
@@ -5075,6 +5149,27 @@ REMOTE_TIMER_EVENT_HOURS = {
     "timer_12h": 12.0,
     "timer_none": None,  # remote's default: use configured manual_grace_seconds
 }
+
+# QuietCool RF remote speed events (Issue #519). The firmware already emits these on an
+# explicit speed-select press (0x1F/0x2F/0x3F); CA previously dropped them entirely. No
+# CONFIG_METADATA entry -- this is not user-facing config, it's a fixed token set.
+REMOTE_SPEED_TOKENS = frozenset({"low", "medium", "high"})
+
+# Issue #519: window to combine a single physical multi-field remote interaction (a speed
+# confirmation and a timer confirmation, transmitted as separate packets moments apart for
+# ONE user action) into one decision instead of two. Grounded in the firmware's own documented
+# protocol timing (docs/remote-capture-protocol.md in gunkl/quietcool-house-fan):
+# SAME_BURST_TOLERANCE_MS=400ms per-value repeat spacing, CONFIRM_WINDOW_MS=1500ms per-field
+# confirm cycle, multi-field bursts observed arriving within a similar few-second span.
+# Internal-only, not user-configurable. Provisional pending live-hardware confirmation after
+# the firmware change ships -- see the Verification step that tunes this against real capture
+# data, same status as the firmware's own SELF_ECHO_WINDOW_MS.
+REMOTE_BURST_WINDOW_SECONDS: float = 1.5
+
+# Issue #519: object_id substring hint used to find the sibling ambient-speed text_sensor on
+# the same ESPHome device as CONF_FAN_REMOTE_ENTITY, via the entity/device registry. Kept
+# liberal (not an exact suffix match) since firmware naming could vary across forks/versions.
+REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS: tuple[str, ...] = ("speed",)
 
 # Natural ventilation mode (door/window open + outdoor air within comfort range)
 CONF_NATURAL_VENT_DELTA = "natural_vent_delta"

@@ -12,6 +12,8 @@ import contextlib
 import functools
 import logging
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 
 from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
@@ -157,6 +160,8 @@ from .const import (
     REJECT_TOO_FEW_BLOCKS,
     REJECT_TOO_FEW_SAMPLES,
     REJECT_WINDOW_TOO_SHORT,
+    REMOTE_BURST_WINDOW_SECONDS,
+    REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -218,7 +223,7 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
-from .fan_status import is_ca_fan_running, parse_remote_timer_event
+from .fan_status import is_ca_fan_running, parse_remote_speed_event, parse_remote_timer_event
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
@@ -240,6 +245,27 @@ _REJECTION_LOG_CAP: int = 100
 # propagated into the chart log.
 _MIN_PLAUSIBLE_INDOOR_F: float = 40.0
 _MAX_PLAUSIBLE_INDOOR_F: float = 110.0
+
+
+@dataclass
+class _PendingFanRemoteBurst:
+    """Accumulates a single physical QuietCool remote interaction's speed/timer fields
+    (Issue #519) so they flush as ONE decision instead of two — a speed confirmation and a
+    timer confirmation from one interaction arrive as separate packets moments apart (see
+    docs/remote-capture-protocol.md in gunkl/quietcool-house-fan).
+
+    ``was_running_before`` is snapshotted exactly ONCE, when the burst opens (the first
+    speed/timer event of a new interaction) — critically NOT re-read at flush time, since by
+    then the fan has typically already turned on and a post-hoc read would answer "yes" for
+    nearly every case, including genuine off->on overrides. See
+    ``ClimateAdvisorCoordinator._flush_fan_remote_burst()`` for how this drives the
+    override-vs-comfort-only classification.
+    """
+
+    speed: str | None = None
+    timer_hours: float | None = None
+    has_timer: bool = False
+    was_running_before: bool | None = None
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -397,6 +423,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # old event as if it were a fresh press. Not persisted: a stale restore right after
         # restart is already covered by _suppress_during_startup_coalescing.
         self._last_fan_remote_event_ts: str | None = None
+        # Issue #519: pending burst accumulator for combining a single physical remote
+        # interaction (e.g. speed + timer confirmed as separate packets moments apart) into
+        # one decision. None when no burst is pending. Session-only, never persisted.
+        self._fan_remote_burst: _PendingFanRemoteBurst | None = None
+        self._fan_remote_burst_cancel: Callable[[], None] | None = None
+        # Issue #519: resolved sibling ambient-speed sensor entity_id (via entity/device
+        # registry, keyed off CONF_FAN_REMOTE_ENTITY). Cached once found; a miss is NEVER
+        # cached (the registry can populate asynchronously at startup — see
+        # _resolve_fan_remote_speed_sensor()).
+        self._fan_remote_speed_sensor_eid: str | None = None
         self._last_violation_check: datetime | None = None
         # Chart_log endpoint estimator backfill flags (Issue #137)
         self._passive_k_backfilled: bool = False  # True after chart_log passive windows processed
@@ -3876,7 +3912,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
 
     async def _async_fan_remote_changed(self, event: Event) -> None:
-        """Handle a QuietCool RF wall remote event (Issue #486).
+        """Handle a QuietCool RF wall remote event (Issue #486, extended by Issue #519).
 
         `event` is a state-changed event for the configured ``fan_remote_entity`` (an
         HA ``event.*`` entity — each remote press fires as a state change to a new
@@ -3884,10 +3920,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         docs/fan-remote-spec.md for the firmware contract
         (gunkl/quietcool-house-fan).
 
-        Only timer tokens are acted on this cut (timer_1h..timer_12h, timer_none);
-        everything else (on/off/speed, unknown, unavailable) is ignored — deliberately
-        not routed through a separate entry point (see handle_fan_manual_override()'s
-        docstring for why).
+        Issue #519: timer AND speed tokens are now both acted on (previously only timer);
+        `on` is only meaningful as context within an already-open burst (a bare `on` with
+        nothing else pending is NOT actionable on its own — physical fan-entity detection
+        already covers plain on/off, see fan-remote-spec.md); `off` cancels any pending
+        burst outright. Speed/timer events accumulate into a short-lived burst
+        (`_arm_fan_remote_burst`/`_flush_fan_remote_burst`) instead of triggering
+        `handle_fan_manual_override()` directly, so a single physical interaction that
+        touches both fields (common — see docs/remote-capture-protocol.md) produces ONE
+        decision, not two.
         """
         new_state = event.data.get("new_state")
         if not new_state or new_state.state in ("unknown", "unavailable"):
@@ -3911,9 +3952,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
 
         event_type = new_state.attributes.get("event_type")
-        is_timer_event, hours = parse_remote_timer_event(event_type)
-        if not is_timer_event:
-            return
 
         # Issue #491: suppress during startup coalescing — the QuietCool remote's event.*
         # entity can re-announce its last retained event_type (a stale timer press) while
@@ -3921,21 +3959,178 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if self._suppress_during_startup_coalescing(f"fan remote event_type={event_type}"):
             return
 
-        self._last_fan_remote_event_ts = new_state.state
-        duration_seconds = hours * 3600 if hours is not None else None
+        is_timer, hours = parse_remote_timer_event(event_type)
+        speed = parse_remote_speed_event(event_type)
+
+        if is_timer or speed is not None:
+            self._last_fan_remote_event_ts = new_state.state
+            is_new_burst = self._fan_remote_burst is None
+            burst = self._fan_remote_burst or _PendingFanRemoteBurst()
+            if is_new_burst:
+                # Snapshot "was it already running" exactly once, right now, before
+                # anything in THIS interaction has had a chance to change the fan's state —
+                # Part 2's override-vs-comfort decision needs the PRE-interaction state, not
+                # a later re-read (see _flush_fan_remote_burst()'s docstring for why).
+                physical_on = self._get_fan_physical_state()
+                burst.was_running_before = (
+                    physical_on if physical_on is not None else self.automation_engine._fan_active
+                )
+            if speed is not None:
+                burst.speed = speed
+            if is_timer:
+                burst.timer_hours = hours
+                burst.has_timer = True
+            self._fan_remote_burst = burst
+            self._arm_fan_remote_burst()
+            _LOGGER.info(
+                "Fan remote burst %s: speed=%s timer_hours=%s was_running_before=%s",
+                "started" if is_new_burst else "extended",
+                burst.speed,
+                burst.timer_hours,
+                burst.was_running_before,
+            )
+        elif event_type == "off":
+            self._cancel_fan_remote_burst()  # supersedes any not-yet-applied override intent
+        # else: unknown/ignored token, or a bare "on" with no open burst — unchanged behavior.
+
+    def _cancel_fan_remote_burst(self) -> None:
+        """Cancel any pending fan-remote burst without flushing it (Issue #519).
+
+        Called when `off` arrives — turning the fan off supersedes any not-yet-applied
+        override/comfort intent from a burst still being combined.
+        """
+        if self._fan_remote_burst_cancel is not None:
+            self._fan_remote_burst_cancel()
+            self._fan_remote_burst_cancel = None
+        if self._fan_remote_burst is not None:
+            _LOGGER.info("Fan remote burst cancelled — off received")
+            self._fan_remote_burst = None
+
+    def _arm_fan_remote_burst(self) -> None:
+        """(Re-)arm the burst-combining window (Issue #519).
+
+        Cancels any in-flight timer and starts a fresh one — called on every new
+        speed/timer event within an open burst, so the window extends (rather than
+        flushing twice) as long as related events keep arriving.
+        """
+        if self._fan_remote_burst_cancel is not None:
+            self._fan_remote_burst_cancel()
+
+        @callback
+        def _burst_window_elapsed(_now: Any) -> None:
+            self._fan_remote_burst_cancel = None
+            self.hass.async_create_task(self._flush_fan_remote_burst())
+
+        self._fan_remote_burst_cancel = async_call_later(self.hass, REMOTE_BURST_WINDOW_SECONDS, _burst_window_elapsed)
+
+    async def _flush_fan_remote_burst(self) -> None:
+        """Apply the accumulated burst's decision once the combining window elapses (Issue #519).
+
+        Classification (see Part 2 of the #519 design):
+        1. A timer selection (with or without speed) is ALWAYS an override — an explicit
+           timer press is always manual intent, matching the pre-#519 behavior exactly.
+        2. A bare speed press (no timer) is an override only if the fan was NOT already
+           running before this interaction started (``was_running_before``, snapshotted at
+           burst-open time in ``_async_fan_remote_changed`` — see that snapshot's own
+           comment for why it must NOT be re-read here at flush time: by now the fan has
+           typically already turned on, which would make a fresh read say "yes" for nearly
+           every case, including genuine off->on overrides, silently misclassifying them as
+           comfort-only). If the fan was already running, this is a comfort-only speed
+           adjustment — record it via ``handle_fan_speed_observed()`` without arming an
+           override/grace/HVAC-suppression.
+        """
+        burst = self._fan_remote_burst
+        self._fan_remote_burst = None
+        self._fan_remote_burst_cancel = None
+        if burst is None:
+            return
+
+        if burst.has_timer:
+            is_override = True
+            reason = "timer selected"
+        elif burst.speed is not None:
+            is_override = not bool(burst.was_running_before)
+            reason = (
+                "fan was off/unknown before this press" if is_override else "fan already running, speed-only change"
+            )
+        else:
+            return  # nothing actionable accumulated (shouldn't normally happen)
+
         _LOGGER.info(
-            "Fan RF remote timer event: event_type=%s -> duration=%s",
-            event_type,
-            f"{hours}h" if hours is not None else "configured default",
+            "Fan remote burst flushed: outcome=%s speed=%s timer_hours=%s has_timer=%s was_running_before=%s reason=%s",
+            "override" if is_override else "comfort-only",
+            burst.speed,
+            burst.timer_hours,
+            burst.has_timer,
+            burst.was_running_before,
+            reason,
         )
-        self.automation_engine.handle_fan_manual_override(
-            fan_before="?",
-            fan_after="on",
-            duration_override=duration_seconds,
-            remote_timer_hours=hours,
-            is_remote_event=True,
-        )
+        if is_override:
+            duration_seconds = burst.timer_hours * 3600 if burst.timer_hours is not None else None
+            self.automation_engine.handle_fan_manual_override(
+                fan_before="?",
+                fan_after="on",
+                duration_override=duration_seconds,
+                remote_timer_hours=burst.timer_hours if burst.has_timer else None,
+                remote_speed=burst.speed,
+                is_remote_event=True,
+            )
+        else:
+            self.automation_engine.handle_fan_speed_observed(burst.speed, is_remote_event=True)
         await self.async_request_refresh()
+
+    def _resolve_fan_remote_speed_sensor(self) -> str | None:
+        """Resolve the sibling ambient-speed `text_sensor` on the same ESPHome device as
+        `fan_remote_entity`, via HA's entity/device registry (Issue #519).
+
+        No new user-facing config: keyed entirely off the already-configured
+        `CONF_FAN_REMOTE_ENTITY`. Caches the resolved entity_id once found (registry
+        relationships don't change during a running session); NEVER caches a negative
+        result — HA's entity/device registry can populate asynchronously at startup, so a
+        too-early miss must self-correct on a later call rather than permanently disabling
+        the feature for the rest of the session.
+
+        Returns None if `fan_remote_entity` is unset, unregistered, has no device, or no
+        sibling `sensor.*` entity matches `REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS` — in every
+        case, the caller (`_read_fan_remote_speed`) degrades to "speed unknown," which IS
+        the auto-detect + fallback mechanism for installs without the new firmware feature.
+        """
+        if self._fan_remote_speed_sensor_eid is not None:
+            return self._fan_remote_speed_sensor_eid
+        remote_entity_id = self.config.get(CONF_FAN_REMOTE_ENTITY)
+        if not remote_entity_id:
+            return None
+        ent_reg = er.async_get(self.hass)
+        entry = ent_reg.async_get(remote_entity_id)
+        if entry is None or entry.device_id is None:
+            return None
+        for sibling in er.async_entries_for_device(ent_reg, entry.device_id, include_disabled_entities=False):
+            if sibling.domain != "sensor":
+                continue
+            object_id = sibling.entity_id.split(".", 1)[-1]
+            if any(hint in object_id for hint in REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS):
+                _LOGGER.info("Fan remote ambient speed sensor discovered: %s", sibling.entity_id)
+                self._fan_remote_speed_sensor_eid = sibling.entity_id
+                return sibling.entity_id
+        return None
+
+    def _read_fan_remote_speed(self) -> str | None:
+        """Live, stateless read of the ambient current-speed sensor (Issue #519).
+
+        Mirrors the existing `_get_thermostat_capabilities()` precedent (automation.py): a
+        fresh capability/value read every call, degrading to None on anything missing —
+        NOT an accumulated "have we ever seen a speed event" persisted boolean. This
+        live-read-degrades-to-None behavior IS the auto-detect + fallback mechanism: no
+        sibling sensor (older/un-updated firmware) or an unknown/unavailable state both
+        resolve to None, identical to today's behavior for installs without this feature.
+        """
+        entity_id = self._resolve_fan_remote_speed_sensor()
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable"):
+            return None
+        return state.state
 
     async def _async_reassert_setpoint_after_fan_off(self) -> None:
         """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).
@@ -7168,6 +7363,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Issue #486: QuietCool RF remote timer selection, for status-card display only.
             "fan_remote_timer_hours": ae._fan_remote_timer_hours,
             "fan_remote_timer_ends": (ae._grace_end_time if ae._fan_remote_timer_hours is not None else None),
+            # Issue #519: live ambient speed read wins (always current); falls back to the
+            # engine's last press-derived value so the card isn't blank between beacons on
+            # installs where the ambient sensor isn't discoverable (older firmware).
+            "fan_remote_speed": self._read_fan_remote_speed() or ae._fan_remote_speed,
             "fan_mode_config": ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
             "economizer_active": ae._economizer_active,
             "economizer_phase": ae._economizer_phase,

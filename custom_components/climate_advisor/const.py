@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.28"
+VERSION = "0.5.29"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.29": [
+        "Fix #511: for installs with no dedicated outdoor sensor (weather-service source"
+        " only, e.g. Met.no), the dashboard's 'Actual Outdoor' reading and the automation"
+        " decisions based on it could lag or lead true conditions by up to an hour during"
+        " a temperature ramp — the weather integration's live reading only refreshes"
+        " roughly hourly, so it was really a stale point-sample, not a live value."
+        " Outdoor temp is now estimated by interpolating between the two nearest hourly"
+        " forecast points, refreshed every 5 minutes, feeding the dashboard, the"
+        " windows-recommended flag, nat-vent/economizer gating, and thermal-learning"
+        " model accuracy. Installs with a dedicated sensor or input_number are unaffected"
+        " — they already had a true live reading.",
+    ],
     "0.5.28": [
         "Fix #508: pressing 'Cancel Fan Override' on the dashboard cleared the fan override"
         " but left the grace-period countdown running for its full original duration — up to"
@@ -1208,6 +1220,60 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    511: {
+        "version_fixed": "0.5.29",
+        "title": (
+            "Weather-service-only installs' outdoor temp reading was a stale point-sample,"
+            " not a live value, causing chart/automation errors of up to ~4°F during ramps"
+        ),
+        "scope_covered": (
+            "Confirmed via live chart_log cross-correlation analysis (SSH-pulled, ~107 days"
+            " of data) that for weather-service installs with no dedicated sensor (e.g."
+            " Met.no's weather.forecast_home), the 'temperature' attribute used as 'Actual"
+            " Outdoor' is a step function that plateaus 30-90 min before updating — a"
+            " ~50-55 min effective phase lag against true conditions, producing a +3-4°F"
+            " morning-warming bias and a -2°F evening-cooling bias. _get_outdoor_temp()"
+            " now interpolates linearly between the two nearest hourly-forecast points"
+            " (new _interpolate_hourly_outdoor_temp(), built on a new shared"
+            " _parse_forecast_entries() parsing helper also used by the two pre-existing"
+            " forecast-reading functions) instead of trusting the live attribute directly,"
+            " unconditionally for weather_service source — sensor/input_number installs are"
+            " untouched. The estimate now refreshes every 5 minutes via the existing thermal-"
+            " sample timer (new _refresh_weather_service_outdoor_temp(), gated to skip"
+            " entirely for sensor/input_number sources) instead of only once per 30-min"
+            " cycle, and a new single _apply_outdoor_temp() propagation method consolidates"
+            " what were previously 4 independently-written touch points (30-min cycle x2"
+            " lines, daily briefing, and the new 5-min tick) across the coordinator and"
+            " automation engine mirror. _async_end_of_day()'s midnight reset now"
+            " immediately re-fetches the hourly forecast instead of leaving up to a ~30-min"
+            " gap where interpolation degrades nightly to the pre-fix behavior. All"
+            " downstream consumers (automation gating, chart 'actual outdoor' values,"
+            " classification windows-gate, outdoor sensor entity, api.py dashboard payload)"
+            " inherit the fix automatically since they all read the same"
+            " _last_outdoor_temp/coordinator.data fields this change updates — no separate"
+            " code changes were needed in automation.py, sensor.py, or api.py."
+        ),
+        "scope_not_covered": (
+            "The 'Predicted Outdoor' line (_extract_current_hour_forecast_temp/"
+            "_build_future_forecast_outdoor) still uses nearest-neighbor selection, not"
+            " interpolation — its own ~30-60 min offset is unchanged; fixing it would make"
+            " predicted and actual nearly coincide for weather-service installs, defeating"
+            " the point of two separate lines, and the user's stated mental model (predicted"
+            " = a frozen morning snapshot, actual = live-tracking) is a distinct feature"
+            " needing new persisted state, tracked separately. A likely pre-existing Celsius-"
+            " unit bug was found (not fixed) in that same predicted-outdoor path: it never"
+            " applies to_fahrenheit() to raw forecast values before they reach get_chart_data()'s"
+            " _conv()/from_fahrenheit() conversion, unlike every other outdoor-temp read path"
+            " in the file — flagged for a separate issue, not touched here to keep this PR's"
+            " blast radius scoped to the reported bug. Target Band chart history has zero"
+            " persistence (confirmed, unrelated pre-existing gap) and the no-HVAC counterfactual"
+            " prediction question is undecided — both tracked as separate follow-up issues, not"
+            " addressed in this change. The nat-vent threshold arithmetic duplication"
+            " (comfort_cool + nat_vent_delta, computed independently at 4 sites) was identified"
+            " during design but deliberately deferred/not touched, to keep this PR's diff"
+            " minimal for a live-HVAC-controlling production deploy."
+        ),
+    },
     508: {
         "version_fixed": "0.5.28",
         "title": (

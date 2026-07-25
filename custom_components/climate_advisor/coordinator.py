@@ -696,7 +696,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     @callback
     def _async_thermal_sample_tick(self, now: datetime) -> None:
         """Sample active thermal observations on the 5-min tick."""
+        self._refresh_weather_service_outdoor_temp()
         self._sample_all_observations()
+
+    def _refresh_weather_service_outdoor_temp(self) -> None:
+        """Refresh the interpolated outdoor estimate every 5 min (Issue #511).
+
+        Weather-service installs only — sensor/input_number installs already get
+        live updates via their own state-change listener (see coordinator.py ~608)
+        and must not be touched here, since they have a true live reading already.
+        """
+        source = self.config.get("outdoor_temp_source", TEMP_SOURCE_WEATHER_SERVICE)
+        if source in (TEMP_SOURCE_SENSOR, TEMP_SOURCE_INPUT_NUMBER):
+            return
+        weather_entity = self.config.get("weather_entity")
+        weather_state = self.hass.states.get(weather_entity) if weather_entity else None
+        if not weather_state:
+            return
+        self._apply_outdoor_temp(self._get_outdoor_temp(weather_state.attributes), record_history=False)
 
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
@@ -1390,6 +1407,37 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             c.windows_recommended = False
 
+    def _apply_outdoor_temp(self, value: float | None, *, record_history: bool) -> None:
+        """Propagate a newly-read outdoor temperature to every downstream consumer.
+
+        Consolidates what used to be 3-4 independently-written touch points (the
+        30-min main cycle, the daily briefing, and now the 5-min tick added by
+        Issue #511) into a single shared function, so a new consumer only needs
+        to be wired in once.
+
+        record_history=True only from the 30-min cycle — the observed-extremes
+        history used for classification's high/low correction intentionally stays
+        on its existing 30-min cadence; sampling it 6x more often via the 5-min
+        tick could subtly affect classification stability and is out of scope.
+        """
+        if value is None:
+            return
+        previous = getattr(self, "_last_outdoor_temp", None)
+        self._last_outdoor_temp = value
+        self.automation_engine.update_outdoor_temp(value)
+        self._apply_outdoor_windows_gate()
+        if record_history:
+            self._outdoor_temp_history.append((dt_util.now().isoformat(), value))
+        if getattr(self, "data", None):
+            self.data[ATTR_OUTDOOR_TEMP] = value
+            self.async_update_listeners()
+        if previous is None or abs(value - previous) >= 0.1:
+            _LOGGER.info(
+                "Outdoor temp updated: %s → %.1f°F",
+                f"{previous:.1f}°F" if previous is not None else "unknown",
+                value,
+            )
+
     async def _do_startup_coalesce(self) -> None:
         """Proactively coalesce HVAC and nat-vent state 5 minutes after restart (Issue #321)."""
         open_sensors = [s for s in self._resolved_sensors if self._is_sensor_open(s)]
@@ -1624,8 +1672,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
             }
             self._current_classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
-            self._last_outdoor_temp = forecast.current_outdoor_temp
-            self._apply_outdoor_windows_gate()
+            # record_history=True here; the 5-min tick (Issue #511) always passes False
+            # so _outdoor_temp_history keeps its existing 30-min cadence.
+            self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
 
             # Chart log: emit classification_change event when day type changes
             if prev_type is not None and prev_type != self._current_classification.day_type:
@@ -1856,11 +1905,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._startup_retries_remaining = 5
                 self._startup_retry_delay = 30
 
-            # Record temperature history for dashboard chart
+            # Outdoor temp history + automation-engine mirror now handled by
+            # _apply_outdoor_temp() above (Issue #511 consolidation).
             now_str = dt_util.now().isoformat()
-            self._outdoor_temp_history.append((now_str, forecast.current_outdoor_temp))
-            # Keep automation engine's outdoor temp current for natural vent decisions
-            self.automation_engine.update_outdoor_temp(forecast.current_outdoor_temp)
             if forecast.current_indoor_temp is not None:
                 self._indoor_temp_history.append((now_str, forecast.current_indoor_temp))
 
@@ -2285,7 +2332,31 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             state.state,
                         )
 
-        # weather_service source or fallback
+        # weather_service source or fallback: interpolate between the two nearest
+        # hourly-forecast points instead of trusting the weather integration's live
+        # "temperature" attribute directly — that attribute is itself often just a
+        # coarse point-sample of the same hourly model (e.g. Met.no refreshes ~hourly),
+        # so it can lag or lead true current conditions by up to ~an hour during a
+        # temperature ramp (Issue #511).
+        interpolated, method = _interpolate_hourly_outdoor_temp(
+            getattr(self, "_hourly_forecast_temps", None), dt_util.now()
+        )
+        if interpolated is not None:
+            # Hourly forecast entries report temperature in the weather entity's
+            # native unit, same as weather_attrs["temperature"] below — must go
+            # through the same conversion, not just the live-attribute fallback.
+            interpolated_f = to_fahrenheit(interpolated, unit)
+            if method == "edge-nearest":
+                _LOGGER.debug(
+                    "Outdoor temp: edge-clamped interpolation (%.1f°F) — now is outside the hourly forecast range",
+                    interpolated_f,
+                )
+            return interpolated_f
+
+        _LOGGER.warning(
+            "Hourly forecast interpolation unavailable for outdoor temp — "
+            "falling back to weather nowcast attribute (integration may not support hourly forecasts)"
+        )
         return to_fahrenheit(float(weather_attrs.get("temperature", 65)), unit)
 
     def _get_indoor_temp(self) -> float | None:
@@ -2633,8 +2704,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         }
         classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
         self._current_classification = classification
-        self._last_outdoor_temp = forecast.current_outdoor_temp
-        self._apply_outdoor_windows_gate()
+        # Issue #511: also mirrors to automation_engine now (previously this call
+        # site didn't — a minor pre-existing gap closed as a side effect of the
+        # single-function consolidation).
+        self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=False)
 
         # Daily incremental solar phase re-fit (Issue #310/#312)
         if self.config.get("learning_enabled", True):
@@ -2945,6 +3018,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
         self._hourly_forecast_temps.clear()
+        # Issue #511: refetch immediately rather than waiting for the next 30-min
+        # cycle — otherwise outdoor-temp interpolation has nothing to interpolate
+        # against for up to ~30 min after every midnight reset, degrading nightly
+        # to the raw (pre-Issue #511) weather attribute with a WARNING each time.
+        self._hourly_forecast_temps = await self._get_hourly_forecast_data()
+        self.automation_engine._hourly_forecast_temps = self._hourly_forecast_temps
 
         # Reset pre-cool state for the new day
         if self._pre_cool_trigger_cancel is not None:
@@ -8332,6 +8411,34 @@ def _build_outdoor_curve(
     return result
 
 
+def _parse_forecast_entries(hourly_forecast: list[dict] | None) -> list[tuple[datetime, float]]:
+    """Extract raw (datetime, temperature) pairs from hourly forecast entries.
+
+    Shared field-extraction/validation used by every function that reads
+    self._hourly_forecast_temps, so entry-shape parsing (datetime/time key
+    fallback, temperature/temp key fallback, ISO parse failure handling) only
+    needs to be correct in one place. Timestamps are returned exactly as
+    parsed (naive or aware, in original order) — callers apply their own
+    timezone normalization, since existing callers intentionally differ in
+    how they treat naive timestamps (UTC-anchored delta comparison vs.
+    local-display formatting).
+    """
+    if not hourly_forecast:
+        return []
+    result: list[tuple[datetime, float]] = []
+    for entry in hourly_forecast:
+        dt_str = entry.get("datetime") or entry.get("time")
+        temp = entry.get("temperature") if entry.get("temperature") is not None else entry.get("temp")
+        if dt_str is None or temp is None:
+            continue
+        try:
+            dt_obj = datetime.fromisoformat(dt_str)
+            result.append((dt_obj, float(temp)))
+        except (ValueError, TypeError):
+            continue
+    return result
+
+
 def _build_future_forecast_outdoor(
     hourly_forecast: list[dict] | None,
     classification: Any | None = None,
@@ -8349,20 +8456,11 @@ def _build_future_forecast_outdoor(
     """
     now = dt_util.now()
     result = []
-    if hourly_forecast:
-        for entry in hourly_forecast:
-            dt_str = entry.get("datetime") or entry.get("time")
-            temp = entry.get("temperature") if entry.get("temperature") is not None else entry.get("temp")
-            if dt_str is None or temp is None:
-                continue
-            try:
-                dt_obj = datetime.fromisoformat(dt_str)
-                local_dt = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
-                if local_dt < now:
-                    continue
-                result.append({"ts": local_dt.isoformat(), "temp": round(float(temp), 1)})
-            except (ValueError, TypeError):
-                continue
+    for dt_obj, temp in _parse_forecast_entries(hourly_forecast):
+        local_dt = dt_util.as_local(dt_obj) if dt_obj.tzinfo else dt_obj
+        if local_dt < now:
+            continue
+        result.append({"ts": local_dt.isoformat(), "temp": round(temp, 1)})
     if not result and classification is not None:
         # Hourly forecast unavailable — build cosine curve for display
         cosine = _cosine_outdoor_curve(classification.today_high, classification.today_low)
@@ -8386,26 +8484,78 @@ def _extract_current_hour_forecast_temp(
     exact hour matching would never find the current hour. Instead, find the
     entry with minimum absolute time delta to now.
     """
-    if not hourly_forecast:
+    entries = _parse_forecast_entries(hourly_forecast)
+    if not entries:
         return None
     now_utc = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
     best_temp: float | None = None
     best_delta: float = float("inf")
-    for entry in hourly_forecast:
-        dt_str = entry.get("datetime") or entry.get("time")
-        temp = entry.get("temperature") if entry.get("temperature") is not None else entry.get("temp")
-        if dt_str is None or temp is None:
-            continue
-        try:
-            dt_obj = datetime.fromisoformat(dt_str)
-            entry_utc = dt_obj.replace(tzinfo=UTC) if dt_obj.tzinfo is None else dt_obj.astimezone(UTC)
-            delta = abs((entry_utc - now_utc).total_seconds())
-            if delta < best_delta and delta <= 7200:
-                best_delta = delta
-                best_temp = round(float(temp), 1)
-        except (ValueError, TypeError):
-            continue
+    for dt_obj, temp in entries:
+        entry_utc = dt_obj.replace(tzinfo=UTC) if dt_obj.tzinfo is None else dt_obj.astimezone(UTC)
+        delta = abs((entry_utc - now_utc).total_seconds())
+        if delta < best_delta and delta <= 7200:
+            best_delta = delta
+            best_temp = round(temp, 1)
     return best_temp
+
+
+def _interpolate_hourly_outdoor_temp(
+    hourly_forecast: list[dict] | None,
+    now: datetime,
+) -> tuple[float | None, str]:
+    """Estimate current outdoor temp by linearly interpolating between the two
+    hourly forecast entries bracketing `now`.
+
+    HA's hourly forecast returns entries starting at the next full hour, so a
+    single reading nearest to `now` (as _extract_current_hour_forecast_temp
+    does) can be up to ~59 minutes out of phase with where outdoor temp
+    actually is within that hour. Interpolating between the two bracketing
+    entries estimates the current position along that trajectory instead.
+
+    Returns (temp, method):
+      "interpolated": now falls between two usable entries — true linear interpolation.
+      "edge-nearest": now is within 2h before the first entry or after the last —
+          clamped to that single edge value (mirrors the ±2h tolerance already
+          used by _extract_current_hour_forecast_temp).
+      "unavailable": empty/unparseable forecast, or now is outside the ±2h edge
+          tolerance on both ends — caller must fall back.
+
+    All comparisons use absolute UTC time deltas, never wall-clock hour
+    arithmetic, so this is safe across DST transitions.
+    """
+    entries = _parse_forecast_entries(hourly_forecast)
+    if not entries:
+        return None, "unavailable"
+
+    def _to_utc(dt_obj: datetime) -> datetime:
+        return dt_obj.replace(tzinfo=UTC) if dt_obj.tzinfo is None else dt_obj.astimezone(UTC)
+
+    now_utc = _to_utc(now)
+    normalized = sorted(((_to_utc(dt_obj), temp) for dt_obj, temp in entries), key=lambda pair: pair[0])
+
+    first_dt, first_temp = normalized[0]
+    last_dt, last_temp = normalized[-1]
+
+    if now_utc <= first_dt:
+        if (first_dt - now_utc).total_seconds() <= 7200:
+            return round(first_temp, 1), "edge-nearest"
+        return None, "unavailable"
+
+    if now_utc >= last_dt:
+        if (now_utc - last_dt).total_seconds() <= 7200:
+            return round(last_temp, 1), "edge-nearest"
+        return None, "unavailable"
+
+    for (dt_before, temp_before), (dt_after, temp_after) in zip(normalized, normalized[1:], strict=False):
+        if dt_before <= now_utc <= dt_after:
+            span = (dt_after - dt_before).total_seconds()
+            if span <= 0:
+                return round(temp_before, 1), "edge-nearest"
+            fraction = (now_utc - dt_before).total_seconds() / span
+            interpolated = temp_before + (temp_after - temp_before) * fraction
+            return round(interpolated, 1), "interpolated"
+
+    return None, "unavailable"
 
 
 def _derive_predicted_setpoint(

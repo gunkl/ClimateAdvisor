@@ -995,6 +995,9 @@ class TestBriefingRegeneration:
         coord.learning.get_thermal_model.return_value = {}
 
         coord._async_save_state = AsyncMock()
+        # Issue #511: _async_end_of_day now refetches the hourly forecast immediately
+        # after clearing it, to close the midnight interpolation data gap.
+        coord._get_hourly_forecast_data = AsyncMock(return_value=[])
 
         # Stubs for Phase 2 ceiling guard (not under test here)
         coord._get_indoor_temp = MagicMock(return_value=None)

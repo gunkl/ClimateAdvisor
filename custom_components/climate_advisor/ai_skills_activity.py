@@ -567,6 +567,15 @@ def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
     return "Fan manual override", settings
 
 
+def _render_fan_speed_observed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #519: a comfort-only remote speed change — NOT a manual override (the fan was
+    already running; the user just adjusted speed, so no grace/HVAC-suppression armed)."""
+    speed = str(p.get("speed", "")).strip()
+    fan_device = p.get("fan_device", "fan")
+    settings = f"{fan_device}: speed->{speed}" if speed else ""
+    return "Fan speed observed (comfort-only)", settings
+
+
 def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
     source = str(p.get("source", "")).strip() or "thermostat-initiated"
     action = str(p.get("hvac_action", "")).strip()
@@ -914,6 +923,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "fan_activated": _render_fan_activated,
     "fan_deactivated": _render_fan_deactivated,
     "fan_manual_override": _render_fan_manual_override,
+    "fan_speed_observed": _render_fan_speed_observed,
     "hvac_write_blocked_whf_active": _render_hvac_write_blocked_whf_active,
     "whf_hvac_suppressed": _render_whf_hvac_suppressed,
     "whf_hvac_released": _render_whf_hvac_released,

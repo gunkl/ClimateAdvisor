@@ -854,6 +854,37 @@ class TestManualWhfOnSuppressesHvac:
         assert len(captured) == 0, "FAN_MODE_HVAC must not schedule HVAC suppression on a manual fan-on detection"
         assert engine._pre_fan_hvac_mode is None
 
+    def test_speed_press_originated_override_still_suppresses_hvac(self):
+        """Issue #519: a speed-press-classified-as-override call (remote_speed set, fan was
+        off beforehand) must schedule HVAC suppression exactly like a timer/on override
+        does — it arms the SAME shared machinery, not a lighter-touch path."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_manual_override(fan_before="?", fan_after="on", remote_speed="high", is_remote_event=True)
+
+        assert len(captured) == 1, "Expected _suppress_hvac_for_whf() to be scheduled"
+        asyncio.run(captured[0])
+
+        hvac_calls = _get_hvac_mode_calls(engine)
+        assert "off" in hvac_calls, f"Expected HVAC to be set to 'off' after speed-override; got: {hvac_calls}"
+        assert engine._fan_remote_speed == "high"
+
+    def test_comfort_only_speed_observation_does_not_suppress_hvac(self):
+        """Issue #519: handle_fan_speed_observed() (the comfort-only path) must NOT touch
+        override/grace/HVAC-suppression state at all — only handle_fan_manual_override()
+        does that."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="cool")
+        engine._emit_event_callback = MagicMock()
+        captured = _run_scheduled_suppress(engine)
+
+        engine.handle_fan_speed_observed("medium", is_remote_event=True)
+
+        assert len(captured) == 0, "Comfort-only speed observation must not schedule HVAC suppression"
+        assert engine._fan_override_active is False
+        assert engine._fan_remote_speed == "medium"
+
     def test_two_rapid_manual_overrides_do_not_reclobber_pre_fan_hvac_mode(self):
         """Two manual-override calls in quick succession (the live incident: a physical
         fan-on at 20:45:32 followed by an RF remote press at 20:48:40) must not re-capture

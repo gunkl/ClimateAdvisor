@@ -536,6 +536,11 @@ class AutomationEngine:
         # None when the active override wasn't started by a remote timer, or the
         # remote selected "no timer" (falls back to configured manual_grace_seconds).
         self._fan_remote_timer_hours: float | None = None
+        # RF remote speed selection, for observability only (Issue #519). Set by both
+        # handle_fan_manual_override() (an override-classified speed press) and
+        # handle_fan_speed_observed() (a comfort-only speed press) — either way, this is
+        # "the last speed the remote reported," not an indicator of which path set it.
+        self._fan_remote_speed: str | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
         # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
         # Restored when the whole-house fan deactivates so AC/heat resumes.
@@ -859,6 +864,7 @@ class AutomationEngine:
         event_context_id: str | None = None,
         duration_override: float | None = None,
         remote_timer_hours: float | None = None,
+        remote_speed: str | None = None,
         is_remote_event: bool = False,
     ) -> None:
         """Handle a manual fan state change — sets fan override flag + grace (Issue #327).
@@ -894,6 +900,10 @@ class AutomationEngine:
                 to None) from a plain non-remote fan-on re-detection also passing
                 ``remote_timer_hours=None`` (which should NOT clobber an already-active
                 remote timer — see the preserve-on-restamp comment below).
+            remote_speed: The RF remote's selected speed (``"low"``/``"medium"``/``"high"``),
+                for observability only (Issue #519) — same guarded-overwrite treatment as
+                ``remote_timer_hours`` below. None for a non-remote-triggered override, or a
+                remote press with no speed component (e.g. timer alone).
         """
         was_override_active = self._fan_override_active
         self._stop_fan_min_runtime_cycles()
@@ -912,12 +922,18 @@ class AutomationEngine:
         # clear the stored value (revert to the configured default duration).
         if is_remote_event or remote_timer_hours is not None or not was_override_active:
             self._fan_remote_timer_hours = remote_timer_hours
+        # Issue #519: same guarded-overwrite treatment as remote_timer_hours above, so a
+        # plain re-stamp doesn't clobber an already-known remote speed to None.
+        if is_remote_event or remote_speed is not None or not was_override_active:
+            self._fan_remote_speed = remote_speed
         _LOGGER.info(
-            "Fan override: set — manual fan change detected %s->%s, override active since %s, grace period starting%s",
+            "Fan override: set — manual fan change detected %s->%s, override active since %s,"
+            " grace period starting%s%s",
             fan_before or "?",
             fan_after or "?",
             self._fan_override_time,
             f" (RF remote timer: {self._fan_remote_timer_hours}h)" if self._fan_remote_timer_hours is not None else "",
+            f" (RF remote speed: {self._fan_remote_speed})" if self._fan_remote_speed is not None else "",
         )
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -929,6 +945,7 @@ class AutomationEngine:
                     "fan_device": _fan_device_label(self.config),
                     "event_context_id": event_context_id,
                     "remote_timer_hours": remote_timer_hours,
+                    "remote_speed": remote_speed,
                 },
             )
         self._start_grace_period("manual", trigger="fan_manual_override", duration_override=duration_override)
@@ -942,6 +959,38 @@ class AutomationEngine:
                 self._suppress_hvac_for_whf(
                     reason="whole-house fan manually turned on — suppressing HVAC to prevent AC/fan fighting"
                 )
+            )
+
+    def handle_fan_speed_observed(self, speed: str, is_remote_event: bool = True) -> None:
+        """Record a remote-reported speed CHANGE that does not constitute a manual override
+        (Issue #519).
+
+        The coordinator's burst-classification logic (coordinator._flush_fan_remote_burst())
+        routes a bare speed press here — instead of through handle_fan_manual_override() —
+        specifically when the fan was ALREADY running before this interaction and no timer
+        was also selected: the user adjusted speed only, which is a comfort preference, not
+        "taking manual control" of an off fan. Deliberately a separate, small function rather
+        than a branch/flag inside handle_fan_manual_override(): that function's entire
+        contract is "arm an override" (sets _fan_override_active, starts grace, suppresses
+        HVAC) — smearing a "don't actually override" path through it via a flag would mix two
+        different outcomes into one already-complex function instead of keeping each
+        single-purpose and independently testable.
+
+        Does NOT touch _fan_override_active, grace, or HVAC suppression — display/
+        observability only. This is the seam a future CA-initiated speed-comfort feature
+        (adjusting WHF speed for comfort/energy reasons) would build on; no such feature
+        exists yet.
+        """
+        self._fan_remote_speed = speed
+        _LOGGER.info("Fan remote speed observed (comfort-only, no override): %s", speed)
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "fan_speed_observed",
+                {
+                    "speed": speed,
+                    "fan_device": _fan_device_label(self.config),
+                    "is_remote_event": is_remote_event,
+                },
             )
 
     def on_fan_turned_off(self, fan_before: str = "", fan_after: str = "", event_context_id: str | None = None) -> None:
@@ -978,6 +1027,7 @@ class AutomationEngine:
             self._fan_override_active = False
             self._fan_override_time = None
             self._fan_remote_timer_hours = None
+            self._fan_remote_speed = None
 
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -1070,6 +1120,7 @@ class AutomationEngine:
             self._fan_override_active = False
             self._fan_override_time = None
             self._fan_remote_timer_hours = None
+            self._fan_remote_speed = None
             # Restart the min-runtime cycle that was suspended when override was set
             self.hass.async_create_task(self.start_min_fan_runtime_cycles())
             # Issue #495: release any WHF HVAC suppression this override was holding.
@@ -5567,6 +5618,10 @@ class AutomationEngine:
         # Issue #486: an RF remote timer selection is part of the override it started —
         # not persisted/restored, same as the rest of the override/grace clean slate above.
         self._fan_remote_timer_hours = None
+        # Issue #519: same clean-slate treatment — a comfort-only speed observation isn't
+        # tied to an override at all, but it's still transient, ambient, restart-scoped
+        # observability, not state worth preserving across a restart.
+        self._fan_remote_speed = None
         _LOGGER.info(
             "Fan override: restart clean-slate — _fan_override_active and _fan_override_time "
             "cleared (Issue #327); reconcile will decide fan disposition"
@@ -5607,6 +5662,8 @@ class AutomationEngine:
             # Issue #486: RF remote timer hours, for observability only — like the two
             # fields above, always cleared on restore() (clean-slate policy), not restored.
             "fan_remote_timer_hours": self._fan_remote_timer_hours,
+            # Issue #519: RF remote speed, for observability only — same clean-slate policy.
+            "fan_remote_speed": self._fan_remote_speed,
             "fan_min_runtime_active": self._fan_min_runtime_active,
             "pre_fan_hvac_mode": self._pre_fan_hvac_mode,
             "last_welcome_home_notified": (

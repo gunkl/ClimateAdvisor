@@ -224,6 +224,9 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             # active fan override's grace duration.
             "fan_remote_timer_hours": data.get("fan_remote_timer_hours"),
             "fan_remote_timer_ends": data.get("fan_remote_timer_ends"),
+            # Issue #519: current QuietCool remote-reported speed, null when unknown (no
+            # ambient sensor discoverable, or no press observed yet this session).
+            "fan_remote_speed": data.get("fan_remote_speed"),
             "paused_by_door": ae.is_paused_by_door,
             "ca_target_heat": _ca_target_heat,
             "ca_target_cool": _ca_target_cool,

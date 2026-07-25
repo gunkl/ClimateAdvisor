@@ -51,6 +51,11 @@ _HA_MODULES = [
     "homeassistant.components.repairs",
     "homeassistant.helpers.issue_registry",
     "homeassistant.helpers.config_validation",
+    # Issue #519: entity/device registry, for the QuietCool ambient-speed sensor's
+    # sibling-entity discovery (coordinator._resolve_fan_remote_speed_sensor()) — the
+    # first feature in this codebase needing registry stubs.
+    "homeassistant.helpers.entity_registry",
+    "homeassistant.helpers.device_registry",
     "aiohttp",
     "aiohttp.web",
 ]
@@ -271,6 +276,16 @@ def install_ha_stubs() -> None:
     duc = sys.modules["homeassistant.helpers.update_coordinator"]
     duc.DataUpdateCoordinator = _MockDataUpdateCoordinator
     duc.CoordinatorEntity = _MockCoordinatorEntity
+
+    # Issue #519: `from homeassistant.helpers import entity_registry as er` resolves via
+    # the PARENT mock's attribute, not sys.modules[...] directly, when the parent
+    # (homeassistant.helpers) is itself a MagicMock — an auto-mocked attribute access
+    # returns a NEW, unrelated MagicMock, not the real registered submodule. Same failure
+    # mode already documented below for `homeassistant.config_entries`; same fix: pin the
+    # parent's attribute to the actual registered submodule object.
+    helpers = sys.modules["homeassistant.helpers"]
+    helpers.entity_registry = sys.modules["homeassistant.helpers.entity_registry"]
+    helpers.device_registry = sys.modules["homeassistant.helpers.device_registry"]
 
     core = sys.modules["homeassistant.core"]
     core.Context = _MockContext

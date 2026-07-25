@@ -1,36 +1,43 @@
 <!-- Nav: ← [grace-periods-spec.md](grace-periods-spec.md) | → [automation.py](../custom_components/climate_advisor/automation.py) + [coordinator.py](../custom_components/climate_advisor/coordinator.py) + [fan_status.py](../custom_components/climate_advisor/fan_status.py) | ↔ [08-COMPUTATION-REFERENCE.md](08-COMPUTATION-REFERENCE.md) -->
 
-# QuietCool RF Remote Timer Events — Territory Spec (Tier 3)
+# QuietCool RF Remote Timer & Speed Events — Territory Spec (Tier 3)
 
 ## Anchors
 
 | Question | Short answer | → Full answer |
 |---|---|---|
 | What does the occupant experience when they press a timer on the physical remote? | The whole-house fan runs for exactly the selected duration (1/2/4/8/12 hours) without Climate Advisor's own automation shutting it off partway through, the way it would with an un-communicated manual override. | [§ Occupant Impact](#occupant-impact) |
-| What entity/attribute does the firmware expose, and what values does it emit? | An HA `event.*` entity (e.g. `event.quietcool_remote`). Each firmware-decoded remote press fires a state change with the command in `attributes["event_type"]`. Timer tokens: `timer_1h`, `timer_2h`, `timer_4h`, `timer_8h`, `timer_12h`, `timer_none`. | [§ Firmware Event Contract](#firmware-event-contract) |
+| What entity/attribute does the firmware expose, and what values does it emit? | An HA `event.*` entity (e.g. `event.quietcool_remote`). Each firmware-decoded remote press fires a state change with the command in `attributes["event_type"]`. Timer tokens: `timer_1h`, `timer_2h`, `timer_4h`, `timer_8h`, `timer_12h`, `timer_none`; speed tokens: `low`, `medium`, `high`. As of Issue #519, a second entity — `sensor.*` (e.g. `sensor.<device>_quietcool_speed`) — reports the current speed as continuously-readable ambient STATE, distinct from the discrete-press event entity. | [§ Firmware Event Contract](#firmware-event-contract) |
 | How does a timer selection map onto CA's existing grace mechanics? | It does NOT create a new predicate. A timer press calls the SAME `handle_fan_manual_override()` the physical-fan-on detection path already uses, with an optional `duration_override` (seconds) that bypasses the configured `manual_grace_seconds` for that one override. | [§ Design — One Entry Point](#design--one-entry-point) |
+| What happens when the user presses a speed button (Issue #519)? | Depends on whether the fan was already running. If the fan was off (or state unknown), it's treated as taking manual control — the SAME override machinery as a timer press. If the fan was ALREADY running, it's treated as a comfort-only speed adjustment — recorded via `handle_fan_speed_observed()`, which does NOT arm grace/HVAC-suppression. | [§ Speed-Press Classification](#speed-press-classification-issue-519) |
+| What happens when one physical interaction touches both speed and timer? | The remote transmits them as separate packets moments apart (not simultaneously) — `coordinator.py` combines them into a short-lived burst and applies ONE decision, not two, once the combining window elapses. | [§ Burst Combining](#burst-combining-issue-519) |
 | Is the timer absolute, or can a safety/comfort condition still turn the fan off? | Fully absolute (log-only) by design decision (2026-07-12). Every existing fan-off decision path is suppressed exactly as it is for any other manual fan override; a WARNING is logged instead of silently dropping the suppressed decision, so the behavior is observable in HA logs. | [§ Suppression Is Absolute](#suppression-is-absolute) |
-| What happens to an active RF timer across an HA restart? | Nothing survives — it is not persisted. This matches CA's existing clean-slate policy for all override/grace state (Issue #327/#282); `restore_state()` resets `_fan_remote_timer_hours` to `None` alongside `_fan_override_active`. | [§ Restart Behavior](#restart-behavior) |
+| What happens to an active RF timer across an HA restart? | Nothing survives — it is not persisted. This matches CA's existing clean-slate policy for all override/grace state (Issue #327/#282); `restore_state()` resets `_fan_remote_timer_hours` (and, as of Issue #519, `_fan_remote_speed`) to `None` alongside `_fan_override_active`. | [§ Restart Behavior](#restart-behavior) |
 | What clears an RF-timer-driven override? | The same two paths that clear any manual fan override: (1) the fan physically turns off (detected via `fan_entity`/`fan_state_entity`, routed to `on_fan_turned_off()`), or (2) the grace timer naturally expires (`_on_grace_expired()`). There is no separate "remote timer expired" detection — CA relies on the fan's own physical state. | [§ Clearing](#clearing) |
-| What is out of scope for this feature? | Speed tokens (`low`/`medium`/`high`) and explicit `on`/`off` event handling are not decoded or acted on. Only the `timer_*` family drives behavior. | [§ Scope](#scope) |
-| Does an RF timer press also suppress HVAC? | Yes, as of Issue #495 — for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` schedules `_suppress_hvac_for_whf()`, the same helper `_activate_fan()` uses. Previously ONLY CA-initiated activation suppressed HVAC; a manual/remote fan-on left the AC armed for the life of the override. | [§ HVAC Suppression on Manual/Remote Fan-On](#hvac-suppression-on-manualremote-fan-on) |
+| What is out of scope for this feature? | Any code path that actually calls a speed-setting HA service (`fan.set_percentage` or similar) — this feature is detect-and-respect only, not detect-and-set. See [§ Scope](#scope) for the full boundary, including what changed from the original (pre-#519) scope. | [§ Scope](#scope) |
+| Does an RF timer press also suppress HVAC? | Yes, as of Issue #495 — for `FAN_MODE_WHOLE_HOUSE`/`BOTH`, `handle_fan_manual_override()` schedules `_suppress_hvac_for_whf()`, the same helper `_activate_fan()` uses. Previously ONLY CA-initiated activation suppressed HVAC; a manual/remote fan-on left the AC armed for the life of the override. As of Issue #519, an override-classified speed press schedules the same suppression; a comfort-only speed observation does not. | [§ HVAC Suppression on Manual/Remote Fan-On](#hvac-suppression-on-manualremote-fan-on) |
 | Can a stale/repeated remote event trigger a false override? | It used to. The `event.*` entity flaps to `unavailable` at arbitrary times (not just restart) and re-announces its STALE last `event_type` with the SAME state (the entity's `state` field IS the event timestamp). Issue #495 added a dedup guard (`_last_fan_remote_event_ts`) that ignores a re-announced identical timestamp — confirmed live: without it, a phantom 2h override fired with zero user action when the entity restored a 6-hour-stale `timer_2h`. | [§ Stale-Event Dedup](#stale-event-dedup) |
-| Does the dashboard's remote-timer display stay accurate? | As of Issue #495, yes. Previously `handle_fan_manual_override()` unconditionally overwrote `_fan_remote_timer_hours` on every call — including plain non-remote re-stamps (e.g. the WHF fan entity re-reporting "on") — which nulled an active remote timer within seconds of a genuine press. Fixed by only overwriting when the caller is the remote itself (`is_remote_event=True`) or supplies a genuine value. | [§ Timer Value Durability](#timer-value-durability) |
+| Does the dashboard's remote-timer display stay accurate? | As of Issue #495, yes. Previously `handle_fan_manual_override()` unconditionally overwrote `_fan_remote_timer_hours` on every call — including plain non-remote re-stamps (e.g. the WHF fan entity re-reporting "on") — which nulled an active remote timer within seconds of a genuine press. Fixed by only overwriting when the caller is the remote itself (`is_remote_event=True`) or supplies a genuine value. `_fan_remote_speed` (Issue #519) uses the identical guarded-overwrite idiom. | [§ Timer Value Durability](#timer-value-durability) |
+| How does CA find the ambient speed sensor without new config? | Auto-discovery via HA's entity/device registry, keyed off the already-configured `fan_remote_entity` — resolves its `device_id`, then scans sibling entities for a `sensor.*` matching an object-id hint. No new user-facing config field; a discovery miss (older firmware, or registry not yet populated at startup) degrades to "speed unknown," which IS the auto-detect + fallback mechanism. | [§ Ambient Speed Sensor Discovery](#ambient-speed-sensor-discovery-issue-519) |
 
 ---
 
 ## Scope
 
 **Files:**
-- `custom_components/climate_advisor/fan_status.py` — `parse_remote_timer_event()`, the single source of truth for the event-token → hours mapping
-- `custom_components/climate_advisor/const.py` — `CONF_FAN_REMOTE_ENTITY`, `REMOTE_TIMER_EVENT_HOURS`
-- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup)
-- `custom_components/climate_advisor/automation.py` — `handle_fan_manual_override(duration_override=..., is_remote_event=...)`, `_start_grace_period(duration_override=...)`, the suppression WARNING at `_deactivate_fan()` and `fan_thermostat_check()`, `_suppress_hvac_for_whf()`/`_release_whf_and_reclassify()` (Issue #495 HVAC suppression + reclassify-on-exit)
+- `custom_components/climate_advisor/fan_status.py` — `parse_remote_timer_event()`, the single source of truth for the event-token → hours mapping; `parse_remote_speed_event()` (Issue #519), the sibling for the speed-token family
+- `custom_components/climate_advisor/const.py` — `CONF_FAN_REMOTE_ENTITY`, `REMOTE_TIMER_EVENT_HOURS`; `REMOTE_SPEED_TOKENS`, `REMOTE_BURST_WINDOW_SECONDS`, `REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS` (Issue #519)
+- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup); `_PendingFanRemoteBurst`, `_arm_fan_remote_burst()`/`_cancel_fan_remote_burst()`/`_flush_fan_remote_burst()` (Issue #519 burst combining + classification); `_resolve_fan_remote_speed_sensor()`/`_read_fan_remote_speed()` (Issue #519 ambient sensor discovery)
+- `custom_components/climate_advisor/automation.py` — `handle_fan_manual_override(duration_override=..., is_remote_event=..., remote_speed=...)`, `_start_grace_period(duration_override=...)`, the suppression WARNING at `_deactivate_fan()` and `fan_thermostat_check()`, `_suppress_hvac_for_whf()`/`_release_whf_and_reclassify()` (Issue #495 HVAC suppression + reclassify-on-exit); `handle_fan_speed_observed()` (Issue #519 comfort-only path)
+- `custom_components/climate_advisor/api.py` + `custom_components/climate_advisor/frontend/index.html` — `fan_remote_speed` status field + dashboard display (Issue #519)
+- `gunkl/quietcool-house-fan` `component.yaml` (separate repo) — the new `text_sensor.quietcool_speed` ambient entity (Issue #519)
 
 **Out of scope for this spec** (see [grace-periods-spec.md](grace-periods-spec.md) for the general grace-period mechanics this feature reuses):
-- Speed tokens (`low`/`medium`/`high`) — firmware decodes and emits these, CA does not act on them this cut
-- Explicit `on`/`off` event tokens — CA relies on physical fan-entity state changes for on/off detection instead (see [§ Firmware Event Contract](#firmware-event-contract) for why)
-- Any change to the general manual-override/grace state machine — this feature only adds an optional duration override to the existing mechanism
+- Any code path that actually calls a speed-SETTING HA service (`fan.set_percentage` or similar) — Issue #519 is detect-and-respect only. `handle_fan_speed_observed()`, `_resolve_fan_remote_speed_sensor()`, and `_fan_remote_speed` are the seam a future CA-initiated speed-comfort feature would build on; `fan:`'s `on_speed_set` in the firmware already transmits the needed RF commands, so no firmware work would be needed for that future feature either.
+- Explicit `on`/`off` event tokens for on/off DETECTION purposes — CA still relies on physical fan-entity state changes for that (see [§ Firmware Event Contract](#firmware-event-contract) for why); `on`/`off` remain relevant only as burst-combining context (see [§ Burst Combining](#burst-combining-issue-519)).
+- Any change to the general manual-override/grace state machine — this feature only adds an optional duration override / speed value to the existing mechanism.
+
+**Historical note:** prior to Issue #519, speed tokens (`low`/`medium`/`high`) were explicitly out of scope — "firmware decodes and emits these, CA does not act on them." That is no longer true; see [§ Speed-Press Classification](#speed-press-classification-issue-519) below for the current, in-scope behavior.
 
 ---
 
@@ -63,31 +70,155 @@ entity**.
   not in CA.
 - **Recognized `event_type` tokens** (RF command codes in parentheses):
 
-  | Token | RF code | CA action this cut |
+  | Token | RF code | CA action |
   |---|---|---|
-  | `timer_1h` | `0x91` | Fan override, grace = 3600 s |
-  | `timer_2h` | `0x92` | Fan override, grace = 7200 s |
-  | `timer_4h` | `0x94` | Fan override, grace = 14400 s |
-  | `timer_8h` | `0x98` | Fan override, grace = 28800 s |
-  | `timer_12h` | `0x9C` | Fan override, grace = 43200 s |
-  | `timer_none` | `0x9F` | Fan override, grace = configured `manual_grace_seconds` |
-  | `on` | `0xBF` | Ignored this cut (see [§ Scope](#scope)) |
-  | `off` | `0x80`/`0xB0` | Ignored this cut — CA relies on physical fan-entity state instead |
-  | `low`/`medium`/`high` | `0x1F`/`0x2F`/`0x3F` | Ignored this cut |
+  | `timer_1h` | `0x91`/`0xA1`/`0xB1` (speed-context-dependent, see the [HIGH-speed timer fix PR](https://github.com/gunkl/quietcool-house-fan/pull/2)) | Accumulates into a burst; flushes as an override, grace = 3600 s |
+  | `timer_2h` | `0x92`/`0xA2`/`0xB2` | Override, grace = 7200 s |
+  | `timer_4h` | `0x94`/`0xA4`/`0xB4` | Override, grace = 14400 s |
+  | `timer_8h` | `0x98`/`0xA8`/`0xB8` | Override, grace = 28800 s |
+  | `timer_12h` | `0x9C`/`0xAC`/`0xBC` | Override, grace = 43200 s |
+  | `timer_none` | `0x9F`/`0xAF`/`0xBF` | Override, grace = configured `manual_grace_seconds` |
+  | `on` | `0xBF` | Not independently actionable — CA relies on physical fan-entity state for on/off detection instead. Only meaningful as burst-combining context (see [§ Burst Combining](#burst-combining-issue-519)) if it arrives while a speed/timer burst is already open. |
+  | `off` | `0x80`/`0xB0` | Cancels any pending burst (see [§ Burst Combining](#burst-combining-issue-519)); on/off detection itself still flows through physical fan-entity state, not this token |
+  | `low`/`medium`/`high` | `0x1F`/`0x2F`/`0x3F` | **As of Issue #519:** accumulates into a burst; flushes as either an override or a comfort-only observation — see [§ Speed-Press Classification](#speed-press-classification-issue-519) |
 
 - **Known firmware guidance:** `off` is the only definitive power-down signal in the raw
   protocol; any other token confirms the fan is active. CA does not rely on this for
   power state — see the next point.
 
-**Why CA doesn't act on the `on`/`off` tokens:** because events are edge-triggered, a bare
-power-on that doesn't also change the timer field may not emit any token CA needs to react
-to, and a power-off might arrive out of order relative to the physical fan entity's own
-state change. CA already has a robust, tested physical-state detection path
-(`fan_entity`/`fan_state_entity` + `_async_fan_entity_changed()`) for on/off — duplicating
-that logic against a second, less deterministic signal would be exactly the kind of
-"sibling threshold drift" this codebase has been burned by before (#400/#402/#417/#456/#458).
-The remote integration's sole job is to supply the **duration** when a timer is pressed;
-everything else about fan on/off state continues to flow through the existing path.
+**Why CA doesn't act on the `on`/`off` tokens for power-state DETECTION:** because events are
+edge-triggered, a bare power-on that doesn't also change the timer field may not emit any
+token CA needs to react to, and a power-off might arrive out of order relative to the
+physical fan entity's own state change. CA already has a robust, tested physical-state
+detection path (`fan_entity`/`fan_state_entity` + `_async_fan_entity_changed()`) for on/off —
+duplicating that logic against a second, less deterministic signal would be exactly the kind
+of "sibling threshold drift" this codebase has been burned by before
+(#400/#402/#417/#456/#458). This reasoning is unaffected by Issue #519 — `on`/`off` still do
+not drive on/off detection; they matter only as burst-combining context now.
+
+---
+
+## Speed-Press Classification (Issue #519)
+
+**Occupant impact:** if you adjust the QuietCool remote's speed dial while the fan is already
+running for some other reason (nat-vent, a prior timer, another manual override), that's a
+comfort preference — CA remembers it but doesn't treat it as "you just took manual control,"
+so it doesn't arm a grace period or suppress HVAC on top of whatever was already happening. If
+you select a speed while the fan was off, that IS taking manual control, exactly like pressing
+a timer — CA backs off the same way it always has for a manual fan-on.
+
+**Decision table** (implemented in `coordinator._flush_fan_remote_burst()`):
+
+1. **Timer selected** (with or without speed) → always an **override**. An explicit timer
+   press is always manual intent — unchanged from pre-#519 behavior.
+2. **Bare speed press** (no timer) → consult whether the fan was already running **before**
+   this interaction started:
+   - Fan was OFF, or state unknown (command-only mode, no ground truth) → **override**. The
+     "unknown" case defaults to override as the safe/conservative direction — never less
+     protective than pre-#519 behavior (which ignored speed presses entirely).
+   - Fan was ALREADY running → **comfort-only**. Routed to `handle_fan_speed_observed()`
+     instead of `handle_fan_manual_override()` — records `_fan_remote_speed` and emits a
+     `fan_speed_observed` event, but does NOT touch `_fan_override_active`, grace, or HVAC
+     suppression.
+
+**Correctness detail — why "was running" must be snapshotted at burst-OPEN time, not
+flush time:** an earlier draft of this design planned to re-read `_get_fan_physical_state()`
+at flush time, after any `on`-transition in the burst had already happened. Since the fan is
+typically already on by the time the burst flushes (that's often the whole point of the
+interaction), a flush-time read would answer "yes, already running" for nearly every case —
+including genuine off→on overrides — silently misclassifying them as comfort-only. Fixed by
+snapshotting `was_running_before` exactly once, the moment the burst opens (the first
+speed/timer event of a new interaction), before anything in that interaction could have
+changed the fan's state. Covered by a dedicated regression test
+(`TestFanRemoteBurstClassification::test_timing_bug_regression_fan_turns_on_mid_burst_still_classifies_as_override`)
+that was verified to fail against the flush-time-read version before the fix.
+
+**Why a separate `handle_fan_speed_observed()` function, not a flag inside
+`handle_fan_manual_override()`:** that function's entire contract is "arm an override" (sets
+`_fan_override_active`, starts grace, suppresses HVAC). Smearing a "don't actually override"
+path through it via a boolean flag would mix two different outcomes into one already-complex
+function instead of keeping each single-purpose and independently testable — consistent with
+this codebase's general aversion to conditional branches that change a function's entire
+behavioral contract.
+
+---
+
+## Burst Combining (Issue #519)
+
+A single physical interaction with the remote (e.g. selecting a speed AND a timer together)
+transmits the two fields as **separate packets moments apart**, not simultaneously (see
+`docs/remote-capture-protocol.md` in `gunkl/quietcool-house-fan`). Without combining, CA would
+apply two independent decisions for what the user experienced as one action — two grace
+periods, two HVAC-suppression schedules.
+
+`coordinator.py` accumulates speed/timer events into a `_PendingFanRemoteBurst` and flushes
+exactly once, `REMOTE_BURST_WINDOW_SECONDS` (default 1.5s) after the last related event:
+
+- Each new speed/timer event within the window re-arms the timer (extends, doesn't
+  double-flush) and overwrites the corresponding field — **latest value wins per field**. If
+  the user selects a timer, then changes their mind and clears it (`timer_none`) within the
+  window, the later confirmation correctly overwrites the accumulator before flush.
+- `off` **cancels** the pending burst outright (does not flush it) — turning the fan off
+  supersedes any not-yet-applied override/comfort intent.
+- A bare `on` with no burst already open is not actionable (matches pre-#519 behavior); if it
+  arrives while a burst IS open, it's accounted for as context but does not independently
+  extend or open a new burst.
+
+**Why 1.5 seconds, not longer:** grounded in the firmware's own documented protocol timing
+(`docs/remote-capture-protocol.md`: `SAME_BURST_TOLERANCE_MS=400ms` per-value repeat spacing,
+`CONFIRM_WINDOW_MS=1500ms` per-field confirm cycle, multi-field bursts observed arriving
+within a similar few-second span) rather than an arbitrary "be safe" guess. A longer window
+would only add latency before protection (grace/suppression) is armed when it should be, and
+increases the risk of merging a genuinely separate, later user action into a stale prior
+burst. **This value is provisional** pending live-hardware confirmation once the firmware
+ships — flagged for tuning against real capture data, the same status as the firmware's own
+`SELF_ECHO_WINDOW_MS`.
+
+---
+
+## Ambient Speed Sensor Discovery (Issue #519)
+
+Firmware exposes a second entity, `text_sensor.quietcool_speed` (domain `sensor`, not
+`event`), reporting the current speed as continuously-readable state — distinct from
+`event.quietcool_remote`'s discrete presses. This exists for restart-survival and "the fan
+came pre-set to a speed, never pressed this session" cases the press-event stream alone can't
+cover, and as the seam a future CA-initiated speed-setting feature would read from.
+
+**No new user-facing config.** `coordinator._resolve_fan_remote_speed_sensor()` auto-discovers
+the sibling entity via HA's entity/device registry:
+
+1. Resolve `fan_remote_entity` (already configured) → `device_id` via
+   `entity_registry.async_get()`.
+2. Scan sibling entities on that device via `entity_registry.async_entries_for_device()` for a
+   `sensor.*` domain entity whose object_id matches `REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS`
+   (default: contains `"speed"`).
+3. Cache the resolved entity_id once found (registry relationships don't change during a
+   running session) — but **never cache a negative result**. HA's entity/device registry can
+   populate asynchronously at startup, so a too-early miss must self-correct on a later call
+   rather than permanently disabling the feature for the rest of the session.
+
+`_read_fan_remote_speed()` is then a live, stateless value read each call — mirrors the
+existing `_get_thermostat_capabilities()` precedent (a fresh capability/value read every call,
+degrading to `None` on anything missing), NOT an accumulated "have we ever seen a speed event"
+persisted boolean. This live-read-degrades-to-`None` behavior IS the auto-detect + fallback
+mechanism: no sibling sensor (older/un-updated firmware) or an `unknown`/`unavailable` state
+both resolve to `None`, identical to today's behavior for installs without this feature.
+
+**Test infrastructure note:** this is the first feature in this codebase using HA's
+entity/device registry. Building it surfaced a real gap in `tools/sim_harness/ha_stubs.py`:
+`from homeassistant.helpers import entity_registry as er` resolves via the *parent* mock's
+attribute, not `sys.modules[...]` directly, when the parent (`homeassistant.helpers`) is
+itself a `MagicMock` — an auto-mocked attribute access returns a new, unrelated `MagicMock`,
+not the actually-registered submodule. Fixed by pinning
+`sys.modules["homeassistant.helpers"].entity_registry` (and `.device_registry`) to the real
+registered submodule objects — the same fix already documented there for
+`homeassistant.config_entries`.
+
+**Dashboard display:** `api.py` exposes `fan_remote_speed` in the status payload (live read,
+falling back to the engine's last press-derived `_fan_remote_speed` so the card isn't blank
+between beacons); `index.html` shows it as an additional line on the WHF status card **only
+when known** — omitted entirely (never "unknown speed") otherwise, per this project's existing
+status-card conventions (`.status-item` extension, non-null-gated).
 
 ---
 
@@ -186,10 +317,14 @@ its pre-existing level.
 Consistent with CA's clean-slate policy for override/grace state (Issue #327/#282), an
 active RF timer does **not** survive an HA restart:
 
-- `_fan_remote_timer_hours` is included in `get_serializable_state()` for observability
-  only (dashboard/status display), never restored.
-- `restore_state()` explicitly resets `_fan_remote_timer_hours = None` in the same
-  clean-slate block that resets `_fan_override_active`/`_fan_override_time`/`_grace_active`.
+- `_fan_remote_timer_hours` (and, as of Issue #519, `_fan_remote_speed`) are included in
+  `get_serializable_state()` for observability only (dashboard/status display), never
+  restored.
+- `restore_state()` explicitly resets `_fan_remote_timer_hours = None` and
+  `_fan_remote_speed = None` in the same clean-slate block that resets
+  `_fan_override_active`/`_fan_override_time`/`_grace_active`. The burst-buffer state
+  (`_fan_remote_burst`, Issue #519) is plain coordinator instance state, not persisted at all
+  — it's cleared implicitly by process restart, with no explicit reset needed.
 - After a restart, `reconcile_fan_on_startup()` (unchanged) decides the fan's disposition
   from physical state, the same as it always has.
 
@@ -292,12 +427,17 @@ via the same two paths as any other manual fan override:
 ## Code Reference
 
 - [`parse_remote_timer_event`](../custom_components/climate_advisor/fan_status.py) — token → hours mapping (pure)
+- [`parse_remote_speed_event`](../custom_components/climate_advisor/fan_status.py) — speed-token recognition (pure, Issue #519)
 - [`REMOTE_TIMER_EVENT_HOURS`](../custom_components/climate_advisor/const.py) — the single-source mapping table
-- [`_async_fan_remote_changed`](../custom_components/climate_advisor/coordinator.py) — event dispatch; `_last_fan_remote_event_ts` dedup guard (Issue #495)
-- [`handle_fan_manual_override`](../custom_components/climate_advisor/automation.py) — shared entry point (RF + physical paths); `is_remote_event` (Issue #495)
+- [`REMOTE_SPEED_TOKENS`](../custom_components/climate_advisor/const.py), [`REMOTE_BURST_WINDOW_SECONDS`](../custom_components/climate_advisor/const.py), [`REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS`](../custom_components/climate_advisor/const.py) — Issue #519
+- [`_async_fan_remote_changed`](../custom_components/climate_advisor/coordinator.py) — event dispatch; `_last_fan_remote_event_ts` dedup guard (Issue #495); routes speed/timer into the burst accumulator (Issue #519)
+- [`_arm_fan_remote_burst`/`_cancel_fan_remote_burst`/`_flush_fan_remote_burst`](../custom_components/climate_advisor/coordinator.py) — burst combining + override-vs-comfort classification (Issue #519)
+- [`_resolve_fan_remote_speed_sensor`/`_read_fan_remote_speed`](../custom_components/climate_advisor/coordinator.py) — ambient sensor discovery via entity/device registry (Issue #519)
+- [`handle_fan_manual_override`](../custom_components/climate_advisor/automation.py) — shared entry point (RF + physical paths); `is_remote_event` (Issue #495); `remote_speed` (Issue #519)
+- [`handle_fan_speed_observed`](../custom_components/climate_advisor/automation.py) — comfort-only speed observation, does NOT arm override/grace/HVAC-suppression (Issue #519)
 - [`_suppress_hvac_for_whf`](../custom_components/climate_advisor/automation.py) — shared HVAC-off helper, CA-initiated AND manual/remote (Issue #495)
 - [`_release_whf_and_reclassify`](../custom_components/climate_advisor/automation.py) — manual-session exit: release + reclassify, not blind restore (Issue #495)
 - [`_start_grace_period`](../custom_components/climate_advisor/automation.py) — `duration_override` resolution
 - [`_deactivate_fan`](../custom_components/climate_advisor/automation.py) — primary suppression choke point + WARNING
 - [`fan_thermostat_check`](../custom_components/climate_advisor/automation.py) — secondary suppression choke point + WARNING
-- Tests: `tests/test_fan_remote.py`, `tests/test_whole_house_fan_hvac_suppression.py` (`TestManualWhfOnSuppressesHvac`, `TestManualWhfOffReleasesAndReclassifies`)
+- Tests: `tests/test_fan_remote.py` (incl. `TestParseRemoteSpeedEvent`, `TestFanRemoteBurstClassification`, `TestFanRemoteBurstWindow`, `TestFanRemoteSpeedSensorDiscovery`), `tests/test_whole_house_fan_hvac_suppression.py` (`TestManualWhfOnSuppressesHvac`, `TestManualWhfOffReleasesAndReclassifies`), `tests/test_api.py` (`TestStatusFanRemoteSpeed`)

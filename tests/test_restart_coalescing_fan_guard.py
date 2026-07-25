@@ -189,11 +189,20 @@ def _make_fan_remote_coord(*, startup_coalesce_active: bool) -> object:
     # Issue #495: _async_fan_remote_changed() now dedups on the last acted-on event
     # timestamp — object.__new__() skips __init__, so this must be set explicitly.
     coord._last_fan_remote_event_ts = None
+    # Issue #519: burst-combining state — object.__new__() skips __init__, so these must
+    # be set explicitly. Tests that need the flushed decision call _flush_fan_remote_burst()
+    # directly rather than waiting out the real async_call_later timer.
+    coord._fan_remote_burst = None
+    coord._fan_remote_burst_cancel = None
+    coord._get_fan_physical_state = MagicMock(return_value=None)
 
     coord._suppress_during_startup_coalescing = types.MethodType(
         ClimateAdvisorCoordinator._suppress_during_startup_coalescing, coord
     )
     coord._async_fan_remote_changed = types.MethodType(ClimateAdvisorCoordinator._async_fan_remote_changed, coord)
+    coord._arm_fan_remote_burst = types.MethodType(ClimateAdvisorCoordinator._arm_fan_remote_burst, coord)
+    coord._cancel_fan_remote_burst = types.MethodType(ClimateAdvisorCoordinator._cancel_fan_remote_burst, coord)
+    coord._flush_fan_remote_burst = types.MethodType(ClimateAdvisorCoordinator._flush_fan_remote_burst, coord)
     return coord
 
 
@@ -227,10 +236,21 @@ class TestFanRemoteChangedCoalescingGuard:
         new_state = _make_state("2026-07-12T16:58:00+00:00", {"event_type": "timer_2h"})
         event = _make_event({"new_state": new_state})
 
-        asyncio.run(coord._async_fan_remote_changed(event))
+        async def _run():
+            await coord._async_fan_remote_changed(event)
+            # Issue #519: the override call is now deferred until the burst-combining
+            # window elapses — flush directly instead of waiting out the real timer.
+            await coord._flush_fan_remote_burst()
+
+        asyncio.run(_run())
 
         coord.automation_engine.handle_fan_manual_override.assert_called_once_with(
-            fan_before="?", fan_after="on", duration_override=7200.0, remote_timer_hours=2.0, is_remote_event=True
+            fan_before="?",
+            fan_after="on",
+            duration_override=7200.0,
+            remote_timer_hours=2.0,
+            remote_speed=None,
+            is_remote_event=True,
         )
 
 

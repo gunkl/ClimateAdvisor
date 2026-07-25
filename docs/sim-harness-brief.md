@@ -57,6 +57,7 @@
 def run_production_scenario(scenario: dict) -> ProductionRunResult:
     """Drive the real AutomationEngine through a scenario dict, return logs."""
 
+
 # Build a headless engine for direct test use
 def build_headless_engine(
     config: dict | None = None,
@@ -69,9 +70,11 @@ def build_headless_engine(
 ) -> tuple[AutomationEngine, FakeHass, FakeScheduler, list]:
     """Returns (engine, fake_hass, scheduler, event_log)."""
 
+
 # Convert event_log to legacy outcome vocab
 def production_decisions(result: ProductionRunResult) -> list[ProductionDecision]:
     """Map event_log + action_log enrichment to time-ordered ProductionDecision list."""
+
 
 # Check a custom assertion type
 def check_assertion(
@@ -102,11 +105,12 @@ class ProductionRunResult:
     engine_state: dict[str, Any]  # snapshot of live engine flags
     callback_errors: list[tuple[datetime, BaseException]]
 
+
 @dataclass
 class ProductionDecision:
-    time: str          # naive ISO timestamp (tz stripped for lexicographic compare)
-    event_type: str    # raw production event type
-    outcome: str       # legacy outcome vocabulary string
+    time: str  # naive ISO timestamp (tz stripped for lexicographic compare)
+    event_type: str  # raw production event type
+    outcome: str  # legacy outcome vocabulary string
     target_temp: float | None  # set when a temperature was applied
 ```
 

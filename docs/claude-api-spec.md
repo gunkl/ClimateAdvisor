@@ -228,15 +228,15 @@ A successful attempt on any retry number returns immediately without sleep.
 ```python
 @dataclass
 class ClaudeResponse:
-    success: bool          # True iff the API call completed and returned a valid response
-    content: str           # Claude's raw text response; always "" when success=False
-    input_tokens: int      # Tokens consumed from the prompt; 0 when success=False
-    output_tokens: int     # Tokens in the response; 0 when success=False
+    success: bool  # True iff the API call completed and returned a valid response
+    content: str  # Claude's raw text response; always "" when success=False
+    input_tokens: int  # Tokens consumed from the prompt; 0 when success=False
+    output_tokens: int  # Tokens in the response; 0 when success=False
     estimated_cost: float  # USD cost estimate from _MODEL_COSTS; 0.0 when success=False
-    latency_ms: float      # Wall-clock ms from first attempt to return (includes retries)
-    error: str | None      # Error message string; None when success=True
-    rate_limited: bool     # True iff rejected by the daily rate limit guard (pre-flight)
-    circuit_open: bool     # True iff rejected by the circuit breaker guard (pre-flight)
+    latency_ms: float  # Wall-clock ms from first attempt to return (includes retries)
+    error: str | None  # Error message string; None when success=True
+    rate_limited: bool  # True iff rejected by the daily rate limit guard (pre-flight)
+    circuit_open: bool  # True iff rejected by the circuit breaker guard (pre-flight)
     budget_exceeded: bool  # True iff rejected by the monthly budget guard (pre-flight)
 ```
 

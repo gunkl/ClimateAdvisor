@@ -120,9 +120,9 @@ _LOGGER.debug("No persisted state found — starting fresh")
 **WARNING — recoverable problem with fallback** (coordinator.py):
 ```python
 _LOGGER.warning(
-    "Outdoor temp entity %s has non-numeric state %r; "
-    "falling back to weather attribute",
-    entity_id, state.state,
+    "Outdoor temp entity %s has non-numeric state %r; falling back to weather attribute",
+    entity_id,
+    state.state,
 )
 ```
 

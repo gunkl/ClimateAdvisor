@@ -38,21 +38,26 @@ FAHRENHEIT: str = "fahrenheit"
 CELSIUS: str = "celsius"
 UNIT_SYMBOL: dict[str, str]  # {"fahrenheit": "°F", "celsius": "°C"}
 
+
 def to_fahrenheit(value: float, unit: str) -> float:
     """Convert an absolute temperature from display unit to internal °F.
     Use at HA config read boundaries (user-entered setpoints in Celsius homes)."""
+
 
 def from_fahrenheit(value: float, unit: str) -> float:
     """Convert an absolute temperature from internal °F to display unit.
     Use when displaying any stored temperature to the user."""
 
+
 def format_temp(value_fahrenheit: float, unit: str, decimals: int = 0) -> str:
     """Format an internal °F temperature as a display string, e.g. '22°C'.
     Calls from_fahrenheit() internally."""
 
+
 def convert_delta(value_fahrenheit: float, unit: str) -> float:
     """Convert a temperature delta or rate from °F scale to display unit scale.
     Scale only (×5/9 for Celsius) — no +32/−32 offset."""
+
 
 def format_temp_delta(delta_fahrenheit: float, unit: str, decimals: int = 0) -> str:
     """Format a temperature delta as a display string, e.g. '5°C'.

@@ -33,7 +33,7 @@ The briefing fires at `briefing_time` (default 06:00), which typically precedes 
 (default 06:30) and the daily classification event. The briefing uses:
 
 ```python
-today_date = dt_util.now().date()       # calendar today
+today_date = dt_util.now().date()  # calendar today
 tomorrow_date = today_date + timedelta(days=1)
 ```
 

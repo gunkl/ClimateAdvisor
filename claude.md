@@ -159,9 +159,7 @@ Before calling a function from inside an `async def` method, ask: **"Does this r
 ```python
 import functools
 
-result = await self.hass.async_add_executor_job(
-    functools.partial(heavy_sync_function, arg1, arg2, keyword=value)
-)
+result = await self.hass.async_add_executor_job(functools.partial(heavy_sync_function, arg1, arg2, keyword=value))
 ```
 
 **Capture all arguments in the event loop thread** (i.e., evaluate `self.*` attributes and helper calls like `self._get_indoor_temp()` before `functools.partial`, not inside the executor). The executor runs the partial with no additional arguments.
@@ -274,6 +272,8 @@ replace the README badge with a hardcoded string, or skip a GitHub Release on a 
   ```python
   def _consume_coroutine(coro):
       coro.close()
+
+
   hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
   ```
   Reference implementations: `test_door_window.py:255`, `test_resume_from_pause.py:44`
@@ -911,6 +911,8 @@ Any callback passed to `async_call_later` that calls `hass.async_create_task` MU
 @callback
 def _schedule_work(_now: Any) -> None:
     self.hass.async_create_task(_do_async_work())
+
+
 async_call_later(self.hass, delay, _schedule_work)
 ```
 Never: `async_call_later(self.hass, delay, lambda _now: self.hass.async_create_task(_do_async_work()))`. `callback` is imported from `homeassistant.core` and is already present in `automation.py` and `coordinator.py`. Issue #325 fixed four violations of this rule.

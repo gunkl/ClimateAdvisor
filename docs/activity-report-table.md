@@ -277,8 +277,7 @@ In `tests/test_ai_activity_table.py`, add a test that asserts:
 ```python
 def test_my_new_event_settings_populated():
     table = build_event_timeline_table(
-        [{"time": "10:00", "type": "my_new_event",
-          "setpoint_f": 72.0, "mode": "cool", "trigger": "user_schedule"}],
+        [{"time": "10:00", "type": "my_new_event", "setpoint_f": 72.0, "mode": "cool", "trigger": "user_schedule"}],
         config={"temp_unit": "fahrenheit"},
         hours=24,
         now=datetime.now(),

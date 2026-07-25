@@ -950,7 +950,7 @@ Prior to Issue #147, MILD day window scheduling used hardcoded `time(10, 0)` (op
 
 ```python
 # classifier.py (pre-v0.3.46) — lines 118–119
-self.window_open_time = time(10, 0)   # always 10am
+self.window_open_time = time(10, 0)  # always 10am
 self.window_close_time = time(17, 0)  # always 5pm
 ```
 
@@ -961,8 +961,8 @@ These literals were correct as a starting guess but systematically incorrect for
 **Constants moved to `const.py`:**
 
 ```python
-MILD_WINDOW_OPEN_HOUR = 10    # MILD-day window open fallback (was hardcoded in classifier.py)
-MILD_WINDOW_CLOSE_HOUR = 17   # MILD-day window close fallback
+MILD_WINDOW_OPEN_HOUR = 10  # MILD-day window open fallback (was hardcoded in classifier.py)
+MILD_WINDOW_CLOSE_HOUR = 17  # MILD-day window close fallback
 ```
 
 **`classifier.py` now uses the constants:**

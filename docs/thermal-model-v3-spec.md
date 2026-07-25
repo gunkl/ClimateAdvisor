@@ -388,8 +388,8 @@ When `_k_passive_via_bridge=True`, the confidence count requirement is bypassed 
 ```python
 _bridge_guard_applies = (
     _k_passive_via_bridge
-    and _windows_recommended          # classification has a window schedule
-    and not _hour_windows_open        # current hour is outside the open window
+    and _windows_recommended  # classification has a window schedule
+    and not _hour_windows_open  # current hour is outside the open window
 )
 ```
 When the guard applies, ramp interpolation is used for that hour. When windows are NOT recommended (no schedule), the bridge runs for all hours without guard interference.
@@ -521,12 +521,14 @@ def _solar_factor(
 
 ```python
 effective_hour = int(local_hour) - int(round(phase_offset_h))
-if effective_hour < THERMAL_SOLAR_DAYTIME_START_H:   # 8
+if effective_hour < THERMAL_SOLAR_DAYTIME_START_H:  # 8
     return 0.0
-if effective_hour >= THERMAL_SOLAR_DAYTIME_END_H:    # 18
+if effective_hour >= THERMAL_SOLAR_DAYTIME_END_H:  # 18
     return 0.0
 # sin curve over [8, 18), peak at effective_hour = 13
-angle = (effective_hour - THERMAL_SOLAR_DAYTIME_START_H) / (THERMAL_SOLAR_DAYTIME_END_H - THERMAL_SOLAR_DAYTIME_START_H) * π
+angle = (
+    (effective_hour - THERMAL_SOLAR_DAYTIME_START_H) / (THERMAL_SOLAR_DAYTIME_END_H - THERMAL_SOLAR_DAYTIME_START_H) * π
+)
 return max(0.0, sin(angle))
 ```
 
@@ -665,31 +667,31 @@ A chart_log window is eligible for a phase observation only when all six conditi
 
 ```python
 {
-  "k_passive": {
-    "active": bool,          # True when k_passive is not None
-    "value": float | None,   # current thermal_model_cache["k_passive"]
-    "confidence": str,       # "none" | "low" | "medium" | "high"
-  },
-  "k_solar": {
-    "active": bool,
-    "value": float | None,
-    "confidence": str,       # derived from observation_count_solar (same grade thresholds as k_passive)
-  },
-  "solar_phase_offset_h": {
-    "active": bool,          # True when solar_phase_offset_h is not None
-    "value": float | None,
-  },
-  "k_vent_window": {
-    "active": bool,
-    "value": float | None,
-  },
-  "k_active_hvac": {
-    "active": bool,                                  # True when k_active_heat or k_active_cool is not None
-    "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool
-  },
-  "ode_version": str,        # "v3" when k_solar or k_vent present; "basic" otherwise
-  "physics_eligible": bool,  # True when the ODE prediction path is currently active
-  "physics_eligible_reason": str,  # human-readable explanation of eligibility state
+    "k_passive": {
+        "active": bool,  # True when k_passive is not None
+        "value": float | None,  # current thermal_model_cache["k_passive"]
+        "confidence": str,  # "none" | "low" | "medium" | "high"
+    },
+    "k_solar": {
+        "active": bool,
+        "value": float | None,
+        "confidence": str,  # derived from observation_count_solar (same grade thresholds as k_passive)
+    },
+    "solar_phase_offset_h": {
+        "active": bool,  # True when solar_phase_offset_h is not None
+        "value": float | None,
+    },
+    "k_vent_window": {
+        "active": bool,
+        "value": float | None,
+    },
+    "k_active_hvac": {
+        "active": bool,  # True when k_active_heat or k_active_cool is not None
+        "value": {"heat": float | None, "cool": float | None},  # k_active_heat and k_active_cool
+    },
+    "ode_version": str,  # "v3" when k_solar or k_vent present; "basic" otherwise
+    "physics_eligible": bool,  # True when the ODE prediction path is currently active
+    "physics_eligible_reason": str,  # human-readable explanation of eligibility state
 }
 ```
 

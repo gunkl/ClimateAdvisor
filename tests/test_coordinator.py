@@ -264,7 +264,7 @@ class TestComputeNextAction:
         """Mild day (not hot/cold) → no action needed message."""
         c = _make_classification(day_type="mild")
         result = _compute_next_action(c, {}, time(12, 0))
-        assert "No action needed" in result
+        assert "Automation active" in result
 
     def test_next_action_warm_day_after_close_before_evening(self):
         """WARM day after 10 AM close, before 5 PM — mid-day gap, no window guidance."""
@@ -275,7 +275,7 @@ class TestComputeNextAction:
             window_close_time=time(WARM_WINDOW_CLOSE_HOUR, 0),
         )
         result = _compute_next_action(c, {}, time(13, 0))
-        assert "No action needed" in result
+        assert "Automation active" in result
 
     def test_next_action_warm_day_after_close_at_evening_start(self):
         """WARM day after 10 AM close, at exactly 5 PM — evening ventilation suggested."""
@@ -306,7 +306,7 @@ class TestComputeNextAction:
         assert "78" in result
         assert "70" in result
         assert "open windows" in result.lower()
-        assert "No action needed" not in result
+        assert "Automation active" not in result
 
     def test_next_action_indoor_above_comfort_outdoor_hotter_suppresses_bug(self):
         """Regression test for Issue #428 — indoor 75/outdoor 80 must NOT suggest opening windows."""
@@ -491,19 +491,19 @@ class TestComputeNextAction:
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=70.0)
         assert "78" in result
-        assert "No action needed" not in result
+        assert "Automation active" not in result
 
     def test_next_action_indoor_at_comfort_boundary_no_guidance(self):
         """Indoor temp exactly at comfort_cool boundary (not above) → no alert."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=75.0)
-        assert "No action needed" in result
+        assert "Automation active" in result
 
     def test_next_action_indoor_none_falls_back_to_no_action(self):
         """When indoor_temp is None — no comfort alert, falls back to default."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=None)
-        assert "No action needed" in result
+        assert "Automation active" in result
 
     def test_next_action_warm_day_midday_indoor_above_comfort(self):
         """WARM day mid-day with indoor above comfort, outdoor cooler — comfort guidance wins over 'no action'."""
@@ -515,7 +515,7 @@ class TestComputeNextAction:
         )
         result = _compute_next_action(c, {"comfort_cool": 75}, time(13, 0), indoor_temp=79.0, outdoor_temp=72.0)
         assert "79" in result
-        assert "No action needed" not in result
+        assert "Automation active" not in result
 
     def test_next_action_hot_day_indoor_above_comfort_still_shows_ac_message(self):
         """HOT day: HOT branch always returns before indoor check — AC message wins."""

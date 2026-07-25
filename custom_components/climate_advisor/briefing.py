@@ -109,6 +109,19 @@ def generate_briefing(
         "sleep_time": sleep_time,
         "wake_time": wake_time,
     }
+    # Single source of truth for warm-day window/AC timing (Issue #518): derive once here
+    # and hand the same result to both the header table and the conversational body, so
+    # they can never disagree about when windows close or whether AC is expected.
+    warm_events = (
+        _derive_warm_day_events(
+            predicted_indoor=predicted_indoor_future,
+            predicted_outdoor=predicted_outdoor_future,
+            comfort_cool=comfort_cool,
+        )
+        if c.day_type == DAY_TYPE_WARM and predicted_indoor_future and predicted_outdoor_future
+        else None
+    )
+
     tldr_lines = _generate_tldr_table(
         c,
         config,
@@ -116,6 +129,7 @@ def generate_briefing(
         bedtime_setback_heat=bedtime_setback_heat,
         bedtime_setback_cool=bedtime_setback_cool,
         occupancy_mode=occupancy_mode,
+        warm_events=warm_events,
     )
 
     if verbosity == "tldr_only":
@@ -149,8 +163,7 @@ def generate_briefing(
                 sleep_time,
                 fan_mode=fan_mode,
                 temp_unit=temp_unit,
-                predicted_indoor_future=predicted_indoor_future,
-                predicted_outdoor_future=predicted_outdoor_future,
+                warm_events=warm_events,
                 pre_cool_target=bedtime_setback_cool,
             )
         )
@@ -244,6 +257,7 @@ def _generate_tldr_table(
     bedtime_setback_heat: float | None = None,
     bedtime_setback_cool: float | None = None,
     occupancy_mode: str = "home",
+    warm_events: dict | None = None,
 ) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
@@ -254,6 +268,9 @@ def _generate_tldr_table(
         temp_unit: Display unit — "fahrenheit" or "celsius".
         bedtime_setback_heat: Adaptive bedtime heat setback temperature, if learned.
         bedtime_setback_cool: Adaptive bedtime cool setback temperature, if learned.
+        warm_events: Result of _derive_warm_day_events(), pre-computed once in
+            generate_briefing() (Issue #518) so the header's window-close time always
+            agrees with the conversational body — never re-derive it independently here.
 
     Returns:
         List of lines forming a plain-text aligned table.
@@ -286,7 +303,12 @@ def _generate_tldr_table(
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
     if c.windows_recommended and c.window_open_time and c.window_close_time:
         open_t = c.window_open_time.strftime(_FMT_HOUR)
-        close_t = c.window_close_time.strftime(_FMT_HOUR)
+        # Prefer the same ODE-derived cutoff the conversational body uses (Issue #518) \u2014
+        # falls back to the classifier's static hour only when no forecast curve exists.
+        warm_cutoff = warm_events.get("nat_vent_cutoff") if warm_events else None
+        close_t = (
+            warm_cutoff.strftime(_FMT_HOUR) if warm_cutoff is not None else c.window_close_time.strftime(_FMT_HOUR)
+        )
         windows_val = f"Open {open_t} \u2013 {close_t}"
     elif c.window_opportunity_morning and c.window_opportunity_evening:
         m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR).lstrip("0")
@@ -474,6 +496,7 @@ def _derive_warm_day_events(
       precool_start_time: datetime | None — ceiling_breach_time minus computed lead
       any_nat_vent_window: bool — True if outdoor < indoor at any point
       nat_vent_recovers: bool — True if outdoor drops back below indoor after cutoff
+      recovery_time: datetime | None — first timestamp after cutoff where outdoor < indoor again
     """
     result: dict = {
         "nat_vent_cutoff": None,
@@ -481,6 +504,7 @@ def _derive_warm_day_events(
         "precool_start_time": None,
         "any_nat_vent_window": False,
         "nat_vent_recovers": False,
+        "recovery_time": None,
     }
 
     if not predicted_indoor or not predicted_outdoor:
@@ -528,12 +552,13 @@ def _derive_warm_day_events(
         lead_min = max(30.0, min(240.0, lead_min))
         result["precool_start_time"] = result["ceiling_breach_time"] - timedelta(minutes=lead_min)
 
-    # nat_vent_recovers: outdoor drops back below indoor AFTER the cutoff
+    # nat_vent_recovers / recovery_time: outdoor drops back below indoor AFTER the cutoff
     if result["nat_vent_cutoff"] is not None:
         cutoff_ts = result["nat_vent_cutoff"]
         for ts, i_temp, o_temp in pairs:
             if ts > cutoff_ts and o_temp < i_temp:
                 result["nat_vent_recovers"] = True
+                result["recovery_time"] = ts
                 break
 
     _LOGGER.debug(
@@ -610,23 +635,25 @@ def _warm_day_plan(
     predicted_indoor_future: list[dict] | None = None,
     predicted_outdoor_future: list[dict] | None = None,
     pre_cool_target: float | None = None,
+    warm_events: dict | None = None,
 ) -> list[str]:
-    """Conversational plan for warm days (75-85\u00b0F)."""
+    """Conversational plan for warm days (75-85\u00b0F).
+
+    Issue #518: window/AC timing is derived once in generate_briefing() and passed
+    in as `warm_events` so this never disagrees with the header table. Falls back to
+    deriving it locally only when called directly with raw prediction curves (tests).
+    """
     lines = []
 
-    # Derive ODE timing events if prediction data is available
-    _events = (
-        _derive_warm_day_events(
+    _events = warm_events
+    if _events is None and predicted_indoor_future and predicted_outdoor_future:
+        _events = _derive_warm_day_events(
             predicted_indoor=predicted_indoor_future,
             predicted_outdoor=predicted_outdoor_future,
             comfort_cool=comfort_cool,
         )
-        if predicted_indoor_future and predicted_outdoor_future
-        else None
-    )
     _nat_vent_cutoff = _events["nat_vent_cutoff"] if _events else None
     _ceiling_breach = _events["ceiling_breach_time"] if _events else None
-    _precool_start = _events["precool_start_time"] if _events else None
     _nat_vent_recovers = _events["nat_vent_recovers"] if _events else False
 
     if c.windows_recommended and c.window_open_time:
@@ -636,7 +663,7 @@ def _warm_day_plan(
             lines.append(
                 f"Open windows around {open_t} to catch the cool morning air."
                 f" Close up at {close_t} \u2014 after that the outdoor air will be"
-                f" warmer than inside. I'll take over with AC as needed."
+                f" warmer than inside."
             )
         else:
             lines.append(
@@ -644,28 +671,28 @@ def _warm_day_plan(
                 f" \u2014 cross-ventilation keeps things comfortable without the AC."
             )
     else:
-        lines.append("HVAC is off this morning \u2014 no action needed.")
+        lines.append("HVAC is off this morning.")
 
     if fan_mode != FAN_MODE_DISABLED:
         lines.append("I'll use the fan to boost cross-ventilation when windows are open.")
 
     lines.append("")
 
+    # Issue #518: this used to independently promise "I'll run the AC starting around
+    # X \u2014 no action needed from you", ignoring window state entirely \u2014 contradicting
+    # the real automation guard (automation.py apply_classification()'s DEFER_PAUSED
+    # branch actually suppresses AC the whole time a window is open) and duplicating
+    # _fresh_air_section()'s already-correct, debounce-aware version of this same fact.
+    # This section now only states the forecast and ties the AC to windows being
+    # closed; _fresh_air_section owns the debounce/pause mechanics, so it's said once.
     if _ceiling_breach is not None:
         breach_t = _ceiling_breach.strftime(_FMT_HOUR)
-        if _precool_start is not None:
-            precool_t = _precool_start.strftime(_FMT_HOUR)
-            lines.append(
-                f"Indoor temps are forecast to reach"
-                f" {format_temp(comfort_cool, temp_unit)} around {breach_t}."
-                f" I'll run the AC starting around {precool_t} \u2014 no action needed from you."
-            )
-        else:
-            lines.append(
-                f"Indoor temps are forecast to reach"
-                f" {format_temp(comfort_cool, temp_unit)} around {breach_t}."
-                f" I'll run the AC as needed to keep things comfortable."
-            )
+        lines.append(
+            f"Indoor temps are forecast to reach"
+            f" {format_temp(comfort_cool, temp_unit)} around {breach_t}."
+            f" Once windows are closed, the AC will step in automatically if it's"
+            f" needed to hold that ceiling."
+        )
     elif c.window_close_time:
         close_t = c.window_close_time.strftime(_FMT_HOUR)
         lines.append(
@@ -688,23 +715,19 @@ def _warm_day_plan(
         )
 
     if _nat_vent_recovers and _events is not None:
-        # Find recovery time from the curves
-        _recovery_ts = None
-        cutoff = _events["nat_vent_cutoff"]
-        if cutoff is not None and predicted_indoor_future and predicted_outdoor_future:
-            for i_e, o_e in zip(predicted_indoor_future, predicted_outdoor_future, strict=False):
-                try:
-                    ts = datetime.fromisoformat(i_e["ts"])
-                except (KeyError, ValueError, TypeError):
-                    continue
-                if ts > cutoff and o_e.get("temp", 99) < i_e.get("temp", 0):
-                    _recovery_ts = ts
-                    break
+        _recovery_ts = _events["recovery_time"]
         if _recovery_ts is not None:
             rec_t = _recovery_ts.strftime(_FMT_HOUR)
-            lines.append(
-                f"Reopen windows around {rec_t} when the evening air cools back down \u2014 I'll turn off the AC."
-            )
+            # Issue #518: only claim "I'll turn off the AC" when the AC could
+            # plausibly have engaged first (breach predicted before recovery) \u2014
+            # otherwise this contradicted itself by canceling an action that was
+            # never actually started.
+            if _ceiling_breach is not None and _ceiling_breach < _recovery_ts:
+                lines.append(
+                    f"Reopen windows around {rec_t} when the evening air cools back down \u2014 I'll turn off the AC."
+                )
+            else:
+                lines.append(f"Reopen windows around {rec_t} when the evening air cools back down.")
 
     return lines
 
@@ -992,6 +1015,6 @@ def _tonight_preview(
             f"Tomorrow looks pretty similar to today \u2014 {format_temp(c.tomorrow_high, temp_unit)}"
             f" for a high. Nothing special planned overnight.",
         ]
-    if adaptive_thermal_active:
+    if adaptive_thermal_active and c.hvac_mode in ("heat", "cool"):
         lines.append("Bedtime setback and pre-heat timing are tuned to your home's actual heating performance.")
     return lines

@@ -119,6 +119,7 @@ FOCUS_TAG_MAP: dict[str, frozenset[str]] = {
     "override": frozenset({"learning", "events", "system"}),
     "config": frozenset({"config", "system"}),
     "window": frozenset({"learning", "events", "system"}),
+    "briefing": frozenset({"briefing", "system"}),
 }
 
 # ---------------------------------------------------------------------------
@@ -439,6 +440,24 @@ async def build_current_state_context(hass: Any, coordinator: Any, **kwargs: Any
     except Exception:
         _LOGGER.warning("investigator: failed to read coordinator.data — skipping current state")
         return "=== CURRENT STATE ===\n  unavailable\n"
+
+
+async def build_last_briefing_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
+    """Build LAST BRIEFING section — the most recently rendered briefing text (Issue #518).
+
+    Lets the investigator review the user-facing briefing itself for internal
+    contradictions (e.g. header/body disagreeing on a time, or a sentence that
+    doesn't match the day's actual hvac_mode) rather than only inspecting the
+    structured coordinator state that produced it.
+    """
+    try:
+        text = getattr(coordinator, "_last_briefing", "") or ""
+        if not text:
+            return "=== LAST BRIEFING ===\n  not yet generated today\n"
+        return "\n".join(["=== LAST BRIEFING ===", text, ""])
+    except Exception:
+        _LOGGER.warning("investigator: failed to read coordinator._last_briefing — skipping")
+        return "=== LAST BRIEFING ===\n  unavailable\n"
 
 
 async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
@@ -1065,6 +1084,14 @@ _PROVIDER_REGISTRY.register(
         tags=frozenset({"hvac"}),
         priority=0,
         builder=build_hvac_entity_context,
+    )
+)
+_PROVIDER_REGISTRY.register(
+    ContextProvider(
+        name="last_briefing",
+        tags=frozenset({"system", "briefing"}),
+        priority=1,
+        builder=build_last_briefing_context,
     )
 )
 _PROVIDER_REGISTRY.register(

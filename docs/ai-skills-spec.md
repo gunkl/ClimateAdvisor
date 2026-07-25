@@ -349,12 +349,20 @@ This is the only skill in the registry that uses per-skill config overrides.
 
 `async_build_investigator_context(hass, coordinator, **kwargs) → str`
 
-Assembles seven numbered context blocks. Each block is wrapped in its own `try/except`. If a block fails, its section is replaced with `"  unavailable"` and assembly continues — a failure in one block never aborts the others.
+Assembles context blocks via a `ContextProviderRegistry` (`ai_skills_context.py`), sorted by
+`priority` and optionally filtered by a `focus` keyword (`ContextProviderRegistry.select()`).
+Each block is wrapped in its own `try/except`. If a block fails, its section is replaced with
+`"  unavailable"` and assembly continues — a failure in one block never aborts the others. The
+table below lists the blocks as of Issue #518; the registry has grown since the original
+"seven blocks" description (it now also includes `known_fixes`, `version`, and `github`
+providers) — treat the registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`)
+as authoritative if this table and the code ever disagree.
 
 | Block # | Section label | Data source |
 |---|---|---|
 | 1 | `CURRENT STATE` | `coordinator.data` + fresh HVAC runtime |
 | 2 | `HVAC ENTITY` | `hass.states.get(climate_entity_id)` — `hvac_mode` and `current_temperature` |
+| 2b | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim (added Issue #518, so the investigator can review the user-facing briefing itself for internal contradictions, not just the structured state that produced it) |
 | 3 | `LEARNING — COMPLIANCE SUMMARY` | `learning.get_compliance_summary()` |
 | 3 | `LEARNING — THERMAL MODEL` | `learning.get_thermal_model()` |
 | 3 | `LEARNING — WEATHER BIAS` | `learning.get_weather_bias()` |

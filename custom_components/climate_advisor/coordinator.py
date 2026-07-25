@@ -1680,20 +1680,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if prev_type is not None and prev_type != self._current_classification.day_type:
                 with contextlib.suppress(Exception):
                     _chart_hvac_cc = self._read_chart_hvac_action()
+                    # Issue #510 0.4: compute once, reuse below — avoids duplicate
+                    # _compute_fan_status() calls (and duplicate WARNING logs) for the same instant.
+                    _fan_status_cc = self._compute_fan_status() if self.automation_engine else "disabled"
                     _LOGGER.debug(
                         "chart_log append: event=classification_change hvac=%r fan=%s",
                         _chart_hvac_cc,
-                        self._fan_is_running() if self.automation_engine else False,
+                        self._fan_is_running(_fan_status_cc) if self.automation_engine else False,
                     )
                     self._chart_log.append(
                         hvac=_chart_hvac_cc,
-                        fan=self._fan_is_running() if self.automation_engine else False,
+                        fan=self._fan_is_running(_fan_status_cc) if self.automation_engine else False,
                         indoor=forecast.current_indoor_temp,
                         outdoor=forecast.current_outdoor_temp,
                         windows_open=self._any_sensor_open(),
                         windows_recommended=bool(self._current_classification.windows_recommended),
                         event="classification_change",
-                        fan_running=self._fan_physically_running() if self.automation_engine else False,
+                        fan_running=self._fan_physically_running(_fan_status_cc) if self.automation_engine else False,
                         nat_vent_active=bool(
                             self.automation_engine._natural_vent_active if self.automation_engine else False
                         ),
@@ -2007,6 +2010,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._startup_hvac_initialized = True
             await self._initialize_hvac_session_from_current_state(_cs)
 
+        # Issue #510 0.4: compute once, reuse below (including at the untracked-fan check
+        # further down) — avoids repeated duplicate _compute_fan_status() calls (and duplicate
+        # WARNING logs) for the same instant within a single update cycle. Independent of
+        # hvac_mode/hvac_action, so safe to compute unconditionally here.
+        _fan_status_uc = self._compute_fan_status()
+
         # Emit a structured warning event when the HVAC entity reports an active action
         # (heating/cooling/fan) while hvac_mode is "off".  This surfaces the contradiction
         # in the investigator event log so it is not invisible outside the AI narrative.
@@ -2027,9 +2036,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # here, even though ai_skills_activity.py's independent check already treated
             # "running (manual override)" as expected — the two sites had silently
             # disagreed on this case.
-            _ca_fan_running = self.automation_engine._natural_vent_active or is_ca_fan_running(
-                self._compute_fan_status()
-            )
+            _ca_fan_running = self.automation_engine._natural_vent_active or is_ca_fan_running(_fan_status_uc)
             _is_expected_fan = str(hvac_action).lower() == "fan" and _ca_fan_running
             if not _is_expected_fan:
                 _now = dt_util.now()
@@ -2048,7 +2055,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # blower/fan that CA did not command) in the event log so it is not invisible.
         # Deduped entry/exit: emit once when the fan enters the untracked-running state and
         # once when it clears — never per cooling-cycle. Classify the inferred source.
-        _is_untracked = self._compute_fan_status() == "running (untracked)"
+        _is_untracked = _fan_status_uc == "running (untracked)"
         _untracked_logged = getattr(self, "_untracked_fan_active", False)
         if _is_untracked and not _untracked_logged:
             _cs2 = self.hass.states.get(self.config.get("climate_entity", ""))
@@ -2099,6 +2106,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # The one-shot trigger in _async_thermostat_changed (~line 2826) is guarded by
         # not _fan_override_active, but that flag may already be True from Block 3 in the same
         # event, leaving the untracked fan permanently unresolved.  This backstop catches it.
+        #
+        # Issue #510 0.2: this backstop now ALSO catches the mirror-direction drift bug
+        # (a stale _natural_vent_active flag masking a physically-running WHF) with zero
+        # additional code — _is_untracked is derived from _compute_fan_status(), and 0.1b's
+        # fix in that function makes the nat-vent-stale case resolve to "running (untracked)"
+        # too (previously it resolved to "nat-vent (session active, fan idle)", which this
+        # backstop's `_is_untracked` check never matched). A separate 2-tick-confirm pure
+        # decision function was drafted for this direction and then deliberately discarded
+        # once this was discovered — reusing this already-shipped, already-tested mechanism
+        # is strictly simpler and lower-risk than adding a parallel one that does the same
+        # job. The ~30-min cadence here (vs. the primary direction's ~10-min 2-tick confirm)
+        # is acceptable for this direction: it's an automation-ownership bookkeeping concern,
+        # not a display concern (0.1a/0.1b already fix display immediately and independently).
         if (
             _is_untracked
             and not self.automation_engine._fan_override_active
@@ -3748,6 +3768,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if new_state.state == old_state.state:
             return
 
+        # Issue #510: refresh immediately on every genuine physical transition, regardless of
+        # whether an override is currently active or what caused it -- so the displayed status
+        # never waits on the next scheduled coordinator poll (up to 30 min) to reflect reality.
+        # Display-only: does not affect the override-detection/decision logic below. Previously
+        # this refresh only fired from inside the "override already active" branch further down,
+        # leaving the display stale whenever a physical transition happened with NO override
+        # active (the exact mechanism behind Issue #510's reported staleness — a nat-vent
+        # session flag masked a confirmed-running WHF for hours because nothing prompted a
+        # recompute). Mirrors the identical Issue #489 pattern already used for door/window.
+        _LOGGER.debug(
+            "fan_entity physical transition %s -> %s — requesting refresh so displayed status stays live",
+            old_state.state,
+            new_state.state,
+        )
+        self.hass.async_create_task(self.async_request_refresh())
+
         # Issue #482: HA attaches the originating service call's Context to every
         # state-changed Event. When CA itself issued the fan command (via
         # automation.py's _call_fan_service_with_context), it stamps
@@ -3797,18 +3833,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
             return
 
-        # Skip if fan override is already active — but a physical-state confirmation
-        # event (e.g. the fan_state_entity flipping on right after fan_entity did) still
-        # needs to reach the displayed status promptly, otherwise it stays stale until
-        # the next scheduled coordinator poll (up to update_interval, currently 30 min).
+        # Skip if fan override is already active — the display refresh already happened
+        # unconditionally above (Issue #510); this just skips re-running override detection
+        # for a transition that's already accounted for.
         if self.automation_engine._fan_override_active:
             _LOGGER.info(
                 "Fan/state entity changed while override already active (%s -> %s) — "
-                "requesting refresh so displayed status reflects confirmed physical state",
+                "skipping override re-detection (display already refreshed above)",
                 old_state.state,
                 new_state.state,
             )
-            await self.async_request_refresh()
             return
 
         # Skip if a fan command was issued recently (cloud thermostat echo guard)
@@ -3977,23 +4011,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return
         fan_mode = str(_cs_pg.attributes.get("fan_mode", ""))
         hvac_action = str(_cs_pg.attributes.get("hvac_action", "")).lower()
-        thermostat_fan_running = fan_mode == "on" or hvac_action == "fan"
+        # Issue #510 0.3: the outer gate previously used the THERMOSTAT's own fan_mode/
+        # hvac_action directly (fan_mode == "on" or hvac_action == "fan"), unconditionally —
+        # correct for FAN_MODE_HVAC (thermostat blower IS the fan) but wrong for a WHF
+        # install where the fan is a physically separate device: the thermostat's own fan
+        # attributes normally show no activity there, so the gate was always False and
+        # reconcile_fan_on_startup() below never ran for WHF-only installs, even though the
+        # archetype-aware value was ALREADY being computed correctly (just only as an inner
+        # call argument, never consulted for the gate itself). Fixed by computing the
+        # archetype-aware value once and using it for both the gate and the call — also
+        # removes a redundant duplicate computation of "is the fan running" (previously
+        # computed once wrong, once right).
+        archetype_fan_running = self._derive_thermostat_fan_running_for_reconcile(
+            fan_mode_attr=fan_mode,
+            hvac_action_attr=hvac_action,
+        )
         _LOGGER.info(
-            "Post-grace fan check: fan_mode=%s hvac_action=%s fan_running=%s",
+            "Post-grace fan check: fan_mode=%s hvac_action=%s archetype_fan_running=%s",
             fan_mode,
             hvac_action,
-            thermostat_fan_running,
+            archetype_fan_running,
         )
-        if thermostat_fan_running and hvac_action not in ("heating", "cooling"):
+        if archetype_fan_running and hvac_action not in ("heating", "cooling"):
             await ae.reconcile_fan_on_startup(
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
-                # Issue #423: archetype-aware — WHF mode checks the real fan entity's
-                # physical state instead of always trusting the thermostat's attributes.
-                thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
-                    fan_mode_attr=fan_mode,
-                    hvac_action_attr=hvac_action,
-                ),
+                thermostat_fan_running=archetype_fan_running,
                 any_sensor_open=self._any_sensor_open(),
             )
 
@@ -6348,16 +6391,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return "cooling"
         return hvac_action
 
-    def _fan_is_running(self) -> bool:
+    def _fan_is_running(self, _status: str | None = None) -> bool:
         """Return True if the fan is running for any reason.
 
         Covers CA-activated, manual override, and untracked states so that
         chart_log entries correctly reflect fan activity even when CA's own
         _fan_active flag is False (e.g. post-heat blowdown still in progress).
-        """
-        return self._compute_fan_status() not in {"inactive", "disabled"}
 
-    def _fan_physically_running(self) -> bool:
+        Issue #510 0.4: accepts an optional pre-computed status string so a caller that
+        already invoked ``_compute_fan_status()`` this cycle (e.g. ``_async_update_data_impl``,
+        which calls it repeatedly and was producing duplicate WARNING log lines) can pass it
+        through instead of triggering another full recomputation. Defaults to None (computes
+        fresh, exactly as before) — every other caller is unaffected.
+        """
+        status = _status if _status is not None else self._compute_fan_status()
+        return status not in {"inactive", "disabled"}
+
+    def _fan_physically_running(self, _status: str | None = None) -> bool:
         """Return True iff the fan is physically spinning right now.
 
         Differs from _fan_is_running() by excluding the
@@ -6366,8 +6416,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Used for the chart_log ``fan_running`` field so the frontend can
         distinguish a spinning fan from a merely armed nat-vent session.
+
+        Issue #510 0.4: see _fan_is_running()'s docstring — same optional-cache pattern.
         """
-        return self._compute_fan_status() in {
+        status = _status if _status is not None else self._compute_fan_status()
+        return status in {
             "active",
             "running (manual override)",
             "running (untracked)",
@@ -6377,44 +6430,69 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Compute the current fan status string.
 
         Priority order:
-        1. CA-activated fan (_fan_active=True) → "active"
+        1. CA-activated fan (_fan_active=True) → "active" (or "active (unconfirmed)" briefly,
+           see Issue #510 0.1c below)
         2. Manual override → "running (manual override)" / "off (manual override)"
-        3. Ground-truth fallback: read thermostat fan_mode/hvac_action — catches
-           post-restart state, user/Ecobee-initiated fan runs that CA didn't command.
+        3. Ground-truth fallback: physical WHF entity, then thermostat fan_mode/hvac_action —
+           catches post-restart state, user/Ecobee-initiated fan runs that CA didn't command.
         4. "inactive"
+
+        Issue #510: ground truth (the physical WHF entity, when configured with
+        fan_state_feedback) now wins over CA's own internal session flags wherever it's
+        available, rather than being consulted only as a last resort — see 0.1b (nat-vent
+        branch) and 0.1c (active-unconfirmed settling) below.
         """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return "disabled"
+        # Issue #510 0.1b: read ground truth at most once, reused by every branch below that
+        # needs it (including the nat-vent session-flag branch, which previously never
+        # consulted it at all) — but still lazily, exactly like the pre-#510 code: the
+        # override_active+fan_active=True fast path below must NOT trigger a physical-state
+        # read at all (an existing, deliberate property this codebase already tests for).
+        _physical_on_cache: list[bool | None] = []
+
+        def _physical_on() -> bool | None:
+            if not _physical_on_cache:
+                _physical_on_cache.append(
+                    self._get_fan_physical_state() if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) else None
+                )
+            return _physical_on_cache[0]
+
         if ae._fan_override_active:
             if ae._fan_active:
                 return "running (manual override)"
             # _fan_active=False: check physical state to distinguish
             # "user is running it" from "user turned it on then off"
-            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-                physical_on = self._get_fan_physical_state()
-                if physical_on is True:
-                    return "running (manual override)"
+            if _physical_on() is True:
+                return "running (manual override)"
             return "off (manual override)"
         if ae._fan_active:
-            if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-                physical_on = self._get_fan_physical_state()
-                if physical_on is False:
-                    _LOGGER.warning(
-                        "WHF _fan_active=True but physical state=off — possible stale flag after manual stop"
-                    )
+            if _physical_on() is False:
+                # Issue #510 0.1c: a brand-new CA command hasn't had time to propagate to the
+                # physical entity yet — that's expected and NOT the bug; only treat this as a
+                # stale flag once enough time has passed that ground truth should be trusted.
+                if self._is_recent_fan_command(threshold_seconds=30.0):
                     return "active (unconfirmed)"
+                _LOGGER.warning("WHF _fan_active=True but physical state=off — possible stale flag after manual stop")
+                return "inactive"
             return "active"
-        # Bug 3 (Issue #321): nat-vent session active but fan is idle between cycles
+        # Issue #510 0.1b: nat-vent session flag can go stale (still "active" between cycles,
+        # or after an external change CA hasn't reconciled) while the fan is genuinely running
+        # for an unrelated reason — trust confirmed ground truth over the session flag.
         if ae._natural_vent_active:
+            if _physical_on() is True:
+                _LOGGER.info(
+                    "WHF nat-vent session flag stale but physical state confirms running — "
+                    "displaying running (untracked) instead of trusting the session flag"
+                )
+                return "running (untracked)"
             return "nat-vent (session active, fan idle)"
         # WHF ground-truth fallback: reads fan_state_entity (Type 2) or fan_entity (Type 1).
         # Catches post-restart and externally-run WHF when CA's internal flags are all clear.
-        if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
-            physical_on = self._get_fan_physical_state()
-            if physical_on is True:
-                return "running (untracked)"
+        if _physical_on() is True:
+            return "running (untracked)"
         # Ground-truth fallback: CA's flag says inactive, but check what the
         # thermostat is actually doing. Catches post-restart and externally-run fan.
         if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
@@ -6428,25 +6506,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return "inactive"
 
     def _compute_whf_status(self) -> str | None:
-        """Return WHF-specific status, or None when WHF is not configured."""
+        """Return WHF-specific status, or None when WHF is not configured.
+
+        Issue #510: same ground-truth-first priority as _compute_fan_status() — see that
+        method's docstring and 0.1b/0.1c below for the rationale.
+        """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
             return None
+        physical_on = self._get_fan_physical_state()
         if ae._fan_override_active:
-            physical_on = self._get_fan_physical_state()
             if ae._fan_active or physical_on is True:
                 return "running (manual override)"
             return "off (manual override)"
         if ae._fan_active:
-            physical_on = self._get_fan_physical_state()
             if physical_on is False:
+                if self._is_recent_fan_command(threshold_seconds=30.0):
+                    return "active (unconfirmed)"
                 _LOGGER.warning("WHF _fan_active=True but physical state=off — possible stale flag after manual stop")
-                return "active (unconfirmed)"
+                return "inactive"
             return "active"
         if ae._natural_vent_active:
+            if physical_on is True:
+                _LOGGER.info(
+                    "WHF nat-vent session flag stale but physical state confirms running — "
+                    "displaying running (untracked) instead of trusting the session flag"
+                )
+                return "running (untracked)"
             return "nat-vent (session active, fan idle)"
-        physical_on = self._get_fan_physical_state()
         if physical_on is True:
             return "running (untracked)"
         return "inactive"

@@ -910,3 +910,68 @@ class TestFanRemoteSpeedSensorDiscovery:
         state.state = "high"
         coord.hass.states.get = MagicMock(return_value=state)
         assert coord._read_fan_remote_speed() == "high"
+
+
+class TestFanRemoteStatusFieldsWiring:
+    """coordinator._compute_fan_remote_status_fields() (Issue #524).
+
+    Before this fix, fan_remote_speed/fan_remote_timer_hours/fan_remote_timer_ends existed
+    ONLY inside get_debug_state() (debug endpoint + diagnostics download) and never reached
+    coordinator.data -- so the dashboard's WHF status card was unconditionally dark regardless
+    of firmware/remote activity. This class tests the extracted shared helper directly (the
+    real production computation, not a mirror); coordinator.py's own
+    _async_update_data_impl()/get_debug_state() call sites are reviewed directly in the diff
+    rather than additionally covered by a full-pipeline test here, consistent with this
+    codebase's existing granularity for this class of method (no other _async_update_data_impl()
+    field has a full-pipeline test either -- see test_coordinator_health.py, which mocks
+    _async_update_data_impl() wholesale rather than exercising its real body).
+    """
+
+    def _make_coord(self) -> MagicMock:
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = MagicMock()
+        coord._compute_fan_remote_status_fields = types.MethodType(
+            mod.ClimateAdvisorCoordinator._compute_fan_remote_status_fields, coord
+        )
+        coord._read_fan_remote_speed = MagicMock(return_value=None)
+        return coord
+
+    def test_live_read_wins_over_engine_fallback(self):
+        coord = self._make_coord()
+        coord._read_fan_remote_speed = MagicMock(return_value="high")
+        coord.automation_engine._fan_remote_speed = "low"
+        coord.automation_engine._fan_remote_timer_hours = None
+
+        result = coord._compute_fan_remote_status_fields()
+        assert result["fan_remote_speed"] == "high"
+
+    def test_falls_back_to_engine_value_when_live_read_unavailable(self):
+        coord = self._make_coord()
+        coord._read_fan_remote_speed = MagicMock(return_value=None)
+        coord.automation_engine._fan_remote_speed = "low"
+        coord.automation_engine._fan_remote_timer_hours = None
+
+        result = coord._compute_fan_remote_status_fields()
+        assert result["fan_remote_speed"] == "low"
+
+    def test_timer_fields_present_when_timer_active(self):
+        coord = self._make_coord()
+        coord.automation_engine._fan_remote_speed = None
+        coord.automation_engine._fan_remote_timer_hours = 4.0
+        coord.automation_engine._grace_end_time = "2026-07-26T12:00:00"
+
+        result = coord._compute_fan_remote_status_fields()
+        assert result["fan_remote_timer_hours"] == 4.0
+        assert result["fan_remote_timer_ends"] == "2026-07-26T12:00:00"
+
+    def test_timer_fields_none_when_no_timer(self):
+        """A stale/unrelated grace_end_time must not leak into fan_remote_timer_ends when
+        no remote timer is actually active -- the two fields are gated together."""
+        coord = self._make_coord()
+        coord.automation_engine._fan_remote_speed = None
+        coord.automation_engine._fan_remote_timer_hours = None
+        coord.automation_engine._grace_end_time = "2026-07-26T12:00:00"
+
+        result = coord._compute_fan_remote_status_fields()
+        assert result["fan_remote_timer_hours"] is None
+        assert result["fan_remote_timer_ends"] is None

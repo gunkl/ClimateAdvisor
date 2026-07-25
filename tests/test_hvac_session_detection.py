@@ -191,6 +191,7 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._resolve_monitored_sensors = MagicMock(return_value=[])
     coord._unsubscribe_door_window_listeners = MagicMock()
     coord._subscribe_door_window_listeners = MagicMock()
+    coord._fan_remote_speed_sensor_eid = None  # Issue #524: read by _compute_fan_remote_status_fields()
 
     # Forecast — return None so the `if forecast:` block is skipped entirely,
     # which lets the method fall straight through to the data dict section.

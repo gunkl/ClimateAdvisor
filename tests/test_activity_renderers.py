@@ -779,6 +779,49 @@ class TestFanManualOverrideRenderer:
         source = _act_mod._event_source_label("fan_manual_override", {"source": ""})
         assert source == "manual"
 
+    def test_remote_speed_appears_in_settings(self):
+        """Issue #524: an override armed by a remote speed press shows the speed chosen --
+        without this, the row was indistinguishable from a generic thermostat-detected toggle."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"fan_before": "off", "fan_after": "on", "remote_speed": "high"},
+            "fahrenheit",
+        )
+        assert ev == "Fan manual override"
+        assert st == "fan: off->on, remote: high speed"
+
+    def test_remote_timer_hours_appears_in_settings(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"fan_before": "off", "fan_after": "on", "remote_timer_hours": 4.0},
+            "fahrenheit",
+        )
+        assert st == "fan: off->on, remote timer: 4.0h"
+
+    def test_remote_speed_and_timer_both_appear_in_settings(self):
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"fan_before": "off", "fan_after": "on", "remote_speed": "low", "remote_timer_hours": 1.0},
+            "fahrenheit",
+        )
+        assert st == "fan: off->on, remote: low speed, remote timer: 1.0h"
+
+    def test_remote_context_alone_when_fan_states_missing(self):
+        """A remote press with speed/timer info but no fan_before/fan_after still surfaces
+        the remote context rather than going blank."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"remote_speed": "high"},
+            "fahrenheit",
+        )
+        assert st == "remote: high speed"
+
+    def test_plain_override_unaffected_by_remote_fields(self):
+        """A plain thermostat-detected override (no remote_speed/remote_timer_hours keys at
+        all) must render byte-for-byte identical to before this fix -- regression guard."""
+        ev, st = _act_mod.EVENT_RENDERERS["fan_manual_override"](
+            {"fan_before": "on", "fan_after": "auto", "override_active_since": "2026-06-20T06:48:00"},
+            "fahrenheit",
+        )
+        assert ev == "Fan manual override"
+        assert st == "fan: on->auto"
+
 
 # ---------------------------------------------------------------------------
 # TestTempColumns (Issue #352)

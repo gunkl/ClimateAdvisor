@@ -559,11 +559,24 @@ def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
 
 
 def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #524: append remote speed/timer context when the override was armed by an RF
+    remote press (`automation.py::handle_fan_manual_override`'s `remote_speed`/
+    `remote_timer_hours` kwargs) -- without it, this row looked identical whether a specific
+    speed/timer choice drove the override or a thermostat-detected toggle did. A plain
+    (non-remote) override has neither field set and renders exactly as before."""
     fan_before = str(p.get("fan_before", "")).strip()
     fan_after = str(p.get("fan_after", "")).strip()
     fan_device = p.get("fan_device", "fan")
     change = f"{fan_before}->{fan_after}" if fan_before and fan_after else ""
     settings = f"{fan_device}: {change}" if change else ""
+    remote_speed = p.get("remote_speed")
+    if remote_speed:
+        settings = f"{settings}, remote: {remote_speed} speed" if settings else f"remote: {remote_speed} speed"
+    remote_timer_hours = p.get("remote_timer_hours")
+    if remote_timer_hours is not None:
+        settings = (
+            f"{settings}, remote timer: {remote_timer_hours}h" if settings else f"remote timer: {remote_timer_hours}h"
+        )
     return "Fan manual override", settings
 
 

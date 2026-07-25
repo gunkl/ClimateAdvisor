@@ -435,14 +435,14 @@ calls to `_set_temperature()` bypass it. See §6a in `docs/08-COMPUTATION-REFERE
 | Value | Meaning |
 |---|---|
 | `"active"` | CA commanded the fan on (nat vent or HVAC fan-only mode); physical state confirmed for WHF |
-| `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged (added Issue #374). Since Issue #423, this is expected to be **transient** — `_reconcile_fan_physical_drift()` (the 5-min backstop) self-corrects a confirmed disagreement within 2 ticks (~10 min) rather than displaying this indefinitely. |
+| `"active (unconfirmed)"` | CA flag `_fan_active=True` but WHF physical state reads off — stale flag after manual stop; WARNING logged (added Issue #374). Since Issue #423, `_reconcile_fan_physical_drift()` (the 5-min backstop) self-corrects the underlying `_fan_active` flag within 2 ticks (~10 min). Since Issue #510, the *displayed* value additionally resolves faster than that: only shown within the transient ~30s post-command window (`_is_recent_fan_command()`); past that window the display returns `"inactive"` directly (ground truth wins), independent of whether the 5-min backstop has ticked yet. |
 | `"running (manual override)"` | Fan is running; CA's `_fan_override_active` flag is set |
-| `"running (untracked)"` | Thermostat reports fan running (`fan_mode=on` or `hvac_action=fan`) but CA's `_fan_active=False` — typical after HA restart or when user ran fan from thermostat app |
+| `"running (untracked)"` | Thermostat reports fan running (`fan_mode=on` or `hvac_action=fan`) but CA's `_fan_active=False` — typical after HA restart or when user ran fan from thermostat app. Since Issue #510, also returned (instead of a stale `"nat-vent (session active, fan idle)"`) when `_natural_vent_active` disagrees with physical ground truth that confirms the fan is running — ground truth wins over the session flag. |
 | `"inactive"` | Fan is off and CA has no record of activating it |
 | `"off (manual override)"` | User turned fan on at the thermostat (setting `_fan_override_active=True`), then turned fan off before the grace period expired. Override still in effect, physical fan is off. Condition: `_fan_override_active=True AND _fan_active=False`. |
 | `"disabled"` | Fan control feature is turned off in configuration |
 
-`"running (untracked)"` was added in Issue #91. `"active (unconfirmed)"` was added in Issue #374 to distinguish WHF state disagreements from the confirmed-active case. Any code that checks `ca_fan_running` for suppression purposes must include all four non-inactive, non-disabled active values (`"active"`, `"active (unconfirmed)"`, `"running (manual override)"`, `"running (untracked)"`).
+`"running (untracked)"` was added in Issue #91. `"active (unconfirmed)"` was added in Issue #374 to distinguish WHF state disagreements from the confirmed-active case. Any code that checks `ca_fan_running` for suppression purposes must include all four non-inactive, non-disabled active values (`"active"`, `"active (unconfirmed)"`, `"running (manual override)"`, `"running (untracked)"`). Issue #510 made the display-layer priority for both `"active (unconfirmed)"` and the nat-vent/`"running (untracked)"` boundary ground-truth-first rather than session-flag-first — see `docs/08-COMPUTATION-REFERENCE.md` §9e-F for the full investigation and fix.
 
 ### Project Memory
 

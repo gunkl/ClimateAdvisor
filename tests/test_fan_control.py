@@ -2660,11 +2660,18 @@ def _make_coordinator_for_fan_status(
     physical_state: bool | None = None,
     climate_fan_mode: str = "auto",
     climate_hvac_action: str = "",
+    recent_fan_command: bool = False,
 ):
     """Build a minimal coordinator stub for testing _compute_whf_status / _compute_hvac_fan_status.
 
     Uses object.__new__ to bypass DataUpdateCoordinator.__init__, then attaches only the
     attributes required by the two status methods and _compute_fan_status.
+
+    Issue #510 0.1c: recent_fan_command controls _is_recent_fan_command()'s return value,
+    which the "active (unconfirmed)" branch now consults — mocked directly (matching this
+    file's existing idiom for the same real-clock-dependent check elsewhere) rather than
+    exercising the real dt_util-based implementation. Defaults to False (settled -> ground
+    truth wins, "inactive"), matching a coordinator with no recent fan command.
     """
     from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
 
@@ -2687,6 +2694,7 @@ def _make_coordinator_for_fan_status(
 
     # Wire _get_fan_physical_state to return the supplied physical_state value
     coord._get_fan_physical_state = MagicMock(return_value=physical_state)
+    coord._is_recent_fan_command = MagicMock(return_value=recent_fan_command)
 
     return coord
 
@@ -2728,15 +2736,30 @@ class TestDualFanStatus:
         assert coord._compute_whf_status() == "active"
 
     def test_whf_status_active_unconfirmed_when_physical_off(self):
-        """_compute_whf_status returns 'active (unconfirmed)' when _fan_active=True but physical=False."""
+        """_compute_whf_status returns 'active (unconfirmed)' when _fan_active=True but
+        physical=False, WITHIN the recent-command transient window (Issue #510 0.1c)."""
         coord = _make_coordinator_for_fan_status(
             fan_mode=FAN_MODE_WHOLE_HOUSE,
             fan_active=True,
             physical_state=False,
+            recent_fan_command=True,
+        )
+        result = coord._compute_whf_status()
+        assert result == "active (unconfirmed)"
+
+    def test_whf_status_settles_to_inactive_once_stale(self):
+        """Issue #510 0.1c: once NOT within the recent-command window, ground truth wins —
+        'active (unconfirmed)' must not persist indefinitely (the reported #510 WARNING fired
+        138 times over 24+ hours before this fix)."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            physical_state=False,
+            recent_fan_command=False,
         )
         with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
             result = coord._compute_whf_status()
-        assert result == "active (unconfirmed)"
+        assert result == "inactive"
         mock_logger.warning.assert_called_once()
 
     def test_hvac_fan_status_active_when_fan_active(self):
@@ -2757,16 +2780,30 @@ class TestDualFanStatus:
         assert coord._compute_whf_status() == "active"
         assert coord._compute_hvac_fan_status() == "active"
 
-    def test_compute_fan_status_warns_on_stale_flag(self):
-        """_compute_fan_status returns 'active (unconfirmed)' + WARNING when _fan_active=True but physical=False."""
+    def test_compute_fan_status_active_unconfirmed_within_recent_command_window(self):
+        """_compute_fan_status returns 'active (unconfirmed)' when _fan_active=True but
+        physical=False, WITHIN the recent-command transient window (Issue #510 0.1c)."""
         coord = _make_coordinator_for_fan_status(
             fan_mode=FAN_MODE_WHOLE_HOUSE,
             fan_active=True,
             physical_state=False,
+            recent_fan_command=True,
+        )
+        result = coord._compute_fan_status()
+        assert result == "active (unconfirmed)"
+
+    def test_compute_fan_status_warns_and_settles_on_stale_flag(self):
+        """Issue #510 0.1c: once NOT within the recent-command window, ground truth wins and
+        the WARNING fires — must not stay 'active (unconfirmed)' indefinitely."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            physical_state=False,
+            recent_fan_command=False,
         )
         with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
             result = coord._compute_fan_status()
-        assert result == "active (unconfirmed)"
+        assert result == "inactive"
         mock_logger.warning.assert_called_once()
 
     def test_whf_status_nat_vent_idle(self):
@@ -2778,6 +2815,38 @@ class TestDualFanStatus:
             physical_state=False,
         )
         assert coord._compute_whf_status() == "nat-vent (session active, fan idle)"
+
+    def test_whf_status_nat_vent_stale_flag_confirmed_running(self):
+        """Issue #510 0.1b regression test: the exact reported bug — a stale
+        _natural_vent_active flag must NOT mask a WHF that ground truth confirms is
+        physically running. Must return 'running (untracked)', not
+        'nat-vent (session active, fan idle)'."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            natural_vent_active=True,
+            physical_state=True,  # ground truth: WHF is physically ON
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_whf_status()
+        assert result == "running (untracked)"
+        assert result != "nat-vent (session active, fan idle)"
+        mock_logger.info.assert_called_once()
+
+    def test_compute_fan_status_nat_vent_stale_flag_confirmed_running(self):
+        """Issue #510 0.1b regression test (same scenario, _compute_fan_status variant) —
+        also asserts the new INFO log line fires so this correction is diagnosable live."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            natural_vent_active=True,
+            physical_state=True,
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_fan_status()
+        assert result == "running (untracked)"
+        mock_logger.info.assert_called_once()
+        assert "nat-vent session flag stale" in mock_logger.info.call_args[0][0]
 
     def test_hvac_fan_status_nat_vent_idle(self):
         """_compute_hvac_fan_status returns 'nat-vent (session active, fan idle)' when nat-vent active, fan idle."""

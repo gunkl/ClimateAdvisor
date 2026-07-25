@@ -4,10 +4,10 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.30"
+VERSION = "0.5.31"
 
 RELEASE_NOTES: dict[str, list[str]] = {
-    "0.5.30": [
+    "0.5.31": [
         "Feat #519: Climate Advisor now detects and respects QuietCool remote speed changes"
         " (low/medium/high), not just timer presses. If you adjust speed while the fan was"
         " already running, that's treated as a comfort preference — it's just recorded, not"
@@ -18,6 +18,24 @@ RELEASE_NOTES: dict[str, list[str]] = {
         " also shows the fan's current remote-reported speed. Fully auto-detected — no new"
         " setting to configure, and installs without the firmware update behave exactly as"
         " they do today.",
+    ],
+    "0.5.30": [
+        "Fix #510: the dashboard WHF status card could show 'nat-vent active, fan idle' for"
+        " hours while the whole-house fan was genuinely, physically running — confirmed via"
+        " live logs on an install with dedicated fan power detection, where a stale nat-vent"
+        " session flag masked ground truth that was available the whole time. The display now"
+        " refreshes immediately on every real physical fan transition (previously only when a"
+        " manual override was already active) and always trusts confirmed physical state over"
+        " CA's own internal session flags when it's available. The related 'active"
+        " (unconfirmed)' status — which could also persist indefinitely once stale (observed"
+        " 138 times over 24+ hours in the same incident) — now correctly settles to 'inactive'"
+        " once enough time has passed for ground truth to be trusted, rather than leading with"
+        " 'active' forever. Also fixes two related automation-bookkeeping gaps found during the"
+        " same investigation: a whole-house-fan install's post-grace-period check was silently"
+        " skipped because it consulted the thermostat's own fan attributes instead of the real"
+        " fan entity, and the existing periodic untracked-fan reconciliation now also covers a"
+        " stale nat-vent flag, not just a fully-untracked fan, closing the loop within ~30"
+        " minutes if it recurs.",
     ],
     "0.5.29": [
         "Fix #511: for installs with no dedicated outdoor sensor (weather-service source"
@@ -1233,7 +1251,7 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     519: {
-        "version_fixed": "0.5.30",
+        "version_fixed": "0.5.31",
         "title": ("Climate Advisor now detects and respects QuietCool remote speed changes, not just timer presses"),
         "scope_covered": (
             "Designed via a shaping (ontology-first) session followed by three review passes"
@@ -1292,6 +1310,64 @@ KNOWN_FIXES: dict[int, dict] = {
             " number. The POWER-family (0xBF/0xB0) speed-context extraction in the firmware is"
             " an extrapolation from the confirmed TIMER-family pattern, not independently"
             " verified via a dedicated capture."
+        ),
+    },
+    510: {
+        "version_fixed": "0.5.30",
+        "title": (
+            "WHF status card could show 'nat-vent active, fan idle' for hours while the"
+            " fan was physically running; related 'active (unconfirmed)' status could also"
+            " persist indefinitely"
+        ),
+        "scope_covered": (
+            "Investigated end-to-end (docs -> live logs/entity history -> code) per the"
+            " mandatory investigation protocol; confirmed via live data on the reporting"
+            " install (fan_state_feedback=True with a dedicated power-detection entity) that"
+            " the physical fan was genuinely toggling every ~2-7 minutes for over an hour"
+            " while the card showed stale info, and the '_fan_active=True but physical"
+            " state=off' WARNING recurred 138 times over 24+ hours (also found firing 6x per"
+            " invocation, unrelated log-noise bug, also fixed). Root-caused to two coupled"
+            " defects in coordinator.py: (1) _async_fan_entity_changed() only requested an"
+            " immediate display refresh when a manual override was already active (mirroring"
+            " the Issue #489 door/window pattern too narrowly) -- hoisted to fire"
+            " unconditionally on every genuine physical transition; (2) _compute_fan_status()/"
+            "_compute_whf_status() checked the _natural_vent_active session flag BEFORE the"
+            " existing physical-state ground-truth fallback, so a stale flag blocked the truth"
+            " check entirely -- ground truth is now read once (preserving the original lazy-"
+            "read property the override_active+fan_active fast path already relied on, kept"
+            " via a memoized closure) and consulted inside the nat-vent branch too, reusing the"
+            " existing 'running (untracked)' status value rather than adding a new one. The"
+            " related 'active (unconfirmed)' status (a DIFFERENT direction of disagreement --"
+            " _fan_active=True but physical=off) had the same 'leads with the wrong word'"
+            " defect; fixed by reusing the existing _is_recent_fan_command(threshold_seconds="
+            "30.0) helper (already used nearby for the same purpose) so the transient ~30s"
+            " post-command window still correctly shows 'active (unconfirmed)', but a settled"
+            " disagreement now resolves to 'inactive'. Two secondary automation-bookkeeping"
+            " fixes bundled in the same investigation: _async_post_grace_fan_reconcile()'s"
+            " outer gate was computed from the thermostat's own fan_mode/hvac_action"
+            " unconditionally, silently skipping reconciliation entirely for WHF-only installs"
+            " (fan physically separate from the thermostat) -- now uses the same archetype-"
+            "aware _derive_thermostat_fan_running_for_reconcile() helper already used for the"
+            " inner call. And: the pre-existing Issue #359 Fix D periodic untracked-fan"
+            " backstop (coordinator.py, 30-min cadence) now ALSO self-corrects the stale-nat-"
+            "vent-flag direction with zero additional code, as a direct consequence of the"
+            " _compute_fan_status() fix above (_is_untracked is derived from that function's"
+            " return value) -- a separate 2-tick-confirm pure-decision-function mechanism was"
+            " drafted for this and deliberately discarded once this was discovered, in favor of"
+            " reusing the already-shipped, already-tested mechanism."
+        ),
+        "scope_not_covered": (
+            "Command-only WHF installs (no dedicated fan_state_entity, fan_state_feedback="
+            "False) are unaffected by any of these fixes -- there is no ground truth to prefer"
+            " in that mode, matching the reporter's own point that the ambiguity only exists"
+            " where it's actually resolvable. The dedup fix (0.4) only covers the specific"
+            " duplicate-computation call sites within _async_update_data_impl that have no"
+            " intervening awaits/state-mutating calls between them -- later call sites in the"
+            " same method (the main ATTR_FAN_STATUS/ATTR_WHF_STATUS assignment, and a later"
+            " chart-log block) were deliberately left as fresh, uncached computations, since"
+            " real state-mutating awaits (reconcile_fan_on_startup, fan activation/"
+            "deactivation commands) occur between them and the earlier computation -- caching"
+            " across that boundary would itself be a staleness bug, not an optimization."
         ),
     },
     511: {

@@ -582,3 +582,57 @@ class TestOverrideActiveRequestsRefresh:
         asyncio.run(method(event))
 
         coord.async_request_refresh.assert_not_called()
+
+    def test_state_change_without_override_active_still_requests_refresh(self):
+        """Issue #510 0.1a: a genuine physical transition must refresh the display even when
+        NO override is active — this is the exact mechanism behind the reported bug (the
+        refresh previously only fired from inside the override-already-active branch, so a
+        transition with no override active left the dashboard stale for up to 30 minutes).
+        """
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_override_active = False
+        ae._fan_active = False  # will be picked up as a manual override below too
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("off")
+        new_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        coord.async_request_refresh.assert_called_once()
+        # The override-detection logic below the refresh must still run unaffected.
+        ae.handle_fan_manual_override.assert_called_once()
+
+    def test_override_active_no_longer_double_refreshes(self):
+        """Issue #510 0.1a: the override-already-active branch no longer issues its OWN
+        refresh (it would be redundant with the new unconditional one) — exactly one refresh
+        per genuine transition, not two."""
+        config = {
+            CONF_FAN_ENTITY: "switch.whf_command",
+            CONF_FAN_STATE_ENTITY: "binary_sensor.whf_running",
+        }
+        coord = _make_coord_stub(config)
+        ae = coord.automation_engine
+        ae._fan_active = False
+        ae._fan_override_active = True
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_entity_changed, coord)
+
+        old_state = _make_fake_state("off")
+        new_state = _make_fake_state("on")
+        event = MagicMock()
+        event.data = {"old_state": old_state, "new_state": new_state}
+
+        asyncio.run(method(event))
+
+        coord.async_request_refresh.assert_called_once()

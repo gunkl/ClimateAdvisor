@@ -34,6 +34,7 @@ if "homeassistant" not in sys.modules:
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 28, 8, 0, 0)
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
+from custom_components.climate_advisor.const import CONF_FAN_MODE, FAN_MODE_WHOLE_HOUSE  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -267,6 +268,49 @@ class TestFanCancelCoordinator:
         asyncio.run(method())
 
         ae.reconcile_fan_on_startup.assert_not_awaited()
+
+    def test_post_grace_reconcile_whf_archetype_uses_physical_state_not_thermostat_gate(self):
+        """Issue #510 0.3 regression test: for a WHF-archetype install (fan physically
+        separate from the thermostat), the outer gate must consult the archetype-aware
+        signal (real WHF physical state), not the thermostat's own fan_mode/hvac_action —
+        which normally shows no activity at all for a WHF-only install, previously making
+        this whole reconciliation path a permanent no-op for that archetype.
+
+        Scenario: thermostat reports fan_mode="auto", hvac_action="idle" (no thermostat-side
+        fan signal at all — this is the realistic, common case for a WHF install) while the
+        real configured WHF entity is physically ON. Before the fix, the gate read False from
+        the thermostat attributes alone and reconcile_fan_on_startup() never ran. After the
+        fix, the archetype-aware helper correctly reads the real WHF state and the gate opens.
+        """
+        coord = _make_coordinator_stub(
+            config={
+                "climate_entity": "climate.thermostat",
+                "comfort_heat": 70,
+                "comfort_cool": 75,
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            }
+        )
+        ae = coord.automation_engine
+        ae.reconcile_fan_on_startup = AsyncMock()
+
+        climate_state = _make_fake_state("auto", {"fan_mode": "auto", "hvac_action": "idle"})
+        coord.hass.states.get = MagicMock(return_value=climate_state)
+        # Real WHF ground truth: physically running, even though the thermostat shows nothing.
+        coord._get_fan_physical_state = MagicMock(return_value=True)
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        # Bind the REAL archetype-aware helper too (not just the method under test) — this is
+        # the exact helper the fix routes the outer gate through.
+        coord._derive_thermostat_fan_running_for_reconcile = types.MethodType(
+            mod.ClimateAdvisorCoordinator._derive_thermostat_fan_running_for_reconcile, coord
+        )
+        method = types.MethodType(mod.ClimateAdvisorCoordinator._async_post_grace_fan_reconcile, coord)
+
+        asyncio.run(method())
+
+        ae.reconcile_fan_on_startup.assert_awaited_once()
+        _, kwargs = ae.reconcile_fan_on_startup.call_args
+        assert kwargs["thermostat_fan_running"] is True
 
     def test_reassert_setpoint_after_fan_off_calls_apply_classification(self):
         """Fix A: _async_reassert_setpoint_after_fan_off calls apply_classification with current classification.

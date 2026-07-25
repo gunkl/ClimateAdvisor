@@ -136,7 +136,7 @@ if today_fc is None and tomorrow_fc is None and len(forecast) >= 2:
     today_fc = forecast[0]
     tomorrow_fc = forecast[1]
 elif today_fc is None and tomorrow_fc is not None and len(forecast) >= 1:
-    today_fc = forecast[0]   # BUG: forecast[0] may be the same entry as tomorrow_fc
+    today_fc = forecast[0]  # BUG: forecast[0] may be the same entry as tomorrow_fc
 ```
 
 When the weather API returned a forecast array starting from tomorrow (no today entry), the

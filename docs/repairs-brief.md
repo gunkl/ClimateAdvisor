@@ -104,11 +104,11 @@ No module-level data structures. `WeatherEntityRepairFlow` carries no persistent
 The entity selector schema:
 
 ```python
-vol.Schema({
-    vol.Required("weather_entity"): selector.EntitySelector(
-        selector.EntitySelectorConfig(domain="weather")
-    ),
-})
+vol.Schema(
+    {
+        vol.Required("weather_entity"): selector.EntitySelector(selector.EntitySelectorConfig(domain="weather")),
+    }
+)
 ```
 
 **Persistence:** none — the module is stateless. Issue persistence is managed by HA's issue registry, not by this module.

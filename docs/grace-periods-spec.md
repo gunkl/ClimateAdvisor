@@ -471,7 +471,7 @@ This blocks ALL downstream classification effects: HVAC mode changes, temperatur
 
 ```python
 if _override_confirm_pending:
-    _override_confirm_cancel()   # cancels the pending timer
+    _override_confirm_cancel()  # cancels the pending timer
     _override_confirm_pending = False
     _override_confirm_time = None
     _override_confirm_mode = None

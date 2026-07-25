@@ -129,13 +129,13 @@ Every `async_execute()` call returns exactly this shape:
 
 ```python
 {
-    "success": bool,          # True only on the AI success path
-    "source": str,            # "ai" | "fallback" | "error"
-    "data": dict,             # parsed skill output, fallback output, or {} on error
-    "error": str | None,      # error message string; None on success
-    "input_context": str,     # assembled context string; "" if context build failed early
-    "raw_response": str,      # Claude's raw text; "" on failure/fallback
-    "truncated": bool,        # True iff Claude's stop_reason was "max_tokens" (AI success path only)
+    "success": bool,  # True only on the AI success path
+    "source": str,  # "ai" | "fallback" | "error"
+    "data": dict,  # parsed skill output, fallback output, or {} on error
+    "error": str | None,  # error message string; None on success
+    "input_context": str,  # assembled context string; "" if context build failed early
+    "raw_response": str,  # Claude's raw text; "" on failure/fallback
+    "truncated": bool,  # True iff Claude's stop_reason was "max_tokens" (AI success path only)
 }
 ```
 
@@ -279,11 +279,11 @@ Formats the `get_engine_status()` return value from `LearningEngine` as a multi-
 
 ```python
 # All other engines (flat scalar):
-engine_status["k_passive"]["value"]           # float | None
+engine_status["k_passive"]["value"]  # float | None
 
 # k_active_hvac only (nested dict):
-engine_status["k_active_hvac"]["value"]["heat"]   # float | None
-engine_status["k_active_hvac"]["value"]["cool"]   # float | None
+engine_status["k_active_hvac"]["value"]["heat"]  # float | None
+engine_status["k_active_hvac"]["value"]["cool"]  # float | None
 ```
 
 **Active gate:** An engine is displayed as active when `value is not None` (or for k_active_hvac: either `heat is not None or cool is not None`). A `"since"` date is included when available; if the engine was active before date tracking was introduced (pre-v0.3.46), it displays as `"pre-v0.3.46"`.
@@ -444,7 +444,7 @@ Splits on `## HEADER` lines. Expected headers and output keys:
     "hypotheses": str,
     "recommended_actions": str,
     "assumptions": str,
-    "full_text": str,   # always populated; holds complete raw Claude response
+    "full_text": str,  # always populated; holds complete raw Claude response
 }
 ```
 

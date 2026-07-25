@@ -476,16 +476,16 @@ Returns the current accumulated thermal model from `thermal_model_cache`.
 ```python
 {
     # Core physics parameters
-    "k_passive": float | None,              # envelope decay rate (hr⁻¹, negative)
-    "k_active_heat": float | None,          # HVAC heating contribution (°F/hr, positive)
-    "k_active_cool": float | None,          # HVAC cooling contribution (°F/hr, negative)
-    "k_vent": float | None,                 # fan-only ventilation decay rate (hr⁻¹, negative)
-    "k_vent_window": float | None,          # window-open ventilation decay rate (hr⁻¹, negative)
-    "k_solar": float | None,               # solar gain coefficient (°F/hr per unit solar factor)
+    "k_passive": float | None,  # envelope decay rate (hr⁻¹, negative)
+    "k_active_heat": float | None,  # HVAC heating contribution (°F/hr, positive)
+    "k_active_cool": float | None,  # HVAC cooling contribution (°F/hr, negative)
+    "k_vent": float | None,  # fan-only ventilation decay rate (hr⁻¹, negative)
+    "k_vent_window": float | None,  # window-open ventilation decay rate (hr⁻¹, negative)
+    "k_solar": float | None,  # solar gain coefficient (°F/hr per unit solar factor)
     # Confidence
-    "confidence": str,                      # HVAC confidence: "none"|"low"|"medium"|"high" (heat+cool obs count)
-    "confidence_k_passive": str,            # passive confidence: "none"|"low"|"medium"|"high" (passive obs count)
-    "confidence_k_hvac": str,              # same as "confidence" — explicit alias
+    "confidence": str,  # HVAC confidence: "none"|"low"|"medium"|"high" (heat+cool obs count)
+    "confidence_k_passive": str,  # passive confidence: "none"|"low"|"medium"|"high" (passive obs count)
+    "confidence_k_hvac": str,  # same as "confidence" — explicit alias
     # Observation counts
     "observation_count_heat": int,
     "observation_count_cool": int,
@@ -537,10 +537,10 @@ Analyzes historical records where both forecast and observed temperatures are pr
 
 ```python
 {
-    "high_bias": float,       # mean forecast high error in °F (positive = forecast runs warm)
-    "low_bias": float,        # mean forecast low error in °F (positive = forecast runs warm)
-    "confidence": str,        # "none" | "low" | "medium" | "high"
-    "sample_count": int,      # number of days used to compute the bias
+    "high_bias": float,  # mean forecast high error in °F (positive = forecast runs warm)
+    "low_bias": float,  # mean forecast low error in °F (positive = forecast runs warm)
+    "confidence": str,  # "none" | "low" | "medium" | "high"
+    "sample_count": int,  # number of days used to compute the bias
 }
 ```
 
@@ -603,11 +603,11 @@ The `get_compliance_summary()` method returns a dict suitable for sensor attribu
 
 ```python
 {
-    "status": "active",            # or "collecting_data"
+    "status": "active",  # or "collecting_data"
     "days_recorded": 28,
-    "window_compliance": 0.35,     # 35% of recommended days
+    "window_compliance": 0.35,  # 35% of recommended days
     "avg_daily_hvac_runtime_minutes": 145.5,
-    "comfort_score": 0.92,         # 92% of time in comfort range
+    "comfort_score": 0.92,  # 92% of time in comfort range
     "total_manual_overrides": 8,
     "pending_suggestions": 2,
 }

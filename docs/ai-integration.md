@@ -159,10 +159,10 @@ class AISkillDefinition:
     name: str
     description: str
     system_prompt: str
-    context_builder: Callable        # async (hass, coordinator, **kwargs) → str
-    response_parser: Callable        # (content: str) → dict
-    fallback: Callable | None        # (coordinator, context, **kwargs) → dict; None = use _error_result()
-    triggered_by: str                # "auto" | "manual" (default "manual")
+    context_builder: Callable  # async (hass, coordinator, **kwargs) → str
+    response_parser: Callable  # (content: str) → dict
+    fallback: Callable | None  # (coordinator, context, **kwargs) → dict; None = use _error_result()
+    triggered_by: str  # "auto" | "manual" (default "manual")
     # optional per-skill config key overrides:
     config_key_model: str | None
     config_key_max_tokens: str | None
@@ -190,10 +190,10 @@ Every `async_execute()` call returns exactly this shape, regardless of path take
 {
     "success": bool,
     "source": "ai" | "fallback" | "error",
-    "data": dict,                  # parsed skill output or fallback output
-    "error": str | None,           # error message; None on success
-    "input_context": str,          # the assembled context string sent to Claude
-    "raw_response": str,           # Claude's raw text response; "" on failure
+    "data": dict,  # parsed skill output or fallback output
+    "error": str | None,  # error message; None on success
+    "input_context": str,  # the assembled context string sent to Claude
+    "raw_response": str,  # Claude's raw text response; "" on failure
 }
 ```
 
@@ -293,7 +293,7 @@ Seven context blocks are assembled independently. Each is wrapped in its own `tr
     "hypotheses": str,
     "recommended_actions": str,
     "assumptions": str,
-    "full_text": str,           # always holds complete raw Claude response
+    "full_text": str,  # always holds complete raw Claude response
 }
 ```
 
@@ -330,42 +330,46 @@ Key public entry points called by external modules:
 @dataclass
 class ClaudeResponse:
     success: bool
-    content: str                  # Claude's raw text; "" on failure
+    content: str  # Claude's raw text; "" on failure
     input_tokens: int
     output_tokens: int
-    estimated_cost: float         # USD; computed from _MODEL_COSTS
+    estimated_cost: float  # USD; computed from _MODEL_COSTS
     latency_ms: int
     error: str | None
     rate_limited: bool
     circuit_open: bool
     budget_exceeded: bool
 
+
 @dataclass
 class _CircuitBreaker:
-    state: str                    # "closed" | "open" | "half_open"
+    state: str  # "closed" | "open" | "half_open"
     consecutive_failures: int
-    opened_at: datetime | None    # set when state → "open"
+    opened_at: datetime | None  # set when state → "open"
+
 
 @dataclass
 class _RateLimitCounters:
     auto_requests_today: int
     manual_requests_today: int
-    counter_date: date            # date of last reset
+    counter_date: date  # date of last reset
+
 
 @dataclass
 class _BudgetTracker:
-    monthly_cost: float           # USD accumulated this calendar month
-    budget_month: int             # calendar month (1–12) of current accumulation window
+    monthly_cost: float  # USD accumulated this calendar month
+    budget_month: int  # calendar month (1–12) of current accumulation window
+
 
 @dataclass
 class AISkillDefinition:
     name: str
     description: str
     system_prompt: str
-    context_builder: Callable     # async (hass, coordinator, **kwargs) → str
-    response_parser: Callable     # (content: str) → dict
+    context_builder: Callable  # async (hass, coordinator, **kwargs) → str
+    response_parser: Callable  # (content: str) → dict
     fallback: Callable | None
-    triggered_by: str             # "auto" | "manual"
+    triggered_by: str  # "auto" | "manual"
     model_config_key: str | None
     max_tokens_config_key: str | None
     reasoning_config_key: str | None

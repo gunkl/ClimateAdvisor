@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.31"
+VERSION = "0.5.32"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.32": [
+        "Fix #518: the warm/windows-day briefing could contradict itself — the header's"
+        " window-close time didn't match the body's, an AC-start message ignored whether"
+        " windows were actually open (and contradicted a correct warning elsewhere in the"
+        " same briefing), a 'reopen windows' message could cancel an AC run that never"
+        " started, and a bedtime-setback note could appear even when the header said 'No"
+        " setback'. All four are now derived from a single computation so the header and"
+        " body always agree, and the AC-safety-net wording is stated once, tied to windows"
+        " being closed. Also dropped redundant 'no action needed' phrasing from the"
+        " briefing and dashboard status text.",
+    ],
     "0.5.31": [
         "Feat #519: Climate Advisor now detects and respects QuietCool remote speed changes"
         " (low/medium/high), not just timer presses. If you adjust speed while the fan was"
@@ -1250,6 +1261,46 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    518: {
+        "version_fixed": "0.5.32",
+        "title": "Warm/windows-day briefing text could contradict itself in several places",
+        "scope_covered": (
+            "briefing.py: header window-close time (_generate_tldr_table) and the"
+            " conversational body's window-close time (_warm_day_plan via"
+            " _derive_warm_day_events) were computed from two independent sources — a"
+            " classifier constant vs. a live ODE-forecast crossover — and could disagree;"
+            " now computed once in generate_briefing() and passed to both as `warm_events`."
+            " The AC-safety-net sentence in _warm_day_plan used to independently promise a"
+            " fixed clock time with no awareness of door/window state, contradicting the"
+            " real automation guard (automation.py apply_classification()'s DEFER_PAUSED"
+            " branch, which suppresses AC the whole time a window is open) and duplicating"
+            " _fresh_air_section()'s already-correct, debounce-aware version of the same"
+            " fact — removed the duplicate, kept one window-state-conditioned statement."
+            " The 'reopen windows... I'll turn off the AC' sentence now only claims the"
+            " AC-off action when the predicted ceiling breach occurred before the recovery"
+            " time (_derive_warm_day_events now also returns `recovery_time`). The"
+            " adaptive-thermal-timing footer in _tonight_preview() used to fire whenever"
+            " `adaptive_thermal_active` was true regardless of tonight's actual hvac_mode —"
+            " now also requires `hvac_mode in ('heat', 'cool')`, so it can't contradict a"
+            " header that says 'No setback'. Dropped 'no action needed' phrasing from"
+            " briefing.py and reworded coordinator.py's dashboard status fallback string."
+            " Added tools/briefing_review.py — a deterministic day_type x hvac_mode x"
+            " setback-active scenario matrix with coherence assertions for this bug class."
+            " Added an 8th investigator context block (LAST BRIEFING, ai_skills_context.py)"
+            " so the AI investigator can review the rendered briefing text itself. Authored"
+            " docs/briefing-spec.md's previously-stub sections and reconciled"
+            " docs/04-BRIEFING-EXAMPLES.md's warm-day example with 08-COMPUTATION-REFERENCE.md,"
+            " and corrected every other example's stale 5-minute debounce reference to the"
+            " actual 10-minute default (constant changed in Issue #504)."
+        ),
+        "scope_not_covered": (
+            "The issue's broader 'no action needed'-family audit was scoped to the literal"
+            " phrase; near-variant phrasing that explains an actual consequence (e.g."
+            " leaving_home_section's 'nothing really changes today') was left as-is since"
+            " it's informative, not boilerplate. learning.py:1862 (narrative help text, not"
+            " a per-cycle status line) was not changed."
+        ),
+    },
     519: {
         "version_fixed": "0.5.31",
         "title": ("Climate Advisor now detects and respects QuietCool remote speed changes, not just timer presses"),

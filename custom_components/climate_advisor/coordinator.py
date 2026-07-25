@@ -6240,7 +6240,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 indoor=indoor_temp,
             )
 
-        return _decide("No action needed right now. Automation is handling it.")
+        return _decide("Automation active — no changes planned right now.")
 
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""

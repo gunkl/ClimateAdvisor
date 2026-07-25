@@ -54,7 +54,7 @@ Close up the windows by 5:00 PM to trap the warmth before the sun drops. The hou
 
 If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
 
-If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 5 minutes and then pause until you close up.
+If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
 
 Looking ahead — tomorrow's warmer at 78°F, so I'm going to set back a bit more aggressively tonight. Less heating needed means energy saved while you sleep.
 ```
@@ -63,7 +63,11 @@ Looking ahead — tomorrow's warmer at 78°F, so I'm going to set back a bit mor
 
 ## Example: Warm Day
 
-**Conditions:** Today high 80°F, low 60°F, tomorrow high 82°F
+**Conditions:** Today high 80°F, low 60°F, tomorrow high 82°F. Window times below are the
+static `WARM_WINDOW_OPEN_HOUR`/`WARM_WINDOW_CLOSE_HOUR` constants (6 AM–10 AM, see
+[§7. Window Recommendations](08-COMPUTATION-REFERENCE.md#7-window-recommendations)); when
+ODE forecast data is available, the close time instead comes from `nat_vent_cutoff`
+(Issue #518) — the header and body always show the same value, whichever source is used.
 
 ```
 🏠 Your Home Climate Plan for Today
@@ -75,20 +79,26 @@ Day Type: Warm | Trend: Stable
 
   Day Type:        Warm (80°F)
   HVAC Mode:       Off — windows day
-  Windows:         Open 8 AM – 6 PM
+  Windows:         Open 6 AM – 10 AM
   Bedtime Setback: No setback
   Tomorrow:        Stable (82°F)
 
-The HVAC is off this morning — the house held its temperature nicely overnight. Around 8:00 AM, it'll be a great time to open some windows. Opening on opposite sides gives you a nice cross-breeze that keeps things comfortable without the AC.
+Open windows around 6:00 AM to catch the cool morning air. Close up at 10:00 AM — after that the outdoor air will be warmer than inside.
 
-You'll want to close things up by 6:00 PM though — I'll be ready to kick on the AC if temps push above 75°F, and it works much better with the house sealed up.
+Indoor temps are forecast to reach 75°F around 2:30 PM. Once windows are closed, the AC will step in automatically if it's needed to hold that ceiling.
 
 If you head out, nothing really changes today — the HVAC is off. If it was running as a safety net, it'll set back on its own.
 
-If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 5 minutes and then pause until you close up.
+If you want to open a window for some fresh air, go for it — the HVAC is off today so there's no energy impact at all. Enjoy the breeze. If the system does need to kick on as a safety net later and a window is still open, I'll give it 10 minutes and then pause until you close up.
 
 Tomorrow looks pretty similar to today — 82°F for a high. Nothing special planned overnight.
 ```
+
+Note: the AC-as-backup fact is stated exactly once — the forecast/ceiling sentence ties it
+to windows being closed, and the fresh-air paragraph owns the window-open debounce/pause
+guard (matching the real `automation.py` `apply_classification()` `DEFER_PAUSED` behavior).
+Earlier versions of this example independently promised a specific AC start clock-time with
+no window-state awareness — that was the root cause of Issue #518 and has been corrected.
 
 ---
 
@@ -118,7 +128,7 @@ If outdoor temps drop below 75°F after sunset, I'll send you a heads-up that it
 
 If you head out, no worries. After about 15 minutes I'll let the house drift up to 80°F to save energy. When you're back, I'll pull it right back down — give it 20 to 30 minutes to feel normal again.
 
-If you want to crack a window for some fresh air, no problem — it's your house. I'll keep the AC running for a bit in case it's just a quick thing, but if it stays open past 5 minutes I'll shut the AC off so you're not cooling the outdoors. Once you close up, I'll fire the AC back up right away. Just know that on a day like today it may take a bit longer to pull back down to 75°F, so if you want to minimize the impact, shorter is better — and try to keep other windows and doors shut while you've got one open.
+If you want to crack a window for some fresh air, no problem — it's your house. I'll keep the AC running for a bit in case it's just a quick thing, but if it stays open past 10 minutes I'll shut the AC off so you're not cooling the outdoors. Once you close up, I'll fire the AC back up right away. Just know that on a day like today it may take a bit longer to pull back down to 75°F, so if you want to minimize the impact, shorter is better — and try to keep other windows and doors shut while you've got one open.
 
 Tomorrow looks pretty similar to today — 92°F for a high. Nothing special planned overnight.
 ```
@@ -151,7 +161,7 @@ After 3pm I'll bring it back to 70°F as the sun drops. At bedtime, I'll set thi
 
 If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
 
-If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 5 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
+If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 10 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
 
 Looking ahead — tomorrow's cooler at 50°F, so I'll bank some extra warmth this evening and go easy on the overnight setback. If the house feels a touch warmer than usual before bed, that's intentional.
 ```
@@ -184,7 +194,7 @@ Tonight I'm using a conservative setback — 67°F instead of the usual 60°F. W
 
 If you head out, I'll drop to 60°F after about 15 minutes. When you get back, I'll warm things right up — should take 20 to 30 minutes depending on how long you were gone.
 
-If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 5 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
+If you want to open a window for some fresh air, no problem — go for it. I'll keep the heat running for a bit in case you're just airing things out, but if it stays open past 10 minutes I'll turn the heat off so we're not heating the neighborhood. Once you close up, the heat kicks right back on. It'll take a little extra energy to warm back up, so if you want to minimize the impact, a quick burst of fresh air works great — and closing doors to the room with the open window helps keep the rest of the house comfortable while you do it.
 
 Looking ahead — tomorrow's cooler at 28°F, so I'll bank some extra warmth this evening and go easy on the overnight setback. If the house feels a touch warmer than usual before bed, that's intentional.
 ```

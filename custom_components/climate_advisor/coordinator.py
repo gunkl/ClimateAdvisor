@@ -225,7 +225,6 @@ from .const import (
 )
 from .fan_status import is_ca_fan_running, parse_remote_speed_event, parse_remote_timer_event
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
-from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
 from .temperature import convert_delta, format_temp, free_cooling_direction_ok, from_fahrenheit, to_fahrenheit
 
@@ -1492,56 +1491,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         nat_vent_activated = False
         hvac_commanded = False
 
-        if open_sensors and outdoor is not None and indoor is not None:
-            comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
-            comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-            nat_vent_delta = float(self.config.get("natural_vent_delta", DEFAULT_NATURAL_VENT_DELTA))
-            nat_vent_threshold = comfort_cool + nat_vent_delta
-            # Architecture-reset (Issue #429 consolidation): this pre-check used to hand-roll
-            # the same 3-part gate (direction/floor/ceiling) that _nat_vent_may_reactivate()
-            # already consolidates — risking exactly the site-drift #429/#411 warns about
-            # (e.g. this copy never considered fan_mode archetype or aggressive_savings for
-            # the ceiling check, unlike the real gate). No hysteresis and no sleep-window
-            # floor resolution here, matching this call site's original (pre-consolidation)
-            # scope exactly — comfort_heat is passed through as-is, not sleep-aware, since
-            # startup coalescing has never resolved that here.
-            _startup_gate_inputs = NatVentGateInputs(
-                outdoor=outdoor,
-                indoor=indoor,
-                comfort_heat_raw=comfort_heat,
-                sleep_heat=comfort_heat,
-                in_sleep_window=False,
-                comfort_cool=comfort_cool,
-                nat_vent_delta=nat_vent_delta,
-                hysteresis=0.0,
-                fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-                aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        if open_sensors:
+            # Issue #523: this call site used to hand-roll its own incomplete copy of the
+            # nat-vent gate purely to decide WHETHER to call handle_door_window_open() — a
+            # third parallel copy of the threshold logic already consolidated once for
+            # #400/#402 (see project_natvent_duplicate_threshold_logic). When that cheap
+            # pre-check said "no nat-vent", handle_door_window_open() — the only function
+            # that can set _paused_by_door — was never called at all, so an open window at
+            # restart could silently fall through to apply_classification() unsuppressed.
+            # Delegate unconditionally instead: handle_door_window_open() already runs the
+            # full _nat_vent_may_reactivate() gate (fan-mode archetype, aggressive_savings,
+            # forecast/floor guards, missing-temp safety) and falls through to the pause
+            # branch itself when nat-vent isn't viable — single source of truth.
+            first_sensor = open_sensors[0]
+            _LOGGER.debug("[coalesce-diag] before handle_door_window_open(%s)", first_sensor)
+            await self.automation_engine.handle_door_window_open(first_sensor)
+            _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
+            nat_vent_activated = self.automation_engine._natural_vent_active
+            _LOGGER.info(
+                "Startup coalescing: door/window handling complete for %s — nat_vent_activated=%s, paused_by_door=%s",
+                first_sensor,
+                nat_vent_activated,
+                self.automation_engine._paused_by_door,
             )
-            if decide_nat_vent_gate(_startup_gate_inputs):
-                _LOGGER.info(
-                    "Startup coalescing: nat-vent conditions met"
-                    " (outdoor %.1f°F < indoor %.1f°F, indoor > comfort_heat %.1f°F,"
-                    " outdoor < threshold %.1f°F) — activating nat-vent",
-                    outdoor,
-                    indoor,
-                    comfort_heat,
-                    nat_vent_threshold,
-                )
-                first_sensor = open_sensors[0]
-                _LOGGER.debug("[coalesce-diag] before handle_door_window_open(%s)", first_sensor)
-                await self.automation_engine.handle_door_window_open(first_sensor)
-                _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
-                nat_vent_activated = True
-            else:
-                _nat_vent_delta_log = float(self.config.get("natural_vent_delta", DEFAULT_NATURAL_VENT_DELTA))
-                _LOGGER.info(
-                    "Startup coalescing: nat-vent conditions not met"
-                    " (outdoor=%.1f, indoor=%.1f, comfort_heat=%.1f, threshold=%.1f)",
-                    outdoor or 0,
-                    indoor or 0,
-                    float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT)),
-                    float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)) + _nat_vent_delta_log,
-                )
 
         if not nat_vent_activated and c:
             climate_state = self.hass.states.get(self.config.get("climate_entity", ""))

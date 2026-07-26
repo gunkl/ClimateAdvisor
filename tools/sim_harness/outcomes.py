@@ -130,6 +130,13 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         "nat_vent_predicted_floor_exit",
         "grace_started",
         "incident_detected",
+        # Issue #523: startup_coalesced is a bookkeeping summary (nat_vent_activated/
+        # hvac_commanded/sensors_open_count echoing what the coalesce cycle already
+        # decided via its handle_door_window_open()/apply_classification() calls) —
+        # not a decision outcome of its own. Left mapped, it always fires last in the
+        # cycle and shadows the real outcome (e.g. classification_suppressed_paused)
+        # at that same timestamp in production_outcome_at()'s "most recent" lookup.
+        "startup_coalesced",
     }
 )
 

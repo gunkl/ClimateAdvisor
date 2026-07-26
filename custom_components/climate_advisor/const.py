@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.33"
+VERSION = "0.5.34"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.34": [
+        "Fix #523: after an HA restart, if a window was already open, Climate Advisor could"
+        " turn the AC on and cool against the open window instead of staying paused like it"
+        " does at every other point in the day — most visible after an update. Startup"
+        " handling now defers to the same door/window pause logic used the rest of the time,"
+        " and that pause logic itself now correctly stays engaged even when the thermostat was"
+        " already off when the window opened.",
+    ],
     "0.5.33": [
         "Fix #524: the dashboard's whole-house-fan status card never showed the QuietCool"
         " remote's reported speed, even though the underlying detection (#519) was working"
@@ -1269,6 +1277,53 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    523: {
+        "version_fixed": "0.5.34",
+        "title": (
+            "HVAC could arm against an already-open window right after an HA restart,"
+            " instead of staying paused like it does at every other point in the day"
+        ),
+        "scope_covered": (
+            "coordinator.py: _do_startup_coalesce() hand-rolled its own incomplete copy of"
+            " the nat-vent gate purely to decide whether to call handle_door_window_open() at"
+            " all — a third parallel copy of threshold logic already consolidated once for"
+            " #400/#402. When that pre-check declined nat-vent (e.g. outdoor warmer than"
+            " indoor), handle_door_window_open() — the only function that sets"
+            " _paused_by_door — was never called, so an open window at restart could fall"
+            " through to an unsuppressed apply_classification(). Fixed by deleting the"
+            " duplicate gate and delegating unconditionally to handle_door_window_open()"
+            " whenever a sensor is open, letting it make the nat-vent-vs-pause decision with"
+            " its own complete, single-source-of-truth gate. automation.py:"
+            " handle_door_window_open()'s pause branch also never set _paused_by_door when"
+            " the current HVAC mode was already 'off' — exactly the state found after a"
+            " restart where the window was already open before HA restarted (the sibling"
+            " _re_pause_for_open_sensor(), added whole in #47, already got this right;"
+            " handle_door_window_open() predates #47 and was never brought in line)."
+            " Extracted a shared _pause_for_door_window() helper (mirroring the #491"
+            " precedent) used by both call sites, so the off/not-off branch exists in one"
+            " place going forward; both branches now also emit an activity event (the"
+            " off-mode case previously emitted none in either function). Also guarded"
+            " reconcile_fan_on_startup()'s no-fan branch (restore_hvac=not"
+            " self._paused_by_door) so a stranded WHF _pre_fan_hvac_mode from before the"
+            " restart cannot silently restore HVAC right after the pause fix takes effect —"
+            " the same invariant #418 established for the nat-vent-exit path."
+            " check_natural_vent_conditions()'s idle-open re-evaluation loop (#244/#402/#504)"
+            " needed a companion _paused_with_hvac_already_off flag to keep re-checking nat-"
+            " vent opportunity for a sensor open with HVAC genuinely idle, since _paused_by_door"
+            " alone is no longer sufficient to mean 'HVAC was actively interrupted.'"
+        ),
+        "scope_not_covered": (
+            "The production-harness (Tier A) scenario"
+            " (tools/simulations/pending/startup_coalesce_sensor_open_nat_vent_gate_false.json)"
+            " calls coordinator._do_startup_coalesce() directly via a new 'startup_coalesce'"
+            " harness event type rather than driving it through the full periodic-refresh/"
+            " weather-retry machinery via the 300s timer + scheduler.advance_to() — reaching"
+            " it that way was found to require more DataUpdateCoordinator polling fidelity"
+            " than the fake scheduler currently drives reliably. The method under test is"
+            " real production code either way; only the surrounding timer/refresh indirection"
+            " is bypassed, matching the existing reconcile_fan_on_startup event precedent."
+        ),
+    },
     524: {
         "version_fixed": "0.5.33",
         "title": (

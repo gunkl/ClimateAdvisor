@@ -366,6 +366,37 @@ class TestHandleDoorWindowOpenWithGrace:
         # Should not have called any service
         engine.hass.services.async_call.assert_not_called()
 
+    def test_sets_pause_flag_when_hvac_already_off(self):
+        """Issue #523: HVAC already off must still set _paused_by_door.
+
+        Before the fix, handle_door_window_open() only set _paused_by_door when
+        the current mode was not "off" — if the sensor opened (or was already
+        open at startup) while HVAC was already idle, the flag never got set,
+        silently leaving the next apply_classification() cycle free to arm a
+        fresh comfort band against the still-open window (the reported
+        incident). No mode change is needed here — nothing was running to
+        interrupt — but the flag itself must still be set.
+        """
+        engine = _make_automation_engine()
+        engine.hass.states.get.return_value = _make_state("off")
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_emits_activity_event_when_hvac_already_off(self):
+        """Issue #523: the off-mode pause must still be visible in the Activity Report."""
+        engine = _make_automation_engine()
+        engine.hass.states.get.return_value = _make_state("off")
+        events = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert ("sensor_opened", {"entity": "binary_sensor.front_door", "result": "paused"}) in events
+
 
 class TestHandleAllDoorsWindowsClosed:
     """Tests for handle_all_doors_windows_closed starting grace periods."""

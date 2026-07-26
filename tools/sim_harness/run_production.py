@@ -468,14 +468,25 @@ def _dispatch_event(
     elif etype == "sensor_open":
         entity_id = event.get("entity", "binary_sensor.window")
         if coordinator is not None:
-            # Issue #476: real state-change dispatch through the coordinator's
-            # actual _async_door_window_changed listener (registered via
-            # _subscribe_door_window_listeners() in async_setup(), requires the
-            # entity_id to be in the scenario's config["door_window_sensors"]).
-            # This owns debounce (harness default sensor_debounce_seconds=0, so
-            # effectively instant), pause/resume, and starting the real grace
-            # timer — none of that is approximated here.
-            fake_hass.states.async_set(entity_id, "on", {})
+            if event.get("seed"):
+                # Issue #523: models a window that was ALREADY open before HA
+                # restarted — no fresh on/off transition ever occurs (HA's
+                # _async_door_window_changed listener only fires on a state
+                # CHANGE event, not on the value already in place when it
+                # subscribes), so the debounce-driven pause path never engages.
+                # Only _do_startup_coalesce()'s own raw _is_sensor_open() read
+                # sees this sensor open. Uses the silent states.set() (no
+                # listener dispatch) instead of async_set().
+                fake_hass.states.set_simple(entity_id, "on", {})
+            else:
+                # Issue #476: real state-change dispatch through the coordinator's
+                # actual _async_door_window_changed listener (registered via
+                # _subscribe_door_window_listeners() in async_setup(), requires the
+                # entity_id to be in the scenario's config["door_window_sensors"]).
+                # This owns debounce (harness default sensor_debounce_seconds=0, so
+                # effectively instant), pause/resume, and starting the real grace
+                # timer — none of that is approximated here.
+                fake_hass.states.async_set(entity_id, "on", {})
         else:
             tracker.open(entity_id)
             run_coro(engine.handle_door_window_open(entity_id))
@@ -590,6 +601,22 @@ def _dispatch_event(
                 any_sensor_open=bool(event.get("any_sensor_open", False)),
             )
         )
+
+    elif etype == "startup_coalesce":
+        # Issue #523: direct call to the real coordinator's _do_startup_coalesce()
+        # entry point — the same legitimate pattern as reconcile_fan_on_startup
+        # above, not a coordinator-dispatch approximation. In production this
+        # method runs inside _async_update_data_impl(), gated on
+        # (_startup_timer_fired and _startup_coalesce_active and
+        # _current_classification) once the 300s post-restart timer fires and a
+        # subsequent refresh cycle runs. Driving that full periodic-refresh/
+        # weather-retry machinery through the fake scheduler just to reach this
+        # one method is unnecessary indirection — this calls it directly so a
+        # scenario can assert its real, current behavior (sensor pause vs.
+        # nat-vent vs. classification) against real sensor/temp/classification
+        # state, exactly as it runs in production once reached.
+        if coordinator is not None:
+            run_coro(coordinator._do_startup_coalesce())
 
     elif etype == "thermostat_state_changed":
         # Issue #474: when a real coordinator is present, dispatch via

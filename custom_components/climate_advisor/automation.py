@@ -465,6 +465,12 @@ class AutomationEngine:
         self._current_classification: DayClassification | None = None
         self._paused_by_door = False
         self._pre_pause_mode: str | None = None
+        # Issue #523: distinguishes "_paused_by_door=True with HVAC already off" (nothing
+        # was interrupted, no grace/resume timer exists) from a genuine mode-change pause —
+        # check_natural_vent_conditions()'s idle-open re-evaluation loop (Issue #244/#402/
+        # #504) must keep running every cycle in the former case, since nothing else will
+        # ever re-trigger it otherwise. Only _pause_for_door_window() sets this True.
+        self._paused_with_hvac_already_off = False
 
         # Issue #392 Fix 3: serialize the six automation decision-pass entry points
         # (apply_classification, handle_door_window_open, handle_all_doors_windows_closed,
@@ -2456,6 +2462,48 @@ class AutomationEngine:
                 "duration_hours": 2,
             }
 
+    async def _pause_for_door_window(
+        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
+    ) -> bool:
+        """Pause HVAC for an open door/window, or mark paused if HVAC was already off.
+
+        Issue #523: handle_door_window_open() and _re_pause_for_open_sensor() each used to
+        hand-roll this off-vs-not-off branch separately, and drifted out of sync — the older
+        handle_door_window_open() never set _paused_by_door when HVAC was already off,
+        silently leaving the next apply_classification() cycle unguarded. Single source of
+        truth for both call sites now.
+
+        Returns True if HVAC was actively turned off (a real mode transition happened),
+        False if HVAC was already off and only the pause flag was set.
+        """
+        state = self.hass.states.get(self.climate_entity)
+        mode = state.state if state else None
+        if mode and mode not in ("off", "unavailable", "unknown"):
+            self._pre_pause_mode = mode
+            self._paused_by_door = True
+            self._paused_with_hvac_already_off = False
+            await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
+            await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "sensor_opened",
+                    {"entity": entity_label, "result": "paused", "hvac_mode_change": f"{mode}→off"},
+                )
+            return True
+        if mode == "off":
+            self._paused_by_door = True
+            self._paused_with_hvac_already_off = True
+            _LOGGER.info(
+                "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
+                entity_label,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "sensor_opened",
+                    {"entity": entity_label, "result": "paused"},
+                )
+        return False
+
     async def handle_door_window_open(self, entity_id: str) -> None:
         """Handle a door/window being opened for longer than the debounce period.
 
@@ -2623,37 +2671,18 @@ class AutomationEngine:
                     outdoor is not None and outdoor < nat_vent_threshold,
                 )
 
-            # Get current mode before pausing
-            state = self.hass.states.get(self.climate_entity)
-            if state:
-                self._pre_pause_mode = state.state
-
-            if self._pre_pause_mode and self._pre_pause_mode != "off":
-                self._paused_by_door = True
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "sensor_opened",
-                        {
-                            "entity": entity_id,
-                            "result": "paused",
-                            "hvac_mode_change": f"{self._pre_pause_mode}→off",
-                        },
-                    )
-                await self._set_hvac_mode(
-                    "off",
-                    reason=f"door/window open — {entity_id}, was {self._pre_pause_mode} mode",
-                )
-
-                # Notify
-                debounce_minutes = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS) // 60
-                friendly_name = entity_id.split(".")[-1].replace("_", " ").title()
-                await self._notify(
+            debounce_minutes = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS) // 60
+            friendly_name = entity_id.split(".")[-1].replace("_", " ").title()
+            await self._pause_for_door_window(
+                entity_label=entity_id,
+                reason=f"door/window open — {entity_id}",
+                notify_message=(
                     f"🚪 HVAC paused — {friendly_name} has been open for "
                     f"{debounce_minutes} minutes. "
-                    f"Heating/cooling will resume when it's closed.",
-                    "Climate Advisor",
-                    notification_type="door_window_pause",
-                )
+                    f"Heating/cooling will resume when it's closed."
+                ),
+                notify_type="door_window_pause",
+            )
 
     async def handle_all_doors_windows_closed(self) -> None:
         """Resume HVAC after all monitored doors/windows are closed."""
@@ -2705,6 +2734,7 @@ class AutomationEngine:
                 return
 
             self._paused_by_door = False
+            self._paused_with_hvac_already_off = False
             if self._pre_pause_mode:
                 await self._set_hvac_mode(
                     self._pre_pause_mode,
@@ -2725,7 +2755,14 @@ class AutomationEngine:
         Mirrors the monitoring logic in tools/simulate.py ClimateSimulator.
         """
         async with self._decision_pass("check_natural_vent_conditions"):
-            if not (self._paused_by_door or self._natural_vent_active):
+            # Issue #523: _paused_by_door alone is no longer a reliable "HVAC was actively
+            # interrupted" signal — handle_door_window_open()/_pause_for_door_window() now
+            # correctly set it even when HVAC was already off (nothing to interrupt, no
+            # grace/resume timer ever starts). Without _actively_paused, that flag-only case
+            # would permanently block this idle-open re-evaluation loop below (Issue #244/
+            # #402/#504) since nothing else would ever re-trigger it.
+            _actively_paused = self._paused_by_door and not self._paused_with_hvac_already_off
+            if not (_actively_paused or self._natural_vent_active):
                 # Comfort-ceiling override (Issue #134): if grace is active and indoor has
                 # risen above comfort_cool, allow re-evaluation so nat-vent can engage.
                 # Grace still blocks rapid door-open/close cycling below the comfort ceiling.
@@ -2781,7 +2818,8 @@ class AutomationEngine:
 
             # Issue #134: comfort-ceiling re-entry during grace — neither flag is True but
             # indoor has risen above comfort_cool. Check nat-vent conditions directly.
-            if not (self._paused_by_door or self._natural_vent_active):
+            # (_actively_paused computed above — same value, condition unchanged in between.)
+            if not (_actively_paused or self._natural_vent_active):
                 _indoor = self._get_indoor_temp_f()
                 _comfort_heat = self._nat_vent_reactivation_floor()
                 _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
@@ -3074,6 +3112,7 @@ class AutomationEngine:
                     )
                     self._natural_vent_active = True
                     self._paused_by_door = False
+                    self._paused_with_hvac_already_off = False
                     _LOGGER.info(
                         "Natural vent activated: outdoor %.1f°F < indoor %.1f°F − %.1f°F hysteresis,"
                         " outdoor ≤ threshold %.1f°F while paused",
@@ -3467,9 +3506,16 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
+            # Issue #523: never restore a suppressed HVAC mode while paused for an open
+            # door/window — matches the invariant #418 already established for the
+            # nat-vent-exit path ("_paused_by_door=True while _deactivate_fan()'s default
+            # restore_hvac=True restores HVAC anyway" contradicts pause semantics). Without
+            # this guard, a WHF session left _pre_fan_hvac_mode stranded from before a
+            # restart could silently re-command HVAC on right after the classification block
+            # above correctly paused it for an open window.
             await self._deactivate_fan(
                 reason="startup reconcile — fan confirmed off, releasing any stranded HVAC suppression",
-                restore_hvac=True,
+                restore_hvac=not self._paused_by_door,
             )
             return
 
@@ -3596,6 +3642,7 @@ class AutomationEngine:
             return
         _LOGGER.info("Manual HVAC override detected during door/window pause")
         self._paused_by_door = False
+        self._paused_with_hvac_already_off = False
         self._pre_pause_mode = None
         # Start confirmation period — wait before formally accepting the override
         self.start_override_confirmation(
@@ -3619,6 +3666,7 @@ class AutomationEngine:
 
         _LOGGER.info("User resumed HVAC from door/window pause via dashboard")
         self._paused_by_door = False
+        self._paused_with_hvac_already_off = False
         self._pre_pause_mode = None
         self._resumed_from_pause = True
 
@@ -3883,22 +3931,12 @@ class AutomationEngine:
                 if self._emit_event_callback:
                     self._emit_event_callback("sensor_opened", {"entity": "re-check", "result": "natural_ventilation"})
                 return
-            state = self.hass.states.get(self.climate_entity)
-            if state and state.state not in ("off", "unavailable", "unknown"):
-                self._pre_pause_mode = state.state
-                self._paused_by_door = True
-                await self._set_hvac_mode(
-                    "off",
-                    reason="grace expired — door/window still open, re-pausing",
-                )
-                await self._notify(
-                    "Grace period expired but a door/window is still open. HVAC has been paused again.",
-                    "Climate Advisor",
-                    notification_type="grace_repause",
-                )
-            elif state and state.state == "off":
-                # HVAC already off, just set the pause flag
-                self._paused_by_door = True
+            await self._pause_for_door_window(
+                entity_label="re-check",
+                reason="grace expired — door/window still open, re-pausing",
+                notify_message=("Grace period expired but a door/window is still open. HVAC has been paused again."),
+                notify_type="grace_repause",
+            )
 
     async def _apply_current_scheduled_state(self, reason: str = "grace_expired") -> None:
         """After override clears, converge to the scheduled automation state.

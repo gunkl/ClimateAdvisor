@@ -141,6 +141,8 @@ When the system sets HVAC to `off` as part of a pause, it sets `_hvac_command_pe
 
 **Nat-vent runs before pause.** After the debounce expires, `handle_door_window_open()` checks natural ventilation conditions first (`outdoor < indoor AND indoor > comfort_heat AND outdoor < comfort_cool + delta`). If met, the fan turns on and the comfort band stays armed (Issue #249) — HVAC is NOT set to off and `_paused_by_door` is NOT set. The HVAC-off pause is only the fallback when nat-vent gates fail.
 
+**Pause always sets `_paused_by_door`, even with nothing to interrupt (Issue #523).** When the pause fallback fires, `handle_door_window_open()` and `_re_pause_for_open_sensor()` (grace-expiry re-check) both delegate to a shared `_pause_for_door_window()` helper: if HVAC was actively running, it captures `_pre_pause_mode`, calls HVAC off, and notifies; if HVAC was already `"off"`, only `_paused_by_door` (and the companion `_paused_with_hvac_already_off` flag) is set — no service call, no notification, but the flag still gets set. This matters because `apply_classification()`'s only door/window signal is `_paused_by_door`; leaving it unset when HVAC was already off (the old behavior) let the next classification cycle freely arm HVAC against a window that was never actually closed — most visible via `_do_startup_coalesce()` after a restart, where HVAC is commonly already off. See `grace-periods-spec.md` for the full pause-guard writeup.
+
 ```mermaid
 graph TD
     A[Sensor state change] --> B{Sensor is open?}
@@ -612,6 +614,7 @@ flowchart TD
 **Key invariants:**
 - The coalesce window (`_first_run = True`, 5-minute settling) suppresses override detection — the turn-off command is not misread as a user manual action.
 - Log line `Fan reconcile: thermostat fan_mode=<x> hvac_action=<y> nat_vent_eligible=<bool> decision=<adopt-on|turn-off|no-fan> archetype=<mode>` is the post-deploy validation grep target.
+- **(D) `no-fan` never restores HVAC while paused for an open door/window (Issue #523).** The `no-fan` branch releases any stranded WHF HVAC suppression via `_deactivate_fan(restore_hvac=True)` by default — but if the nat-vent/`apply_classification` step immediately above just set `_paused_by_door=True` (because a window is open and HVAC was already off — see §12 and `grace-periods-spec.md`), that restore must not fire: `restore_hvac=not self._paused_by_door` instead. Otherwise a WHF session's stranded `_pre_fan_hvac_mode` from before the restart could silently re-arm HVAC right after the pause was correctly applied, matching the invariant `_exit_nat_vent()` already established for the nat-vent-exit path (Issue #418).
 
 ### 14b. Thermostatic Fan Loop Trigger Sources
 

@@ -1,0 +1,62 @@
+{
+  "name": "startup_coalesce_sensor_open_nat_vent_gate_false",
+  "description": "Issue #523: HA restart with a window already open and HVAC already off (from before the restart) — outdoor warmer than indoor so nat-vent correctly declines, but the startup coalesce cycle must still suppress classification instead of arming a fresh comfort band.",
+  "source": "activity-report",
+  "issue": 523,
+  "notes": [
+    "Occupant impact: reproduces the exact reported incident — after every restart/update, if a window happens to be open, Climate Advisor was arming the AC and cooling against an open window instead of respecting the pause it applies at every other point in the day.",
+    "The 'seed' sensor_open event models a window that was ALREADY open before HA restarted (no fresh on/off transition — HA's _async_door_window_changed listener only fires on a state CHANGE, not on the value already in place when it subscribes at startup). Only _do_startup_coalesce()'s own raw sensor read sees this. This isolates the bug from the normal debounce-driven listener path, which was never broken.",
+    "Before the #523 fix: _do_startup_coalesce() hand-rolled its own incomplete nat-vent gate purely to decide whether to call handle_door_window_open() at all. Outdoor(76F) > indoor(71F) fails the direction gate, so nat-vent correctly declines -- but the old code then skipped calling handle_door_window_open() entirely, leaving _paused_by_door=False, and apply_classification() armed the comfort band unsuppressed.",
+    "After the fix: _do_startup_coalesce() delegates unconditionally to handle_door_window_open(), which sets _paused_by_door=True even though HVAC was already off (nothing to interrupt) -- apply_classification() then correctly suppresses via DEFER_PAUSED.",
+    "initial_thermostat_mode defaults to 'off', matching the incident (HVAC was already suppressed/off from the open window before the restart)."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.group_contact_sensors"]
+  },
+  "use_coordinator": true,
+  "events": [
+    {
+      "time": "2026-07-25T11:15:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Startup classification cycle — warm/stable day, matches the incident's 'Classification applied: warm (stable)'"
+    },
+    {
+      "time": "2026-07-25T11:15:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 76.0,
+      "note": "Indoor 71F, outdoor 76F — outdoor warmer than indoor, nat-vent direction gate correctly declines"
+    },
+    {
+      "time": "2026-07-25T11:15:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.group_contact_sensors",
+      "seed": true,
+      "note": "Window already open at boot — no transition event, only _do_startup_coalesce()'s raw sensor read observes this"
+    },
+    {
+      "time": "2026-07-25T11:20:00",
+      "type": "startup_coalesce",
+      "note": "Direct call to the real coordinator._do_startup_coalesce() entry point (production reaches this via the 300s post-restart timer + next refresh cycle -- see run_production.py's startup_coalesce event handler for why this bypasses that indirection)"
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-25T11:20:00",
+      "expect": "classification_suppressed_paused",
+      "reason": "Window open at restart with HVAC already off must still suppress classification via _paused_by_door -- not arm a fresh comfort band against an open window."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Startup coalescing with a window already open and HVAC already off correctly suppresses classification instead of arming HVAC against the open window.",
+    "observed_behavior": "classification_suppressed_paused at 11:20 (coalesce delegated to handle_door_window_open, which set _paused_by_door=True despite HVAC already being off)",
+    "expected_behavior": "classification_suppressed_paused -- no comfort band applied while the window is open, matching the suppression behavior production already shows at every other point in the day."
+  }
+}

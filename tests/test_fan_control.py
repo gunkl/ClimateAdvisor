@@ -2218,6 +2218,28 @@ class TestReconcileFanOnStartup:
         assert engine._set_hvac_mode.call_args.args[0] == "cool"
         assert engine._pre_fan_hvac_mode is None
 
+    def test_stranded_hvac_suppression_not_restored_while_paused_by_door(self):
+        """Issue #523: never restore a suppressed HVAC mode while paused for an open
+        door/window — matches the invariant #418 already established for the
+        nat-vent-exit path. Without this guard, a WHF session left _pre_fan_hvac_mode
+        stranded from before a restart could silently re-command HVAC on right after
+        the startup classification block correctly paused it for an open window."""
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._set_hvac_mode = AsyncMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._pre_fan_hvac_mode = "cool"  # stranded from a prior _activate_fan() session
+        engine._paused_by_door = True  # startup coalesce just paused for an open window
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=71.0, outdoor=76.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._set_hvac_mode.assert_not_awaited()
+
     def test_no_fan_and_nothing_stranded_is_a_true_noop(self):
         """Companion to the #405 regression test: when nothing is stranded, releasing
         the (nonexistent) suppression must not issue a spurious HVAC write or Activity

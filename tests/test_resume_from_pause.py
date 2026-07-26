@@ -440,16 +440,25 @@ class TestGraceExpiryRecheck:
         assert engine._last_resume_source is None
 
     def test_re_pause_when_hvac_already_off(self):
-        """_re_pause_for_open_sensor sets _paused_by_door=True without a service call when HVAC is already off."""
+        """_re_pause_for_open_sensor sets _paused_by_door=True without a service call when HVAC is already off.
+
+        Issue #523: this off-mode case previously never emitted an activity event
+        either (in either handle_door_window_open() or here) — invisible in the
+        Activity Report despite genuinely changing pause state. Now routed through
+        the shared _pause_for_door_window() helper, which always emits.
+        """
         engine = _make_automation_engine()
 
         state_mock = MagicMock()
         state_mock.state = "off"
         engine.hass.states.get.return_value = state_mock
+        events = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
 
         asyncio.run(engine._re_pause_for_open_sensor())
 
         assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
         # No climate service call should have been made (HVAC already off)
         hvac_calls = [
             c
@@ -457,6 +466,7 @@ class TestGraceExpiryRecheck:
             if c.args[0] == "climate" and c.args[1] == "set_hvac_mode"
         ]
         assert len(hvac_calls) == 0
+        assert ("sensor_opened", {"entity": "re-check", "result": "paused"}) in events
 
 
 # ---------------------------------------------------------------------------

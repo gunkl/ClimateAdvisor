@@ -430,13 +430,24 @@ class TestStartupCoalesceDoCoalesce:
 
         Occupant impact: windows left open after restart now correctly resume
         nat-vent instead of idling with HVAC in an unknown state.
+
+        Issue #523: _do_startup_coalesce() no longer pre-evaluates the nat-vent gate
+        itself — it delegates unconditionally to handle_door_window_open() and reads
+        the resulting _natural_vent_active flag back. handle_door_window_open() is
+        mocked here, so the side_effect simulates the real function's effect of
+        setting _natural_vent_active=True when nat-vent activates.
         """
+
+        async def _activate_nat_vent(_entity_id):
+            coord.automation_engine._natural_vent_active = True
+
         coord = _make_coalesce_coord_stub(
             _resolved_sensors=["binary_sensor.front_window"],
             _get_indoor_temp=MagicMock(return_value=73.0),
             _last_outdoor_temp=65.0,  # outdoor < indoor, conditions met
         )
         coord._is_sensor_open = MagicMock(return_value=True)  # sensor open
+        coord.automation_engine.handle_door_window_open = AsyncMock(side_effect=_activate_nat_vent)
 
         asyncio.run(coord._do_startup_coalesce())
 
@@ -468,7 +479,14 @@ class TestStartupCoalesceDoCoalesce:
         assert coord._startup_coalesce_active is False
 
     def test_nat_vent_conditions_not_met_applies_classification(self):
-        """Outdoor warmer than indoor → nat-vent gate fails → apply_classification called."""
+        """Outdoor warmer than indoor → nat-vent gate fails → still pauses via
+        handle_door_window_open(), then apply_classification runs (and, in the real
+        engine, correctly suppresses itself via _paused_by_door — Issue #523).
+
+        Before the #523 fix, handle_door_window_open() was never called at all when
+        the coordinator's own duplicate gate pre-check said "no nat-vent", so an open
+        window at restart silently fell through to an unsuppressed apply_classification.
+        """
         coord = _make_coalesce_coord_stub(
             _resolved_sensors=["binary_sensor.front_window"],
             _get_indoor_temp=MagicMock(return_value=72.0),
@@ -478,7 +496,7 @@ class TestStartupCoalesceDoCoalesce:
 
         asyncio.run(coord._do_startup_coalesce())
 
-        coord.automation_engine.handle_door_window_open.assert_not_called()
+        coord.automation_engine.handle_door_window_open.assert_called_once_with("binary_sensor.front_window")
         coord.automation_engine.apply_classification.assert_called_once()
         event_name, event_data = coord._emit_event.call_args[0]
         assert event_name == "startup_coalesced"

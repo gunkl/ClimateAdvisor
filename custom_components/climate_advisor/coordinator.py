@@ -1610,6 +1610,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             outdoor=outdoor,
             thermostat_fan_running=_thermostat_fan_running,
             any_sensor_open=self._any_sensor_open(),
+            trigger="ha_restart",
         )
         _LOGGER.debug("[coalesce-diag] after reconcile_fan_on_startup()")
 
@@ -1636,9 +1637,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         mid-cancel, or a future third endpoint that bypasses it). Runs every regular update cycle
         (~30s), so any residual inconsistency self-heals within one cycle instead of persisting
         for hours.
+
+        Scoped via ``ae._grace_protects_override`` (Issue #530): only grace periods started for
+        a real override (``_start_grace_period(trigger=...)`` with a trigger in
+        ``automation._GRACE_TRIGGERS_PROTECTING_OVERRIDE``) can be "orphaned" in the sense this
+        check means. Fan-off cooldown, physical-drift-correction, window-close-resume, and
+        nat-vent-exit-resume grace never set an override flag in the first place — checking only
+        flag-absence (pre-#530) misread every one of those as orphaned and killed them within
+        about one event-loop tick of starting, defeating Issue #359's fan-off protection almost
+        universally. This does not weaken the original Issue #508 protection: every trigger that
+        genuinely represents an override-confirmation grace is still covered.
         """
         ae = self.automation_engine
-        if not (ae._grace_active and not ae._manual_override_active and not ae._fan_override_active):
+        if not (
+            ae._grace_active
+            and getattr(ae, "_grace_protects_override", False)
+            and not ae._manual_override_active
+            and not ae._fan_override_active
+        ):
             return
         _LOGGER.error(
             "Stuck grace detected: grace_active=True but no override is active — force-cancelling grace (Issue #508)."
@@ -2198,6 +2214,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         hvac_action_attr=_bst_hvac_action,
                     ),
                     any_sensor_open=self._any_sensor_open(),
+                    trigger="backstop_30min",
                 )
             else:
                 _LOGGER.warning(
@@ -3539,6 +3556,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     hvac_action_attr=new_action,
                 ),
                 any_sensor_open=self._any_sensor_open(),
+                trigger="thermostat_state_change",
             )
 
         # If thermostat is now fully off, clear any stale HVAC-based fan active flag.
@@ -4263,6 +4281,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 outdoor=self._last_outdoor_temp,
                 thermostat_fan_running=archetype_fan_running,
                 any_sensor_open=self._any_sensor_open(),
+                trigger="post_grace_expiry",
             )
 
     def _fan_state_feedback_enabled(self) -> bool:

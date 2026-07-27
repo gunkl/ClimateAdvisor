@@ -15,7 +15,9 @@
 | What is the override confirmation delay — how does it work and what does it gate? | A debounce window (default 600 s) between detecting a thermostat mode change and formally accepting it as a manual override. While pending, `apply_classification()` returns early, blocking all HVAC commands. If the mode self-corrects within the window (transient glitch), the event is discarded — no grace period starts. | [§ Override Confirmation Delay](#override-confirmation-delay) |
 | What are all the callsites that clear a manual override, and under what conditions? | Eight callsites: three in `_grace_expired()` branches (always clear — intended, one of them via `cancel_override()` as of Issue #508), two scheduled handlers (bedtime/wakeup — skip if override active after Issue #204 fix), the two dashboard cancel buttons (always clear, via `cancel_override()` as of Issue #508), and one occupancy handler (away/vacation — clears before setback, fix #220). Every clear is logged at INFO with a `reason=` parameter. Note (Issue #498): both scheduled handlers must snapshot `_fan_override_active` *before* calling `clear_manual_override()` — that call unconditionally clears the fan-override flag as a side effect via `clear_fan_override()`, so reading the live attribute afterward always sees it already cleared. | [§ What Clears a Manual Override](#what-clears-a-manual-override) |
 | What is the difference between `clear_manual_override()` and `cancel_override()`, and which should a new callsite use? | `clear_manual_override()` clears override flags only — used by scheduled handlers (bedtime/wakeup/occupancy) that supersede an override without touching its grace timer, by design. `cancel_override()` (Issue #508) additionally cancels grace and forces the same fan-reconcile + coordinator-refresh a natural grace expiry performs — it is the single entry point for "user/system deliberately ends this override right now" (both dashboard "Cancel..." buttons, and the `adopted_matching_decision` path). A new callsite meaning deliberate cancellation must call `cancel_override()`, not compose the primitives by hand. | [§ Deliberate Cancellation — `cancel_override()` (Issue #508)](#deliberate-cancellation-cancel_override-issue-508) |
-| What happens if grace is left active with no override behind it (e.g. a future callsite bypasses `cancel_override()`)? | `coordinator._check_orphaned_grace()` (Issue #508), run every regular update cycle (~30s), self-heals: if `_grace_active=True` and neither `_manual_override_active` nor `_fan_override_active` is set, it force-cancels grace and emits `stuck_grace_recovered` with `reason="grace_without_override"`. This is the mirror of the pre-existing Issue #321 stuck-grace check (which catches the opposite shape — an override stuck active past its own due grace-end-time); the two checks are independent and cannot both fire on the same state. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
+| What happens if grace is left active with no override behind it (e.g. a future callsite bypasses `cancel_override()`)? | `coordinator._check_orphaned_grace()` (Issue #508), run every regular update cycle (~30s), self-heals: if `_grace_active=True`, `_grace_protects_override=True` (Issue #530 — see next row), and neither `_manual_override_active` nor `_fan_override_active` is set, it force-cancels grace and emits `stuck_grace_recovered` with `reason="grace_without_override"`. This is the mirror of the pre-existing Issue #321 stuck-grace check (which catches the opposite shape — an override stuck active past its own due grace-end-time); the two checks are independent and cannot both fire on the same state. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
+| Can every grace type be "orphaned" in the Issue #508 sense — does the watchdog apply to fan-off/window-close/resume grace too? | No (Issue #530 fix). `_start_grace_period(trigger=...)` sets `_grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE` (only `"fan_manual_override"` and `"override_confirmed"`) — the watchdog now only fires for grace that was genuinely started to protect a real override. Before this fix, the watchdog inferred "orphaned" purely from absent override flags, which is also the NORMAL, by-design shape of fan-off/drift-correction/window-close/dashboard-resume grace — every one of those was being killed within about one event-loop tick of starting. | [§ Orphaned Grace Self-Heal (Issue #508)](#orphaned-grace-self-heal-issue-508) |
+| A fan-off arrives seconds after an RF-remote-timer grace expires — is that a fresh event? | No (Issue #530). `_on_grace_expired()` arms `_timer_boundary_settle_until` (2 min) whenever the expiring grace's `_fan_remote_timer_hours` was set. A fan-off inside that window is treated as the tail of the SAME timer boundary — routed straight through `_exit_nat_vent()` instead of starting an independent new grace. | [§ RF-Timer Boundary Settle Window (Issue #530)](#rf-timer-boundary-settle-window-issue-530) |
 | Does PATH B (self-resolved transient) send a notification? | Yes (Issue #200). When the thermostat reverts to the expected mode within the confirmation window, a push notification is sent: "Brief thermostat adjustment detected — treated as transient. Climate Advisor continues normal operation." | [§ State Machine — PATH B](#state-machine) |
 | What happens if the user changes to a different mode while a grace period is already active? | The current override and grace timer are cleared, and a fresh 10-minute confirmation window starts for the new mode (Issue #201). The latest user action always wins. | [§ Second Override During Active Grace](#second-override-during-active-grace-issue-201) |
 | Where can the user see how much longer an active grace period will run? | The Status dashboard's next-action text (`_compute_next_automation_action()`/`_compute_next_action()` in coordinator.py) appends a formatted end-time + remaining-minutes suffix, e.g. "Grace period active (manual) — ends 7:14 AM (18 min left)", via `_format_grace_remaining()` reading `_grace_end_time` (Issue #498 — previously shown with no time at all). | [§ Timer Lifecycle](#timer-lifecycle) |
@@ -31,18 +33,20 @@
 
 **Line ranges (automation.py):**
 - `_is_within_planned_window_period()`: L706
-- `clear_manual_override()`: L764–L797
-- `cancel_override()`: L799–L831 (Issue #508 — see [§ Deliberate Cancellation](#deliberate-cancellation-cancel_override-issue-508))
-- `clear_fan_override()`: L1058
+- `clear_manual_override()`: L799
+- `cancel_override()`: L834 (Issue #508 — see [§ Deliberate Cancellation](#deliberate-cancellation-cancel_override-issue-508))
+- `on_fan_turned_off()`: L1026 (Issue #530: RF-timer boundary settle-window check at its top — see [§ RF-Timer Boundary Settle Window](#rf-timer-boundary-settle-window-issue-530))
+- `clear_fan_override()`: L1180
 - `handle_door_window_open()`: L2408
 - `handle_all_doors_windows_closed()`: L2607
 - `handle_manual_override_during_pause()`: L3532
 - `resume_from_pause()`: L3557
-- `_start_grace_period()`: L3590
-- `_on_grace_expired()`: L3658 (its three branches now call `_cancel_grace_timers()` for the grace-flag
-  reset instead of inlining it — deduped in Issue #508)
-- `_cancel_grace_timers()`: L3781
+- `_start_grace_period()`: L3766 (Issue #530: sets `_grace_protects_override` from `trigger`)
+- `_on_grace_expired()`: L3844 (its three branches now call `_cancel_grace_timers()` for the grace-flag
+  reset instead of inlining it — deduped in Issue #508; Issue #530 added the settle-window arm at its top)
+- `_cancel_grace_timers()`: L3980
 - `_re_pause_for_open_sensor()`: L3793
+- `_release_whf_and_reclassify()`: L4842 (Issue #530: `_natural_vent_active` guard added — see [§ Shared Scheduled-Band Gate](#shared-scheduled-band-gate-issue-498))
 - `restore_state()`: L5503
 - `get_serializable_state()`: L5588
 
@@ -50,11 +54,11 @@
 - `_subscribe_door_window_listeners()`: L1146
 - `_cancel_all_debounce_timers()`: L1302
 - `_any_sensor_open()`: L1350
-- `_check_orphaned_grace()`: L1521 (Issue #508 — see [§ Orphaned Grace Self-Heal](#orphaned-grace-self-heal-issue-508))
+- `_check_orphaned_grace()`: L1629 (Issue #508, scope corrected in #530 — see [§ Orphaned Grace Self-Heal](#orphaned-grace-self-heal-issue-508))
 - `_async_door_window_changed()`: L2960
 - `_async_thermostat_changed()` (pause-override detection): L3080
 
-**Note on line-number drift:** these are exact as of Issue #508 (v0.5.28) but will drift with future edits —
+**Note on line-number drift:** these are exact as of Issue #530 but will drift with future edits —
 treat them as a navigation aid, not a contract; if a line doesn't match, search for the function name.
 
 **Out of scope for this spec:**
@@ -80,7 +84,9 @@ treat them as a navigation aid, not a contract; if a line doesn't match, search 
 
 **Flags cleared:** `_fan_active = False`, `_natural_vent_active = False`. Critically, `_fan_override_active` is NOT set — this is not a manual override (the user stopped the fan, not started one against CA's intent).
 
-**End condition:** Grace timer fires → `reconcile_fan_on_startup()` is called to re-evaluate the physical fan state. If the fan is still running (edge case), the reconcile step either adopts it as nat-vent or turns it off. If the fan is off (normal case), no action is taken.
+**Never orphaned-grace-eligible (Issue #530):** because this grace type never sets an override flag by design, `_start_grace_period(trigger="fan_off")` (the default `trigger_label` in `_clear_fan_flags_and_start_grace()`) is NOT a member of `_GRACE_TRIGGERS_PROTECTING_OVERRIDE` — `_grace_protects_override` is `False`, so `coordinator._check_orphaned_grace()` never touches it. Before this fix, the watchdog could not distinguish "no override flag because nothing needs protecting" from "no override flag because something is broken," and killed essentially every fan-off grace within about one event-loop tick of starting (see [§ Orphaned Grace Self-Heal](#orphaned-grace-self-heal-issue-508)).
+
+**End condition:** Grace timer fires → `reconcile_fan_on_startup()` is called to re-evaluate the physical fan state. If the fan is still running (edge case), the reconcile step either adopts it as nat-vent or turns it off. If the fan is off (normal case), no action is taken. **Exception (Issue #530):** if the fan-off arrives inside the RF-timer boundary settle window, no fan-off grace is started at all — see [§ RF-Timer Boundary Settle Window](#rf-timer-boundary-settle-window-issue-530).
 
 #### Fan-Off Grace and Command-Only Mode (Issue #361)
 
@@ -286,26 +292,95 @@ cancellation plus reconciliation, only for callers that mean deliberate, immedia
 
 **Shape of the problem:** the opposite of the pre-existing Issue #321 stuck-grace check (below).
 Issue #321 catches `_grace_active=False` with `_grace_end_time` in the past (a timer that should
-have fired but didn't — override stuck active). This new check catches `_grace_active=True` with
+have fired but didn't — override stuck active). This check catches `_grace_active=True` with
 no override active at all — `_grace_end_time` is typically still validly in the future (the timer
 will fire correctly on its own), but nothing is being protected. Defense-in-depth for any path that
 clears an override without going through `cancel_override()` — an exception mid-cancel, or a future
 third endpoint that composes the primitives by hand again.
 
-**Implementation:** `coordinator._check_orphaned_grace()` (`coordinator.py:1521`), called once per
-regular `_async_update_data()` cycle (~30s). Condition: `ae._grace_active and not
-ae._manual_override_active and not ae._fan_override_active`. On match: logs an ERROR, calls
-`ae._cancel_grace_timers()`, and emits `"stuck_grace_recovered"` with
-`{"grace_end_time": ..., "reason": "grace_without_override"}`.
+**Corrected scope (Issue #530) — only grace that claims to protect an override can be "orphaned":**
+The original implementation inferred "orphaned" purely from `_manual_override_active`/
+`_fan_override_active` both being `False`. That is also the *normal, by-design* shape of every
+grace type that was never about an override in the first place — fan-off cooldown (Issue #359),
+physical-drift-correction, window-close resume, nat-vent-exit resume, and dashboard resume all
+start grace without ever touching either flag. The watchdog could not tell "nothing to protect
+because nothing is broken" from "nothing to protect because something clobbered the flag," and
+killed the former just as eagerly as the latter — confirmed live: a whole-house-fan session's
+fan-off grace was destroyed within roughly one event-loop tick of starting, because the same fan
+transition that started it also requested an immediate coordinator refresh (Issue #510), and that
+refresh's `_check_orphaned_grace()` call ran before anything else had a chance to protect it. This
+defeated Issue #359's fan-off protection for essentially every whole-house-fan-off, not just the
+RF-remote-timer scenario #530 was originally reported against.
+
+**Fix:** `_start_grace_period(trigger=...)` now sets `self._grace_protects_override = trigger in
+_GRACE_TRIGGERS_PROTECTING_OVERRIDE` (`automation.py`) — a 2-item frozenset containing only
+`"fan_manual_override"` and `"override_confirmed"`, the two triggers that genuinely correspond to
+a real override having just been set. This is a **centralized classification, not a parameter
+threaded through every callsite**: every `_start_grace_period()` caller already passes a distinct
+`trigger` string (pre-existing, used for logging/events), so a future 8th callsite is automatically
+excluded unless its trigger is deliberately added to the set — there is no new per-callsite
+judgment call to get wrong or forget. `_cancel_grace_timers()` resets `_grace_protects_override`
+to `False` alongside `_grace_active` so a stale `True` can never leak into whatever starts next.
+
+**Implementation:** `coordinator._check_orphaned_grace()` (`coordinator.py:1629`), called once per
+regular `_async_update_data()` cycle (~30s). Condition: `ae._grace_active and
+ae._grace_protects_override and not ae._manual_override_active and not ae._fan_override_active`.
+On match: logs an ERROR, calls `ae._cancel_grace_timers()`, and emits `"stuck_grace_recovered"`
+with `{"grace_end_time": ..., "reason": "grace_without_override"}`.
 
 **Renderer note:** `_render_stuck_grace_recovered()` (`ai_skills_activity.py`) branches on the
 `reason` field — the pre-existing Issue #321 call site never sets it and keeps its original
-`"Stuck grace recovered (expired {grace_end})"` label; this new call site renders `"Stuck grace
+`"Stuck grace recovered (expired {grace_end})"` label; this call site renders `"Stuck grace
 recovered (no override was active to protect it)"` instead, since `grace_end` is misleadingly
 labeled "expired" when it's actually still in the future.
 
 **These two watchdog checks are mutually exclusive** — one requires `_grace_active=False`, the
 other requires `_grace_active=True` — and run independently in the same update cycle.
+
+---
+
+## RF-Timer Boundary Settle Window (Issue #530)
+
+**Problem:** A manual grace tied to an RF-remote timer (`_start_grace_period(duration_override=...)`
+from `handle_fan_manual_override()`, e.g. an 8-hour QuietCool selection) tracks that timer in
+software. The physical remote/fan hardware runs the *same* timer independently and completes it on
+its own clock — confirmed live at an ~11-second gap, with follow-on RF chatter settling within
+~60 seconds total. When CA's software-side grace expires first (the common case), its normal
+expiry path (`clear_manual_override()` → `clear_fan_override()`) discards `_fan_remote_timer_hours`
+immediately — so by the time the hardware's own fan-off report arrives seconds later,
+`on_fan_turned_off()` has zero memory a timer was ever involved and treats it as a brand-new,
+unrelated event: a fresh fan-off grace starts, gets killed by the (pre-#530) orphaned-grace
+watchdog, the fan gets re-armed 5 seconds after the user/timer turned it off, and that re-arm can
+itself trigger a further RF override detection — three independent grace/override cycles from one
+physical action.
+
+**Fix — treat it as the same transition, not a new event:** `_on_grace_expired()` snapshots, before
+`clear_manual_override()` runs, whether the expiring grace's `_fan_remote_timer_hours` was set. If
+so, it arms `self._timer_boundary_settle_until = now + TIMER_BOUNDARY_SETTLE_SECONDS` (`const.py`,
+120s — generous headroom over the observed single-digit-second real gap). `on_fan_turned_off()`
+checks this window first, before anything else: if the fan-off lands inside it, the window is
+consumed (one-shot) and the event is **not** treated as fresh —
+- If `_natural_vent_active` is `True` (the post-grace reconcile had already adopted the still-running
+  fan as a nat-vent session), the fan-off is routed straight to `_exit_nat_vent()` — the single
+  choke point for ending a session, which correctly checks live sensor state (pauses if a monitored
+  sensor is still open; restores HVAC + starts an ordinary `"automation"`-sourced grace if closed).
+- Otherwise, the fan flags are simply reconciled to "off" with no new grace at all.
+
+Either way, **no second, independent fan-off grace is started** for a timer-boundary fan-off — this
+is a stronger guarantee than "the fan-off grace now survives the orphaned-grace watchdog" (the
+general fix above): it skips the redundant grace/session entirely, matching the fact that CA
+already knew this fan-off was coming.
+
+**Relationship to the Orphaned Grace Self-Heal fix above:** complementary, not overlapping. The
+watchdog fix (Issue #530, previous section) restores fan-off grace surviving its full duration for
+*any* fan-off, timer-linked or not. This settle window additionally recognizes the *specific*,
+predictable case of a timer-linked fan-off and resolves it immediately instead of even starting a
+grace — per the project's operating model, an automation outcome CA can already predict should be
+handled as a known continuation, not re-discovered from scratch by a second mechanism.
+
+**Location:** `automation.py` — `_on_grace_expired()` (arms the window),
+`on_fan_turned_off()` (consumes it), `_timer_boundary_settle_until` (instance attribute,
+reset alongside grace's other one-shot state). `const.py` — `TIMER_BOUNDARY_SETTLE_SECONDS`.
 
 ---
 
@@ -587,3 +662,18 @@ snapshot `_fan_was_overridden = self._fan_override_active` *before* calling
 `clear_manual_override()`, and use that snapshot for the deactivation decision — the same
 capture-before-clear pattern already used in `_confirm_override()` (automation.py:~3648) for
 `_manual_override_mode`/`_manual_override_source`.
+
+**A second, independent side effect of the same call (Issue #530):** the capture-before-clear fix
+above only protects the *fan-deactivation* decision inside `handle_morning_wakeup()` itself.
+`clear_manual_override()` → `clear_fan_override()` also unconditionally calls
+`_release_whf_and_reclassify()`, which releases WHF HVAC suppression (`_pre_fan_hvac_mode = None`)
+whenever the physical fan reads off — with **no awareness of `_natural_vent_active` at all**.
+Confirmed live: `handle_morning_wakeup()` correctly computed `DEFER_NAT_VENT` ("leaving fan alone")
+from the gate at the top of the handler, then two lines later `clear_manual_override()`'s side
+effect released suppression anyway (physical fan was off; `_natural_vent_active` was still `True`
+but never checked), so the `_apply_comfort_band()` write a few lines further down armed active
+HVAC mode with windows still open. Fixed by adding a `_natural_vent_active` guard to
+`_release_whf_and_reclassify()` itself (automation.py) — it now no-ops whenever a nat-vent session
+is still considered active, deferring to `_exit_nat_vent()` as the only path that ends that
+session's suppression, matching the pattern already established for the physical-fan-state guard
+immediately above it.

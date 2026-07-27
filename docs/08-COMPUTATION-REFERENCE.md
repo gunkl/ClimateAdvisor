@@ -1770,6 +1770,51 @@ this only makes what's already true readable on the dashboard.
 defaults `_override_confirm_pending`/`_fan_override_active` to `False`, per the MagicMock-truthy
 pitfall this project has hit before — see CLAUDE.md's async-mock testing rules).
 
+**Superseded by Issue #527** — the branch-syncing fix above kept two functions manually in
+agreement about mechanism state, but it didn't hold: a third function
+(`_compute_next_automation_action()`) independently grew the same class of duplication, and
+`_compute_next_action()`'s own mechanism-flag branches went on to shadow its real comfort
+guidance. §9e documents the resolution: mechanism state (paused/grace/override/confirming) was
+removed from `_compute_next_action()` and `_compute_next_automation_action()` entirely, not kept
+in sync — it now lives only in `_compute_automation_status()`. The four-card ontology table this
+established is also in `CLAUDE.md` under "Status Card Ontology."
+
+### 9e. Status Card Ontology — Removing Mechanism Narration from Next User Action / Next Automation (Issue #527)
+
+Three coordinator functions feed the Status tab: `_compute_automation_status()` (Status card),
+`_compute_next_action()` (Next User Action card), and `_compute_next_automation_action()` (Next
+Automation + Automation Time cards). Each answers a different question, but `_compute_next_action()`
+and `_compute_next_automation_action()` had each accumulated early-return branches that read
+automation-mechanism flags (`is_paused_by_door`, `_grace_active`, `_override_confirm_pending`,
+`_manual_override_active`) and returned mechanism text — duplicating `_compute_automation_status()`
+and, in `_compute_next_action()`'s case, pre-empting its own real comfort guidance lower in the
+function (unreachable whenever any of those flags was set).
+
+**Fix:** those branches were deleted outright, not synced. `_compute_next_action()` now always
+falls through to comfort-based guidance (window/fan direction checks, heating/cooling-needed
+logic) regardless of pause/grace/override state — the guidance is correct independent of whether
+the automation itself is currently paused. `_compute_next_automation_action()` now always falls
+through to the real schedule-candidate list (briefing/wake/bedtime/pre-cool) for the same reason:
+the plan is simply deferred until the mechanism state clears, not different.
+
+Wording was also tightened to drop redundant "the AC/heater/automation is handling it" tails and
+a stray "Automation active —" lead-in in the in-band fallback — these restated the Status card's
+job (confirming the automation is active) inside a card whose job is comfort guidance. Away/vacation
+occupancy messages became a small date-seeded rotating pool (`_AWAY_ACTION_MESSAGES`/
+`_VACATION_ACTION_MESSAGES`, `_pick_daily_line()`) instead of one fixed sentence.
+
+Also fixed in the same issue: `pause_suppressed_classification` (and a new
+`pause_suppressed_classification_text`) were wired into `ClimateAdvisorStatusView` in `api.py` for
+the first time — the field existed in `get_serializable_state()` (the Debug tab) and was
+documented as a known gap in `KNOWN_FIXES[367]`, but had never been added to the actual Status API
+response, so the frontend's `pause_suppressed_classification` check in `index.html` was
+unreachable dead code (identical shape to the `nat_vent_active` gap fixed in the same PR as #367).
+
+**Test coverage:** `tests/test_coordinator.py::TestComputeNextAction` (paused/grace/override tests
+renamed `test_next_action_*_does_not_preempt_schedule`, asserting the real guidance now surfaces
+and the mechanism word does NOT appear), `tests/test_status_sensors.py::TestComputeNextAutomationAction`
+(`test_paused_by_door_still_shows_real_next_step`, `test_grace_period_active_still_shows_real_next_step`).
+
 ---
 
 ## 10. Door/Window HVAC Pause

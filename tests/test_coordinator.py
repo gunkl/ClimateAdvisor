@@ -150,20 +150,41 @@ class TestComputeNextAction:
         assert result == "Waiting for forecast data..."
 
     def test_next_action_vacation_occupancy_short_circuits(self):
-        """VACATION occupancy → status message, bypassing all thermal/window logic."""
+        """VACATION occupancy → rotating flavor message, bypassing all thermal/window logic (Issue #527).
+
+        Asserts pool membership (not a literal "vacation" substring) since the pool
+        deliberately mixes deadpan/playful lines that don't all repeat the mode name —
+        the invariant under test is that occupancy mode short-circuits to the curated
+        pool and never leaks the 78/80 temps into the message.
+        """
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
         c = _make_classification(day_type=DAY_TYPE_MILD)
         result = _compute_next_action(
             c, {}, time(8, 0), indoor_temp=78.0, outdoor_temp=80.0, occupancy_mode=OCCUPANCY_VACATION
         )
-        assert "vacation" in result.lower()
+        assert result in mod._VACATION_ACTION_MESSAGES
+        assert "78" not in result
+        assert "80" not in result
 
     def test_next_action_away_occupancy_short_circuits(self):
-        """AWAY occupancy → status message, bypassing all thermal/window logic."""
+        """AWAY occupancy → rotating flavor message, bypassing all thermal/window logic (Issue #527)."""
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
         c = _make_classification(day_type=DAY_TYPE_MILD)
         result = _compute_next_action(
             c, {}, time(8, 0), indoor_temp=78.0, outdoor_temp=80.0, occupancy_mode=OCCUPANCY_AWAY
         )
-        assert "away" in result.lower()
+        assert result in mod._AWAY_ACTION_MESSAGES
+        assert "78" not in result
+        assert "80" not in result
+
+    def test_next_action_away_vacation_rotate_daily_stable_within_day(self):
+        """Date-seeded rotation: same line across repeated calls same day, pool membership guaranteed."""
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        c = _make_classification(day_type=DAY_TYPE_MILD)
+        first = _compute_next_action(c, {}, time(8, 0), occupancy_mode=OCCUPANCY_AWAY)
+        second = _compute_next_action(c, {}, time(20, 0), occupancy_mode=OCCUPANCY_AWAY)
+        assert first == second
+        assert first in mod._AWAY_ACTION_MESSAGES
 
     def test_next_action_hot_morning_shows_threshold(self):
         """HOT day, morning opportunity, before 9 AM → threshold and cutoff time shown."""
@@ -235,7 +256,6 @@ class TestComputeNextAction:
         )
         result = _compute_next_action(c, {}, time(13, 0))
         assert "Keep windows and blinds closed" in result
-        assert "AC is handling it" in result
 
     def test_next_action_hot_uses_custom_comfort_cool(self):
         """HOT day morning opportunity respects a non-default comfort_cool setting."""
@@ -249,22 +269,22 @@ class TestComputeNextAction:
         assert "75" in result
 
     def test_next_action_cold_day_doors_open(self):
-        """COLD day, doors physically open → keep-doors-closed message."""
+        """COLD day, doors physically open → close-doors message."""
         c = _make_classification(day_type=DAY_TYPE_COLD)
         result = _compute_next_action(c, {}, time(12, 0), windows_physically_open=True)
-        assert "Keep doors closed" in result
+        assert "Close doors" in result
 
     def test_next_action_cold_day_doors_already_closed(self):
-        """COLD day, doors already physically closed → confirms heater is handling it, no redundant ask."""
+        """COLD day, doors already physically closed → confirms nothing to change, no redundant ask."""
         c = _make_classification(day_type=DAY_TYPE_COLD)
         result = _compute_next_action(c, {}, time(12, 0), windows_physically_open=False)
-        assert "Doors are closed" in result
+        assert "Keep doors closed" in result
 
     def test_next_action_mild_day(self):
         """Mild day (not hot/cold) → no action needed message."""
         c = _make_classification(day_type="mild")
         result = _compute_next_action(c, {}, time(12, 0))
-        assert "Automation active" in result
+        assert "Comfortable" in result
 
     def test_next_action_warm_day_after_close_before_evening(self):
         """WARM day after 10 AM close, before 5 PM — mid-day gap, no window guidance."""
@@ -275,7 +295,7 @@ class TestComputeNextAction:
             window_close_time=time(WARM_WINDOW_CLOSE_HOUR, 0),
         )
         result = _compute_next_action(c, {}, time(13, 0))
-        assert "Automation active" in result
+        assert "Comfortable" in result
 
     def test_next_action_warm_day_after_close_at_evening_start(self):
         """WARM day after 10 AM close, at exactly 5 PM — evening ventilation suggested."""
@@ -306,7 +326,7 @@ class TestComputeNextAction:
         assert "78" in result
         assert "70" in result
         assert "open windows" in result.lower()
-        assert "Automation active" not in result
+        assert "Comfortable" not in result
 
     def test_next_action_indoor_above_comfort_outdoor_hotter_suppresses_bug(self):
         """Regression test for Issue #428 — indoor 75/outdoor 80 must NOT suggest opening windows."""
@@ -329,7 +349,7 @@ class TestComputeNextAction:
         """Outdoor reading unavailable → conservative message, never a guessed suggestion."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=None)
-        assert "unavailable" in result.lower()
+        assert "no outdoor reading" in result.lower()
         assert "open windows" not in result.lower()
 
     def test_next_action_indoor_above_comfort_fan_disabled_no_fan_mention(self):
@@ -362,7 +382,7 @@ class TestComputeNextAction:
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         ae = _make_ae_stub(_natural_vent_active=True)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=70.0, ae=ae)
-        assert "already active" in result.lower()
+        assert "free cooling is active" in result.lower()
 
     def test_next_action_cooling_needed_windows_open_direction_favorable(self):
         """Cooling needed, windows already open, outdoor favorable → confirm, don't repeat the ask."""
@@ -375,7 +395,7 @@ class TestComputeNextAction:
             outdoor_temp=70.0,
             windows_physically_open=True,
         )
-        assert "windows are open" in result.lower()
+        assert "windows open" in result.lower()
         assert "helping" in result.lower()
 
     def test_next_action_cooling_needed_windows_open_direction_unfavorable(self):
@@ -389,7 +409,7 @@ class TestComputeNextAction:
             outdoor_temp=80.0,
             windows_physically_open=True,
         )
-        assert "closing them" in result.lower()
+        assert "close windows" in result.lower()
 
     def test_next_action_heating_needed_outdoor_warmer_suggests_windows(self):
         """Heating needed (indoor below comfort_heat), outdoor warmer → new heating-direction mirror."""
@@ -402,7 +422,7 @@ class TestComputeNextAction:
             outdoor_temp=72.0,
         )
         assert "warmer" in result.lower()
-        assert "opening windows" in result.lower()
+        assert "open windows" in result.lower()
 
     def test_next_action_heating_needed_outdoor_not_warmer_keep_closed(self):
         """Heating needed, outdoor not warmer than indoor → keep closed, hold heat."""
@@ -427,10 +447,16 @@ class TestComputeNextAction:
             outdoor_temp=72.0,
             windows_physically_open=True,
         )
-        assert "close them" in result.lower()
+        assert "close windows" in result.lower()
 
-    def test_next_action_manual_override_active_preempts_schedule(self):
-        """Manual override active → surfaced before any scheduled window message (guard-ordering decision)."""
+    def test_next_action_manual_override_active_does_not_preempt_schedule(self):
+        """Manual override active → still shows real comfort guidance (Issue #527).
+
+        Prior behavior (pre-#527) short-circuited to "Manual override active — automation
+        is standing by," duplicating what the Status card already says and hiding the
+        actual comfort guidance. Next User Action must never narrate automation mechanism
+        state — see the card-ontology table in CLAUDE.md.
+        """
         c = _make_classification(
             day_type=DAY_TYPE_WARM,
             windows_recommended=True,
@@ -438,10 +464,11 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_manual_override_active=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "manual override" in result.lower()
+        assert "09:00 AM" in result
+        assert "manual override" not in result.lower()
 
-    def test_next_action_grace_active_preempts_schedule(self):
-        """Grace period active → surfaced before any scheduled window message."""
+    def test_next_action_grace_active_does_not_preempt_schedule(self):
+        """Grace period active → still shows real comfort guidance, not mechanism state (Issue #527)."""
         c = _make_classification(
             day_type=DAY_TYPE_WARM,
             windows_recommended=True,
@@ -449,10 +476,14 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_grace_active=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "grace period" in result.lower()
+        assert "09:00 AM" in result
+        assert "grace period" not in result.lower()
 
-    def test_next_action_paused_by_door_preempts_schedule(self):
-        """Paused by an open door → surfaced before any scheduled window message."""
+    def test_next_action_paused_by_door_does_not_preempt_schedule(self):
+        """Paused by an open door → still shows real comfort guidance, not mechanism state (Issue #527).
+
+        The Status card is the only place "paused" belongs (_compute_automation_status()).
+        """
         c = _make_classification(
             day_type=DAY_TYPE_WARM,
             windows_recommended=True,
@@ -460,7 +491,8 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(is_paused_by_door=True)
         result = _compute_next_action(c, {}, time(7, 0), ae=ae)
-        assert "paused" in result.lower()
+        assert "09:00 AM" in result
+        assert "paused" not in result.lower()
 
     def test_next_action_hot_no_opportunity_free_cooling_active(self):
         """HOT day, no scheduled opportunity, but nat-vent/economizer already active — don't contradict it."""
@@ -471,7 +503,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_economizer_active=True)
         result = _compute_next_action(c, {}, time(13, 0), ae=ae)
-        assert "both working on it" in result.lower()
+        assert "free cooling is active" in result.lower()
 
     def test_next_action_guest_occupancy_behaves_like_home(self):
         """GUEST occupancy mode is not short-circuited — full comfort logic applies same as HOME."""
@@ -491,19 +523,19 @@ class TestComputeNextAction:
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=70.0)
         assert "78" in result
-        assert "Automation active" not in result
+        assert "Comfortable" not in result
 
     def test_next_action_indoor_at_comfort_boundary_no_guidance(self):
         """Indoor temp exactly at comfort_cool boundary (not above) → no alert."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=75.0)
-        assert "Automation active" in result
+        assert "Comfortable" in result
 
     def test_next_action_indoor_none_falls_back_to_no_action(self):
         """When indoor_temp is None — no comfort alert, falls back to default."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=None)
-        assert "Automation active" in result
+        assert "Comfortable" in result
 
     def test_next_action_warm_day_midday_indoor_above_comfort(self):
         """WARM day mid-day with indoor above comfort, outdoor cooler — comfort guidance wins over 'no action'."""
@@ -515,7 +547,7 @@ class TestComputeNextAction:
         )
         result = _compute_next_action(c, {"comfort_cool": 75}, time(13, 0), indoor_temp=79.0, outdoor_temp=72.0)
         assert "79" in result
-        assert "Automation active" not in result
+        assert "Comfortable" not in result
 
     def test_next_action_hot_day_indoor_above_comfort_still_shows_ac_message(self):
         """HOT day: HOT branch always returns before indoor check — AC message wins."""
@@ -526,7 +558,6 @@ class TestComputeNextAction:
         )
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=80.0)
         assert "Keep windows and blinds closed" in result
-        assert "AC is handling it" in result
 
 
 # ---------------------------------------------------------------------------

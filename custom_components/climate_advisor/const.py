@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.34"
+VERSION = "0.5.35"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.35": [
+        "Fix #527: the dashboard's Status, Next User Action, and Next Automation cards could"
+        " all say the same thing in different words whenever a door/window was open (or a"
+        " grace period or thermostat-change confirmation was active) — the Next User Action"
+        " card said 'Automation paused,' restating the Status card instead of telling you"
+        " what to actually do (like closing the window), and the Next Automation card said"
+        " 'Waiting' instead of showing the real next step (like tonight's bedtime setback)"
+        " and when it'll happen. Each card now sticks to its own job, and away/vacation mode"
+        " gets a bit of rotating personality in Next User Action instead of one flat line.",
+    ],
     "0.5.34": [
         "Fix #523: after an HA restart, if a window was already open, Climate Advisor could"
         " turn the AC on and cool against the open window instead of staying paused like it"
@@ -1277,6 +1287,51 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    527: {
+        "version_fixed": "0.5.35",
+        "title": (
+            "Status, Next User Action, and Next Automation cards independently narrated the"
+            " same automation-mechanism fact (paused by door/window, grace period, override"
+            " confirming) with three different wordings, instead of each card answering its"
+            " own question"
+        ),
+        "scope_covered": (
+            "coordinator.py: _compute_next_action() (Next User Action card) — deleted the"
+            " early-return block that read _override_confirm_pending/_manual_override_active/"
+            "_grace_active/is_paused_by_door and returned mechanism text; this had been"
+            " pre-empting the function's own real comfort guidance (window/fan direction"
+            " checks, heating/cooling-needed logic) further down, which is now always"
+            " reachable regardless of automation mechanism state. Also trimmed redundant"
+            " 'the AC/heater/automation is handling it' tails and an 'Automation active —'"
+            " lead-in that restated the Status card's job inside the comfort-guidance card,"
+            " and replaced the flat away/vacation sentences with a small date-seeded rotating"
+            " pool (_AWAY_ACTION_MESSAGES/_VACATION_ACTION_MESSAGES via _pick_daily_line())."
+            " _compute_next_automation_action() (Next Automation + Automation Time cards) —"
+            " deleted the 'Windows open as recommended' / 'Waiting — HVAC paused' / 'Grace"
+            " period active' / 'Evaluating door/window sensors' early returns so the function"
+            " always falls through to the real schedule-candidate list (briefing/wake/bedtime/"
+            "pre-cool); added INFO-level entry and outcome logging (this function previously"
+            " had none). api.py: wired pause_suppressed_classification and a new"
+            " pause_suppressed_classification_text into ClimateAdvisorStatusView — this field"
+            " existed in coordinator.get_serializable_state() (Debug tab) and was flagged as a"
+            " known gap in KNOWN_FIXES[367] but had never reached the actual Status API"
+            " response, so index.html's check of it was unreachable dead code; the text itself"
+            " also moved from a frontend-hardcoded literal to this new backend field."
+            " CLAUDE.md + docs/08-COMPUTATION-REFERENCE.md §9e: documented the four-card"
+            " ontology (Status=state+why, Next User Action=comfort action only, Next"
+            " Automation=plan only, Automation Time=when) as a guardrail against a repeat —"
+            " this is the second time this duplication class has appeared (first: #495, §9d,"
+            " which patched two functions to stay in sync rather than removing the"
+            " duplication; that patch didn't hold when a third function grew the same problem"
+            " independently)."
+        ),
+        "scope_not_covered": (
+            "No new predictive next-automation event types were added (e.g. a forecast-based"
+            " ETA for when the whole-house fan/nat-vent will start) — Next Automation still"
+            " only predicts the four pre-existing fixed-schedule events (briefing, wake,"
+            " bedtime, pre-cool). Tracked separately in issue #528."
+        ),
+    },
     523: {
         "version_fixed": "0.5.34",
         "title": (

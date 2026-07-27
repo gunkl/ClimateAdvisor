@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import logging
 import math
 from collections.abc import Callable
@@ -265,6 +266,47 @@ class _PendingFanRemoteBurst:
     timer_hours: float | None = None
     has_timer: bool = False
     was_running_before: bool | None = None
+
+
+# Next User Action flavor text for occupancy modes where there's nothing for the
+# occupant to do (Issue #527). Date-seeded rotation (see _pick_daily_line()) picks
+# one line per calendar day so the dashboard doesn't flicker between refreshes.
+_AWAY_ACTION_MESSAGES: tuple[str, ...] = (
+    "You're away. The house is holding steady.",
+    "Away mode: nothing needs you right now.",
+    "No action needed. The thermostat has it handled.",
+    "You're away — temperature's stable, no news is good news.",
+    "Nothing to do. The house is behaving.",
+    "You're away — the house says it's fine, promise.",
+    "We've got the house-sitting covered.",
+    "Away and comfortable. Go enjoy wherever you are.",
+    "Nothing to do — even the thermostat's taking it easy.",
+    "Away mode: the house is behaving better than usual.",
+)
+_VACATION_ACTION_MESSAGES: tuple[str, ...] = (
+    "Vacation mode: deep setback engaged, nothing for you to do.",
+    "On vacation. The thermostat is unbothered.",
+    "Deep setback active — the house is coasting.",
+    "Nothing needed here. Go be on vacation.",
+    "Setback engaged. This message is the only work being done.",
+    "Vacation mode — the house is on autopilot, saving you money while you're gone.",
+    "Go have fun. The thermostat's got the boring part.",
+    "On vacation — sit back, we're saving energy for you.",
+    "Deep setback engaged. The house is basically hibernating politely.",
+    "Vacation: lights out, temps relaxed, wallet happy.",
+)
+
+
+def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
+    """Deterministically pick one line from ``pool`` per calendar day.
+
+    Stable across repeated calls within the same day (no flicker on the ~30-min
+    update cycle); changes the next day. ``salt`` distinguishes independent pools
+    (e.g. "away" vs "vacation") so they don't rotate in lockstep.
+    """
+    today = dt_util.now().date().isoformat()
+    index = int(hashlib.sha256(f"{today}:{salt}".encode()).hexdigest(), 16) % len(pool)
+    return pool[index]
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -6069,46 +6111,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             (_LOGGER.warning if warn else _LOGGER.info)("Next-action: %s (%s)", msg, ctx_str)
             return msg
 
+        def _close_windows_msg(od: float, id_: float) -> str:
+            return f"Close windows — outdoor's not helping now ({format_temp(od, unit)} vs {format_temp(id_, unit)})."
+
+        def _windows_helping_msg(od: float, id_: float) -> str:
+            return f"Windows open — outdoor's helping ({format_temp(od, unit)} vs {format_temp(id_, unit)})."
+
         if not c:
             return _decide("Waiting for forecast data...")
 
+        # Occupancy guards (Issue #527): these answer "what should I do" with "nothing —
+        # you're not here," which is legitimate comfort-relevant guidance, not automation
+        # mechanism narration, so they stay ahead of the comfort-guidance branches below.
         if self._occupancy_mode == OCCUPANCY_VACATION:
-            return _decide("On vacation — deep energy-saving setback active.")
+            return _decide(_pick_daily_line(_VACATION_ACTION_MESSAGES, "vacation"))
         if self._occupancy_mode == OCCUPANCY_AWAY:
-            return _decide("You're away — automation managing temperature.")
+            return _decide(_pick_daily_line(_AWAY_ACTION_MESSAGES, "away"))
 
-        # Automation-state guards checked early/globally: if the system isn't in its
-        # normal control loop right now, that fact is more relevant to the occupant
-        # than a scheduled reminder that ignores it (see plan's "Guard ordering"
-        # decision, Issue #428).
-        if ae is not None:
-            # Issue #495: _override_confirm_pending (the 10-min setpoint-override confirm
-            # window) and _grace_active (the fan-override grace) are independent tracks that
-            # can legitimately overlap — a manual WHF-on starts its grace immediately while a
-            # concurrent setpoint override is still only pending confirmation. Without this
-            # branch, a pending-confirm setpoint override with no fan override active fell
-            # through silently to no guard at all, and one WITH a concurrent fan-override
-            # grace fell through to the grace_active branch below, which then described the
-            # fan's grace as if it were the (still-unconfirmed) setpoint override's own —
-            # narrating two different overrides as one. This mirrors
-            # _compute_automation_status()'s "override pending (confirming...)" check
-            # (checked ahead of its own grace_active check there too) so the two dashboard
-            # status lines agree instead of contradicting each other.
-            if ae._override_confirm_pending:
-                if ae._grace_active:
-                    return _decide(
-                        "Confirming your thermostat change; whole-house fan override also active.",
-                        fan_override_active=ae._fan_override_active,
-                    )
-                return _decide("Confirming your thermostat change before automation resumes.")
-            if ae._manual_override_active:
-                return _decide("Manual override active — automation is standing by.")
-            if ae._grace_active:
-                return _decide(
-                    f"Grace period active — automation will resume shortly.{self._format_grace_remaining(ae)}"
-                )
-            if ae.is_paused_by_door:
-                return _decide("Automation paused — a door or window is open.")
+        # Issue #527: automation-mechanism state (override/grace/pause) used to be
+        # narrated here directly, pre-empting the comfort guidance below and duplicating
+        # what the Status card already says (_compute_automation_status()). That guard
+        # block was removed — this card answers "what should I do for comfort," which is
+        # true independent of whether the automation itself is currently paused/grace/
+        # confirming. See docs/08-COMPUTATION-REFERENCE.md §9d for the prior (Issue #495)
+        # instance of this exact duplication class, and CLAUDE.md's card-ontology table.
 
         now = dt_util.now().time()
         direction_ok = free_cooling_direction_ok(outdoor_temp, indoor_temp)
@@ -6122,30 +6148,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 if windows_physically_open:
                     if outdoor_temp is not None and indoor_temp is not None and not direction_ok:
                         return _decide(
-                            f"Windows are open, but outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler"
-                            f" than indoor ({format_temp(indoor_temp, unit)}) — consider closing them so the"
-                            f" AC/fan can help.",
+                            _close_windows_msg(outdoor_temp, indoor_temp),
                             warn=True,
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
-                    return _decide("Windows are open — you're all set.")
+                    return _decide("Windows open — you're all set.")
                 if outdoor_temp is not None and indoor_temp is not None:
                     if direction_ok:
                         return _decide(
-                            f"Open windows to cool down — outdoor ({format_temp(outdoor_temp, unit)}) is"
-                            f" now cooler than indoor ({format_temp(indoor_temp, unit)}).",
+                            f"Open windows — outdoor's cooler now ({format_temp(outdoor_temp, unit)} vs"
+                            f" {format_temp(indoor_temp, unit)}).",
                             outdoor=outdoor_temp,
                             indoor=indoor_temp,
                         )
                     return _decide(
-                        f"Outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler than indoor"
-                        f" ({format_temp(indoor_temp, unit)}) yet — keep windows closed for now.",
+                        f"Keep windows closed for now — outdoor ({format_temp(outdoor_temp, unit)}) isn't"
+                        f" cooler than indoor ({format_temp(indoor_temp, unit)}) yet.",
                         warn=True,
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
-                return _decide("Open windows to cool down — outdoor air may be cooler now.")
+                return _decide("Open windows — outdoor air may be cooler now.")
 
         if c.day_type == DAY_TYPE_HOT:
             threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
@@ -6155,12 +6179,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif c.window_opportunity_evening and now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)}")
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
-                return _decide("AC and free cooling are both working on it.")
-            return _decide("Keep windows and blinds closed. AC is handling it.")
+                return _decide("Free cooling is active.")
+            return _decide("Keep windows and blinds closed.")
         elif c.day_type == DAY_TYPE_COLD:
             if windows_physically_open:
-                return _decide("Keep doors closed — help the heater out.")
-            return _decide("Doors are closed — heater is handling it.")
+                return _decide("Close doors to help the heater.")
+            return _decide("Keep doors closed.")
 
         # WARM/MILD/COOL fallback: symmetric cooling-direction and heating-direction
         # checks, both gated on live outdoor-vs-indoor direction (Issue #428).
@@ -6169,35 +6193,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
-                return _decide("Free cooling is already active.")
+                return _decide("Free cooling is active.")
             if windows_physically_open:
                 if outdoor_temp is not None and not direction_ok:
                     return _decide(
-                        f"Windows are open, but outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler"
-                        f" than indoor ({format_temp(indoor_temp, unit)}) — consider closing them so the"
-                        f" AC/fan can help.",
+                        _close_windows_msg(outdoor_temp, indoor_temp),
                         warn=True,
                         outdoor=outdoor_temp,
                         indoor=indoor_temp,
                     )
-                return _decide("Windows are open and outdoor air is helping.")
+                if outdoor_temp is not None:
+                    return _decide(_windows_helping_msg(outdoor_temp, indoor_temp))
+                return _decide("Windows open — you're all set.")
             if outdoor_temp is None:
                 return _decide(
-                    f"Indoor is {format_temp(indoor_temp, unit)} — outdoor reading unavailable,"
-                    f" automation is handling it conservatively.",
+                    f"Indoor is {format_temp(indoor_temp, unit)} — no outdoor reading available.",
                     indoor=indoor_temp,
                 )
             if direction_ok:
                 fan_clause = " or turn on the fan" if fan_enabled else ""
                 return _decide(
-                    f"Indoor temp is {format_temp(indoor_temp, unit)} — open windows{fan_clause} to cool"
-                    f" down; outdoor ({format_temp(outdoor_temp, unit)}) is cooler now.",
+                    f"Open windows{fan_clause} — outdoor's cooler now ({format_temp(outdoor_temp, unit)} vs"
+                    f" {format_temp(indoor_temp, unit)}).",
                     outdoor=outdoor_temp,
                     indoor=indoor_temp,
                 )
             return _decide(
-                f"Indoor is {format_temp(indoor_temp, unit)} — outdoor ({format_temp(outdoor_temp, unit)})"
-                f" isn't cooler, so windows/fan won't help right now. Automation is handling it.",
+                f"Outdoor ({format_temp(outdoor_temp, unit)}) isn't cooler than indoor"
+                f" ({format_temp(indoor_temp, unit)}) yet — windows/fan won't help.",
                 warn=True,
                 outdoor=outdoor_temp,
                 indoor=indoor_temp,
@@ -6205,21 +6228,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if heating_needed:
             if windows_physically_open:
-                return _decide("Windows are open — close them to help the heater.")
+                return _decide("Close windows to enable the heater.")
             if outdoor_temp is not None and outdoor_temp > indoor_temp:
                 return _decide(
-                    f"Indoor is {format_temp(indoor_temp, unit)} — outdoor ({format_temp(outdoor_temp, unit)})"
-                    f" is warmer; opening windows briefly could help warm the home.",
+                    f"Open windows briefly — outdoor's warmer ({format_temp(outdoor_temp, unit)} vs"
+                    f" {format_temp(indoor_temp, unit)}).",
                     outdoor=outdoor_temp,
                     indoor=indoor_temp,
                 )
             return _decide(
-                f"Indoor is {format_temp(indoor_temp, unit)} — keep windows and doors closed to hold heat."
-                f" Automation is handling it.",
+                f"Keep windows and doors closed to hold heat (indoor {format_temp(indoor_temp, unit)}).",
                 indoor=indoor_temp,
             )
 
-        return _decide("Automation active — no changes planned right now.")
+        return _decide("Comfortable — no action needed.")
 
     def _emit_event(self, event_type: str, data: dict) -> None:
         """Append a timestamped event to the in-memory event log ring buffer (Issue #76)."""
@@ -6808,28 +6830,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         today = now.date()
 
-        # Check if windows are open during planned window period
-        if self.automation_engine._is_within_planned_window_period() and self._any_sensor_open():
-            return ("Windows open as recommended", "")
-
-        # Check if automation is paused
-        if self.automation_engine.is_paused_by_door:
-            return ("Waiting — HVAC paused (door/window open)", "")
-
-        if self.automation_engine._grace_active:
-            source = self.automation_engine._last_resume_source or "automation"
-            return (f"Grace period active ({source}){self._format_grace_remaining(self.automation_engine)}", "")
-
-        # If a contact sensor debounce is pending, that is the soonest upcoming action
-        if self._door_open_timers and self._door_open_timer_expiry:
-            try:
-                earliest_iso = min(self._door_open_timer_expiry.values())
-                expiry_dt = dt_util.parse_datetime(earliest_iso)
-                if expiry_dt and expiry_dt > now:
-                    time_str = dt_util.as_local(expiry_dt).strftime("%I:%M:%S %p").lstrip("0")
-                    return ("Evaluating door/window sensors", time_str)
-            except (ValueError, AttributeError, TypeError):
-                pass
+        # Issue #527: this function used to short-circuit here whenever automation was
+        # paused by an open door/window, in a debounce window, or in a grace period,
+        # returning mechanism text ("Waiting — HVAC paused...", "Grace period active...")
+        # instead of the real next plan step. That duplicated what the Status card
+        # already says (_compute_automation_status()) and hid the actual answer to "what
+        # will the automation do next" — which is unaffected by those mechanism states;
+        # it's simply deferred until they clear. Always fall through to the real
+        # schedule-candidate list below. See docs/08-COMPUTATION-REFERENCE.md §9d and
+        # CLAUDE.md's card-ontology table.
+        ae = self.automation_engine
+        _LOGGER.info(
+            "Next-automation evaluation: day_type=%s hvac_mode=%s paused_by_door=%s grace_active=%s"
+            " debounce_pending=%s startup_coalesce_active=%s",
+            c.day_type,
+            c.hvac_mode,
+            ae.is_paused_by_door,
+            ae._grace_active,
+            bool(self._door_open_timers),
+            self._startup_coalesce_active,
+        )
 
         # Build list of upcoming scheduled events as (datetime, description).
         # Using full datetimes (not time objects) so cross-midnight events like
@@ -6885,11 +6905,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             candidates.append((self._pre_cool_trigger_dt, pc_desc))
 
         if not candidates:
+            _LOGGER.info("Next-automation: No more actions today")
             return ("No more actions today", "")
 
         candidates.sort(key=lambda e: e[0])
         next_dt, next_desc = candidates[0]
         time_str = dt_util.as_local(next_dt).strftime("%I:%M %p").lstrip("0")
+        _LOGGER.info("Next-automation: %s at %s", next_desc, time_str)
         return (next_desc, time_str)
 
     @property

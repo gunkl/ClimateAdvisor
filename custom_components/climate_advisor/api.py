@@ -183,6 +183,20 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             and not coordinator.config.get("aggressive_savings", False)
         )
 
+        # Issue #527: pause_suppressed_classification had the identical "documented but
+        # never wired in" gap as nat_vent_active above (see KNOWN_FIXES[367] in const.py) —
+        # the frontend's Status-card line reading data.pause_suppressed_classification was
+        # unreachable dead code because this endpoint never included the key. Computed live
+        # (not from coordinator.data) for the same freshness reason as ca_target_heat/cool.
+        # The text itself now lives here (backend) instead of hardcoded in index.html, so
+        # the Status card's text has one source, like every other line on that card.
+        _pause_suppressed_classification = bool(ae.is_paused_by_door) and ae._last_classification_applied is not None
+        _pause_suppressed_classification_text = (
+            "Classification suppressed — HVAC held off until windows close"
+            if _pause_suppressed_classification
+            else None
+        )
+
         # Issue #480: gate on coordinator.last_update_success instead of silently
         # serving coordinator.data forever once updates start failing. HA's own
         # DataUpdateCoordinator retains the last successful snapshot indefinitely
@@ -228,6 +242,8 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             # ambient sensor discoverable, or no press observed yet this session).
             "fan_remote_speed": data.get("fan_remote_speed"),
             "paused_by_door": ae.is_paused_by_door,
+            "pause_suppressed_classification": _pause_suppressed_classification,
+            "pause_suppressed_classification_text": _pause_suppressed_classification_text,
             "ca_target_heat": _ca_target_heat,
             "ca_target_cool": _ca_target_cool,
             "nat_vent_active": _nat_vent_active,

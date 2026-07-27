@@ -592,20 +592,30 @@ class TestNextActionWithOccupancy:
     """Test _compute_next_action reflects occupancy mode."""
 
     def test_vacation_shows_vacation_message(self):
-        """When on vacation, next action mentions vacation."""
+        """When on vacation, next action is one of the curated vacation-flavor lines (Issue #527).
+
+        Pool membership (not a literal "vacation" substring) since the pool deliberately
+        mixes deadpan/playful lines that don't all repeat the mode name.
+        """
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
         coord = _make_coordinator()
         coord._occupancy_mode = OCCUPANCY_VACATION
         c = _make_classification()
         action = coord._compute_next_action(c)
-        assert "vacation" in action.lower()
+        assert action in mod._VACATION_ACTION_MESSAGES
 
     def test_away_shows_away_message(self):
-        """When away, next action mentions away."""
+        """When away, next action is one of the curated away-flavor lines (Issue #527)."""
+        import importlib
+
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
         coord = _make_coordinator()
         coord._occupancy_mode = OCCUPANCY_AWAY
         c = _make_classification()
         action = coord._compute_next_action(c)
-        assert "away" in action.lower()
+        assert action in mod._AWAY_ACTION_MESSAGES
 
     def test_home_shows_normal_action(self):
         """When home, next action is the normal day-type action."""

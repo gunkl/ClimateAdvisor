@@ -137,6 +137,19 @@ Any new automation phase or state that the occupant (or developer) would want to
 
 Typical state values a status field should express: `"scheduled (X°F @ HH:MM)"`, `"active (X°F)"`, `"suppressed — reason"`, `null` when inactive (hidden from UI).
 
+#### Status Card Ontology (CRITICAL — Issue #527)
+
+Four Status-tab cards each answer one distinct question. A card must never answer another card's question — this is how the dashboard ended up narrating "a door/window is open, automation is paused" independently in three places with three different wordings (Issue #527; the same duplication class hit `_compute_automation_status()`/`_compute_next_action()` once already, Issue #495, §9d).
+
+| Card | Question it answers | Backend owner | Must NOT contain |
+|---|---|---|---|
+| **Status** | What's happening right now, and why? | `_compute_automation_status()` | — (this is the only card where mechanism state belongs) |
+| **Next User Action** | Stop doing something, start doing something, or continue doing something — for comfort, right now | `_compute_next_action()` | Any automation mechanism word (paused, grace, override, waiting, confirming), and any "the AC/heater/automation is handling it" filler |
+| **Next Automation** | What is the automation's plan to do next (comfort-impact terms), assuming conditions hold? | `_compute_next_automation_action()`, action string only | Time-of-day phrasing; "waiting"/"paused"/"grace"/door-window "why" |
+| **Automation Time** | When will that plan step happen? | Same function, time string element | — |
+
+Before adding a branch to any of these three functions that reads an automation-mechanism flag (`is_paused_by_door`, `_grace_active`, `_override_confirm_pending`, `_manual_override_active`), ask: does this belong in Status instead? If the branch's purpose is to explain *why* the system is in a state, it belongs only in `_compute_automation_status()`. Next User Action and Next Automation must answer their own question regardless of the automation's current mechanism state — that state is simply deferred, not different.
+
 #### Chart Coverage
 
 Any automation phase that changes the thermostat setpoint (even temporarily) MUST be reflected in the chart's Target Band:

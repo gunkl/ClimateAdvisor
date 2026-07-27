@@ -213,21 +213,26 @@ class TestComputeNextAutomationAction:
         assert action == "Waiting for classification..."
         assert t == ""
 
-    def test_paused_by_door_returns_waiting_message(self):
-        """When paused_by_door → returns paused message regardless of schedule."""
+    def test_paused_by_door_still_shows_real_next_step(self):
+        """When paused_by_door → still shows the real next scheduled step, not mechanism text (Issue #527).
+
+        The Status card is the only place "paused" belongs (_compute_automation_status()).
+        Next Automation answers "what's the plan," which holds regardless of the pause —
+        it's simply deferred until the pause clears.
+        """
         ae = _make_automation_engine(is_paused_by_door=True)
         c = _make_classification(hvac_mode="cool")
         action, t = _compute_next_automation_action(c, ae, {}, time(8, 0))
-        assert "paused" in action.lower()
-        assert "door" in action.lower()
+        assert "paused" not in action.lower()
+        assert "Bedtime" in action
 
-    def test_grace_period_active_returns_grace_message(self):
-        """When grace period active → returns grace message."""
+    def test_grace_period_active_still_shows_real_next_step(self):
+        """When grace period active → still shows the real next scheduled step, not mechanism text (Issue #527)."""
         ae = _make_automation_engine(grace_active=True, last_resume_source="manual")
         c = _make_classification(hvac_mode="cool")
         action, t = _compute_next_automation_action(c, ae, {}, time(8, 0))
-        assert "grace period" in action.lower()
-        assert "manual" in action.lower()
+        assert "grace period" not in action.lower()
+        assert "Bedtime" in action
 
     def test_before_briefing_time_returns_briefing_event(self):
         """Time before briefing_time → first event is 'Send daily briefing'."""

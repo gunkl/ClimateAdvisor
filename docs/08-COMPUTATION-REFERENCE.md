@@ -1130,12 +1130,12 @@ Window advice is set by the classifier at classification time, based on `day_typ
 |---|---|---|---|---|
 | `hot` | Not a traditional recommendation — window *opportunities* only | 6:00 AM | 9:00 AM | Morning opportunity: `today_low <= 80` |
 | `hot` | Evening opportunity | 5:00 PM | Midnight (00:00) | Evening opportunity: `tomorrow_low <= 80` |
-| `warm` | Yes (if condition met) | 6:00 AM | 10:00 AM | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
+| `warm` | Yes (if condition met) | 6:00 AM | 10:00 AM (`WARM_WINDOW_CLOSE_HOUR`) or `nat_vent_cutoff` when ODE available | `today_low <= comfort_cool - ECONOMIZER_TEMP_DELTA` = `today_low <= 72°F` (defaults) |
 | `mild` | Always yes | 10:00 AM (`MILD_WINDOW_OPEN_HOUR`) | 5:00 PM (`MILD_WINDOW_CLOSE_HOUR`) or `nat_vent_cutoff` when ODE available | No condition — always recommended |
 | `cool` | No | — | — | — |
 | `cold` | No | — | — | — |
 
-**Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`.
+**Warm-day window condition formula:** `today_low <= DEFAULT_COMFORT_COOL - ECONOMIZER_TEMP_DELTA` = `75 - 3 = 72°F` at defaults. Constant: `WARM_WINDOW_OPEN_HOUR = 6`, `WARM_WINDOW_CLOSE_HOUR = 10`. **Like MILD (below), the static `WARM_WINDOW_CLOSE_HOUR` is only a fallback** — `briefing.py`'s `_derive_warm_day_events()` (§9e, Issue #528) overrides it with the ODE-derived `nat_vent_cutoff` whenever a forecast curve is available, exactly the same cascade §6d documents for MILD days. This table previously omitted that caveat for WARM specifically, which read as a contradiction between a correct-but-dynamic production briefing and this static reference.
 
 **MILD-day window times (v0.3.46+):** Open time is always `MILD_WINDOW_OPEN_HOUR = 10` (10:00 AM). Close time uses `nat_vent_cutoff` when the ODE is calibrated, otherwise falls back to `MILD_WINDOW_CLOSE_HOUR = 17` (5:00 PM). See [§6d. MILD Day Dynamic Window Close Time](#6d-mild-day-dynamic-window-close-time-fix-c-issue-147).
 
@@ -1814,6 +1814,69 @@ unreachable dead code (identical shape to the `nat_vent_active` gap fixed in the
 renamed `test_next_action_*_does_not_preempt_schedule`, asserting the real guidance now surfaces
 and the mechanism word does NOT appear), `tests/test_status_sensors.py::TestComputeNextAutomationAction`
 (`test_paused_by_door_still_shows_real_next_step`, `test_grace_period_active_still_shows_real_next_step`).
+
+### 9f. Timestamp-Correct Forecast-Curve Crossing Scan, and Predictive Next Automation Candidates (Issue #528)
+
+**Bug:** `briefing.py`'s `_derive_warm_day_events()` — the function that derives WARM/MILD-day
+window-close and reopen times shown in the daily briefing (§7) — paired the predicted-indoor and
+predicted-outdoor forecast curves by **list index** (`zip(predicted_indoor, predicted_outdoor)`)
+rather than by matching ISO timestamp. The two curves are built with different "now" filter
+operators and, in production, at different times (indoor is cached from the last 30-min coordinator
+cycle; outdoor is rebuilt fresh on every briefing send) — any drift between the two silently shifted
+the pairing without either timestamp ever being cross-checked. This shipped whole-cloth with Issue
+#518 (which fixed the two briefing surfaces *agreeing* with each other, not the derived values
+themselves being correct) and had zero test coverage, since every existing test built both curves
+starting at the same hour with the same length — i.e., perfectly aligned by construction. Live
+production logs confirmed a real occurrence: a Warm 79°F day's briefing said "Close up at 8:00 AM"
+and "Reopen windows around 2:00 PM," neither plausible relative to the same computation's own
+5:30 PM `ceiling_breach_time`.
+
+**Fix:** `find_temperature_crossing(indoor_curve, outdoor_curve, comparator, after=None)` in
+`temperature.py` — aligns the two curves by building a `{ts: temp}` lookup from one and walking the
+other, so an hour present in only one curve is skipped rather than mismatched against a neighboring
+hour from the other. `comparator(ts, outdoor_temp, indoor_temp)` receives the timestamp (not just
+the two temperatures) so time-of-day-aware conditions (e.g. a sleep-window-gated threshold) can be
+expressed without a second scanning loop. `_derive_warm_day_events()`'s `nat_vent_cutoff` and
+`recovery_time` (and, transitively, `any_nat_vent_window`) now go through this function instead of
+the manual zip; `ceiling_breach_time` was never pairing-dependent (indoor-only) and is unchanged.
+`recovery_time` was also added to the function's `_LOGGER.debug("WarmDayEvents: ...")` line — it was
+the one field in that dict not logged, which is why this took live-log correlation across the other
+three fields to catch instead of a direct log grep.
+
+**Feature, built on the same primitive:** `_compute_next_automation_action()` gained three new
+candidate types, none of which existed before this issue:
+- **Nat-vent/WHF start prediction** — scans `self._last_predicted_indoor` against a freshly-built
+  outdoor forecast curve (`_build_future_forecast_outdoor()`) using `decide_nat_vent_gate()` from
+  `nat_vent_gate.py` as the comparator — the same pure, already-production-validated activation gate
+  `automation.py`'s `check_natural_vent_conditions()` calls (differentially tested against
+  `_nat_vent_may_reactivate()`). **Not** `compute_nat_vent_cycling_band()` — that function
+  describes the fan's on/off cycling midpoint *while a session is already active* (its own docstring
+  says so explicitly, and `nat_vent_temperature_check()` early-returns when inactive) — a materially
+  different formula (no ceiling-margin/fan-mode/aggressive-savings awareness) that would have
+  silently repeated this section's own bug class had it been used as the activation threshold. Gated
+  on `ae.is_paused_by_door or self._any_sensor_open()`, mirroring `check_natural_vent_conditions()`'s
+  own precondition — nat-vent cannot start with everything closed, so the candidate never promises a
+  time contingent on the occupant opening a window first.
+- **WARM/MILD warm-day-event candidates** — the same `nat_vent_cutoff`/`ceiling_breach_time`/
+  `recovery_time` computed above (now timestamp-correct) are surfaced as "Close windows — outdoor no
+  longer helping" / "AC turns on to hold the ceiling" / "Reopen windows — outdoor helping again," gated
+  on `c.windows_recommended` and a forecast curve being available. Previously computed only for the
+  briefing; now also visible on the dashboard ahead of the next briefing send.
+- **HOT-day window-cooling opportunities** — `classifier.py`'s existing static
+  `window_opportunity_morning`/`_evening` fields (already computed, previously only used for the
+  Next User Action card) surfaced as "Morning/Evening window cooling opportunity" candidates —
+  fixed-hour, no forecast scan needed, same pattern as the pre-existing briefing/wake/bedtime
+  candidates. Deliberately worded to avoid implying the automation opens the window itself — these
+  are forecasted conditions the occupant can act on, not an automation-executed setpoint change,
+  unlike every other candidate in this function.
+
+**Test coverage:** `tests/test_temperature.py::TestFindTemperatureCrossing` (alignment, `after`
+boundary, comparator receiving `ts`); `tests/test_briefing.py::TestDeriveWarmDayEvents`
+(`test_misaligned_curves_pair_by_timestamp_not_index`, `test_misaligned_curves_recovery_time_after_true_cutoff`
+— both fail against the pre-fix zip-based implementation, confirmed by reverting locally before
+merge); `tests/test_status_sensors.py::TestHotDayWindowOpportunityCandidates`,
+`TestNatVentStartCandidate` (including `test_uses_real_gate_ceiling_margin_not_naive_midpoint`,
+proving the real gate's formula is used, not the cycling-band midpoint), `TestWarmDayForecastEventCandidates`.
 
 ---
 

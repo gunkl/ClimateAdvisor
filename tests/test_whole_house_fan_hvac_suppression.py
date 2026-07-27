@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Patch dt_util.now before importing automation
@@ -975,6 +975,29 @@ class TestManualWhfOffReleasesAndReclassifies:
         assert engine._pre_fan_hvac_mode == "cool", "Must not release suppression while fan is still on"
         engine._reclassify_callback.assert_not_called()
 
+    def test_clear_fan_override_does_not_release_while_nat_vent_session_active(self):
+        """Issue #530: clearing a fan override must NOT release WHF HVAC suppression while
+        a nat-vent session is still considered active, even when the fan happens to be
+        physically off at that instant (command-only mode, no ground-truth callback).
+
+        Live incident: handle_morning_wakeup() computed DEFER_NAT_VENT ("leaving fan
+        alone") because _natural_vent_active was True, then clear_manual_override() ->
+        clear_fan_override() released suppression anyway a few lines later in the same
+        handler — letting the immediately-following comfort-band write arm active HVAC
+        with windows still open. _exit_nat_vent() is the only path that should end this
+        session's suppression.
+        """
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        engine._pre_fan_hvac_mode = "off"
+        engine._fan_override_active = True
+        engine._natural_vent_active = True
+        engine._reclassify_callback = MagicMock()
+
+        engine.clear_fan_override()
+
+        assert engine._pre_fan_hvac_mode == "off", "Must not release suppression while nat-vent session is active"
+        engine._reclassify_callback.assert_not_called()
+
     def test_clear_fan_override_no_op_when_no_suppression_session(self):
         """clear_fan_override() with no _pre_fan_hvac_mode set (e.g. FAN_MODE_HVAC override,
         or override cleared with nothing to release) must not touch the reclassify callback."""
@@ -986,3 +1009,134 @@ class TestManualWhfOffReleasesAndReclassifies:
         engine.clear_fan_override()
 
         engine._reclassify_callback.assert_not_called()
+
+
+class TestTimerBoundarySettleWindow:
+    """Issue #530: a fan-off report arriving shortly after an RF-timer-linked grace
+    expires must be treated as the tail of that SAME timer boundary, not a fresh event.
+
+    Live incident: an 8h RF remote timer's grace expired in software at T+0; the timer's
+    own hardware side turned the physical fan off ~11s later. CA's post-grace reconcile
+    had already adopted the still-running fan as a fresh nat-vent session at T+0, so the
+    delayed fan-off (T+11s) looked like an unexpected new event: it started a second,
+    independent fan-off grace, which the Issue #508 orphaned-grace watchdog immediately
+    killed (fan-off grace deliberately carries no override flag), re-arming the fan 5s
+    later — a decision made by one automation feature immediately undone by another.
+    """
+
+    _FIXED_NOW = datetime(2026, 6, 12, 14, 0, 30)
+
+    def setup_method(self) -> None:
+        # dt_util.now() must return a real, comparable datetime — the settle-window check
+        # does `dt_util.now() <= self._timer_boundary_settle_until`, which raises against
+        # the module-default MagicMock some other tests in this file never exercise.
+        # Patched directly on automation.dt_util (not sys.modules["homeassistant.util.dt"])
+        # because `from homeassistant.util import dt as dt_util` resolves, in this stub
+        # environment, via the parent mock's auto-vivified `.dt` attribute — a distinct
+        # object per importing module, not the sys.modules entry (see ha_stubs.py's
+        # equivalent, deliberate pinning for entity_registry/device_registry, which this
+        # module was never included in).
+        automation_module = importlib.import_module("custom_components.climate_advisor.automation")
+        automation_module.dt_util.now = lambda: self._FIXED_NOW
+
+    def _arm_settle_window(self, engine, *, seconds_remaining: float = 60.0) -> None:
+        engine._timer_boundary_settle_until = self._FIXED_NOW + timedelta(seconds=seconds_remaining)
+
+    def test_fan_off_within_settle_window_and_nat_vent_active_exits_via_choke_point(self):
+        """Fan-off inside the settle window, with nat-vent already adopted, and sensors
+        closed: must route through _exit_nat_vent() (restoring HVAC + starting an
+        AUTOMATION grace) rather than starting a fresh MANUAL fan-off grace."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        self._arm_settle_window(engine)
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._sensor_check_callback = MagicMock(return_value=False)  # sensors closed
+
+        captured: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._timer_boundary_settle_until is None, "Settle window must be consumed (one-shot)"
+        assert len(captured) == 1, "_exit_nat_vent() must be scheduled, not run inline"
+        asyncio.run(captured[0])
+
+        assert engine._natural_vent_active is False
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "automation", (
+            "Sensors closed -> _exit_nat_vent() restores HVAC and starts an AUTOMATION grace,"
+            " never a fresh MANUAL fan-off grace"
+        )
+
+    def test_fan_off_within_settle_window_and_sensor_open_pauses_instead_of_reengaging(self):
+        """Fan-off inside the settle window with a monitored sensor still open: must pause
+        (not restore HVAC / re-arm the fan) — proves the coalesced exit still respects live
+        sensor state instead of blindly resuming."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        self._arm_settle_window(engine)
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "cool"
+        engine._sensor_check_callback = MagicMock(return_value=True)  # sensor still open
+        engine._paused_by_door = False
+
+        captured: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda c: captured.append(c))
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+        asyncio.run(captured[0])
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True, "Open sensor -> pause, not restore/re-engage"
+        assert engine._grace_active is False, "No grace should start while paused for an open sensor"
+
+    def test_fan_off_within_settle_window_but_not_adopted_just_clears_flags(self):
+        """If the post-grace reconcile did NOT adopt the fan as nat-vent (e.g. conditions no
+        longer favored it), a fan-off inside the settle window has nothing to reconcile —
+        flags are cleared and no new grace is started at all."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        self._arm_settle_window(engine)
+        engine._natural_vent_active = False
+        engine._fan_active = False
+
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._timer_boundary_settle_until is None
+        assert engine._fan_active is False
+        assert engine._grace_active is False, "No fan-off grace should start for a coalesced timer-boundary event"
+        engine.hass.async_create_task.assert_not_called()
+
+    def test_fan_off_outside_settle_window_uses_normal_fresh_event_path(self):
+        """No settle window armed (the common case: a fan-off unrelated to any RF timer)
+        must behave exactly as before — starts a fresh manual fan-off grace."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        assert engine._timer_boundary_settle_until is None
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "manual", "Unrelated fan-off still starts its own fan-off grace"
+        assert engine._natural_vent_active is False
+
+    def test_fan_off_after_settle_window_expired_uses_normal_fresh_event_path(self):
+        """A settle window that has already elapsed must not coalesce a later, unrelated
+        fan-off — the one-shot window only covers events genuinely close to the timer
+        boundary."""
+        engine = _make_engine(fan_mode=FAN_MODE_WHOLE_HOUSE, current_hvac_mode="off")
+        self._arm_settle_window(engine, seconds_remaining=-5.0)  # already expired
+        engine._natural_vent_active = True
+        engine._fan_active = True
+
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._grace_active is True
+        assert engine._last_resume_source == "manual"

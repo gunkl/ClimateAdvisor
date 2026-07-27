@@ -136,6 +136,11 @@ def _make_stuck_grace_coord_stub(
     ae._manual_override_active = manual_override_active
     ae._grace_active = grace_active
     ae._grace_end_time = grace_end_time
+    # Issue #530: MagicMock attributes are truthy by default (CLAUDE.md testing doctrine) —
+    # must be set explicitly or _check_orphaned_grace()'s new _grace_protects_override gate
+    # would pass for the wrong reason. Default True here matches every pre-#530 test's intent
+    # in this file: they all model a grace that protects a real override.
+    ae._grace_protects_override = True
     ae.clear_manual_override = MagicMock()
     coord.automation_engine = ae
 
@@ -459,3 +464,102 @@ class TestOrphanedGraceDetection:
 
         coord.automation_engine._cancel_grace_timers.assert_not_called()
         coord._emit_event.assert_not_called()
+
+    def test_orphaned_grace_not_cancelled_when_grace_does_not_protect_override(self):
+        """Issue #530: grace_active=True, no override flags, BUT this grace was never
+        started to protect an override (e.g. fan-off cooldown, window-close resume) —
+        must NOT fire. Pre-#530, this exact shape (no override flag set, by design) was
+        indistinguishable from a genuinely orphaned override-grace, so a fan-off grace
+        was killed within ~1 event-loop tick of starting, defeating Issue #359's
+        fan-off protection almost universally, not just in the RF-timer scenario #530
+        was originally reported against.
+        """
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=False,
+            grace_active=True,
+            grace_end_time="2026-06-12T21:53:00+00:00",
+        )
+        coord.automation_engine._fan_override_active = False
+        coord.automation_engine._grace_protects_override = False
+        coord.automation_engine._cancel_grace_timers = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord._emit_event.assert_not_called()
+
+    def test_orphaned_grace_still_cancelled_when_protects_override_and_flags_gone(self):
+        """Issue #530 regression guard: the new gate must not accidentally weaken the
+        original Issue #508 protection. A grace that WAS started to protect a real
+        override, whose override flags are now gone (the actual bug #508 exists to
+        catch), must still be force-cancelled."""
+        coord = _make_stuck_grace_coord_stub(
+            manual_override_active=False,
+            grace_active=True,
+            grace_end_time="2026-06-12T21:53:00+00:00",
+        )
+        coord.automation_engine._fan_override_active = False
+        coord.automation_engine._grace_protects_override = True
+        coord.automation_engine._cancel_grace_timers = MagicMock()
+
+        coord._check_orphaned_grace()
+
+        coord.automation_engine._cancel_grace_timers.assert_called_once()
+        coord._emit_event.assert_called_once()
+
+
+class TestGraceProtectsOverrideClassification:
+    """automation._start_grace_period() sets _grace_protects_override from `trigger`
+    membership in _GRACE_TRIGGERS_PROTECTING_OVERRIDE (Issue #530) — centralized
+    classification instead of a boolean threaded through every callsite. Exercises the
+    REAL AutomationEngine._start_grace_period(), not a re-implementation.
+    """
+
+    def _make_real_engine_for_grace_start(self):
+        ae = _make_automation_engine_stub()
+        ae._start_grace_period = types.MethodType(AutomationEngine._start_grace_period, ae)
+        ae._cancel_grace_timers = types.MethodType(AutomationEngine._cancel_grace_timers, ae)
+        ae._emit_event_callback = None
+        ae.config = {}
+        return ae
+
+    def test_fan_manual_override_trigger_protects_override(self):
+        """trigger='fan_manual_override' (a real fan-on override) -> protects_override=True."""
+        ae = self._make_real_engine_for_grace_start()
+        ae._start_grace_period("manual", trigger="fan_manual_override")
+        assert ae._grace_protects_override is True
+
+    def test_override_confirmed_trigger_protects_override(self):
+        """trigger='override_confirmed' (a real thermostat override) -> protects_override=True."""
+        ae = self._make_real_engine_for_grace_start()
+        ae._start_grace_period("manual", trigger="override_confirmed")
+        assert ae._grace_protects_override is True
+
+    def test_fan_off_trigger_does_not_protect_override(self):
+        """trigger='fan_off' (Issue #359 cooldown, no override involved) -> protects_override=False."""
+        ae = self._make_real_engine_for_grace_start()
+        ae._start_grace_period("manual", trigger="fan_off")
+        assert ae._grace_protects_override is False
+
+    def test_dashboard_resume_trigger_does_not_protect_override(self):
+        """trigger='dashboard_resume' -> protects_override=False."""
+        ae = self._make_real_engine_for_grace_start()
+        ae._start_grace_period("manual", trigger="dashboard_resume")
+        assert ae._grace_protects_override is False
+
+    def test_sensor_closed_resume_trigger_does_not_protect_override(self):
+        """trigger='sensor_closed_resume' (automation-initiated) -> protects_override=False."""
+        ae = self._make_real_engine_for_grace_start()
+        ae._start_grace_period("automation", trigger="sensor_closed_resume")
+        assert ae._grace_protects_override is False
+
+    def test_cancel_grace_timers_resets_protects_override(self):
+        """_cancel_grace_timers() must reset _grace_protects_override alongside _grace_active,
+        so a stale True doesn't leak into whatever starts next."""
+        ae = self._make_real_engine_for_grace_start()
+        ae._start_grace_period("manual", trigger="fan_manual_override")
+        assert ae._grace_protects_override is True
+
+        ae._cancel_grace_timers()
+
+        assert ae._grace_protects_override is False

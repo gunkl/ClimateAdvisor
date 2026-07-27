@@ -77,6 +77,7 @@ from .const import (
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
+    TIMER_BOUNDARY_SETTLE_SECONDS,
     VACATION_SETBACK_EXTRA,
 )
 from .desired_state import (
@@ -114,6 +115,19 @@ from .temperature import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Issue #530: the ONLY two `_start_grace_period(trigger=...)` values that mean "this grace
+# exists to protect an active manual/fan override" — read by `_start_grace_period()` to set
+# `_grace_protects_override`, which `coordinator._check_orphaned_grace()` uses to scope its
+# self-heal to grace types that can actually BE orphaned (an override was cleared without its
+# grace being cancelled alongside it). Every other grace trigger (fan-off cooldown, physical-
+# drift correction, window-close resume, nat-vent-exit resume, dashboard resume) never sets
+# `_manual_override_active`/`_fan_override_active` in the first place by design — treating
+# their absence as "orphaned" was the root cause of #530's fan-off grace being killed within
+# ~1ms of starting. A future grace-starting call site is automatically excluded here unless
+# its trigger string is deliberately added to this set — if it's meant to protect a real
+# override, add it; if not, leave it out.
+_GRACE_TRIGGERS_PROTECTING_OVERRIDE = frozenset({"fan_manual_override", "override_confirmed"})
 
 
 @dataclass(frozen=True)
@@ -501,6 +515,10 @@ class AutomationEngine:
         self._last_resume_source: str | None = None
         self._grace_end_time: str | None = None
         self._grace_duration_seconds: int = 0
+        # Issue #530: whether the CURRENTLY active grace exists to protect a real override
+        # (see _GRACE_TRIGGERS_PROTECTING_OVERRIDE) — set fresh by _start_grace_period() on
+        # every start, read by coordinator._check_orphaned_grace().
+        self._grace_protects_override: bool = False
 
         # Comfort-band event dedup (Issue #444): tracks the last-announced band so
         # overlapping triggers (startup coalesce + its own refresh, grace-expiry
@@ -548,6 +566,12 @@ class AutomationEngine:
         # "the last speed the remote reported," not an indicator of which path set it.
         self._fan_remote_speed: str | None = None
         self._fan_command_pending: bool = False  # transient: distinguishes integration vs manual changes
+        # Issue #530: when a manual grace tied to an RF-remote timer expires, the timer's
+        # physical hardware side typically finishes within seconds of CA's software clock —
+        # not always before. This deadline marks a short coalescing window during which a
+        # fan-off report is treated as the tail of that SAME timer boundary (not a fresh,
+        # unexpected event) — see on_fan_turned_off() and _on_grace_expired().
+        self._timer_boundary_settle_until: datetime | None = None
         # HVAC mode captured before whole-house fan activation (Issue #277 Fix C).
         # Restored when the whole-house fan deactivates so AC/heat resumes.
         self._pre_fan_hvac_mode: str | None = None
@@ -1014,6 +1038,48 @@ class AutomationEngine:
                 any (Issue #482) — surfaced in the Activity Report payload as diagnostic
                 provenance data.
         """
+        # Issue #530: a fan-off arriving inside the settle window of a just-expired
+        # RF-timer-linked grace is the tail of that SAME timer boundary, not a fresh
+        # event — coalesce into whatever the post-grace reconcile already decided instead
+        # of starting a brand-new fan-off grace (which the orphaned-grace watchdog cannot
+        # distinguish from a genuinely stuck one) and re-litigating the whole decision
+        # from scratch.
+        _settle_until = getattr(self, "_timer_boundary_settle_until", None)
+        if _settle_until is not None and dt_util.now() <= _settle_until:
+            self._timer_boundary_settle_until = None  # one-shot — consumed
+            _LOGGER.info(
+                "Fan turned off within the RF-timer boundary settle window (fan=%s->%s) —"
+                " treating as the same timer session ending, not a new event",
+                fan_before or "?",
+                fan_after or "?",
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_cancel",
+                    {
+                        "fan_before": fan_before,
+                        "fan_after": fan_after,
+                        "trigger": "timer_boundary_settle",
+                        "fan_device": _fan_device_label(self.config),
+                        "event_context_id": event_context_id,
+                    },
+                )
+            if self._natural_vent_active:
+                # The post-grace reconcile adopted this fan as a nat-vent session moments
+                # ago (it was still physically on when the grace's software clock
+                # expired) — let the single choke point for ending a session decide
+                # pause-vs-restore against live sensor state, instead of starting a fresh
+                # fan-off grace that only gets fought by the orphaned-grace watchdog.
+                self.hass.async_create_task(
+                    self._exit_nat_vent(reason=f"fan={fan_before or '?'}->{fan_after or '?'} (RF timer boundary)")
+                )
+            else:
+                # Reconcile didn't adopt the fan (or it was already off) — nothing further
+                # to reconcile; just make sure the flags reflect reality.
+                self._fan_active = False
+                self._fan_on_since = None
+            return
+
         _LOGGER.info(
             "Fan turned off by user: fan=%s->%s, trigger=fan_off",
             fan_before or "?",
@@ -3454,6 +3520,7 @@ class AutomationEngine:
         outdoor: float | None,
         thermostat_fan_running: bool,
         any_sensor_open: bool,
+        trigger: str = "startup",
     ) -> None:
         """Reconcile fan state on HA startup / coalesce window (Issue #327).
 
@@ -3483,6 +3550,16 @@ class AutomationEngine:
                                     fan session based on an unrelated thermostat-internal fan
                                     blip while the real WHF was off (Issue #423).
             any_sensor_open:      True when at least one door/window sensor is open.
+            trigger:               Which of the 4 call sites invoked this reconcile — used only
+                                    in log/reason strings (Issue #530). This method is called from
+                                    a genuine HA restart (``"ha_restart"``), the periodic 30-min
+                                    untracked-fan backstop (``"backstop_30min"``), a live
+                                    thermostat hvac_action transition (``"thermostat_state_change"``),
+                                    and every grace-period expiry (``"post_grace_expiry"``) — the
+                                    reason string previously hardcoded "startup reconcile" for all
+                                    four, which read as a phantom HA restart when none of the other
+                                    three triggers fired. Defaults to ``"startup"`` for any caller
+                                    that doesn't pass one explicitly.
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         archetype = fan_mode
@@ -3514,7 +3591,7 @@ class AutomationEngine:
             # restart could silently re-command HVAC on right after the classification block
             # above correctly paused it for an open window.
             await self._deactivate_fan(
-                reason="startup reconcile — fan confirmed off, releasing any stranded HVAC suppression",
+                reason=f"{trigger} reconcile — fan confirmed off, releasing any stranded HVAC suppression",
                 restore_hvac=not self._paused_by_door,
             )
             return
@@ -3561,7 +3638,7 @@ class AutomationEngine:
             # managed with no record of why, unlike the turn-off branch below which does
             # emit a fan_deactivated event. Record the adoption the same way.
             _adopt_reason = (
-                f"startup reconcile — fan already running, indoor {indoor:.1f}°F,"
+                f"{trigger} reconcile — fan already running, indoor {indoor:.1f}°F,"
                 f" outdoor {outdoor:.1f}°F, nat-vent conditions met — adopting as CA-owned"
             )
             self._record_action("Fan activated", _adopt_reason)
@@ -3584,7 +3661,7 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
-            _turn_off_reason = "startup reconcile — fan running without CA warrant"
+            _turn_off_reason = f"{trigger} reconcile — fan running without CA warrant"
 
             # Issue #446: reconcile_fan_on_startup() is called from 4 different sites
             # (startup coalesce, 30-min backstop, thermostat state-change, post-grace-expiry)
@@ -3692,6 +3769,15 @@ class AutomationEngine:
         Args:
             source: "manual" for user-initiated overrides,
                     "automation" for Climate Advisor resumptions.
+            trigger: Distinct per-callsite label (e.g. "fan_manual_override", "fan_off",
+                "dashboard_resume") — logged/emitted for observability, and, as of Issue
+                #530, also determines whether this grace protects a real override:
+                membership in ``_GRACE_TRIGGERS_PROTECTING_OVERRIDE`` sets
+                ``self._grace_protects_override``, which ``coordinator._check_orphaned_grace()``
+                reads to decide whether an override-less grace is a bug (a real override
+                grace whose flag vanished without going through ``cancel_override()``) or
+                expected (fan-off cooldown, window-close resume, etc. never set an override
+                flag in the first place). Every callsite must pass an explicit trigger.
             duration_override: When set (seconds), bypasses the configured manual
                 grace duration and uses this value instead. Used by RF-remote timer
                 selections (Issue #486) to make the grace period last exactly as
@@ -3732,6 +3818,7 @@ class AutomationEngine:
         self._last_resume_source = source
         self._grace_duration_seconds = duration
         self._grace_end_time = grace.at.isoformat()
+        self._grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE
 
         @callback
         def _grace_expired(_now: Any) -> None:
@@ -3760,6 +3847,19 @@ class AutomationEngine:
         Extracted from the inner callback in ``_start_grace_period`` so it can
         also be invoked from ``_reschedule_grace_timer`` after an HA restart.
         """
+        # Issue #530: snapshot whether this grace was tied to an RF-remote timer BEFORE
+        # clear_manual_override() (called in every branch below) wipes
+        # _fan_remote_timer_hours. If so, arm a short settle window: a fan-off report
+        # arriving shortly after is the tail of this SAME timer boundary — the timer's
+        # own hardware side completing a few seconds after CA's software clock — not a
+        # fresh, independent event. See on_fan_turned_off().
+        if source == "manual" and getattr(self, "_fan_remote_timer_hours", None) is not None:
+            self._timer_boundary_settle_until = dt_util.now() + timedelta(seconds=TIMER_BOUNDARY_SETTLE_SECONDS)
+            _LOGGER.debug(
+                "RF-timer-linked grace expiring — arming %ss timer-boundary settle window",
+                TIMER_BOUNDARY_SETTLE_SECONDS,
+            )
+
         # If within planned window period, sensors open is expected — just clear grace
         if self._is_within_planned_window_period():
             _LOGGER.info(
@@ -3888,6 +3988,7 @@ class AutomationEngine:
         self._grace_active = False
         self._grace_end_time = None  # Bug 2 fix (Issue #321): prevent stuck-at-0 display
         self._last_resume_source = None
+        self._grace_protects_override = False
 
     async def _re_pause_for_open_sensor(self) -> None:
         """Re-pause HVAC because a sensor is still open when grace expired."""
@@ -4755,9 +4856,27 @@ class AutomationEngine:
         None in command-only mode). The post-grace fan reconcile
         (``_on_post_grace_fan_check`` -> ``reconcile_fan_on_startup``) owns the "still running"
         case; releasing here too would race it.
+
+        Guard (Issue #530): also no-op if ``_natural_vent_active`` is still True. Physical
+        fan state alone is not sufficient — ``clear_fan_override()`` calls this method
+        whenever an override is cleared, including cases where the fan happens to be
+        physically off at that instant but CA still considers a nat-vent session live (e.g.
+        wake-up clearing a leftover fan override while nat-vent is mid-session, confirmed
+        live: ``handle_morning_wakeup()`` decided ``DEFER_NAT_VENT`` — "leaving fan alone" —
+        moments before this exact call released suppression anyway, letting the very next
+        comfort-band write arm active HVAC with windows still open). As long as
+        ``_natural_vent_active`` is True, the nat-vent session itself owns when suppression
+        ends — via ``_exit_nat_vent()`` — not this override-clear side effect.
         """
         if self._pre_fan_hvac_mode is None:
             return  # no suppression session to release
+        if self._natural_vent_active:
+            _LOGGER.debug(
+                "WHF release-and-reclassify skipped (%s) — nat-vent session still active,"
+                " _exit_nat_vent() owns suppression release",
+                reason,
+            )
+            return
         if self._get_fan_physical_state_callback and self._get_fan_physical_state_callback():
             _LOGGER.debug("WHF release-and-reclassify skipped (%s) — fan still physically on", reason)
             return
@@ -5649,6 +5768,7 @@ class AutomationEngine:
         self._grace_end_time = None
         self._grace_duration_seconds = None
         self._last_resume_source = None
+        self._grace_protects_override = False
         # Issue #327: fan override cleared on restart — no grace timer to reschedule.
         # reconcile_fan_on_startup() runs shortly after and decides adopt-on / turn-off.
         self._fan_override_active = False

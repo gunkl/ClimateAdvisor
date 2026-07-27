@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.36"
+VERSION = "0.5.37"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.37": [
+        "Fix #530: turning off the whole-house fan didn't reliably stick — a watchdog meant"
+        " to catch a completely different, rare bug was mistaking the normal 'no override in"
+        " progress' state of an ordinary fan-off for a stuck automation, and killing its"
+        " protection within about a second almost every time. Fixed at the root, so fan-off"
+        " now stays off for its full protection window like it's always been supposed to."
+        " On top of that, an overnight session started via an 8-hour RF remote timer no"
+        " longer produces a burst of contradictory decisions right when the timer runs out —"
+        " a fan-off report in the couple of minutes after that timer's own grace period ends"
+        " is now recognized as the tail of the same session instead of a brand-new event."
+        " Separately, a leftover fan override being cleared at the 6:30 AM wake-up could arm"
+        " the AC with windows still open — wake-up no longer releases whole-house-fan HVAC"
+        " suppression while a nat-vent session is still active.",
+    ],
     "0.5.36": [
         "Fix #528: on warm/mild days, the briefing's window-close and reopen times could"
         " be badly wrong — one real example told the user to close windows at 8 AM"
@@ -1297,6 +1311,76 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    530: {
+        "version_fixed": "0.5.37",
+        "title": (
+            "Whole-house-fan-off grace was killed by the Issue #508 orphaned-grace watchdog"
+            " within ~1 event-loop tick almost universally (not just the RF-timer case"
+            " originally reported); an 8h RF-timer boundary compounded this into a burst of"
+            " contradictory grace/override decisions; morning wake-up could separately arm"
+            " HVAC with windows still open"
+        ),
+        "scope_covered": (
+            "Three fixes, automation.py + coordinator.py. (1) ROOT CAUSE, general case:"
+            " coordinator._check_orphaned_grace() (Issue #508) inferred 'orphaned' purely"
+            " from _manual_override_active/_fan_override_active both being False — also the"
+            " normal, by-design shape of fan-off/physical-drift-correction/window-close-"
+            " resume/dashboard-resume/nat-vent-exit-resume grace, none of which ever touch"
+            " those flags. Fixed by making _start_grace_period(trigger=...) set a new"
+            " self._grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE"
+            " (frozenset of exactly 'fan_manual_override'/'override_confirmed', the only two"
+            " triggers that correspond to a real override) — centralized classification via"
+            " the trigger string every callsite already passes, not a new parameter threaded"
+            " through all 7 call sites. _check_orphaned_grace() now additionally requires"
+            " _grace_protects_override; _cancel_grace_timers() resets it. This restores"
+            " Issue #359's fan-off protection for ANY whole-house-fan-off, not only the"
+            " RF-timer scenario originally reported, while leaving the original Issue #508"
+            " protection fully intact for the three genuine override-driven triggers."
+            " (2) RF-timer-specific refinement: _on_grace_expired() snapshots whether the"
+            " expiring grace was RF-timer-linked (_fan_remote_timer_hours, read before"
+            " clear_manual_override() wipes it) and, if so, arms"
+            " self._timer_boundary_settle_until for TIMER_BOUNDARY_SETTLE_SECONDS (const.py,"
+            " 120s — the real observed software/hardware gap was ~11s). on_fan_turned_off()"
+            " checks this window first: a fan-off inside it routes straight to"
+            " _exit_nat_vent() instead of starting a second, independent grace at all —"
+            " stronger than (1) alone for this specific, predictable case, since CA already"
+            " knows the timer is about to complete. (3) _release_whf_and_reclassify()"
+            " (called from clear_fan_override(), itself called by handle_morning_wakeup()"
+            " via clear_manual_override()) gained a _natural_vent_active guard: no longer"
+            " releases WHF HVAC suppression while a nat-vent session is still considered"
+            " active, even if the fan happens to be physically off at that instant — closes"
+            " an ordering bug where wake-up's own DEFER_NAT_VENT gate decision (computed"
+            " moments earlier) was silently undercut by this side effect before the"
+            " following comfort-band write ran. Also threaded a `trigger` parameter through"
+            " reconcile_fan_on_startup() (previously hardcoded 'startup reconcile' in its"
+            " reason strings for all 4 call sites — ha_restart, backstop_30min,"
+            " thermostat_state_change, post_grace_expiry — reading as a phantom HA restart"
+            " when none occurred). 13 new regression tests across"
+            " tests/test_whole_house_fan_hvac_suppression.py, tests/test_grace_stuck.py, and"
+            " tests/test_fan_command_guard.py, each verified to fail without its"
+            " corresponding fix via a stash/revert check. docs/grace-periods-spec.md updated:"
+            " Orphaned Grace Self-Heal section rewritten for the corrected scope, new"
+            " RF-Timer Boundary Settle Window section, Fan-Off Grace and Shared"
+            " Scheduled-Band Gate sections cross-referenced."
+        ),
+        "scope_not_covered": (
+            "No golden simulation scenario was added — the Tier A production harness"
+            " (tools/sim_harness/run_production.py) has no event dispatch path for the"
+            " QuietCool RF-remote entity (_async_fan_remote_changed()/"
+            " handle_fan_manual_override() with duration_override), only for the plain"
+            " fan_entity on/off transition (external_fan_state_change). Adding that dispatch"
+            " path is a harness feature, not a production fix, and was intentionally left"
+            " out of this change's scope; regression coverage is the unit tests against the"
+            " real AutomationEngine/coordinator instead. H3 from the investigation (whether"
+            " the FAN_MODE_HVAC archetype's fan-off path also gets an immediate coordinator"
+            " refresh the way the WHF fan_entity path does, per Issue #510) was checked and"
+            " disproven — that path never calls async_request_refresh() — but fix (1) above"
+            " protects that archetype's fan-off grace regardless, since it no longer depends"
+            " on refresh timing at all. The 'startup reconcile' -> trigger-labeled reason"
+            " string change is cosmetic/observability only and does not itself change any"
+            " HVAC or fan decision."
+        ),
+    },
     528: {
         "version_fixed": "0.5.36",
         "title": (
@@ -5342,6 +5426,14 @@ MAX_CONTINUOUS_RUNTIME_HOURS = 3
 # (~5-6 minutes) while staying well under the 30-minute regular classification
 # cycle, so a genuine re-announcement after a real cycle is never swallowed.
 COMFORT_BAND_EVENT_DEDUP_SECONDS = 600  # 10 minutes
+
+# Issue #530: an RF-remote-timer-linked manual grace period's software-tracked expiry and
+# the timer's own hardware-side completion are the same physical event, but don't land at
+# the exact same instant — confirmed live at an 11-second gap, with follow-on RF chatter
+# settling within 60 seconds. This window (generous vs. that observed gap) marks how long
+# after such a grace expires a fan-off report is still treated as the tail of that SAME
+# timer boundary, not a fresh, independent event requiring its own new grace period.
+TIMER_BOUNDARY_SETTLE_SECONDS = 120  # 2 minutes
 
 # Economizer (window cooling) threshold
 ECONOMIZER_TEMP_DELTA = 3  # °F — activate when outdoor temp within this delta of comfort_cool

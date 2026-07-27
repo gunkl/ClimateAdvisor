@@ -34,7 +34,7 @@ from .const import (
     FAN_MODE_DISABLED,
     OCCUPANCY_SETBACK_MINUTES,
 )
-from .temperature import FAHRENHEIT, format_temp, format_temp_delta
+from .temperature import FAHRENHEIT, find_temperature_crossing, format_temp, format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -510,41 +510,38 @@ def _derive_warm_day_events(
     if not predicted_indoor or not predicted_outdoor:
         return result
 
-    # Build aligned (ts, indoor_temp, outdoor_temp) triples by matching timestamps
-    pairs = []
-    for i_entry, o_entry in zip(predicted_indoor, predicted_outdoor, strict=False):
-        i_temp = i_entry.get("temp")
-        o_temp = o_entry.get("temp")
-        ts_str = i_entry.get("ts")
-        if i_temp is None or o_temp is None or ts_str is None:
+    # Issue #528: each crossing is found via find_temperature_crossing(), which aligns
+    # the two curves by matching ISO timestamp — not list position — so a mismatch in
+    # how/when the two curves were built (different "now" filter boundaries, one cached
+    # from an earlier cycle vs. the other rebuilt fresh) can no longer silently shift
+    # the pairing the way the previous zip()-by-index implementation did. See
+    # docs/08-COMPUTATION-REFERENCE.md's warm-day-events note for the production
+    # incident this replaced.
+    result["any_nat_vent_window"] = (
+        find_temperature_crossing(predicted_indoor, predicted_outdoor, lambda _ts, o, i: o < i) is not None
+    )
+
+    result["nat_vent_cutoff"] = find_temperature_crossing(
+        predicted_indoor, predicted_outdoor, lambda _ts, o, i: _nat_vent_cutoff_reached(o, i)
+    )
+
+    # ceiling_breach_time only reads the indoor curve — no pairing needed.
+    for entry in predicted_indoor:
+        ts_str = entry.get("ts")
+        i_temp = entry.get("temp")
+        if ts_str is None or i_temp is None:
             continue
         try:
             ts = datetime.fromisoformat(ts_str)
         except (ValueError, TypeError):
             continue
-        pairs.append((ts, float(i_temp), float(o_temp)))
-
-    if not pairs:
-        return result
-
-    # Any nat-vent window (outdoor < indoor at any point)
-    result["any_nat_vent_window"] = any(o < i for _, i, o in pairs)
-
-    # nat_vent_cutoff: first entry where outdoor >= indoor - 1 F
-    for ts, i_temp, o_temp in pairs:
-        if _nat_vent_cutoff_reached(o_temp, i_temp):
-            result["nat_vent_cutoff"] = ts
-            break
-
-    # ceiling_breach_time: first entry where indoor > comfort_cool
-    for ts, i_temp, _o_temp in pairs:
-        if i_temp > comfort_cool:
+        if float(i_temp) > comfort_cool:
             result["ceiling_breach_time"] = ts
             break
 
     # precool_start_time = ceiling_breach_time - lead_time
     if result["ceiling_breach_time"] is not None:
-        t_in_now = pairs[0][1] if pairs else comfort_cool - 2.0
+        t_in_now = predicted_indoor[0].get("temp", comfort_cool - 2.0)
         if k_active_cool is not None and abs(k_active_cool) > 0:
             lead_min = ((comfort_cool - t_in_now) / abs(k_active_cool)) * 60 * 1.3
         else:
@@ -554,19 +551,18 @@ def _derive_warm_day_events(
 
     # nat_vent_recovers / recovery_time: outdoor drops back below indoor AFTER the cutoff
     if result["nat_vent_cutoff"] is not None:
-        cutoff_ts = result["nat_vent_cutoff"]
-        for ts, i_temp, o_temp in pairs:
-            if ts > cutoff_ts and o_temp < i_temp:
-                result["nat_vent_recovers"] = True
-                result["recovery_time"] = ts
-                break
+        result["recovery_time"] = find_temperature_crossing(
+            predicted_indoor, predicted_outdoor, lambda _ts, o, i: o < i, after=result["nat_vent_cutoff"]
+        )
+        result["nat_vent_recovers"] = result["recovery_time"] is not None
 
     _LOGGER.debug(
-        "WarmDayEvents: nat_vent_cutoff=%s, ceiling_breach=%s, precool_start=%s, recovers=%s",
+        "WarmDayEvents: nat_vent_cutoff=%s, ceiling_breach=%s, precool_start=%s, recovers=%s, recovery_time=%s",
         result["nat_vent_cutoff"],
         result["ceiling_breach_time"],
         result["precool_start_time"],
         result["nat_vent_recovers"],
+        result["recovery_time"],
     )
 
     return result

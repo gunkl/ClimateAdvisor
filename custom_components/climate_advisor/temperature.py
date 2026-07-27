@@ -6,6 +6,9 @@ This module provides the only conversion boundary used throughout the integratio
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
+
 FAHRENHEIT = "fahrenheit"
 CELSIUS = "celsius"
 
@@ -75,6 +78,65 @@ def free_cooling_direction_ok(outdoor_temp: float | None, indoor_temp: float | N
     Unknown readings default to True (caller decides whether to act on an unknown).
     """
     return indoor_temp is None or outdoor_temp is None or outdoor_temp < indoor_temp
+
+
+def find_temperature_crossing(
+    indoor_curve: list[dict] | None,
+    outdoor_curve: list[dict] | None,
+    comparator: Callable[[datetime, float, float], bool],
+    after: datetime | None = None,
+) -> datetime | None:
+    """Find the first timestamp where comparator(ts, outdoor_temp, indoor_temp) is True.
+
+    Each curve is a list of {"ts": ISO-8601 string, "temp": float} entries (the shape
+    both _build_predicted_indoor_future() and _build_future_forecast_outdoor() in
+    coordinator.py already produce). Aligns the two curves by matching ISO timestamps
+    — not list position — so an hour present in only one curve is skipped rather than
+    silently mismatched against a neighboring hour from the other curve. Curves may
+    differ in length, start time, or filtering boundary; alignment is by timestamp
+    value only (Issue #528 — replaces the zip()-by-index pairing that produced
+    implausible warm-day window-close/reopen times whenever the two curves drifted).
+
+    `ts` is passed to the comparator, not just the two temperatures, because some
+    crossing conditions depend on time-of-day (e.g. a sleep-window-aware gate) and
+    not on temperature alone.
+
+    `after`, if given, restricts the scan to timestamps strictly after it — lets a
+    "first crossing following an earlier crossing" scan reuse this same function.
+
+    Returns None if either curve is empty/None or no crossing is found.
+    """
+    if not indoor_curve or not outdoor_curve:
+        return None
+
+    outdoor_by_ts: dict[datetime, float] = {}
+    for entry in outdoor_curve:
+        ts_str = entry.get("ts")
+        temp = entry.get("temp")
+        if ts_str is None or temp is None:
+            continue
+        try:
+            outdoor_by_ts[datetime.fromisoformat(ts_str)] = float(temp)
+        except (ValueError, TypeError):
+            continue
+
+    for entry in indoor_curve:
+        ts_str = entry.get("ts")
+        indoor_temp = entry.get("temp")
+        if ts_str is None or indoor_temp is None:
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError):
+            continue
+        if after is not None and ts <= after:
+            continue
+        outdoor_temp = outdoor_by_ts.get(ts)
+        if outdoor_temp is None:
+            continue
+        if comparator(ts, outdoor_temp, float(indoor_temp)):
+            return ts
+    return None
 
 
 def convert_delta(value_fahrenheit: float, unit: str) -> float:

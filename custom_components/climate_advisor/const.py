@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.35"
+VERSION = "0.5.36"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.36": [
+        "Fix #528: on warm/mild days, the briefing's window-close and reopen times could"
+        " be badly wrong — one real example told the user to close windows at 8 AM"
+        " (outdoor was still cooler for hours after that) and reopen at 2 PM, before the"
+        " day's actual heat peak, both computed from a data-alignment bug that's now fixed."
+        " Feat #528: the Next Automation card can now predict the whole-house fan/nat-vent"
+        " starting (using the same real activation logic the automation itself uses), the"
+        " warm-day window-close/AC-on/reopen events, and hot-day morning/evening window-"
+        " cooling opportunities — previously only the daily briefing knew about any of this.",
+    ],
     "0.5.35": [
         "Fix #527: the dashboard's Status, Next User Action, and Next Automation cards could"
         " all say the same thing in different words whenever a door/window was open (or a"
@@ -1287,6 +1297,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    528: {
+        "version_fixed": "0.5.36",
+        "title": (
+            "Warm/mild-day briefing window-close and reopen times could be implausibly"
+            " wrong (e.g. reopen shown hours before the day's actual heat peak); Next"
+            " Automation card had no predictive events at all — only fixed-schedule ones"
+        ),
+        "scope_covered": (
+            "temperature.py: new find_temperature_crossing(indoor_curve, outdoor_curve,"
+            " comparator, after=None) — aligns two {ts,temp} forecast curves by matching"
+            " ISO timestamp (not list position) before evaluating comparator(ts, outdoor,"
+            " indoor); returns the first matching timestamp or None. briefing.py:"
+            " _derive_warm_day_events() nat_vent_cutoff/recovery_time (and transitively"
+            " any_nat_vent_window) now go through this function instead of a zip()-by-index"
+            " pairing that silently mispaired the two curves whenever they were built with"
+            " different 'now' filter boundaries or at different times (indoor cached from"
+            " the last 30-min cycle, outdoor rebuilt fresh per briefing) — confirmed live via"
+            " production logs and a git-blame trace to the original #518 commit (introduced"
+            " whole-cloth, never modified since — an original design gap, not a regression)."
+            " Added recovery_time to the existing WarmDayEvents debug log line (previously"
+            " the one field in that dict not logged). coordinator.py:"
+            " _compute_next_automation_action() gained three new candidate types: (1)"
+            " nat-vent/WHF start prediction via decide_nat_vent_gate()/NatVentGateInputs"
+            " (nat_vent_gate.py) — the real, already-production-validated activation gate,"
+            " not compute_nat_vent_cycling_band() (that function describes the fan's cycling"
+            " band once already active, a materially different formula with no ceiling-"
+            " margin/fan-mode awareness) — gated on a door/window already open or grace,"
+            " matching check_natural_vent_conditions()'s own precondition; (2) the same"
+            " WARM/MILD warm-day events above, surfaced as 'Close windows'/'AC turns on'/"
+            "'Reopen windows' candidates; (3) HOT-day window_opportunity_morning/evening"
+            " (classifier.py, already-computed static fields) surfaced as fixed-schedule"
+            " candidates for the first time. docs/08-COMPUTATION-REFERENCE.md: §7 WARM row"
+            " now discloses the same ODE-override caveat the MILD row already had; new §9f."
+        ),
+        "scope_not_covered": (
+            "No sanity/plausibility bound was added inside find_temperature_crossing() or"
+            " _derive_warm_day_events() itself — a genuinely malformed forecast curve could"
+            " still produce an implausible crossing; the fix addresses the confirmed root"
+            " cause (index-based pairing) rather than adding a second, independent"
+            " correctness check on top of it."
+        ),
+    },
     527: {
         "version_fixed": "0.5.35",
         "title": (

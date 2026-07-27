@@ -43,7 +43,7 @@ from .automation import (
     compute_pre_cool_target,
     select_comfort_band,
 )
-from .briefing import generate_briefing
+from .briefing import _derive_warm_day_events, generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .const import (
@@ -95,6 +95,7 @@ from .const import (
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
+    CONF_NATURAL_VENT_DELTA,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SLEEP_HEAT,
@@ -226,8 +227,16 @@ from .const import (
 )
 from .fan_status import is_ca_fan_running, parse_remote_speed_event, parse_remote_timer_event
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
+from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
-from .temperature import convert_delta, format_temp, free_cooling_direction_ok, from_fahrenheit, to_fahrenheit
+from .temperature import (
+    convert_delta,
+    find_temperature_crossing,
+    format_temp,
+    free_cooling_direction_ok,
+    from_fahrenheit,
+    to_fahrenheit,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -6903,6 +6912,97 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             unit = self.config.get("temp_unit", "fahrenheit")
             pc_desc = f"Pre-cool ceiling ({format_temp(self._pre_cool_target, unit)})"
             candidates.append((self._pre_cool_trigger_dt, pc_desc))
+
+        # HOT-day window-cooling opportunities (Issue #528) — static, classifier-computed
+        # hours, no forecast-scan needed. Wording deliberately avoids implying the
+        # automation opens the window itself — these are forecasted conditions the
+        # occupant can act on, not an automation-executed setpoint change.
+        if c.window_opportunity_morning and c.window_opportunity_morning_start:
+            mo_dt = _to_dt(c.window_opportunity_morning_start)
+            if mo_dt > now:
+                candidates.append((mo_dt, "Morning window cooling opportunity"))
+
+        if c.window_opportunity_evening and c.window_opportunity_evening_start:
+            ev_dt = _to_dt(c.window_opportunity_evening_start)
+            if ev_dt > now:
+                candidates.append((ev_dt, "Evening window cooling opportunity"))
+
+        # Issue #528: self._last_predicted_indoor is always set in __init__() in
+        # production, but several test files build a coordinator via object.__new__()
+        # without running __init__() — getattr() keeps those minimal stubs working
+        # rather than requiring every one of them to know about this new attribute.
+        _predicted_indoor = getattr(self, "_last_predicted_indoor", None)
+
+        # WARM/MILD-day forecast-derived events (Issue #528) — the same nat_vent_cutoff/
+        # ceiling_breach_time/precool_start_time/recovery_time already computed for the
+        # briefing (now timestamp-correct, see _derive_warm_day_events()), surfaced here
+        # for the first time so the dashboard doesn't have to wait for the next briefing
+        # to show them.
+        if c.windows_recommended and _predicted_indoor:
+            _outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+            _warm_events = _derive_warm_day_events(
+                predicted_indoor=_predicted_indoor,
+                predicted_outdoor=_outdoor_curve,
+                comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            )
+            if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
+                candidates.append((_warm_events["nat_vent_cutoff"], "Close windows — outdoor no longer helping"))
+            if _warm_events["ceiling_breach_time"] and _warm_events["ceiling_breach_time"] > now:
+                candidates.append((_warm_events["ceiling_breach_time"], "AC turns on to hold the ceiling"))
+            if _warm_events["recovery_time"] and _warm_events["recovery_time"] > now:
+                candidates.append((_warm_events["recovery_time"], "Reopen windows — outdoor helping again"))
+
+        # Nat-vent/WHF start prediction (Issue #528). Uses the real activation gate
+        # (decide_nat_vent_gate(), the same pure function automation.py's
+        # check_natural_vent_conditions() calls) — not compute_nat_vent_cycling_band(),
+        # which describes the fan's cycling band once ALREADY active, a different
+        # threshold entirely (see docs/08-COMPUTATION-REFERENCE.md's #528 note).
+        # Gated on a door/window already being open (or grace), mirroring
+        # check_natural_vent_conditions()'s own precondition — nat-vent cannot start
+        # with everything closed, so this never promises a time that depends on the
+        # occupant opening a window first.
+        if (
+            self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
+            and not ae._natural_vent_active
+            and (ae.is_paused_by_door or self._any_sensor_open())
+            and _predicted_indoor
+        ):
+            _comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+            # "sleep_heat" literal, not the CONF_SLEEP_HEAT constant: the bedtime block
+            # above does a local `from .const import ... CONF_SLEEP_HEAT` inside an
+            # `if c.hvac_mode in ("heat", "cool")` branch, which makes CONF_SLEEP_HEAT a
+            # local name for this ENTIRE function regardless of whether that branch
+            # actually runs — referencing the module-level import here raises
+            # UnboundLocalError whenever hvac_mode is "off"/"auto". Same value either way.
+            _sleep_heat = float(self.config.get("sleep_heat", _comfort_heat_raw))
+            _comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+            _nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+            _hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+            _fan_mode_val = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+            _aggressive_savings = bool(self.config.get("aggressive_savings", False))
+
+            def _nat_vent_gate_comparator(ts: datetime, outdoor: float, indoor: float) -> bool:
+                return decide_nat_vent_gate(
+                    NatVentGateInputs(
+                        outdoor=outdoor,
+                        indoor=indoor,
+                        comfort_heat_raw=_comfort_heat_raw,
+                        sleep_heat=_sleep_heat,
+                        in_sleep_window=_in_sleep_window(ts, self.config),
+                        comfort_cool=_comfort_cool,
+                        nat_vent_delta=_nat_vent_delta,
+                        hysteresis=_hysteresis,
+                        fan_mode=_fan_mode_val,
+                        aggressive_savings=_aggressive_savings,
+                    )
+                )
+
+            _nat_vent_outdoor_curve = _build_future_forecast_outdoor(self._hourly_forecast_temps, c)
+            _nat_vent_dt = find_temperature_crossing(
+                _predicted_indoor, _nat_vent_outdoor_curve, _nat_vent_gate_comparator, after=now
+            )
+            if _nat_vent_dt:
+                candidates.append((_nat_vent_dt, "Natural ventilation"))
 
         if not candidates:
             _LOGGER.info("Next-automation: No more actions today")

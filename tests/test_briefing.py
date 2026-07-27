@@ -1532,6 +1532,48 @@ class TestDeriveWarmDayEvents:
         # fallback = 120 min -> precool = breach - 2h
         assert abs((breach - precool).total_seconds() - 7200) < 60  # within 1 min
 
+    def test_misaligned_curves_pair_by_timestamp_not_index(self):
+        """Issue #528 regression: indoor/outdoor curves that start at different hours
+        (the real production shape — indoor cached from an earlier cycle, outdoor
+        rebuilt fresh) must be paired by matching ISO timestamp, not list position.
+
+        Indoor covers hours 8-11 UTC; outdoor covers hours 10-13 UTC (only 10 and 11
+        overlap). The old zip()-by-index implementation would pair indoor[0] (hour 8,
+        72F) against outdoor[0] (hour 10, 73F) — two hours apart — and (wrongly)
+        report a cutoff at hour 8, since 73 >= 72-1. The timestamp-correct
+        implementation has no outdoor entry for hour 8 at all, so it must skip
+        straight to the real overlap and report the cutoff at hour 10, where
+        outdoor(73) >= indoor(74)-1=73.
+        """
+        indoor = _make_indoor_curve([72.0, 73.0, 74.0, 75.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([73.0, 76.0, 78.0, 80.0], start_hour_utc=10)
+        events = _derive_warm_day_events(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=100.0,  # keep ceiling_breach out of the way for this test
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 10
+        # The old buggy behavior would have reported hour 8 here.
+        assert events["nat_vent_cutoff"].hour != 8
+
+    def test_misaligned_curves_recovery_time_after_true_cutoff(self):
+        """Same misalignment shape, extended to prove recovery_time also uses the
+        timestamp-correct cutoff as its `after` boundary, not an index-drifted one."""
+        indoor = _make_indoor_curve([72.0, 73.0, 74.0, 75.0, 74.0, 70.0], start_hour_utc=8)
+        outdoor = _make_outdoor_curve([73.0, 76.0, 71.0, 68.0], start_hour_utc=10)
+        events = _derive_warm_day_events(
+            predicted_indoor=indoor,
+            predicted_outdoor=outdoor,
+            comfort_cool=100.0,
+        )
+        assert events["nat_vent_cutoff"] is not None
+        assert events["nat_vent_cutoff"].hour == 10
+        assert events["nat_vent_recovers"] is True
+        assert events["recovery_time"] is not None
+        assert events["recovery_time"] > events["nat_vent_cutoff"]
+        assert events["recovery_time"].hour == 12
+
 
 class TestWarmDayBriefWithPrediction:
     """Enriched warm-day brief includes action/consequence language."""

@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from custom_components.climate_advisor.temperature import (
     CELSIUS,
     FAHRENHEIT,
     UNIT_SYMBOL,
+    find_temperature_crossing,
     format_temp,
     format_temp_delta,
     free_cooling_direction_ok,
     from_fahrenheit,
     to_fahrenheit,
 )
+
+
+def _curve(temps: list[float], start_hour: int = 8) -> list[dict]:
+    base = datetime(2026, 7, 27, start_hour, 0, 0, tzinfo=UTC)
+    return [{"ts": (base + timedelta(hours=i)).isoformat(), "temp": t} for i, t in enumerate(temps)]
 
 
 class TestToFahrenheit:
@@ -185,3 +193,56 @@ class TestFreeCoolingDirectionOk:
 
     def test_indoor_none_defaults_to_ok(self):
         assert free_cooling_direction_ok(outdoor_temp=70.0, indoor_temp=None) is True
+
+
+class TestFindTemperatureCrossing:
+    """Tests for find_temperature_crossing() (Issue #528)."""
+
+    def test_finds_first_crossing_on_aligned_curves(self):
+        indoor = _curve([72.0, 73.0, 74.0, 75.0], start_hour=8)
+        outdoor = _curve([65.0, 68.0, 73.0, 76.0], start_hour=8)
+        result = find_temperature_crossing(indoor, outdoor, lambda _ts, o, i: o >= i - 1.0)
+        assert result is not None
+        assert result.hour == 10
+
+    def test_returns_none_when_no_crossing(self):
+        indoor = _curve([72.0, 73.0, 74.0], start_hour=8)
+        outdoor = _curve([50.0, 51.0, 52.0], start_hour=8)
+        assert find_temperature_crossing(indoor, outdoor, lambda _ts, o, i: o >= i) is None
+
+    def test_returns_none_for_empty_or_none_curves(self):
+        curve = _curve([72.0], start_hour=8)
+        assert find_temperature_crossing(None, curve, lambda _ts, o, i: True) is None
+        assert find_temperature_crossing(curve, None, lambda _ts, o, i: True) is None
+        assert find_temperature_crossing([], [], lambda _ts, o, i: True) is None
+
+    def test_misaligned_curves_align_by_timestamp_not_index(self):
+        """The core Issue #528 regression: curves starting at different hours must be
+        paired by matching ISO timestamp, never by list position."""
+        indoor = _curve([72.0, 73.0, 74.0, 75.0], start_hour=8)
+        outdoor = _curve([73.0, 76.0, 78.0, 80.0], start_hour=10)  # only hours 10-11 overlap
+        result = find_temperature_crossing(indoor, outdoor, lambda _ts, o, i: o >= i - 1.0)
+        assert result is not None
+        assert result.hour == 10  # not 8 — hour 8 has no matching outdoor entry at all
+
+    def test_hour_present_in_only_one_curve_is_skipped(self):
+        indoor = _curve([72.0, 999.0], start_hour=8)  # hour 9 would trivially "cross" if matched wrongly
+        outdoor = _curve([65.0], start_hour=8)  # only hour 8 present
+        result = find_temperature_crossing(indoor, outdoor, lambda _ts, o, i: o >= i - 1.0)
+        assert result is None  # hour 8: 65 >= 72-1=71 is False; hour 9 has no outdoor match to test against
+
+    def test_after_parameter_restricts_scan_to_later_timestamps(self):
+        indoor = _curve([72.0, 73.0, 74.0, 75.0], start_hour=8)
+        outdoor = _curve([73.0, 76.0, 78.0, 80.0], start_hour=8)  # crosses at hour 8 already
+        cutoff = datetime(2026, 7, 27, 8, 0, 0, tzinfo=UTC)
+        result = find_temperature_crossing(indoor, outdoor, lambda _ts, o, i: o >= i - 1.0, after=cutoff)
+        assert result is not None
+        assert result.hour == 9  # hour 8 excluded by `after`, even though it also crosses
+
+    def test_comparator_receives_timestamp(self):
+        """Comparator must see `ts`, not just the two temperatures, for time-of-day-aware gates."""
+        indoor = _curve([72.0, 72.0], start_hour=8)
+        outdoor = _curve([72.0, 72.0], start_hour=8)
+        result = find_temperature_crossing(indoor, outdoor, lambda ts, _o, _i: ts.hour == 9)
+        assert result is not None
+        assert result.hour == 9

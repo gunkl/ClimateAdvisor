@@ -9,7 +9,7 @@ Tests for:
 from __future__ import annotations
 
 import sys
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -334,6 +334,192 @@ class TestComputeNextAutomationAction:
         }
         action, t = _compute_next_automation_action(c, ae, config, time(20, 0))
         assert action == "Bedtime check"
+
+
+# ---------------------------------------------------------------------------
+# Tests: Issue #528 forecast-derived Next Automation candidates
+# ---------------------------------------------------------------------------
+
+
+def _curve(temps: list[float], start_hour: int, ts_key: str = "ts", temp_key: str = "temp") -> list[dict]:
+    """Build a naive-datetime curve matching the (ts_key, temp_key) shape a given
+    consumer expects — {"ts","temp"} for predicted-indoor curves, {"datetime","temperature"}
+    for raw self._hourly_forecast_temps entries."""
+    base = datetime(2026, 7, 10, start_hour, 0, 0)
+    return [{ts_key: (base + timedelta(hours=i)).isoformat(), temp_key: t} for i, t in enumerate(temps)]
+
+
+def _compute_next_automation_action_with_forecast(
+    c,
+    automation_engine,
+    config: dict,
+    now_time: time,
+    predicted_indoor: list[dict] | None,
+    hourly_forecast_temps: list[dict] | None,
+):
+    """Like _compute_next_automation_action(), but also wires forecast-curve state
+    (self._last_predicted_indoor / self._hourly_forecast_temps) needed by the
+    Issue #528 candidates — not part of the base wrapper since most existing tests
+    don't need it."""
+    from custom_components.climate_advisor import coordinator as _coord_mod
+
+    coord = _make_real_coordinator(True, automation_engine)
+    coord.config = config
+    coord._last_predicted_indoor = predicted_indoor
+    coord._hourly_forecast_temps = hourly_forecast_temps or []
+
+    now_dt = datetime.combine(date(2026, 7, 10), now_time)
+    with (
+        patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+        patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+    ):
+        return coord._compute_next_automation_action(c)
+
+
+class TestHotDayWindowOpportunityCandidates:
+    """HOT-day window-cooling opportunity candidates (Issue #528)."""
+
+    def test_morning_opportunity_present_before_start(self):
+        ae = _make_automation_engine()
+        c = _make_classification(
+            day_type="hot",
+            window_opportunity_morning=True,
+            window_opportunity_morning_start=time(6, 0),
+        )
+        # briefing_time defaults to 06:00:00 too — push it out of the way so this test
+        # isolates the window-opportunity candidate instead of a same-time tiebreak.
+        action, t = _compute_next_automation_action(c, ae, {"briefing_time": "23:00:00"}, time(5, 0))
+        assert action == "Morning window cooling opportunity"
+        assert t == "6:00 AM"
+
+    def test_morning_opportunity_absent_once_past(self):
+        ae = _make_automation_engine()
+        c = _make_classification(
+            day_type="hot",
+            window_opportunity_morning=True,
+            window_opportunity_morning_start=time(6, 0),
+        )
+        action, _t = _compute_next_automation_action(c, ae, {}, time(7, 0))
+        assert action != "Morning window cooling opportunity"
+
+    def test_morning_opportunity_absent_when_flag_false(self):
+        ae = _make_automation_engine()
+        c = _make_classification(day_type="hot", window_opportunity_morning=False)
+        action, _t = _compute_next_automation_action(c, ae, {}, time(5, 0))
+        assert action != "Morning window cooling opportunity"
+
+    def test_evening_opportunity_present_before_start(self):
+        ae = _make_automation_engine()
+        c = _make_classification(
+            day_type="hot",
+            window_opportunity_evening=True,
+            window_opportunity_evening_start=time(17, 0),
+        )
+        action, t = _compute_next_automation_action(c, ae, {}, time(16, 0))
+        assert action == "Evening window cooling opportunity"
+        assert t == "5:00 PM"
+
+
+class TestNatVentStartCandidate:
+    """Nat-vent/WHF start prediction candidate (Issue #528)."""
+
+    def test_predicted_when_gate_crosses_and_window_open(self):
+        """Uses the real decide_nat_vent_gate() semantics, not the cycling-band formula."""
+        ae = _make_automation_engine(is_paused_by_door=True)
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "whole_house_fan"}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action == "Natural ventilation"
+        assert t == "3:00 PM"  # hour 15: outdoor 70 < indoor 80 - 1 = 79, indoor > comfort_heat, outdoor < 77
+
+    def test_absent_when_nothing_open(self):
+        """Nat-vent cannot start with everything closed — no candidate, even if the
+        temperature gate alone would pass."""
+        ae = _make_automation_engine(is_paused_by_door=False)
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "whole_house_fan"}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action != "Natural ventilation"
+
+    def test_absent_when_fan_disabled(self):
+        ae = _make_automation_engine(is_paused_by_door=True)
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "disabled"}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action != "Natural ventilation"
+
+    def test_uses_real_gate_ceiling_margin_not_naive_midpoint(self):
+        """Proves the candidate is sourced from decide_nat_vent_gate() — which has a
+        fan-mode/aggressive-savings-aware ceiling check — not the cycling-band midpoint
+        formula, which has no such concept at all. With fan_mode=hvac_fan and
+        aggressive_savings=True, the real gate's ceiling_threshold is comfort_cool(74) + 2 = 76;
+        indoor held at 80 (above that ceiling) must block the candidate even though the
+        temperature-only condition (outdoor dropping well below indoor) is satisfied —
+        a naive midpoint-only formula would have no ceiling check to block on.
+        """
+        ae = _make_automation_engine(is_paused_by_door=True)
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "hvac_fan", "aggressive_savings": True}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action != "Natural ventilation"
+
+    def test_absent_when_already_active(self):
+        ae = _make_automation_engine(is_paused_by_door=True)
+        ae._natural_vent_active = True
+        c = _make_classification(day_type="warm", hvac_mode="off")
+        config = {"fan_mode": "whole_house_fan"}
+        indoor = _curve([80.0, 80.0, 80.0, 80.0], start_hour=13)
+        outdoor = _curve([85.0, 82.0, 70.0, 65.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action != "Natural ventilation"
+
+
+class TestWarmDayForecastEventCandidates:
+    """WARM/MILD-day forecast-derived events surfaced as Next Automation candidates (Issue #528)."""
+
+    def test_ceiling_breach_candidate_present(self):
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
+        config = {"comfort_cool": 75.0}
+        indoor = _curve([70.0, 72.0, 76.0, 78.0], start_hour=13)
+        outdoor = _curve([65.0, 66.0, 67.0, 68.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action == "AC turns on to hold the ceiling"
+        assert t == "3:00 PM"  # hour 15: indoor 76 > comfort_cool 75
+
+    def test_close_windows_candidate_present(self):
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="warm", hvac_mode="off", windows_recommended=True)
+        config = {"comfort_cool": 100.0}  # keep ceiling breach out of the way
+        indoor = _curve([70.0, 71.0, 72.0, 73.0], start_hour=13)
+        outdoor = _curve([60.0, 62.0, 71.5, 74.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action == "Close windows — outdoor no longer helping"
+        assert t == "3:00 PM"  # hour 15: outdoor 71.5 >= indoor 72 - 1
+
+    def test_absent_when_windows_not_recommended(self):
+        ae = _make_automation_engine()
+        ae._natural_vent_active = False
+        c = _make_classification(day_type="mild", hvac_mode="off", windows_recommended=False)
+        config = {"comfort_cool": 75.0}
+        indoor = _curve([70.0, 72.0, 76.0, 78.0], start_hour=13)
+        outdoor = _curve([65.0, 66.0, 67.0, 68.0], start_hour=13, ts_key="datetime", temp_key="temperature")
+        action, _t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
+        assert action != "AC turns on to hold the ceiling"
 
 
 # ---------------------------------------------------------------------------

@@ -335,6 +335,23 @@ class TestMildDayBriefing:
             or "takes care of itself" in low
         )
 
+    def test_uses_ode_close_time_when_forecast_available(self):
+        """Issue #534: MILD-day close time uses the ODE-derived cutoff when a forecast curve
+        is available, instead of always falling back to the static classifier hour (5 PM)."""
+        c = _make_classification("mild", today_high=68, today_low=48)
+        # Outdoor crosses indoor at hour 13 UTC (index 3) — well before the static 5 PM fallback.
+        indoor = _make_indoor_curve([65.0, 66.0, 67.0, 68.0], start_hour_utc=10)
+        outdoor = _make_outdoor_curve([55.0, 58.0, 62.0, 67.5], start_hour_utc=10)
+        result = _generate(c, predicted_indoor_future=indoor, predicted_outdoor_future=outdoor)
+        assert "1:00 PM" in result
+        assert "5:00 PM" not in result
+
+    def test_falls_back_to_static_close_time_without_forecast(self):
+        """No forecast curve (fresh install / uncalibrated model) — unchanged static fallback."""
+        c = _make_classification("mild", today_high=68, today_low=48)
+        result = _generate(c)
+        assert "5" in result or "17" in result
+
 
 class TestCoolDayBriefing:
     """Cool day briefings should mention heating and keeping sealed."""

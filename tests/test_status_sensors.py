@@ -508,7 +508,7 @@ class TestWarmDayForecastEventCandidates:
         indoor = _curve([70.0, 71.0, 72.0, 73.0], start_hour=13)
         outdoor = _curve([60.0, 62.0, 71.5, 74.0], start_hour=13, ts_key="datetime", temp_key="temperature")
         action, t = _compute_next_automation_action_with_forecast(c, ae, config, time(12, 0), indoor, outdoor)
-        assert action == "Close windows — outdoor no longer helping"
+        assert action == "Outdoor will stop helping around 3:00 PM — close windows"
         assert t == "3:00 PM"  # hour 15: outdoor 71.5 >= indoor 72 - 1
 
     def test_absent_when_windows_not_recommended(self):

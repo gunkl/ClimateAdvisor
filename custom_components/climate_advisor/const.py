@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.37"
+VERSION = "0.5.38"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.38": [
+        "Fix #534: the Next Automation card's 'outdoor no longer helping' message could read"
+        " as a claim about right now even though it was always a forecast for a specific"
+        " future time — the action text now says when that's expected to happen (e.g."
+        " 'Outdoor will stop helping around 9:00 AM — close windows') instead of only showing"
+        " the time in a separate card. Also: mild-day briefings now use the same"
+        " weather-forecast-based window close time warm days already got, instead of always"
+        " showing a fixed 5:00 PM regardless of actual conditions.",
+    ],
     "0.5.37": [
         "Fix #530: turning off the whole-house fan didn't reliably stick — a watchdog meant"
         " to catch a completely different, rare bug was mistaking the normal 'no override in"
@@ -1311,6 +1320,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    534: {
+        "version_fixed": "0.5.38",
+        "title": (
+            "Next Automation card's 'outdoor no longer helping' text could be misread as a"
+            " present-tense claim even though it was always an accurate forecast for a"
+            " separately-displayed future time; mild-day briefings never used the"
+            " weather-forecast-based window close time warm days already had"
+        ),
+        "scope_covered": (
+            "Investigated as a possible live nat-vent control defect (reported symptom: nat-vent"
+            " session inactive for ~2.5 hours overnight while conditions looked favorable)."
+            " Extending the log window through the predicted cutoff time and viewing the"
+            " reporter's screenshot directly confirmed the forecast (9:00 AM) was accurate"
+            " (outdoor actually caught up to indoor ~9:10-9:23 AM) and nat-vent reactivated on"
+            " its own the moment indoor cleared the comfort floor, exactly as designed — no"
+            " control-path defect. coordinator.py: _compute_next_automation_action() now folds"
+            " the predicted time into the candidate action string itself (e.g. 'Outdoor will"
+            " stop helping around 9:00 AM — close windows') instead of relying on the separate"
+            " Automation Time card alone, removing the present-tense misread. briefing.py:"
+            " generate_briefing() now computes mild_events via _derive_warm_day_events() for"
+            " MILD days (mirroring the existing warm-day pattern) and threads it into both"
+            " _generate_tldr_table() and _mild_day_plan(), so mild-day close times use the ODE"
+            " forecast when available, falling back to the static classifier hour otherwise —"
+            " closing a gap where docs/08-COMPUTATION-REFERENCE.md §6d already claimed this"
+            " behavior existed but it never had been wired up."
+        ),
+        "scope_not_covered": (
+            "_derive_warm_day_events()'s nat_vent_cutoff prediction (outdoor >= indoor - 1°F)"
+            " still has no comfort-floor term, unlike the real activation gate"
+            " decide_nat_vent_gate() in nat_vent_gate.py. In this incident the outdoor-crossing"
+            " prediction was the correct binding constraint anyway, so this did not cause the"
+            " reported symptom, but it could produce a wrong prediction in a scenario where the"
+            " floor would bind first. No incident has confirmed this firing — tracked as a"
+            " separate defensive-hardening follow-up (Issue #535) rather than bundled into this"
+            " fix."
+            " _derive_natural_vent_events() (the MILD-day hour-indexed sibling of the warm-day"
+            " function) remains dead code — it was never wired up (the fix above uses"
+            " _derive_warm_day_events() instead, since it matches the actual curve shape"
+            " _build_predicted_indoor_future() produces; _derive_natural_vent_events()'s"
+            " documented list[float] hour-indexed input shape does not)."
+        ),
+    },
     530: {
         "version_fixed": "0.5.37",
         "title": (

@@ -6965,7 +6965,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
             )
             if _warm_events["nat_vent_cutoff"] and _warm_events["nat_vent_cutoff"] > now:
-                candidates.append((_warm_events["nat_vent_cutoff"], "Close windows — outdoor no longer helping"))
+                # Issue #534: this is a forecast for a future time, not a claim about current
+                # conditions — the qualifying time otherwise lives only in the separate
+                # "Automation Time" card, and a user comparing this text to *current* conditions
+                # (which can look nothing like it, hours ahead of the actual crossing) reads it as
+                # a present-tense contradiction. Folding the time into the action text itself
+                # removes the ambiguity without changing when this candidate fires.
+                _cutoff_t = _warm_events["nat_vent_cutoff"].strftime("%I:%M %p").lstrip("0")
+                candidates.append(
+                    (_warm_events["nat_vent_cutoff"], f"Outdoor will stop helping around {_cutoff_t} — close windows")
+                )
             if _warm_events["ceiling_breach_time"] and _warm_events["ceiling_breach_time"] > now:
                 candidates.append((_warm_events["ceiling_breach_time"], "AC turns on to hold the ceiling"))
             if _warm_events["recovery_time"] and _warm_events["recovery_time"] > now:

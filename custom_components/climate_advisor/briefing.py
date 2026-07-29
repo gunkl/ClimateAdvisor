@@ -121,6 +121,23 @@ def generate_briefing(
         if c.day_type == DAY_TYPE_WARM and predicted_indoor_future and predicted_outdoor_future
         else None
     )
+    # Issue #534: MILD-day window close time was documented (docs/08-COMPUTATION-REFERENCE.md
+    # §6d) as ODE-dynamic but never actually wired up — _mild_day_plan() always used the static
+    # classifier hour. The dead `_derive_natural_vent_events()` helper was built for a
+    # list[float] hour-indexed curve shape that _build_predicted_indoor_future() has never
+    # actually produced (it returns list[{"ts", "temp"}], same as the warm-day curves) — so
+    # reuse _derive_warm_day_events() here instead, the same call already validated accurate
+    # for warm days, rather than wiring up a function whose expected input shape doesn't match
+    # what production provides.
+    mild_events = (
+        _derive_warm_day_events(
+            predicted_indoor=predicted_indoor_future,
+            predicted_outdoor=predicted_outdoor_future,
+            comfort_cool=comfort_cool,
+        )
+        if c.day_type == DAY_TYPE_MILD and predicted_indoor_future and predicted_outdoor_future
+        else None
+    )
 
     tldr_lines = _generate_tldr_table(
         c,
@@ -130,6 +147,7 @@ def generate_briefing(
         bedtime_setback_cool=bedtime_setback_cool,
         occupancy_mode=occupancy_mode,
         warm_events=warm_events,
+        mild_events=mild_events,
     )
 
     if verbosity == "tldr_only":
@@ -168,7 +186,9 @@ def generate_briefing(
             )
         )
     elif c.day_type == DAY_TYPE_MILD:
-        lines.extend(_mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit=temp_unit))
+        lines.extend(
+            _mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit=temp_unit, mild_events=mild_events)
+        )
     elif c.day_type == DAY_TYPE_COOL:
         lines.extend(
             _cool_day_plan(
@@ -258,6 +278,7 @@ def _generate_tldr_table(
     bedtime_setback_cool: float | None = None,
     occupancy_mode: str = "home",
     warm_events: dict | None = None,
+    mild_events: dict | None = None,
 ) -> list[str]:
     """Generate a plain-text aligned TLDR summary table.
 
@@ -271,6 +292,8 @@ def _generate_tldr_table(
         warm_events: Result of _derive_warm_day_events(), pre-computed once in
             generate_briefing() (Issue #518) so the header's window-close time always
             agrees with the conversational body — never re-derive it independently here.
+        mild_events: Same, for MILD days (Issue #534) — only one of warm_events/mild_events
+            is ever populated for a given classification's day_type.
 
     Returns:
         List of lines forming a plain-text aligned table.
@@ -303,12 +326,13 @@ def _generate_tldr_table(
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
     if c.windows_recommended and c.window_open_time and c.window_close_time:
         open_t = c.window_open_time.strftime(_FMT_HOUR)
-        # Prefer the same ODE-derived cutoff the conversational body uses (Issue #518) \u2014
-        # falls back to the classifier's static hour only when no forecast curve exists.
-        warm_cutoff = warm_events.get("nat_vent_cutoff") if warm_events else None
-        close_t = (
-            warm_cutoff.strftime(_FMT_HOUR) if warm_cutoff is not None else c.window_close_time.strftime(_FMT_HOUR)
-        )
+        # Prefer the same ODE-derived cutoff the conversational body uses (Issue #518, extended
+        # to MILD days in #534) \u2014 falls back to the classifier's static hour only when no
+        # forecast curve exists. warm_events/mild_events are mutually exclusive (populated only
+        # for their matching day_type).
+        _events = warm_events or mild_events
+        _cutoff = _events.get("nat_vent_cutoff") if _events else None
+        close_t = _cutoff.strftime(_FMT_HOUR) if _cutoff is not None else c.window_close_time.strftime(_FMT_HOUR)
         windows_val = f"Open {open_t} \u2013 {close_t}"
     elif c.window_opportunity_morning and c.window_opportunity_evening:
         m_start = c.window_opportunity_morning_start.strftime(_FMT_HOUR).lstrip("0")
@@ -728,7 +752,9 @@ def _warm_day_plan(
     return lines
 
 
-def _mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit: str = FAHRENHEIT) -> list[str]:
+def _mild_day_plan(
+    c, comfort_heat, wake_time, sleep_time, temp_unit: str = FAHRENHEIT, mild_events: dict | None = None
+) -> list[str]:
     """Conversational plan for mild days (60-74\u00b0F)."""
     lines = [
         f"A day where the house practically takes care of itself. I warmed to"
@@ -744,8 +770,14 @@ def _mild_day_plan(c, comfort_heat, wake_time, sleep_time, temp_unit: str = FAHR
             f" cross-breeze that freshens the air and warms the house for free."
         )
 
-    if c.window_close_time:
-        close_t = c.window_close_time.strftime(_FMT_HOUR)
+    # Issue #534: prefer the ODE-derived cutoff when available (same forecast already validated
+    # accurate for warm days), matching docs/08-COMPUTATION-REFERENCE.md \u00a76d \u2014 falls back to the
+    # classifier's static hour only when no forecast curve exists (fresh install, uncalibrated
+    # model), same fallback pattern _generate_tldr_table() already uses for warm days.
+    _mild_cutoff = mild_events.get("nat_vent_cutoff") if mild_events else None
+    _close_time = _mild_cutoff if _mild_cutoff is not None else c.window_close_time
+    if _close_time:
+        close_t = _close_time.strftime(_FMT_HOUR)
         lines.append("")
         lines.append(
             f"Close up by {close_t} to trap the warmth. If it dips below"

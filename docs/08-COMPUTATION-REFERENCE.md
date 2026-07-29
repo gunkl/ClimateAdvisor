@@ -974,11 +974,23 @@ self.window_close_time = time(MILD_WINDOW_CLOSE_HOUR, 0)
 
 **`briefing.py` applies ODE timing when available:**
 
-The `_derive_warm_day_events()` function (which computes `nat_vent_cutoff` and `ceiling_breach_time` from the predicted indoor and outdoor curves) is extracted into a shared helper `_derive_natural_vent_events(predicted_indoor_future, predicted_outdoor_future, comfort_cool, k_active_cool)`. This helper is called from the MILD day briefing path as well as the warm day path.
+**Correction (Issue #534, 2026-07-28):** this section previously described a shared helper,
+`_derive_natural_vent_events(predicted_indoor_future, predicted_outdoor_future, comfort_cool,
+k_active_cool)`, as wired into the MILD day briefing path. That was aspirational, not actual —
+the function existed and was unit-tested but had zero production call sites, and `_mild_day_plan()`
+used the static `c.window_close_time` unconditionally. It has now been wired up, but via
+`_derive_warm_day_events()` directly (the same function warm days use), not
+`_derive_natural_vent_events()` — that helper's documented input shape (`list[float]`,
+hour-indexed) does not match what `_build_predicted_indoor_future()` actually produces
+(`list[{"ts", "temp"}]`, the same shape warm-day curves use), so it remains unused/dead code.
+`generate_briefing()` computes `mild_events` for MILD days the same way it already computes
+`warm_events` for warm days (identical call shape), and passes it to both `_generate_tldr_table()`
+(header row) and `_mild_day_plan()` (conversational body).
 
-When the ODE is available (thermal model calibrated, physics gate eligible):
-- MILD day window close time = `nat_vent_cutoff` (the hour when outdoor temp ≥ indoor − 1°F)
-- Fallback when ODE unavailable = `time(MILD_WINDOW_CLOSE_HOUR, 0)` (5pm)
+When a predicted indoor/outdoor forecast curve is available (thermal model calibrated):
+- MILD day window close time = `nat_vent_cutoff` (the timestamp outdoor temp ≥ indoor − 1°F)
+- Fallback when no forecast curve is available = `time(MILD_WINDOW_CLOSE_HOUR, 0)` (5pm), unchanged
+  from before this fix
 
 #### Impact Cascade from Solar Phase Offset Correction
 

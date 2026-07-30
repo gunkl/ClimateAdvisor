@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.38"
+VERSION = "0.5.39"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.39": [
+        "Fix #538: the 'Next User Action' card said 'Free cooling is active.' while nat-vent"
+        " or economizer cooling was already running — just repeating what the Status card"
+        " already showed instead of telling you what to do. It now shows '-' when there's"
+        " nothing for you to do.",
+    ],
     "0.5.38": [
         "Fix #534: the Next Automation card's 'outdoor no longer helping' message could read"
         " as a claim about right now even though it was always a forecast for a specific"
@@ -1320,6 +1326,31 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    538: {
+        "version_fixed": "0.5.39",
+        "title": (
+            "Next User Action card narrated automation-mechanism state ('Free cooling is"
+            " active.') instead of answering what the occupant should do, duplicating the"
+            " Status card and violating the Issue #527 card ontology"
+        ),
+        "scope_covered": (
+            "coordinator.py: _compute_next_action() had two branches (HOT-day fallback and the"
+            " WARM/MILD/COOL cooling-needed path) that returned 'Free cooling is active.' when"
+            " ae._natural_vent_active or ae._economizer_active was already True. Both now return"
+            " '-' — there is nothing for the occupant to do while free cooling is already"
+            " handling comfort, and the Status card already surfaces the nat-vent/economizer"
+            " mechanism state. Audited the rest of _compute_next_action() for other"
+            " mechanism-flag leaks (is_paused_by_door, _grace_active, _manual_override_active,"
+            " _override_confirm_pending) — none found outside the diagnostic log line, which is"
+            " not user-facing."
+        ),
+        "scope_not_covered": (
+            "Did not re-audit _compute_automation_status() or"
+            " _compute_next_automation_action() for the same duplication class — those own"
+            " different questions in the Issue #527 card ontology and were not implicated in"
+            " this report."
+        ),
+    },
     534: {
         "version_fixed": "0.5.38",
         "title": (

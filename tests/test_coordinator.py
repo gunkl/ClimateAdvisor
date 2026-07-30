@@ -378,11 +378,11 @@ class TestComputeNextAction:
         assert "fan" in result.lower()
 
     def test_next_action_cooling_needed_free_cooling_already_active(self):
-        """Nat-vent/economizer already active → don't suggest a duplicate action."""
+        """Nat-vent/economizer already active → nothing for the occupant to do (Issue #527 regression)."""
         c = _make_classification(day_type=DAY_TYPE_MILD, windows_recommended=False)
         ae = _make_ae_stub(_natural_vent_active=True)
         result = _compute_next_action(c, {"comfort_cool": 75}, time(14, 0), indoor_temp=78.0, outdoor_temp=70.0, ae=ae)
-        assert "free cooling is active" in result.lower()
+        assert result == "-"
 
     def test_next_action_cooling_needed_windows_open_direction_favorable(self):
         """Cooling needed, windows already open, outdoor favorable → confirm, don't repeat the ask."""
@@ -495,7 +495,7 @@ class TestComputeNextAction:
         assert "paused" not in result.lower()
 
     def test_next_action_hot_no_opportunity_free_cooling_active(self):
-        """HOT day, no scheduled opportunity, but nat-vent/economizer already active — don't contradict it."""
+        """HOT day, no scheduled opportunity, nat-vent/economizer already active — nothing to do (Issue #527)."""
         c = _make_classification(
             day_type=DAY_TYPE_HOT,
             window_opportunity_morning=False,
@@ -503,7 +503,7 @@ class TestComputeNextAction:
         )
         ae = _make_ae_stub(_economizer_active=True)
         result = _compute_next_action(c, {}, time(13, 0), ae=ae)
-        assert "free cooling is active" in result.lower()
+        assert result == "-"
 
     def test_next_action_guest_occupancy_behaves_like_home(self):
         """GUEST occupancy mode is not short-circuited — full comfort logic applies same as HOME."""

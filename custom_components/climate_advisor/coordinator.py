@@ -899,6 +899,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         temp_hist = state.get("temp_history", {})
         self._outdoor_temp_history = [(ts, t) for ts, t in temp_hist.get("outdoor", [])]
         self._indoor_temp_history = [(ts, t) for ts, t in temp_hist.get("indoor", [])]
+        # Issue #540: mirror the restored buffer's peak/count immediately, so soft-start's
+        # minimum-sample guard doesn't see an artificially thin buffer for up to 30 min
+        # after a same-day restart (this restore path only runs when the persisted date
+        # matches today's local date — see the state_date == today_str gate above).
+        if self._outdoor_temp_history:
+            _restored_outdoor_temps = [t for _, t in self._outdoor_temp_history]
+            self.automation_engine._outdoor_temp_today_peak = max(_restored_outdoor_temps)
+            self.automation_engine._outdoor_temp_today_sample_count = len(_restored_outdoor_temps)
 
         # Today's record
         record_data = state.get("today_record")
@@ -1514,6 +1522,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._apply_outdoor_windows_gate()
         if record_history:
             self._outdoor_temp_history.append((dt_util.now().isoformat(), value))
+            # Issue #540: nat-vent soft-start needs "today's observed peak so far" to
+            # detect a past-peak/declining trend. Computed here (single source of truth,
+            # same buffer used for forecast high/low correction below) and plumbed to the
+            # automation engine the same way _hourly_forecast_temps already is.
+            observed_temps = [t for _, t in self._outdoor_temp_history]
+            self.automation_engine._outdoor_temp_today_peak = max(observed_temps)
+            self.automation_engine._outdoor_temp_today_sample_count = len(observed_temps)
         if getattr(self, "data", None):
             self.data[ATTR_OUTDOOR_TEMP] = value
             self.async_update_listeners()
@@ -3121,6 +3136,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._outdoor_temp_history.clear()
         self._indoor_temp_history.clear()
         self._hourly_forecast_temps.clear()
+        # Issue #540: reset the soft-start peak-tracking mirror alongside the buffer it's
+        # derived from, so a stale "yesterday's peak" can't leak into the new day before
+        # the first post-midnight sample arrives.
+        self.automation_engine._outdoor_temp_today_peak = None
+        self.automation_engine._outdoor_temp_today_sample_count = 0
         # Issue #511: refetch immediately rather than waiting for the next 30-min
         # cycle — otherwise outdoor-temp interpolation has nothing to interpolate
         # against for up to ~30 min after every midnight reset, degrading nightly
@@ -6549,6 +6569,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # here can silently drift from the live band across a sleep-window boundary
             # (e.g. cached "71°F" vs. live "64°F–66°F"). The live band is the only place
             # this temperature is shown now; don't reintroduce it here.
+            # Issue #540: soft-start is a distinct sub-mode (purge/comfort at parity, not
+            # bulk free-cooling) — surfaced here per the Status Card Ontology, since this
+            # is the one card where mechanism state belongs.
+            if self.automation_engine._nat_vent_soft_start:
+                return "nat-vent — soft-start (purge)"
             return "nat-vent"
         if self.automation_engine.is_paused_by_door:
             if self._occupancy_mode == OCCUPANCY_AWAY:
@@ -7552,6 +7577,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ),
             # Bug 3 (Issue #321): nat-vent cycling visibility in debug pane
             "nat_vent_active": ae._natural_vent_active,
+            # Issue #540: soft-start qualifier — only meaningful when nat_vent_active is True.
+            "nat_vent_soft_start": ae._nat_vent_soft_start,
             # Issue #338: AC assist status — true when nat-vent is active with FAN_MODE_HVAC
             # and aggressive_savings is off (full comfort band armed, compressor may assist).
             # FAN_MODE_BOTH excluded: _activate_fan() suppresses HVAC for BOTH (same as WHOLE_HOUSE).

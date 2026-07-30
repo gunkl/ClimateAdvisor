@@ -49,6 +49,7 @@ from .const import (
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
+    CONF_NAT_VENT_SOFT_START_ENABLED,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_PUSH_BRIEFING,
     CONF_PUSH_DOOR_WINDOW_PAUSE,
@@ -82,6 +83,7 @@ from .const import (
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_FAN_MODE,
     DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
@@ -977,6 +979,10 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(min=0, max=60, step=1, unit_of_measurement="min", mode="box")
                     ),
+                    vol.Optional(
+                        CONF_NAT_VENT_SOFT_START_ENABLED,
+                        default=current.get(CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED),
+                    ): selector.BooleanSelector(),
                 }
             ),
         )

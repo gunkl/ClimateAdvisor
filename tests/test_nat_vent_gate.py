@@ -13,9 +13,11 @@ from custom_components.climate_advisor.nat_vent_gate import (
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
     NatVentGateInputs,
+    NatVentSoftStartGateInputs,
     _resolve_ceiling_threshold,
     _resolve_comfort_heat,
     decide_nat_vent_gate,
+    decide_nat_vent_soft_start_gate,
 )
 
 _BASE = {
@@ -120,3 +122,89 @@ class TestResolveCeilingThreshold:
 
     def test_aggressive_savings_adds_margin(self):
         assert _resolve_ceiling_threshold(_inputs(fan_mode=FAN_MODE_HVAC, aggressive_savings=True)) == 78.0
+
+
+_SOFT_START_BASE = {
+    "outdoor": 75.0,
+    "indoor": 76.0,
+    "comfort_heat": 70.0,
+    "comfort_cool": 74.0,
+    "fan_mode": FAN_MODE_WHOLE_HOUSE,
+    "outdoor_today_peak": 90.0,
+    "outdoor_sample_count": 5,
+    "peak_decline_margin": 1.0,
+    "full_gate_active": False,
+}
+
+
+def _soft_start_inputs(**overrides) -> NatVentSoftStartGateInputs:
+    return NatVentSoftStartGateInputs(**{**_SOFT_START_BASE, **overrides})
+
+
+class TestDecideNatVentSoftStartGate:
+    """Issue #540 (scoped from #533): WHF purge/comfort soft-start at outdoor/indoor
+    parity once today is confirmed past its peak and declining."""
+
+    def test_activates_when_all_conditions_met(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs()) is True
+
+    def test_none_outdoor_blocks(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor=None)) is False
+
+    def test_none_indoor_blocks(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(indoor=None)) is False
+
+    def test_full_gate_already_active_stands_down(self):
+        """Soft-start never competes with the full bulk-cooling gate for the same activation."""
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(full_gate_active=True)) is False
+
+    def test_hvac_only_fan_mode_blocks(self):
+        """Soft-start is a WHF-purge claim — HVAC-only fan archetype does not qualify."""
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(fan_mode=FAN_MODE_HVAC)) is False
+
+    def test_disabled_fan_mode_blocks(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(fan_mode=FAN_MODE_DISABLED)) is False
+
+    def test_both_fan_mode_qualifies(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(fan_mode=FAN_MODE_BOTH)) is True
+
+    def test_parity_boundary_equal_temps_activates(self):
+        """Core ask: outdoor <= indoor, not the full gate's strict outdoor < indoor."""
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor=76.0, indoor=76.0)) is True
+
+    def test_parity_boundary_outdoor_above_indoor_blocks(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor=76.1, indoor=76.0)) is False
+
+    def test_floor_boundary_indoor_at_comfort_heat_blocks(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(indoor=70.0, outdoor=68.0)) is False
+
+    def test_floor_boundary_indoor_at_comfort_cool_blocks(self):
+        """Strict '>' on comfort_cool too — indoor must be above, not just above comfort_heat."""
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(indoor=74.0, outdoor=70.0)) is False
+
+    def test_past_peak_margin_boundary_exactly_at_margin_blocks(self):
+        """Strict '<' — outdoor exactly (peak - margin) is not yet 'declining'."""
+        assert (
+            decide_nat_vent_soft_start_gate(
+                _soft_start_inputs(outdoor_today_peak=90.0, peak_decline_margin=1.0, outdoor=89.0, indoor=89.5)
+            )
+            is False
+        )
+
+    def test_past_peak_margin_boundary_just_past_activates(self):
+        assert (
+            decide_nat_vent_soft_start_gate(
+                _soft_start_inputs(outdoor_today_peak=90.0, peak_decline_margin=1.0, outdoor=88.9, indoor=89.5)
+            )
+            is True
+        )
+
+    def test_thin_sample_buffer_fails_safe(self):
+        """Issue #540 timezone/restart sanity check: a thin post-restart buffer must not
+        produce a false 'already past peak' read."""
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor_sample_count=0)) is False
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor_sample_count=2)) is False
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor_sample_count=3)) is True
+
+    def test_none_peak_blocks(self):
+        assert decide_nat_vent_soft_start_gate(_soft_start_inputs(outdoor_today_peak=None)) is False

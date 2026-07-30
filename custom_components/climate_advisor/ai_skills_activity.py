@@ -676,6 +676,21 @@ def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]
     return label, ", ".join(parts)
 
 
+def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[str, str]:
+    outdoor = p.get("outdoor")
+    indoor = p.get("indoor")
+    label = "Nat-vent soft-start -- purge/comfort at parity"
+    if outdoor is not None and indoor is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent soft-start -- outdoor {format_temp(float(outdoor), unit)}"
+                f" <= indoor {format_temp(float(indoor), unit)}, past today's peak"
+            )
+    peak = p.get("outdoor_today_peak")
+    detail = f"today's peak: {format_temp(float(peak), unit)}" if peak is not None else ""
+    return label, detail
+
+
 def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor")
     cool = p.get("comfort_cool")
@@ -947,6 +962,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_reconcile_exit": _render_nat_vent_reconcile_exit,
     "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
+    "nat_vent_soft_start_entered": _render_nat_vent_soft_start_entered,
     "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,
     "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
     "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,

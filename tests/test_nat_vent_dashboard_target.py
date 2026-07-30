@@ -55,6 +55,7 @@ def _make_nat_vent_coord_stub(*, config: dict) -> object:
 
     ae = MagicMock()
     ae._natural_vent_active = True
+    ae._nat_vent_soft_start = False
     ae._fan_active = True
     ae._fan_override_active = False
     ae._manual_override_active = False

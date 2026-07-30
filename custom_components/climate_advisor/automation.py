@@ -36,6 +36,7 @@ from .const import (
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
     CONF_NAT_VENT_REACTIVATION_LOCKOUT_S,
+    CONF_NAT_VENT_SOFT_START_ENABLED,
     CONF_NATURAL_VENT_DELTA,
     CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
@@ -48,6 +49,7 @@ from .const import (
     DEFAULT_COMFORT_HEAT,
     DEFAULT_FAN_MIN_RUNTIME_PER_HOUR,
     DEFAULT_MANUAL_GRACE_SECONDS,
+    DEFAULT_NAT_VENT_SOFT_START_ENABLED,
     DEFAULT_NATURAL_VENT_DELTA,
     DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
@@ -73,6 +75,7 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_VACATION,
     OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
+    PEAK_DECLINE_MARGIN_F,
     REVISIT_DELAY_SECONDS,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
@@ -102,7 +105,12 @@ from .fan_thermostat_decision import (
     decide_fan_thermostat_check,
     resolve_hard_exit_floor,
 )
-from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_gate import (
+    NatVentGateInputs,
+    NatVentSoftStartGateInputs,
+    decide_nat_vent_gate,
+    decide_nat_vent_soft_start_gate,
+)
 from .nat_vent_reactivation_lockout import is_reactivation_locked_out
 from .setpoint_verify_decision import SetpointVerifyOutcome, decide_setpoint_verify
 from .temperature import (
@@ -607,6 +615,21 @@ class AutomationEngine:
         # Timestamp of last outdoor-warm exit (outdoor ≥ indoor → pause).
         # Used for hysteresis lockout. Not serialized — resets on HA restart (acceptable for 5-min window).
         self._nat_vent_outdoor_exit_time: datetime | None = None
+
+        # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): qualifies WHY an
+        # active nat-vent session was entered — True when entered via the parity/
+        # past-peak soft-start gate rather than the full bulk-cooling gate. Coexists with
+        # _natural_vent_active the same way _grace_protects_override coexists with
+        # _grace_active: same top-level state, a distinct qualifying sub-flag. Cleared
+        # alongside every _natural_vent_active = False assignment (see _exit_nat_vent()
+        # and its documented bypass sites).
+        self._nat_vent_soft_start: bool = False
+        # Today's observed outdoor peak-so-far and sample count, mirrored from the
+        # coordinator's _outdoor_temp_history (single source of truth — see
+        # coordinator._apply_outdoor_temp()). Not serialized — rebuilt from the
+        # coordinator's own persisted/restored history within one update cycle.
+        self._outdoor_temp_today_peak: float | None = None
+        self._outdoor_temp_today_sample_count: int = 0
 
         # Override confirmation period (Issue #76) — pending window before override is formally accepted
         self._override_confirm_pending: bool = False
@@ -1161,6 +1184,7 @@ class AutomationEngine:
         self._fan_on_since = None
         if not preserve_nat_vent_session:
             self._natural_vent_active = False
+            self._nat_vent_soft_start = False
 
         _LOGGER.info(
             "Fan flags cleared (%s): _fan_active/_fan_on_since cleared, _natural_vent_active %s;"
@@ -1959,6 +1983,7 @@ class AutomationEngine:
                                     )
                                 )
                                 self._natural_vent_active = False
+                                self._nat_vent_soft_start = False
                                 if self._emit_event_callback:
                                     self._emit_event_callback(
                                         "nat_vent_ceiling_escalation",
@@ -2931,7 +2956,71 @@ class AutomationEngine:
                                 "trigger": "open_door_reeval",
                             },
                         )
+                elif self._nat_vent_may_soft_start(
+                    outdoor=outdoor,
+                    indoor=_indoor,
+                    comfort_heat=_comfort_heat,
+                    comfort_cool=comfort_cool,
+                    full_gate_active=False,
+                ):
+                    # Issue #540: WHF purge/comfort soft-start — outdoor has reached parity
+                    # with indoor and today is confirmed past its peak and declining, but the
+                    # full bulk-cooling gate (outdoor meaningfully below indoor) hasn't
+                    # cleared yet. Reuses the same fan-activation/HVAC-band machinery as full
+                    # nat-vent; only the qualifier flag and log/event text differ.
+                    _LOGGER.info(
+                        "Nat-vent soft-start entered: outdoor %.1f°F <= indoor %.1f°F,"
+                        " past today's peak %.1f°F by >= %.1f°F, indoor > comfort_heat %.1f°F",
+                        outdoor,
+                        _indoor,
+                        self._outdoor_temp_today_peak or 0.0,
+                        PEAK_DECLINE_MARGIN_F,
+                        _comfort_heat,
+                    )
+                    await self._activate_fan(
+                        reason=(
+                            f"nat-vent soft-start: outdoor {outdoor:.1f}°F at/below indoor {_indoor:.1f}°F"
+                            " parity, past today's peak and declining — purge/comfort air movement"
+                        )
+                    )
+                    self._natural_vent_active = True
+                    self._nat_vent_soft_start = True
+                    await self._apply_nat_vent_hvac_state()
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_soft_start_entered",
+                            {
+                                "outdoor": outdoor,
+                                "indoor": _indoor,
+                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                            },
+                        )
                 return
+
+            # Issue #540: soft-start → full nat-vent upgrade. Once an active soft-start
+            # session's outdoor/indoor delta independently clears the full bulk-cooling
+            # gate, drop the qualifier — the session itself (fan, HVAC suppression, exit
+            # hierarchy) is already running unchanged; only the status label changes.
+            if self._natural_vent_active and self._nat_vent_soft_start:
+                _indoor_upg = self._get_indoor_temp_f()
+                _comfort_heat_upg = self._nat_vent_reactivation_floor()
+                _hysteresis_upg = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+                if self._nat_vent_may_reactivate(
+                    outdoor=outdoor,
+                    indoor=_indoor_upg,
+                    comfort_heat=_comfort_heat_upg,
+                    comfort_cool=comfort_cool,
+                    nat_vent_delta=nat_vent_delta,
+                    hysteresis=_hysteresis_upg,
+                ):
+                    self._nat_vent_soft_start = False
+                    _LOGGER.info(
+                        "Nat-vent soft-start upgraded to full free-cooling: outdoor %.1f°F"
+                        " < indoor %.1f°F − %.1f°F hysteresis",
+                        outdoor if outdoor is not None else 0.0,
+                        _indoor_upg if _indoor_upg is not None else 0.0,
+                        _hysteresis_upg,
+                    )
 
             # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting
             # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
@@ -3017,6 +3106,7 @@ class AutomationEngine:
                         comfort_cool,
                     )
                     self._natural_vent_active = False
+                    self._nat_vent_soft_start = False
                     await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
                     # Do NOT pause — just let away setback handle HVAC
                     if self._emit_event_callback:
@@ -3187,6 +3277,45 @@ class AutomationEngine:
                         hysteresis,
                         threshold,
                     )
+                    await self._apply_nat_vent_hvac_state()
+                elif self._nat_vent_may_soft_start(
+                    outdoor=outdoor,
+                    indoor=indoor,
+                    comfort_heat=comfort_heat,
+                    comfort_cool=comfort_cool,
+                    full_gate_active=False,
+                ):
+                    # Issue #540: same soft-start sub-mode as the idle-open reactivation
+                    # path above, for the paused-by-door reactivation site. Still subject
+                    # to this block's outdoor-warm-exit lockout (checked above) — soft-start
+                    # doesn't bypass it, it only relaxes the outdoor/indoor delta itself.
+                    await self._activate_fan(
+                        reason=(
+                            f"nat-vent soft-start while paused: outdoor {outdoor:.1f}°F at/below"
+                            f" indoor {indoor:.1f}°F parity, past today's peak and declining"
+                        )
+                    )
+                    self._natural_vent_active = True
+                    self._nat_vent_soft_start = True
+                    self._paused_by_door = False
+                    self._paused_with_hvac_already_off = False
+                    _LOGGER.info(
+                        "Nat-vent soft-start activated while paused: outdoor %.1f°F <= indoor %.1f°F,"
+                        " past today's peak %.1f°F by >= %.1f°F",
+                        outdoor,
+                        indoor,
+                        self._outdoor_temp_today_peak or 0.0,
+                        PEAK_DECLINE_MARGIN_F,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_soft_start_entered",
+                            {
+                                "outdoor": outdoor,
+                                "indoor": indoor,
+                                "outdoor_today_peak": self._outdoor_temp_today_peak,
+                            },
+                        )
                     await self._apply_nat_vent_hvac_state()
                 else:
                     _LOGGER.debug(
@@ -3511,6 +3640,7 @@ class AutomationEngine:
         )
         if self._natural_vent_active:
             self._natural_vent_active = False
+            self._nat_vent_soft_start = False
         await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
 
     async def reconcile_fan_on_startup(
@@ -3575,6 +3705,7 @@ class AutomationEngine:
             self._fan_active = False
             self._fan_on_since = None
             self._natural_vent_active = False
+            self._nat_vent_soft_start = False
             decision = "no-fan"
             _LOGGER.info(
                 "Fan reconcile: thermostat_fan_running=%s nat_vent_eligible=%s decision=%s archetype=%s",
@@ -4307,6 +4438,7 @@ class AutomationEngine:
             if _gate != ScheduledBandGate.DEFER_NAT_VENT and self._fan_active and not _fan_was_overridden:
                 await self._deactivate_fan(reason="bedtime — no classification")
                 self._natural_vent_active = False
+                self._nat_vent_soft_start = False
             if self._economizer_active:
                 await self._deactivate_economizer(outdoor_temp=0)
             return
@@ -4333,6 +4465,7 @@ class AutomationEngine:
             if self._fan_active and not _fan_was_overridden:
                 await self._deactivate_fan(reason="bedtime — nat-vent not active")
                 self._natural_vent_active = False
+                self._nat_vent_soft_start = False
         if self._economizer_active:
             await self._deactivate_economizer(outdoor_temp=0)
 
@@ -4672,6 +4805,7 @@ class AutomationEngine:
                 refactor (Issue #411 blast-radius finding).
         """
         self._natural_vent_active = False
+        self._nat_vent_soft_start = False
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
         sensor_open = bool(self._sensor_check_callback and self._sensor_check_callback())
@@ -4779,6 +4913,51 @@ class AutomationEngine:
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
         return decide_nat_vent_gate(inputs)
+
+    def _nat_vent_may_soft_start(
+        self,
+        *,
+        outdoor: float | None,
+        indoor: float | None,
+        comfort_heat: float,
+        comfort_cool: float,
+        full_gate_active: bool,
+    ) -> bool:
+        """Shared soft-start sub-gate for nat-vent (Issue #540, scoped from #533).
+
+        Distinct from ``_nat_vent_may_reactivate()``/``decide_nat_vent_gate()`` — allows
+        WHF purge/comfort activation at outdoor/indoor parity once today's outdoor temp
+        is confirmed past its peak and declining, without waiting for the full
+        bulk-cooling gate's hysteresis-cleared delta. Opt-out via
+        ``CONF_NAT_VENT_SOFT_START_ENABLED`` (default on — no humidity/dew-point sensor
+        guards this today, so disable it if you only want the fan to run once outdoor is
+        measurably cooler than indoor). See ``nat_vent_gate.NatVentSoftStartGateInputs``
+        for full field rationale.
+
+        Args:
+            outdoor: Current outdoor temperature (°F), or None if unavailable.
+            indoor: Current indoor temperature (°F), or None if unavailable.
+            comfort_heat: Comfort floor (°F) — already sleep-window-resolved by the
+                caller, same as ``_nat_vent_may_reactivate()``'s ``comfort_heat`` arg.
+            comfort_cool: Comfort ceiling (°F).
+            full_gate_active: The caller's own ``_nat_vent_may_reactivate(...)`` result
+                for the same inputs — soft-start stands down once the full gate would
+                already apply, so the two gates never compete for the same activation.
+        """
+        if not self.config.get(CONF_NAT_VENT_SOFT_START_ENABLED, DEFAULT_NAT_VENT_SOFT_START_ENABLED):
+            return False
+        inputs = NatVentSoftStartGateInputs(
+            outdoor=outdoor,
+            indoor=indoor,
+            comfort_heat=comfort_heat,
+            comfort_cool=comfort_cool,
+            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+            outdoor_today_peak=self._outdoor_temp_today_peak,
+            outdoor_sample_count=self._outdoor_temp_today_sample_count,
+            peak_decline_margin=PEAK_DECLINE_MARGIN_F,
+            full_gate_active=full_gate_active,
+        )
+        return decide_nat_vent_soft_start_gate(inputs)
 
     def _ceiling_threshold(self, comfort_cool: float | None) -> float | None:
         """Ceiling above which the compressor should take over from fan-assisted cooling.

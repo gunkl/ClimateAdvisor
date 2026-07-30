@@ -2269,6 +2269,69 @@ If outdoor were 76°F instead, the ceiling check would fail (`76 ≥ 75`) and na
 
 Default value: `NAT_VENT_DELTA_DEFAULT = 3°F` (see §15 Defaults Reference).
 
+### Soft-Start Sub-Mode (Issue #540, scoped from #533)
+
+**Occupant impact:** without soft-start, the whole-house fan sits idle for the entire
+approach-to-parity window in the evening — even once the home has clearly passed its
+daily peak and outdoor air is falling toward indoor — because every other activation
+path requires outdoor to be *measurably* cooler than indoor (see Activation Conditions
+and Re-activation from Pause above). Soft-start closes that gap: it lets the WHF start
+at outdoor/indoor **parity** for air-movement comfort and attic/thermal-mass purge,
+distinct from bulk free-cooling.
+
+**Opt-out, on by default** (`nat_vent_soft_start_enabled` config key). Issue #533
+recommended opt-in given the comfort benefit is subjective and unverified by any
+humidity/dew-point sensor (none exists in the integration today — tracked as an explicit
+gap, not solved here); the project chose to default this on instead, so every WHF install
+gets the benefit unless the user explicitly disables it in settings.
+
+**Gate** (`decide_nat_vent_soft_start_gate()` in `nat_vent_gate.py`), all of the
+following must hold:
+
+| Condition | Rationale |
+|---|---|
+| `fan_mode in (whole_house_fan, both)` | The attic-purge claim is WHF-specific; HVAC-only fan archetypes don't qualify for v1 (a general comfort-fan mode is a separate, larger decision — see Related Condition (C) in Issue #533) |
+| At least one door/window sensor open | Same physical prerequisite as the full gate |
+| `indoor > comfort_heat` | Same floor guard as the full gate |
+| `indoor > comfort_cool` | Still warm enough that purge/air-movement has value |
+| `outdoor_sample_count >= 3` AND `outdoor < today's observed peak − PEAK_DECLINE_MARGIN_F (1.0°F)` | "Past peak and declining" — built from `coordinator._outdoor_temp_history` (already sampled every 30 min for forecast high/low correction), not a new sensor. The minimum-sample guard fails closed after a restart that crosses local midnight, when the history buffer is briefly thin (see Timezone/Day-Boundary note below) — it doesn't risk a false "already past peak" read from 0-2 samples |
+| `outdoor <= indoor` | Parity, not the full gate's `outdoor < indoor − hysteresis` — this is the core relaxation |
+| `not decide_nat_vent_gate(...)` for the same inputs | Soft-start only fires in the gap *before* the full bulk-cooling gate would already apply — the two gates never compete for the same activation |
+
+**Qualifier flag, not a second session:** soft-start sets `_nat_vent_soft_start = True`
+alongside `_natural_vent_active = True` — it is a qualifying sub-flag on the *same*
+session (mirroring how `_grace_protects_override` coexists with `_grace_active`), not a
+parallel state machine. It reuses the existing fan-activation machinery, HVAC-band
+arming, and — critically — the existing Exit Hierarchy above completely unchanged: an
+outdoor-rise exit, comfort-floor exit, ceiling exit, etc. all end a soft-start session
+exactly the same way they end a full one, clearing both flags together.
+
+**Upgrade path:** every cycle a soft-start session is active, the engine re-checks
+whether the full bulk-cooling gate (`decide_nat_vent_gate()`) now independently holds. If
+it does, `_nat_vent_soft_start` clears (logged as an upgrade) — the fan keeps running
+uninterrupted; only the status label changes from soft-start to full nat-vent. There is
+no downgrade path (full → soft-start): once the full gate has been satisfied, exiting and
+re-entering soft-start on a later temperature dip is intentionally out of scope for v1.
+
+**Status/logging:** surfaced via the existing Status card (`_compute_automation_status()`
+returns `"nat-vent — soft-start (purge)"` instead of `"nat-vent"` — no new card, per the
+Status Card Ontology in the root `CLAUDE.md`). Entry is logged at INFO and emits
+`nat_vent_soft_start_entered` (rendered in the Activity Report via
+`ai_skills_activity.py`'s `EVENT_RENDERERS`).
+
+**Timezone/day-boundary note:** `coordinator._outdoor_temp_history` is written and
+cleared entirely in HA local time (`dt_util.now()`, `async_track_time_change` at
+23:59:00 local) and restored on restart only when the persisted date matches today's
+local calendar date — consistent with the Issue #190 local-date convention used
+elsewhere in `coordinator.py`. The one edge case is an overnight outage that crosses
+local midnight: the buffer starts thin until the next 30-min cycle, which is exactly
+what the `outdoor_sample_count >= 3` guard protects against.
+
+**Test coverage:** `tests/test_nat_vent_gate.py::TestDecideNatVentSoftStartGate` (pure
+gate logic); `tests/test_nat_vent_soft_start.py` (engine-level entry, precedence over the
+full gate, HVAC-only fan exclusion, thin-buffer fail-safe, upgrade, and exit-hierarchy
+reuse).
+
 ### Fan Cycling Within an Active Session (Issues #321, #374)
 
 Once `_natural_vent_active = True`, the fan does not simply stay on until the session ends. Instead, the engine targets a context-dependent temperature and cycles the fan on and off using a hysteresis band to prevent rapid toggling. The target and thresholds differ between the daytime and sleep windows.

@@ -513,6 +513,7 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Warm/mild-day window-close and reopen times fixed (a data-alignment bug could tell users to close windows hours too early); Next Automation card now predicts WHF/nat-vent start, warm-day window/AC events, and hot-day window-cooling opportunities using the same logic the automation itself uses (#528)
 - [x] Whole-house-fan-off grace period reliably sticks for its full protection window — a watchdog meant for a rare stuck-automation case was misfiring on ordinary fan-off almost every time; 8-hour RF remote timer sessions no longer produce a burst of contradictory decisions when the timer runs out (#530)
 - [x] Next Automation's "outdoor no longer helping" message now states when that's expected to happen instead of reading like a claim about right now; mild-day briefings use the same forecast-based window-close time warm days already got instead of a fixed 5:00 PM (#534)
+- [x] Whole-house fan can now soft-start for air movement and attic/thermal-mass purge as soon as outdoor reaches parity with indoor in the evening, once the day is confirmed past its peak — instead of waiting for outdoor to be measurably cooler; on by default, disable in settings for the old strict-delta behavior (#540)
 
 ### Phase 4: Seasonal & Cost Intelligence (v0.5+) — Future
 - [ ] Seasonal performance baselines (after 1 year of data)

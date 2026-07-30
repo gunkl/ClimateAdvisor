@@ -107,3 +107,78 @@ def decide_nat_vent_gate(inputs: NatVentGateInputs) -> bool:
         and inputs.outdoor < threshold
         and ceiling_ok
     )
+
+
+# Minimum number of same-day outdoor-temp samples required before trusting
+# "today's peak" (Issue #540). Below this, _outdoor_temp_history may be thin
+# after a restart that crossed local midnight (see coordinator.py's
+# async_restore_state day-boundary gate) — failing closed avoids a false
+# "already past peak" read from 0-1 samples.
+_MIN_PEAK_SAMPLE_COUNT = 3
+
+
+@dataclass(frozen=True)
+class NatVentSoftStartGateInputs:
+    """Inputs for the nat-vent soft-start sub-gate (Issue #540, scoped from #533).
+
+    Distinct from, and does not modify, ``NatVentGateInputs``/``decide_nat_vent_gate()``.
+    Soft-start is a separate WHF-purge/comfort entry path that fires only in the gap
+    before the full bulk-cooling gate would already apply.
+
+    Field-by-field correspondence to the real code:
+      outdoor, indoor          -> same live reads as NatVentGateInputs
+      comfort_heat             -> already sleep-resolved by the caller (mirrors
+                                   NatVentGateInputs.comfort_heat_raw/sleep_heat resolution)
+      comfort_cool             -> raw config comfort_cool
+      fan_mode                 -> config CONF_FAN_MODE; soft-start is WHF-only
+                                   (whole_house_fan/both) — the attic-purge claim doesn't
+                                   apply to HVAC-only fan archetypes
+      outdoor_today_peak       -> max of coordinator._outdoor_temp_history for today,
+                                   plumbed to the caller via
+                                   automation_engine._outdoor_temp_today_peak
+      outdoor_sample_count     -> len(coordinator._outdoor_temp_history) for today, plumbed
+                                   via automation_engine._outdoor_temp_today_sample_count
+      peak_decline_margin      -> PEAK_DECLINE_MARGIN_F (const.py), degrees below today's
+                                   observed peak required before calling it "declining"
+      full_gate_active         -> the caller's own decide_nat_vent_gate(...) result for the
+                                   same inputs — soft-start stands down once the full gate
+                                   would already apply, so the two gates never compete for
+                                   the same activation
+    """
+
+    outdoor: float | None
+    indoor: float | None
+    comfort_heat: float
+    comfort_cool: float
+    fan_mode: str
+    outdoor_today_peak: float | None
+    outdoor_sample_count: int
+    peak_decline_margin: float
+    full_gate_active: bool
+
+
+def decide_nat_vent_soft_start_gate(inputs: NatVentSoftStartGateInputs) -> bool:
+    """Should nat-vent soft-start (purge/comfort sub-mode) activate right now?
+
+    Unlike ``decide_nat_vent_gate()``, this does not require outdoor to be below
+    indoor by any margin — only that outdoor has reached parity (``<=``) with
+    indoor, and that today's outdoor temperature is confirmed past its peak and
+    declining. See Issue #540 (scoped from #533's soft-start hypothesis).
+    """
+    if inputs.outdoor is None or inputs.indoor is None:
+        return False
+    if inputs.full_gate_active:
+        return False
+    if inputs.fan_mode not in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
+        return False
+    if inputs.outdoor_sample_count < _MIN_PEAK_SAMPLE_COUNT or inputs.outdoor_today_peak is None:
+        return False
+
+    past_peak = inputs.outdoor < inputs.outdoor_today_peak - inputs.peak_decline_margin
+
+    return (
+        past_peak
+        and inputs.indoor > inputs.comfort_heat
+        and inputs.indoor > inputs.comfort_cool
+        and inputs.outdoor <= inputs.indoor
+    )

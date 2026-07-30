@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.39"
+VERSION = "0.5.40"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.40": [
+        "Feat #540: new 'Nat-Vent Soft-Start (Purge Mode)' setting, on by default. The"
+        " whole-house fan can now start moving air and purging attic/thermal-mass heat as soon"
+        " as outdoor temperature reaches parity with indoor in the evening, once the day is"
+        " confirmed past its peak — instead of waiting for outdoor to be measurably cooler."
+        " Disable it in settings if you prefer the old strict-delta-only behavior. See the"
+        " Status card for a distinct 'soft-start (purge)' label while it's active.",
+    ],
     "0.5.39": [
         "Fix #538: the 'Next User Action' card said 'Free cooling is active.' while nat-vent"
         " or economizer cooling was already running — just repeating what the Status card"
@@ -1326,6 +1334,47 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    540: {
+        "version_fixed": "0.5.40",
+        "title": (
+            "Whole-house fan sat idle for up to ~30 minutes after outdoor temperature reached"
+            " parity with indoor in the evening — every existing nat-vent activation path"
+            " required outdoor to be measurably below indoor, so air-movement/purge benefit at"
+            " parity was structurally unreachable, not just delayed"
+        ),
+        "scope_covered": (
+            "New opt-out (default on) 'soft-start' sub-mode: nat_vent_gate.py gains"
+            " NatVentSoftStartGateInputs + decide_nat_vent_soft_start_gate(), a sibling to the"
+            " existing full gate, not a modification of it. Gated on: WHF fan archetype only"
+            " (whole_house_fan/both), door/window open, indoor above comfort_heat and"
+            " comfort_cool, today's outdoor temp confirmed past its peak and declining (derived"
+            " from coordinator._outdoor_temp_history, with a >=3-sample minimum guard against a"
+            " thin post-restart buffer), outdoor <= indoor (parity, not the full gate's"
+            " hysteresis-cleared delta), and only when the full bulk-cooling gate hasn't already"
+            " cleared (the two gates never compete for the same activation). automation.py: new"
+            " _nat_vent_soft_start qualifier flag alongside _natural_vent_active (same pattern as"
+            " _grace_protects_override/_grace_active) — cleared at every"
+            " _natural_vent_active=False site, wired into both reactivation call sites"
+            " (idle-open/comfort-ceiling-during-grace and paused-by-door), with an upgrade check"
+            " that clears the qualifier once the full gate independently clears. Reuses the"
+            " existing exit hierarchy unchanged. Status card shows 'nat-vent — soft-start"
+            " (purge)' distinctly (no new card); nat_vent_soft_start_entered event rendered in"
+            " the Activity Report."
+        ),
+        "scope_not_covered": (
+            "Does not add a humidity/dew-point guard (Issue #533 Related Condition (E)) — no"
+            " such sensor exists in the integration today; parity-triggered activation inherits"
+            " the same unaddressed risk the original issue flagged, and defaulting this on"
+            " (rather than opt-in as #533 recommended) means every WHF install is exposed to"
+            " that gap unless the user explicitly disables the setting. Does not extend soft-start"
+            " to HVAC-only fan archetypes or decouple it into a general comfort-fan mode (Issue"
+            " #533 Related Condition (C)) — that is a larger philosophical scope change needing"
+            " explicit owner sign-off, deliberately not folded in here. reconcile_fan_on_startup()"
+            " always adopts a found-running fan as full nat-vent, never as soft-start — a cosmetic"
+            " status-label gap only, self-corrects via the upgrade check on the next cycle if the"
+            " full gate is already satisfied, otherwise persists until conditions change."
+        ),
+    },
     538: {
         "version_fixed": "0.5.39",
         "title": (
@@ -5618,6 +5667,18 @@ NAT_VENT_REACTIVATION_LOCKOUT_S = 300
 CONF_NAT_VENT_HYSTERESIS_F = "nat_vent_hysteresis_f"
 CONF_NAT_VENT_REACTIVATION_LOCKOUT_S = "nat_vent_reactivation_lockout_s"
 
+# Nat-vent soft-start sub-mode (Issue #540, scoped from #533): WHF-purge/comfort activation
+# at outdoor/indoor parity once today's outdoor temp is confirmed past its peak and
+# declining. Opt-out (default on) — users who want the old strict-delta-only behavior can
+# disable it. No humidity/dew-point guard exists today; the comfort benefit itself is
+# still subjective, but the project has chosen to default this on rather than opt-in.
+CONF_NAT_VENT_SOFT_START_ENABLED = "nat_vent_soft_start_enabled"
+DEFAULT_NAT_VENT_SOFT_START_ENABLED = True
+
+# Degrees below today's observed outdoor peak required before soft-start considers the
+# day "declining" — mirrors NAT_VENT_HYSTERESIS_F's role as a noise-margin buffer.
+PEAK_DECLINE_MARGIN_F = 1.0
+
 # Minimum viable nat vent window — skip activation (or exit proactively) if thermal
 # model predicts indoor will hit comfort_heat floor within this many hours.
 MIN_VIABLE_NAT_VENT_HOURS = 1.0
@@ -5868,6 +5929,18 @@ CONFIG_METADATA = {
             "Controls how fans assist ventilation. 'Whole house fan' controls a dedicated entity."
             " 'HVAC fan' uses the thermostat fan mode."
             " Fan activates during economizer maintain phase."
+        ),
+        "category": "fan",
+    },
+    "nat_vent_soft_start_enabled": {
+        "label": "Nat-Vent Soft-Start (Purge Mode)",
+        "description": (
+            "When enabled, the whole-house fan may start at outdoor/indoor temperature parity"
+            " (not waiting for outdoor to be measurably cooler) once today's outdoor temperature"
+            " is confirmed past its peak and declining — for air movement and attic/thermal-mass"
+            " purge, not bulk cooling. On by default; disable if you only want the fan to run"
+            " once outdoor is measurably cooler than indoor. No humidity/dew-point sensor guards"
+            " this today."
         ),
         "category": "fan",
     },

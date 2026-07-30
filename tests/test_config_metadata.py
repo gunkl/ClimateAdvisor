@@ -36,6 +36,7 @@ EXPECTED_KEYS = {
     "fan_state_feedback",
     "fan_remote_entity",
     "fan_min_runtime_per_hour",
+    "nat_vent_soft_start_enabled",
     "wake_time",
     "sleep_time",
     "sleep_heat",

@@ -6207,7 +6207,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             elif c.window_opportunity_evening and now >= time(ECONOMIZER_EVENING_START_HOUR, 0):
                 return _decide(f"Open windows if outdoor temp is below {format_temp(threshold, unit)}")
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
-                return _decide("Free cooling is active.")
+                return _decide("-")
             return _decide("Keep windows and blinds closed.")
         elif c.day_type == DAY_TYPE_COLD:
             if windows_physically_open:
@@ -6221,7 +6221,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if cooling_needed:
             if ae is not None and (ae._natural_vent_active or ae._economizer_active):
-                return _decide("Free cooling is active.")
+                return _decide("-")
             if windows_physically_open:
                 if outdoor_temp is not None and not direction_ok:
                     return _decide(

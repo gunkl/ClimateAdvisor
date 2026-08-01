@@ -119,19 +119,31 @@ and removes the ambiguity entirely.
 ### First few steps succeed, then "Connection reset by peer" / "Connection timed out" for the rest of the run
 This is the signature of the SSH add-on's rate-limit/brute-force protection ("Protection
 mode," a fail2ban-style feature many HAOS SSH add-ons enable by default) blocking your
-machine's IP after several connections in a short window — `deploy.py` opens 6-8 separate
-SSH/SCP connections per run (connection test, dir check, backup, cleanup, file copy, restart,
-log check), which can trip it even though every connection was legitimate.
+machine's IP after several connections in a short window — a full `deploy.py` run opens
+several separate SSH/SCP connections (connection test, backup, remote cleanup, file copy,
+restart, log check), which can trip it even though every connection was legitimate.
 
-Since #549, `deploy.py` multiplexes all of those through a single real SSH connection
-(`ControlMaster`/`ControlPath`/`ControlPersist`, set up automatically — no config needed), so
-the add-on only ever sees one connection per run. If you still hit this:
+Since #551, `deploy.py` batches what used to be several separate remote commands into fewer,
+combined round trips (e.g. the backup existence-check + tar creation happen in one SSH call
+instead of two; temp-file cleanup + legacy-backup removal + directory setup happen in one call
+instead of three-plus) to reduce the total connection count per run.
+
+(An earlier attempt, #549, tried SSH connection multiplexing — `ControlMaster` — for the same
+goal. It was reverted in #551: it failed outright on this project's Windows/Git-for-Windows SSH
+client against a real HAOS SSH add-on, with `ControlMaster` connections immediately getting
+`Connection reset by peer` even when a plain, non-multiplexed connection to the same host
+succeeded instantly right before and after. If you're on a different platform where
+`ControlMaster` is reliable, adding it back locally is safe to try — just be aware it wasn't
+portable enough to ship by default here.)
+
+Batching reduces connection count but isn't a guarantee against a strict rate limit. If you
+still hit this:
 - Check your SSH add-on's configuration for a "Protection mode" or rate-limit setting and
-  raise its threshold or disable it, at least while deploying
+  raise its threshold or disable it, at least while deploying — this is the authoritative fix
 - If it just tripped, wait for its cooldown window to clear before retrying — retrying
   immediately usually just extends the block
-- You can verify multiplexing is active mid-run: a control socket appears at
-  `~/.ssh/sockets/deploy-<user>-<host>-<port>.sock` while `deploy.py` is running
+- `python tools/deploy.py --skip-restart` skips the restart + log-check steps (2 fewer
+  connections), useful when iterating on file changes without needing a full deploy each time
 
 ### Can't find `/config/custom_components/`
 - The directory may not exist yet. Create it: `mkdir -p /config/custom_components/`

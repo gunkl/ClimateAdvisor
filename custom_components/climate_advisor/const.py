@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.44"
+VERSION = "0.5.45"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.45": [
+        "Fix #551: reverted #549's SSH connection multiplexing in `tools/deploy.py` — it"
+        " failed outright on Windows/Git-for-Windows SSH clients against a real HAOS SSH"
+        " add-on. Replaced with command batching (fewer, combined SSH round trips) to reduce"
+        " connection count and avoid tripping the add-on's rate-limit protection, without"
+        " depending on client-side multiplexing support. Developer/deployment tooling only —"
+        " no change to the integration itself.",
+    ],
     "0.5.44": [
         "Fix #549: `tools/deploy.py` now multiplexes all of its SSH/SCP connections through"
         " one real connection per run (SSH `ControlMaster`), instead of opening 6-8 separate"
@@ -1359,6 +1367,60 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    551: {
+        "version_fixed": "0.5.45",
+        "title": (
+            "#549's SSH ControlMaster multiplexing, merged to fix deploy.py's rate-limit"
+            " problem, made deploys worse in live testing: every connection attempt failed"
+            " immediately (~1s, not a timeout) with 'mux_client_request_session: read from"
+            " master failed: Connection reset by peer' / 'Failed to connect to new control"
+            " master' — reproduced consistently as the very first connection of a fresh run"
+            " (ruling out the rate limiter), with both Windows-style and POSIX-style control"
+            " socket paths, while a bare non-multiplexed connection to the same host succeeded"
+            " instantly immediately before and after each failure — indicating ControlMaster"
+            " itself doesn't work reliably with this project's Windows/Git-for-Windows SSH"
+            " client build against this HAOS SSH add-on"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: removed control_path(), _multiplex_args(), and"
+            " close_control_master() entirely; ssh_args()/scp_args() no longer add any"
+            " ControlMaster/ControlPath/ControlPersist options; main()'s try/finally wrapper"
+            " (which existed only to call close_control_master()) removed, restoring the"
+            " original flow. Replaced with command batching to address the original"
+            " connection-count problem without depending on client-side multiplexing support:"
+            " create_backup() combines the remote existence check and tar creation into one"
+            " SSH call (was two); the new prep_remote_target() combines temp-file cleanup,"
+            " legacy climate_advisor.bak.* directory removal (now via a single 'ls | xargs -r"
+            " rm -rf' instead of one rm per matched directory), and mkdir -p into one SSH call"
+            " (replacing clean_legacy_backups() plus the separate mkdir previously inside"
+            " deploy_files()); do_rollback()'s restore-extract and temp-cleanup combined into"
+            " one call. Reduces a typical full-deploy run from ~10-11 SSH/SCP connections to"
+            " ~8. Verified live against the real HA host: both new combined commands"
+            " (create_backup's tar-or-skip logic, prep_remote_target's cleanup+mkdir sequence)"
+            " execute correctly and produce the expected results. docs/SSH-SETUP.md updated to"
+            " describe the batching approach and explicitly document the ControlMaster"
+            " reversion and why, so a future contributor doesn't re-attempt the same fix"
+            " without knowing it was already tried and found unreliable here."
+        ),
+        "scope_not_covered": (
+            "Command batching is a best-effort mitigation, not a guaranteed fix — it reduces"
+            " connection count (~10-11 to ~8) but doesn't eliminate SSH connections entirely,"
+            " so a sufficiently strict rate limit on the HA SSH add-on's Protection mode could"
+            " still trip. The authoritative fix (raising or disabling that setting) remains a"
+            " manual, server-side step documented in docs/SSH-SETUP.md, outside this repo's"
+            " control. Does not investigate root-causing exactly why ControlMaster fails on"
+            " this specific client/server combination (e.g. whether it's a Git-for-Windows"
+            " MSYS AF_UNIX socket emulation issue specifically) — the live evidence was"
+            " sufficient to conclude it's unreliable here without further diagnosis, but the"
+            " underlying mechanism remains unconfirmed. A pre-existing cosmetic issue was"
+            " observed but not fixed: the remote login shell appears to be zsh, whose default"
+            " NOMATCH option prints a 'zsh:1: no matches found: ...' stderr line when the"
+            " legacy-backup glob pattern matches nothing (harmless — the surrounding command"
+            " sequence still completes correctly via xargs -r's empty-input no-op — but noisy"
+            " in logs); this behavior predates this fix (same glob pattern was already used by"
+            " the original clean_legacy_backups()) and was left as-is to avoid scope creep."
+        ),
+    },
     549: {
         "version_fixed": "0.5.44",
         "title": (

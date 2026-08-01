@@ -137,42 +137,9 @@ def validate_config(config: dict[str, str]) -> list[str]:
     return errors
 
 
-def control_path(config: dict[str, str]) -> str:
-    """Path for the SSH multiplexing control socket shared by every ssh/scp call this run.
-
-    Issue #549: the HA SSH add-on's rate-limit protection ("Protection mode," a fail2ban-style
-    feature many HAOS SSH add-ons enable by default) blocks a source IP after ~4-5 connections
-    in a short window, regardless of whether they succeeded. deploy.py opens 6-8 separate
-    ssh/scp connections per run, which trips it. Routing them all through one multiplexed
-    connection means the add-on only ever sees one.
-    """
-    sockets_dir = Path.home() / ".ssh" / "sockets"
-    sockets_dir.mkdir(parents=True, exist_ok=True)
-    return str(sockets_dir / f"deploy-{config['HA_SSH_USER']}-{config['HA_HOST']}-{config['HA_SSH_PORT']}.sock")
-
-
-def _multiplex_args(config: dict[str, str]) -> list[str]:
-    """Shared ControlMaster options so every ssh/scp call in a run reuses one connection.
-
-    ControlMaster=auto: the first call creates the master; every later call with a matching
-    ControlPath transparently tunnels through it instead of opening a new TCP connection.
-    ControlPersist=10m: keeps the master alive in the background for reuse across the whole
-    run (and briefly after), even though each individual ssh/scp command exits immediately.
-    """
-    return [
-        "-o",
-        f"ControlPath={control_path(config)}",
-        "-o",
-        "ControlMaster=auto",
-        "-o",
-        "ControlPersist=10m",
-    ]
-
-
 def ssh_args(config: dict[str, str]) -> list[str]:
     """Build SSH command-line arguments."""
     args = ["ssh", "-p", config["HA_SSH_PORT"], "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
-    args.extend(_multiplex_args(config))
     if config["HA_SSH_KEY"]:
         args.extend(["-i", config["HA_SSH_KEY"]])
     if config["HA_SSH_KEY"] and sys.platform != "win32":
@@ -193,27 +160,9 @@ def ssh_target(config: dict[str, str]) -> str:
 def scp_args(config: dict[str, str]) -> list[str]:
     """Build SCP command-line arguments."""
     args = ["scp", "-P", config["HA_SSH_PORT"], "-o", "StrictHostKeyChecking=accept-new", "-r"]
-    args.extend(_multiplex_args(config))
     if config["HA_SSH_KEY"]:
         args.extend(["-i", config["HA_SSH_KEY"]])
     return args
-
-
-def close_control_master(config: dict[str, str]) -> None:
-    """Best-effort close of the multiplexed control connection at the end of a run.
-
-    Safe to call even if no master was ever established (ControlPersist means one may not
-    exist yet, e.g. if the run failed before the first ssh/scp call) — `-O exit` against a
-    missing/stale socket just fails harmlessly, which we ignore.
-    """
-    cpath = control_path(config)
-    if not Path(cpath).exists():
-        return
-    subprocess.run(
-        ["ssh", "-o", f"ControlPath={cpath}", "-O", "exit", ssh_target(config)],
-        capture_output=True,
-        text=True,
-    )
 
 
 def remote_path(config: dict[str, str]) -> str:
@@ -305,11 +254,23 @@ def run_validation() -> bool:
 def create_backup(config: dict[str, str]) -> None:
     step("Downloading backup from HA server")
     rpath = remote_path(config)
+    parent = f"{config['HA_CONFIG_PATH']}/custom_components"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    rc, output = run_ssh(config, f"test -d '{rpath}' && echo yes || echo no")
-    if "yes" not in output:
+    # Issue #551: combine the existence check and the tar creation into one round trip
+    # (reduces connection count — see docs/SSH-SETUP.md's rate-limit note). Cleanup of
+    # /tmp/ca_backup.tar.gz happens later, batched into prep_remote_target().
+    cmd = (
+        f"if [ -d {shlex.quote(rpath)} ]; then "
+        f"tar czf /tmp/ca_backup.tar.gz -C {shlex.quote(parent)} climate_advisor && echo TARED; "
+        f"else echo NOEXIST; fi"
+    )
+    rc, output = run_ssh(config, cmd)
+    if "NOEXIST" in output:
         info("No existing installation found. Skipping backup.")
+        return
+    if "TARED" not in output:
+        fail(f"Remote tar failed: {output}")
         return
 
     BACKUP_DIR.mkdir(exist_ok=True)
@@ -317,24 +278,14 @@ def create_backup(config: dict[str, str]) -> None:
         os.chmod(BACKUP_DIR, 0o700)
     local_tar = BACKUP_DIR / f"climate_advisor-{timestamp}.tar.gz"
     target = ssh_target(config)
-    parent = f"{config['HA_CONFIG_PATH']}/custom_components"
 
-    # Tar+gzip the remote directory and download it locally
-    try:
-        rc, output = run_ssh(config, f"tar czf /tmp/ca_backup.tar.gz -C '{parent}' climate_advisor")
-        if rc != 0:
-            fail(f"Remote tar failed: {output}")
-            return
+    cmd = scp_args(config) + [f"{target}:/tmp/ca_backup.tar.gz", str(local_tar)]
+    rc, output = run_local(cmd)
+    if rc != 0:
+        fail(f"Backup download failed: {output}")
+        return
 
-        cmd = scp_args(config) + [f"{target}:/tmp/ca_backup.tar.gz", str(local_tar)]
-        rc, output = run_local(cmd)
-        if rc != 0:
-            fail(f"Backup download failed: {output}")
-            return
-
-        ok(f"Backup saved: {local_tar}")
-    finally:
-        run_ssh(config, "rm -f /tmp/ca_backup.tar.gz")
+    ok(f"Backup saved: {local_tar}")
 
 
 def prune_backups(config: dict[str, str]) -> None:
@@ -351,23 +302,26 @@ def prune_backups(config: dict[str, str]) -> None:
     ok(f"Pruned {removed} old backup(s), {min(len(backups), BACKUP_KEEP_COUNT)} kept")
 
 
-def clean_legacy_backups(config: dict[str, str]) -> None:
-    """Remove old climate_advisor.bak.* directories from custom_components/.
+def prep_remote_target(config: dict[str, str]) -> None:
+    """Clean up temp/legacy state and ensure the target directory exists — one round trip.
 
-    These backup directories contain manifest.json files that cause HA's
-    loader to discover them as duplicate integrations, breaking import.
+    Issue #551: combines what used to be 3+ separate SSH connections (temp backup-tar
+    cleanup, legacy climate_advisor.bak.* directory removal, mkdir -p) into a single
+    command, to reduce the total connection count deploy.py opens per run — the HA SSH
+    add-on's rate-limit protection can block a source IP after several connections in a
+    short window (see docs/SSH-SETUP.md).
+
+    Legacy .bak.* directories contain manifest.json files that cause HA's loader to
+    discover them as duplicate integrations, breaking import — removed unconditionally
+    if any are found.
     """
     rpath = remote_path(config)
-    rc, output = run_ssh(config, f"ls -1d {shlex.quote(rpath)}.bak.* 2>/dev/null")
-    if rc != 0 or not output.strip():
-        return
-
-    dirs = [d.strip() for d in output.splitlines() if d.strip()]
-    if dirs:
-        step(f"Removing {len(dirs)} legacy backup dir(s) from custom_components/")
-        for d in dirs:
-            run_ssh(config, f"rm -rf {shlex.quote(d)}")
-        ok(f"Removed {len(dirs)} legacy backup dir(s)")
+    cmd = (
+        f"rm -f /tmp/ca_backup.tar.gz; "
+        f"ls -1d {shlex.quote(rpath)}.bak.* 2>/dev/null | xargs -r rm -rf; "
+        f"mkdir -p {shlex.quote(rpath)}"
+    )
+    run_ssh(config, cmd)
 
 
 def ensure_brand_dir() -> None:
@@ -402,8 +356,7 @@ def deploy_files(config: dict[str, str]) -> bool:
     # Ensure brand/ dir has icon + logo for HA's Add Integration dialog
     ensure_brand_dir()
 
-    # Ensure remote directory exists
-    run_ssh(config, f"mkdir -p '{rpath}'")
+    # Remote target directory already ensured by prep_remote_target() (Issue #551)
 
     # Copy files and subdirectories (e.g. brand/), excluding __pycache__
     local_items = [str(f) for f in COMPONENT_DIR.iterdir() if (f.is_file() or f.is_dir()) and f.name != "__pycache__"]
@@ -503,8 +456,12 @@ def do_rollback(config: dict[str, str]) -> None:
         info("Rollback cancelled.")
         return
 
-    run_ssh(config, f"rm -rf '{rpath}' && tar xzf /tmp/ca_restore.tar.gz -C '{parent}'")
-    run_ssh(config, "rm -f /tmp/ca_restore.tar.gz")
+    # Issue #551: combined into one round trip (reduces connection count)
+    run_ssh(
+        config,
+        f"rm -rf {shlex.quote(rpath)} && tar xzf /tmp/ca_restore.tar.gz -C {shlex.quote(parent)}; "
+        f"rm -f /tmp/ca_restore.tar.gz",
+    )
     ok("Backup restored")
 
     step("Restarting Home Assistant core")
@@ -560,52 +517,49 @@ def main() -> None:
     print(f"  Host: {config['HA_HOST']}:{config['HA_SSH_PORT']}")
     print(f"  Target: {rpath}")
 
-    try:
-        if args.rollback:
-            do_rollback(config)
-            sys.exit(0)
+    if args.rollback:
+        do_rollback(config)
+        sys.exit(0)
 
-        # Step 1: Validate
-        if not run_validation():
-            sys.exit(1)
+    # Step 1: Validate
+    if not run_validation():
+        sys.exit(1)
 
-        if args.dry_run:
-            ensure_brand_dir()
-            print(f"\n{Color.CYAN}============================================{Color.RESET}")
-            print(f"{Color.YELLOW}  DRY RUN complete. No changes made.{Color.RESET}")
-            print(f"{Color.CYAN}============================================{Color.RESET}")
-            print("\nFiles that would be deployed:")
-            for f in sorted(COMPONENT_DIR.rglob("*")):
-                if f.is_file() and "__pycache__" not in f.parts:
-                    gray(str(f.relative_to(COMPONENT_DIR)))
-            sys.exit(0)
+    if args.dry_run:
+        ensure_brand_dir()
+        print(f"\n{Color.CYAN}============================================{Color.RESET}")
+        print(f"{Color.YELLOW}  DRY RUN complete. No changes made.{Color.RESET}")
+        print(f"{Color.CYAN}============================================{Color.RESET}")
+        print("\nFiles that would be deployed:")
+        for f in sorted(COMPONENT_DIR.rglob("*")):
+            if f.is_file() and "__pycache__" not in f.parts:
+                gray(str(f.relative_to(COMPONENT_DIR)))
+        sys.exit(0)
 
-        # Step 2: Test SSH (also establishes the multiplexed connection every later
-        # step in this run reuses — see control_path()/Issue #549)
-        if not test_ssh(config):
-            sys.exit(1)
+    # Step 2: Test SSH
+    if not test_ssh(config):
+        sys.exit(1)
 
-        # Step 3: Backup
-        create_backup(config)
-        prune_backups(config)
-        clean_legacy_backups(config)
+    # Step 3: Backup + remote prep (Issue #551: batched into few round trips —
+    # see prep_remote_target()/create_backup())
+    create_backup(config)
+    prune_backups(config)
+    prep_remote_target(config)
 
-        # Step 4: Deploy
-        if not deploy_files(config):
-            sys.exit(1)
+    # Step 4: Deploy
+    if not deploy_files(config):
+        sys.exit(1)
 
-        # Step 5: Restart
-        restart_ha(config, skip=args.skip_restart)
+    # Step 5: Restart
+    restart_ha(config, skip=args.skip_restart)
 
-        # Step 6: Verify
-        if not args.skip_restart:
-            check_logs(config)
+    # Step 6: Verify
+    if not args.skip_restart:
+        check_logs(config)
 
-        print(f"\n{Color.GREEN}============================================{Color.RESET}")
-        print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")
-        print(f"{Color.GREEN}============================================{Color.RESET}")
-    finally:
-        close_control_master(config)
+    print(f"\n{Color.GREEN}============================================{Color.RESET}")
+    print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")
+    print(f"{Color.GREEN}============================================{Color.RESET}")
 
 
 if __name__ == "__main__":

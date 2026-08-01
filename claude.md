@@ -663,6 +663,9 @@ git merge origin/release/<version>   # or other pending branches
 **Every PR must include its own version bump.** Do NOT create a PR without first updating:
 - `const.py`: bump `VERSION` to the next patch (e.g. 0.4.14 → 0.4.15), add `RELEASE_NOTES["X.Y.Z"]` entry, add `KNOWN_FIXES[<issue>]` entry
 - `manifest.json`: `"version"` to match
+- `CHANGELOG.md`: matching `## [X.Y.Z] — <date>` entry (see below) — this was skipped for ~80
+  releases (0.4.61 → 0.5.40) because it wasn't in this checklist; backfilled in #543, don't
+  let it drift again
 
 This replaces the old pattern of separate `release/X.Y.Z` branches for patch fixes. Release branches are now only used when preparing a GitHub Release tag for distribution.
 
@@ -672,12 +675,15 @@ This replaces the old pattern of separate `release/X.Y.Z` branches for patch fix
 
 **What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry must have `scope_covered` (exact code paths fixed) and `scope_not_covered` (explicit gaps).
 
+**What goes in CHANGELOG.md**: Same user-visible bullet(s) as `RELEASE_NOTES`, Keep-a-Changelog formatted under a new `## [X.Y.Z] — <date>` section, newest on top.
+
 #### PR checklist (before `gh pr create`)
 1. Bump `VERSION` in `const.py` and `manifest.json` to the next patch version
 2. Add `RELEASE_NOTES["X.Y.Z"]` entry with one bullet per fixed issue
 3. Add `KNOWN_FIXES[<issue_number>]` entry with `version_fixed`, `title`, `scope_covered`, `scope_not_covered`
-4. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
-5. Then open the PR
+4. Add a matching `CHANGELOG.md` entry
+5. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
+6. Then open the PR
 
 #### GitHub Release tagging (for distributable releases only)
 When creating a versioned GitHub Release (not every PR):

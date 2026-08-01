@@ -12,13 +12,14 @@ Usage:
 """
 
 import argparse
+import io
 import logging
 import os
 import re
 import shlex
 import subprocess
 import sys
-import time
+import tarfile
 from datetime import datetime
 from pathlib import Path
 
@@ -216,28 +217,61 @@ def run_local(command: list[str]) -> tuple[int, str]:
     return result.returncode, output
 
 
+def run_ssh_piped(config: dict[str, str], command: str, input_bytes: bytes) -> tuple[int, str]:
+    """Run a command on the remote server via SSH, piping input_bytes to its stdin.
+
+    Issue #553: used to transfer the component directory as a tar stream through the same
+    SSH connection that also runs extraction/restart/verification, instead of a separate
+    `scp` connection — the HA SSH add-on's rate-limit protection can block a source IP
+    after just a handful of connections in a short window (see docs/SSH-SETUP.md), so a
+    full deploy needs to fit in as few real connections as possible.
+    """
+    cmd = ssh_args(config) + [ssh_target(config), command]
+    _log.debug("SSH (piped, %d bytes stdin) cmd: %s", len(input_bytes), " ".join(cmd))
+    result = subprocess.run(cmd, input=input_bytes, capture_output=True)
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
+    _log.debug("SSH rc=%d stdout=%r stderr=%r", result.returncode, stdout.strip(), stderr.strip())
+    return result.returncode, (stdout + stderr).strip()
+
+
+def _build_component_tar(component_dir: Path) -> bytes:
+    """Build an in-memory gzip tar of component_dir's immediate contents, excluding
+    __pycache__. Piped through run_ssh_piped()'s stdin so the deploy payload travels over
+    the same SSH connection that extracts/restarts/verifies, instead of a separate `scp`.
+    """
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for item in sorted(component_dir.iterdir()):
+            if item.name == "__pycache__":
+                continue
+            tf.add(item, arcname=item.name)
+    return buf.getvalue()
+
+
+def _split_marked_output(output: str) -> dict[str, str]:
+    """Split combined remote-script stdout into named sections delimited by ___MARKER___
+    lines (e.g. "___FILES___", "___LOGS___"). Lines before the first marker are dropped.
+    """
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for line in output.splitlines():
+        if line.startswith("___") and line.endswith("___") and len(line) > 6:
+            if current is not None:
+                sections[current] = "\n".join(buf)
+            current = line.strip("_")
+            buf = []
+        elif current is not None:
+            buf.append(line)
+    if current is not None:
+        sections[current] = "\n".join(buf)
+    return sections
+
+
 # ---------------------------------------------------------------------------
 # Deploy steps
 # ---------------------------------------------------------------------------
-
-
-def test_ssh(config: dict[str, str]) -> bool:
-    step(f"Testing SSH connection to {config['HA_HOST']}:{config['HA_SSH_PORT']}")
-    identity = resolve_ssh_identity(config)
-    if identity:
-        info(f"Using SSH key: {identity}")
-    else:
-        info(
-            "No SSH key file resolved (HA_SSH_KEY unset, no default identity file found) — "
-            "relying on ssh-agent or other auth."
-        )
-    rc, output = run_ssh(config, "echo ok")
-    if rc == 0 and "ok" in output:
-        ok("SSH connection successful")
-        return True
-    fail("Cannot connect via SSH. Check .deploy.env and SSH setup.")
-    info("See docs/SSH-SETUP.md for configuration instructions.")
-    return False
 
 
 def run_validation() -> bool:
@@ -251,27 +285,67 @@ def run_validation() -> bool:
     return True
 
 
-def create_backup(config: dict[str, str]) -> None:
-    step("Downloading backup from HA server")
+def create_backup(config: dict[str, str]) -> bool:
+    """Connection 1: connect + server-side backup tar + legacy-backup cleanup + mkdir,
+    combined into one SSH call. Connection 2 (scp): download that backup tar locally, if
+    one was created.
+
+    Issue #553: this also serves as the connectivity test — there's no separate "echo ok"
+    call. A full deploy now costs at most 3 real connections total: this function's 1-2,
+    plus deploy_files()'s 1 (transfer + extract + restart + verify, all piped through a
+    single ssh connection's stdin).
+
+    Legacy climate_advisor.bak.* directories contain manifest.json files that cause HA's
+    loader to discover them as duplicate integrations, breaking import — removed
+    unconditionally if any are found.
+
+    Returns True if the SSH connection itself succeeded (regardless of whether a backup
+    existed to create), False if the connection failed.
+    """
+    step(f"Connecting to {config['HA_HOST']}:{config['HA_SSH_PORT']} and preparing backup")
+    identity = resolve_ssh_identity(config)
+    if identity:
+        info(f"Using SSH key: {identity}")
+    else:
+        info(
+            "No SSH key file resolved (HA_SSH_KEY unset, no default identity file found) — "
+            "relying on ssh-agent or other auth."
+        )
+
     rpath = remote_path(config)
-    parent = f"{config['HA_CONFIG_PATH']}/custom_components"
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    # Issue #551: combine the existence check and the tar creation into one round trip
-    # (reduces connection count — see docs/SSH-SETUP.md's rate-limit note). Cleanup of
-    # /tmp/ca_backup.tar.gz happens later, batched into prep_remote_target().
+    # Note: the backup step uses if/then/else/fi (not && / || shorthand) so a tar failure
+    # (dir exists but tar errors) is distinguishable from "no existing install" — with
+    # && / || shorthand, both cases fall through to the same branch, silently misreporting
+    # a real tar failure as "nothing to back up". Joined with `;`, not `&&`, to the cleanup
+    # and mkdir steps so those still run even if the backup step itself failed.
+    #
+    # Tar is built flat (-C rpath . — contents of the directory, no wrapping
+    # climate_advisor/ level) to match _build_component_tar()'s layout, since
+    # do_rollback() extracts a backup tar the same way it extracts a deploy tar
+    # (Issue #553). A wrapped tar wrongly produced climate_advisor/climate_advisor/
+    # when swapped into place — caught during this fix's live validation.
     cmd = (
         f"if [ -d {shlex.quote(rpath)} ]; then "
-        f"tar czf /tmp/ca_backup.tar.gz -C {shlex.quote(parent)} climate_advisor && echo TARED; "
-        f"else echo NOEXIST; fi"
+        f"tar czf /tmp/ca_backup.tar.gz -C {shlex.quote(rpath)} . && echo TARED; "
+        f"else echo NOEXIST; fi; "
+        f"ls -1d {shlex.quote(rpath)}.bak.* 2>/dev/null | xargs -r rm -rf; "
+        f"mkdir -p {shlex.quote(rpath)}"
     )
     rc, output = run_ssh(config, cmd)
+    if "TARED" not in output and "NOEXIST" not in output:
+        fail("Cannot connect via SSH. Check .deploy.env and SSH setup.")
+        info("See docs/SSH-SETUP.md for configuration instructions.")
+        return False
+    ok("SSH connection successful")
+
     if "NOEXIST" in output:
         info("No existing installation found. Skipping backup.")
-        return
+        return True
     if "TARED" not in output:
         fail(f"Remote tar failed: {output}")
-        return
+        return True
 
     BACKUP_DIR.mkdir(exist_ok=True)
     if sys.platform != "win32":
@@ -283,9 +357,10 @@ def create_backup(config: dict[str, str]) -> None:
     rc, output = run_local(cmd)
     if rc != 0:
         fail(f"Backup download failed: {output}")
-        return
+        return True
 
     ok(f"Backup saved: {local_tar}")
+    return True
 
 
 def prune_backups(config: dict[str, str]) -> None:
@@ -300,28 +375,6 @@ def prune_backups(config: dict[str, str]) -> None:
         old.unlink()
         removed += 1
     ok(f"Pruned {removed} old backup(s), {min(len(backups), BACKUP_KEEP_COUNT)} kept")
-
-
-def prep_remote_target(config: dict[str, str]) -> None:
-    """Clean up temp/legacy state and ensure the target directory exists — one round trip.
-
-    Issue #551: combines what used to be 3+ separate SSH connections (temp backup-tar
-    cleanup, legacy climate_advisor.bak.* directory removal, mkdir -p) into a single
-    command, to reduce the total connection count deploy.py opens per run — the HA SSH
-    add-on's rate-limit protection can block a source IP after several connections in a
-    short window (see docs/SSH-SETUP.md).
-
-    Legacy .bak.* directories contain manifest.json files that cause HA's loader to
-    discover them as duplicate integrations, breaking import — removed unconditionally
-    if any are found.
-    """
-    rpath = remote_path(config)
-    cmd = (
-        f"rm -f /tmp/ca_backup.tar.gz; "
-        f"ls -1d {shlex.quote(rpath)}.bak.* 2>/dev/null | xargs -r rm -rf; "
-        f"mkdir -p {shlex.quote(rpath)}"
-    )
-    run_ssh(config, cmd)
 
 
 def ensure_brand_dir() -> None:
@@ -348,63 +401,97 @@ def ensure_brand_dir() -> None:
                 ok(f"Created brand/{name} from {icon.name}")
 
 
-def deploy_files(config: dict[str, str]) -> bool:
+def deploy_files(config: dict[str, str], skip_restart: bool) -> tuple[bool, str]:
+    """Connection 3 (final connection of a full deploy): pipe the component directory as a
+    tar stream through one ssh connection's stdin, extract it remotely, verify the file
+    count, and — unless skip_restart — restart HA core, wait for it, and fetch its log
+    tail, all within that same single connection/script (Issue #553).
+
+    Extracts into a temp directory first, then does rm-rf-the-old + mv-the-new-into-place
+    as the last step (not extract-directly-on-top-of-the-live-directory): this project's
+    HA SSH add-on has been observed to reset SSH connections mid-command under its
+    rate-limit protection (see docs/SSH-SETUP.md), and tar extraction of the several-MB
+    payload measurably takes ~20s — long enough to be a real window for that. Extracting
+    to a temp dir keeps that whole window off the live directory; only the final rm+mv
+    (milliseconds) touches it. This also means the deployed directory always exactly
+    matches the source tree (no more stale files left over from a previous version that
+    no longer exist in the current one, e.g. renamed/removed files — extract-on-top never
+    cleaned those up).
+
+    Returns (success, log_output) — log_output is the captured HA log tail when restart
+    wasn't skipped, else "".
+    """
     step("Deploying files to HA server")
     rpath = remote_path(config)
-    target = ssh_target(config)
 
     # Ensure brand/ dir has icon + logo for HA's Add Integration dialog
     ensure_brand_dir()
 
-    # Remote target directory already ensured by prep_remote_target() (Issue #551)
+    tar_bytes = _build_component_tar(COMPONENT_DIR)
+    local_count = sum(1 for f in COMPONENT_DIR.iterdir() if f.name != "__pycache__")
 
-    # Copy files and subdirectories (e.g. brand/), excluding __pycache__
-    local_items = [str(f) for f in COMPONENT_DIR.iterdir() if (f.is_file() or f.is_dir()) and f.name != "__pycache__"]
-    local_count = len(local_items)
+    script_steps = [
+        "rm -f /tmp/ca_backup.tar.gz",
+        "rm -rf /tmp/ca_deploy_tmp",
+        "mkdir -p /tmp/ca_deploy_tmp",
+        "tar xzf - -C /tmp/ca_deploy_tmp",
+        f"rm -rf {shlex.quote(rpath)}",
+        f"mv /tmp/ca_deploy_tmp {shlex.quote(rpath)}",
+        "echo ___FILES___",
+        f"ls -1 {shlex.quote(rpath)} | wc -l",
+    ]
+    if not skip_restart:
+        script_steps += [
+            "echo ___RESTARTING___",
+            "ha core restart",
+            "sleep 60",
+            "echo ___LOGS___",
+            "ha core logs 2>/dev/null | grep -i climate_advisor | tail -30",
+        ]
+    script = " && ".join(script_steps)
 
-    cmd = scp_args(config) + local_items + [f"{target}:{rpath}/"]
-    _log.debug("SCP cmd: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    _log.debug("SCP rc=%d stdout=%r stderr=%r", result.returncode, result.stdout.strip(), result.stderr.strip())
-    if result.returncode != 0:
-        _log.error("SCP failed: rc=%d stderr=%s", result.returncode, result.stderr.strip())
-        fail("File copy failed")
-        if result.stderr:
-            print(f"   {result.stderr.strip()}")
-        return False
+    if not skip_restart:
+        info("Transferring files, extracting, restarting HA, and waiting ~60s — please wait...")
 
-    # Verify
-    rc, output = run_ssh(config, f"ls -1 '{rpath}' | wc -l")
-    remote_count = output.strip()
-    ok(f"Deployed {local_count} files to {rpath} (remote has {remote_count} files)")
-    return True
+    rc, output = run_ssh_piped(config, script, tar_bytes)
+    sections = _split_marked_output(output)
 
+    if "FILES" not in sections:
+        _log.error("SSH (piped) failed: rc=%d output=%s", rc, output)
+        fail("File transfer/extraction failed")
+        if output:
+            print(f"   {output.strip()}")
+        return False, ""
 
-def restart_ha(config: dict[str, str], skip: bool = False) -> None:
-    if skip:
+    remote_count = sections["FILES"].strip()
+    ok(f"Deployed {local_count} files to {rpath} (remote reports {remote_count} files)")
+
+    if skip_restart:
         info("Skipping restart (--skip-restart). Remember to restart HA manually.")
-        return
+        return True, ""
 
-    step("Restarting Home Assistant core")
-    run_ssh(config, "ha core restart")
-    ok("HA core restart initiated")
+    if "LOGS" not in sections:
+        fail("HA core restart did not complete successfully (script stopped before log fetch)")
+        if output:
+            print(f"   {output.strip()}")
+        return True, ""
 
-    step("Waiting 60 seconds for HA to restart")
-    for i in range(60, 0, -10):
-        print(f"   {Color.GRAY}{i}s remaining...{Color.RESET}", end="\r")
-        time.sleep(10)
-    print("   " + " " * 30)  # clear the countdown line
+    ok("HA core restart initiated and wait completed")
+    return True, sections["LOGS"]
 
 
-def check_logs(config: dict[str, str]) -> None:
+def check_logs(log_output: str) -> None:
+    """Report on an already-captured HA log tail (Issue #553: log fetching now happens
+    server-side as part of deploy_files()'s/do_rollback()'s single connection, not a
+    separate ssh call — this function just interprets the text it's given).
+    """
     step("Checking HA logs for errors")
-    rc, output = run_ssh(config, "ha core logs 2>/dev/null | grep -i 'climate_advisor' | tail -30")
 
-    if not output:
+    if not log_output.strip():
         info("No log entries found for climate_advisor yet.")
         return
 
-    lines = output.splitlines()
+    lines = log_output.strip().splitlines()
     error_lines = [line for line in lines if "ERROR" in line]
 
     if error_lines:
@@ -419,6 +506,14 @@ def check_logs(config: dict[str, str]) -> None:
 
 
 def do_rollback(config: dict[str, str]) -> None:
+    """Restore the most recent local backup — one connection total (Issue #553): the
+    chosen backup's tar bytes are already sitting locally, so upload + extract + restart
+    + wait + log-fetch all pipe through one ssh connection's stdin, no separate scp.
+
+    The destructive-action confirmation prompt happens before that connection opens
+    (previously it was after an initial upload) — nothing touches the network until
+    after you've confirmed, which is strictly safer than before, not just different.
+    """
     step("Listing available local backups")
 
     if not BACKUP_DIR.exists():
@@ -434,47 +529,50 @@ def do_rollback(config: dict[str, str]) -> None:
     for i, b in enumerate(backups):
         print(f"   [{i}] {b.name}")
 
-    if not test_ssh(config):
-        sys.exit(1)
-
     latest = backups[0]
-    step(f"Restoring from: {latest.name}")
-
-    rpath = remote_path(config)
-    target = ssh_target(config)
-    parent = f"{config['HA_CONFIG_PATH']}/custom_components"
-
-    # Upload tarball and extract on server
-    cmd = scp_args(config) + [str(latest), f"{target}:/tmp/ca_restore.tar.gz"]
-    rc, output = run_local(cmd)
-    if rc != 0:
-        fail(f"Upload failed: {output}")
-        sys.exit(1)
 
     resp = input(f"   This will DELETE the current installation and restore from {latest.name}. Continue? [y/N] ")
     if resp.strip().lower() != "y":
         info("Rollback cancelled.")
         return
 
-    # Issue #551: combined into one round trip (reduces connection count)
-    run_ssh(
-        config,
-        f"rm -rf {shlex.quote(rpath)} && tar xzf /tmp/ca_restore.tar.gz -C {shlex.quote(parent)}; "
-        f"rm -f /tmp/ca_restore.tar.gz",
+    step(f"Restoring from: {latest.name}")
+    identity = resolve_ssh_identity(config)
+    if identity:
+        info(f"Using SSH key: {identity}")
+
+    rpath = remote_path(config)
+    tar_bytes = latest.read_bytes()
+
+    # Extract into a temp dir first, only rm+mv the live directory as the final,
+    # near-instant step — see deploy_files()'s docstring for why (this project's SSH
+    # add-on has been observed to reset connections mid-command; a multi-second tar
+    # extraction is a real window for that to land badly on the live directory).
+    script = " && ".join(
+        [
+            "rm -rf /tmp/ca_restore_tmp",
+            "mkdir -p /tmp/ca_restore_tmp",
+            "tar xzf - -C /tmp/ca_restore_tmp",
+            f"rm -rf {shlex.quote(rpath)}",
+            f"mv /tmp/ca_restore_tmp {shlex.quote(rpath)}",
+            "echo ___RESTARTING___",
+            "ha core restart",
+            "sleep 60",
+            "echo ___LOGS___",
+            "ha core logs 2>/dev/null | grep -i climate_advisor | tail -30",
+        ]
     )
-    ok("Backup restored")
 
-    step("Restarting Home Assistant core")
-    run_ssh(config, "ha core restart")
-    ok("HA core restart initiated after rollback")
+    info("Uploading, extracting, restarting HA, and waiting ~60s — please wait...")
+    rc, output = run_ssh_piped(config, script, tar_bytes)
+    sections = _split_marked_output(output)
 
-    step("Waiting 60 seconds for HA to restart")
-    for i in range(60, 0, -10):
-        print(f"   {Color.GRAY}{i}s remaining...{Color.RESET}", end="\r")
-        time.sleep(10)
-    print("   " + " " * 30)
+    if "LOGS" not in sections:
+        fail(f"Rollback did not complete successfully: {output}")
+        sys.exit(1)
 
-    check_logs(config)
+    ok("Backup restored, HA core restart initiated")
+    check_logs(sections["LOGS"])
 
 
 # ---------------------------------------------------------------------------
@@ -536,26 +634,21 @@ def main() -> None:
                 gray(str(f.relative_to(COMPONENT_DIR)))
         sys.exit(0)
 
-    # Step 2: Test SSH
-    if not test_ssh(config):
+    # Step 2: Connect + backup (Issue #553: connections 1-2 of at most 3 total — see
+    # create_backup()'s docstring). Also serves as the connectivity test.
+    if not create_backup(config):
         sys.exit(1)
-
-    # Step 3: Backup + remote prep (Issue #551: batched into few round trips —
-    # see prep_remote_target()/create_backup())
-    create_backup(config)
     prune_backups(config)
-    prep_remote_target(config)
 
-    # Step 4: Deploy
-    if not deploy_files(config):
+    # Step 3: Deploy — connection 3: transfer + extract + verify + restart + wait +
+    # log-fetch, all in one connection (Issue #553 — see deploy_files()'s docstring)
+    success, log_output = deploy_files(config, skip_restart=args.skip_restart)
+    if not success:
         sys.exit(1)
 
-    # Step 5: Restart
-    restart_ha(config, skip=args.skip_restart)
-
-    # Step 6: Verify
+    # Step 4: Verify
     if not args.skip_restart:
-        check_logs(config)
+        check_logs(log_output)
 
     print(f"\n{Color.GREEN}============================================{Color.RESET}")
     print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")

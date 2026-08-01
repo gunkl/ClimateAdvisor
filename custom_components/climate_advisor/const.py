@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.45"
+VERSION = "0.5.46"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.46": [
+        "Fix #553: `tools/deploy.py` now transfers files by piping a tar stream through the"
+        " same SSH connection that extracts/restarts/verifies (no separate `scp`), capping a"
+        " full deploy at 3 connections total (was ~8 after #551's partial batching) and"
+        " `--rollback` at 1. Also fixes two real bugs found during live validation against"
+        " the production HA instance: a crash-safety gap where an interrupted connection"
+        " mid-extraction could leave the live integration directory deleted or half-written"
+        " (now extracts to a temp dir and swaps it into place as the final, near-instant"
+        " step), and a backup/restore tar-format mismatch that produced a nested"
+        " climate_advisor/climate_advisor/ directory on rollback. Developer/deployment"
+        " tooling only — no change to the integration itself.",
+    ],
     "0.5.45": [
         "Fix #551: reverted #549's SSH connection multiplexing in `tools/deploy.py` — it"
         " failed outright on Windows/Git-for-Windows SSH clients against a real HAOS SSH"
@@ -1367,6 +1379,67 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    553: {
+        "version_fixed": "0.5.46",
+        "title": (
+            "#551's command batching cut a typical deploy from ~10-11 SSH/SCP connections to"
+            " ~8, but a live test still hit the wall: 4 connections succeed, the 5th (the"
+            " file-copy scp, still a separate invocation from the batched ssh calls) gets"
+            " reset — same threshold as the original unfixed behavior. Explicit direction:"
+            " combine everything into no more than 3 connections total, and validate live"
+            " before opening any PR (the prior PR, #549, had gone out on lint/unit checks"
+            " alone and turned out to be broken in live use)"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: eliminated the scp file-transfer connection entirely by piping"
+            " a tar stream of the component directory through an ssh connection's stdin (new"
+            " _build_component_tar() using stdlib tarfile+io.BytesIO, new run_ssh_piped()"
+            " passing input=tar_bytes to subprocess.run) — the remote script that receives it"
+            " also runs everything else that needs to happen after the files land (verify,"
+            " restart, wait, log-fetch), all in that one connection. create_backup() combines"
+            " connect+backup-tar+legacy-cleanup+mkdir into one ssh call (also serves as the"
+            " connectivity test, replacing the standalone test_ssh()) plus one scp download of"
+            " the backup — connections 1-2. deploy_files() is connection 3. do_rollback() drops"
+            " to 1 connection (the chosen local backup's bytes pipe in the same way, no upload-"
+            " then-separate-extract). Result: 3 connections for a full deploy (2 for"
+            " --skip-restart), 1 for --rollback — verified via deploy.py's own debug log during"
+            " live testing against the real HA host. Two real bugs were caught during that live"
+            " validation (not caught by ruff/pytest, which is exactly why live validation was"
+            " required this time): (1) crash-safety — the initial rm-rf-then-extract approach"
+            " for both deploy and rollback left a multi-second window where a connection drop"
+            " mid-extraction (this HA SSH add-on has demonstrated it does reset connections"
+            " mid-command) could leave the live integration directory deleted or half-written;"
+            " fixed by extracting into a temp dir and swapping it into place as the final,"
+            " near-instant step, confirmed safe by directly inspecting the remote filesystem"
+            " after a live connection reset actually occurred mid-test. (2) tar-format"
+            " mismatch — create_backup()'s backup tar wrapped its contents in a climate_advisor/"
+            " directory (tar czf -C parent climate_advisor) while the new temp-extract-and-swap"
+            " logic assumed a flat layout matching _build_component_tar(), so a live rollback"
+            " test produced a nested climate_advisor/climate_advisor/ and a broken HA"
+            " integration ('Integration climate_advisor not found') until create_backup()'s tar"
+            " command was changed to -C rpath . (flat, matching the deploy-tar format);"
+            " re-verified live afterward with a clean rollback that left the exact expected"
+            " file layout and a healthy HA restart. As a side effect of the temp-dir-swap"
+            " approach, deploys are now exact mirrors of the source tree (extract-on-top"
+            " previously left stale files from earlier versions, e.g. renamed/removed files,"
+            " sitting around indefinitely — observed live as a 35-local-vs-38-remote file-count"
+            " mismatch, now exactly 35=35). docs/SSH-SETUP.md rewritten to document the 3"
+            " connections precisely and record both superseded approaches (#549, #551) and why."
+        ),
+        "scope_not_covered": (
+            "Does not add automated test coverage for the new tar-piping/temp-swap logic"
+            " (tests/ stubs Home Assistant and has no live-SSH test harness) — validated"
+            " entirely through live manual testing against the real production HA instance"
+            " per explicit instruction, not through the automated test suite. Does not handle"
+            " backup files created by deploy.py before this fix (they use the old wrapped tar"
+            " format); if a user has pre-#553 backups and needs to roll back to one after"
+            " upgrading, they'd need to extract it manually — a narrow, low-likelihood edge"
+            " case judged acceptable rather than adding dual-format-detection complexity for"
+            " it. Still no guarantee against an arbitrarily strict SSH add-on rate limit — 3"
+            " (or 1) is a large reduction, not a mathematical zero; the add-on's own"
+            " Protection-mode setting remains the authoritative fix if hit."
+        ),
+    },
     551: {
         "version_fixed": "0.5.45",
         "title": (

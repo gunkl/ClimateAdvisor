@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.40"
+VERSION = "0.5.41"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.41": [
+        "Fix #543: Chart-log save/load no longer runs synchronously on Home Assistant's event"
+        " loop — could cause brief startup/update stalls. The integration also now correctly"
+        " reports itself as cloud-connected ('cloud_polling') instead of 'local_polling',"
+        " matching its use of the Anthropic AI cloud API. Both were required by HACS's"
+        " official default-repository review.",
+    ],
     "0.5.40": [
         "Feat #540: new 'Nat-Vent Soft-Start (Purge Mode)' setting, on by default. The"
         " whole-house fan can now start moving air and purging attic/thermal-mass heat as soon"
@@ -1334,6 +1341,67 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    543: {
+        "version_fixed": "0.5.41",
+        "title": (
+            "HACS default-repository review (hacs/default#8117) flagged two blocking issues:"
+            " chart_log.py's ChartStateLog.load()/save() performed synchronous file I/O"
+            " (tempfile write + os.replace + os.chmod, or a blocking Path.read_text()) directly"
+            " on Home Assistant's event loop from three coordinator.py call sites, and"
+            " manifest.json declared iot_class: 'local_polling' for an integration whose AI"
+            " features call the Anthropic cloud API"
+        ),
+        "scope_covered": (
+            "coordinator.py: the synchronous self._chart_log.load() call in __init__() was"
+            " removed and replaced with the first await"
+            " self.hass.async_add_executor_job(self._chart_log.load) call inside"
+            " async_restore_state() — safe because nothing between coordinator construction"
+            " (__init__.py) and async_restore_state() reads chart_log entries. Both"
+            " self._chart_log.save() call sites (the 30-min poll write in"
+            " _async_update_data_impl, and the event-driven hvac_action-transition write in"
+            " _async_thermostat_changed) now await"
+            " self.hass.async_add_executor_job(self._chart_log.save), matching the existing"
+            " executor-offload pattern already used for learning/state-persistence I/O"
+            " elsewhere in this file. ChartStateLog.append() was left unchanged — it only"
+            " mutates an in-memory list, no I/O. manifest.json iot_class corrected from"
+            " 'local_polling' to 'cloud_polling'. Updated six test stub builders"
+            " (test_event_log_persistence.py, test_grace_restart_behavior.py,"
+            " test_solar_phase_periodic.py — missing _chart_log attribute plus positional"
+            " executor-mock side_effect lists that assumed a fixed call count/order in"
+            " async_restore_state(); test_hvac_session_detection.py — async_add_executor_job"
+            " mock that didn't invoke the wrapped function, breaking a"
+            " coord._chart_log.save.assert_called() assertion; test_startup_coalesce.py and"
+            " test_override_automation_boundary.py — bare MagicMock() hass with no"
+            " async_add_executor_job override, which would silently swallow the new awaited"
+            " call via the pre-existing contextlib.suppress(Exception) around the chart-log"
+            " write). Also fixed a documentation/process gap found while working this issue:"
+            " claude.md's mandatory PR checklist never required a CHANGELOG.md entry, so it had"
+            " silently gone unmaintained since v0.4.60 — added a checklist step for it and"
+            " backfilled CHANGELOG.md with every release from v0.4.61 through v0.5.41 using"
+            " real commit dates pulled from git history (three RELEASE_NOTES keys —"
+            " 0.4.62, 0.4.75, 0.5.0 — were never actually committed as a live VERSION value and"
+            " are folded into the version that actually shipped their content, 0.4.63 and"
+            " 0.5.1 respectively; 0.5.31's exact originating commit is ambiguous due to a"
+            " same-day multi-version merge sequence and is folded into 0.5.32 with that"
+            " ambiguity noted inline)."
+        ),
+        "scope_not_covered": (
+            "Does not address any other reviewer feedback from HACS PR #8117 beyond these two"
+            " specific items — if additional review comments exist, they need their own"
+            " tracking issue. Does not audit other modules for un-offloaded blocking I/O beyond"
+            " chart_log.py; state.py's StatePersistence and learning.py's LearningEngine I/O"
+            " were already offloaded via the executor pattern prior to this fix, but a full"
+            " sweep of the rest of the integration for similar gaps was not performed. Does not"
+            " add locking around the now-concurrent _chart_log.save() executor calls — two"
+            " call sites that were previously serialized by the single-threaded event loop can"
+            " now run on different executor threads; each write is still atomic"
+            " (tempfile+os.replace) so this cannot corrupt the file, and it's consistent with"
+            " the existing no-lock convention already accepted for learning.save_state()/"
+            " _state_persistence.save() elsewhere in this file, but it is a real (very narrow)"
+            " behavior change — a single asyncio.Lock() around the two call sites would close"
+            " it if wanted later."
+        ),
+    },
     540: {
         "version_fixed": "0.5.40",
         "title": (

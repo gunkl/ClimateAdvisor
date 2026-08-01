@@ -204,6 +204,9 @@ def _make_restore_coord_stub(ae_mock=None):
     coord._set_occupancy_mode = MagicMock()
     coord._emit_event = MagicMock()
 
+    # Issue #543: async_restore_state() now also loads chart_log via the executor.
+    coord._chart_log = MagicMock()
+
     coord.async_restore_state = types.MethodType(ClimateAdvisorCoordinator.async_restore_state, coord)
 
     return coord
@@ -235,14 +238,15 @@ def _run_restore_with_state(state_data: dict, ae: MagicMock) -> MagicMock:
     coord.learning = learning_mock
     coord._state_persistence = MagicMock()
 
+    async def _fake_executor(fn, *args):
+        if fn is coord._state_persistence.load:
+            return state_data
+        return None
+
     with (
         patch(_PATCH_DT_NOW, return_value=_STABLE_NOW),
-        patch.object(coord.hass, "async_add_executor_job", new_callable=AsyncMock) as mock_exec,
+        patch.object(coord.hass, "async_add_executor_job", new=_fake_executor),
     ):
-        mock_exec.side_effect = [
-            None,  # learning.load_state()
-            state_data,  # _state_persistence.load()
-        ]
         asyncio.run(coord.async_restore_state())
 
     return coord

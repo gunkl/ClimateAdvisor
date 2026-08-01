@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.45] — 2026-08-01
+
+- Fix #551: reverted #549's SSH connection multiplexing (`ControlMaster`) in
+  `tools/deploy.py` — live testing showed it fails immediately against a real HAOS SSH
+  add-on on this project's Windows/Git-for-Windows SSH client, making deploys worse (failing
+  on the very first connection instead of getting partway through). Replaced with command
+  batching — combining several remote commands into fewer SSH round trips — to reduce
+  connection count and avoid tripping the add-on's rate-limit protection, without depending
+  on client-side multiplexing support. `docs/SSH-SETUP.md` documents both the batching
+  approach and the ControlMaster reversion. Developer/deployment tooling only — no change to
+  the integration itself.
+
 ## [0.5.44] — 2026-08-01
 
 - Fix #549: `tools/deploy.py` now multiplexes all of its SSH/SCP connections through one real

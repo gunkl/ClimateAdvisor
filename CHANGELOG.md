@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.43] — 2026-08-01
+
+- Fix #547: `tools/deploy.py` now prints which SSH identity file it will use before
+  connecting (`Using SSH key: ...`), resolved locally via `ssh -G` with no network I/O.
+  `docs/SSH-SETUP.md` documents a Windows-specific gotcha where two different `ssh.exe`
+  binaries commonly on `PATH` (Git's MSYS build and Windows' native OpenSSH client) can
+  resolve default identity files differently, and recommends setting `HA_SSH_KEY` explicitly
+  to remove the ambiguity. Deployment tooling and docs only — no change to the integration.
+
 ## [0.5.42] — 2026-08-01
 
 - Fix #545: strengthened project guidance and automated checks to prevent a repeat of

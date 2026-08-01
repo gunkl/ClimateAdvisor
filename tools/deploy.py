@@ -169,6 +169,29 @@ def remote_path(config: dict[str, str]) -> str:
     return f"{config['HA_CONFIG_PATH']}/custom_components/climate_advisor"
 
 
+def resolve_ssh_identity(config: dict[str, str]) -> str | None:
+    """Locally resolve which SSH identity file would be used, without connecting.
+
+    Issue #547: on Windows, two different ssh.exe binaries (Git's MSYS build and
+    Windows' native OpenSSH client) commonly sit on PATH and can resolve default
+    identities differently depending on invocation context, making key-related
+    connection failures hard to diagnose. This surfaces the answer up front —
+    `ssh -G` only resolves config locally, it never opens a network connection.
+    Returns None if resolution fails or no candidate identity file exists on disk.
+    """
+    if config["HA_SSH_KEY"]:
+        return config["HA_SSH_KEY"]
+
+    result = subprocess.run(["ssh", "-G", ssh_target(config)], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.lower().startswith("identityfile "):
+            candidate = line.split(None, 1)[1]
+            if Path(candidate).expanduser().exists():
+                return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # SSH helpers
 # ---------------------------------------------------------------------------
@@ -200,6 +223,14 @@ def run_local(command: list[str]) -> tuple[int, str]:
 
 def test_ssh(config: dict[str, str]) -> bool:
     step(f"Testing SSH connection to {config['HA_HOST']}:{config['HA_SSH_PORT']}")
+    identity = resolve_ssh_identity(config)
+    if identity:
+        info(f"Using SSH key: {identity}")
+    else:
+        info(
+            "No SSH key file resolved (HA_SSH_KEY unset, no default identity file found) — "
+            "relying on ssh-agent or other auth."
+        )
     rc, output = run_ssh(config, "echo ok")
     if rc == 0 and "ok" in output:
         ok("SSH connection successful")

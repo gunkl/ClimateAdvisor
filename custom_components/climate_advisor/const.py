@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.42"
+VERSION = "0.5.43"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.43": [
+        "Fix #547: `tools/deploy.py` now prints which SSH identity file it will use before"
+        " connecting, and the SSH setup guide documents a Windows-specific default-key-"
+        " resolution gotcha. Developer/deployment tooling only — no change to the integration"
+        " itself.",
+    ],
     "0.5.42": [
         "Fix #545: strengthened project guidance and automated checks to prevent a repeat of"
         " #543-style bugs (blocking file I/O called directly from async code, stalling Home"
@@ -1347,6 +1353,36 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    547: {
+        "version_fixed": "0.5.43",
+        "title": (
+            "Deploying #543/#545 hit intermittent SSH connection resets/timeouts;"
+            " confirming which SSH key tools/deploy.py would actually use required a manual"
+            " investigation (reading ssh_args()'s HA_SSH_KEY handling, checking ~/.ssh/"
+            " contents, running ssh -G by hand) instead of being visible from the tool itself"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: new resolve_ssh_identity() helper — resolves and prints which"
+            " SSH identity file will be used (via ssh -G <user>@<host>, a local-only call, no"
+            " network I/O) before test_ssh() attempts the actual connection. No change to"
+            " connection/deploy logic itself; HA_SSH_KEY was already optional and per-user"
+            " (git-ignored .deploy.env), never hardcoded in source. docs/SSH-SETUP.md:"
+            " Troubleshooting section gained a note on Windows' two-ssh.exe-on-PATH situation"
+            " (Git's MSYS build vs. the native OpenSSH client, which can resolve default"
+            " identities differently depending on invocation context) recommending explicit"
+            " HA_SSH_KEY as a zero-downside way to remove the ambiguity, plus a"
+            " self-diagnostic (ssh -G user@host) users can run themselves."
+        ),
+        "scope_not_covered": (
+            "Does not root-cause the original #543/#545 deploy connection resets/timeouts —"
+            " those were separately diagnosed (via ssh -v and Test-NetConnection) as a"
+            " connection-churn/rate-limit reaction on the HA SSH add-on side (deploy.py opens"
+            " ~6-8 sequential SSH connections per run), not a key-resolution problem; not"
+            " addressed here since it's server-side add-on configuration, outside this repo's"
+            " control. No user-visible or runtime behavior change — deployment tooling and"
+            " docs only."
+        ),
+    },
     545: {
         "version_fixed": "0.5.42",
         "title": (

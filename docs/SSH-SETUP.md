@@ -98,6 +98,19 @@ This runs validation only and shows what would be deployed without making change
 - Verify your public key is in the add-on's Authorized Keys config
 - Make sure you're pointing to the correct private key file
 - Check the key wasn't accidentally modified (re-copy it)
+- `python tools/deploy.py` prints the resolved identity file (`Using SSH key: ...`) before
+  connecting — check that it's the key you expect. You can also run this yourself, purely
+  locally (no connection attempted): `ssh -G <user>@<host>` and look for the `identityfile`
+  line(s).
+
+### Windows: default-key resolution behaves inconsistently
+Windows commonly has two `ssh.exe` binaries on `PATH` — Git for Windows' bundled MSYS build
+and Windows' native OpenSSH client — which can resolve default identity files differently
+depending on how a program invokes `ssh` (this affects `HOME` resolution and, in turn, which
+`~/.ssh/` default key gets picked). If you have a specific key you expect to be used, set
+`HA_SSH_KEY=~/.ssh/your_key` explicitly in `.deploy.env` rather than relying on default
+resolution — it costs nothing (still per-user, git-ignored config, not hardcoded anywhere)
+and removes the ambiguity entirely.
 
 ### "Host key verification failed"
 - The deploy script uses `StrictHostKeyChecking=no` to avoid this

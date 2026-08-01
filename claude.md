@@ -163,11 +163,18 @@ Any automation phase that changes the thermostat setpoint (even temporarily) MUS
 
 ### Thread-Safety Requirements (CRITICAL)
 
-**Decision**: Any heavy synchronous computation called from an `async` method MUST be offloaded to a thread-pool executor via `await hass.async_add_executor_job()`. Blocking the HA event loop with CPU-bound work causes event loop jitter and can trigger HA watchdog restarts.
+**Decision**: Any blocking work called from an `async` method MUST be offloaded to a thread-pool executor via `await hass.async_add_executor_job()`. This covers two distinct hazards, both of which stall the HA event loop for the entire Home Assistant instance (not just this integration) and can trigger HA watchdog restarts: **heavy synchronous computation** (CPU-bound work) and **blocking I/O** (file reads/writes, `os.replace`/`os.chmod`, `tempfile`, sockets, subprocess calls). Treat both as equally in scope — do not read this section as "CPU work only."
 
 #### Rule
 
-Before calling a function from inside an `async def` method, ask: **"Does this run more than ~10 ms of synchronous Python?"** If yes, offload it:
+Before calling a function from inside an `async def` method, ask **both** questions — either one alone is sufficient to require offloading:
+
+1. **CPU heuristic**: "Does this run more than ~10 ms of synchronous Python?"
+2. **I/O heuristic** (does not depend on timing): "Does this call ever touch a filesystem, socket, or subprocess — `open`, `Path.read_text`/`write_text`, `os.replace`, `os.chmod`, `tempfile`, `requests`/`urllib`, `subprocess`?" If yes, it must be offloaded regardless of how fast it usually runs in testing — disk/network latency spikes are exactly when blocking the event loop hurts most, and they won't show up in a quick local test.
+
+This applies just as much to a call one level removed — `self._some_helper.save()` — as to a literal `open(...)` written inline. A blocking call doesn't stop being blocking because it's hidden behind a method name; check what the callee actually does, not just what the call site looks like.
+
+If either question is "yes," offload it:
 
 ```python
 import functools
@@ -175,20 +182,25 @@ import functools
 result = await self.hass.async_add_executor_job(functools.partial(heavy_sync_function, arg1, arg2, keyword=value))
 ```
 
+For a plain bound method with no extra arguments, `functools.partial` isn't needed — pass the method directly: `await self.hass.async_add_executor_job(self._chart_log.save)`.
+
 **Capture all arguments in the event loop thread** (i.e., evaluate `self.*` attributes and helper calls like `self._get_indoor_temp()` before `functools.partial`, not inside the executor). The executor runs the partial with no additional arguments.
 
 #### Canonical Examples
 
-- `_build_predicted_indoor_future()` in `coordinator.py` — ODE integration + OLS math (~400 lines). Called from `_async_update_data()` and `_async_send_briefing()` via executor. Fixed in Issue #376.
+- `_build_predicted_indoor_future()` in `coordinator.py` — ODE integration + OLS math (~400 lines). Called from `_async_update_data()` and `_async_send_briefing()` via executor. Fixed in Issue #376 (the CPU-bound case this section was originally written for).
 - OLS regression functions in `learning.py` (`compute_k_passive`, `compute_k_active`, etc.) — called from synchronous commit helpers that are themselves invoked via `async_add_executor_job`. Already correct.
+- `ChartStateLog.load()`/`save()` in `chart_log.py` — plain synchronous `tempfile`/`os.replace`/`os.chmod`/`Path.read_text` calls, zero CPU-bound math. Called from `coordinator.py`'s `__init__` (moved to `async_restore_state()`) and two `async` methods. Fixed in Issue #543 — this is the **I/O case**, and it shipped unwrapped and passed review for months precisely because nothing about it looked like "heavy computation": no loop, no math, just `self._chart_log.save()`. If you're checking whether your code needs offloading, don't just ask "is this slow" — ask "does the thing I'm calling touch disk."
 
 #### What Does NOT Need Offloading
 
 - Simple dict lookups, attribute reads, string formatting — these complete in microseconds.
 - Coroutine calls (`await some_async_fn()`) — already non-blocking by definition.
-- I/O already wrapped in `async_add_executor_job` (file reads, DB writes) — do not double-wrap.
+- I/O that is *already* wrapped in `async_add_executor_job` at its call site — do not double-wrap. This is the only I/O exemption; it is not a blanket "I/O is handled elsewhere" pass. New I/O you're adding is your responsibility to wrap.
 
-**Violation protocol**: Same as Security — stop, flag, and ask before shipping new CPU-heavy code that runs synchronously inside an `async` method.
+**Violation protocol**: Same as Security — stop, flag, and ask before shipping new CPU-heavy or blocking-I/O code that runs synchronously inside an `async` method.
+
+**Enforcement**: This rule is checked, not just asserted. Ruff's `ASYNC` lint category (enabled in `pyproject.toml`) catches a blocking call written literally inline in an async function (e.g. `open()`, a `Path` method, `time.sleep`). `tests/test_executor_offload.py` catches known blocking sub-component methods (see its `_BLOCKING_METHODS` registry) called unwrapped from any async method in `coordinator.py` — the pattern that actually bit Issue #543, since ruff's `ASYNC` rules don't see through a method call into another module. If you introduce a new I/O sub-component (a new `chart_log.py`/`state.py`/`learning.py`-shaped class), add its blocking methods to that registry.
 
 ### Security Requirements (CRITICAL)
 

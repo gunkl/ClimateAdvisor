@@ -1,10 +1,16 @@
-"""Regression tests for Issue #376: ODE/OLS computation executor offload.
+"""Regression tests for Issue #376 and Issue #543/#545: executor offload for
+blocking work called from async methods in coordinator.py.
 
-Verifies that _build_predicted_indoor_future is never called directly from
-async methods in coordinator.py (which would block the HA event loop).
+TestODEExecutorOffload (Issue #376) verifies that _build_predicted_indoor_future
+is never called directly from specific async methods — CPU-bound work.
 
-The fix wraps all async callsites in await hass.async_add_executor_job(functools.partial(...)).
-If someone removes the wrapper, the AST test catches it at test time rather than in prod.
+TestBlockingIOExecutorOffload (Issue #543/#545) is registry-driven and generalizes
+the same idea to blocking I/O: known blocking sub-component methods (chart_log,
+state persistence, learning) must never be called directly from ANY async method
+in coordinator.py, not just a hardcoded list of call sites.
+
+If someone removes an executor wrapper, these AST tests catch it at test time
+rather than in prod.
 """
 
 from __future__ import annotations
@@ -175,4 +181,88 @@ class TestODEExecutorOffload:
         assert executor_calls, (
             "async_add_executor_job not found in ClimateAdvisorChartDataView.get(). "
             "The chart endpoint must offload get_chart_data to the thread pool."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Issue #543 / #545: generalized check for blocking sub-component methods
+# called unwrapped from ANY async method in coordinator.py.
+# ---------------------------------------------------------------------------
+
+# Known (attribute_name, method_name) pairs that do blocking I/O and must never
+# be called directly from an async method — only passed by reference to
+# await hass.async_add_executor_job(self.<attr>.<method>, ...).
+# Add an entry here whenever a new I/O sub-component is introduced (chart_log.py,
+# state.py, learning.py are the existing ones as of Issue #543/#545).
+_BLOCKING_METHODS: set[tuple[str, str]] = {
+    ("_chart_log", "load"),
+    ("_chart_log", "save"),
+    ("_state_persistence", "load"),
+    ("_state_persistence", "save"),
+    ("learning", "load_state"),
+    ("learning", "save_state"),
+}
+
+
+def _find_blocking_calls_in_node(fn_node: ast.AST) -> list[ast.Call]:
+    """Walk fn_node and return any direct calls shaped like self.<attr>.<method>(...)
+    where (<attr>, <method>) is a known-blocking pair from _BLOCKING_METHODS.
+
+    Correctly-offloaded code never produces this Call shape at all — the fix passes
+    self.<attr>.<method> by reference to hass.async_add_executor_job(...) without
+    invoking it (e.g. `await self.hass.async_add_executor_job(self._chart_log.save)`).
+    So unlike _find_direct_calls_in_node above (which must skip functools.partial's
+    arguments, since those ARE real calls to the wrapped function), no exclusion
+    logic is needed here: any matching Call node is, by construction, a direct
+    blocking call that bypassed the executor.
+    """
+    blocking_calls = []
+
+    class _Visitor(ast.NodeVisitor):
+        def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Attribute)
+                and isinstance(func.value.value, ast.Name)
+                and func.value.value.id == "self"
+                and (func.value.attr, func.attr) in _BLOCKING_METHODS
+            ):
+                blocking_calls.append(node)
+            self.generic_visit(node)
+
+    _Visitor().visit(fn_node)
+    return blocking_calls
+
+
+class TestBlockingIOExecutorOffload:
+    """Known blocking sub-component methods must never be called directly from
+    any async method in coordinator.py.
+
+    Regression for Issue #543: ChartStateLog.load()/save() did blocking file I/O
+    (tempfile write, os.replace, os.chmod, Path.read_text) but were called directly
+    from async coordinator methods without going through
+    await hass.async_add_executor_job(...), stalling the HA event loop for the
+    entire Home Assistant instance. Unlike TestODEExecutorOffload above (hardcoded
+    to 3 call sites for one function), this check is registry-driven and applies to
+    EVERY async method in coordinator.py — add new (attribute, method) pairs to
+    _BLOCKING_METHODS as new I/O sub-components are introduced (see
+    claude.md's Thread-Safety Requirements section).
+    """
+
+    def test_no_blocking_calls_in_any_async_method(self):
+        source = COORDINATOR_PY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        offenders: list[tuple[str, ast.Call]] = []
+        for name, node in _extract_async_methods(tree):
+            for call in _find_blocking_calls_in_node(node):
+                offenders.append((name, call))
+
+        assert not offenders, (
+            "Blocking sub-component method(s) called directly (not via "
+            "hass.async_add_executor_job) inside async method(s): "
+            + ", ".join(f"{name}() at line {call.lineno}" for name, call in offenders)
+            + ". Wrap in await self.hass.async_add_executor_job(self.<attr>.<method>) "
+            "to avoid blocking the HA event loop."
         )

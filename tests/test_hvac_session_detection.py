@@ -64,7 +64,9 @@ def _make_thermostat_coord(*, hvac_on_since=None):
     coord = object.__new__(ClimateAdvisorCoordinator)
 
     hass = MagicMock()
-    hass.async_add_executor_job = AsyncMock(return_value=None)
+    # Issue #543: _chart_log.save() is now awaited via the executor — must actually
+    # invoke the wrapped function so coord._chart_log.save.assert_called() below works.
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
 
     coord.hass = hass

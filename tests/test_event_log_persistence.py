@@ -126,6 +126,9 @@ def _make_restore_coordinator():
     # ── _state_persistence ────────────────────────────────────────────────
     coord._state_persistence = MagicMock()
 
+    # ── _chart_log (Issue #543: async_restore_state() now loads it) ────────
+    coord._chart_log = MagicMock()
+
     # ── runtime state ─────────────────────────────────────────────────────
     coord._event_log = []
     coord._rejection_log = {}
@@ -166,17 +169,22 @@ def _make_restore_coordinator():
 def _run_restore(coord, *, state_data: dict):
     """Drive async_restore_state() with controlled executor responses.
 
-    The two async_add_executor_job calls inside async_restore_state are:
-      1. self.learning.load_state        → returns None
-      2. self._state_persistence.load   → returns state_data
+    The async_add_executor_job calls inside async_restore_state are:
+      1. self._chart_log.load           → return value unused
+      2. self.learning.load_state       → returns None
+      3. self._state_persistence.load   → returns state_data
+
+    Keyed by function identity rather than call order, since call count/order
+    isn't a contract worth pinning down in this stub.
 
     dt_util is patched on the coordinator module so that strftime("%Y-%m-%d")
     returns _TODAY_STR and the same-day restore branch is reached (not skipped).
     """
-    executor_results = iter([None, state_data])
 
     async def _fake_executor(fn, *args):
-        return next(executor_results, None)
+        if fn is coord._state_persistence.load:
+            return state_data
+        return None
 
     coord.hass = MagicMock()
     coord.hass.async_add_executor_job = _fake_executor

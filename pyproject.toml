@@ -8,11 +8,15 @@ line-length = 120
 exclude = [".claude"]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "UP", "B", "SIM", "T20"]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "T20", "ASYNC"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["T20"]
 "tools/*" = ["T20"]
+# take_screenshots.py runs its own private asyncio loop for Playwright, not Home
+# Assistant's shared event loop — the ASYNC240 hazard (stalling a live production
+# loop) doesn't apply to a one-off local CLI script.
+"tools/take_screenshots.py" = ["ASYNC240"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

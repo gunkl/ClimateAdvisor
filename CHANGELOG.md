@@ -3,6 +3,18 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.42] — 2026-08-01
+
+- Fix #545: strengthened project guidance and automated checks to prevent a repeat of
+  #543-style bugs (blocking file I/O called directly from async code, stalling Home
+  Assistant's event loop). `claude.md`'s Thread-Safety Requirements section now explicitly
+  covers blocking I/O, not just CPU-bound computation. Ruff's `ASYNC` lint category is now
+  enabled (catches a blocking call written directly inline in an async function, going
+  forward). `tests/test_executor_offload.py` gained a registry-driven check
+  (`TestBlockingIOExecutorOffload`) that verifies known blocking sub-component methods are
+  never called unwrapped from any async method in `coordinator.py` — the part that actually
+  would have caught #543. No user-visible behavior change; contributor-facing tooling only.
+
 ## [0.5.41] — 2026-08-01
 
 - Fix #543: `chart_log.py`'s `ChartStateLog.load()`/`save()` performed synchronous file I/O

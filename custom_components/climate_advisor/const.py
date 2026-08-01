@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.41"
+VERSION = "0.5.42"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.42": [
+        "Fix #545: strengthened project guidance and automated checks to prevent a repeat of"
+        " #543-style bugs (blocking file I/O called directly from async code, stalling Home"
+        " Assistant). No user-visible behavior change — this is contributor-facing tooling"
+        " (docs, lint rule, and a regression test) only.",
+    ],
     "0.5.41": [
         "Fix #543: Chart-log save/load no longer runs synchronously on Home Assistant's event"
         " loop — could cause brief startup/update stalls. The integration also now correctly"
@@ -1341,6 +1347,58 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    545: {
+        "version_fixed": "0.5.42",
+        "title": (
+            "Issue #543 (blocking file I/O called directly from async coordinator methods)"
+            " passed review for months despite this project already having a CRITICAL-tier"
+            " rule against blocking the event loop, because that rule (claude.md's"
+            " Thread-Safety Requirements, added after Issue #376) was framed entirely around"
+            " CPU-bound computation — blocking I/O was only mentioned as a 'don't"
+            " double-wrap' assumption — and its enforcement (tests/test_executor_offload.py)"
+            " was hardcoded to the 3 call sites from that earlier issue's specific function,"
+            " with no way to catch a different function/pattern"
+        ),
+        "scope_covered": (
+            "claude.md: Thread-Safety Requirements section broadened to explicitly cover"
+            " blocking I/O (file reads/writes, os.replace/os.chmod, tempfile, sockets,"
+            " subprocess) as equally in-scope as CPU-bound work, with a second heuristic"
+            " question that doesn't depend on timing, ChartStateLog/#543 added as a second"
+            " canonical example explaining why it was missed (no CPU-heavy math, blocking call"
+            " hidden behind a helper method name), the 'I/O already wrapped' exemption"
+            " reworded so it can't be misread as a blanket I/O pass, and a new Enforcement"
+            " line cross-referencing the two mechanisms below. pyproject.toml: ruff's ASYNC"
+            " lint category (flake8-async) enabled — verified zero existing violations across"
+            " the whole repo except one pre-existing false-positive-for-purpose case in"
+            " tools/take_screenshots.py (a standalone Playwright CLI script with its own"
+            " private event loop, not Home Assistant's shared one), which got a scoped"
+            " per-file-ignore with a comment explaining why. Catches ASYNC230/240/210/212/220"
+            "/221/222/251 (blocking open/Path methods/sync HTTP/subprocess/sleep) written"
+            " literally inline in any async function going forward — verified this would NOT"
+            " have caught #543 itself, since #543's blocking call was hidden inside a helper"
+            " object's method, not literally inline. tests/test_executor_offload.py: new"
+            " registry-driven TestBlockingIOExecutorOffload class with a _BLOCKING_METHODS set"
+            " of (attribute, method) pairs (_chart_log.load/save, _state_persistence.load/save,"
+            " learning.load_state/save_state) checked against every async method in"
+            " coordinator.py (not just a hardcoded list of call sites) — this is the part that"
+            " actually would have caught #543. Verified both that it passes against the"
+            " current (fixed) coordinator.py and, via a synthetic reproduction of the original"
+            " pre-fix pattern, that it correctly flags a blocking call in an async method"
+            " while correctly ignoring the same call in a sync method and a properly-wrapped"
+            " async_add_executor_job reference."
+        ),
+        "scope_not_covered": (
+            "No runtime behavior change — this is entirely contributor-facing tooling/docs."
+            " The _BLOCKING_METHODS registry is manually maintained, not auto-discovered — a"
+            " new I/O sub-component's blocking methods must be added to it by whoever"
+            " introduces them; nothing currently enforces that the registry itself stays"
+            " complete. Does not add a generic taint-analysis-style blocking-call detector"
+            " (out of scope, not this project's established testing style). Does not extend"
+            " ruff ASYNC or the registry check to files outside custom_components/coordinator.py"
+            " (e.g. api.py, automation.py) — those are covered only by the older, narrower"
+            " TestODEExecutorOffload checks where applicable."
+        ),
+    },
     543: {
         "version_fixed": "0.5.41",
         "title": (

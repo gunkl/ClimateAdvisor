@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.43"
+VERSION = "0.5.44"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.44": [
+        "Fix #549: `tools/deploy.py` now multiplexes all of its SSH/SCP connections through"
+        " one real connection per run (SSH `ControlMaster`), instead of opening 6-8 separate"
+        " ones — avoids tripping the HA SSH add-on's rate-limit/brute-force protection."
+        " Developer/deployment tooling only — no change to the integration itself.",
+    ],
     "0.5.43": [
         "Fix #547: `tools/deploy.py` now prints which SSH identity file it will use before"
         " connecting, and the SSH setup guide documents a Windows-specific default-key-"
@@ -1353,6 +1359,46 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    549: {
+        "version_fixed": "0.5.44",
+        "title": (
+            "Deploying #543/#545/#547 hit a repeatable pattern: the first ~4 SSH connections"
+            " tools/deploy.py opens in a single run succeed cleanly, then the 5th gets"
+            " 'Connection reset by <host> port 22', and every connection after that times out"
+            " for the rest of the run — the signature of the HA SSH add-on's rate-limit/"
+            " brute-force protection ('Protection mode') blocking the source IP after too many"
+            " connections in a short window, since deploy.py opens 6-8 separate connections"
+            " per run (connection test, dir check, backup tar+download, cleanup, mkdir, file"
+            " copy, restart, log check)"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: new control_path()/_multiplex_args() helpers add SSH"
+            " ControlMaster/ControlPath/ControlPersist options to every ssh_args()/scp_args()"
+            " invocation, so all of a run's connections tunnel through one real TCP connection"
+            " instead of opening a fresh one each time (ControlMaster=auto — the first call"
+            " creates the master, every later call with a matching ControlPath transparently"
+            " reuses it; ControlPersist=10m keeps it alive across the run). New"
+            " close_control_master() does a best-effort cleanup at the end of main(), wrapped"
+            " in try/finally so it runs on every exit path including sys.exit() calls and"
+            " --rollback. Verified via a manual reproduction that the exact multiplexed ssh"
+            " command builds and executes correctly (produces a real control socket at"
+            " ~/.ssh/sockets/deploy-<user>-<host>-<port>.sock). docs/SSH-SETUP.md: new"
+            " Troubleshooting entry describing the rate-limit signature and pointing at this"
+            " fix plus the add-on's own Protection mode setting as a second line of defense."
+        ),
+        "scope_not_covered": (
+            "Does not change or configure the HA SSH add-on's rate-limit/Protection mode"
+            " settings — that's server-side configuration outside this repo's control; docs"
+            " point users at it as a manual step. Live end-to-end verification of a full"
+            " deploy run completing under multiplexing was inconclusive at review time — a"
+            " manual multiplexed connection attempt hit 'Connection reset by peer' while the"
+            " host was still inside the rate-limit cooldown window from an earlier failed"
+            " full-deploy attempt (confirmed via a bare non-multiplexed connection succeeding"
+            " immediately before it, then failing immediately after — consistent with a"
+            " still-recovering rate limit, not a multiplexing defect) — re-verify with a real"
+            " deploy run once enough time has passed since the last rate-limit trip."
+        ),
+    },
     547: {
         "version_fixed": "0.5.43",
         "title": (

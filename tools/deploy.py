@@ -137,9 +137,42 @@ def validate_config(config: dict[str, str]) -> list[str]:
     return errors
 
 
+def control_path(config: dict[str, str]) -> str:
+    """Path for the SSH multiplexing control socket shared by every ssh/scp call this run.
+
+    Issue #549: the HA SSH add-on's rate-limit protection ("Protection mode," a fail2ban-style
+    feature many HAOS SSH add-ons enable by default) blocks a source IP after ~4-5 connections
+    in a short window, regardless of whether they succeeded. deploy.py opens 6-8 separate
+    ssh/scp connections per run, which trips it. Routing them all through one multiplexed
+    connection means the add-on only ever sees one.
+    """
+    sockets_dir = Path.home() / ".ssh" / "sockets"
+    sockets_dir.mkdir(parents=True, exist_ok=True)
+    return str(sockets_dir / f"deploy-{config['HA_SSH_USER']}-{config['HA_HOST']}-{config['HA_SSH_PORT']}.sock")
+
+
+def _multiplex_args(config: dict[str, str]) -> list[str]:
+    """Shared ControlMaster options so every ssh/scp call in a run reuses one connection.
+
+    ControlMaster=auto: the first call creates the master; every later call with a matching
+    ControlPath transparently tunnels through it instead of opening a new TCP connection.
+    ControlPersist=10m: keeps the master alive in the background for reuse across the whole
+    run (and briefly after), even though each individual ssh/scp command exits immediately.
+    """
+    return [
+        "-o",
+        f"ControlPath={control_path(config)}",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPersist=10m",
+    ]
+
+
 def ssh_args(config: dict[str, str]) -> list[str]:
     """Build SSH command-line arguments."""
     args = ["ssh", "-p", config["HA_SSH_PORT"], "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]
+    args.extend(_multiplex_args(config))
     if config["HA_SSH_KEY"]:
         args.extend(["-i", config["HA_SSH_KEY"]])
     if config["HA_SSH_KEY"] and sys.platform != "win32":
@@ -160,9 +193,27 @@ def ssh_target(config: dict[str, str]) -> str:
 def scp_args(config: dict[str, str]) -> list[str]:
     """Build SCP command-line arguments."""
     args = ["scp", "-P", config["HA_SSH_PORT"], "-o", "StrictHostKeyChecking=accept-new", "-r"]
+    args.extend(_multiplex_args(config))
     if config["HA_SSH_KEY"]:
         args.extend(["-i", config["HA_SSH_KEY"]])
     return args
+
+
+def close_control_master(config: dict[str, str]) -> None:
+    """Best-effort close of the multiplexed control connection at the end of a run.
+
+    Safe to call even if no master was ever established (ControlPersist means one may not
+    exist yet, e.g. if the run failed before the first ssh/scp call) — `-O exit` against a
+    missing/stale socket just fails harmlessly, which we ignore.
+    """
+    cpath = control_path(config)
+    if not Path(cpath).exists():
+        return
+    subprocess.run(
+        ["ssh", "-o", f"ControlPath={cpath}", "-O", "exit", ssh_target(config)],
+        capture_output=True,
+        text=True,
+    )
 
 
 def remote_path(config: dict[str, str]) -> str:
@@ -509,48 +560,52 @@ def main() -> None:
     print(f"  Host: {config['HA_HOST']}:{config['HA_SSH_PORT']}")
     print(f"  Target: {rpath}")
 
-    if args.rollback:
-        do_rollback(config)
-        sys.exit(0)
+    try:
+        if args.rollback:
+            do_rollback(config)
+            sys.exit(0)
 
-    # Step 1: Validate
-    if not run_validation():
-        sys.exit(1)
+        # Step 1: Validate
+        if not run_validation():
+            sys.exit(1)
 
-    if args.dry_run:
-        ensure_brand_dir()
-        print(f"\n{Color.CYAN}============================================{Color.RESET}")
-        print(f"{Color.YELLOW}  DRY RUN complete. No changes made.{Color.RESET}")
-        print(f"{Color.CYAN}============================================{Color.RESET}")
-        print("\nFiles that would be deployed:")
-        for f in sorted(COMPONENT_DIR.rglob("*")):
-            if f.is_file() and "__pycache__" not in f.parts:
-                gray(str(f.relative_to(COMPONENT_DIR)))
-        sys.exit(0)
+        if args.dry_run:
+            ensure_brand_dir()
+            print(f"\n{Color.CYAN}============================================{Color.RESET}")
+            print(f"{Color.YELLOW}  DRY RUN complete. No changes made.{Color.RESET}")
+            print(f"{Color.CYAN}============================================{Color.RESET}")
+            print("\nFiles that would be deployed:")
+            for f in sorted(COMPONENT_DIR.rglob("*")):
+                if f.is_file() and "__pycache__" not in f.parts:
+                    gray(str(f.relative_to(COMPONENT_DIR)))
+            sys.exit(0)
 
-    # Step 2: Test SSH
-    if not test_ssh(config):
-        sys.exit(1)
+        # Step 2: Test SSH (also establishes the multiplexed connection every later
+        # step in this run reuses — see control_path()/Issue #549)
+        if not test_ssh(config):
+            sys.exit(1)
 
-    # Step 3: Backup
-    create_backup(config)
-    prune_backups(config)
-    clean_legacy_backups(config)
+        # Step 3: Backup
+        create_backup(config)
+        prune_backups(config)
+        clean_legacy_backups(config)
 
-    # Step 4: Deploy
-    if not deploy_files(config):
-        sys.exit(1)
+        # Step 4: Deploy
+        if not deploy_files(config):
+            sys.exit(1)
 
-    # Step 5: Restart
-    restart_ha(config, skip=args.skip_restart)
+        # Step 5: Restart
+        restart_ha(config, skip=args.skip_restart)
 
-    # Step 6: Verify
-    if not args.skip_restart:
-        check_logs(config)
+        # Step 6: Verify
+        if not args.skip_restart:
+            check_logs(config)
 
-    print(f"\n{Color.GREEN}============================================{Color.RESET}")
-    print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")
-    print(f"{Color.GREEN}============================================{Color.RESET}")
+        print(f"\n{Color.GREEN}============================================{Color.RESET}")
+        print(f"{Color.GREEN}  Deployment complete!{Color.RESET}")
+        print(f"{Color.GREEN}============================================{Color.RESET}")
+    finally:
+        close_control_master(config)
 
 
 if __name__ == "__main__":

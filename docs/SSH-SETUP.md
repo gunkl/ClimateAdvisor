@@ -116,6 +116,23 @@ and removes the ambiguity entirely.
 - The deploy script uses `StrictHostKeyChecking=no` to avoid this
 - If you see this with manual SSH, run: `ssh-keygen -R homeassistant.local`
 
+### First few steps succeed, then "Connection reset by peer" / "Connection timed out" for the rest of the run
+This is the signature of the SSH add-on's rate-limit/brute-force protection ("Protection
+mode," a fail2ban-style feature many HAOS SSH add-ons enable by default) blocking your
+machine's IP after several connections in a short window — `deploy.py` opens 6-8 separate
+SSH/SCP connections per run (connection test, dir check, backup, cleanup, file copy, restart,
+log check), which can trip it even though every connection was legitimate.
+
+Since #549, `deploy.py` multiplexes all of those through a single real SSH connection
+(`ControlMaster`/`ControlPath`/`ControlPersist`, set up automatically — no config needed), so
+the add-on only ever sees one connection per run. If you still hit this:
+- Check your SSH add-on's configuration for a "Protection mode" or rate-limit setting and
+  raise its threshold or disable it, at least while deploying
+- If it just tripped, wait for its cooldown window to clear before retrying — retrying
+  immediately usually just extends the block
+- You can verify multiplexing is active mid-run: a control socket appears at
+  `~/.ssh/sockets/deploy-<user>-<host>-<port>.sock` while `deploy.py` is running
+
 ### Can't find `/config/custom_components/`
 - The directory may not exist yet. Create it: `mkdir -p /config/custom_components/`
 - This is normal on a fresh HA install with no custom integrations

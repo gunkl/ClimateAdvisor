@@ -3,6 +3,15 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.44] — 2026-08-01
+
+- Fix #549: `tools/deploy.py` now multiplexes all of its SSH/SCP connections through one real
+  connection per run (SSH `ControlMaster`/`ControlPath`/`ControlPersist`), instead of opening
+  6-8 separate ones — avoids tripping the HA SSH add-on's rate-limit/brute-force protection,
+  which was blocking deploys partway through with `Connection reset by peer` /
+  `Connection timed out`. `docs/SSH-SETUP.md` documents the failure signature and the fix.
+  Developer/deployment tooling only — no change to the integration itself.
+
 ## [0.5.43] — 2026-08-01
 
 - Fix #547: `tools/deploy.py` now prints which SSH identity file it will use before

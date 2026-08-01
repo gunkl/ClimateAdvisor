@@ -119,31 +119,45 @@ and removes the ambiguity entirely.
 ### First few steps succeed, then "Connection reset by peer" / "Connection timed out" for the rest of the run
 This is the signature of the SSH add-on's rate-limit/brute-force protection ("Protection
 mode," a fail2ban-style feature many HAOS SSH add-ons enable by default) blocking your
-machine's IP after several connections in a short window — a full `deploy.py` run opens
-several separate SSH/SCP connections (connection test, backup, remote cleanup, file copy,
-restart, log check), which can trip it even though every connection was legitimate.
+machine's IP after several connections in a short window.
 
-Since #551, `deploy.py` batches what used to be several separate remote commands into fewer,
-combined round trips (e.g. the backup existence-check + tar creation happen in one SSH call
-instead of two; temp-file cleanup + legacy-backup removal + directory setup happen in one call
-instead of three-plus) to reduce the total connection count per run.
+The connection budget for a full `deploy.py` run, as of #553:
+- **Connection 1** (`ssh`): connect (doubles as the connectivity test) + create a server-side
+  backup tar of the existing install + prune legacy `.bak.*` dirs + `mkdir -p` the target
+- **Connection 2** (`scp`): download that backup tar locally (skipped on a fresh install with
+  nothing to back up)
+- **Connection 3** (`ssh`, component directory piped through stdin as a tar stream — no
+  separate `scp` for the upload): extract to a temp dir, swap it into place, verify the file
+  count, and (unless `--skip-restart`) restart HA core, wait ~60s, and fetch its log tail —
+  all in that one connection/script
 
-(An earlier attempt, #549, tried SSH connection multiplexing — `ControlMaster` — for the same
-goal. It was reverted in #551: it failed outright on this project's Windows/Git-for-Windows SSH
-client against a real HAOS SSH add-on, with `ControlMaster` connections immediately getting
-`Connection reset by peer` even when a plain, non-multiplexed connection to the same host
-succeeded instantly right before and after. If you're on a different platform where
-`ControlMaster` is reliable, adding it back locally is safe to try — just be aware it wasn't
-portable enough to ship by default here.)
+**3 connections total** for a full deploy (2 for `--skip-restart`), **1** for `--rollback`
+(the chosen local backup's bytes are piped in the same way — no upload-then-separate-extract).
+This was validated live against a real HAOS SSH add-on before being merged, including
+confirming the exact connection count from `deploy.py`'s own debug log (`logs/deploy-*.log`).
 
-Batching reduces connection count but isn't a guarantee against a strict rate limit. If you
-still hit this:
+Earlier attempts at solving this, for the curious (or if you're revisiting this later and
+wondering why the code doesn't look like these):
+- **#549** tried SSH connection multiplexing (`ControlMaster`). Reverted in #551: it failed
+  outright on this project's Windows/Git-for-Windows SSH client against this HAOS SSH add-on
+  — `ControlMaster` connections immediately got `Connection reset by peer`, even when a plain
+  non-multiplexed connection to the same host succeeded instantly right before and after. If
+  you're on a platform where `ControlMaster` is reliable, it's a legitimate alternative — just
+  know it wasn't portable enough to ship by default here.
+- **#551** batched several separate remote commands into fewer `&&`/`;`-chained `ssh` calls
+  (cutting a run from ~10-11 connections to ~8), but kept `scp` as a separate connection for
+  the file transfer. A live test after merging still hit the wall (4 connections succeed, the
+  5th — the file copy — gets reset), because partial batching didn't eliminate enough
+  connections. Superseded by #553's stdin-piped-tar approach, which eliminates `scp` for the
+  transfer entirely and gets a full deploy to 3 connections.
+
+If a rate limit is still hit at 3 (or 1, for rollback) connections:
 - Check your SSH add-on's configuration for a "Protection mode" or rate-limit setting and
   raise its threshold or disable it, at least while deploying — this is the authoritative fix
 - If it just tripped, wait for its cooldown window to clear before retrying — retrying
   immediately usually just extends the block
-- `python tools/deploy.py --skip-restart` skips the restart + log-check steps (2 fewer
-  connections), useful when iterating on file changes without needing a full deploy each time
+- `python tools/deploy.py --skip-restart` drops to 2 connections (no restart/log-fetch tail),
+  useful when iterating on file changes without needing a full deploy each time
 
 ### Can't find `/config/custom_components/`
 - The directory may not exist yet. Create it: `mkdir -p /config/custom_components/`

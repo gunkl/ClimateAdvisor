@@ -3,6 +3,21 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.46] — 2026-08-01
+
+- Fix #553: `tools/deploy.py` now transfers files by piping a tar stream through the same SSH
+  connection that extracts/restarts/verifies, instead of a separate `scp` — a full deploy is
+  now capped at 3 connections total (down from ~8 after #551's partial batching), and
+  `--rollback` at 1. Also fixes two real bugs caught during live validation against the
+  production HA instance: a crash-safety gap where an interrupted connection mid-extraction
+  could leave the live integration directory deleted or half-written (now extracts to a temp
+  directory and swaps it into place as the final, near-instant step), and a backup/restore
+  tar-format mismatch that could produce a broken, nested directory on rollback. As a side
+  effect, deploys are now exact mirrors of the source tree (previously, files removed or
+  renamed between versions could linger indefinitely). `docs/SSH-SETUP.md` documents the new
+  connection budget and both superseded approaches (#549, #551). Developer/deployment tooling
+  only — no change to the integration itself.
+
 ## [0.5.45] — 2026-08-01
 
 - Fix #551: reverted #549's SSH connection multiplexing (`ControlMaster`) in

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.41] — 2026-08-02
+
+- Fix #555: Daily Briefing sensor no longer drops to "unknown" on days with a lot to say (away/vacation occupancy + dual window opportunities) — the TLDR summary is now shortened to reliably fit HA's 255-char sensor state limit, with a truncation safety net and full text still available in the sensor's attributes as a backstop.
+
 ## [0.4.60] — 2026-07-03
 
 - Fix #402: whole-house-fan nat-vent could silently stop controlling the home for hours overnight instead of cycling through the sleep window. Two causes: (1) `fan_thermostat_check()` — the tick-level safety check that runs far more often than the 30-minute classification cycle — still used the flat daytime `comfort_heat` floor even during the sleep window, so it always ended the nat-vent session prematurely before the correct sleep-window cycling (fixed in #374) ever got a chance to run. (2) Once that premature exit fired, `apply_classification()` legitimately arms `cool` mode as a compressor backstop — but that permanently blocked the fan's own re-activation check, which required the thermostat's armed mode to be literally "off" even though the compressor was never actually running. Both fixed: the tick-level floor check is now sleep-aware, and re-activation now checks whether the compressor is actively calling instead of the armed mode string.

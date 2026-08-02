@@ -93,6 +93,7 @@ class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
     """Base class for Climate Advisor sensors."""
 
     _empty_data_warned: bool = False
+    _truncation_warned: bool = False
 
     def __init__(
         self,
@@ -121,6 +122,25 @@ class ClimateAdvisorBaseSensor(CoordinatorEntity, SensorEntity):
             )
             self._empty_data_warned = True
         return None
+
+    def _capped_state(self, text: str, *, limit: int = 250, level: int = logging.DEBUG) -> str:
+        """Truncate text to HA's 255-char sensor state limit, logging once if triggered.
+
+        This is a safety net, not the primary fix (Issue #555) — callers should shrink
+        their source data so this rarely/never actually triggers.
+        """
+        if len(text) <= limit:
+            return text
+        if not self._truncation_warned:
+            _LOGGER.log(
+                level,
+                "%s state truncated — %d chars exceeds %d-char limit",
+                self._attr_name,
+                len(text),
+                limit,
+            )
+            self._truncation_warned = True
+        return text[: limit - 3] + "..."
 
 
 class ClimateAdvisorDayTypeSensor(ClimateAdvisorBaseSensor):
@@ -201,17 +221,16 @@ class ClimateAdvisorBriefingSensor(ClimateAdvisorBaseSensor):
         if not self.coordinator.data:
             return ""
         short = self.coordinator.data.get(ATTR_BRIEFING_SHORT, "")
-        if short:
-            return short
-        # Fallback: truncate full briefing if short version not yet available
-        full = self.coordinator.data.get(ATTR_BRIEFING, "")
-        return full[:247] + "..." if len(full) > 250 else full
+        text = short or self.coordinator.data.get(ATTR_BRIEFING, "")
+        return self._capped_state(text, level=logging.WARNING)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Store the full briefing text as an attribute."""
+        """Store the full briefing text and untruncated TLDR as attributes."""
+        data = self.coordinator.data or {}
         return {
-            "full_briefing": self.coordinator.data.get(ATTR_BRIEFING, "") if self.coordinator.data else "",
+            "full_briefing": data.get(ATTR_BRIEFING, ""),
+            "tldr": data.get(ATTR_BRIEFING_SHORT, ""),
         }
 
 
@@ -301,8 +320,6 @@ class ClimateAdvisorLastActionTimeSensor(ClimateAdvisorBaseSensor):
 class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
     """Sensor showing the reason for the last HVAC action."""
 
-    _truncation_warned: bool = False
-
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, ATTR_LAST_ACTION_REASON, "Last Action Reason", "mdi:text-box-outline")
 
@@ -312,15 +329,7 @@ class ClimateAdvisorLastActionReasonSensor(ClimateAdvisorBaseSensor):
         full = self.coordinator.data.get(ATTR_LAST_ACTION_REASON, "") if self.coordinator.data else ""
         if not full:
             return None
-        if len(full) > 250:
-            if not self._truncation_warned:
-                _LOGGER.debug(
-                    "Last action reason truncated — %d chars exceeds limit",
-                    len(full),
-                )
-                self._truncation_warned = True
-            return full[:247] + "..."
-        return full
+        return self._capped_state(full)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

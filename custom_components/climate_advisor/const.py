@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.40"
+VERSION = "0.5.41"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.41": [
+        "Fix #555: Daily Briefing sensor no longer drops to 'unknown' on days with a lot"
+        " to say (away/vacation occupancy + dual window opportunities) — the TLDR summary"
+        " is now shortened to reliably fit HA's 255-char sensor state limit, with a"
+        " truncation safety net and full text still available in the sensor's attributes"
+        " as a backstop.",
+    ],
     "0.5.40": [
         "Feat #540: new 'Nat-Vent Soft-Start (Purge Mode)' setting, on by default. The"
         " whole-house fan can now start moving air and purging attic/thermal-mass heat as soon"
@@ -1334,6 +1341,39 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    555: {
+        "version_fixed": "0.5.41",
+        "title": (
+            "sensor.climate_advisor_daily_briefing exceeded HA's 255-char sensor state limit"
+            " on days with a lot to report (away/vacation occupancy + dual morning/evening"
+            " window-opportunity rows), causing HA to reject the state and fall the sensor"
+            " back to 'unknown' — the primary UI surface went blank on exactly the days with"
+            " the most to say"
+        ),
+        "scope_covered": (
+            "_generate_tldr_table() in briefing.py shortened: dropped fixed 17-char label"
+            " alignment padding (pure whitespace overhead, not reliably rendered as aligned"
+            " columns in either UI surface), and removed the redundant '(setback — away/"
+            " vacation)' phrase from the HVAC Mode row since the Occupancy row directly below"
+            " it already states the same fact. Brings the documented worst case from ~260-265"
+            " chars to a comfortable margin under 250. Added a shared"
+            " ClimateAdvisorBaseSensor._capped_state() truncation safety net (used by both"
+            " ClimateAdvisorBriefingSensor and, refactored behavior-preserving,"
+            " ClimateAdvisorLastActionReasonSensor) so a future regression degrades gracefully"
+            " instead of dropping to 'unknown'. Added TestTldrTableLength regression test"
+            " covering the away/vacation + dual-window worst case, and"
+            " tests/test_briefing_sensor.py covering the sensor's truncation/fallback logic"
+            " directly."
+        ),
+        "scope_not_covered": (
+            "The full multi-section briefing (ATTR_BRIEFING, non-tldr_only verbosity) already"
+            " had its own truncate-on-fallback handling and is unchanged. Conversational body"
+            " sections (_hot_day_plan() etc.) are unchanged. Column alignment is lost in the"
+            " full-briefing text display — not reliably rendered as aligned columns in either"
+            " UI surface today (dashboard and notify-service bodies are both proportional-"
+            " font), so not treated as a regression. Table label wording is unchanged."
+        ),
+    },
     540: {
         "version_fixed": "0.5.40",
         "title": (

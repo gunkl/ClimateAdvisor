@@ -1303,6 +1303,47 @@ class TestTldrLength:
         assert len(result) < len(normal), "tldr_only should be shorter than normal"
 
 
+class TestTldrTableLength:
+    """Issue #555: TLDR table must stay well under HA's 255-char sensor state limit.
+
+    TestTldrLength above covers the simple per-day-type case, but the real regression
+    only showed up when occupancy (away/vacation) and dual morning+evening window
+    opportunity rows stack together with a large warming trend — this is the documented
+    worst case (a real-world instance measured 261 chars before this fix).
+    """
+
+    @pytest.mark.parametrize("occupancy_mode", ["home", "away", "vacation", "guest"])
+    def test_worst_case_tldr_fits_sensor_state_limit(self, occupancy_mode):
+        """HOT day + low temps <= WINDOW_OPPORTUNITY_MAX_LOW_F (classifier.py) auto-trigger
+        both morning and evening window-opportunity rows, combined with the longest trend
+        text and (for away/vacation) the occupancy row — the documented worst case."""
+        c = _make_classification(
+            "hot",
+            today_high=95,
+            today_low=72,
+            tomorrow_high=110,
+            tomorrow_low=72,
+            trend_direction="warming",
+            trend_magnitude=15,
+        )
+        result = generate_briefing(
+            classification=c,
+            comfort_heat=COMFORT_HEAT,
+            comfort_cool=COMFORT_COOL,
+            setback_heat=SETBACK_HEAT,
+            setback_cool=SETBACK_COOL,
+            wake_time=DEFAULT_WAKE,
+            sleep_time=DEFAULT_SLEEP,
+            occupancy_mode=occupancy_mode,
+            verbosity="tldr_only",
+        )
+        assert len(result) <= 250, (
+            f"TLDR table is {len(result)} chars — exceeds the 250-char safety margin "
+            f"under HA's 255-char sensor state limit (Issue #555). Shorten "
+            f"_generate_tldr_table() output before merging."
+        )
+
+
 # ---------------------------------------------------------------------------
 # No markdown in briefing output (Issue #21)
 # ---------------------------------------------------------------------------

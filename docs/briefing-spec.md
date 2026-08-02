@@ -27,6 +27,7 @@ learning suggestions, and any required human actions.
 | How does the grace period state appear in briefing output? | [§ Grace Period Injection](#grace-period-injection) |
 | How does the header table stay consistent with the conversational body? | [§ Single Source of Truth for Warm-Day Timing (Issue #518)](#single-source-of-truth-for-warm-day-timing-issue-518) |
 | What does each day-type briefing look like? | [Briefing Examples](04-BRIEFING-EXAMPLES.md) |
+| Why does the TLDR table stay under HA's 255-char sensor state limit? | [§ TLDR Table Length Budget (Issue #555)](#tldr-table-length-budget-issue-555) |
 
 ## Date Computation
 
@@ -131,6 +132,36 @@ reopen) are derived from `predicted_indoor_future`/`predicted_outdoor_future` ti
 which are already local-time-aware by the time they reach `briefing.py` (produced upstream by
 `coordinator.py`'s forecast pipeline) — `briefing.py` only calls `.strftime(_FMT_HOUR)` on
 them, performing no timezone conversion itself.
+
+## TLDR Table Length Budget (Issue #555)
+
+`ClimateAdvisorBriefingSensor.native_value` (`sensor.py`) returns `ATTR_BRIEFING_SHORT` —
+the TLDR table produced by `_generate_tldr_table()` — as the sensor's `state`. HA rejects
+any sensor `state` string over 255 chars outright and falls the entity back to `unknown`.
+Before Issue #555, no length guard existed on this path (only on the full-briefing
+fallback, which is unreachable once the TLDR is populated), so away/vacation days with
+dual morning+evening window-opportunity rows and a large warming trend could exceed 255
+chars and silently blank the primary UI surface.
+
+Two changes keep this from recurring:
+
+1. **Content is shortened, not just truncated.** `_generate_tldr_table()` uses a single
+   fixed-width gap (`"  Label: value"`) instead of column-padding every label to a
+   constant width — that padding was pure whitespace overhead and wasn't reliably
+   rendered as aligned columns in either UI surface (dashboard/notify-service bodies are
+   both proportional-font, not monospace). The HVAC Mode row also no longer repeats
+   `"(setback — away/vacation)"` when the Occupancy row directly below it already states
+   the same fact. This keeps the documented worst case comfortably under 250 chars.
+2. **Truncation remains a safety net**, not the primary fix: `ClimateAdvisorBaseSensor._capped_state()`
+   (`sensor.py`) caps any sensor state at 250 chars (`text[:247] + "..."`), logging a
+   one-time `WARNING` if it ever actually fires, so a future regression degrades to a
+   truncated-but-valid state instead of `unknown`. The untruncated TLDR is always
+   available via the `tldr` attribute (and the full multi-section briefing via
+   `full_briefing`).
+
+`tests/test_briefing.py::TestTldrTableLength` asserts the away/vacation + dual-window
+worst case stays ≤ 250 chars across all occupancy modes — this is the regression guard;
+the sensor-level cap should rarely/never actually trigger in practice.
 
 ## Stale/Missing Data Handling
 

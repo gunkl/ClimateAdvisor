@@ -65,7 +65,7 @@ graph TD
 ```mermaid
 graph TD
     A[ForecastSnapshot in] --> B{today_high >= 85?}
-    B -->|Yes| C[day_type = hot\nhvac_mode = cool\npre_condition = True]
+    B -->|Yes| C["day_type = hot\nhvac_mode = cool\n(no pre_condition — removed #558)"]
     B -->|No| D{today_high >= 75?}
     D -->|Yes| E[day_type = warm\nhvac_mode = off]
     D -->|No| F{today_high >= 60?}

@@ -828,7 +828,15 @@ class TestBandScheduleComputedOnce:
 
         with (
             patch.object(coord_mod, "_compute_target_band_schedule", wrapped),
-            patch.object(coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+            # Issue #558: today+tomorrow both hot now makes _compute_pre_cool_trigger_time()'s
+            # wake-time fallback branch reachable (previously short-circuited before any
+            # datetime comparison since setback_modifier=0.0 skipped pre-cool entirely) —
+            # as_local must actually attach a tz, not no-op, or naive/aware comparison fails.
+            patch.object(
+                coord_mod.dt_util,
+                "as_local",
+                side_effect=lambda x: x if x.tzinfo is not None else x.replace(tzinfo=UTC),
+            ),
             patch.object(coord_mod.dt_util, "now", return_value=datetime(2026, 5, 13, 12, 0, 0, tzinfo=UTC)),
         ):
             result = coord.get_chart_data()

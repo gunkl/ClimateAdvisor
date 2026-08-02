@@ -164,12 +164,6 @@ class TestOtherStateFieldsStillRestored:
         engine.restore_state({"fan_active": True})
         assert engine._fan_active is True
 
-    def test_pre_condition_achieved_restored(self):
-        """_pre_condition_achieved is persisted so a restart mid-day does not re-arm the ceiling offset."""
-        engine = _make_engine()
-        engine.restore_state({"pre_condition_achieved": True, "pre_condition_achieved_date": "2026-06-13"})
-        assert engine._pre_condition_achieved is True
-
     def test_economizer_active_restored(self):
         """_economizer_active is a carry-across field and must be restored."""
         engine = _make_engine()

@@ -96,21 +96,25 @@ class TestSelectComfortBandWarmDays:
         assert b.active == "ceiling"
         assert (b.floor, b.ceiling) == (70.0, 74.0)
 
-    def test_hot_day_defends_ceiling_with_possible_precool(self):
-        """HOT day: same ceiling defense; pre-cool offset may lower ceiling."""
+    def test_hot_day_defends_ceiling(self):
+        """HOT day: same ceiling defense as warm/mild — no pre-cool offset (Issue #558)."""
         c = _classification(DAY_TYPE_HOT)
         b = select_comfort_band(
             c, CONFIG, occupancy_mode=OCCUPANCY_HOME, in_sleep_window=False, aggressive_savings=False
         )
-        offset = float(c.pre_condition_target) if (c.pre_condition_target and c.pre_condition_target < 0) else 0.0
         assert b.active == "ceiling"
-        assert b.ceiling == 74.0 + offset
+        assert b.ceiling == 74.0
         assert b.floor == 70.0  # comfort_heat — full occupied+awake band
 
-    def test_hot_day_precool_lowers_ceiling(self):
-        """Pre-cool offset of -2°F lowers ceiling from 74 to 72."""
+    def test_hot_day_precool_target_no_longer_lowers_ceiling(self):
+        """Issue #558: select_comfort_band() no longer applies any pre-cool ceiling offset —
+        the daytime hot-day catch-up chase was removed. Overnight banking now happens
+        exclusively via resolve_pre_cool_modifier()/compute_pre_cool_target() in the separate
+        overnight pre-cool mechanism, never through this daytime band. Even if a
+        pre_condition_target happened to be set on the classification, the ceiling stays at
+        plain comfort_cool."""
         b = _band(DAY_TYPE_HOT, pre=-2.0)
-        assert b.ceiling == 72.0
+        assert b.ceiling == 74.0
         assert b.floor == 70.0
 
     def test_aggressive_savings_widens_active_ceiling(self):

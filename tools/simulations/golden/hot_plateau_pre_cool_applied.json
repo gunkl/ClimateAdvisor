@@ -1,0 +1,88 @@
+{
+  "name": "hot_plateau_pre_cool_applied",
+  "description": "Issue #558: a plateaued stretch of hot days (today 91°F, tomorrow 95°F — both hot, but the day-over-day trend magnitude is only +4°F, below TREND_THRESHOLD_MODERATE=5°F) previously got ZERO overnight pre-cool banking, indefinitely, because handle_pre_cool()'s only gate was setback_modifier < 0 (a fresh warming trend). resolve_pre_cool_modifier() now also fires on tomorrow's absolute hot classification (tomorrow_high >= threshold_hot=85) even when setback_modifier stays 0.0, using a flat HOT_DAY_PRE_COOL_MODIFIER=-2.0 fallback so the target isn't a no-op equal to sleep_cool.",
+  "source": "synthetic",
+  "issue": 558,
+  "notes": [
+    "Three-exercise protocol (CLAUDE.md §10):",
+    "(a) Scenario effectiveness: reverting handle_pre_cool()'s gate to the old",
+    "    'if not c or c.setback_modifier >= 0: skip' check causes the 02:30 assertion",
+    "    (expect pre_cool_applied, target=70) to FAIL — the trigger would be skipped entirely",
+    "    since setback_modifier=0.0 in this scenario.",
+    "(b) Docs↔production alignment: docs/08-COMPUTATION-REFERENCE.md §4/overnight pre-cool",
+    "    section must document the hot-day-OR-trend gate and the HOT_DAY_PRE_COOL_MODIFIER",
+    "    fallback before this scenario is promoted to golden.",
+    "(c) Occupant experience: without this fix, a household in a multi-day heat wave with no",
+    "    single night trending sharply warmer than the last gets no overnight thermal-mass",
+    "    banking at all, night after night — the AC works harder than necessary each afternoon",
+    "    purely because the classifier never saw one big jump, only a sustained plateau.",
+    "Config: comfort_heat=70, comfort_cool=74 (no explicit sleep_cool/sleep_heat → defaults",
+    "  DEFAULT_SLEEP_COOL=72.0, DEFAULT_SLEEP_HEAT=64.0 apply).",
+    "setback_modifier=0.0 (no fresh trend) means resolve_pre_cool_modifier() falls through the",
+    "  trend branch entirely and checks tomorrow_high(95) >= threshold_hot(85 default) — true,",
+    "  so it returns HOT_DAY_PRE_COOL_MODIFIER=-2.0 instead of None.",
+    "compute_pre_cool_target(config, -2.0) = max(sleep_cool(72) + (-2.0), sleep_heat(64)+hysteresis(1)) =",
+    "  max(70.0, 65.0) = 70.0 — 2F below the plain sleep band, not a no-op.",
+    "No nat-vent configured (natural_vent_delta absent) → pre-cool uses wake_time-4h fallback.",
+    "  wake_time default = '06:30' → trigger at 02:30."
+  ],
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 79,
+    "wake_time": "06:30",
+    "sleep_time": "22:30"
+  },
+  "events": [
+    {
+      "time": "2026-07-16T14:00:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "setback_modifier": 0.0,
+      "today_high": 91.0,
+      "tomorrow_high": 95.0,
+      "note": "Plateaued heat wave: today 91°F, tomorrow 95°F — both hot, but only a +4°F trend (below the 5°F moderate threshold), so setback_modifier stays 0.0. The classifier never sees a fresh 'warming trend', only sustained heat."
+    },
+    {
+      "time": "2026-07-16T18:00:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 84.0,
+      "note": "Evening temperatures — AC holding indoor near comfort_cool."
+    },
+    {
+      "time": "2026-07-16T22:30:00",
+      "type": "bedtime",
+      "note": "Bedtime: normal sleep band [64/72] applied. Pre-cool fires separately at 02:30."
+    },
+    {
+      "time": "2026-07-17T02:30:00",
+      "type": "pre_cool",
+      "indoor_f": 74.0,
+      "nat_vent_just_closed": false,
+      "note": "Pre-cool trigger fires (wake_time 06:30 - 4h fallback). setback_modifier=0.0 (no trend) but tomorrow_high=95 >= threshold_hot=85, so the hot-day fallback gate applies. Target = sleep_cool(72) + HOT_DAY_PRE_COOL_MODIFIER(-2.0) = 70F."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-16T22:30:00",
+      "expect": "setback_applied",
+      "expect_temp": 72.0,
+      "reason": "Bedtime sleep band [64/72] — ceiling=72F for cool mode. Pre-cool has not fired yet; sleep setpoints are normal."
+    },
+    {
+      "at": "2026-07-17T02:30:00",
+      "expect": "pre_cool_applied",
+      "expect_temp": 70.0,
+      "reason": "Pre-cool trigger fired via the hot-day fallback gate (Issue #558): setback_modifier=0.0 does not qualify via the trend branch, but tomorrow_high(95) >= threshold_hot(85) does, so resolve_pre_cool_modifier() returns HOT_DAY_PRE_COOL_MODIFIER=-2.0. compute_pre_cool_target() = sleep_cool(72) + (-2.0) = 70F, above the sleep_heat(64)+hysteresis(1)=65F floor, so it applies uncapped. Without this fallback the target would incorrectly equal sleep_cool(72) — a no-op — and this assertion would fail."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A plateaued hot-day forecast (no fresh warming trend, but tomorrow independently hot) still triggers overnight pre-cool banking via the new hot-day fallback gate",
+    "observed_behavior": "classification_applied (day_type=hot, setback_modifier=0.0) → setback_applied (72F sleep ceiling) → pre_cool_applied (70F cool ceiling)",
+    "expected_behavior": "Even without a fresh day-over-day warming trend, a household in a multi-day heat wave gets overnight thermal-mass banking every night tomorrow is forecast hot — not just on the one night the trend happens to jump."
+  }
+}

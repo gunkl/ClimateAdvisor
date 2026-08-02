@@ -277,14 +277,13 @@ class TestRecommendations:
         result = self._classify(today_high=90)
         assert result.hvac_mode == "cool"
 
-    def test_hot_pre_condition_enabled(self):
+    def test_hot_day_no_longer_sets_pre_condition(self):
+        """Issue #558: the daytime hot-day catch-up offset was removed — overnight banking is
+        now handled exclusively by resolve_pre_cool_modifier()/compute_pre_cool_target() in
+        automation.py, not by a flag on the classification itself."""
         result = self._classify(today_high=90)
-        assert result.pre_condition is True
-
-    def test_hot_pre_condition_target_negative(self):
-        # Should be 2°F *below* cooling setpoint
-        result = self._classify(today_high=90)
-        assert result.pre_condition_target == pytest.approx(-2.0)
+        assert result.pre_condition is False
+        assert result.pre_condition_target is None
 
     def test_hot_no_window_recommendation(self):
         result = self._classify(today_high=90)

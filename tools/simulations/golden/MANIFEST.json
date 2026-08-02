@@ -233,11 +233,6 @@
     "signed": "2026-06-13",
     "issue": 277
   },
-  "hot_day_precool_achieved_reverts_to_comfort": {
-    "sha256": "c22eba9ef04f6341e5aee73ae3e19bca341bbeb6c7fa6ae508b5c46bc254c710",
-    "signed": "2026-06-15",
-    "issue": 295
-  },
   "nat_vent_thermostat_cycling": {
     "sha256": "80e32b07cbb768c35901f94b3ce416e150f6b039e43319db20e295b54737650c",
     "signed": "2026-06-15",
@@ -372,5 +367,10 @@
     "sha256": "5c940c360f5da74bbac528a9412549af5f6ae01455bf1a066c51c7d8a20cf17e",
     "signed": "2026-07-12",
     "issue": 229
+  },
+  "hot_plateau_pre_cool_applied": {
+    "sha256": "9420399d1886bc767d6388597eac9d027b0b8c68ee67daa799945f5a283a7630",
+    "signed": "2026-08-02",
+    "issue": 558
   }
 }

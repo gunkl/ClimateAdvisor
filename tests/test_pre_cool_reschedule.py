@@ -43,7 +43,7 @@ from custom_components.climate_advisor.classifier import DayClassification  # no
 from custom_components.climate_advisor.coordinator import _decide_pre_cool_reschedule  # noqa: E402
 
 
-def _make_classification(setback_modifier: float = -3.0) -> DayClassification:
+def _make_classification(setback_modifier: float = -3.0, tomorrow_high: float = 96) -> DayClassification:
     c = object.__new__(DayClassification)
     c.__dict__.update(
         {
@@ -52,7 +52,7 @@ def _make_classification(setback_modifier: float = -3.0) -> DayClassification:
             "trend_magnitude": 3.0,
             "today_high": 88,
             "today_low": 65,
-            "tomorrow_high": 96,
+            "tomorrow_high": tomorrow_high,
             "tomorrow_low": 70,
             "hvac_mode": "cool",
             "pre_condition": False,
@@ -76,7 +76,7 @@ class TestDecidePreCoolReschedule:
         """Nat-vent exits at 23:00; scheduled trigger was 01:30 — pull it to 23:30."""
         result = _decide_pre_cool_reschedule(
             current_trigger_at=_NOW + timedelta(hours=2, minutes=30),
-            setback_modifier=-3.0,
+            pre_cool_eligible=True,
             nat_vent_close_delay_minutes=30,
             now=_NOW,
         )
@@ -86,17 +86,18 @@ class TestDecidePreCoolReschedule:
         """Mirrors 'already fired today, or never scheduled' — current_trigger_at is None."""
         result = _decide_pre_cool_reschedule(
             current_trigger_at=None,
-            setback_modifier=-3.0,
+            pre_cool_eligible=True,
             nat_vent_close_delay_minutes=30,
             now=_NOW,
         )
         assert result is None
 
-    def test_none_when_no_warming_trend(self):
-        """setback_modifier >= 0 -> pre-cool wouldn't have been scheduled in the first place."""
+    def test_none_when_not_eligible(self):
+        """pre_cool_eligible=False (no warming trend and tomorrow not hot) -> pre-cool wouldn't
+        have been scheduled in the first place (Issue #558)."""
         result = _decide_pre_cool_reschedule(
             current_trigger_at=_NOW + timedelta(hours=2),
-            setback_modifier=0.0,
+            pre_cool_eligible=False,
             nat_vent_close_delay_minutes=30,
             now=_NOW,
         )
@@ -107,7 +108,7 @@ class TestDecidePreCoolReschedule:
         already-scheduled time must not push pre-cool back."""
         result = _decide_pre_cool_reschedule(
             current_trigger_at=_NOW + timedelta(minutes=10),
-            setback_modifier=-3.0,
+            pre_cool_eligible=True,
             nat_vent_close_delay_minutes=30,
             now=_NOW,
         )
@@ -117,7 +118,7 @@ class TestDecidePreCoolReschedule:
         """candidate == current_trigger_at -> no reschedule (non-strict >= guard)."""
         result = _decide_pre_cool_reschedule(
             current_trigger_at=_NOW + timedelta(minutes=30),
-            setback_modifier=-3.0,
+            pre_cool_eligible=True,
             nat_vent_close_delay_minutes=30,
             now=_NOW,
         )
@@ -196,9 +197,11 @@ class TestMaybeReschedulePreCoolOnNatVentExitLoadBearing:
         assert mock_track.call_count == 0
 
     def test_no_reschedule_when_no_warming_trend(self):
-        """Nat-vent exits, but today has no warming trend -> pre-cool was never pending."""
+        """Nat-vent exits, but no warming trend AND tomorrow isn't hot either -> pre-cool was
+        never pending (Issue #558: tomorrow_high must also be below threshold_hot, or the
+        hot-day fallback gate would make it eligible anyway)."""
         coord = _make_coord_stub()
-        coord._current_classification = _make_classification(setback_modifier=0.0)
+        coord._current_classification = _make_classification(setback_modifier=0.0, tomorrow_high=80.0)
 
         with (
             patch("custom_components.climate_advisor.coordinator.async_track_point_in_time") as mock_track,

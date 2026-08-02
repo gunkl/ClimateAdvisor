@@ -46,6 +46,19 @@ COMFORT_HEAT = 70.0
 COMFORT_COOL = 75.0
 SETBACK_HEAT = 60.0
 SETBACK_COOL = 80.0
+# Issue #558: config dict for the overnight pre-cool eligibility check in _hot_day_plan().
+# sleep_cool=68 (below comfort_cool=75) keeps the pre-cool target (68-2=66) distinct from
+# every other temperature these tests assert on.
+DEFAULT_CONFIG = {
+    "comfort_heat": COMFORT_HEAT,
+    "comfort_cool": COMFORT_COOL,
+    "setback_heat": SETBACK_HEAT,
+    "setback_cool": SETBACK_COOL,
+    "sleep_heat": 62.0,
+    "sleep_cool": 68.0,
+    "threshold_hot": 85,
+    "nat_vent_hysteresis_f": 1.0,
+}
 
 
 def _generate(classification: DayClassification, **kwargs) -> str:
@@ -63,6 +76,7 @@ def _generate(classification: DayClassification, **kwargs) -> str:
         occupancy_mode=kwargs.get("occupancy_mode", "home"),
         predicted_indoor_future=kwargs.get("predicted_indoor_future"),
         predicted_outdoor_future=kwargs.get("predicted_outdoor_future"),
+        runtime_config=kwargs.get("runtime_config", DEFAULT_CONFIG),
     )
 
 
@@ -131,10 +145,34 @@ class TestHotDayBriefing:
     """Hot day briefings should mention pre-cooling, sealed house, AC setpoint."""
 
     def test_mentions_precool_target(self):
+        """Tomorrow is also hot (95 >= threshold_hot=85), so overnight pre-cool is eligible via
+        the hot-day gate (Issue #558) even with a stable trend; target = sleep_cool(68) +
+        HOT_DAY_PRE_COOL_MODIFIER(-2) = 66."""
         c = _make_classification("hot", today_high=95, today_low=72)
         result = _generate(c)
-        # Pre-cool target is comfort_cool - 2 = 73
-        assert "73" in result
+        assert "66" in result
+        assert "Tonight I'll pre-cool" in result
+
+    def test_no_precool_claim_without_config(self):
+        """Without a config dict, the briefing must not fabricate a pre-cool claim — it should
+        fall back to a truthful, forward-looking statement instead (Issue #558)."""
+        c = _make_classification("hot", today_high=95, today_low=72)
+        result = _generate(c, runtime_config=None)
+        assert "pre-cool" not in result.lower()
+        assert "I'll hold things at" in result
+
+    def test_no_precool_claim_when_not_eligible(self):
+        """Neither a warming trend nor a hot tomorrow — no overnight pre-cool should be claimed."""
+        c = _make_classification(
+            "hot",
+            today_high=95,
+            today_low=72,
+            tomorrow_high=80,  # below threshold_hot=85
+            trend_direction="stable",
+        )
+        result = _generate(c)
+        assert "pre-cool" not in result.lower()
+        assert "I'll hold things at" in result
 
     def test_mentions_comfort_cool(self):
         c = _make_classification("hot", today_high=95, today_low=72)
@@ -221,10 +259,11 @@ class TestHotDayWindowOpportunities:
     # --- Persistent content regardless of opportunities ---
 
     def test_hot_day_still_mentions_precool(self):
-        """Pre-cool target (comfort_cool - 2 = 73) should always appear on hot days."""
+        """Tomorrow defaults to today_high=95 (hot) so the pre-cool gate is eligible; target =
+        sleep_cool(68) + HOT_DAY_PRE_COOL_MODIFIER(-2) = 66 (Issue #558)."""
         c = _make_classification("hot", today_high=95, today_low=72, tomorrow_low=70)
         result = _generate(c)
-        assert "73" in result
+        assert "66" in result
 
     def test_hot_day_still_mentions_blinds(self):
         """Blind/sun-facing guidance should appear on hot days regardless of opportunity branch."""

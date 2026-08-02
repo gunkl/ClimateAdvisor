@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.48"
+VERSION = "0.5.49"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.49": [
+        "Fix #557: options dialog sections now save the instant you hit Submit — no more"
+        " separate 'Save & Close' step. Previously, submitting a section (e.g. Setpoints or"
+        " Notifications) only staged the change in memory; re-opening that same section"
+        " before hitting the separate Save button showed the old value, making it look like"
+        " the change hadn't taken. Every section now writes and reloads immediately, so"
+        " what you see after Submit is always what's actually saved.",
+    ],
     "0.5.48": [
         "Fix #558: the AC no longer chases a colder-than-comfort setpoint on hot days after"
         " you return from being away — it now simply restores your normal comfort setting."
@@ -1394,6 +1402,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    557: {
+        "version_fixed": "0.5.49",
+        "title": (
+            "Options dialog sections appeared to silently discard changes: submitting any"
+            " one of the 11 section forms (core, setpoints, temperature sources, sensors,"
+            " occupancy, schedule, notifications, advanced, classification thresholds, AI"
+            " settings, GitHub integration) only staged the values into an in-memory"
+            " self._updates dict and routed back to the menu — none of them called"
+            " hass.config_entries.async_update_entry(). Every section's form defaults were"
+            " built from self.config_entry.data (the persisted entry), never from the staged"
+            " self._updates, so re-opening the just-edited section showed the old value"
+            " unless the user separately navigated to the menu's distinct 'Save & Close'"
+            " item, which was the only step that actually persisted and reloaded."
+        ),
+        "scope_covered": (
+            "Replaced the two-phase stage-then-save design with immediate per-section commit."
+            " Added ClimateAdvisorOptionsFlow._commit_section() — merges the section's input"
+            " (reusing _apply_step_input() for the 3 steps with clearable optional-entity"
+            " fields), calls hass.config_entries.async_update_entry() +"
+            " hass.config_entries.async_reload() immediately, logs an INFO line, then resets"
+            " scratch state. All 11 section steps' success branches now call"
+            " _commit_section() instead of staging into self._updates directly. Deleted"
+            " async_step_save() and removed 'save' from OPTIONS_MENU_OPTIONS and both"
+            " strings.json/translations/en.json menu labels — the HA frontend's built-in"
+            " dialog close control is the only way to exit the options flow now. Updated"
+            " tests/test_config_flow.py's _make_options_flow()/_run_options_flow() harness to"
+            " mirror real HA's async_update_entry() (mutating entry.data in place) and to"
+            " drive steps without a trailing save call; rewrote TestOptionsFlowMenu's"
+            " save-specific tests into per-section-commit tests including an explicit"
+            " regression guard that a single section submit persists without any further"
+            " step. TestOptionsFlowMultiStep and TestOptionsFlowClearing (Issue #434)"
+            " continued passing unchanged against the new harness, confirming multi-section"
+            " accumulation and clearable-field semantics are preserved."
+        ),
+        "scope_not_covered": (
+            "Editing multiple sections in one sitting now triggers one coordinator reload per"
+            " section submitted (was one reload total, at Save & Close) — an accepted,"
+            " bounded tradeoff for always-correct display, not a regression fix in itself."
+            " No mechanism was added to batch or debounce reloads across rapid consecutive"
+            " section edits."
+        ),
+    },
     558: {
         "version_fixed": "0.5.48",
         "title": (

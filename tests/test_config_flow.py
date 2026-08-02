@@ -49,11 +49,18 @@ def _make_options_flow(entry_data: dict):
     Enabled by the ha_stubs realification of ``config_entries.OptionsFlow``
     (same pattern as SensorEntity/HomeAssistantView, Issue #452). Returns
     ``(flow, captured)`` where ``captured['data']`` is the dict persisted by
-    ``async_step_save``.
+    the most recent section commit (``_commit_section``, Issue #557 — each
+    section step persists immediately on submit; there is no longer a
+    separate save step).
 
-    DOCTRINE: options-flow tests must exercise the production step handlers and
-    save path — never re-implement the merge in the test body. A mirror of the
-    merge embeds the same logic it claims to test and cannot catch a bug in it
+    The mocked ``async_update_entry`` also mirrors real HA's behavior of
+    mutating ``entry.data`` in place, so that driving multiple section steps
+    in sequence correctly accumulates: each step's ``_commit_section`` reads
+    ``self.config_entry.data`` fresh, which must reflect prior steps' commits.
+
+    DOCTRINE: options-flow tests must exercise the production step handlers —
+    never re-implement the merge in the test body. A mirror of the merge
+    embeds the same logic it claims to test and cannot catch a bug in it
     (this is exactly how Issue #434 shipped despite green tests).
     """
     from unittest.mock import AsyncMock
@@ -66,26 +73,29 @@ def _make_options_flow(entry_data: dict):
     flow.config_entry = _make_config_entry(entry_data)
 
     captured: dict = {}
+
+    def _update_entry(entry, data):
+        captured["data"] = data
+        entry.data = data  # mirror real HA: async_update_entry mutates entry.data
+
     hass = MagicMock()
-    hass.config_entries.async_update_entry = MagicMock(
-        side_effect=lambda entry, data: captured.__setitem__("data", data)
-    )
+    hass.config_entries.async_update_entry = MagicMock(side_effect=_update_entry)
     hass.config_entries.async_reload = AsyncMock()
     flow.hass = hass
     return flow, captured
 
 
 def _run_options_flow(entry_data: dict, steps: list[tuple[str, dict]]) -> dict:
-    """Drive the REAL flow: apply each (step_method_name, user_input), then save.
+    """Drive the REAL flow: apply each (step_method_name, user_input) in sequence.
 
-    Returns the dict actually persisted by ``async_step_save``.
+    Each step commits immediately (Issue #557) — no trailing save call.
+    Returns the dict persisted by the last driven step.
     """
     flow, captured = _make_options_flow(entry_data)
 
     async def _drive() -> None:
         for method_name, user_input in steps:
             await getattr(flow, method_name)(user_input)
-        await flow.async_step_save()
 
     asyncio.run(_drive())
     return captured["data"]
@@ -1849,7 +1859,6 @@ class TestOptionsFlowMenu:
             "classification_thresholds",
             "ai_settings",
             "github_settings",
-            "save",
         ]
         assert expected == OPTIONS_MENU_OPTIONS
 
@@ -1859,14 +1868,23 @@ class TestOptionsFlowMenu:
 
         assert "notifications" in OPTIONS_MENU_OPTIONS
 
-    def test_menu_has_save(self):
-        """Save & Close must be a menu option."""
-        from custom_components.climate_advisor.config_flow import OPTIONS_MENU_OPTIONS
+    def test_menu_has_no_separate_save_step(self):
+        """Issue #557 — there is no separate "Save & Close" menu item or step.
 
-        assert "save" in OPTIONS_MENU_OPTIONS
+        Each section persists immediately on submit; a distinct save step
+        re-introduces the stage-then-save design whose stale-value bug this
+        issue fixed.
+        """
+        from custom_components.climate_advisor.config_flow import (
+            OPTIONS_MENU_OPTIONS,
+            ClimateAdvisorOptionsFlow,
+        )
 
-    def test_save_merges_updates(self):
-        """The REAL save step merges accumulated updates and preserves untouched fields."""
+        assert "save" not in OPTIONS_MENU_OPTIONS
+        assert not hasattr(ClimateAdvisorOptionsFlow, "async_step_save")
+
+    def test_section_commit_merges_updates(self):
+        """A single section's commit merges into entry data and preserves untouched fields."""
         data = _run_options_flow(
             dict(FULL_CONFIG),
             [("async_step_advanced", {"learning_enabled": False, "aggressive_savings": True})],
@@ -1875,6 +1893,19 @@ class TestOptionsFlowMenu:
         assert data["aggressive_savings"] is True
         # Untouched fields preserved
         assert data["weather_entity"] == "weather.forecast_home"
+
+    def test_section_submit_persists_without_separate_save(self):
+        """Issue #557 regression guard: submitting ONE section must itself persist and
+        reload — re-opening that section must not require a separate save step to see
+        the new value, since config_entry.data is what forms read their defaults from.
+        """
+        flow, captured = _make_options_flow(dict(FULL_CONFIG))
+
+        asyncio.run(flow.async_step_advanced({"learning_enabled": False, "aggressive_savings": True}))
+
+        assert "data" in captured, "async_update_entry must be called on section submit, not deferred"
+        assert flow.config_entry.data["learning_enabled"] is False
+        flow.hass.config_entries.async_reload.assert_called_once_with(flow.config_entry.entry_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1915,7 +1946,7 @@ class TestNotificationsStep:
         assert config.get("email_briefing", True) is True
 
     def test_notifications_saves_to_updates(self):
-        """Submitted notification values persist through the REAL save step."""
+        """Submitted notification values persist immediately through the REAL step handler."""
         data = _run_options_flow(
             dict(FULL_CONFIG),
             [
@@ -1939,7 +1970,7 @@ class TestOptionsFlowMultiStep:
     """Test that the multi-step options flow merges data correctly."""
 
     def test_step_core_merges_core_settings(self):
-        """Core step collects entity and temperature settings (via the REAL handler + save)."""
+        """Core step collects entity and temperature settings and persists immediately (REAL handler)."""
         data = _run_options_flow(
             dict(FULL_CONFIG),
             [
@@ -2060,12 +2091,13 @@ class TestOptionsFlowMultiStep:
 class TestOptionsFlowClearing:
     """Issue #434 — optional entity fields must actually clear when left blank.
 
-    These tests INVOKE the real options flow (the production step handlers plus
-    async_step_save), not a re-implementation of the merge. The bug shipped
-    because the prior tests mirrored the merge in the test body and only ever
-    supplied values — never an omitted (cleared) key. A cleared optional entity
-    field is dropped from user_input by voluptuous, so the fix must record it for
-    removal at save time.
+    These tests INVOKE the real options flow (the production step handlers,
+    which persist immediately on submit as of Issue #557), not a
+    re-implementation of the merge. The bug shipped because the prior tests
+    mirrored the merge in the test body and only ever supplied values — never
+    an omitted (cleared) key. A cleared optional entity field is dropped from
+    user_input by voluptuous, so the fix must record it for removal when the
+    section commits.
     """
 
     # (owning step handler, config key) for every clearable optional-entity field.

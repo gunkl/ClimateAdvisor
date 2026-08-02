@@ -142,7 +142,6 @@ OPTIONS_MENU_OPTIONS = [
     "classification_thresholds",
     "ai_settings",
     "github_settings",
-    "save",
 ]
 
 TEMP_UNIT_OPTIONS = [
@@ -588,10 +587,14 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self) -> None:
         """Initialize the options flow."""
+        # Scratch space used only within a single section's commit — see
+        # _commit_section(). Not carried across steps: each section persists
+        # immediately on submit (Issue #557), so there is no multi-step
+        # staged-but-unsaved state to track between calls.
         self._updates: dict[str, Any] = {}
         # Keys that a step owns but that came back cleared (omitted from the
-        # submitted input). Applied as deletions in async_step_save so optional
-        # entity fields can actually be emptied (Issue #434).
+        # submitted input). Applied as deletions in _commit_section() so
+        # optional entity fields can actually be emptied (Issue #434).
         self._removed: set[str] = set()
 
     def _apply_step_input(self, user_input: dict[str, Any], clearable_keys: tuple[str, ...]) -> None:
@@ -602,7 +605,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         ``user_input`` entirely — so a plain ``self._updates.update(user_input)``
         would silently keep the old stored value (Issue #434). For each key the
         step owns: if present, it's a set/update; if absent, it's a clear, which
-        we record for removal at save time.
+        we record for removal when this section commits.
         """
         for key in clearable_keys:
             if key in user_input:
@@ -611,6 +614,33 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 self._removed.add(key)
                 self._updates.pop(key, None)
         self._updates.update(user_input)
+
+    async def _commit_section(self, user_input: dict[str, Any], clearable_keys: tuple[str, ...] = ()) -> None:
+        """Persist one section's submitted values immediately and reload (Issue #557).
+
+        Previously, section steps only staged values into ``self._updates`` and
+        a separate "Save & Close" menu step was the only thing that ever wrote
+        to the config entry — so re-opening a section before hitting Save showed
+        stale data. Submit now commits directly: every section step's success
+        branch calls this instead of staging, so "Submit" always means "saved."
+        """
+        if clearable_keys:
+            self._apply_step_input(user_input, clearable_keys)
+        else:
+            self._updates.update(user_input)
+
+        data = {**self.config_entry.data, **self._updates}
+        for key in self._removed:
+            data.pop(key, None)
+
+        self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+        await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        _LOGGER.info("Options section saved — reload triggered (cleared=%d)", len(self._removed))
+
+        # Everything just flushed to config_entry.data; reset scratch state so
+        # the next section's commit starts clean.
+        self._updates = {}
+        self._removed = set()
 
     # ---- Menu ----
 
@@ -634,7 +664,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if not _NOTIFY_SERVICE_RE.match(notify_svc):
                 errors["notify_service"] = "invalid_notify_service"
             if not errors:
-                self._updates.update(user_input)
+                await self._commit_section(user_input)
                 return await self.async_step_init()
 
         return self.async_show_form(
@@ -688,7 +718,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 for key in ("comfort_heat", "comfort_cool", "setback_heat", "setback_cool", "sleep_heat", "sleep_cool"):
                     if key in user_input:
                         user_input[key] = to_fahrenheit(user_input[key], unit)
-                self._updates.update(user_input)
+                await self._commit_section(user_input)
                 return await self.async_step_init()
 
         if is_celsius:
@@ -812,12 +842,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         """Temperature source selection."""
         if user_input is not None:
-            self._apply_step_input(user_input, ("outdoor_temp_entity", "indoor_temp_entity"))
             _LOGGER.debug(
                 "Options — outdoor_source=%s, indoor_source=%s",
                 user_input.get("outdoor_temp_source"),
                 user_input.get("indoor_temp_source"),
             )
+            await self._commit_section(user_input, clearable_keys=("outdoor_temp_entity", "indoor_temp_entity"))
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -870,7 +900,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             ):
                 if key in user_input:
                     user_input[key] = int(user_input[key] * 60)
-            self._apply_step_input(user_input, (CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY))
+            await self._commit_section(
+                user_input, clearable_keys=(CONF_FAN_ENTITY, CONF_FAN_STATE_ENTITY, CONF_FAN_REMOTE_ENTITY)
+            )
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -994,7 +1026,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             if CONF_WELCOME_HOME_DEBOUNCE in user_input:
                 user_input[CONF_WELCOME_HOME_DEBOUNCE] = int(user_input[CONF_WELCOME_HOME_DEBOUNCE] * 60)
-            self._apply_step_input(user_input, (CONF_HOME_TOGGLE, CONF_VACATION_TOGGLE, CONF_GUEST_TOGGLE))
+            await self._commit_section(
+                user_input, clearable_keys=(CONF_HOME_TOGGLE, CONF_VACATION_TOGGLE, CONF_GUEST_TOGGLE)
+            )
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -1054,7 +1088,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     async def async_step_schedule(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
         """Daily schedule configuration."""
         if user_input is not None:
-            self._updates.update(user_input)
+            await self._commit_section(user_input)
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -1087,7 +1121,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         """Notification preferences — per-event push and email toggles."""
         if user_input is not None:
-            self._updates.update(user_input)
+            await self._commit_section(user_input)
             return await self.async_step_init()
 
         current = self.config_entry.data
@@ -1157,7 +1191,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if default_p > max_p:
                 errors["default_preheat_minutes"] = "preheat_default_exceeds_max"
             if not errors:
-                self._updates.update(user_input)
+                await self._commit_section(user_input)
                 return await self.async_step_init()
 
         current = self.config_entry.data
@@ -1246,7 +1280,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 for key in (CONF_THRESHOLD_HOT, CONF_THRESHOLD_WARM, CONF_THRESHOLD_MILD, CONF_THRESHOLD_COOL):
                     if key in user_input:
                         converted[key] = to_fahrenheit(user_input[key], unit)
-                self._updates.update(converted)
+                await self._commit_section(converted)
                 return await self.async_step_init()
 
         if is_celsius:
@@ -1384,7 +1418,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     if key in merged:
                         merged[key] = int(merged[key])
 
-                self._updates.update(merged)
+                await self._commit_section(merged)
                 return await self.async_step_init()
 
         # Build masked key status placeholder for description
@@ -1523,7 +1557,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                 else:
                     merged.pop(CONF_GITHUB_TOKEN, None)
                 merged[CONF_GITHUB_REPO] = repo
-                self._updates.update(merged)
+                await self._commit_section(merged)
                 return await self.async_step_init()
 
         existing_token = current.get(CONF_GITHUB_TOKEN, "")
@@ -1547,20 +1581,3 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
             description_placeholders={"token_status": token_status},
         )
-
-    # ---- Save & Close ----
-
-    async def async_step_save(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """Merge all updates and save."""
-        data = {**self.config_entry.data, **self._updates}
-        # Apply explicit clears (Issue #434): keys a step owned but that came back
-        # empty are removed so optional entity fields can actually be unset.
-        for key in self._removed:
-            data.pop(key, None)
-        self.hass.config_entries.async_update_entry(
-            self.config_entry,
-            data=data,
-        )
-        await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        _LOGGER.info("Options updated — reload triggered (cleared=%d)", len(self._removed))
-        return self.async_create_entry(title="", data={})

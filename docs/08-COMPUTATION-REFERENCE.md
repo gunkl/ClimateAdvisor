@@ -153,7 +153,7 @@ Default values used in examples: `comfort_heat = 70`, `comfort_cool = 75`, `setb
 - Guest mode calls `handle_occupancy_home()` directly — no separate handler.
 - Morning wakeup is skipped when occupancy is `away` or `vacation` (Issue #85).
 - Bedtime setback is skipped when occupancy is `vacation` (vacation setback is deeper).
-- The daily briefing TLDR table shows setback temps and an occupancy status row when not home.
+- The daily briefing TLDR table shows setback temps and an occupancy status row when not home. The HVAC Mode row's setback temp no longer repeats "(setback — away/vacation)" — the Occupancy row directly below it already states that fact (Issue #555 dedup, needed to fit HA's 255-char sensor state limit).
 
 ### 5a. Adaptive Bedtime Setback (`compute_bedtime_setback()`)
 

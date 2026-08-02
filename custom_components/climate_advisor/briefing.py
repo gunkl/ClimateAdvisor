@@ -310,9 +310,9 @@ def _generate_tldr_table(
     setback_cool = config.get("setback_cool", DEFAULT_SETBACK_COOL)
     if occupancy_mode in ("away", "vacation"):
         if c.hvac_mode == "cool":
-            hvac_val = f"Cool at {format_temp(setback_cool, temp_unit)} (setback — {occupancy_mode})"
+            hvac_val = f"Cool at {format_temp(setback_cool, temp_unit)}"
         elif c.hvac_mode == "heat":
-            hvac_val = f"Heat at {format_temp(setback_heat, temp_unit)} (setback — {occupancy_mode})"
+            hvac_val = f"Heat at {format_temp(setback_heat, temp_unit)}"
         else:
             hvac_val = f"Off — {occupancy_mode}"
     elif c.hvac_mode == "cool":
@@ -369,23 +369,22 @@ def _generate_tldr_table(
     trend_desc = _trend_description(c, temp_unit=temp_unit)
     tomorrow_val = f"{trend_desc} ({format_temp(c.tomorrow_high, temp_unit)})"
 
-    label_w = 17
     rows = [
-        f"  {'Day Type:':<{label_w}} {day_type_val}",
-        f"  {'HVAC Mode:':<{label_w}} {hvac_val}",
+        f"  Day Type: {day_type_val}",
+        f"  HVAC Mode: {hvac_val}",
     ]
     # Issue #85: show occupancy status when not home
     if occupancy_mode == "away":
-        rows.append(f"  {'Occupancy:':<{label_w}} Away — setback active")
+        rows.append("  Occupancy: Away — setback active")
     elif occupancy_mode == "vacation":
-        rows.append(f"  {'Occupancy:':<{label_w}} Vacation — deep setback active")
+        rows.append("  Occupancy: Vacation — deep setback active")
     elif occupancy_mode == "guest":
-        rows.append(f"  {'Occupancy:':<{label_w}} Guest — comfort maintained")
+        rows.append("  Occupancy: Guest — comfort maintained")
     rows.extend(
         [
-            f"  {'Windows:':<{label_w}} {windows_val}",
-            f"  {'Bedtime Setback:':<{label_w}} {bedtime_val}",
-            f"  {'Tomorrow:':<{label_w}} {tomorrow_val}",
+            f"  Windows: {windows_val}",
+            f"  Bedtime Setback: {bedtime_val}",
+            f"  Tomorrow: {tomorrow_val}",
         ]
     )
     return rows

@@ -31,7 +31,7 @@ Climate Advisor exposes several sensor entities in Home Assistant. These persist
 | Last Action Time | `sensor.climate_advisor_last_action_time` | ISO timestamp | — | When last action occurred |
 | Contact Sensors | `sensor.climate_advisor_contact_status` | "all closed" / sensor names | `sensors`, `paused_by_door`, `open_count` | Door/window state and pause status |
 | Fan Status | `sensor.climate_advisor_fan_status` | active / inactive / override — on / override — off / disabled | `fan_runtime_minutes`, `fan_override_since`, `fan_running` | Fan automation state |
-| Daily Briefing | `sensor.climate_advisor_daily_briefing` | TLDR summary | `full_briefing` | Today's plan |
+| Daily Briefing | `sensor.climate_advisor_daily_briefing` | TLDR summary, truncated (250 chars) only if it exceeds HA's 255-char limit (Issue #555) | `full_briefing`, `tldr` (untruncated) | Today's plan |
 | Occupancy Mode | `sensor.climate_advisor_occupancy_mode` | home / away / guest / vacation | — | Current occupancy |
 | Comfort Score | `sensor.climate_advisor_comfort_score` | 0-100% | `pending_suggestions` | Compliance tracking |
 | AI Status | `sensor.climate_advisor_ai_status` | active / inactive / error / disabled / circuit_open | `last_request_time`, `error_count`, `total_requests`, `model_in_use`, `circuit_breaker`, `monthly_cost_estimate`, `auto_requests_today`, `manual_requests_today` | AI integration health and usage |

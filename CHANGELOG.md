@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.47] — 2026-08-02
+
+- Fix #555: Daily Briefing sensor no longer drops to "unknown" on days with a lot to say (away/vacation occupancy + dual window opportunities) — the TLDR summary is now shortened to reliably fit HA's 255-char sensor state limit, with a truncation safety net and full text still available in the sensor's attributes as a backstop.
+
 ## [0.5.46] — 2026-08-01
 
 - Fix #553: `tools/deploy.py` now transfers files by piping a tar stream through the same SSH

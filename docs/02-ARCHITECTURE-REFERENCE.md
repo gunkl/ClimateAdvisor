@@ -155,7 +155,7 @@ Both are rendered in the dashboard as a stepped purple/magenta line: solid past,
 | `sensor.climate_advisor_day_type` | hot/warm/mild/cool/cold | trend_direction, trend_magnitude |
 | `sensor.climate_advisor_trend` | warming/cooling/stable | (dynamic icon) |
 | `sensor.climate_advisor_next_action` | Human-readable next action | — |
-| `sensor.climate_advisor_daily_briefing` | Truncated briefing (255 char) | full_briefing (complete text) |
+| `sensor.climate_advisor_daily_briefing` | TLDR summary, capped at 250 chars (HA's hard limit is 255 — Issue #555) | full_briefing (complete text), tldr (untruncated TLDR) |
 | `sensor.climate_advisor_comfort_score` | 0–100% | `pending_suggestions`, `comfort_violations_minutes_today`, `comfort_range_low`, `comfort_range_high` |
 | `sensor.climate_advisor_status` | active/inactive | — |
 | `sensor.climate_advisor_occupancy_mode` | home/away/vacation/guest | occupancy_entity_states (raw toggle states) |

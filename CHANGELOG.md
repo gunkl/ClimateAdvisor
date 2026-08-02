@@ -3,9 +3,298 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.5.41] — 2026-08-02
+## [0.5.47] — 2026-08-02
 
 - Fix #555: Daily Briefing sensor no longer drops to "unknown" on days with a lot to say (away/vacation occupancy + dual window opportunities) — the TLDR summary is now shortened to reliably fit HA's 255-char sensor state limit, with a truncation safety net and full text still available in the sensor's attributes as a backstop.
+
+## [0.5.46] — 2026-08-01
+
+- Fix #553: `tools/deploy.py` now transfers files by piping a tar stream through the same SSH
+  connection that extracts/restarts/verifies, instead of a separate `scp` — a full deploy is
+  now capped at 3 connections total (down from ~8 after #551's partial batching), and
+  `--rollback` at 1. Also fixes two real bugs caught during live validation against the
+  production HA instance: a crash-safety gap where an interrupted connection mid-extraction
+  could leave the live integration directory deleted or half-written (now extracts to a temp
+  directory and swaps it into place as the final, near-instant step), and a backup/restore
+  tar-format mismatch that could produce a broken, nested directory on rollback. As a side
+  effect, deploys are now exact mirrors of the source tree (previously, files removed or
+  renamed between versions could linger indefinitely). `docs/SSH-SETUP.md` documents the new
+  connection budget and both superseded approaches (#549, #551). Developer/deployment tooling
+  only — no change to the integration itself.
+
+## [0.5.45] — 2026-08-01
+
+- Fix #551: reverted #549's SSH connection multiplexing (`ControlMaster`) in
+  `tools/deploy.py` — live testing showed it fails immediately against a real HAOS SSH
+  add-on on this project's Windows/Git-for-Windows SSH client, making deploys worse (failing
+  on the very first connection instead of getting partway through). Replaced with command
+  batching — combining several remote commands into fewer SSH round trips — to reduce
+  connection count and avoid tripping the add-on's rate-limit protection, without depending
+  on client-side multiplexing support. `docs/SSH-SETUP.md` documents both the batching
+  approach and the ControlMaster reversion. Developer/deployment tooling only — no change to
+  the integration itself.
+
+## [0.5.44] — 2026-08-01
+
+- Fix #549: `tools/deploy.py` now multiplexes all of its SSH/SCP connections through one real
+  connection per run (SSH `ControlMaster`/`ControlPath`/`ControlPersist`), instead of opening
+  6-8 separate ones — avoids tripping the HA SSH add-on's rate-limit/brute-force protection,
+  which was blocking deploys partway through with `Connection reset by peer` /
+  `Connection timed out`. `docs/SSH-SETUP.md` documents the failure signature and the fix.
+  Developer/deployment tooling only — no change to the integration itself.
+
+## [0.5.43] — 2026-08-01
+
+- Fix #547: `tools/deploy.py` now prints which SSH identity file it will use before
+  connecting (`Using SSH key: ...`), resolved locally via `ssh -G` with no network I/O.
+  `docs/SSH-SETUP.md` documents a Windows-specific gotcha where two different `ssh.exe`
+  binaries commonly on `PATH` (Git's MSYS build and Windows' native OpenSSH client) can
+  resolve default identity files differently, and recommends setting `HA_SSH_KEY` explicitly
+  to remove the ambiguity. Deployment tooling and docs only — no change to the integration.
+
+## [0.5.42] — 2026-08-01
+
+- Fix #545: strengthened project guidance and automated checks to prevent a repeat of
+  #543-style bugs (blocking file I/O called directly from async code, stalling Home
+  Assistant's event loop). `claude.md`'s Thread-Safety Requirements section now explicitly
+  covers blocking I/O, not just CPU-bound computation. Ruff's `ASYNC` lint category is now
+  enabled (catches a blocking call written directly inline in an async function, going
+  forward). `tests/test_executor_offload.py` gained a registry-driven check
+  (`TestBlockingIOExecutorOffload`) that verifies known blocking sub-component methods are
+  never called unwrapped from any async method in `coordinator.py` — the part that actually
+  would have caught #543. No user-visible behavior change; contributor-facing tooling only.
+
+## [0.5.41] — 2026-08-01
+
+- Fix #543: `chart_log.py`'s `ChartStateLog.load()`/`save()` performed synchronous file I/O
+  (tempfile write + `os.replace` + `os.chmod`, or a blocking `Path.read_text()`) directly on
+  Home Assistant's event loop from three coordinator.py call sites — the initial load during
+  coordinator startup, and two mid-run saves (30-min poll, and the event-driven
+  hvac_action-transition write). All three now run via `hass.async_add_executor_job()`,
+  matching the existing pattern already used for learning/state-persistence I/O.
+- Fix #543: `manifest.json`'s `iot_class` corrected from `local_polling` to `cloud_polling` —
+  Climate Advisor's AI features call the Anthropic cloud API (`anthropic>=0.49.0`), so
+  `local_polling` was inaccurate. Both fixes were required by HACS's official
+  default-repository review (hacs/default#8117).
+
+## [0.5.40] — 2026-07-29
+
+- Feat #540: new 'Nat-Vent Soft-Start (Purge Mode)' setting, on by default. The whole-house fan can now start moving air and purging attic/thermal-mass heat as soon as outdoor temperature reaches parity with indoor in the evening, once the day is confirmed past its peak — instead of waiting for outdoor to be measurably cooler. Disable it in settings if you prefer the old strict-delta-only behavior. See the Status card for a distinct 'soft-start (purge)' label while it's active.
+
+## [0.5.39] — 2026-07-29
+
+- Fix #538: the 'Next User Action' card said 'Free cooling is active.' while nat-vent or economizer cooling was already running — just repeating what the Status card already showed instead of telling you what to do. It now shows '-' when there's nothing for you to do.
+
+## [0.5.38] — 2026-07-28
+
+- Fix #534: the Next Automation card's 'outdoor no longer helping' message could read as a claim about right now even though it was always a forecast for a specific future time — the action text now says when that's expected to happen (e.g. 'Outdoor will stop helping around 9:00 AM — close windows') instead of only showing the time in a separate card. Also: mild-day briefings now use the same weather-forecast-based window close time warm days already got, instead of always showing a fixed 5:00 PM regardless of actual conditions.
+
+## [0.5.37] — 2026-07-27
+
+- Fix #530: turning off the whole-house fan didn't reliably stick — a watchdog meant to catch a completely different, rare bug was mistaking the normal 'no override in progress' state of an ordinary fan-off for a stuck automation, and killing its protection within about a second almost every time. Fixed at the root, so fan-off now stays off for its full protection window like it's always been supposed to. On top of that, an overnight session started via an 8-hour RF remote timer no longer produces a burst of contradictory decisions right when the timer runs out — a fan-off report in the couple of minutes after that timer's own grace period ends is now recognized as the tail of the same session instead of a brand-new event. Separately, a leftover fan override being cleared at the 6:30 AM wake-up could arm the AC with windows still open — wake-up no longer releases whole-house-fan HVAC suppression while a nat-vent session is still active.
+
+## [0.5.36] — 2026-07-27
+
+- Fix #528: on warm/mild days, the briefing's window-close and reopen times could be badly wrong — one real example told the user to close windows at 8 AM (outdoor was still cooler for hours after that) and reopen at 2 PM, before the day's actual heat peak, both computed from a data-alignment bug that's now fixed. Feat #528: the Next Automation card can now predict the whole-house fan/nat-vent starting (using the same real activation logic the automation itself uses), the warm-day window-close/AC-on/reopen events, and hot-day morning/evening window- cooling opportunities — previously only the daily briefing knew about any of this.
+
+## [0.5.35] — 2026-07-26
+
+- Fix #527: the dashboard's Status, Next User Action, and Next Automation cards could all say the same thing in different words whenever a door/window was open (or a grace period or thermostat-change confirmation was active) — the Next User Action card said 'Automation paused,' restating the Status card instead of telling you what to actually do (like closing the window), and the Next Automation card said 'Waiting' instead of showing the real next step (like tonight's bedtime setback) and when it'll happen. Each card now sticks to its own job, and away/vacation mode gets a bit of rotating personality in Next User Action instead of one flat line.
+
+## [0.5.34] — 2026-07-25
+
+- Fix #523: after an HA restart, if a window was already open, Climate Advisor could turn the AC on and cool against the open window instead of staying paused like it does at every other point in the day — most visible after an update. Startup handling now defers to the same door/window pause logic used the rest of the time, and that pause logic itself now correctly stays engaged even when the thermostat was already off when the window opened.
+
+## [0.5.33] — 2026-07-25
+
+- Fix #524: the dashboard's whole-house-fan status card never showed the QuietCool remote's reported speed, even though the underlying detection (#519) was working correctly — the value was computed but never reached the dashboard. It now shows promptly after any remote press. Also, the Activity Report's fan-override entries now note when a remote speed or timer selection armed the override, instead of looking identical to a generic detected toggle.
+
+## [0.5.32] — 2026-07-25
+
+- Fix #518: the warm/windows-day briefing could contradict itself — the header's window-close time didn't match the body's, an AC-start message ignored whether windows were actually open (and contradicted a correct warning elsewhere in the same briefing), a 'reopen windows' message could cancel an AC run that never started, and a bedtime-setback note could appear even when the header said 'No setback'. All four are now derived from a single computation so the header and body always agree, and the AC-safety-net wording is stated once, tied to windows being closed. Also dropped redundant 'no action needed' phrasing from the briefing and dashboard status text.
+<!-- 0.5.31 folded in: exact commit ambiguous, see PR #543 discussion -->
+- Feat #519: Climate Advisor now detects and respects QuietCool remote speed changes (low/medium/high), not just timer presses. If you adjust speed while the fan was already running, that's treated as a comfort preference — it's just recorded, not treated as taking manual control (no grace period or HVAC suppression armed). If you select a speed while the fan was off, or select a timer (with or without a speed), that's still treated as an override exactly like before. If your remote's firmware has been updated to the latest gunkl/quietcool-house-fan, the dashboard also shows the fan's current remote-reported speed. Fully auto-detected — no new setting to configure, and installs without the firmware update behave exactly as they do today.
+
+## [0.5.30] — 2026-07-25
+
+- Fix #510: the dashboard WHF status card could show 'nat-vent active, fan idle' for hours while the whole-house fan was genuinely, physically running — confirmed via live logs on an install with dedicated fan power detection, where a stale nat-vent session flag masked ground truth that was available the whole time. The display now refreshes immediately on every real physical fan transition (previously only when a manual override was already active) and always trusts confirmed physical state over CA's own internal session flags when it's available. The related 'active (unconfirmed)' status — which could also persist indefinitely once stale (observed 138 times over 24+ hours in the same incident) — now correctly settles to 'inactive' once enough time has passed for ground truth to be trusted, rather than leading with 'active' forever. Also fixes two related automation-bookkeeping gaps found during the same investigation: a whole-house-fan install's post-grace-period check was silently skipped because it consulted the thermostat's own fan attributes instead of the real fan entity, and the existing periodic untracked-fan reconciliation now also covers a stale nat-vent flag, not just a fully-untracked fan, closing the loop within ~30 minutes if it recurs.
+
+## [0.5.29] — 2026-07-24
+
+- Fix #511: for installs with no dedicated outdoor sensor (weather-service source only, e.g. Met.no), the dashboard's 'Actual Outdoor' reading and the automation decisions based on it could lag or lead true conditions by up to an hour during a temperature ramp — the weather integration's live reading only refreshes roughly hourly, so it was really a stale point-sample, not a live value. Outdoor temp is now estimated by interpolating between the two nearest hourly forecast points, refreshed every 5 minutes, feeding the dashboard, the windows-recommended flag, nat-vent/economizer gating, and thermal-learning model accuracy. Installs with a dedicated sensor or input_number are unaffected — they already had a true live reading.
+
+## [0.5.28] — 2026-07-22
+
+- Fix #508: pressing 'Cancel Fan Override' on the dashboard cleared the fan override but left the grace-period countdown running for its full original duration — up to 8 hours for a QuietCool RF remote timer — so the dashboard kept saying 'Grace period active' long after you'd already cancelled it. The fan/HVAC state also had no guaranteed way to re-sync immediately; it only worked today because an unrelated door/window event happened to fire a minute later. Both dashboard 'Cancel...' buttons now share one cancellation path that clears grace, re-checks the fan, and logs the cancellation to the Activity Report every time. A background safety check also self-heals any grace period left with no override behind it.
+
+## [0.5.27] — 2026-07-20
+
+- Fix #505: vacation mode's deep energy-saving setback was armed once when you turned vacation mode on, and never enforced again for the rest of the trip — confirmed against real logs from a 5-day vacation where the home ran at normal comfort temperature almost the entire time. A temporary override (e.g. for cleaners) that was later cancelled left the thermostat at the override's setpoint indefinitely instead of returning to the deep setback, the same way away mode already correctly does. Away mode itself, home mode, and guest mode were not affected. Also fixed the same gap for the bedtime and pre-cool triggers, which had the identical assumption.
+
+## [0.5.26] — 2026-07-20
+
+- Fix #504: a monitored door/window sensor bouncing open/closed rapidly (flaky contact hardware, or a quick open-close-open) could snap the whole-house fan on and back off within the same minute — an audible burst with no settle time, even though a sensor debounce period was configured. The debounce now also governs when free-cooling fan control reacts to a sensor change, not just HVAC pause/resume, so a bounce no longer instantly re-triggers the fan. The default debounce is also now 10 minutes (was 5) for new installs. Also fixed: the Activity Report row for nat-vent ending because a sensor closed now shows the fan's on->off transition, matching every other fan-transition row.
+
+## [0.5.25] — 2026-07-13
+
+- Fix #485: the Activity Report showed the same "Occupancy setback (away)" entry repeated every ~5 minutes for hours at a time while nobody was home, drowning out everything else in the log. The setpoint itself was never actually changing — Climate Advisor just wasn't collapsing the repeats the way it already does for other frequently-repeated entries. Now it shows one entry with a repeat count and time range, and still shows a new entry right away whenever something real changes (you come home, leave for vacation, etc.).
+
+## [0.5.24] — 2026-07-13
+
+- Fix #498: the Status dashboard showed "Grace period active" during an override but never said when it would end — now shows the end time and minutes remaining. Also fixed: the 6:30am wake-up could turn off a manually-overridden whole-house fan and arm the AC against open windows, self-correcting only by luck a cycle later. Bedtime, wake-up, and the overnight pre-cool trigger no longer each decide independently whether to touch the fan or arm HVAC — they now share one gate with the main 30-minute decision loop, closing two related gaps in the same pass: none of the three previously respected an open door/window pause, and bedtime's own free-cooling continuation check could hand off to the compressor prematurely even while the fan was still doing useful, cheaper work.
+
+## [0.5.23] — 2026-07-12
+
+- Fix #495: manually or remotely turning on the whole-house fan (WHF) — by hand, or via a QuietCool RF remote timer press — left the AC armed for the entire session, fighting the fan and wasting energy while windows were open. Only Climate Advisor's own fan activation suppressed HVAC; a user-initiated fan-on did not. Fixed: both paths now share one HVAC-suppression helper, and ending a manual session reclassifies (rather than blindly restoring a potentially hours-stale captured mode — an RF-remote-timer session can run up to 12 hours). Also fixes two QuietCool remote bugs found while investigating: (1) the remote's status entity can flap unavailable and re-announce a stale timer selection with no user action, which was previously processed as a fresh press — confirmed live as a phantom 2-hour override with zero button presses; (2) the dashboard's remote-timer display could go blank within seconds of a real press. And: the dashboard could show two contradicting status lines at once when a fan override and a pending thermostat-override confirmation overlapped — now reconciled.
+
+## [0.5.22] — 2026-07-12
+
+- Fix #493: found while verifying #491's restart fix on a real HA restart — learning.save_state() could occasionally log 'Failed to save learning state: No such file or directory' when two saves happened to run at the same moment (common at restart). It wrote to a shared, fixed staging filename, so one save could find the file already consumed by another. Non-fatal (the error was already caught and logged; nothing was corrupted), but one save's data could be silently skipped for that cycle. Each save now stages to its own uniquely-named temp file, the same pattern already used by CA's other state file — eliminating the collision entirely.
+
+## [0.5.21] — 2026-07-12
+
+- Fix #491: two restart-time bugs found immediately after the 0.5.20 deploy, both pre-existing and unrelated to #489. (1) The dashboard could show a false 'Fan manual override' and a bogus multi-hour manual grace period right after every HA restart — the whole-house fan never turned on and nobody touched the remote; the QuietCool RF remote's device entity can re-announce its last retained state while HA is still settling after restart, and neither fan listener had the same 5-minute startup-suppression guard the thermostat listener already had (Issue #321). Both fan listeners now share that guard. (2) A 'Climate Advisor unavailable' error banner could appear after routine restarts/deploys with nothing actually wrong — a plumbing bug in the thermal observation pipeline (present since April) crashed the coordinator update whenever a pending thermal observation was abandoned right as HVAC started, which is common at restart. Fixed; no HVAC or automation timing behavior changed by either fix.
+
+## [0.5.20] — 2026-07-12
+
+- Fix #489: the Doors/Windows status card could show a stale 'N open' reading for up to 30 minutes after a monitored door or window was actually closed again. Brief real door use (a few seconds) was always detected correctly, but closing it back up didn't force the dashboard to refresh — only opening did. Now every sensor transition, open or closed, refreshes the status display immediately. Automation timing is unaffected: the existing debounce still exclusively governs when HVAC actually pauses or resumes for a door/window event.
+
+## [0.5.19] — 2026-07-12
+
+- Feat #486: Climate Advisor can now hear the QuietCool whole-house fan's physical RF wall remote (via the gunkl/quietcool-house-fan ESPHome firmware's event entity) and honor a timer selection made at the remote. Previously, pressing '8 hours' on the remote had no effect on CA's own automatic fan-off timing — CA would still shut the fan off on its usual ~30-90 minute grace period, contradicting what the person just told the fan to do. Now, when an optional Fan RF Remote Event Entity is configured, a 1/2/4/8/12-hour remote timer selection sets the duration of CA's fan manual-override grace period, so CA backs off for exactly as long as the user asked. Fully optional and non-breaking: leave the field blank and nothing changes. See docs/fan-remote-spec.md for the firmware event contract and mapping.
+
+## [0.5.18] — 2026-07-12
+
+- Fix #434: optional entity settings can now actually be cleared. Previously, if you'd set a Home/Away toggle, Vacation toggle, Guest toggle, fan entity, fan-state entity, or a custom outdoor/indoor temperature-source entity and later wanted to stop using it, clearing the picker and hitting Save & Close did nothing — Climate Advisor kept reacting to the old entity even though the UI says 'leave blank if you don't use that feature'. The options flow now removes a field you've emptied, so leaving it blank truly unsets it (occupancy falls back to Home; vacation/guest default to off).
+
+## [0.5.17] — 2026-07-11
+
+- Fix #480: when Climate Advisor's coordinator update fails (the failure that took every climate_advisor_* entity unavailable simultaneously during the Issue #478 incident), the dashboard used to keep confidently showing the last-known automation/fan status with zero indication anything was wrong — you'd have no way to know CA had silently stopped working until you noticed the numbers looked stale. The Status card now shows ⚠ Climate Advisor unavailable since HH:MM — <error> the moment an update fails, and the underlying error/failure-count record is now written to disk, so it survives an HA restart and is still readable even after HA's own log retention has rotated past the event — the exact gap that made the original incident's root cause unrecoverable.
+- Fix #481: fixes a false-positive comfort log entry that could make it look like the house was too cold overnight when it wasn't. The incident-detection subsystem that powers compliance/history review was comparing live indoor temperature against the flat daytime comfort band (e.g. 68°F) even during the overnight sleep window, where a lower sleep-band floor (e.g. 64°F) is the real, actively-applied target — so indoor temps that were genuinely comfortable within the sleep band (e.g. 66°F) could still log a 'comfort_undertemp' incident. Incident detection now resolves the same currently-active band (sleep/away/vacation-aware) that the dashboard's target-heat/cool fields and every setpoint-writing automation handler already use, so the incident log only reflects violations the occupant actually experienced.
+- Fix #482: no user-visible change (latent-risk hardening). Closes two real gaps found during Issue #478's investigation in the fan-off manual-vs-automation classification path. (1) The fan physical-state drift-reconciliation self-correction (_reconcile_fan_physical_drift()'s off-command) now stamps the same _fan_command_pending/_fan_command_time bookkeeping every other WHF command site already sets, matching the existing pattern, so coordinator._async_fan_entity_changed() can suppress the resulting state-changed event as CA-caused instead of risking a misclassification as a manual fan-off (which would start a spurious grace period and temporarily block automated free cooling/HVAC control). (2) Every outgoing WHF fan/switch service call now carries a real HA Context (automation.py's new _call_fan_service_with_context()), and coordinator._async_fan_entity_changed() checks event.context.id/parent_id against it as an additional, authoritative CA-attribution signal alongside the existing _fan_command_pending/30-second timing heuristic (kept as-is, not replaced — context propagation through third-party fan/switch integrations, especially a one-way RF transmitter with no feedback of its own, is not guaranteed reliable by HA core). Every provenance decision (matched or not) is now logged at DEBUG so a future investigation has direct evidence instead of needing cross-source timestamp archaeology, and a genuinely external fan change's Context id is surfaced as diagnostic data in the Activity Report payload.
+- Fix #483: if a manual thermostat override starts a grace period and Climate Advisor's own automation decision independently converges on the same HVAC mode (and, for heat/cool modes, the same effective setpoint) the override already produced, the override is now adopted instead of silently sitting out the rest of the grace window. Checked both pre-expiry (inside apply_classification(), so convergence is recognized as soon as the next classification cycle agrees — not just at the timer's natural expiry) and at natural grace expiry (skips the misleading 'your override has expired' notification when nothing was actually reverted). Deliberately conservative: only HVAC-mode overrides are eligible; setpoint-only overrides and fan/door-window grace types are unchanged (see KNOWN_FIXES[483] for the full scope boundary). New Activity Report event 'override_adopted'.
+
+## [0.5.16] — 2026-07-11
+
+- Fix #476: no user-visible change. Migrates all 10 remaining coordinator-dependent test scenarios (grace-period lifecycle, override detection/confirmation/self-resolve, bedtime+override interaction, cancel-override, restart behavior) to the coordinator-level Tier A harness built in #474 — closing out the full scope of #472's original investigation. Found and fixed 3 more real harness bugs along the way: a scheduler ordering bug where a coordinator listener's own state dispatch didn't settle before the next scenario event (silently misattributing timestamps to unrelated timers), an unpatched dt_util.parse_datetime() returning a MagicMock and crashing thermal-observation code, and async_track_time_change/interval callbacks (briefing/wakeup/bedtime) being constructed as coroutines but never awaited. Also fixed engine._sensor_check_callback being clobbered by an engine-only stub even in coordinator mode, breaking grace-expiry re-pause detection. Every migrated scenario was verified load-bearing via a real revert test (temporarily disabling the specific guard it protects, confirming failure, then restoring) — test-infrastructure only, no changes to coordinator.py/automation.py.
+
+## [0.5.15] — 2026-07-10
+
+- Fix #474: no user-visible change. Adds coordinator-level Tier A test harness coverage — a real ClimateAdvisorCoordinator can now be constructed headlessly over dispatching FakeHass/FakeScheduler fakes (real state-change events, real timers), closing a gap where 12 scenarios covering override detection, away-setback correctness, and grace-period behavior had no automated regression guard. Also deletes an 18-line hand-approximation of the coordinator's real override-detection state machine that had already drifted stale (test-infrastructure only — tools/sim_harness/, tools/simulate.py; no changes to the integration itself).
+
+## [0.5.14] — 2026-07-10
+
+- Fix #470: the chart's predicted-indoor curve could disagree with its own displayed target band overnight on nights where an adaptive sleep setpoint applied and sleep_heat/sleep_cool were left at their defaults (not explicitly configured) — the prediction curve silently used a flat default sleep floor while the band shown alongside it used the thermal-model-adjusted one. Also completes Phase B (coordinator single- source): the chart's target-band schedule is now computed once per request instead of twice.
+
+## [0.5.13] — 2026-07-10
+
+- Fix #468: the AI Activity Report and Investigator's thermal-model sections could show an empty learning-health summary and a blank thermal equilibrium temperature even when the dashboard's Comfort Score sensor showed real rejection/observation data for the same moment — three AI-context call sites queried the thermal model without the per-observation-type health data the dashboard already includes, producing a structurally incomplete result for no reason. One of the three had already computed that exact data a few lines above for its own display and simply never passed it along. Now all three match what the dashboard sees.
+
+## [0.5.12] — 2026-07-10
+
+- Fix #466: no user-visible change. Continues Phase B (coordinator single- source): added target_temp/target_temp_low/target_temp_high to coordinator.data so ai_skills_activity.py and ai_skills_context.py stop independently re-fetching the thermostat entity to derive the same values. api.py's dashboard status endpoint deliberately keeps its own live read — it powers the ca_target_heat/cool divergence check (#402/ #462), whose entire purpose is comparing CA's computed target against the real thermostat right now, not a snapshot that can be up to 30 min old.
+
+## [0.5.11] — 2026-07-10
+
+- Fix #464: no user-visible change. Starts Phase B of the architecture- consolidation direction (coordinator single-source) by adding coordinator.get_hvac_runtime_today() as the one place today's live HVAC runtime is computed, replacing an identical formula that was copy-pasted byte-for-byte in coordinator.py, ai_skills_context.py, and ai_skills_activity.py. No drift had occurred yet, but any future change to the formula (e.g. excluding paused/away time) would have needed to be applied in 3 places to avoid the AI Activity Report and Investigator silently diverging from the dashboard.
+
+## [0.5.10] — 2026-07-10
+
+- Fix #462: the dashboard's setpoint-divergence indicator (ca_target_heat/cool) could show the wrong intended target while the home was in away or vacation mode — it never accounted for occupancy at all, so it displayed the comfort or sleep band even though the thermostat was actually being held at the (wider) setback band. Routed through the same select_comfort_band() function every real setpoint-writing code path already uses, so this indicator can no longer silently drift from what the thermostat is actually doing. Also corrected the fallback used when sleep_heat/sleep_cool aren't explicitly configured, from the flat daytime comfort temps to the documented sleep defaults (64/72°F), matching what the thermostat is actually set to overnight in that configuration.
+
+## [0.5.9] — 2026-07-10
+
+- Fix #460: no user-visible change (confirmed via unit tests and a positive control). Consolidated the 'should this comfort/setback code path defer because occupancy is away/vacation' gate — previously phrased 3 different (but logically equivalent) ways across automation.py's setpoint paths (_set_temperature_for_mode, handle_bedtime, handle_pre_cool, handle_morning_wakeup) — into a single should_defer_to_occupancy_setback() function. No drift had occurred yet, but the risk was live: a future change to which occupancy modes should defer could easily be applied to 3 of the 4 sites and miss the 4th, the same class of bug already found once in #458.
+
+## [0.5.8] — 2026-07-10
+
+- Fix #458: the AI Activity Report could misreport the whole-house fan as a contradiction ('hvac_mode=off but hvac_action=fan') during the brief window where CA detects and self-corrects a stale WHF on/off flag (Issue #423's 'active (unconfirmed)' state) — that specific fan state was missing from this report's allow-list of expected fan activity, even though the dashboard status card already handled it correctly. Consolidated the two independently-written checks (coordinator.py, ai_skills_activity.py) onto one shared predicate so this class of drift can't recur; also fixed a second latent gap the consolidation surfaced: a confirmed-running manual fan override wasn't suppressing the coordinator's own internal contradiction-warning event either.
+
+## [0.5.7] — 2026-07-10
+
+- Fix #456: no user-visible change (confirmed via differential testing and a positive control). Consolidated the nat-vent 'hard exit floor' formula — the sleep-aware threshold below which an active free-cooling session ends outright — from 3 independent implementations down to 1. Two automation.py call sites (check_natural_vent_conditions, nat_vent_temperature_check) previously recomputed this formula inline instead of using the already-pure, already-tested fan_thermostat_decision.py version — the same 'sibling function silently drifts' bug class behind issues #400/#402/#417. No drift had occurred yet here, but the risk was live: a future fix to one copy could easily miss the other two.
+
+## [0.5.6] — 2026-07-10
+
+- Fix #454: no user-visible change. Extracted the shared shape behind the nat-vent gate's old-vs-new differential comparator (shadow-mode instrumentation, the Call/ComparisonRun result shape, substitution mode) into a reusable base so each upcoming pure decide_*() extraction gets a comparator by supplying only which production method and pure function to wire together, instead of a new copy-pasted comparator file. A first cut of the refactor introduced an import-order bug that broke the CLI comparator tool (resolving the production class before the module that installs test HA stubs) — caught by running the tool directly, not just the test suite, and fixed before merge.
+
+## [0.5.5] — 2026-07-10
+
+- Fix #452: no user-visible change. Continues the nat-vent architecture-reset direction (v0.5.1) into the test suite — 14 test helpers that hand-copied production logic (API view dispatch, sensor attributes, coordinator status strings) because HomeAssistantView couldn't be instantiated in tests now exercise the real classes directly. Along the way this caught and fixed a stale test assertion that had silently drifted from production: the bedtime status line's expected setpoint used an old comfort-temp-plus-delta formula that stopped matching the real sleep_heat/sleep_cool config keys, so the old test was passing against logic that no longer runs.
+
+## [0.5.4] — 2026-07-10
+
+- Fix #449: found the real reason a whole-house fan could stay off for hours overnight after being turned off outside of Climate Advisor (e.g. a wall switch or the device's own remote) — in dual-entity setups (a control switch plus a separate power-detection sensor), the control entity's Home Assistant state can silently keep saying 'on' even though the fan is truly off, since it's a one-way command with no feedback of its own. A plain 'turn on' command sent to an entity Home Assistant already believes is on can be silently dropped before it ever reaches the device. Climate Advisor now checks the power-detection sensor before every command: if the control entity and the sensor already agree, nothing is touched; if they disagree, it forces a real transition (off, briefly, then on — or the reverse) so the command actually reaches the fan. Confirmed against real device history from an actual overnight incident. Only affects dual-entity whole-house-fan setups — single-entity setups and HVAC-fan-mode ventilation are unchanged.
+
+## [0.5.3] — 2026-07-10
+
+- Fix #446: an automated self-correction (Issue #423's fan physical-drift check fixing its own stale belief about whether the fan was on) was reported in the Activity Report as 'Grace period started (manual)' — telling you that you turned the fan off when nobody did. It's now correctly labeled as an automation-triggered grace period.
+- Fix #446: after a restart, if a fan kept appearing as 'running without CA warrant' (e.g. a thermostat's own circulation schedule CA can't durably override with a single command), CA re-issued the same correction attempt every few minutes for up to 45 minutes. It now waits 5 minutes between correction attempts for the same condition, while still keeping a persistently-stray fan visible in the logs.
+
+## [0.5.2] — 2026-07-10
+
+- Fix #444: the Activity Report could show the same 'Comfort band applied' line 2-3 times in a row for the exact same setpoint — most visibly right after an HA restart, when the startup sequence and the regular classification cycle both independently re-announced the identical band within the same minute. The underlying thermostat command was always correct; only the notification was duplicated. A short-window dedup now suppresses a redundant announcement of an unchanged band, without ever skipping the actual setpoint command.
+
+## [0.5.1] — 2026-07-10
+
+- Fix #439: the initial setup wizard could write stale sleep-temperature defaults into a brand-new install — Fahrenheit sleep fields, and all six Celsius setpoints, were hardcoded and never picked up the household-matched defaults shipped in 0.5.0. Every unit now derives its default directly from the same shared constants, so new installs get the intended values.
+- Fix #440: on a warming-trend night, if natural ventilation ended earlier than its originally scheduled close time — for any reason, including the window simply being closed — the overnight pre-cool AC trigger stayed on the old schedule instead of stepping in right away. It now reacts to nat-vent actually ending and moves the AC trigger earlier when that saves time, never later.
+- Feat #438: the default comfort/setback/sleep temperatures shipped for fresh installs (and any config relying on an unconfigured fallback) now match a real, tuned household configuration instead of arbitrary round numbers — comfort 68°F/74°F, setback 63°F/79°F, and a flat sleep target of 64°F/72°F that's cooler than daytime comfort, not warmer. Fixed 3 latent bugs found along the way where a hardcoded fallback had silently drifted from the value it was supposed to mirror (a setpoint-inconsistency check, the chart's fan-activity prediction, and the away/vacation display in the daily briefing).
+- Fix #437: on a warming-trend night, the overnight pre-cool phase (which lowers the AC ceiling to bank cold thermal mass before the next hot day) could silently become a no-op — it computed a target but immediately clamped it back up near daytime comfort, so no extra cooling ever happened even though the system reported pre-cool as active. The clamp now anchors to the sleep temperature range instead of the daytime one, so pre-cool can use its full intended range. This also closes #436: the chart's target-band display and the real overnight setpoint can no longer show different pre-cool numbers, since both now compute the target the same single way.
+- Fix #435: if you run natural ventilation with no whole-house fan or HVAC-fan device configured (relying on manually-opened windows instead), the activity report could show a confusing 'Nat-vent fan on/off' entry claiming device "none" turned on or off — even though nothing happened, since there's no fan to control in that setup. The cycling check now only reports a fan transition when one actually occurred.
+
+## [0.4.74] — 2026-07-08
+
+- Fix #427: overnight whole-house-fan nat-vent sessions were being torn down and re-adopted every 5-15 minutes for hours, showing repeated 'fan running (untracked)' and 'startup reconcile' notifications even though the window never closed. The proactive floor-exit check (which predicts an imminent floor crossing from the thermal model) was comparing indoor temperature against the flat daytime comfort floor instead of the lower overnight sleep floor, so during the sleep window it believed the floor was already breached hours before it actually was and kept ending the session for no reason. It now uses the same sleep-aware floor as every other nat-vent exit/reactivation check, so sessions persist correctly through the night and the fan only cycles the way it's supposed to.
+
+## [0.4.73] — 2026-07-08
+
+- Fix #428: 'Your Next Action' could tell you to open a window or turn on a fan to cool down even when it was hotter outside than inside — advice that would have made things worse. It now checks live outdoor temperature (the same free-cooling direction guard already used by the economizer/nat-vent logic) before ever suggesting a window or fan, covers the mirrored heating-direction case, and won't repeat advice that's redundant with what you've already done or what automation is already doing.
+
+## [0.4.72] — 2026-07-06
+
+- Fix #424: fan mode 'Both' (whole house fan + HVAC fan simultaneously) is no longer selectable during setup or in options — a proper per-device redesign for two independently-tracked physical fans was judged too risky to build on top of the already-fragile fan-reconcile logic (site of the recent #423 incident), so the option is removed instead. Existing installs configured with 'Both' are automatically migrated to 'Whole house fan' the next time the config entry loads.
+
+## [0.4.71] — 2026-07-06
+
+- Fix #423: a whole-house fan could get stuck showing 'active (unconfirmed)' for hours after physically turning off, with nat-vent never resuming even though conditions clearly favored free cooling. Root cause: the fan-reconcile logic that runs after a thermostat-internal fan blip always trusted the thermostat's own fan attributes as "the fan is running" — correct for a furnace/AC blower, but wrong for a physically separate whole-house fan switch, which could get silently "adopted" as running when it was actually off. It now checks the real configured fan's own reported state for whole-house-fan setups. Also added a background check that self-corrects a stuck fan-status flag within about 10 minutes if it ever disagrees with the real device, instead of only showing 'unconfirmed' in the UI.
+
+## [0.4.70] — 2026-07-05
+
+- Fix #418: two remaining nat-vent exit paths (closing the last open window, and the fast free-cooling-reversal check that runs on every temperature update) now go through the same unified exit handling the other paths already used. The fast-loop path had a real bug — it could mark the session as 'paused, waiting for the window to close' while still turning the HVAC back on into that open window. Closing the last window now restores HVAC and lets it settle into the right mode within a few minutes (previously instant) — a deliberate tradeoff for consistency.
+
+## [0.4.69] — 2026-07-05
+
+- Fix #420: AI Investigation reports now flag when a report was cut off before Claude finished writing it (hit the configured max response length), instead of silently showing an incomplete report as if it were 'Completed'. The dashboard now shows a clear truncation warning and a log WARNING is emitted so you know to raise 'Investigator Max Response Length' in AI settings and re-run.
+
+## [0.4.68] — 2026-07-05
+
+- Fix #417: overnight nat-vent no longer flickers between 'nat-vent' and 'paused — door/window open' every few minutes while the window stays open the whole time. The reactivation gate that decides whether nat-vent can resume was using the flat daytime comfort floor even during the sleep window, so indoor temperatures that were perfectly fine relative to the (lower) sleep floor kept reading as 'too cold' and repeatedly shutting the session down. It now uses the same sleep-aware floor the fan-cycling logic already used.
+
+## [0.4.67] — 2026-07-04
+
+- Fix #415: the Status card no longer shows a stale nat-vent target temperature (e.g. 'nat-vent (target 71°F)') that could disagree with the correct cycling band shown right below it (e.g. '64°F–66°F'). The status string is cached for up to 30 minutes while the cycling band is recomputed live on every dashboard load, so the two could drift apart across a sleep-window transition. The status string now just says 'nat-vent' — the live cycling band is the only place the temperature is shown.
+
+## [0.4.66] — 2026-07-04
+
+- Fix #413: restart-cause diagnostics (added in #403) now correctly classify real HA restarts and deploys as 'version_changed' or 'user_restart' instead of always showing 'unknown'. The persistence step was wired to async_shutdown(), which only runs on config-entry unload/reload — not on a normal Home Assistant restart. A new EVENT_HOMEASSISTANT_STOP listener now persists the same shutdown diagnostics on the restart path that actually happens in practice.
+
+## [0.4.65] — 2026-07-04
+
+- Fix #411: nat-vent floor-exit decisions and false comfort-violation alarms during correct WHF cycling are now consistent; a stuck thermostat setpoint disagreement self-corrects instead of retrying forever.
+
+## [0.4.64] — 2026-07-03
+
+- Fix #409: streamlined the Status card's nat-vent display — removed the duplicate target temperature (previously shown twice), removed the redundant 'Natural ventilation'/'nat-vent' double-naming, and dropped the unverified 'windows open' prefix (nat-vent can be active without any window physically open; real window state is already shown by the dedicated Doors/Windows card).
+
+## [0.4.63] — 2026-07-03
+
+- Fix #407 follow-up: removed the standalone 'Natural Vent' dashboard card — its cycling-band and AC-assist info is now shown as a supplemental line on the main Status card instead of a separate card, per the project's 'no new cards, extend existing ones' dashboard convention.
+- Fix #407: the dashboard Status card no longer shows a stale daytime nat-vent target (e.g. 71°F) overnight during the sleep window — it now matches the Natural Vent card's correct sleep-window target (e.g. 65°F).
+
+## [0.4.61] — 2026-07-03
+
+- Fix #405: HVAC writes no longer stay permanently blocked after a whole-house-fan nat-vent session ends with the fan already off at a restart/coalesce boundary. reconcile_fan_on_startup()'s 'no-fan' decision now releases any stranded HVAC suppression flag (_pre_fan_hvac_mode) the same way a normal fan deactivation does, instead of only clearing the fan-tracking flags — previously the home could be left with no automated cooling response for the rest of the day.
 
 ## [0.4.60] — 2026-07-03
 

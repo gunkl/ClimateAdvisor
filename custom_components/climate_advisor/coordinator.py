@@ -340,8 +340,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Sub-components
         self._state_persistence = StatePersistence(Path(hass.config.config_dir))
+        # Issue #543: chart_log.load() does blocking file I/O — moved to
+        # async_restore_state() where it can be awaited via the executor.
         self._chart_log = ChartStateLog(Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS)
-        self._chart_log.load()
         self.learning = LearningEngine(Path(hass.config.config_dir))
         self.automation_engine = AutomationEngine(
             hass=hass,
@@ -804,6 +805,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def async_restore_state(self) -> None:
         """Restore operational state from disk after startup."""
         _LOGGER.info("Climate Advisor v%s starting up", VERSION)
+        # Issue #543: chart_log.load() does blocking file I/O — offload to executor.
+        await self.hass.async_add_executor_job(self._chart_log.load)
         await self.hass.async_add_executor_job(self.learning.load_state)
         # Restore rejection_log from LearningState (load_state() already validated and capped it)
         loaded_rl = self.learning._state.rejection_log
@@ -2401,7 +2404,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fan_running=self._fan_physically_running(),
                 nat_vent_active=bool(self.automation_engine._natural_vent_active if self.automation_engine else False),
             )
-            self._chart_log.save()
+            await self.hass.async_add_executor_job(self._chart_log.save)
             _LOGGER.debug(
                 "chart_log pred_indoor=%.1f indoor=%.1f delta=%+.1f (%s)",
                 _pred_indoor_val if _pred_indoor_val is not None else float("nan"),
@@ -3619,7 +3622,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self.automation_engine._natural_vent_active if self.automation_engine else False
                     ),
                 )
-                self._chart_log.save()
+                await self.hass.async_add_executor_job(self._chart_log.save)
 
         # Bug 3 fix: Event-driven sampling for active HVAC observations.
         # The 5-min polling tick (_sample_all_observations) can miss short HVAC cycles

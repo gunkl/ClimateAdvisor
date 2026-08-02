@@ -115,6 +115,10 @@ def _make_thermostat_coord_stub(
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
     hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+    # Issue #543: chart-log writes now await hass.async_add_executor_job(); without
+    # this, the call would raise on a bare MagicMock and be silently swallowed by
+    # the surrounding contextlib.suppress(Exception), masking any future regression.
+    hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
 
     ClimateAdvisorCoordinator = _get_coordinator_class()
     coord = object.__new__(ClimateAdvisorCoordinator)
@@ -157,6 +161,7 @@ def _make_thermostat_coord_stub(
     coord._get_indoor_temp = MagicMock(return_value=72.0)
     coord._get_outdoor_temp = MagicMock(return_value=65.0)
     coord._startup_coalesce_active = False  # Bug 1 (Issue #321)
+    coord._chart_log = MagicMock()
 
     # Bind the real method under test
     coord._async_thermostat_changed = types.MethodType(ClimateAdvisorCoordinator._async_thermostat_changed, coord)

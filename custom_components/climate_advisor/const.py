@@ -4,15 +4,60 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.41"
+VERSION = "0.5.47"
 
 RELEASE_NOTES: dict[str, list[str]] = {
-    "0.5.41": [
+    "0.5.47": [
         "Fix #555: Daily Briefing sensor no longer drops to 'unknown' on days with a lot"
         " to say (away/vacation occupancy + dual window opportunities) — the TLDR summary"
         " is now shortened to reliably fit HA's 255-char sensor state limit, with a"
         " truncation safety net and full text still available in the sensor's attributes"
         " as a backstop.",
+    ],
+    "0.5.46": [
+        "Fix #553: `tools/deploy.py` now transfers files by piping a tar stream through the"
+        " same SSH connection that extracts/restarts/verifies (no separate `scp`), capping a"
+        " full deploy at 3 connections total (was ~8 after #551's partial batching) and"
+        " `--rollback` at 1. Also fixes two real bugs found during live validation against"
+        " the production HA instance: a crash-safety gap where an interrupted connection"
+        " mid-extraction could leave the live integration directory deleted or half-written"
+        " (now extracts to a temp dir and swaps it into place as the final, near-instant"
+        " step), and a backup/restore tar-format mismatch that produced a nested"
+        " climate_advisor/climate_advisor/ directory on rollback. Developer/deployment"
+        " tooling only — no change to the integration itself.",
+    ],
+    "0.5.45": [
+        "Fix #551: reverted #549's SSH connection multiplexing in `tools/deploy.py` — it"
+        " failed outright on Windows/Git-for-Windows SSH clients against a real HAOS SSH"
+        " add-on. Replaced with command batching (fewer, combined SSH round trips) to reduce"
+        " connection count and avoid tripping the add-on's rate-limit protection, without"
+        " depending on client-side multiplexing support. Developer/deployment tooling only —"
+        " no change to the integration itself.",
+    ],
+    "0.5.44": [
+        "Fix #549: `tools/deploy.py` now multiplexes all of its SSH/SCP connections through"
+        " one real connection per run (SSH `ControlMaster`), instead of opening 6-8 separate"
+        " ones — avoids tripping the HA SSH add-on's rate-limit/brute-force protection."
+        " Developer/deployment tooling only — no change to the integration itself.",
+    ],
+    "0.5.43": [
+        "Fix #547: `tools/deploy.py` now prints which SSH identity file it will use before"
+        " connecting, and the SSH setup guide documents a Windows-specific default-key-"
+        " resolution gotcha. Developer/deployment tooling only — no change to the integration"
+        " itself.",
+    ],
+    "0.5.42": [
+        "Fix #545: strengthened project guidance and automated checks to prevent a repeat of"
+        " #543-style bugs (blocking file I/O called directly from async code, stalling Home"
+        " Assistant). No user-visible behavior change — this is contributor-facing tooling"
+        " (docs, lint rule, and a regression test) only.",
+    ],
+    "0.5.41": [
+        "Fix #543: Chart-log save/load no longer runs synchronously on Home Assistant's event"
+        " loop — could cause brief startup/update stalls. The integration also now correctly"
+        " reports itself as cloud-connected ('cloud_polling') instead of 'local_polling',"
+        " matching its use of the Anthropic AI cloud API. Both were required by HACS's"
+        " official default-repository review.",
     ],
     "0.5.40": [
         "Feat #540: new 'Nat-Vent Soft-Start (Purge Mode)' setting, on by default. The"
@@ -1342,7 +1387,7 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     555: {
-        "version_fixed": "0.5.41",
+        "version_fixed": "0.5.47",
         "title": (
             "sensor.climate_advisor_daily_briefing exceeded HA's 255-char sensor state limit"
             " on days with a lot to report (away/vacation occupancy + dual morning/evening"
@@ -1372,6 +1417,304 @@ KNOWN_FIXES: dict[int, dict] = {
             " full-briefing text display — not reliably rendered as aligned columns in either"
             " UI surface today (dashboard and notify-service bodies are both proportional-"
             " font), so not treated as a regression. Table label wording is unchanged."
+        ),
+    },
+    553: {
+        "version_fixed": "0.5.46",
+        "title": (
+            "#551's command batching cut a typical deploy from ~10-11 SSH/SCP connections to"
+            " ~8, but a live test still hit the wall: 4 connections succeed, the 5th (the"
+            " file-copy scp, still a separate invocation from the batched ssh calls) gets"
+            " reset — same threshold as the original unfixed behavior. Explicit direction:"
+            " combine everything into no more than 3 connections total, and validate live"
+            " before opening any PR (the prior PR, #549, had gone out on lint/unit checks"
+            " alone and turned out to be broken in live use)"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: eliminated the scp file-transfer connection entirely by piping"
+            " a tar stream of the component directory through an ssh connection's stdin (new"
+            " _build_component_tar() using stdlib tarfile+io.BytesIO, new run_ssh_piped()"
+            " passing input=tar_bytes to subprocess.run) — the remote script that receives it"
+            " also runs everything else that needs to happen after the files land (verify,"
+            " restart, wait, log-fetch), all in that one connection. create_backup() combines"
+            " connect+backup-tar+legacy-cleanup+mkdir into one ssh call (also serves as the"
+            " connectivity test, replacing the standalone test_ssh()) plus one scp download of"
+            " the backup — connections 1-2. deploy_files() is connection 3. do_rollback() drops"
+            " to 1 connection (the chosen local backup's bytes pipe in the same way, no upload-"
+            " then-separate-extract). Result: 3 connections for a full deploy (2 for"
+            " --skip-restart), 1 for --rollback — verified via deploy.py's own debug log during"
+            " live testing against the real HA host. Two real bugs were caught during that live"
+            " validation (not caught by ruff/pytest, which is exactly why live validation was"
+            " required this time): (1) crash-safety — the initial rm-rf-then-extract approach"
+            " for both deploy and rollback left a multi-second window where a connection drop"
+            " mid-extraction (this HA SSH add-on has demonstrated it does reset connections"
+            " mid-command) could leave the live integration directory deleted or half-written;"
+            " fixed by extracting into a temp dir and swapping it into place as the final,"
+            " near-instant step, confirmed safe by directly inspecting the remote filesystem"
+            " after a live connection reset actually occurred mid-test. (2) tar-format"
+            " mismatch — create_backup()'s backup tar wrapped its contents in a climate_advisor/"
+            " directory (tar czf -C parent climate_advisor) while the new temp-extract-and-swap"
+            " logic assumed a flat layout matching _build_component_tar(), so a live rollback"
+            " test produced a nested climate_advisor/climate_advisor/ and a broken HA"
+            " integration ('Integration climate_advisor not found') until create_backup()'s tar"
+            " command was changed to -C rpath . (flat, matching the deploy-tar format);"
+            " re-verified live afterward with a clean rollback that left the exact expected"
+            " file layout and a healthy HA restart. As a side effect of the temp-dir-swap"
+            " approach, deploys are now exact mirrors of the source tree (extract-on-top"
+            " previously left stale files from earlier versions, e.g. renamed/removed files,"
+            " sitting around indefinitely — observed live as a 35-local-vs-38-remote file-count"
+            " mismatch, now exactly 35=35). docs/SSH-SETUP.md rewritten to document the 3"
+            " connections precisely and record both superseded approaches (#549, #551) and why."
+        ),
+        "scope_not_covered": (
+            "Does not add automated test coverage for the new tar-piping/temp-swap logic"
+            " (tests/ stubs Home Assistant and has no live-SSH test harness) — validated"
+            " entirely through live manual testing against the real production HA instance"
+            " per explicit instruction, not through the automated test suite. Does not handle"
+            " backup files created by deploy.py before this fix (they use the old wrapped tar"
+            " format); if a user has pre-#553 backups and needs to roll back to one after"
+            " upgrading, they'd need to extract it manually — a narrow, low-likelihood edge"
+            " case judged acceptable rather than adding dual-format-detection complexity for"
+            " it. Still no guarantee against an arbitrarily strict SSH add-on rate limit — 3"
+            " (or 1) is a large reduction, not a mathematical zero; the add-on's own"
+            " Protection-mode setting remains the authoritative fix if hit."
+        ),
+    },
+    551: {
+        "version_fixed": "0.5.45",
+        "title": (
+            "#549's SSH ControlMaster multiplexing, merged to fix deploy.py's rate-limit"
+            " problem, made deploys worse in live testing: every connection attempt failed"
+            " immediately (~1s, not a timeout) with 'mux_client_request_session: read from"
+            " master failed: Connection reset by peer' / 'Failed to connect to new control"
+            " master' — reproduced consistently as the very first connection of a fresh run"
+            " (ruling out the rate limiter), with both Windows-style and POSIX-style control"
+            " socket paths, while a bare non-multiplexed connection to the same host succeeded"
+            " instantly immediately before and after each failure — indicating ControlMaster"
+            " itself doesn't work reliably with this project's Windows/Git-for-Windows SSH"
+            " client build against this HAOS SSH add-on"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: removed control_path(), _multiplex_args(), and"
+            " close_control_master() entirely; ssh_args()/scp_args() no longer add any"
+            " ControlMaster/ControlPath/ControlPersist options; main()'s try/finally wrapper"
+            " (which existed only to call close_control_master()) removed, restoring the"
+            " original flow. Replaced with command batching to address the original"
+            " connection-count problem without depending on client-side multiplexing support:"
+            " create_backup() combines the remote existence check and tar creation into one"
+            " SSH call (was two); the new prep_remote_target() combines temp-file cleanup,"
+            " legacy climate_advisor.bak.* directory removal (now via a single 'ls | xargs -r"
+            " rm -rf' instead of one rm per matched directory), and mkdir -p into one SSH call"
+            " (replacing clean_legacy_backups() plus the separate mkdir previously inside"
+            " deploy_files()); do_rollback()'s restore-extract and temp-cleanup combined into"
+            " one call. Reduces a typical full-deploy run from ~10-11 SSH/SCP connections to"
+            " ~8. Verified live against the real HA host: both new combined commands"
+            " (create_backup's tar-or-skip logic, prep_remote_target's cleanup+mkdir sequence)"
+            " execute correctly and produce the expected results. docs/SSH-SETUP.md updated to"
+            " describe the batching approach and explicitly document the ControlMaster"
+            " reversion and why, so a future contributor doesn't re-attempt the same fix"
+            " without knowing it was already tried and found unreliable here."
+        ),
+        "scope_not_covered": (
+            "Command batching is a best-effort mitigation, not a guaranteed fix — it reduces"
+            " connection count (~10-11 to ~8) but doesn't eliminate SSH connections entirely,"
+            " so a sufficiently strict rate limit on the HA SSH add-on's Protection mode could"
+            " still trip. The authoritative fix (raising or disabling that setting) remains a"
+            " manual, server-side step documented in docs/SSH-SETUP.md, outside this repo's"
+            " control. Does not investigate root-causing exactly why ControlMaster fails on"
+            " this specific client/server combination (e.g. whether it's a Git-for-Windows"
+            " MSYS AF_UNIX socket emulation issue specifically) — the live evidence was"
+            " sufficient to conclude it's unreliable here without further diagnosis, but the"
+            " underlying mechanism remains unconfirmed. A pre-existing cosmetic issue was"
+            " observed but not fixed: the remote login shell appears to be zsh, whose default"
+            " NOMATCH option prints a 'zsh:1: no matches found: ...' stderr line when the"
+            " legacy-backup glob pattern matches nothing (harmless — the surrounding command"
+            " sequence still completes correctly via xargs -r's empty-input no-op — but noisy"
+            " in logs); this behavior predates this fix (same glob pattern was already used by"
+            " the original clean_legacy_backups()) and was left as-is to avoid scope creep."
+        ),
+    },
+    549: {
+        "version_fixed": "0.5.44",
+        "title": (
+            "Deploying #543/#545/#547 hit a repeatable pattern: the first ~4 SSH connections"
+            " tools/deploy.py opens in a single run succeed cleanly, then the 5th gets"
+            " 'Connection reset by <host> port 22', and every connection after that times out"
+            " for the rest of the run — the signature of the HA SSH add-on's rate-limit/"
+            " brute-force protection ('Protection mode') blocking the source IP after too many"
+            " connections in a short window, since deploy.py opens 6-8 separate connections"
+            " per run (connection test, dir check, backup tar+download, cleanup, mkdir, file"
+            " copy, restart, log check)"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: new control_path()/_multiplex_args() helpers add SSH"
+            " ControlMaster/ControlPath/ControlPersist options to every ssh_args()/scp_args()"
+            " invocation, so all of a run's connections tunnel through one real TCP connection"
+            " instead of opening a fresh one each time (ControlMaster=auto — the first call"
+            " creates the master, every later call with a matching ControlPath transparently"
+            " reuses it; ControlPersist=10m keeps it alive across the run). New"
+            " close_control_master() does a best-effort cleanup at the end of main(), wrapped"
+            " in try/finally so it runs on every exit path including sys.exit() calls and"
+            " --rollback. Verified via a manual reproduction that the exact multiplexed ssh"
+            " command builds and executes correctly (produces a real control socket at"
+            " ~/.ssh/sockets/deploy-<user>-<host>-<port>.sock). docs/SSH-SETUP.md: new"
+            " Troubleshooting entry describing the rate-limit signature and pointing at this"
+            " fix plus the add-on's own Protection mode setting as a second line of defense."
+        ),
+        "scope_not_covered": (
+            "Does not change or configure the HA SSH add-on's rate-limit/Protection mode"
+            " settings — that's server-side configuration outside this repo's control; docs"
+            " point users at it as a manual step. Live end-to-end verification of a full"
+            " deploy run completing under multiplexing was inconclusive at review time — a"
+            " manual multiplexed connection attempt hit 'Connection reset by peer' while the"
+            " host was still inside the rate-limit cooldown window from an earlier failed"
+            " full-deploy attempt (confirmed via a bare non-multiplexed connection succeeding"
+            " immediately before it, then failing immediately after — consistent with a"
+            " still-recovering rate limit, not a multiplexing defect) — re-verify with a real"
+            " deploy run once enough time has passed since the last rate-limit trip."
+        ),
+    },
+    547: {
+        "version_fixed": "0.5.43",
+        "title": (
+            "Deploying #543/#545 hit intermittent SSH connection resets/timeouts;"
+            " confirming which SSH key tools/deploy.py would actually use required a manual"
+            " investigation (reading ssh_args()'s HA_SSH_KEY handling, checking ~/.ssh/"
+            " contents, running ssh -G by hand) instead of being visible from the tool itself"
+        ),
+        "scope_covered": (
+            "tools/deploy.py: new resolve_ssh_identity() helper — resolves and prints which"
+            " SSH identity file will be used (via ssh -G <user>@<host>, a local-only call, no"
+            " network I/O) before test_ssh() attempts the actual connection. No change to"
+            " connection/deploy logic itself; HA_SSH_KEY was already optional and per-user"
+            " (git-ignored .deploy.env), never hardcoded in source. docs/SSH-SETUP.md:"
+            " Troubleshooting section gained a note on Windows' two-ssh.exe-on-PATH situation"
+            " (Git's MSYS build vs. the native OpenSSH client, which can resolve default"
+            " identities differently depending on invocation context) recommending explicit"
+            " HA_SSH_KEY as a zero-downside way to remove the ambiguity, plus a"
+            " self-diagnostic (ssh -G user@host) users can run themselves."
+        ),
+        "scope_not_covered": (
+            "Does not root-cause the original #543/#545 deploy connection resets/timeouts —"
+            " those were separately diagnosed (via ssh -v and Test-NetConnection) as a"
+            " connection-churn/rate-limit reaction on the HA SSH add-on side (deploy.py opens"
+            " ~6-8 sequential SSH connections per run), not a key-resolution problem; not"
+            " addressed here since it's server-side add-on configuration, outside this repo's"
+            " control. No user-visible or runtime behavior change — deployment tooling and"
+            " docs only."
+        ),
+    },
+    545: {
+        "version_fixed": "0.5.42",
+        "title": (
+            "Issue #543 (blocking file I/O called directly from async coordinator methods)"
+            " passed review for months despite this project already having a CRITICAL-tier"
+            " rule against blocking the event loop, because that rule (claude.md's"
+            " Thread-Safety Requirements, added after Issue #376) was framed entirely around"
+            " CPU-bound computation — blocking I/O was only mentioned as a 'don't"
+            " double-wrap' assumption — and its enforcement (tests/test_executor_offload.py)"
+            " was hardcoded to the 3 call sites from that earlier issue's specific function,"
+            " with no way to catch a different function/pattern"
+        ),
+        "scope_covered": (
+            "claude.md: Thread-Safety Requirements section broadened to explicitly cover"
+            " blocking I/O (file reads/writes, os.replace/os.chmod, tempfile, sockets,"
+            " subprocess) as equally in-scope as CPU-bound work, with a second heuristic"
+            " question that doesn't depend on timing, ChartStateLog/#543 added as a second"
+            " canonical example explaining why it was missed (no CPU-heavy math, blocking call"
+            " hidden behind a helper method name), the 'I/O already wrapped' exemption"
+            " reworded so it can't be misread as a blanket I/O pass, and a new Enforcement"
+            " line cross-referencing the two mechanisms below. pyproject.toml: ruff's ASYNC"
+            " lint category (flake8-async) enabled — verified zero existing violations across"
+            " the whole repo except one pre-existing false-positive-for-purpose case in"
+            " tools/take_screenshots.py (a standalone Playwright CLI script with its own"
+            " private event loop, not Home Assistant's shared one), which got a scoped"
+            " per-file-ignore with a comment explaining why. Catches ASYNC230/240/210/212/220"
+            "/221/222/251 (blocking open/Path methods/sync HTTP/subprocess/sleep) written"
+            " literally inline in any async function going forward — verified this would NOT"
+            " have caught #543 itself, since #543's blocking call was hidden inside a helper"
+            " object's method, not literally inline. tests/test_executor_offload.py: new"
+            " registry-driven TestBlockingIOExecutorOffload class with a _BLOCKING_METHODS set"
+            " of (attribute, method) pairs (_chart_log.load/save, _state_persistence.load/save,"
+            " learning.load_state/save_state) checked against every async method in"
+            " coordinator.py (not just a hardcoded list of call sites) — this is the part that"
+            " actually would have caught #543. Verified both that it passes against the"
+            " current (fixed) coordinator.py and, via a synthetic reproduction of the original"
+            " pre-fix pattern, that it correctly flags a blocking call in an async method"
+            " while correctly ignoring the same call in a sync method and a properly-wrapped"
+            " async_add_executor_job reference."
+        ),
+        "scope_not_covered": (
+            "No runtime behavior change — this is entirely contributor-facing tooling/docs."
+            " The _BLOCKING_METHODS registry is manually maintained, not auto-discovered — a"
+            " new I/O sub-component's blocking methods must be added to it by whoever"
+            " introduces them; nothing currently enforces that the registry itself stays"
+            " complete. Does not add a generic taint-analysis-style blocking-call detector"
+            " (out of scope, not this project's established testing style). Does not extend"
+            " ruff ASYNC or the registry check to files outside custom_components/coordinator.py"
+            " (e.g. api.py, automation.py) — those are covered only by the older, narrower"
+            " TestODEExecutorOffload checks where applicable."
+        ),
+    },
+    543: {
+        "version_fixed": "0.5.41",
+        "title": (
+            "HACS default-repository review (hacs/default#8117) flagged two blocking issues:"
+            " chart_log.py's ChartStateLog.load()/save() performed synchronous file I/O"
+            " (tempfile write + os.replace + os.chmod, or a blocking Path.read_text()) directly"
+            " on Home Assistant's event loop from three coordinator.py call sites, and"
+            " manifest.json declared iot_class: 'local_polling' for an integration whose AI"
+            " features call the Anthropic cloud API"
+        ),
+        "scope_covered": (
+            "coordinator.py: the synchronous self._chart_log.load() call in __init__() was"
+            " removed and replaced with the first await"
+            " self.hass.async_add_executor_job(self._chart_log.load) call inside"
+            " async_restore_state() — safe because nothing between coordinator construction"
+            " (__init__.py) and async_restore_state() reads chart_log entries. Both"
+            " self._chart_log.save() call sites (the 30-min poll write in"
+            " _async_update_data_impl, and the event-driven hvac_action-transition write in"
+            " _async_thermostat_changed) now await"
+            " self.hass.async_add_executor_job(self._chart_log.save), matching the existing"
+            " executor-offload pattern already used for learning/state-persistence I/O"
+            " elsewhere in this file. ChartStateLog.append() was left unchanged — it only"
+            " mutates an in-memory list, no I/O. manifest.json iot_class corrected from"
+            " 'local_polling' to 'cloud_polling'. Updated six test stub builders"
+            " (test_event_log_persistence.py, test_grace_restart_behavior.py,"
+            " test_solar_phase_periodic.py — missing _chart_log attribute plus positional"
+            " executor-mock side_effect lists that assumed a fixed call count/order in"
+            " async_restore_state(); test_hvac_session_detection.py — async_add_executor_job"
+            " mock that didn't invoke the wrapped function, breaking a"
+            " coord._chart_log.save.assert_called() assertion; test_startup_coalesce.py and"
+            " test_override_automation_boundary.py — bare MagicMock() hass with no"
+            " async_add_executor_job override, which would silently swallow the new awaited"
+            " call via the pre-existing contextlib.suppress(Exception) around the chart-log"
+            " write). Also fixed a documentation/process gap found while working this issue:"
+            " claude.md's mandatory PR checklist never required a CHANGELOG.md entry, so it had"
+            " silently gone unmaintained since v0.4.60 — added a checklist step for it and"
+            " backfilled CHANGELOG.md with every release from v0.4.61 through v0.5.41 using"
+            " real commit dates pulled from git history (three RELEASE_NOTES keys —"
+            " 0.4.62, 0.4.75, 0.5.0 — were never actually committed as a live VERSION value and"
+            " are folded into the version that actually shipped their content, 0.4.63 and"
+            " 0.5.1 respectively; 0.5.31's exact originating commit is ambiguous due to a"
+            " same-day multi-version merge sequence and is folded into 0.5.32 with that"
+            " ambiguity noted inline)."
+        ),
+        "scope_not_covered": (
+            "Does not address any other reviewer feedback from HACS PR #8117 beyond these two"
+            " specific items — if additional review comments exist, they need their own"
+            " tracking issue. Does not audit other modules for un-offloaded blocking I/O beyond"
+            " chart_log.py; state.py's StatePersistence and learning.py's LearningEngine I/O"
+            " were already offloaded via the executor pattern prior to this fix, but a full"
+            " sweep of the rest of the integration for similar gaps was not performed. Does not"
+            " add locking around the now-concurrent _chart_log.save() executor calls — two"
+            " call sites that were previously serialized by the single-threaded event loop can"
+            " now run on different executor threads; each write is still atomic"
+            " (tempfile+os.replace) so this cannot corrupt the file, and it's consistent with"
+            " the existing no-lock convention already accepted for learning.save_state()/"
+            " _state_persistence.save() elsewhere in this file, but it is a real (very narrow)"
+            " behavior change — a single asyncio.Lock() around the two call sites would close"
+            " it if wanted later."
         ),
     },
     540: {

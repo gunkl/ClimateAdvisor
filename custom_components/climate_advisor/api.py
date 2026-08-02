@@ -150,7 +150,6 @@ class ClimateAdvisorStatusView(HomeAssistantView):
                 occupancy_mode=coordinator._occupancy_mode,
                 in_sleep_window=_in_sleep_window(dt_util.now(), coordinator.config),
                 aggressive_savings=bool(coordinator.config.get("aggressive_savings", False)),
-                pre_condition_achieved=bool(getattr(ae, "_pre_condition_achieved", False)),
             )
             _ca_target_heat = _band.floor
             _ca_target_cool = _band.ceiling

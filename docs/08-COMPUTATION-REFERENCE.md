@@ -25,7 +25,7 @@ The automation logic table and all threshold constants in this document are expr
 | How is the setback modifier computed and what values can it take? | `avg_delta = ((tomorrow_high − today_high) + (tomorrow_low − today_low)) / 2`; modifier ranges from −3.0 (strong warming) to +3.0 (significant cold front); stable trend → 0. | [§3. Setback Modifier](08-COMPUTATION-REFERENCE.md#3-setback-modifier) |
 | What is the bedtime setpoint formula and when does the thermal model change it? | Default: `comfort_heat − 4°F` (heat) / `comfort_cool + 3°F` (cool). When thermal model confidence ≥ "low", `compute_bedtime_setback()` scales depth from `heating_rate_f_per_hour × recovery_window_hours`, clamped to `[MIN_SETBACK_DEPTH, MAX_SETBACK_DEPTH]`. | [§5a. Adaptive Bedtime Setback](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) |
 | When does nat-vent continue past bedtime instead of stopping, and what stops it afterward? | When nat-vent is active, the fan is CA-owned, and `outdoor < sleep_cool`, bedtime emits `nat_vent_bedtime_continue` and keeps the fan running. Through the sleep window the fan cycles on/off around `sleep_heat + hysteresis` (`nat_vent_temperature_check()`); the session itself only ends via the Priority 2 comfort-floor exit (`indoor ≤ sleep_heat − hysteresis`, event `nat_vent_comfort_floor_exit`) — the old Priority 0 `nat_vent_sleep_ceiling_reached` exit was removed in Issue #371. | [§5a nat-vent continuation gate](08-COMPUTATION-REFERENCE.md#5a-adaptive-bedtime-setback-compute_bedtime_setback) · [Exit Hierarchy](08-COMPUTATION-REFERENCE.md#exit-hierarchy) |
-| When and how does CA pre-cool the home on warming-trend nights? | Mid-night trigger (nat-vent close + 30 min, or wake − 4 h fallback); target = `sleep_cool + setback_modifier` floored at `sleep_heat + hysteresis` (`compute_pre_cool_target()`, single source of truth for all 5 call sites). AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258) |
+| When and how does CA pre-cool the home overnight? | Mid-night trigger (nat-vent close + 30 min, or wake − 4 h fallback), eligible on a warming trend OR when tomorrow is independently forecast hot (`resolve_pre_cool_modifier()`, Issue #558); target = `sleep_cool + modifier` floored at `sleep_heat + hysteresis` (`compute_pre_cool_target()`, single source of truth for all 5 call sites). AC suppressed if nat-vent already reached target. Morning guard emits `pre_cool_overshoot` if indoor < `comfort_heat` at wake-up. | [§5a-i. Overnight Pre-Cool Phase](08-COMPUTATION-REFERENCE.md#5a-i-overnight-pre-cool-phase-issue-258-trigger-broadened-in-558) |
 | How does the physics ODE predict future indoor temperature? | `T(t+dt) = T_outdoor + (T − T_outdoor) × exp(k_p × dt) + (Q/k_p) × (exp(k_p × dt) − 1)`, where Q switches between k_active_heat, k_active_cool, and 0 per schedule period. | [§5c. Predicted Temperature Graph — Physics Path](08-COMPUTATION-REFERENCE.md#5c-predicted-temperature-graph--physics-path) |
 | What is the dynamic target band and how does occupancy mode change it? | `_compute_target_band_schedule()` returns `[{ts, lower, upper}]` per forecast hour; away = setback today only, vacation = deep setback all days, home/guest = comfort with sleep/wake ramps. | [§5d. Dynamic Target Band](08-COMPUTATION-REFERENCE.md#5d-dynamic-target-band--_compute_target_band_schedule) |
 | How does comfort score accumulate and what triggers a suggestion? | `comfort_score = 1 − (total_violation_minutes / (days_recorded × 1440))`; more than 5 days with > 30 violation minutes triggers the `comfort_violations` suggestion. | [§Metric Definitions — Comfort Score](05-LEARNING-ENGINE-DESIGN.md#comfort-score-comfort_score) |
@@ -112,20 +112,15 @@ Pre-conditioning sets the HVAC system up ahead of an expected temperature change
 
 | Trigger | Target temperature formula | When applied | Exit condition |
 |---|---|---|---|
-| Hot day (`day_type == hot`) | `comfort_cool + (-2)` = `comfort_cool - 2` | At classification time (morning) | Once `indoor_temp ≤ comfort_cool + pre_condition_target` (e.g. ≤ 73°F), `_pre_condition_achieved` is set and the ceiling offset is skipped for the rest of the day; flag resets daily. |
 | Moderate cold front (`cooling`, magnitude 5–9°F) | `comfort_heat + 2.0` | Scheduled at 7:00 PM | Not yet implemented. |
 | Significant cold front (`cooling`, magnitude ≥ 10°F) | `comfort_heat + 3.0` | Scheduled at 7:00 PM | Not yet implemented. |
 | ODE ceiling defense (`warm` or `mild` day, model calibrated, breach predicted) | `comfort_cool` | Reactive: passive safety backstop (§6c); naturally dormant when the comfort band is armed because the band's ceiling already holds the house below `comfort_cool` | N/A — fires only when a breach is predicted; not a sustained hold. |
 
 > **Issue #249 — band model change:** Warm and mild days previously issued an `hvac_mode=off` command at classification time and relied on §6b/§6c guards to rescue the home if temperatures drifted. The automation engine now programs the occupied comfort band `[comfort_heat, comfort_cool]` (suppression to setback applies only away/asleep) instead. The thermostat holds both edges autonomously; the pre-conditioning column above reflects the new steady-state where the ODE ceiling guard is a passive backstop rather than the primary defense. See [§6e](#6e-comfort-band-programming-issue-249).
 
-**Hot-day pre-cool detail:** The `pre_condition_target` is stored as `-2.0` (a negative offset). `_set_temperature_for_mode()` applies it as `comfort_cool + pre_condition_target`, so a `comfort_cool` of 75°F yields a pre-cool target of **73°F**.
+> **Issue #558 — hot-day daytime pre-condition removed.** Prior to Issue #558, hot days also set `pre_condition_target = -2.0`, lowering the *daytime* comfort ceiling to `comfort_cool - 2` until an achievement flag (`_pre_condition_achieved`) fired once indoor reached the target, gated correctly in `select_comfort_band()`/`apply_classification()` but **not** in `_set_temperature_for_mode()`, which 5 separate "resume comfort" event handlers (occupancy-home, door/window-resume, nat-vent-exit, dashboard-resume, economizer-off) called without checking the flag at all. This caused an audible, energy-expensive daytime AC chase toward the lower target on any resume event after the home had been away/paused overnight on a hot day — most visibly right after a multi-day trip. Root-cause investigation found the daytime offset was also largely redundant: the sleep band (`sleep_cool`, always active overnight regardless of day type) and the separate overnight pre-cool banking mechanism (§5a-i, below) already do the real work of getting the house cold before heat arrives. The daytime mechanism was removed entirely rather than gated — `classifier.py` no longer sets `pre_condition`/`pre_condition_target` for hot days, and `select_comfort_band()`/`_set_temperature_for_mode()` contain no pre-cool offset branch at all. All hot-day thermal-mass banking now happens exclusively through §5a-i's nighttime-only mechanism, whose trigger was simultaneously broadened to close a related gap — see below. Golden scenario `hot_day_precool_achieved_reverts_to_comfort` (Issue #295), which asserted the removed daytime ceiling-lowering behavior, was retired to `tools/simulations/unsupported/`.
 
-**Pre-cool exit:** `_pre_condition_achieved` is set on `AutomationEngine` when `indoor_temp ≤ absolute_target` (i.e. `indoor_temp ≤ comfort_cool + pre_condition_target`). It is passed to `select_comfort_band()` to suppress the ceiling offset for subsequent 30-min cycles — the ceiling reverts to `comfort_cool` for the rest of the day. The flag persists through HA restarts (serialized to state) and resets at the start of each new day. The flag is **not re-armed** if indoor temperature later drifts above the pre-cool target — once achieved, the offset is suppressed for the remainder of the day regardless of subsequent temperature changes.
-
-**Test coverage:** golden scenario `hot_day_precool_achieved_reverts_to_comfort` (Issue #295).
-
-**Cold-front pre-heat detail:** The pre-heat target is stored in `config["_pending_preheat"]` for the coordinator to schedule. The target is `comfort_heat + pre_condition_target` (e.g., 70 + 3 = **73°F** for a significant cold front).
+**Cold-front pre-heat detail:** The pre-heat target is stored in `config["_pending_preheat"]` for the coordinator to schedule. The target is `comfort_heat + pre_condition_target` (e.g., 70 + 3 = **73°F** for a significant cold front). This is unaffected by Issue #558 — only the hot-day/cooling branch was removed.
 
 ---
 
@@ -172,9 +167,20 @@ Bedtime setback depth is computed from the thermal model HVAC rates and the over
 
 **Nat-vent continuation gate at bedtime (Issue #370):** `handle_bedtime()` evaluates the sleep band before deciding whether to deactivate the fan. When nat-vent is active (`_natural_vent_active=True`), the fan is running under CA control (`_fan_active=True`), no manual override is in effect, and `outdoor_temp < sleep_band.ceiling` (outdoor air is still cooler than the sleep target), bedtime skips fan deactivation and emits `nat_vent_bedtime_continue`. The fan then cycles on/off around the sleep-window midpoint via `nat_vent_temperature_check()`; the session only ends via the Priority 2 comfort-floor exit (see Exit Hierarchy below), which is itself sleep-aware as of Issue #402. If any gate fails, `_deactivate_fan()` is called and `_natural_vent_active` is cleared to `False`. This applies to all fan archetypes (WHF, HVAC fan, BOTH).
 
-### 5a-i. Overnight Pre-Cool Phase (Issue #258)
+### 5a-i. Overnight Pre-Cool Phase (Issue #258, trigger broadened in #558)
 
-On warming-trend nights (`setback_modifier < 0`), the coordinator schedules a second setpoint change mid-night — after nat-vent has had its window — to bank cold thermal mass before the afternoon peak:
+On eligible nights, the coordinator schedules a second setpoint change mid-night — after nat-vent has had its window — to bank cold thermal mass before the afternoon peak. Eligibility and target modifier are decided by `resolve_pre_cool_modifier(classification, config)` in `automation.py`, the single source of truth for **all** 5 call sites (`handle_pre_cool()`, `_compute_pre_cool_trigger_time()`, `_maybe_schedule_pre_cool()`, `_maybe_reschedule_pre_cool_on_nat_vent_exit()`/`_decide_pre_cool_reschedule()`, the chart target-band dip, and the ODE predicted-indoor curve):
+
+```
+if classification.setback_modifier < 0:            # warming trend (original Issue #258 gate)
+    modifier = classification.setback_modifier
+elif classification.tomorrow_high >= threshold_hot: # Issue #558: tomorrow independently hot
+    modifier = HOT_DAY_PRE_COOL_MODIFIER (-2.0)
+else:
+    modifier = None   # not eligible tonight
+```
+
+**Issue #558 rationale:** the original trend-only gate (`setback_modifier < 0`, requiring a ≥5°F day-over-day warming jump) misses a plateaued heat wave — several consecutive hot days with no single night trending sharply warmer than the last. Without the fallback, such nights got **zero** overnight banking beyond the flat `sleep_cool` floor, indefinitely, even though every one of those days was genuinely hot. The fallback reuses the exact magnitude of the daytime hot-day offset that Issue #558 removed (§4), just relocated permanently into this patient, nighttime-only mechanism instead of a daytime catch-up chase. A positive `setback_modifier` (cooling trend) falls through to the hot-day check exactly like `0` — a genuine cooling trend doesn't independently suppress the hot-day fallback if tomorrow is still forecast hot.
 
 **Trigger timing** (coordinator `_compute_pre_cool_trigger_time()`):
 
@@ -182,12 +188,12 @@ On warming-trend nights (`setback_modifier < 0`), the coordinator schedules a se
 |---|---|
 | `classification.window_close_time` is set (nat-vent configured) | `window_close_time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES (30 min)` — gives nat-vent a complete window first |
 | No nat-vent config | `wake_time − PRE_COOL_WAKE_OFFSET_HOURS (4 h)` — fallback |
-| `setback_modifier >= 0` | No trigger scheduled (no warming trend) |
+| `resolve_pre_cool_modifier()` returns `None` | No trigger scheduled (not eligible tonight) |
 
-**Target formula** (`compute_pre_cool_target()` in `automation.py` — the single source of truth, called by all 5 sites that need this value: the real AC trigger in `handle_pre_cool()`, `_compute_pre_cool_trigger_time()`, `_maybe_schedule_pre_cool()`'s status text, the chart target-band dip, and the ODE predicted-indoor curve):
+**Target formula** (`compute_pre_cool_target()` in `automation.py`, unchanged by #558 — only the modifier fed into it now comes from `resolve_pre_cool_modifier()` instead of the raw `setback_modifier`):
 
 ```
-raw_target  = sleep_cool + setback_modifier   # modifier is negative → lower ceiling
+raw_target  = sleep_cool + modifier           # modifier is negative → lower ceiling
 floor       = sleep_heat + hysteresis         # same "+1 above the floor" convention as
                                                # nat_vent_temperature_check()'s sleep-window cycling
 pre_cool_target = max(raw_target, floor)      # clamp prevents dropping below the sleep floor
@@ -203,18 +209,20 @@ The floor guard prevents the home from dropping below the sleep band's own floor
 
 | Condition | Result |
 |---|---|
-| `setback_modifier >= 0` (stable or cooling trend) | Skip silently |
+| `resolve_pre_cool_modifier()` returns `None` (no warming trend and tomorrow not hot) | Skip silently |
 | Occupancy is `away` or `vacation` | Skip (setback already active) |
 | `_manual_override_active` | Skip (user in control) |
 | `indoor_temp is None` with `nat_vent_just_closed=True` | No bypass possible → apply setpoint |
 
 **Morning guard:** `handle_morning_wakeup(indoor_temp=...)` now accepts the current indoor temperature. If `indoor_temp < comfort_heat` at wake-up, event `pre_cool_overshoot` is emitted (diagnostic) and the heat may fire. The floor guard on `pre_cool_target` is the primary prevention; the morning guard is observability for cases where thermal drift exceeded the floor.
 
-**Status visibility:** Coordinator exposes `pre_cool_status` string in `_async_update_data()` result dict → `api.py` status response → dashboard Automation Status card (secondary line when non-null). Values: `"pre-cool tonight (75°F @ 2:30 AM)"` / `"pre-cool active (75°F ceiling)"` / `"pre-cool suppressed · nat-vent cooled to 74°F"` / `null` (no warming trend).
+**Status visibility:** Coordinator exposes `pre_cool_status` string in `_async_update_data()` result dict → `api.py` status response → dashboard Automation Status card (secondary line when non-null). Values: `"pre-cool tonight (75°F @ 2:30 AM)"` / `"pre-cool active (75°F ceiling)"` / `"pre-cool suppressed · nat-vent cooled to 74°F"` / `null` (not eligible tonight).
 
 **Chart:** `_compute_target_band_schedule()` accepts `pre_cool_trigger_h` and `pre_cool_target` params. When non-null, the band ceiling steps down from `sleep_cool` to `pre_cool_target` at the trigger hour and holds until `wake_time`.
 
-**Test coverage:** `tests/test_pre_cool.py`; golden scenarios `warming_trend_pre_cool_applied` and `warming_trend_pre_cool_nat_vent_bypass` (Issue #258).
+**Briefing:** the hot-day conversational plan (`briefing._hot_day_plan()`) mentions overnight pre-cool only when `resolve_pre_cool_modifier()` returns non-`None` for tonight, phrased prospectively ("Tonight I'll pre-cool..."), never as a past-tense claim about a morning that may not have happened this way (Issue #558 — the prior hardcoded "I pre-cooled... this morning" line made a specific factual claim regardless of ground truth).
+
+**Test coverage:** `tests/test_pre_cool.py`, `tests/test_pre_cool_reschedule.py`; golden scenarios `warming_trend_pre_cool_applied`, `warming_trend_pre_cool_nat_vent_bypass` (Issue #258), and `hot_plateau_pre_cool_applied` (Issue #558 — covers the hot-day-fallback-only case with `setback_modifier=0.0`).
 
 ### 5b. Adaptive Pre-heat Start Time
 
@@ -1052,8 +1060,7 @@ There is no `off` sentinel, no off+setback divergence, and no per-handler HVAC-m
 |---|---|---|---|---|
 | Home/guest — any day type (awake) | `comfort_heat` | `comfort_cool` | `"floor"` if heat day else `"ceiling"` | Full comfort band; thermostat pre-heats the morning and cools the afternoon |
 | Home/guest — `aggressive_savings=True` | `comfort_heat − CEILING_ESCALATION_SAVINGS_MARGIN_F` | `comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F` | as above | BOTH edges widened so the system runs less |
-| Home/guest — `hot` day, pre-cool **not yet achieved** (`_pre_condition_achieved=False`) | `comfort_heat` | `comfort_cool + pre_condition_target` (e.g. 73°F when `comfort_cool=75`) | `"ceiling"` | Classifier's negative offset lowers the ceiling until the target is reached |
-| Home/guest — `hot` day, pre-cool **achieved** (`_pre_condition_achieved=True`) | `comfort_heat` | `comfort_cool` (e.g. 75°F) | `"ceiling"` | Normal ceiling restored; offset skipped for the rest of the day; flag resets daily |
+| Home/guest — `hot` day | `comfort_heat` | `comfort_cool` | `"ceiling"` | No pre-cool offset — the daytime `hot` day ceiling-lowering mechanism was removed in Issue #558; hot-day thermal-mass banking happens exclusively via the overnight pre-cool phase (§5a-i), not this band |
 | Sleep window (any day type) | `sleep_heat` | `sleep_cool` | `"floor"` (cool/cold) or `"ceiling"` (warm/hot) | Configured `sleep_heat`/`sleep_cool` band |
 | Away occupancy | `setback_heat` | `setback_cool` | `"ceiling"` | Setback band — suppression only applies when nobody is home |
 | Vacation occupancy | `setback_heat − VACATION_SETBACK_EXTRA` | `setback_cool + VACATION_SETBACK_EXTRA` | `"ceiling"` | Deep-setback band |

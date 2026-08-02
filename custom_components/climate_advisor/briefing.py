@@ -15,6 +15,7 @@ import logging
 import platform
 from datetime import datetime, time, timedelta
 
+from .automation import compute_pre_cool_target, resolve_pre_cool_modifier
 from .classifier import DayClassification
 from .const import (
     COLD_DAY_SETBACK_DEPTH_F,
@@ -65,6 +66,7 @@ def generate_briefing(
     adaptive_thermal_active: bool = False,
     predicted_indoor_future: list[dict] | None = None,
     predicted_outdoor_future: list[dict] | None = None,
+    runtime_config: dict | None = None,
 ) -> str:
     """Generate the daily climate briefing message.
 
@@ -84,6 +86,11 @@ def generate_briefing(
         fan_mode: Fan control mode — one of the FAN_MODE_* constants.
         occupancy_mode: Current occupancy state — "home", "away", "guest", or "vacation".
         temp_unit: Display unit — "fahrenheit" or "celsius".
+        runtime_config: Full runtime config dict, used only to compute whether tonight's overnight
+            pre-cool (``resolve_pre_cool_modifier()``) is expected to run, for the hot-day plan's
+            narrative (Issue #558). If omitted, that narrative line is left out rather than
+            guessed. Named distinctly from the local ``config`` dict built below (TLDR-table
+            shape) to avoid shadowing it.
 
     Returns:
         Formatted briefing string suitable for email or notification.
@@ -170,7 +177,16 @@ def generate_briefing(
     # Conversational body
     if c.day_type == DAY_TYPE_HOT:
         lines.extend(
-            _hot_day_plan(c, comfort_cool, setback_cool, wake_time, sleep_time, fan_mode=fan_mode, temp_unit=temp_unit)
+            _hot_day_plan(
+                c,
+                comfort_cool,
+                setback_cool,
+                wake_time,
+                sleep_time,
+                fan_mode=fan_mode,
+                temp_unit=temp_unit,
+                runtime_config=runtime_config,
+            )
         )
     elif c.day_type == DAY_TYPE_WARM:
         lines.extend(
@@ -411,15 +427,29 @@ def _hot_day_plan(
     sleep_time,
     fan_mode: str = FAN_MODE_DISABLED,
     temp_unit: str = FAHRENHEIT,
+    runtime_config: dict | None = None,
 ) -> list[str]:
     """Conversational plan for hot days (85\u00b0F+)."""
     threshold = comfort_cool + ECONOMIZER_TEMP_DELTA
 
-    lines = [
-        f"I pre-cooled to {format_temp(comfort_cool - 2, temp_unit)} this morning while outdoor air"
-        f" was still cool \u2014 that banking strategy cuts energy use significantly over"
-        f" the course of the day.",
-    ]
+    # Issue #558: only claim overnight pre-cool banking when it's actually expected to run
+    # tonight (resolve_pre_cool_modifier() \u2014 the same gate handle_pre_cool() uses), and phrase
+    # it prospectively ("tonight") rather than asserting a past event that may not have happened
+    # (e.g. the home was away overnight, or the trigger hasn't fired yet today).
+    _modifier = resolve_pre_cool_modifier(c, runtime_config) if runtime_config is not None else None
+    if _modifier is not None:
+        _pre_cool_target = compute_pre_cool_target(runtime_config, _modifier)
+        opener = (
+            f"Tonight I'll pre-cool the house to about {format_temp(_pre_cool_target, temp_unit)} while"
+            f" outdoor air is still cool \u2014 that banking strategy cuts energy use over the course"
+            f" of the day."
+        )
+    else:
+        opener = (
+            f"Today's forecast calls for a high near {format_temp(c.today_high, temp_unit)} \u2014"
+            f" I'll hold things at {format_temp(comfort_cool, temp_unit)} through the day."
+        )
+    lines = [opener]
 
     has_morning = c.window_opportunity_morning
     has_evening = c.window_opportunity_evening

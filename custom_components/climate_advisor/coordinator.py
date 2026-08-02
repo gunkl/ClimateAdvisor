@@ -41,6 +41,7 @@ from .automation import (
     _in_sleep_window,
     compute_bedtime_setback,
     compute_pre_cool_target,
+    resolve_pre_cool_modifier,
     select_comfort_band,
 )
 from .briefing import _derive_warm_day_events, generate_briefing
@@ -2803,6 +2804,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 or None
             ),
+            runtime_config=self.config,
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
@@ -2964,7 +2966,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         Primary: nat-vent window close time + PRE_COOL_POST_NAT_VENT_DELAY_MINUTES.
         Fallback: wake_time - PRE_COOL_WAKE_OFFSET_HOURS.
-        Returns None if there is no warming trend today.
+        Returns None if tonight isn't eligible for pre-cool — see ``resolve_pre_cool_modifier()``
+        (warming trend, or tomorrow independently forecast hot).
         """
         from .const import (
             CONF_SLEEP_COOL,
@@ -2974,12 +2977,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
         c = self._current_classification
-        if not c or c.setback_modifier >= 0:
+        _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
+        if _modifier is None:
             return None
 
         # Verify the pre-cool target would actually differ from sleep_cool
         sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
-        pre_cool_target = compute_pre_cool_target(self.config, c.setback_modifier)
+        pre_cool_target = compute_pre_cool_target(self.config, _modifier)
         if pre_cool_target >= sleep_cool:
             _LOGGER.info(
                 "Pre-cool scheduling: clamped target (%.1f°F) == sleep_cool (%.1f°F); skipping",
@@ -3025,7 +3029,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return trigger
 
     def _maybe_schedule_pre_cool(self) -> None:
-        """Schedule the overnight pre-cool trigger if a warming trend is active and not yet scheduled."""
+        """Schedule the overnight pre-cool trigger if tonight is eligible and not yet scheduled."""
         if self._pre_cool_trigger_scheduled:
             return
         trigger_time = self._compute_pre_cool_trigger_time()
@@ -3038,7 +3042,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Build the pre-cool target for status display
         c = self._current_classification
-        pre_cool_target = compute_pre_cool_target(self.config, c.setback_modifier)
+        _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
+        pre_cool_target = compute_pre_cool_target(self.config, _modifier if _modifier is not None else 0.0)
 
         self._pre_cool_trigger_cancel = async_track_point_in_time(self.hass, self._async_pre_cool_trigger, trigger_time)
         self._pre_cool_trigger_scheduled = True
@@ -3080,9 +3085,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         if not self._current_classification:
             return
+        _modifier = resolve_pre_cool_modifier(self._current_classification, self.config)
         new_trigger = _decide_pre_cool_reschedule(
             current_trigger_at=self._pre_cool_trigger_dt,
-            setback_modifier=self._current_classification.setback_modifier,
+            pre_cool_eligible=_modifier is not None,
             nat_vent_close_delay_minutes=PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
             now=dt_util.now(),
         )
@@ -6348,7 +6354,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 occupancy_mode=(self.automation_engine._occupancy_mode if self.automation_engine else OCCUPANCY_HOME),
                 in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
                 aggressive_savings=bool(self.config.get("aggressive_savings", False)),
-                pre_condition_achieved=bool(getattr(self.automation_engine, "_pre_condition_achieved", False)),
             )
             return band.floor, band.ceiling
         if _in_sleep_window(dt_util.now(), self.config):
@@ -7230,11 +7235,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # Compute pre-cool band parameters for chart dip visualization
         _pc_trigger_h: float | None = None
         _pc_target: float | None = None
-        if self._current_classification and self._current_classification.setback_modifier < 0:
+        _pc_modifier = (
+            resolve_pre_cool_modifier(self._current_classification, self.config)
+            if self._current_classification
+            else None
+        )
+        if _pc_modifier is not None:
             _pc_trigger_time = self._compute_pre_cool_trigger_time()
             if _pc_trigger_time is not None:
                 _pc_trigger_h = _pc_trigger_time.hour + _pc_trigger_time.minute / 60.0
-                _pc_target = compute_pre_cool_target(self.config, self._current_classification.setback_modifier)
+                _pc_target = compute_pre_cool_target(self.config, _pc_modifier)
 
         _raw_band = list(
             _compute_target_band_schedule(
@@ -7646,7 +7656,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 def _decide_pre_cool_reschedule(
     *,
     current_trigger_at: datetime | None,
-    setback_modifier: float,
+    pre_cool_eligible: bool,
     nat_vent_close_delay_minutes: float,
     now: datetime,
 ) -> datetime | None:
@@ -7657,8 +7667,9 @@ def _decide_pre_cool_reschedule(
     Returns the new (earlier) trigger time, or None when no reschedule should happen:
       - no trigger is currently pending (already fired today, or none was ever needed —
         `current_trigger_at is None`)
-      - no warming trend is active (`setback_modifier >= 0` — pre-cool wouldn't have
-        been scheduled in the first place)
+      - tonight isn't pre-cool eligible per ``resolve_pre_cool_modifier()`` (neither a
+        warming trend nor tomorrow's forecast classifying hot — pre-cool wouldn't have
+        been scheduled in the first place; Issue #558)
       - the candidate time (now + the same nat-vent-close delay the original schedule
         uses) is NOT earlier than what's already scheduled — this only ever pulls the
         trigger EARLIER, never later, so a nat-vent exit that happens to occur close to
@@ -7666,7 +7677,7 @@ def _decide_pre_cool_reschedule(
     """
     if current_trigger_at is None:
         return None
-    if setback_modifier >= 0:
+    if not pre_cool_eligible:
         return None
     candidate = now + timedelta(minutes=nat_vent_close_delay_minutes)
     if candidate >= current_trigger_at:
@@ -8460,8 +8471,8 @@ def _build_predicted_indoor_future(
         # Compute pre-cool band parameters so the prediction curve tracks the pre-cool setpoint
         _ode_pc_trigger_h: float | None = None
         _ode_pc_target: float | None = None
-        _setback_mod = getattr(classification, "setback_modifier", None)
-        if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
+        _ode_pc_modifier = resolve_pre_cool_modifier(classification, config) if classification is not None else None
+        if _ode_pc_modifier is not None:
             from .const import (
                 PRE_COOL_POST_NAT_VENT_DELAY_MINUTES,
                 PRE_COOL_WAKE_OFFSET_HOURS,
@@ -8474,7 +8485,7 @@ def _build_predicted_indoor_future(
                 _wake_str = config.get("wake_time", "06:30")
                 _wake_h_raw = int(_wake_str.split(":")[0]) + int(_wake_str.split(":")[1]) / 60.0
                 _ode_pc_trigger_h = _wake_h_raw - PRE_COOL_WAKE_OFFSET_HOURS
-            _ode_pc_target = compute_pre_cool_target(config, classification.setback_modifier)
+            _ode_pc_target = compute_pre_cool_target(config, _ode_pc_modifier)
 
         _computed_band_schedule = _compute_target_band_schedule(
             _future_timestamps_for_band,

@@ -42,6 +42,7 @@ from .const import (
     CONF_SENSOR_DEBOUNCE,
     CONF_SLEEP_COOL,
     CONF_SLEEP_HEAT,
+    CONF_THRESHOLD_HOT,
     CONF_WELCOME_HOME_DEBOUNCE,
     DAY_TYPE_HOT,
     DEFAULT_AUTOMATION_GRACE_SECONDS,
@@ -57,6 +58,7 @@ from .const import (
     DEFAULT_SETBACK_HEAT,
     DEFAULT_SLEEP_COOL,
     DEFAULT_SLEEP_HEAT,
+    DEFAULT_THRESHOLD_HOT,
     DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS,
     ECONOMIZER_EVENING_END_HOUR,
     ECONOMIZER_EVENING_START_HOUR,
@@ -67,6 +69,7 @@ from .const import (
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
     FAN_MODE_WHOLE_HOUSE,
+    HOT_DAY_PRE_COOL_MODIFIER,
     MIN_VIABLE_NAT_VENT_HOURS,
     NAT_VENT_HYSTERESIS_F,
     NAT_VENT_REACTIVATION_LOCKOUT_S,
@@ -215,7 +218,6 @@ def select_comfort_band(
     occupancy_mode: str,
     in_sleep_window: bool,
     aggressive_savings: bool,
-    pre_condition_achieved: bool = False,
 ) -> ComfortBand:
     """Compute the comfort band for the current plan — pure, no HA state access.
 
@@ -227,12 +229,14 @@ def select_comfort_band(
     - vacation: deep setback on both edges; ``active="ceiling"`` (a cool-capable unit defends
       the wide ceiling, the dominant concern in an empty home).
     - away: standard setback on both edges; ``active="ceiling"`` for the same reason.
-    - sleep: ``sleep_heat``/``sleep_cool`` band; active follows day type.
+    - sleep: ``sleep_heat``/``sleep_cool`` band; active follows day type. Overnight pre-cool
+      banking (below sleep_cool) is applied separately by ``handle_pre_cool()`` — see
+      ``compute_pre_cool_target()`` — not by this function.
     - occupied + awake (home/guest), ANY day type: the "lazy" comfort band
       ``[comfort_heat, comfort_cool]`` — the thermostat pre-heats the morning to comfort_heat and
       cools the afternoon to comfort_cool. Suppression to a setback edge applies ONLY when
       away/asleep. ``active`` marks the day's dominant edge for single-mode devices (floor on a heat
-      day, ceiling otherwise); pre-cool lowers the ceiling on a hot day.
+      day, ceiling otherwise).
     ``aggressive_savings`` widens BOTH comfort edges by ``CEILING_ESCALATION_SAVINGS_MARGIN_F``
     (floor down, ceiling up) so the system runs less; setback/sleep bands are unaffected.
     """
@@ -262,13 +266,6 @@ def select_comfort_band(
         active = "floor" if classification.hvac_mode == "heat" else "ceiling"
         floor = comfort_heat - margin
         ceiling = comfort_cool + margin
-        if (
-            classification.hvac_mode == "cool"
-            and classification.pre_condition_target is not None
-            and classification.pre_condition_target < 0
-            and not pre_condition_achieved
-        ):
-            ceiling += float(classification.pre_condition_target)  # pre-cool lowers the ceiling
         ctx = "comfort"
 
     reason = (
@@ -301,6 +298,39 @@ def compute_pre_cool_target(config: dict, setback_modifier: float) -> float:
     raw_target = sleep_cool + setback_modifier
     floor = sleep_heat + hysteresis
     return max(raw_target, floor)
+
+
+def resolve_pre_cool_modifier(classification: DayClassification, config: dict) -> float | None:
+    """Decide whether overnight pre-cool should run tonight, and with what modifier (Issue #558).
+
+    Returns ``None`` when neither gate is satisfied (no pre-cool tonight). Otherwise returns the
+    modifier to pass to ``compute_pre_cool_target()``:
+
+    - If tonight qualifies via a warming trend (``setback_modifier < 0``, set by the classifier
+      on a significant/moderate warming trend), that modifier is used as-is — unchanged from the
+      original Issue #258 behavior.
+    - Else, if tomorrow is independently forecast to be a hot day (``tomorrow_high >=
+      threshold_hot``), a flat fallback of ``HOT_DAY_PRE_COOL_MODIFIER`` is used instead. Without
+      this fallback, a plateaued stretch of hot days (each day's forecast high roughly matching
+      the last, so ``setback_modifier`` stays 0) would get zero overnight banking beyond the flat
+      ``sleep_cool`` floor, indefinitely — this closes that gap using the same nightly, patient
+      mechanism rather than reintroducing a daytime catch-up.
+
+    This is the single source of truth for "should/how should tonight pre-cool" — call sites in
+    ``handle_pre_cool()``, the trigger-time scheduler, and the briefing narrative must all use
+    this rather than re-deriving the gate condition. Defensive against loosely-typed test doubles
+    (e.g. a ``MagicMock`` classification with no explicit ``setback_modifier``/``tomorrow_high``
+    set) — treated as "not eligible" rather than raising.
+    """
+    _setback_mod = getattr(classification, "setback_modifier", None)
+    if isinstance(_setback_mod, (int, float)) and _setback_mod < 0:
+        return _setback_mod
+    _tomorrow_high = getattr(classification, "tomorrow_high", None)
+    if isinstance(_tomorrow_high, (int, float)):
+        threshold_hot = float(config.get(CONF_THRESHOLD_HOT, DEFAULT_THRESHOLD_HOT))
+        if _tomorrow_high >= threshold_hot:
+            return HOT_DAY_PRE_COOL_MODIFIER
+    return None
 
 
 def _in_sleep_window(now: datetime, config: dict) -> bool:
@@ -705,12 +735,6 @@ class AutomationEngine:
 
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
-
-        # Pre-cool achievement gate (Issue #295) — once the home reaches the pre-cool
-        # target temperature for the day, revert to comfort_cool ceiling for the rest
-        # of the day rather than holding the lower pre-cool setpoint all afternoon.
-        self._pre_condition_achieved: bool = False
-        self._pre_condition_achieved_date: str | None = None
 
     async def _notify(self, message: str, title: str, notification_type: str) -> None:
         """Send a notification via configured channels, filtered by per-event preferences."""
@@ -1537,7 +1561,6 @@ class AutomationEngine:
             occupancy_mode=self._occupancy_mode,
             in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
-            pre_condition_achieved=self._pre_condition_achieved,
         )
         target_f = band.floor if classification.hvac_mode == "heat" else band.ceiling
 
@@ -1799,35 +1822,6 @@ class AutomationEngine:
                     classification.hvac_mode,
                 )
 
-            # Issue #295: pre-cool achievement gate — daily reset + detection.
-            # Reset the flag at the start of each new calendar day so the pre-cool
-            # ceiling offset re-arms each morning.  Check whether the home has
-            # already reached the pre-cool target temperature; if so, set the flag
-            # so select_comfort_band() reverts to comfort_cool for the rest of the day.
-            _today = dt_util.now().strftime("%Y-%m-%d")
-            if self._pre_condition_achieved_date != _today:
-                self._pre_condition_achieved = False
-                self._pre_condition_achieved_date = _today
-
-            if (
-                not self._pre_condition_achieved
-                and classification.pre_condition
-                and classification.pre_condition_target is not None
-                and classification.pre_condition_target < 0
-                and indoor_temp is not None
-            ):
-                _absolute_target = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)) + float(
-                    classification.pre_condition_target
-                )
-                if indoor_temp <= _absolute_target:
-                    self._pre_condition_achieved = True
-                    _LOGGER.info(
-                        "Pre-cool achieved (indoor=%.1f°F ≤ target=%.1f°F) — reverting to comfort"
-                        " ceiling for rest of day",
-                        indoor_temp,
-                        _absolute_target,
-                    )
-
             # Arm the comfort band — the thermostat holds the house; no mode-specific dispatch needed.
             cls_reason = (
                 f"daily classification — {classification.day_type} day,"
@@ -1839,7 +1833,6 @@ class AutomationEngine:
                 occupancy_mode=self._occupancy_mode,
                 in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
                 aggressive_savings=bool(self.config.get("aggressive_savings", False)),
-                pre_condition_achieved=self._pre_condition_achieved,
             )
             await self._apply_comfort_band(_band, reason=cls_reason)
 
@@ -2447,17 +2440,12 @@ class AutomationEngine:
                 await self.handle_occupancy_vacation()
             return
 
-        unit = self.config.get("temp_unit", "fahrenheit")
         if c.hvac_mode == "heat":
             floor_target = float(self.config["comfort_heat"])
             await self._set_temperature(floor_target, reason=reason, mode="heat")
             return
         elif c.hvac_mode == "cool":
             ceiling_target = float(self.config["comfort_cool"])
-            if c.pre_condition and c.pre_condition_target and c.pre_condition_target < 0:
-                # Pre-cool: target is below comfort
-                ceiling_target = ceiling_target + c.pre_condition_target
-                reason = f"{reason} (pre-cool offset {format_temp_delta(abs(c.pre_condition_target), unit)})"
             await self._set_temperature(ceiling_target, reason=reason, mode="cool")
             return
         else:
@@ -4510,17 +4498,21 @@ class AutomationEngine:
     async def handle_pre_cool(self, indoor_temp: float | None, nat_vent_just_closed: bool) -> str:
         """Apply overnight pre-cool setpoint to bank cold thermal mass before a hot day.
 
-        Fires at the pre-cool trigger time (nat-vent close + delay, or wake_time - 4h).
+        Fires at the pre-cool trigger time (nat-vent close + delay, or wake_time - 4h), gated by
+        ``resolve_pre_cool_modifier()`` — either a warming trend tonight, or tomorrow's forecast
+        classifying hot on its own (Issue #558, closing the plateau gap where consecutive hot
+        days with no further warming got no overnight banking at all).
         Suppressed when nat-vent already brought indoor to or below the target.
         Returns a short status string for logging.
         """
         c = self._current_classification
-        if not c or c.setback_modifier >= 0:
+        _modifier = resolve_pre_cool_modifier(c, self.config) if c else None
+        if _modifier is None:
             _LOGGER.info(
-                "Pre-cool trigger fired: skipped — no warming trend (modifier=%s)",
+                "Pre-cool trigger fired: skipped — no warming trend and tomorrow not hot (modifier=%s)",
                 getattr(c, "setback_modifier", "n/a"),
             )
-            return "skipped: no warming trend"
+            return "skipped: not eligible"
 
         # Issue #498: occupancy/override/paused/nat-vent checks below now route through the
         # single shared gate (desired_state.decide_scheduled_band_gate()) also used by
@@ -4577,7 +4569,7 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "pre_cool_suppressed_nat_vent",
-                    {"modifier": c.setback_modifier, "reason": "active_session"},
+                    {"modifier": _modifier, "reason": "active_session"},
                 )
             if _fan_cfg_pc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
                 return "suppressed: nat-vent/WHF session active"
@@ -4586,15 +4578,15 @@ class AutomationEngine:
         sleep_cool = float(self.config.get(CONF_SLEEP_COOL, DEFAULT_SLEEP_COOL))
         sleep_heat_floor = float(self.config.get(CONF_SLEEP_HEAT, DEFAULT_SLEEP_HEAT))
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-        raw_target = sleep_cool + c.setback_modifier  # setback_modifier is negative for warming trend
+        raw_target = sleep_cool + _modifier  # negative modifier lowers the ceiling below sleep_cool
         floor = sleep_heat_floor + hysteresis
-        pre_cool_target = compute_pre_cool_target(self.config, c.setback_modifier)
+        pre_cool_target = compute_pre_cool_target(self.config, _modifier)
 
         _LOGGER.info(
             "Pre-cool trigger fired: indoor=%s°F, target=%.1f°F, modifier=%.1f (sleep_cool=%.1f, floor=%.1f)",
             f"{indoor_temp:.1f}" if indoor_temp is not None else "unknown",
             pre_cool_target,
-            c.setback_modifier,
+            _modifier,
             sleep_cool,
             floor,
         )
@@ -4622,7 +4614,7 @@ class AutomationEngine:
                     {
                         "indoor": indoor_temp,
                         "target": pre_cool_target,
-                        "modifier": c.setback_modifier,
+                        "modifier": _modifier,
                         "reason": "achieved",
                     },
                 )
@@ -4640,7 +4632,7 @@ class AutomationEngine:
             floor=_sleep_band.floor,
             ceiling=pre_cool_target,
             active="ceiling",
-            reason=f"pre-cool — warming trend thermal mass banking (target {pre_cool_target:.0f}°F)",
+            reason=f"pre-cool — thermal mass banking (target {pre_cool_target:.0f}°F)",
         )
 
         if self._emit_event_callback:
@@ -4648,7 +4640,7 @@ class AutomationEngine:
                 "pre_cool_applied",
                 {
                     "target": pre_cool_target,
-                    "modifier": c.setback_modifier,
+                    "modifier": _modifier,
                     "sleep_cool": sleep_cool,
                     "floor": floor,
                     "indoor": indoor_temp,
@@ -4663,7 +4655,7 @@ class AutomationEngine:
         )
         await self._apply_comfort_band(
             _pre_cool_band,
-            reason=f"pre-cool — warming trend [{_sleep_band.floor:.0f}/{pre_cool_target:.0f}]",
+            reason=f"pre-cool [{_sleep_band.floor:.0f}/{pre_cool_target:.0f}]",
         )
         return f"applied: {pre_cool_target:.1f}°F"
 
@@ -5963,18 +5955,12 @@ class AutomationEngine:
             "Fan override: restart clean-slate — _fan_override_active and _fan_override_time "
             "cleared (Issue #327); reconcile will decide fan disposition"
         )
-        # Issue #295: pre-cool achievement gate — restored so a restart mid-day after
-        # the home reached the pre-cool target does not re-arm the lower ceiling offset.
-        self._pre_condition_achieved = state.get("pre_condition_achieved", False)
-        self._pre_condition_achieved_date = state.get("pre_condition_achieved_date")
         _LOGGER.info(
-            "Restored automation state: last_action=%s, fan_active=%s, fan_override=%s, "
-            "precool_achieved=%s "
+            "Restored automation state: last_action=%s, fan_active=%s, fan_override=%s "
             "(override/grace/pause/fan-override state cleared — clean slate on restart per Issue #263/#327)",
             self._last_action_reason,
             self._fan_active,
             self._fan_override_active,
-            self._pre_condition_achieved,
         )
 
     def get_serializable_state(self) -> dict[str, Any]:
@@ -6015,10 +6001,6 @@ class AutomationEngine:
                 if self._current_classification
                 else None
             ),
-            # Issue #295: pre-cool achievement gate — persisted so an HA restart after
-            # the home reached the pre-cool target does not re-arm the lower ceiling.
-            "pre_condition_achieved": self._pre_condition_achieved,
-            "pre_condition_achieved_date": self._pre_condition_achieved_date,
         }
 
     def cleanup(self) -> None:

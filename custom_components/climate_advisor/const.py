@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.47"
+VERSION = "0.5.48"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.48": [
+        "Fix #558: the AC no longer chases a colder-than-comfort setpoint on hot days after"
+        " you return from being away — it now simply restores your normal comfort setting."
+        " The overnight pre-cool banking feature (which quietly cools the house before a hot"
+        " day, overnight, while it's cheap) now also runs on stretches of consecutive hot"
+        " days that aren't getting hotter each day, not just the first day of a heat wave."
+        " The morning briefing no longer claims pre-cooling happened if it didn't.",
+    ],
     "0.5.47": [
         "Fix #555: Daily Briefing sensor no longer drops to 'unknown' on days with a lot"
         " to say (away/vacation occupancy + dual window opportunities) — the TLDR summary"
@@ -1386,6 +1394,54 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    558: {
+        "version_fixed": "0.5.48",
+        "title": (
+            "Hot-day daytime pre-condition offset (comfort_cool - 2) chased a colder-than-"
+            "comfort setpoint during peak afternoon heat after a multi-day away trip ended,"
+            " because _set_temperature_for_mode() (called from 5 separate 'resume comfort'"
+            " event handlers) reimplemented the offset math without checking the"
+            " _pre_condition_achieved gate that the correctly-gated apply_classification()/"
+            "select_comfort_band() path respected. Root-cause investigation found the daytime"
+            " mechanism was also largely redundant with the sleep band and the separate"
+            " overnight pre-cool banking mechanism, and that the daily briefing unconditionally"
+            " claimed pre-cooling happened 'this morning' regardless of ground truth. Also found"
+            " the overnight pre-cool mechanism (Issue #258) was trend-gated only, missing"
+            " plateaued multi-day heat waves with no single night trending sharply warmer."
+        ),
+        "scope_covered": (
+            "Removed the hot-day daytime pre-condition mechanism entirely: classifier.py no"
+            " longer sets pre_condition/pre_condition_target for DAY_TYPE_HOT (cooling-trend"
+            " pre-heat branch, positive values, untouched). Deleted the now-dead offset branch"
+            " from select_comfort_band() and _set_temperature_for_mode() (all 5 callers:"
+            " handle_occupancy_home, door/window resume, nat-vent comfort-floor exit, dashboard"
+            " resume, economizer deactivation), and the _pre_condition_achieved/"
+            "_pre_condition_achieved_date state (definition, save, load). Added"
+            " resolve_pre_cool_modifier() in automation.py as the single source of truth for"
+            " overnight pre-cool eligibility across all 5 real call sites (handle_pre_cool(),"
+            " trigger-time scheduler, reschedule-on-nat-vent-exit, chart target-band dip, ODE"
+            " predicted-indoor curve) — broadened to fire on tomorrow's absolute hot"
+            " classification (tomorrow_high >= threshold_hot) in addition to the original"
+            " warming-trend gate, using a HOT_DAY_PRE_COOL_MODIFIER=-2.0 fallback so a plateaued"
+            " heat wave gets real overnight banking (target = sleep_cool - 2) instead of a"
+            " no-op. Fixed briefing._hot_day_plan() to only claim overnight pre-cool"
+            " prospectively ('tonight') when resolve_pre_cool_modifier() confirms it's actually"
+            " eligible, falling back to a truthful, non-fabricated statement otherwise. Retired"
+            " golden scenario hot_day_precool_achieved_reverts_to_comfort (Issue #295, asserted"
+            " the removed daytime mechanism) to tools/simulations/unsupported/. Added golden"
+            " scenario hot_plateau_pre_cool_applied covering the new hot-day-fallback-only case."
+        ),
+        "scope_not_covered": (
+            "The overnight pre-cool mechanism's target formula (compute_pre_cool_target()) is"
+            " unchanged — only its trigger eligibility and the modifier fed into it were"
+            " broadened. The sleep band (sleep_cool, always active overnight) is unchanged and"
+            " still the primary nightly floor for all day types. Cross-field config validation"
+            " between comfort_cool and sleep_cool (the fragile coincidence that made the old"
+            " daytime offset appear to 'work silently' on ordinary nights) was not added — the"
+            " mechanism that depended on that coincidence was removed instead, not the"
+            " coincidence itself."
+        ),
+    },
     555: {
         "version_fixed": "0.5.47",
         "title": (
@@ -6902,6 +6958,12 @@ SETBACK_RECOVERY_BUFFER_MINUTES = 30  # pre-heat leads wake_time by this much
 # ---------------------------------------------------------------------------
 PRE_COOL_POST_NAT_VENT_DELAY_MINUTES: int = 30  # delay after nat-vent window closes before AC pre-cool fires
 PRE_COOL_WAKE_OFFSET_HOURS: float = 4.0  # fallback trigger: this many hours before wake_time
+# Issue #558: fallback modifier used when overnight pre-cool is triggered by tomorrow's absolute
+# hot-day classification rather than by a warming trend (setback_modifier stays 0 on a plateaued
+# stretch of hot days, which would otherwise make compute_pre_cool_target() a no-op vs. the plain
+# sleep_cool floor). Reuses the magnitude of the retired daytime hot-day catch-up offset, now
+# applied only within this patient, nighttime-only mechanism.
+HOT_DAY_PRE_COOL_MODIFIER: float = -2.0
 # Pre-cool target floor is sleep_heat + nat_vent hysteresis (compute_pre_cool_target() in
 # automation.py) — the same "+1 above the floor" convention nat_vent_temperature_check() uses
 # for sleep-window fan cycling. Replaces the old comfort_heat + 2F floor (architecture-reset

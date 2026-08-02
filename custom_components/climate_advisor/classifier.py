@@ -85,8 +85,6 @@ class DayClassification:
         # Determine HVAC mode
         if self.day_type == DAY_TYPE_HOT:
             self.hvac_mode = "cool"
-            self.pre_condition = True
-            self.pre_condition_target = -2.0  # 2°F below cooling setpoint
             # Check if morning/evening temps might be favorable for window cooling
             # If today's low is within 5°F of a typical comfort_cool (75°F), windows could help
             if self.today_low <= WINDOW_OPPORTUNITY_MAX_LOW_F:  # Today's low is moderate enough for window opportunity

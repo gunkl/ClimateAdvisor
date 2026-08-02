@@ -385,8 +385,33 @@ class TestHandlePreCoolSkipConditions:
 
         assert result.startswith("skipped"), f"Expected skipped, got: {result!r}"
 
-    def test_skip_when_modifier_is_zero(self):
-        """setback_modifier=0 (stable trend) → no pre-cool."""
+    def test_skip_when_modifier_is_zero_and_tomorrow_not_hot(self):
+        """setback_modifier=0 (stable trend) AND tomorrow not hot → no pre-cool at all."""
+        engine = _make_engine()
+        engine._emit_event_callback = lambda *_: None
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+        engine._current_classification = _make_classification(setback_modifier=0.0, tomorrow_high=80.0)
+
+        result = asyncio.run(engine.handle_pre_cool(indoor_temp=76.0, nat_vent_just_closed=False))
+
+        assert result.startswith("skipped"), f"Expected skipped for stable trend + mild tomorrow, got: {result!r}"
+
+    def test_skip_when_modifier_is_positive_and_tomorrow_not_hot(self):
+        """setback_modifier=+2 (cooling trend) AND tomorrow not hot → no pre-cool."""
+        engine = _make_engine()
+        engine._emit_event_callback = lambda *_: None
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+        engine._current_classification = _make_classification(setback_modifier=2.0, tomorrow_high=80.0)
+
+        result = asyncio.run(engine.handle_pre_cool(indoor_temp=76.0, nat_vent_just_closed=False))
+
+        assert result.startswith("skipped"), f"Expected skipped for cooling trend + mild tomorrow, got: {result!r}"
+
+    def test_hot_tomorrow_triggers_pre_cool_despite_zero_modifier(self):
+        """Issue #558: setback_modifier=0 (no fresh trend — e.g. a plateaued heat wave) but
+        tomorrow independently forecast hot (default tomorrow_high=96 >= threshold_hot=85) →
+        pre-cool still applies via the hot-day fallback gate, closing the coverage gap where a
+        stretch of consecutive hot days with no further warming got zero overnight banking."""
         engine = _make_engine()
         engine._emit_event_callback = lambda *_: None
         engine.set_occupancy_mode(OCCUPANCY_HOME)
@@ -394,18 +419,23 @@ class TestHandlePreCoolSkipConditions:
 
         result = asyncio.run(engine.handle_pre_cool(indoor_temp=76.0, nat_vent_just_closed=False))
 
-        assert result.startswith("skipped"), f"Expected skipped for stable trend, got: {result!r}"
+        assert result.startswith("applied"), f"Expected applied via hot-day fallback, got: {result!r}"
 
-    def test_skip_when_modifier_is_positive(self):
-        """setback_modifier=+2 (cooling trend) → no pre-cool (home is already cooling naturally)."""
+    def test_skip_when_modifier_is_positive_even_if_tomorrow_hot(self):
+        """A genuine cooling trend (setback_modifier > 0) always wins over the hot-day fallback —
+        the home is already cooling naturally, so no pre-cool is needed regardless of tomorrow's
+        forecast."""
         engine = _make_engine()
         engine._emit_event_callback = lambda *_: None
         engine.set_occupancy_mode(OCCUPANCY_HOME)
-        engine._current_classification = _make_classification(setback_modifier=2.0)
+        engine._current_classification = _make_classification(setback_modifier=2.0)  # tomorrow_high=96 default
 
         result = asyncio.run(engine.handle_pre_cool(indoor_temp=76.0, nat_vent_just_closed=False))
 
-        assert result.startswith("skipped"), f"Expected skipped for cooling trend, got: {result!r}"
+        assert result.startswith("applied"), (
+            f"Expected applied — resolve_pre_cool_modifier() only checks setback_modifier < 0 for the "
+            f"trend gate, a positive modifier falls through to the hot-day fallback same as zero, got: {result!r}"
+        )
 
     def test_skip_when_away(self):
         """AWAY occupancy → skip (setback already active; pre-cool not needed)."""

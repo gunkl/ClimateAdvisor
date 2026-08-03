@@ -690,7 +690,7 @@ def _dispatch_event(
         # Used by nat_vent_thermostat_cycling pending scenario to assert cycling behavior.
         indoor_temp = float(event.get("indoor_temp", event.get("indoor_f", 70.0)))
         _inject_indoor_temp(fake_hass, climate_entity, indoor_temp)
-        run_coro(engine.nat_vent_temperature_check(indoor_temp))
+        run_coro(engine.nat_vent_temperature_check(indoor_temp, outdoor=engine._last_outdoor_temp))
 
     elif etype == "external_fan_state_change":
         # Issue #482: models a genuinely external actor changing the configured WHF
@@ -786,7 +786,7 @@ def _handle_temp_update(
     new_indoor = float(indoor_f) if indoor_f is not None else None
     if coordinator is None and new_indoor is not None and new_indoor != old_indoor:
         if engine._natural_vent_active:
-            run_coro(engine.nat_vent_temperature_check(new_indoor))
+            run_coro(engine.nat_vent_temperature_check(new_indoor, outdoor=engine._last_outdoor_temp))
         if engine._fan_active or engine._natural_vent_active:
             run_coro(
                 engine.fan_thermostat_check(

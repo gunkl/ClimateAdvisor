@@ -635,13 +635,26 @@ class AutomationEngine:
         # context propagation through third-party fan/switch integrations (especially
         # one-way RF transmitter entities) is not guaranteed reliable, so this is treated
         # as a corroborating signal, not a replacement for the existing checks.
-        self._fan_command_context_id: str | None = None
+        # Issue #561: bounded recency list, not a single last-write-wins id — see
+        # _record_fan_command_context()'s docstring for why a scalar isn't safe.
+        self._recent_fan_command_context_ids: list[tuple[str, datetime]] = []
         self._last_commanded_hvac_mode: str | None = None  # expected-state tracking: last mode automation commanded
         self._last_commanded_hvac_time: datetime | None = None  # expected-state tracking: when it was commanded
 
         # Natural ventilation mode (Issue #73)
         self._natural_vent_active: bool = False
         self._last_outdoor_temp: float | None = None
+        # Reentrancy guard for reconcile_fan_on_startup() (Issue #561): that method is
+        # called from 4 independent sites (startup coalesce, 30-min untracked-fan backstop,
+        # thermostat state-change, post-grace-expiry) with no coordination between them.
+        # Two overlapping calls previously each independently "adopted" the same physically-
+        # running fan and each started their own self-rescheduling backstop timer
+        # (_start_fan_thermo_backstop() only tracks the single most-recent one via
+        # self._fan_thermo_cancel), leaving the earlier one permanently uncancellable and
+        # ticking forever in parallel. A plain bool (not the shared self._decision_lock,
+        # which is not reentrant and some call sites may already hold) is enough: a second
+        # concurrent call simply skips this tick rather than blocking.
+        self._reconcile_fan_in_progress: bool = False
         # Timestamp of last outdoor-warm exit (outdoor ≥ indoor → pause).
         # Used for hysteresis lockout. Not serialized — resets on HA restart (acceptable for 5-min window).
         self._nat_vent_outdoor_exit_time: datetime | None = None
@@ -676,6 +689,15 @@ class AutomationEngine:
         # _activate_fan, cancelled in _deactivate_fan + cleanup. Ensures fan_thermostat_check
         # fires even when temperature sensors update slowly.
         self._fan_thermo_cancel: Any | None = None
+        # Generation counter (Issue #561, defense-in-depth): self._fan_thermo_cancel can only
+        # ever hold one live cancel handle, so if two chains are ever started concurrently
+        # (e.g. a future reentrancy gap elsewhere), whichever started first becomes
+        # permanently uncancellable the moment the second starts, and both tick forever in
+        # parallel. Each _start_fan_thermo_backstop() call bumps this counter and stamps its
+        # own tick with the value at schedule time; a tick whose stamped generation no longer
+        # matches the current counter belongs to a superseded chain and self-terminates
+        # instead of rescheduling, so at most one chain survives past its next tick.
+        self._fan_thermo_generation: int = 0
 
         # Event log callback — set by coordinator after construction
         self._emit_event_callback: Any | None = None
@@ -2882,11 +2904,7 @@ class AutomationEngine:
                 _debounce_pending = bool(
                     self._sensor_debounce_pending_callback and self._sensor_debounce_pending_callback()
                 )
-                _idle_open = (
-                    bool(self._sensor_check_callback and self._sensor_check_callback())
-                    and _hvac_off_244
-                    and not _debounce_pending
-                )
+                _idle_open = self._any_monitored_sensor_open() and _hvac_off_244 and not _debounce_pending
                 if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
                     return
 
@@ -3318,19 +3336,51 @@ class AutomationEngine:
                         _ceiling_ok,
                     )
 
-    async def nat_vent_temperature_check(self, current_temp: float) -> None:
+    async def nat_vent_temperature_check(self, current_temp: float, *, outdoor: float | None) -> None:
         """Thermostat-style cycling: keep indoor near the comfort midpoint during a nat-vent session.
 
         Called on every thermostat temperature tick via coordinator._async_thermostat_changed.
-        Also called as a 30-minute backstop from check_natural_vent_conditions().
+        Also called as a 5-minute backstop from _thermo_backstop_task().
 
         When indoor drops to (midpoint - hysteresis) the fan turns off temporarily — the
         nat-vent SESSION stays active (_natural_vent_active=True) and HVAC suppression is
         maintained (restore_hvac=False). When indoor warms back to (midpoint + hysteresis)
         the fan re-engages, subject to the outdoor-warm guard.
+
+        Args:
+            current_temp: Current indoor temperature in °F.
+            outdoor: Current outdoor temperature in °F, sourced fresh by the caller (Issue
+                #561) — mirrors fan_thermostat_check()'s existing convention rather than
+                reading self._last_outdoor_temp internally. That cached attribute is only
+                refreshed by coordinator._apply_outdoor_temp(), and this cycling check is
+                the one place that previously read it directly instead of receiving a
+                caller-sourced value, letting it silently go stale for hours (Issue #561
+                root cause A) while every other nat-vent gate in this module reads a live
+                value from its own caller.
         """
         async with self._decision_pass("nat_vent_temperature_check"):
             if not self._natural_vent_active:
+                return
+
+            # Issue #561: a WHF session can be left believing it's still open (e.g. by
+            # _reconcile_fan_physical_drift()'s preserve-session path, or by the
+            # duplicate-timer-chain defect fixed alongside this) well after the monitored
+            # sensors actually closed. Nothing about "cycle the fan back on" is safe to do
+            # with every window/door closed — running a whole-house exhaust fan against a
+            # sealed building has no cooling benefit and can depressurize the home. Scoped
+            # to FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH only: FAN_MODE_HVAC's fan-only mode has
+            # no separate physical-exterior-airflow requirement (it's the thermostat's own
+            # blower, not an exhaust fan) and its reactivation paths are intentionally
+            # allowed to re-engage without an open sensor (Issue #134's grace/ceiling path).
+            _fan_mode_nvtc = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
+            if _fan_mode_nvtc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and not self._any_monitored_sensor_open():
+                _LOGGER.warning(
+                    "Nat-vent session force-closed: _natural_vent_active was True but no"
+                    " monitored sensor is open — ending session instead of cycling fan",
+                )
+                await self._exit_nat_vent(
+                    reason="nat-vent session force-closed: session flag was stale, sensors are closed"
+                )
                 return
 
             comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
@@ -3421,7 +3471,6 @@ class AutomationEngine:
                 return
 
             if not self._fan_active and current_temp >= on_threshold:
-                outdoor = self._last_outdoor_temp
                 if outdoor is not None and outdoor >= current_temp:
                     _LOGGER.info(
                         "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F"
@@ -3679,6 +3728,39 @@ class AutomationEngine:
                                     three triggers fired. Defaults to ``"startup"`` for any caller
                                     that doesn't pass one explicitly.
         """
+        # Issue #561: reentrancy guard — this method is called from 4 independent sites
+        # with no coordination between them. Two overlapping calls previously each
+        # independently reached the "adopt-on" branch below and each started their own
+        # self-rescheduling backstop timer, leaving one permanently uncancellable and
+        # ticking forever in parallel with the other (root cause of the WHF activating
+        # while all windows were closed, hours after the legitimate session had ended).
+        # A concurrent call simply skips this tick — the caller that lost the race gets
+        # another chance on its own next trigger.
+        if self._reconcile_fan_in_progress:
+            _LOGGER.debug("reconcile_fan_on_startup: skipping — already in progress (trigger=%s)", trigger)
+            return
+        self._reconcile_fan_in_progress = True
+        try:
+            await self._reconcile_fan_on_startup_locked(
+                indoor=indoor,
+                outdoor=outdoor,
+                thermostat_fan_running=thermostat_fan_running,
+                any_sensor_open=any_sensor_open,
+                trigger=trigger,
+            )
+        finally:
+            self._reconcile_fan_in_progress = False
+
+    async def _reconcile_fan_on_startup_locked(
+        self,
+        *,
+        indoor: float | None,
+        outdoor: float | None,
+        thermostat_fan_running: bool,
+        any_sensor_open: bool,
+        trigger: str,
+    ) -> None:
+        """Body of reconcile_fan_on_startup(), run under its reentrancy guard (Issue #561)."""
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         archetype = fan_mode
 
@@ -3994,7 +4076,7 @@ class AutomationEngine:
             return
 
         # If any contact sensor is still open, re-pause instead of clearing
-        if self._sensor_check_callback and self._sensor_check_callback():
+        if self._any_monitored_sensor_open():
             _LOGGER.info(
                 "%s grace expired but sensor(s) still open — re-pausing HVAC",
                 source,
@@ -4778,6 +4860,19 @@ class AutomationEngine:
             reason=f"morning wake-up — comfort band [{_wakeup_band.floor:.0f}/{_wakeup_band.ceiling:.0f}]",
         )
 
+    def _any_monitored_sensor_open(self) -> bool:
+        """Return True if any monitored door/window sensor is currently open.
+
+        Single choke point for this check (Issue #561) — previously re-derived inline at
+        each call site (``_sensor_check_callback and _sensor_check_callback()``). Callers
+        that need to know whether a nat-vent session is still legitimately justified by an
+        open sensor, rather than only by the ``_natural_vent_active``/``_fan_active`` flags,
+        should read this directly instead of trusting those flags as a proxy — flags can
+        outlive the sensor state that justified them (see ``nat_vent_temperature_check()``'s
+        reactivation branch and ``_reconcile_fan_physical_drift()``'s preserve-session branch).
+        """
+        return bool(self._sensor_check_callback and self._sensor_check_callback())
+
     async def _exit_nat_vent(self, *, reason: str, set_outdoor_exit_time: bool = False) -> None:
         """Single choke point for ending a nat-vent session (Issue #411).
 
@@ -4800,7 +4895,7 @@ class AutomationEngine:
         self._nat_vent_soft_start = False
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
-        sensor_open = bool(self._sensor_check_callback and self._sensor_check_callback())
+        sensor_open = self._any_monitored_sensor_open()
         # emit_event=False on both branches: every call site already emits its own more
         # specific exit event (nat_vent_predicted_floor_exit, nat_vent_comfort_floor_exit,
         # nat_vent_outdoor_rise_exit, etc.) before calling this method. Letting
@@ -5215,9 +5310,9 @@ class AutomationEngine:
         """Issue a fan/switch service call carrying a fresh HA Context (Issue #482).
 
         HA attaches the originating service call's ``Context`` to the resulting
-        state-changed ``Event``. Stamping and recording our own context here lets
+        state-changed ``Event``. Recording our own context here lets
         ``coordinator._async_fan_entity_changed()`` check ``event.context`` against
-        ``self._fan_command_context_id`` as an additional CA-attribution signal,
+        recently-issued CA command contexts as an additional CA-attribution signal,
         alongside the existing ``_fan_command_pending``/timing-heuristic guards.
 
         Scope note: context propagation through third-party fan/switch integrations
@@ -5227,8 +5322,40 @@ class AutomationEngine:
         additive/corroborating rather than a replacement for the existing checks.
         """
         cmd_context = Context()
-        self._fan_command_context_id = cmd_context.id
+        self._record_fan_command_context(cmd_context.id)
         await self.hass.services.async_call(domain, service, {"entity_id": entity_id}, context=cmd_context)
+
+    def _record_fan_command_context(self, context_id: str) -> None:
+        """Record a just-issued CA fan-command context id (Issue #561).
+
+        Replaces a single last-write-wins ``_fan_command_context_id`` attribute, which
+        could be overwritten by a second overlapping fan command before the first
+        command's resulting state-changed event was evaluated against it — causing CA's
+        own action to be misattributed as a manual override (the "whole-house fan
+        manually turned on" message this issue's report disputed). Keeping a short-lived
+        set instead means either command's context can still be matched, regardless of
+        which one the coordinator's state-change listener happens to see first.
+        """
+        now = dt_util.now()
+        cutoff = now - timedelta(seconds=30)
+        self._recent_fan_command_context_ids = [
+            (cid, ts) for cid, ts in self._recent_fan_command_context_ids if ts >= cutoff
+        ]
+        self._recent_fan_command_context_ids.append((context_id, now))
+
+    def fan_command_context_matches(self, event_context_id: str | None, event_context_parent_id: str | None) -> bool:
+        """Return True if either id matches a CA fan command issued in the last 30s (Issue #561).
+
+        Checked by ``coordinator._async_fan_entity_changed()`` in place of the old
+        single-id equality check.
+        """
+        if event_context_id is None and event_context_parent_id is None:
+            return False
+        cutoff = dt_util.now() - timedelta(seconds=30)
+        return any(
+            ts >= cutoff and cid in (event_context_id, event_context_parent_id)
+            for cid, ts in self._recent_fan_command_context_ids
+        )
 
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
         """Activate fan based on configured fan_mode.
@@ -5362,9 +5489,22 @@ class AutomationEngine:
             self._fan_thermo_cancel()
             self._fan_thermo_cancel = None
 
+        # Issue #561: stamp this chain with the current generation before scheduling —
+        # see self._fan_thermo_generation's declaration for why.
+        self._fan_thermo_generation += 1
+        _my_generation = self._fan_thermo_generation
+
         @callback
         def _thermo_tick(_now: Any) -> None:
             self._fan_thermo_cancel = None
+            if _my_generation != self._fan_thermo_generation:
+                _LOGGER.debug(
+                    "Fan thermo backstop tick (generation %d) superseded by generation %d —"
+                    " a newer chain already started; this stale chain self-terminates",
+                    _my_generation,
+                    self._fan_thermo_generation,
+                )
+                return
             self.hass.async_create_task(self._thermo_backstop_task())
 
         self._fan_thermo_cancel = async_call_later(self.hass, 5 * 60, _thermo_tick)
@@ -5388,7 +5528,7 @@ class AutomationEngine:
         # genuine new temperature-changed event arrived. Piggyback the existing 5-minute
         # timer to also re-evaluate cycling while nat-vent is active.
         if self._natural_vent_active and indoor is not None:
-            await self.nat_vent_temperature_check(indoor)
+            await self.nat_vent_temperature_check(indoor, outdoor=outdoor)
         # Re-arm only if the fan is still active after the check. Architecture-reset
         # Step 2: the decision now lives in desired_state.decide_fan_thermo_backstop() —
         # this method still owns actually calling _start_fan_thermo_backstop() to
@@ -5505,17 +5645,39 @@ class AutomationEngine:
                     "fan_device": _fan_device_label(self.config),
                 },
             )
+        # Issue #561: preserving the nat-vent session across this correction (so
+        # nat_vent_temperature_check() can immediately re-fire below) is only correct if
+        # the session is still legitimately justified by an open sensor. Without this
+        # check, a session whose windows already closed while the physical-drift-confirm
+        # was pending (2 backstop ticks = ~10 min) would be preserved indefinitely — with
+        # no further log line — until temperature happened to cross a cycling threshold
+        # again, at which point the fan would reactivate against a sealed house. If the
+        # session is no longer justified, end it for real (preserve=False) and release any
+        # WHF HVAC suppression it was holding, mirroring on_fan_turned_off()'s genuine
+        # fan-off sequence.
+        _was_nat_vent_active = self._natural_vent_active
+        _preserve_session = _was_nat_vent_active and self._any_monitored_sensor_open()
+        if _was_nat_vent_active and not _preserve_session:
+            _LOGGER.warning(
+                "Nat-vent session force-closed during physical-drift correction — no"
+                " monitored sensor is open, so the session cannot legitimately still be"
+                " open (Issue #561)"
+            )
         self._clear_fan_flags_and_start_grace(
             reason="physical-state drift confirmed over 2 backstop ticks",
             trigger_label="physical_drift_correction",
-            preserve_nat_vent_session=True,
+            preserve_nat_vent_session=_preserve_session,
             source="automation",
         )
+        if _was_nat_vent_active and not _preserve_session:
+            self._release_whf_and_reclassify(
+                reason="physical-drift correction found the nat-vent session's sensors closed"
+            )
         # Issue #449: the control entity's own HA-reported state can silently stay
         # stuck "on" (a one-way transmitter has no feedback of its own) even though
         # ground truth has just confirmed the fan is physically off — reconcile it now
         # so the very next reactivation attempt (nat_vent_temperature_check()'s
-        # immediate same-tick re-fire, since preserve_nat_vent_session=True above)
+        # immediate same-tick re-fire, when the session was preserved above)
         # starts from a control entity that genuinely reads "off".
         #
         # Issue #482: this off-command must set the same _fan_command_pending/

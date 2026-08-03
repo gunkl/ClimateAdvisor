@@ -18,8 +18,9 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
@@ -1908,7 +1909,7 @@ class TestThermoBackstopTask:
 
         asyncio.run(engine._thermo_backstop_task())
 
-        engine.nat_vent_temperature_check.assert_awaited_once_with(69.0)
+        engine.nat_vent_temperature_check.assert_awaited_once_with(69.0, outdoor=65.0)
 
     def test_backstop_skips_nat_vent_check_when_not_active(self):
         """REGRESSION GUARD: when nat-vent is not active (e.g. a plain HVAC-fan-only
@@ -1956,11 +1957,15 @@ class TestThermoBackstopTask:
 class TestReconcileFanPhysicalDrift:
     """_reconcile_fan_physical_drift() — self-corrects a stale _fan_active (Issue #423)."""
 
-    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE, physical_state=False, recent_command=False):
+    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE, physical_state=False, recent_command=False, sensor_open=True):
         engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
         engine._get_fan_physical_state_callback = MagicMock(return_value=physical_state)
         engine._is_recent_fan_command_callback = MagicMock(return_value=recent_command)
         engine._clear_fan_flags_and_start_grace = MagicMock()
+        # Issue #561: default represents a legitimate open-window session experiencing a
+        # physical-state hiccup (the scenario this whole class is about) — sensor_open=False
+        # is exercised by its own dedicated test below.
+        engine._sensor_check_callback = MagicMock(return_value=sensor_open)
         return engine
 
     def test_noop_when_fan_not_active(self):
@@ -2027,9 +2032,11 @@ class TestReconcileFanPhysicalDrift:
 
     def test_second_consecutive_drift_tick_corrects(self):
         """Second consecutive tick of disagreement (5 min later) confirms drift and
-        self-corrects — preserving the nat-vent session so cycling-on can re-fire."""
+        self-corrects — preserving the nat-vent session (sensors still open) so
+        cycling-on can re-fire."""
         engine = self._engine(physical_state=False)
         engine._fan_active = True
+        engine._natural_vent_active = True
 
         engine._reconcile_fan_physical_drift()
         engine._reconcile_fan_physical_drift()
@@ -2041,6 +2048,26 @@ class TestReconcileFanPhysicalDrift:
             source="automation",
         )
         assert engine._fan_drift_tick_count == 0
+
+    def test_drift_correction_does_not_preserve_session_when_sensors_closed(self):
+        """Issue #561: if the monitored sensors are already closed by the time drift is
+        confirmed, the session must NOT be preserved — otherwise _natural_vent_active
+        stays True indefinitely with no further log line, until temperature happens to
+        cross a cycling threshold again and reactivates the fan against a sealed house
+        (the exact mechanism behind the reported incident)."""
+        engine = self._engine(physical_state=False, sensor_open=False)
+        engine._fan_active = True
+        engine._natural_vent_active = True
+
+        engine._reconcile_fan_physical_drift()
+        engine._reconcile_fan_physical_drift()
+
+        engine._clear_fan_flags_and_start_grace.assert_called_once_with(
+            reason="physical-state drift confirmed over 2 backstop ticks",
+            trigger_label="physical_drift_correction",
+            preserve_nat_vent_session=False,
+            source="automation",
+        )
 
     def test_correction_emits_fan_cancel_with_drift_trigger(self):
         """The correction emits a fan_cancel event with a distinct trigger so Activity
@@ -2124,6 +2151,10 @@ class TestReconcileFanDriftIntegration:
         engine._last_outdoor_temp = 59.0  # well below indoor -- favorable
         engine._start_fan_thermo_backstop = MagicMock()
         engine.fan_thermostat_check = AsyncMock()
+        # Issue #561: windows are genuinely open in this scenario — this test is about a
+        # pure physical-state drift on an otherwise-legitimate session, not a stale session
+        # with closed windows (that case is covered separately).
+        engine._sensor_check_callback = MagicMock(return_value=True)
 
         engine._fan_active = True
         engine._natural_vent_active = True
@@ -2443,6 +2474,134 @@ class TestReconcileFanOnStartup:
         assert any("suppressed" in r.message.lower() for r in caplog.records), (
             "Expected an INFO log line reporting the suppressed correction"
         )
+
+
+class TestReconcileFanOnStartupReentrancyGuard:
+    """Issue #561: reconcile_fan_on_startup() is called from 4 independent sites with no
+    coordination between them. Two overlapping calls previously each independently reached
+    the "adopt-on" branch and each started their own self-rescheduling backstop timer,
+    leaving one permanently uncancellable and ticking forever in parallel with the other —
+    the root cause of the WHF activating while all windows were closed, hours after the
+    legitimate session had ended.
+    """
+
+    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE):
+        engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
+        engine._deactivate_fan = AsyncMock()
+        return engine
+
+    def test_concurrent_call_is_skipped_not_processed(self):
+        """A second call arriving while the first is still marked in-progress must be
+        skipped entirely — not run the decision logic a second time."""
+        engine = self._engine()
+        engine._reconcile_fan_in_progress = True  # simulates an in-flight call
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=60.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+
+        # No decision was made: neither the "adopt-on" nor "turn-off"/"no-fan" side effects
+        # ran (_start_fan_thermo_backstop untouched, no fan-flag mutation, no deactivate call).
+        assert engine._fan_active is False
+        assert engine._natural_vent_active is False
+        engine._deactivate_fan.assert_not_awaited()
+
+    def test_flag_cleared_after_completion_so_the_next_call_can_proceed(self):
+        """The reentrancy flag must not get stuck True after a call completes — otherwise
+        every future reconcile would be silently skipped forever."""
+        engine = self._engine()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=60.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        assert engine._reconcile_fan_in_progress is False
+
+    def test_flag_cleared_even_if_the_body_raises(self):
+        """The reentrancy flag must be released via try/finally — a mid-call exception
+        must not permanently wedge every future reconcile call into skipping."""
+        engine = self._engine()
+        engine._deactivate_fan = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with contextlib.suppress(RuntimeError):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=60.0, thermostat_fan_running=False, any_sensor_open=True
+                )
+            )
+
+        assert engine._reconcile_fan_in_progress is False
+
+    def test_two_sequential_calls_both_adopt_independently(self):
+        """REGRESSION GUARD: the guard must only block genuinely *concurrent* calls —
+        two calls that run one after another (the normal case for the 4 real call sites
+        firing at different times) must both still be processed normally."""
+        engine = self._engine()
+        engine._start_fan_thermo_backstop = MagicMock()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=60.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+        assert engine._natural_vent_active is True
+
+        engine._natural_vent_active = False
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=60.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+        assert engine._natural_vent_active is True, "a second, sequential call must still be processed"
+
+
+class TestFanThermoBackstopGenerationGuard:
+    """Issue #561 defense-in-depth: self._fan_thermo_cancel can only ever hold one live
+    cancel handle, so if two backstop timer chains are ever started concurrently, the
+    earlier one becomes permanently uncancellable and both tick forever in parallel. The
+    generation counter ensures a superseded chain self-terminates on its next tick instead.
+    """
+
+    def test_generation_increments_on_every_start(self):
+        """Every call to _start_fan_thermo_backstop() must stamp a new, strictly
+        increasing generation — the mechanism the tick callback checks against."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+
+        engine._start_fan_thermo_backstop()
+        first = engine._fan_thermo_generation
+        engine._start_fan_thermo_backstop()
+        second = engine._fan_thermo_generation
+
+        assert second > first
+
+    def test_stale_tick_after_new_chain_started_is_a_noop(self):
+        """Directly exercises the tick callback's own generation check: manually stamping
+        an older generation onto the engine and then invoking the callback captured by
+        async_call_later must not create a new backstop task."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine.hass.async_create_task = MagicMock()
+
+        captured_ticks = []
+        with patch(
+            "custom_components.climate_advisor.automation.async_call_later",
+            side_effect=lambda hass, delay, cb: captured_ticks.append(cb) or MagicMock(),
+        ):
+            engine._start_fan_thermo_backstop()  # generation 1 tick captured
+
+        # A second, newer chain starts (e.g. from a since-fixed reentrancy gap elsewhere)
+        # before the first chain's tick ever fires.
+        with patch("custom_components.climate_advisor.automation.async_call_later"):
+            engine._start_fan_thermo_backstop()  # generation 2
+
+        # Now the stale generation-1 tick fires late.
+        stale_tick = captured_ticks[0]
+        stale_tick(None)
+
+        engine.hass.async_create_task.assert_not_called()
 
 
 class TestFanEventEmission:
@@ -3002,7 +3161,10 @@ class TestCommandWhfControlEntity:
         must force off->wait->on, not a single (silently-dropped) turn_on."""
         engine = self._engine(control_state="on", ground_truth=False)
 
-        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+        with (
+            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+            patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
+        ):
             commanded = asyncio.run(engine._command_whf_control_entity(True, reason="test"))
 
         assert commanded is True
@@ -3026,7 +3188,10 @@ class TestCommandWhfControlEntity:
         running — must force on->wait->off."""
         engine = self._engine(control_state="off", ground_truth=True)
 
-        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep:
+        with (
+            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+            patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
+        ):
             commanded = asyncio.run(engine._command_whf_control_entity(False, reason="test"))
 
         assert commanded is True
@@ -3073,7 +3238,10 @@ class TestCommandWhfControlEntityWiring:
         engine.hass.states.get = MagicMock(return_value=state_mock)
         engine._get_fan_physical_state_callback = MagicMock(return_value=False)
 
-        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()):
+        with (
+            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()),
+            patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
+        ):
             asyncio.run(engine._activate_fan(reason="test"))
 
         calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
@@ -3089,7 +3257,10 @@ class TestCommandWhfControlEntityWiring:
         engine.hass.states.get = MagicMock(return_value=state_mock)
         engine._get_fan_physical_state_callback = MagicMock(return_value=True)
 
-        with patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()):
+        with (
+            patch("custom_components.climate_advisor.automation.asyncio.sleep", new=AsyncMock()),
+            patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)),
+        ):
             asyncio.run(engine._deactivate_fan(reason="test"))
 
         calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
@@ -3208,22 +3379,22 @@ class TestReconcileFanDriftBookkeeping:
     def test_fan_command_context_id_stamped_for_reconcile_off_command(self):
         """Issue #482 Part 2: the reconcile off-command routes through
         _call_fan_service_with_context (the same funnel _activate_fan/_deactivate_fan
-        use), so it also stamps _fan_command_context_id — giving the resulting
+        use), so it also records a command context — giving the resulting
         state-changed event a real HA Context to be attributed against."""
         engine, scheduled = self._engine_with_confirmed_drift()
 
         for coro in scheduled:
             asyncio.run(coro)
 
-        assert engine._fan_command_context_id is not None, (
-            "Drift-reconciliation off-command must stamp _fan_command_context_id "
+        assert engine._recent_fan_command_context_ids, (
+            "Drift-reconciliation off-command must record a fan command context "
             "via _call_fan_service_with_context, same as every other WHF command site"
         )
 
 
 class TestCallFanServiceWithContext:
     """Issue #482 Part 2 — every outgoing WHF fan/switch service call carries a
-    fresh HA Context, and _fan_command_context_id records its id so
+    fresh HA Context, and a short-lived recency set (Issue #561) records its id so
     coordinator._async_fan_entity_changed() can check event.context against it."""
 
     def test_context_kwarg_passed_to_service_call(self):
@@ -3238,16 +3409,17 @@ class TestCallFanServiceWithContext:
         assert call.kwargs.get("context") is not None
 
     def test_fan_command_context_id_recorded(self):
-        """_fan_command_context_id must be updated to the issued Context's id, so the
-        provenance check in coordinator.py has something real to compare against."""
+        """The issued Context's id must be recorded, so the provenance check in
+        coordinator.py has something real to compare against."""
         engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
-        assert engine._fan_command_context_id is None
+        assert engine._recent_fan_command_context_ids == []
 
-        asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)):
+            asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
 
-        call = engine.hass.services.async_call.call_args_list[0]
-        issued_context = call.kwargs["context"]
-        assert engine._fan_command_context_id == issued_context.id
+            call = engine.hass.services.async_call.call_args_list[0]
+            issued_context = call.kwargs["context"]
+            assert engine.fan_command_context_matches(issued_context.id, None)
 
     def test_each_call_gets_a_distinct_context(self):
         """Two separate commands must not share a context id — otherwise a stale
@@ -3255,12 +3427,50 @@ class TestCallFanServiceWithContext:
         later, unrelated event."""
         engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
 
-        asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
-        first_id = engine._fan_command_context_id
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)):
+            asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+            first_id = engine._recent_fan_command_context_ids[-1][0]
 
-        asyncio.run(engine._call_fan_service_with_context("fan", "turn_off", "fan.whf"))
-        second_id = engine._fan_command_context_id
+            asyncio.run(engine._call_fan_service_with_context("fan", "turn_off", "fan.whf"))
+            second_id = engine._recent_fan_command_context_ids[-1][0]
 
         assert first_id is not None
         assert second_id is not None
         assert first_id != second_id
+
+    def test_overlapping_commands_both_still_match(self):
+        """Issue #561: two commands issued in quick succession must BOTH still be
+        matchable afterward — the old single last-write-wins _fan_command_context_id
+        would let the second overwrite the first, causing the first command's
+        resulting state-changed event to be misattributed as a manual override."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=datetime(2026, 1, 1)):
+            asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+            first_id = engine._recent_fan_command_context_ids[-1][0]
+
+            asyncio.run(engine._call_fan_service_with_context("fan", "turn_on", "fan.whf"))
+            second_id = engine._recent_fan_command_context_ids[-1][0]
+
+            assert engine.fan_command_context_matches(first_id, None), (
+                "the earlier command's context must still match after a second overlapping command"
+            )
+            assert engine.fan_command_context_matches(second_id, None)
+
+    def test_stale_context_does_not_match_after_30s(self):
+        """A context older than the 30s recency window must no longer match — otherwise
+        a genuinely external fan change that happens to reuse an unrelated old id
+        (astronomically unlikely, but the window bound must still hold) or a very
+        late-arriving event should not be attributed to a long-past CA command."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whf"})
+        fixed_now = datetime(2026, 1, 1, 12, 0, 0)
+
+        with patch("custom_components.climate_advisor.automation.dt_util.now", return_value=fixed_now):
+            engine._record_fan_command_context("ctx-old")
+            # Backdate it past the 30s window directly, rather than sleeping in a test.
+            engine._recent_fan_command_context_ids[0] = (
+                "ctx-old",
+                fixed_now - timedelta(seconds=31),
+            )
+
+            assert not engine.fan_command_context_matches("ctx-old", None)

@@ -68,6 +68,8 @@ def _make_coord_stub(config: dict) -> MagicMock:
     ae._fan_active = False
     ae._fan_override_active = False
     ae._fan_command_pending = False
+    ae._recent_fan_command_context_ids = []  # Issue #482/#561: event.context provenance
+    ae.fan_command_context_matches = MagicMock(return_value=False)
     ae.on_fan_turned_off = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
     coord.automation_engine = ae

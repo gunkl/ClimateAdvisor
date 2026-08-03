@@ -65,6 +65,8 @@ def _make_mock_engine() -> MagicMock:
     ae._hvac_command_pending = False
     ae._manual_override_active = False
     ae._fan_command_time = None
+    ae._recent_fan_command_context_ids = []  # Issue #482/#561: event.context provenance
+    ae.fan_command_context_matches = MagicMock(return_value=False)
     ae.on_fan_turned_off = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
     ae.reconcile_fan_on_startup = AsyncMock()

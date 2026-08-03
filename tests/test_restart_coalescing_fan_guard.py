@@ -120,7 +120,8 @@ def _make_fan_entity_coord(*, startup_coalesce_active: bool) -> object:
     ae._fan_command_pending = False
     ae._fan_override_active = False
     ae._fan_active = False
-    ae._fan_command_context_id = None
+    ae._recent_fan_command_context_ids = []
+    ae.fan_command_context_matches = MagicMock(return_value=False)
     ae.handle_fan_manual_override = MagicMock()
     ae.on_fan_turned_off = MagicMock()
     coord.automation_engine = ae

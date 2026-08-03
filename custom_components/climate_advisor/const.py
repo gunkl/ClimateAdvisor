@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.49"
+VERSION = "0.5.50"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.50": [
+        "Fix #561: the whole-house fan could turn itself on with every door and window"
+        " closed, briefly switching the thermostat off for no reason — and the log"
+        " misleadingly claimed 'whole-house fan manually turned on' even though nobody"
+        " touched it. The fan-cycling logic now re-checks that a monitored sensor is"
+        " actually open before ever turning the fan back on, instead of trusting an"
+        " internal flag that could go stale for hours. Also fixed the underlying causes:"
+        " a self-healing check that could keep a ventilation 'session' alive after"
+        " windows closed, and a rare timing gap that could start two duplicate internal"
+        " timers, both of which could leave the system briefly confused about whether"
+        " it or the user caused a fan change.",
+    ],
     "0.5.49": [
         "Fix #557: options dialog sections now save the instant you hit Submit — no more"
         " separate 'Save & Close' step. Previously, submitting a section (e.g. Setpoints or"
@@ -1402,6 +1414,79 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # "[NOT COVERED] — potential gap" instead of "could not verify."
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    561: {
+        "version_fixed": "0.5.50",
+        "title": (
+            "Whole-house fan (WHF) activated by automation with every monitored door/window"
+            " sensor closed, running the exhaust fan against a sealed house for ~45 seconds"
+            " with no cooling benefit while HVAC was silently suppressed. The log's own"
+            " 'whole-house fan manually turned on' message wrongly implied the user did it."
+            " Root-caused to three stacked defects: (A) nat_vent_temperature_check()'s"
+            " on-threshold reactivation branch had no contact-sensor check at all and read a"
+            " cached self._last_outdoor_temp instead of a caller-sourced live value; (B)"
+            " _reconcile_fan_physical_drift()'s CORRECT outcome preserved _natural_vent_active"
+            " unconditionally (Issue #423's preserve_nat_vent_session=True), so a session could"
+            " survive for hours after windows genuinely closed, with no log line, waiting for"
+            " temperature to cross a cycling threshold; (C) reconcile_fan_on_startup() had no"
+            " mutual exclusion across its 4 call sites, so two concurrent 'adopt-on' calls each"
+            " independently started their own self-rescheduling 5-min backstop timer"
+            " (_start_fan_thermo_backstop() only tracks one live handle via"
+            " self._fan_thermo_cancel), leaving one permanently uncancellable; (D) the resulting"
+            " duplicate _activate_fan() calls raced the single last-write-wins"
+            " _fan_command_context_id, so the coordinator's own state-change listener"
+            " misattributed CA's own command as a manual override."
+        ),
+        "scope_covered": (
+            "Added AutomationEngine._any_monitored_sensor_open() as the single choke point for"
+            " 'is a monitored sensor currently open', replacing 3 duplicated inline checks"
+            " (_exit_nat_vent, the idle-open reactivation gate, resume_from_pause) and adding a"
+            " 4th call site. nat_vent_temperature_check()'s on-threshold branch now force-closes"
+            " the session (via the existing _exit_nat_vent() choke point, with a WARNING log)"
+            " instead of cycling the fan on when FAN_MODE_WHOLE_HOUSE/FAN_MODE_BOTH and no"
+            " sensor is open — scoped away from FAN_MODE_HVAC, whose fan-only mode has no"
+            " physical-exterior-airflow requirement and is unaffected. nat_vent_temperature_check()"
+            " now takes outdoor as a required keyword-only parameter (mirroring"
+            " fan_thermostat_check()'s existing convention) instead of reading"
+            " self._last_outdoor_temp internally; both callers"
+            " (coordinator._async_thermostat_changed, automation._thermo_backstop_task) and the"
+            " sim harness (tools/sim_harness/run_production.py) updated accordingly."
+            " _reconcile_fan_physical_drift()'s CORRECT branch now only passes"
+            " preserve_nat_vent_session=True when _any_monitored_sensor_open() confirms the"
+            " session is still legitimate; otherwise it force-ends the session (with a WARNING"
+            " log) and releases any WHF HVAC suppression via _release_whf_and_reclassify(),"
+            " mirroring on_fan_turned_off()'s genuine fan-off sequence. reconcile_fan_on_startup()"
+            " gained a self._reconcile_fan_in_progress reentrancy guard (a concurrent call skips"
+            " its tick rather than double-processing) via a private"
+            " _reconcile_fan_on_startup_locked() body, plus a self._fan_thermo_generation counter"
+            " on _start_fan_thermo_backstop()/its tick callback as defense-in-depth (a superseded"
+            " chain self-terminates on its next tick instead of ticking forever in parallel)."
+            " Replaced the single last-write-wins self._fan_command_context_id with a 30-second"
+            " recency list (self._recent_fan_command_context_ids,"
+            " _record_fan_command_context(), fan_command_context_matches()), so an overlapping"
+            " second command can no longer erase the first's provenance before its resulting"
+            " state-changed event is evaluated; coordinator._async_fan_entity_changed() updated"
+            " to call the new matcher instead of comparing a single id. Added dedicated unit"
+            " tests for all four fixes (sensor-gate force-close, HVAC-mode exemption, drift-"
+            " correction session-closure, reentrancy-guard skip/completion/exception-safety,"
+            " generation-counter supersession, overlapping-context matching, stale-context"
+            " expiry) in tests/test_nat_vent_activation.py and tests/test_fan_control.py."
+        ),
+        "scope_not_covered": (
+            "No golden simulation scenario was added — the exact stale-flag-with-closed-sensors"
+            " condition arises from an internal timing race (concurrent reconcile calls plus a"
+            " multi-hour drift-correction window) that the synchronous event-replay harness"
+            " cannot deterministically reproduce without inventing a synthetic engine-state-"
+            "injection event type, which would violate the harness's 'never invent a decision"
+            " type/state the engine does not emit' principle. Coverage instead relies on unit"
+            " tests exercising the exact production functions directly, matching how Issue #423's"
+            " analogous internal drift-reconciliation mechanism was tested. The exact tick at"
+            " which _natural_vent_active last went stale in the reported incident's live logs"
+            " was not pinpointed with certainty — static log/code analysis established the"
+            " mechanism and ruled out version skew, a second engine instance, and every other"
+            " known reactivation code path, but confirming the precise trigger would require"
+            " live id(self)/state-dump instrumentation this fix did not add."
+        ),
+    },
     557: {
         "version_fixed": "0.5.49",
         "title": (

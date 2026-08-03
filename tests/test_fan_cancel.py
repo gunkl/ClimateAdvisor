@@ -60,7 +60,8 @@ def _make_mock_engine() -> MagicMock:
     ae._override_confirm_pending = False
     ae._last_commanded_hvac_mode = None
     ae._fan_command_time = None
-    ae._fan_command_context_id = None  # Issue #482: event.context provenance
+    ae._recent_fan_command_context_ids = []  # Issue #482/#561: event.context provenance
+    ae.fan_command_context_matches = MagicMock(return_value=False)
     ae.on_fan_turned_off = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
     ae.reconcile_fan_on_startup = AsyncMock()
@@ -478,7 +479,7 @@ class TestFanEntityContextProvenance:
         ae = coord.automation_engine
         ae._fan_active = True  # CA believes fan is on
         ae._fan_command_pending = False  # already cleared — context is the ONLY signal here
-        ae._fan_command_context_id = "ctx-ca-issued-123"
+        ae.fan_command_context_matches = MagicMock(return_value=True)
 
         coord._is_recent_fan_command = MagicMock(return_value=False)
 
@@ -502,7 +503,7 @@ class TestFanEntityContextProvenance:
         ae = coord.automation_engine
         ae._fan_active = True
         ae._fan_command_pending = False
-        ae._fan_command_context_id = "ctx-ca-issued-456"
+        ae.fan_command_context_matches = MagicMock(return_value=True)
 
         coord._is_recent_fan_command = MagicMock(return_value=False)
 
@@ -529,7 +530,7 @@ class TestFanEntityContextProvenance:
         ae = coord.automation_engine
         ae._fan_active = False  # CA believes fan is off
         ae._fan_command_pending = False
-        ae._fan_command_context_id = "ctx-ca-issued-999"  # CA's last command, unrelated
+        ae.fan_command_context_matches = MagicMock(return_value=False)  # unrelated to CA's last command
 
         coord._is_recent_fan_command = MagicMock(return_value=False)
 
@@ -553,7 +554,7 @@ class TestFanEntityContextProvenance:
         ae = coord.automation_engine
         ae._fan_active = False
         ae._fan_command_pending = False
-        ae._fan_command_context_id = None  # CA has never issued a command yet
+        ae.fan_command_context_matches = MagicMock(return_value=False)  # CA has never issued a command yet
 
         coord._is_recent_fan_command = MagicMock(return_value=False)
 
@@ -579,7 +580,7 @@ class TestFanEntityContextProvenance:
         ae = coord.automation_engine
         ae._fan_active = True
         ae._fan_command_pending = False  # simulates the bookkeeping race from Part 1's investigation
-        ae._fan_command_context_id = "ctx-race-survivor"
+        ae.fan_command_context_matches = MagicMock(return_value=True)
 
         coord._is_recent_fan_command = MagicMock(return_value=False)
 

@@ -1560,6 +1560,38 @@ Fan reconcile: thermostat fan_mode=<x> hvac_action=<y> nat_vent_eligible=<bool> 
 
 This is the primary grep target for post-deploy validation: `python tools/ha_logs.py --filter "Fan reconcile"`. It confirms that the new behavior ran and what decision was made for the current physical state.
 
+**Reentrancy guard (Issue #561):** `reconcile_fan_on_startup()` is called from 4 independent
+sites (startup coalesce, the 30-min untracked-fan backstop, a live thermostat state-change, and
+every grace-period expiry) with no coordination between them. Two overlapping calls previously
+could each independently reach the `adopt-on` branch and each call
+`_start_fan_thermo_backstop()` — which only tracks a single live timer handle via
+`self._fan_thermo_cancel`, so whichever chain started first became permanently uncancellable
+the moment the second started, leaving two self-rescheduling 5-minute backstop chains ticking
+in parallel indefinitely (the root cause of Issue #561's reported incident: one of those
+duplicate chains kept re-evaluating nat-vent cycling long after the legitimate session should
+have ended). `self._reconcile_fan_in_progress` (a plain bool, not the shared
+`self._decision_lock` — some of the 4 call sites may already hold that lock) now guards the
+method's body (moved into `_reconcile_fan_on_startup_locked()`): a concurrent call simply skips
+its tick and logs at DEBUG, rather than double-processing. As defense-in-depth,
+`_start_fan_thermo_backstop()`/its tick callback also carry a `self._fan_thermo_generation`
+counter — a tick whose stamped generation no longer matches the current counter belongs to a
+superseded chain and self-terminates instead of rescheduling, so even if a duplicate chain were
+ever started by some other future gap, only the most-recently-started one survives past its
+next tick.
+
+**Command-provenance recency set (Issue #561, hardens Issue #482):** the duplicate-chain defect
+above produced two overlapping `_activate_fan()` calls, and `_call_fan_service_with_context()`'s
+provenance mechanism (Issue #482) previously recorded only the single most-recently-issued
+command context in `self._fan_command_context_id` — a second overlapping command could
+overwrite the first's id before `coordinator._async_fan_entity_changed()` evaluated the first
+command's resulting state-changed event against it, causing CA's own action to be misattributed
+as a manual override (the "whole-house fan manually turned on" message reported in Issue #561).
+`self._recent_fan_command_context_ids` is now a 30-second recency list instead of a scalar,
+written by `_record_fan_command_context()` and checked via
+`fan_command_context_matches(event_context_id, event_context_parent_id)` — either of two
+overlapping commands' contexts can still be matched, regardless of which one the coordinator's
+listener happens to see first.
+
 **Listener registration observability:** at coordinator setup, one INFO line is emitted:
 
 ```
@@ -1611,7 +1643,7 @@ Fixing the ground-truth signal (§B above) prevents the *reconcile* mechanism fr
 
 - No-ops immediately for `FAN_MODE_HVAC` (no separate physical entity to drift from) and for command-only mode (`_get_fan_physical_state()` returns `None` — no ground truth to compare against).
 - For `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH` with feedback enabled: compares `_fan_active` against the real physical state. Skips if a CA fan command was issued in the last 30 seconds (`_is_recent_fan_command()`, the same echo/lag guard `_async_fan_entity_changed()` already uses). Requires the disagreement to persist across **2 consecutive ticks** (~10 minutes) before correcting, so a single transient sensor flap doesn't trigger a correct-then-immediately-re-adopt cycle.
-- On confirmed drift, clears `_fan_active`/`_fan_on_since` via `_clear_fan_flags_and_start_grace(preserve_nat_vent_session=True)` — a helper shared with (and extracted from) `on_fan_turned_off()`. Critically, the nat-vent session (`_natural_vent_active`) is **preserved**, unlike a genuine user fan-off (`on_fan_turned_off()` calls the same helper with `preserve_nat_vent_session=False`, ending the session — a real user decision). Preserving the session lets the immediately-following `nat_vent_temperature_check()` call in the same `_thermo_backstop_task()` tick re-fire `_activate_fan()` — the real HA service call — if conditions still warrant it, closing the loop end-to-end within the same tick the drift is confirmed.
+- On confirmed drift, clears `_fan_active`/`_fan_on_since` via `_clear_fan_flags_and_start_grace(preserve_nat_vent_session=...)` — a helper shared with (and extracted from) `on_fan_turned_off()`. The nat-vent session (`_natural_vent_active`) is **preserved only if `_any_monitored_sensor_open()` confirms a sensor is still open** (Issue #561) — before this check existed, the session was preserved unconditionally, which could leave `_natural_vent_active=True` for hours after windows genuinely closed (no log line exists for "session preserved, no action taken" while indoor sits between the cycling thresholds), until temperature happened to cross `on_threshold` again and reactivated the fan against a sealed house — the root cause of Issue #561's reported incident. When the session is force-closed here, `_release_whf_and_reclassify()` is also called (mirroring `on_fan_turned_off()`'s genuine fan-off sequence) so any WHF HVAC suppression doesn't strand. When a sensor genuinely is still open, preserving the session lets the immediately-following `nat_vent_temperature_check()` call in the same `_thermo_backstop_task()` tick re-fire `_activate_fan()` — the real HA service call — if conditions still warrant it, closing the loop end-to-end within the same tick the drift is confirmed.
 - Uses a distinct event `trigger` (`"physical_drift_correction"`, not `"fan_off"`) so Activity Report consumers can tell a self-correction apart from a genuine user action.
 
 **Observability:** `INFO` on the first (unconfirmed) drift tick, `WARNING` with `"self-correcting stale flag (Issue #423)"` on the confirmed (second) tick — the grep target for post-deploy validation. Since Issue #510 (§F below), `"active (unconfirmed)"` itself now also settles to `"inactive"` on the *display* side once the transient post-command window passes, independent of whether this 5-minute backstop has ticked yet — the two mechanisms are complementary, not redundant: this backstop corrects `_fan_active` (the automation-decision flag); §F corrects only what's *displayed* while `_fan_active` is still catching up.
@@ -2363,6 +2395,24 @@ Once `_natural_vent_active = True`, the fan does not simply stay on until the se
 **Fan cycles on again (indoor ≥ on_threshold):**
 - Fan reactivates if `outdoor_temp < indoor_temp` (directional check still applies).
 - The on_threshold guard prevents re-activation the moment the fan turns off (1°F dead band).
+- **Sensor re-validation gate (Issue #561, `FAN_MODE_WHOLE_HOUSE`/`FAN_MODE_BOTH` only):** before
+  reactivating, `nat_vent_temperature_check()` now calls
+  `AutomationEngine._any_monitored_sensor_open()` — the single choke point for "is a monitored
+  door/window sensor currently open" (also used by `_exit_nat_vent()`, the idle-open reactivation
+  gate, and `resume_from_pause()`). If no sensor is open, the session is force-closed via
+  `_exit_nat_vent()` (with a WARNING log) instead of cycling the fan on. `_natural_vent_active` is
+  otherwise trusted as a proxy for "windows are open," and this closes the gap where that proxy
+  could go stale — e.g. `_reconcile_fan_physical_drift()`'s `CORRECT` outcome preserving the
+  session (see §E below) after windows had already closed. Not applied to `FAN_MODE_HVAC`: its
+  fan-only mode has no separate physical-exterior-airflow requirement (it's the thermostat's own
+  blower, not an exhaust fan), and its Issue #134 reactivation path is intentionally allowed to
+  re-engage without an open sensor.
+- **Outdoor-freshness contract (Issue #561):** `nat_vent_temperature_check()` takes `outdoor` as a
+  required keyword-only parameter (mirroring `fan_thermostat_check()`'s existing convention)
+  instead of reading `self._last_outdoor_temp` internally. Both real callers
+  (`coordinator._async_thermostat_changed`, `automation._thermo_backstop_task`) source it fresh at
+  the call site — this was previously the one nat-vent gate in this module that read the cached
+  attribute directly rather than receiving a caller-sourced value.
 
 **Hard exit (session ends) — takes priority over cycling:**
 The exit hierarchy (§17 Exit Hierarchy above) is evaluated before the cycling logic. Priority 2 fires first if indoor drops to the applicable floor, ending the session (`_natural_vent_active = False`) and restoring heat mode. Fan cycling cannot keep the session alive past the hard-exit floor.

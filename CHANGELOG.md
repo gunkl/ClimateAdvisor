@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.50] — 2026-08-03
+
+- Fix #561: the whole-house fan could turn itself on with every door and window closed, briefly switching the thermostat off for no reason — and the log misleadingly claimed "whole-house fan manually turned on" even though nobody touched it. The fan-cycling logic now re-checks that a monitored sensor is actually open before ever turning the fan back on, instead of trusting an internal flag that could go stale for hours. Also fixed the underlying causes: a self-healing check that could keep a ventilation "session" alive after windows closed, and a rare timing gap that could start two duplicate internal timers, both of which could leave the system briefly confused about whether it or the user caused a fan change.
+
 ## [0.5.47] — 2026-08-02
 
 - Fix #555: Daily Briefing sensor no longer drops to "unknown" on days with a lot to say (away/vacation occupancy + dual window opportunities) — the TLDR summary is now shortened to reliably fit HA's 255-char sensor state limit, with a truncation safety net and full text still available in the sensor's attributes as a backstop.

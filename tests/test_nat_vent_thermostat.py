@@ -553,7 +553,7 @@ class TestNatVentSleepWindowCycling:
         ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
-            asyncio.run(ae.nat_vent_temperature_check(65.0))
+            asyncio.run(ae.nat_vent_temperature_check(65.0, outdoor=ae._last_outdoor_temp))
 
         ae._deactivate_fan.assert_called_once()
         call_kwargs = ae._deactivate_fan.call_args[1]
@@ -577,7 +577,7 @@ class TestNatVentSleepWindowCycling:
         ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
-            asyncio.run(ae.nat_vent_temperature_check(66.0))
+            asyncio.run(ae.nat_vent_temperature_check(66.0, outdoor=ae._last_outdoor_temp))
 
         ae._deactivate_fan.assert_not_called()
         ae._activate_fan.assert_not_called()
@@ -601,7 +601,7 @@ class TestNatVentSleepWindowCycling:
         ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
-            asyncio.run(ae.nat_vent_temperature_check(67.0))
+            asyncio.run(ae.nat_vent_temperature_check(67.0, outdoor=ae._last_outdoor_temp))
 
         ae._activate_fan.assert_called_once()
         event_names = [e[0] for e in emitted]
@@ -621,7 +621,7 @@ class TestNatVentSleepWindowCycling:
 
         # Patch _in_sleep_window to return False (daytime)
         with patch(_IN_SLEEP_WINDOW_PATH, return_value=False):
-            asyncio.run(ae.nat_vent_temperature_check(70.0))
+            asyncio.run(ae.nat_vent_temperature_check(70.0, outdoor=ae._last_outdoor_temp))
 
         ae._deactivate_fan.assert_called_once()
         # Verify the nat_vent_fan_off event carries the daytime target (71°F), not sleep target (66°F)
@@ -644,7 +644,7 @@ class TestNatVentSleepWindowCycling:
         ae._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_THERMO_PATH, return_value=_SLEEP_NOW_THERMO):
-            asyncio.run(ae.nat_vent_temperature_check(64.0))
+            asyncio.run(ae.nat_vent_temperature_check(64.0, outdoor=ae._last_outdoor_temp))
 
         # Hard exit fires — session ends, HVAC is restored. Issue #411: this now routes
         # through _exit_nat_vent(), which relies on _deactivate_fan()'s restore_hvac=True

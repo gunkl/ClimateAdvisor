@@ -2619,7 +2619,7 @@ class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
         engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
-            asyncio.run(engine.nat_vent_temperature_check(73.0))  # >= on_threshold
+            asyncio.run(engine.nat_vent_temperature_check(73.0, outdoor=60.0))  # >= on_threshold
 
         assert engine._fan_active is False, "no fan device configured -- _activate_fan() must stay a no-op"
         event_names = [e[0] for e in emitted]
@@ -2642,7 +2642,7 @@ class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
         engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
-            asyncio.run(engine.nat_vent_temperature_check(71.0))  # <= off_threshold
+            asyncio.run(engine.nat_vent_temperature_check(71.0, outdoor=None))  # <= off_threshold
 
         assert engine._fan_active is True, "no fan device configured -- _deactivate_fan() must stay a no-op"
         event_names = [e[0] for e in emitted]
@@ -2663,15 +2663,86 @@ class TestNoSpuriousFanCyclingEventWhenNoFanConfigured:
         engine._fan_active = False
         engine._last_outdoor_temp = 60.0
         engine._async_save_state = AsyncMock()
+        engine._sensor_check_callback = MagicMock(return_value=True)  # windows open -> legitimate session
 
         emitted: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
-            asyncio.run(engine.nat_vent_temperature_check(73.0))  # >= on_threshold
+            asyncio.run(engine.nat_vent_temperature_check(73.0, outdoor=60.0))  # >= on_threshold
 
         assert engine._fan_active is True, "a real fan device must actually activate"
         event_names = [e[0] for e in emitted]
         assert "nat_vent_fan_on" in event_names, (
             f"nat_vent_fan_on must still fire when the fan really turned on; got events: {event_names}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #561: WHF activated by automation with all monitored sensors closed
+# ---------------------------------------------------------------------------
+
+
+class TestNatVentSessionForceClosedWhenSensorsClosed:
+    """Issue #561: nat_vent_temperature_check() must never cycle a whole-house fan back
+    on while every monitored door/window sensor reads closed, regardless of how
+    _natural_vent_active came to be True — running a whole-house exhaust fan against a
+    sealed house has no cooling benefit and can depressurize the home. This is the
+    structural fix for the reported incident: the fan turned on with all windows closed
+    because _natural_vent_active was stale and the cycling check trusted it as a proxy
+    for "windows are open" instead of re-checking sensor state directly.
+    """
+
+    def test_whf_reactivation_refused_and_session_closed_when_sensors_closed(self):
+        """The exact reported scenario: a stale session flag, an on-threshold crossing,
+        and closed sensors. The fan must NOT activate, and the session must be force-
+        closed instead of silently cycling on."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config["fan_mode"] = "whole_house_fan"
+        engine.config["fan_entity"] = "fan.whole_house"
+        engine._natural_vent_active = True  # stale — no logged reactivation event caused this
+        engine._fan_active = False
+        engine._sensor_check_callback = MagicMock(return_value=False)  # every window/door closed
+        engine._async_save_state = AsyncMock()
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            # indoor >= on_threshold (72), outdoor well below indoor -- conditions that
+            # would otherwise cycle the fan straight back on.
+            asyncio.run(engine.nat_vent_temperature_check(73.0, outdoor=60.0))
+
+        assert engine._fan_active is False, "the WHF must never activate with sensors closed"
+        assert engine._natural_vent_active is False, "the stale session must be force-closed, not left open"
+
+    def test_hvac_fan_mode_reactivation_unaffected_by_sensor_state(self):
+        """FAN_MODE_HVAC has no separate physical-exterior-airflow requirement (it's the
+        thermostat's own blower, not an exhaust fan) — its cycling-on behavior must be
+        completely unaffected by monitored-sensor state, matching pre-#561 behavior."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config["fan_mode"] = "hvac_fan"
+        engine._natural_vent_active = True
+        engine._fan_active = False
+        engine._sensor_check_callback = MagicMock(return_value=False)  # irrelevant for this archetype
+        engine._async_save_state = AsyncMock()
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            asyncio.run(engine.nat_vent_temperature_check(73.0, outdoor=60.0))
+
+        assert engine._fan_active is True, "FAN_MODE_HVAC reactivation must not be gated on sensor state"
+        assert engine._natural_vent_active is True
+
+    def test_legitimate_open_window_session_still_cycles_normally(self):
+        """REGRESSION GUARD: a genuine open-window WHF session must still cycle the fan
+        on exactly as before — the new gate must never block a legitimate reactivation."""
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=74.0, nat_vent_delta=3.0)
+        engine.config["fan_mode"] = "whole_house_fan"
+        engine.config["fan_entity"] = "fan.whole_house"
+        engine._natural_vent_active = True
+        engine._fan_active = False
+        engine._sensor_check_callback = MagicMock(return_value=True)  # a window is genuinely open
+        engine._async_save_state = AsyncMock()
+
+        with patch(_DT_NOW_PATH, return_value=_AWAKE_NOW):
+            asyncio.run(engine.nat_vent_temperature_check(73.0, outdoor=60.0))
+
+        assert engine._fan_active is True
+        assert engine._natural_vent_active is True

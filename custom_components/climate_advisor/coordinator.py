@@ -3309,7 +3309,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and _new_temp_attr != _old_temp_attr
             and self.automation_engine._natural_vent_active
         ):
-            await self.automation_engine.nat_vent_temperature_check(float(_new_temp_attr))
+            await self.automation_engine.nat_vent_temperature_check(
+                float(_new_temp_attr), outdoor=self._last_outdoor_temp
+            )
 
         # Issue #327: Thermostatic fan re-evaluation on every indoor temp tick.
         # Fires whenever the thermostat reports a new current_temperature and a CA fan is running
@@ -3899,13 +3901,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Issue #482: HA attaches the originating service call's Context to every
         # state-changed Event. When CA itself issued the fan command (via
-        # automation.py's _call_fan_service_with_context), it stamps
-        # automation_engine._fan_command_context_id with that Context's id. If this
-        # event's own context.id (or its parent_id, for cases where the target
-        # integration wraps CA's context in a child context) matches, that is an
-        # authoritative "CA caused this" signal — logged here on EVERY change
-        # (matched or not) so a future investigation has direct evidence instead of
-        # needing cross-source timestamp archaeology (the gap this issue closes).
+        # automation.py's _call_fan_service_with_context), it records that Context's id.
+        # If this event's own context.id (or its parent_id, for cases where the target
+        # integration wraps CA's context in a child context) matches a recently-issued
+        # CA command, that is an authoritative "CA caused this" signal — logged here on
+        # EVERY change (matched or not) so a future investigation has direct evidence
+        # instead of needing cross-source timestamp archaeology (the gap this issue
+        # closes).
+        #
+        # Issue #561: matches against a short-lived set of recently-issued command
+        # contexts (automation_engine.fan_command_context_matches()) rather than a
+        # single last-write-wins id — two fan commands issued in close succession (e.g.
+        # a duplicate reactivation attempt from a since-fixed reentrancy gap) could
+        # otherwise have the second command's context overwrite the first's before this
+        # listener evaluated the first command's resulting event, misattributing CA's
+        # own action to the user.
         #
         # This is treated as an ADDITIONAL/corroborating signal alongside the
         # existing _fan_command_pending/timing checks below, not a replacement for
@@ -3917,20 +3927,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         event_context = getattr(event, "context", None)
         event_context_id = getattr(event_context, "id", None) if event_context is not None else None
         event_context_parent_id = getattr(event_context, "parent_id", None) if event_context is not None else None
-        cmd_context_id = self.automation_engine._fan_command_context_id
-        context_confirms_ca = bool(
-            event_context_id is not None
-            and cmd_context_id is not None
-            and (event_context_id == cmd_context_id or event_context_parent_id == cmd_context_id)
+        # Issue #561: matches against a short-lived set of recently-issued CA command
+        # contexts rather than a single last-write-wins id — a second overlapping fan
+        # command could otherwise overwrite the first's id before this listener saw the
+        # first command's resulting event, causing CA's own action to be misattributed
+        # as a manual override.
+        context_confirms_ca = self.automation_engine.fan_command_context_matches(
+            event_context_id, event_context_parent_id
         )
         _LOGGER.debug(
             "fan_entity state change provenance: %s -> %s event_context_id=%s"
-            " event_context_parent_id=%s last_ca_command_context_id=%s context_confirms_ca=%s",
+            " event_context_parent_id=%s context_confirms_ca=%s",
             old_state.state,
             new_state.state,
             event_context_id,
             event_context_parent_id,
-            cmd_context_id,
             context_confirms_ca,
         )
 

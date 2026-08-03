@@ -126,6 +126,8 @@ def _make_coord(*, fan_command_time=None):
     ae._fan_command_time = fan_command_time
     ae._hvac_command_time = None
     ae._temp_command_time = None
+    ae._recent_fan_command_context_ids = []  # Issue #482/#561: event.context provenance
+    ae.fan_command_context_matches = MagicMock(return_value=False)
     ae.handle_manual_override_during_pause = AsyncMock()
     ae.handle_manual_override = MagicMock()
     ae.handle_fan_manual_override = MagicMock()

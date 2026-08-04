@@ -755,6 +755,7 @@ class ClimateAdvisorAIActivityView(HomeAssistantView):
             coordinator,
             coordinator.claude_client,
             hours=hours,
+            narration=True,
         )
 
         # Store the result in the unified report history

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -1415,6 +1416,19 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         else:
             key_status = "Not configured"
 
+        # Issue #563: populate the dropdown from Anthropic's live model registry
+        # instead of the hardcoded AI_MODELS list, so newly released models appear
+        # without a CA code change. fetch_available_models() never raises — it
+        # falls back to AI_MODELS on any failure (no key yet, network error, an
+        # unsupported SDK version) — but a config-flow render must never hang on a
+        # slow network either, hence the wrapping timeout here.
+        from .claude_api import fetch_available_models  # noqa: PLC0415
+
+        try:
+            model_options = await asyncio.wait_for(fetch_available_models(existing_key), timeout=5.0)
+        except Exception:  # noqa: BLE001 — includes asyncio.TimeoutError; must never block config flow render
+            model_options = AI_MODELS
+
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -1429,7 +1443,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     default=current.get(CONF_AI_MODEL, DEFAULT_AI_MODEL),
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=[{"value": m, "label": m} for m in AI_MODELS],
+                        options=[{"value": m, "label": m} for m in model_options],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),

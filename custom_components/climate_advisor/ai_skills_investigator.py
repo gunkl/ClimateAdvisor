@@ -175,7 +175,8 @@ async def async_build_investigator_context(
 
     registry = get_provider_registry()
     focus: str = kwargs.get("focus", "")
-    providers = registry.select(focus)
+    narration: bool = bool(kwargs.get("narration", False))
+    providers = registry.select(focus, narration=narration)
 
     sections: list[str] = ["=== Climate Advisor Investigator Context ===", ""]
 

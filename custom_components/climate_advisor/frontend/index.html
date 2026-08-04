@@ -2733,8 +2733,7 @@
         : '';
       html += '<details open style="margin-bottom:0.5rem;">'
         + '<summary style="cursor:pointer;font-weight:600;padding:0.25rem 0;">' + escapeHtml(def.label) + writingTag + '</summary>'
-        + '<pre style="white-space:pre-wrap;font-size:0.8rem;margin:0.5rem 0 0;padding:0.5rem;background:var(--bg);border-radius:4px;">'
-        + escapeHtml(text) + '</pre></details>';
+        + '<div style="font-size:0.85rem;line-height:1.5;margin:0.5rem 0 0;">' + renderMarkdown(text) + '</div></details>';
     }
     content.innerHTML = html;
   }
@@ -2959,27 +2958,17 @@
           + '<div style="font-size:0.85rem;line-height:1.5">' + renderMarkdown(text) + '</div></div>';
       });
     } else {
-      const sections = [
-        { key: 'summary', label: '\ud83d\udcca Summary' },
-        { key: 'incongruities', label: '\u26a0\ufe0f Incongruities Found' },
-        { key: 'data_quality', label: '\ud83d\udd22 Data Quality Issues' },
-        { key: 'errors_warnings', label: '\ud83d\udea8 System Errors / Warnings' },
-        { key: 'hypotheses', label: '\ud83d\udd2c Hypotheses' },
-        { key: 'recommended_actions', label: '\u2705 Recommended Actions' },
-        { key: 'assumptions', label: '\ud83d\udcdd Assumptions & Confidence' },
-      ];
       let hasSection = false;
-      for (const { key, label } of sections) {
+      for (const { key, label } of _INVESTIGATION_SECTION_DEFS) {
         const text = data[key] || '';
         if (!text) continue;
         hasSection = true;
         html += '<details open style="margin-bottom:0.5rem;">'
           + '<summary style="cursor:pointer;font-weight:600;padding:0.25rem 0;">' + escapeHtml(label) + '</summary>'
-          + '<pre style="white-space:pre-wrap;font-size:0.8rem;margin:0.5rem 0 0;padding:0.5rem;background:var(--bg);border-radius:4px;">'
-          + escapeHtml(text) + '</pre></details>';
+          + '<div style="font-size:0.85rem;line-height:1.5;margin:0.5rem 0 0;">' + renderMarkdown(text) + '</div></details>';
       }
       if (!hasSection && result.raw_response) {
-        html += '<pre style="white-space:pre-wrap;font-size:0.8rem;">' + escapeHtml(result.raw_response) + '</pre>';
+        html += '<div style="font-size:0.85rem;line-height:1.5;">' + renderMarkdown(result.raw_response) + '</div>';
       }
     }
     content.innerHTML = html;

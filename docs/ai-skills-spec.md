@@ -189,34 +189,43 @@ entry modes share this one definition:
 
 `async_build_investigator_context(hass, coordinator, **kwargs) → str`
 
-A thin orchestrator: calls `ContextProviderRegistry.select(focus)` (`ai_skills_context.py`),
-sorted by `priority` and optionally filtered by a `focus` keyword, then concatenates each
-provider's output. Each provider is wrapped in its own `try/except`. If a provider fails, its
-section is replaced with `"  unavailable"` and assembly continues — a failure in one provider
-never aborts the others. As of Issue #563 there are 16 registered providers; treat the
+A thin orchestrator: calls `ContextProviderRegistry.select(focus, narration=...)`
+(`ai_skills_context.py`), sorted by `priority` and filtered either by a `focus` keyword or,
+for the narration path, by a flat `priority <= 1` cutoff, then concatenates each provider's
+output. Each provider is wrapped in its own `try/except`. If a provider fails, its section is
+replaced with `"  unavailable"` and assembly continues — a failure in one provider never
+aborts the others. As of Issue #563 there are 16 registered providers; treat the
 registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`) as
 authoritative if this table and the code ever disagree.
 
-| Provider name | Section label | Data source |
-|---|---|---|
-| `current_state` | `CURRENT STATE` | `coordinator.data` + fresh HVAC runtime |
-| `hvac_entity` | `HVAC ENTITY` | `hass.states.get(climate_entity_id)` — `hvac_mode` and `current_temperature` |
-| `state_cross_validation` | `STATE CROSS-VALIDATION` | HVAC mode/action contradiction check + comfort-band deadband/swing check — ported from the retired activity context (Issue #563) |
-| `last_briefing` | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim |
-| `learning` | `LEARNING — *` (5 sub-sections) | Compliance summary, thermal model, weather bias, active suggestions (full text + evidence, unfiltered), last N daily records |
-| `thermal_pipeline` | `THERMAL OBSERVATION PIPELINE` | Per-type committed/rejected counts, top reason codes, pending observations, `NEVER LEARNED` / `*** PIPELINE FAILURE ***` markers |
-| `event_log` | `EVENT LOG` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log[-200:]` filtered to last N hours (`kwargs.get("hours", 168)`, clamped 1–720); see [Event Log Provider](#event-log-provider) |
-| `activity_timeline` | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored |
-| `override_details` | `MANUAL OVERRIDES TODAY` + `FAN OWNERSHIP HISTORY` | Override count/history/current-duration, Issue #321 stuck-grace critical warning, fan ownership transitions — ported (Issue #563) |
-| `daily_summaries` | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
-| `ai_report_history` | `RECENT AI ACTIVITY REPORTS` | `coordinator.get_ai_report_history()[-3:]` — timestamp and summary only (legacy, pre-merge history) |
-| `config` | `CONFIGURATION` | See [Config Provider](#config-provider) |
-| `operational_design` | `CA OPERATIONAL DESIGN` | Static prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
-| `known_fixes` | `KNOWN-FIXED ISSUES` | See [Known Fixes Context](#known-fixes-context) |
-| `version` | `RUNNING VERSION` + `RECENT RELEASE NOTES` | Last 5 versions from `RELEASE_NOTES` in `const.py` |
-| `github` | `GITHUB REPOSITORY` + `RECENT GITHUB ISSUES` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching — Issue #563); silently omitted on network error |
+**Narration vs investigation scope (Issue #563):** the silent/scheduled narration path
+(`ClimateAdvisorAIActivityView`/`ai_activity_report` — never sets `focus`) passes
+`narration=True`, which caps providers to `priority <= 1` — current-state and
+recent-activity data only. The on-demand `ai_investigate` (SSE) path never sets
+`narration`, so an empty `focus` there still means "audit everything" (all 16 providers) —
+that's a deliberate user action, not a scheduled narration, and is unchanged. The `Narration`
+column below reflects the `priority` cutoff, not a separately maintained list.
 
-**Optional focus:** `kwargs.get("focus", "")` is prepended as `=== INVESTIGATION FOCUS (USER-DIRECTED) ===` if non-empty.
+| Provider name | Priority | Narration | Section label | Data source |
+|---|---|---|---|---|
+| `current_state` | 0 | ✅ | `CURRENT STATE` | `coordinator.data` + fresh HVAC runtime |
+| `hvac_entity` | 0 | ✅ | `HVAC ENTITY` | `hass.states.get(climate_entity_id)` — `hvac_mode` and `current_temperature` |
+| `state_cross_validation` | 0 | ✅ | `STATE CROSS-VALIDATION` | HVAC mode/action contradiction check + comfort-band deadband/swing check — ported from the retired activity context (Issue #563) |
+| `last_briefing` | 1 | ✅ | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim |
+| `learning` | 1 | ✅ | `LEARNING — *` (5 sub-sections) | Compliance summary, thermal model, weather bias, active suggestions (full text + evidence, unfiltered), last N daily records |
+| `thermal_pipeline` | 1 | ✅ | `THERMAL OBSERVATION PIPELINE` | Per-type committed/rejected counts, top reason codes, pending observations, `NEVER LEARNED` / `*** PIPELINE FAILURE ***` markers |
+| `event_log` | 1 | ✅ | `EVENT LOG` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log[-200:]` filtered to last N hours (`kwargs.get("hours", 168)`, clamped 1–720); see [Event Log Provider](#event-log-provider) |
+| `activity_timeline` | 1 | ✅ | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored |
+| `override_details` | 1 | ✅ | `MANUAL OVERRIDES TODAY` + `FAN OWNERSHIP HISTORY` | Override count/history/current-duration, Issue #321 stuck-grace critical warning, fan ownership transitions — ported (Issue #563) |
+| `daily_summaries` | 2 | ❌ | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
+| `ai_report_history` | 2 | ❌ | `RECENT AI ACTIVITY REPORTS` | `coordinator.get_ai_report_history()[-3:]` — timestamp and summary only (legacy, pre-merge history) |
+| `config` | 2 | ❌ | `CONFIGURATION` | See [Config Provider](#config-provider) |
+| `operational_design` | 3 | ❌ | `CA OPERATIONAL DESIGN` | Static prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
+| `known_fixes` | 3 | ❌ | `KNOWN-FIXED ISSUES` | See [Known Fixes Context](#known-fixes-context) |
+| `version` | 3 | ❌ | `RUNNING VERSION` + `RECENT RELEASE NOTES` | Last 5 versions from `RELEASE_NOTES` in `const.py` |
+| `github` | 4 | ❌ | `GITHUB REPOSITORY` + `RECENT GITHUB ISSUES` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching — Issue #563); silently omitted on network error |
+
+**Optional focus:** `kwargs.get("focus", "")` is prepended as `=== INVESTIGATION FOCUS (USER-DIRECTED) ===` if non-empty. Never combined with `narration=True` in practice.
 
 ### Thermal Observation Pipeline Context
 

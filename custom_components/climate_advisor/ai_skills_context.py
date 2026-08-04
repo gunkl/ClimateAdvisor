@@ -91,16 +91,26 @@ class ContextProviderRegistry:
         """Append a provider to the registry."""
         self._providers.append(provider)
 
-    def select(self, focus: str = "") -> list[ContextProvider]:
+    def select(self, focus: str = "", narration: bool = False) -> list[ContextProvider]:
         """Return providers relevant to the given focus string, sorted by priority.
 
         If focus is empty or contains no recognised keywords, all providers are
-        returned (backward-compatible with no-focus behaviour).
+        returned (backward-compatible with no-focus behaviour) — UNLESS narration=True.
+
+        narration=True is for the silent/scheduled narration path (never combined with
+        a non-empty focus in practice — narration call sites never set one, and the
+        on-demand Investigate call site never sets narration). It caps providers to
+        priority <= 1 (current-state + recent-activity), skipping the audit-depth and
+        network-bound providers (priority 2-4: daily summaries, report history, config,
+        operational design, known fixes, version, GitHub) that a "what happened
+        recently" narration doesn't need — see Issue #563.
 
         Priority-0 providers are always included regardless of tag match —
         they provide the essential current-state context every investigation needs.
         """
         sorted_providers = sorted(self._providers, key=lambda p: p.priority)
+        if narration:
+            return [p for p in sorted_providers if p.priority <= 1]
         if not focus:
             return sorted_providers
         focus_lower = focus.lower()

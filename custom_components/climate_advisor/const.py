@@ -6061,7 +6061,12 @@ DEFAULT_AI_INVESTIGATOR_REASONING = "medium"
 DEFAULT_AI_INVESTIGATOR_MAX_TOKENS = 8192  # must exceed MEDIUM reasoning budget (4096) + output buffer
 DEFAULT_AI_INVESTIGATOR_RPD = 3
 
-# Model options
+# Model options — Issue #563: these are the OFFLINE FALLBACK defaults, not "the" list.
+# claude_api.py's fetch_available_models() fetches the live registry from Anthropic at
+# runtime for both the config flow dropdown and capability-tier deprecation fallback;
+# this static list is only used when that live fetch fails (no network, no API key yet,
+# unsupported SDK version, etc.) — keep it reasonably current, but it is a safety net,
+# not the source of truth for what models are actually available.
 AI_MODEL_SONNET = "claude-sonnet-4-6"
 AI_MODEL_OPUS = "claude-opus-4-6"
 AI_MODEL_HAIKU = "claude-haiku-4-5-20251001"

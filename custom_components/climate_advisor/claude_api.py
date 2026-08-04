@@ -16,6 +16,7 @@ from .const import (
     AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     AI_CIRCUIT_BREAKER_THRESHOLD,
     AI_MAX_RETRIES,
+    AI_MODELS,
     AI_REASONING_BUDGET_TOKENS,
     AI_REASONING_HIGH,
     AI_REQUEST_HISTORY_CAP,
@@ -53,6 +54,27 @@ except ImportError:
     APITimeoutError = Exception  # type: ignore[assignment,misc]
     RateLimitError = Exception  # type: ignore[assignment,misc]
 
+try:
+    # Issue #563 — distinct error type for an invalid/deprecated model ID, so the
+    # retry loop can skip pointless same-model backoff and instead try a same-tier
+    # replacement once. Import-guarded like the group above: if this SDK version
+    # doesn't expose it, NotFoundError just never matches and behavior falls
+    # through to today's generic APIError handling unchanged.
+    from anthropic import NotFoundError
+except ImportError:
+    NotFoundError = None  # type: ignore[assignment,misc]
+
+# Issue #563 — capability-tier keywords used for substring-matching a model ID to its
+# tier (e.g. "claude-sonnet-4-6" -> "sonnet"). Intentionally not a maintained list of
+# specific model names — Anthropic's product-line naming is the stable part, specific
+# model IDs are not.
+_MODEL_TIER_KEYWORDS: tuple[str, ...] = ("opus", "sonnet", "haiku")
+
+# TTL for the live model-list cache (claude_api.py-local, not the coordinator's cache —
+# this client has no coordinator reference). Matches the precedent set by
+# ai_skills_context.py's GitHub-issue cache (_GITHUB_OPEN_TTL).
+_MODEL_LIST_CACHE_TTL_SECONDS = 86_400  # 24 hours
+
 # Per-model cost rates (USD per million tokens)
 _MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-sonnet": {"input": 3.0, "output": 15.0},
@@ -82,6 +104,8 @@ class ClaudeResponse:
     budget_exceeded: bool = False
     stop_reason: str | None = None
     truncated: bool = False
+    resolved_model: str = ""  # actual model used; differs from the requested model only
+    # when a deprecated/invalid model triggered a same-tier fallback (Issue #563)
 
 
 @dataclass
@@ -108,6 +132,42 @@ class _BudgetTracker:
 
     monthly_cost: float = 0.0
     budget_month: int = field(default_factory=lambda: date.today().month)
+
+
+def detect_model_tier(model_id: str) -> str | None:
+    """Return the capability tier ("opus"/"sonnet"/"haiku") a model ID belongs to.
+
+    Substring match on Anthropic's stable product-line naming — not a maintained
+    list of specific model names, which would itself go stale (Issue #563).
+    Returns None if no known tier keyword appears in the ID.
+    """
+    model_lower = model_id.lower()
+    for tier in _MODEL_TIER_KEYWORDS:
+        if tier in model_lower:
+            return tier
+    return None
+
+
+async def fetch_available_models(api_key: str) -> list[str]:
+    """Fetch the live list of available Claude model IDs from Anthropic.
+
+    This function must never raise — on any failure (no API key, network error,
+    an SDK version that lacks `.models`, an API error) it falls back to the
+    static AI_MODELS default list. Used both by ClaudeAPIClient.async_list_models()
+    (cached) and directly by config_flow.py (uncached — a config-flow render is a
+    one-off interaction, not a hot path) so there is exactly one implementation of
+    "how to ask Anthropic what models exist and what to do if that fails" (Issue #563).
+    """
+    if not api_key or not ANTHROPIC_AVAILABLE:
+        return list(AI_MODELS)
+    try:
+        client = AsyncAnthropic(api_key=api_key)
+        page = await client.models.list()
+        models = [m.id for m in page.data]
+        return models if models else list(AI_MODELS)
+    except Exception:
+        _LOGGER.debug("fetch_available_models: live fetch failed, using static fallback list", exc_info=True)
+        return list(AI_MODELS)
 
 
 class ClaudeAPIClient:
@@ -149,10 +209,27 @@ class ClaudeAPIClient:
         self._last_request_time: float | None = None
         self._investigator_requests_today: int = 0
         self._investigator_requests_date: str = ""
+        self._models_cache: list[str] | None = None
+        self._models_cache_ts: float = 0.0
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def async_list_models(self) -> list[str]:
+        """Return available Claude model IDs, cached for _MODEL_LIST_CACHE_TTL_SECONDS.
+
+        Thin cached wrapper around the module-level fetch_available_models() — see
+        that function for fallback behavior on failure (Issue #563).
+        """
+        now = time.monotonic()
+        if self._models_cache is not None and (now - self._models_cache_ts) < _MODEL_LIST_CACHE_TTL_SECONDS:
+            return self._models_cache
+        api_key = self._config.get(CONF_AI_API_KEY, "")
+        models = await fetch_available_models(api_key)
+        self._models_cache = models
+        self._models_cache_ts = now
+        return models
 
     async def async_request(
         self,
@@ -760,6 +837,144 @@ class ClaudeAPIClient:
             self._rate_counters.manual_requests_today = 0
             self._rate_counters.counter_date = today
 
+    async def _single_api_call(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str,
+        start_time: float,
+    ) -> ClaudeResponse:
+        """Make exactly one call to the Anthropic messages API and parse the response.
+
+        Raises on failure (RateLimitError/APITimeoutError/APIError/Exception) — this
+        method has no retry/fallback policy of its own; callers (_async_call_with_retry's
+        backoff loop, and the tier-fallback single attempt) own that decision. Factored
+        out so the fallback attempt doesn't duplicate the kwargs-building/response-
+        parsing logic (Issue #563).
+        """
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+            "temperature": temperature,
+        }
+
+        # Extended thinking for high reasoning effort
+        # Claude API requirements when thinking is enabled:
+        #   1. temperature must be exactly 1
+        #   2. max_tokens must exceed budget_tokens
+        if reasoning_effort == AI_REASONING_HIGH:
+            budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
+            kwargs["temperature"] = 1  # required by API — overrides configured value
+            if kwargs["max_tokens"] <= budget:
+                kwargs["max_tokens"] = budget + 4096  # reserve room for output tokens
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+        api_response = await self._client.messages.create(**kwargs)
+
+        latency_ms = (time.monotonic() - start_time) * 1000.0
+        input_tokens: int = getattr(api_response.usage, "input_tokens", 0)
+        output_tokens: int = getattr(api_response.usage, "output_tokens", 0)
+        estimated_cost = self._estimate_cost(model, input_tokens, output_tokens)
+
+        # Extract text content from response blocks
+        content_text = ""
+        for block in api_response.content:
+            if hasattr(block, "text"):
+                content_text += block.text
+
+        stop_reason = getattr(api_response, "stop_reason", None)
+        truncated = stop_reason == "max_tokens"
+        skill_name = self._extract_skill_name(system_prompt)
+        _LOGGER.debug(
+            "Claude response finished: skill=%s stop_reason=%s output_tokens=%d",
+            skill_name,
+            stop_reason,
+            output_tokens,
+        )
+        if truncated:
+            _LOGGER.warning(
+                "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
+                skill_name,
+                output_tokens,
+                kwargs["max_tokens"],
+            )
+
+        return ClaudeResponse(
+            success=True,
+            content=content_text,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost=estimated_cost,
+            latency_ms=latency_ms,
+            stop_reason=stop_reason,
+            truncated=truncated,
+            resolved_model=model,
+        )
+
+    async def _try_tier_fallback(
+        self,
+        *,
+        original_model: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str,
+        start_time: float,
+    ) -> ClaudeResponse | None:
+        """Attempt one same-capability-tier replacement after a not-found-model error.
+
+        Returns the successful ClaudeResponse if a same-tier replacement worked, or
+        None if no replacement could be determined/found or the replacement attempt
+        also failed. Callers must treat None as "fall through to normal error
+        handling for the original model" — not as a new failure mode (Issue #563).
+        """
+        tier = detect_model_tier(original_model)
+        if tier is None:
+            _LOGGER.warning(
+                "Model '%s' rejected by API but its capability tier could not be "
+                "determined — no automatic fallback attempted",
+                original_model,
+            )
+            return None
+
+        live_models = await self.async_list_models()
+        candidates = [m for m in live_models if m != original_model and detect_model_tier(m) == tier]
+        if not candidates:
+            _LOGGER.warning(
+                "Model '%s' rejected by API — no live '%s'-tier replacement found",
+                original_model,
+                tier,
+            )
+            return None
+
+        new_model = candidates[0]  # live list is newest-first per Anthropic's API convention
+        _LOGGER.warning(
+            "Model '%s' rejected by API (deprecated or invalid) — falling back to '%s' (%s tier)",
+            original_model,
+            new_model,
+            tier,
+        )
+        try:
+            return await self._single_api_call(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                model=new_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                start_time=start_time,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("Fallback model '%s' also failed: %s", new_model, exc)
+            return None
+
     async def _async_call_with_retry(
         self,
         *,
@@ -789,64 +1004,14 @@ class ClaudeAPIClient:
 
         for attempt in range(1, AI_MAX_RETRIES + 1):
             try:
-                kwargs: dict[str, Any] = {
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "system": system_prompt,
-                    "messages": [{"role": "user", "content": user_message}],
-                    "temperature": temperature,
-                }
-
-                # Extended thinking for high reasoning effort
-                # Claude API requirements when thinking is enabled:
-                #   1. temperature must be exactly 1
-                #   2. max_tokens must exceed budget_tokens
-                if reasoning_effort == AI_REASONING_HIGH:
-                    budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
-                    kwargs["temperature"] = 1  # required by API — overrides configured value
-                    if kwargs["max_tokens"] <= budget:
-                        kwargs["max_tokens"] = budget + 4096  # reserve room for output tokens
-                    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-
-                api_response = await self._client.messages.create(**kwargs)
-
-                latency_ms = (time.monotonic() - start_time) * 1000.0
-                input_tokens: int = getattr(api_response.usage, "input_tokens", 0)
-                output_tokens: int = getattr(api_response.usage, "output_tokens", 0)
-                estimated_cost = self._estimate_cost(model, input_tokens, output_tokens)
-
-                # Extract text content from response blocks
-                content_text = ""
-                for block in api_response.content:
-                    if hasattr(block, "text"):
-                        content_text += block.text
-
-                stop_reason = getattr(api_response, "stop_reason", None)
-                truncated = stop_reason == "max_tokens"
-                skill_name = self._extract_skill_name(system_prompt)
-                _LOGGER.debug(
-                    "Claude response finished: skill=%s stop_reason=%s output_tokens=%d",
-                    skill_name,
-                    stop_reason,
-                    output_tokens,
-                )
-                if truncated:
-                    _LOGGER.warning(
-                        "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
-                        skill_name,
-                        output_tokens,
-                        kwargs["max_tokens"],
-                    )
-
-                return ClaudeResponse(
-                    success=True,
-                    content=content_text,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    estimated_cost=estimated_cost,
-                    latency_ms=latency_ms,
-                    stop_reason=stop_reason,
-                    truncated=truncated,
+                return await self._single_api_call(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    start_time=start_time,
                 )
 
             except RateLimitError as exc:
@@ -866,6 +1031,26 @@ class ClaudeAPIClient:
                     exc,
                 )
             except APIError as exc:
+                # Issue #563: an invalid/deprecated model won't succeed on retry —
+                # skip the backoff loop and try one same-tier replacement instead.
+                # isinstance() against NotFoundError only when it's actually
+                # importable (import-guarded at module load) — never a bare
+                # `except NotFoundError` clause, which would raise TypeError if
+                # NotFoundError were None.
+                if NotFoundError is not None and isinstance(exc, NotFoundError):
+                    fallback = await self._try_tier_fallback(
+                        original_model=model,
+                        system_prompt=system_prompt,
+                        user_message=user_message,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        reasoning_effort=reasoning_effort,
+                        start_time=start_time,
+                    )
+                    if fallback is not None:
+                        return fallback
+                    # No usable same-tier replacement — fall through to the normal
+                    # error handling/backoff below, same as any other APIError.
                 last_error = f"API error: {exc}"
                 _LOGGER.warning(
                     "Claude API error on attempt %d/%d: %s",

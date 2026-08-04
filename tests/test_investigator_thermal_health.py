@@ -23,6 +23,7 @@ if "anthropic" not in sys.modules:
     _mock_anthropic.APIError = type("APIError", (Exception,), {})
     _mock_anthropic.APITimeoutError = type("APITimeoutError", (Exception,), {})
     _mock_anthropic.RateLimitError = type("RateLimitError", (Exception,), {})
+    _mock_anthropic.NotFoundError = type("NotFoundError", (_mock_anthropic.APIError,), {})
     _mock_anthropic.AsyncAnthropic = MagicMock()
     sys.modules["anthropic"] = _mock_anthropic
 

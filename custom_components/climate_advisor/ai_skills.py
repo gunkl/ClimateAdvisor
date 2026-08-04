@@ -8,6 +8,8 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .const import CONF_AI_MODEL, DEFAULT_AI_MODEL
+
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
@@ -117,6 +119,7 @@ class AISkillRegistry:
         )
 
         if response.success:
+            await _maybe_persist_model_fallback(coordinator, override_model, cfg, response)
             try:
                 parsed = skill.response_parser(response.content)
                 return {
@@ -252,6 +255,29 @@ class AISkillRegistry:
             "raw_response": full_text,
             "truncated": stop_reason == "max_tokens",
         }
+
+
+async def _maybe_persist_model_fallback(
+    coordinator: Any,
+    override_model: str | None,
+    cfg: dict[str, Any],
+    response: Any,
+) -> None:
+    """Persist a same-tier model substitution if claude_api.py made one (Issue #563).
+
+    Only the non-streaming async_request()/_async_call_with_retry() path can produce
+    a fallback (async_request_streaming() never retries — see its docstring), so this
+    is only called from async_execute(), not async_execute_streaming(). Compares the
+    model that was actually requested (mirroring claude_api.py's own resolution:
+    override, else the configured CONF_AI_MODEL, else DEFAULT_AI_MODEL) against
+    response.resolved_model — they differ only when a fallback occurred.
+    """
+    requested_model = override_model or cfg.get(CONF_AI_MODEL, DEFAULT_AI_MODEL)
+    resolved_model = getattr(response, "resolved_model", "") or requested_model
+    if resolved_model != requested_model:
+        persist = getattr(coordinator, "async_persist_model_fallback", None)
+        if persist is not None:
+            await persist(resolved_model)
 
 
 def _run_fallback(

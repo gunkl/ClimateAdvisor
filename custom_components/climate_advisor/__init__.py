@@ -393,7 +393,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # First startup — wait until all integrations are loaded
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _validate_weather_entity)
 
-    coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data))
+    coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data), entry_id=entry.entry_id)
 
     # Restore persisted state from last run (before setup registers listeners)
     await coordinator.async_restore_state()
@@ -521,6 +521,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coordinator,
             coordinator.claude_client,
             hours=hours,
+            narration=True,
         )
         # Store the result in the unified investigation report history
         await coordinator.async_store_investigation_report(result)

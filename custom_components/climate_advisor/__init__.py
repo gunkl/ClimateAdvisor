@@ -501,27 +501,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     AI_ACTIVITY_SCHEMA = vol.Schema(
         {
             vol.Optional("hours", default=24): vol.All(vol.Coerce(int), vol.Range(min=1, max=168)),
-            vol.Optional("detail_level", default="full"): vol.In(["brief", "full"]),
         }
     )
 
     async def handle_ai_activity_report(call):
-        """Handle the ai_activity_report service call."""
+        """Handle the ai_activity_report service call.
+
+        Issue #563: the "activity_report" skill was retired and merged into
+        "investigator" — this must call the merged skill name, or every
+        invocation silently stores an "Unknown skill" error report.
+        """
         if not coordinator.claude_client or not coordinator.ai_skills:
             _LOGGER.warning("AI activity report requested but AI features are disabled")
             return
         hours = call.data.get("hours", 24)
-        detail_level = call.data.get("detail_level", "full")
         result = await coordinator.ai_skills.async_execute(
-            "activity_report",
+            "investigator",
             hass,
             coordinator,
             coordinator.claude_client,
             hours=hours,
-            detail_level=detail_level,
         )
-        # Store the result for dashboard retrieval
-        await coordinator.async_store_ai_report(result)
+        # Store the result in the unified investigation report history
+        await coordinator.async_store_investigation_report(result)
 
     hass.services.async_register(DOMAIN, "ai_activity_report", handle_ai_activity_report, schema=AI_ACTIVITY_SCHEMA)
 

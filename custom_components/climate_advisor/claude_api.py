@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator
@@ -74,6 +75,22 @@ _MODEL_TIER_KEYWORDS: tuple[str, ...] = ("opus", "sonnet", "haiku")
 # this client has no coordinator reference). Matches the precedent set by
 # ai_skills_context.py's GitHub-issue cache (_GITHUB_OPEN_TTL).
 _MODEL_LIST_CACHE_TTL_SECONDS = 86_400  # 24 hours
+
+# Issue #563 follow-on — reactive per-model parameter capability detection. Anthropic's
+# Models API exposes id/display_name/created_at, not a per-model sampling-parameter
+# schema, so there's no way to know ahead of time that e.g. a given model no longer
+# accepts `temperature`. This regex matches the one confirmed error shape
+# ("`temperature` is deprecated for this model."); a future differently-worded
+# deprecation message would not be caught by this pattern — known limitation, not
+# hidden.
+_DEPRECATED_PARAM_RE = re.compile(r"`(\w+)` is deprecated for this model")
+
+
+def _detect_deprecated_param(error_message: str) -> str | None:
+    """Return the parameter name Anthropic's API just rejected as deprecated, if any."""
+    match = _DEPRECATED_PARAM_RE.search(error_message)
+    return match.group(1) if match else None
+
 
 # Per-model cost rates (USD per million tokens)
 _MODEL_COSTS: dict[str, dict[str, float]] = {
@@ -211,6 +228,10 @@ class ClaudeAPIClient:
         self._investigator_requests_date: str = ""
         self._models_cache: list[str] | None = None
         self._models_cache_ts: float = 0.0
+        # Issue #563 follow-on: model_id -> set of request-parameter names Anthropic has
+        # rejected as deprecated for that model. In-memory only, per client instance —
+        # same acceptable cost as _models_cache (resets on integration reload).
+        self._unsupported_params: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -400,8 +421,12 @@ class ClaudeAPIClient:
 
         After all events are yielded the method records the request in history,
         updates budget/rate counters, and resets the circuit breaker on success.
-        Streaming does not retry on error — a single failure increments the
-        circuit-breaker counter and re-raises.
+        Streaming does not retry on error, with one narrow exception (Issue #563
+        follow-on): if the API rejects a request parameter as deprecated for the
+        configured model before any content has been yielded, the request is retried
+        exactly once without that parameter. Any other failure — or a second failure,
+        or one that occurs after content has already streamed to the caller —
+        increments the circuit-breaker counter and re-raises, as before.
 
         Args:
             system_prompt: System-level instructions for the model.
@@ -446,98 +471,109 @@ class ClaudeAPIClient:
             else self._config.get(CONF_AI_REASONING_EFFORT, DEFAULT_AI_REASONING_EFFORT)
         )
 
-        kwargs: dict[str, Any] = {
-            "model": resolved_model,
-            "max_tokens": resolved_max_tokens,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": user_message}],
-            "temperature": resolved_temperature,
-        }
-
-        if resolved_reasoning == AI_REASONING_HIGH:
-            budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
-            kwargs["temperature"] = 1
-            if kwargs["max_tokens"] <= budget:
-                kwargs["max_tokens"] = budget + 4096
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-
         start_time = time.monotonic()
-        try:
-            async with self._client.messages.stream(**kwargs) as stream:
-                async for event in stream:
-                    if getattr(event, "type", None) != "content_block_delta":
-                        continue
-                    delta = getattr(event, "delta", None)
-                    if delta is None:
-                        continue
-                    delta_type = getattr(delta, "type", None)
-                    if delta_type == "thinking_delta":
-                        yield {"type": "thinking", "text": getattr(delta, "thinking", "")}
-                    elif delta_type == "text_delta":
-                        yield {"type": "text", "text": getattr(delta, "text", "")}
-                final_msg = await stream.get_final_message()
+        any_content_yielded = False
+        final_msg = None
+        kwargs: dict[str, Any] = {}
 
-            latency_ms = (time.monotonic() - start_time) * 1000.0
-            input_tokens: int = getattr(final_msg.usage, "input_tokens", 0)
-            output_tokens: int = getattr(final_msg.usage, "output_tokens", 0)
-            estimated_cost = self._estimate_cost(resolved_model, input_tokens, output_tokens)
+        for attempt in (1, 2):
+            kwargs = self._build_request_kwargs(
+                model=resolved_model,
+                max_tokens=resolved_max_tokens,
+                temperature=resolved_temperature,
+                reasoning_effort=resolved_reasoning,
+                system_prompt=system_prompt,
+                user_message=user_message,
+            )
+            try:
+                async with self._client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        if getattr(event, "type", None) != "content_block_delta":
+                            continue
+                        delta = getattr(event, "delta", None)
+                        if delta is None:
+                            continue
+                        delta_type = getattr(delta, "type", None)
+                        if delta_type == "thinking_delta":
+                            any_content_yielded = True
+                            yield {"type": "thinking", "text": getattr(delta, "thinking", "")}
+                        elif delta_type == "text_delta":
+                            any_content_yielded = True
+                            yield {"type": "text", "text": getattr(delta, "text", "")}
+                    final_msg = await stream.get_final_message()
+                break  # success
 
-            stop_reason = getattr(final_msg, "stop_reason", None)
-            truncated = stop_reason == "max_tokens"
-            skill_name = self._extract_skill_name(system_prompt)
-            _LOGGER.debug(
-                "Claude streaming response finished: skill=%s stop_reason=%s output_tokens=%d",
+            except (RateLimitError, APITimeoutError, APIError, Exception) as exc:
+                bad_param = None if any_content_yielded else _detect_deprecated_param(str(exc))
+                if attempt == 1 and bad_param is not None:
+                    self._unsupported_params.setdefault(resolved_model, set()).add(bad_param)
+                    _LOGGER.warning(
+                        "Model '%s' rejected parameter '%s' as deprecated — retrying stream without it",
+                        resolved_model,
+                        bad_param,
+                    )
+                    continue  # next loop iteration rebuilds kwargs without bad_param
+
+                self._circuit_breaker.consecutive_failures += 1
+                self._error_count += 1
+                if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
+                    self._circuit_breaker.state = _CB_OPEN
+                    self._circuit_breaker.opened_at = time.monotonic()
+                    _LOGGER.error(
+                        "Circuit breaker opened after %d consecutive failures",
+                        self._circuit_breaker.consecutive_failures,
+                    )
+                raise
+
+        latency_ms = (time.monotonic() - start_time) * 1000.0
+        input_tokens: int = getattr(final_msg.usage, "input_tokens", 0)
+        output_tokens: int = getattr(final_msg.usage, "output_tokens", 0)
+        estimated_cost = self._estimate_cost(resolved_model, input_tokens, output_tokens)
+
+        stop_reason = getattr(final_msg, "stop_reason", None)
+        truncated = stop_reason == "max_tokens"
+        skill_name = self._extract_skill_name(system_prompt)
+        _LOGGER.debug(
+            "Claude streaming response finished: skill=%s stop_reason=%s output_tokens=%d",
+            skill_name,
+            stop_reason,
+            output_tokens,
+        )
+        if truncated:
+            _LOGGER.warning(
+                "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
                 skill_name,
-                stop_reason,
                 output_tokens,
+                kwargs["max_tokens"],
             )
-            if truncated:
-                _LOGGER.warning(
-                    "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
-                    skill_name,
-                    output_tokens,
-                    kwargs["max_tokens"],
-                )
-            yield {"type": "stop", "stop_reason": stop_reason}
+        yield {"type": "stop", "stop_reason": stop_reason}
 
-            # Update counters on success
-            self._circuit_breaker.consecutive_failures = 0
-            if self._circuit_breaker.state != _CB_CLOSED:
-                _LOGGER.info("Circuit breaker reset to closed after successful streaming request")
-            self._circuit_breaker.state = _CB_CLOSED
-            self._budget.monthly_cost += estimated_cost
-            if triggered_by == "auto":
-                self._rate_counters.auto_requests_today += 1
-            else:
-                self._rate_counters.manual_requests_today += 1
+        # Update counters on success
+        self._circuit_breaker.consecutive_failures = 0
+        if self._circuit_breaker.state != _CB_CLOSED:
+            _LOGGER.info("Circuit breaker reset to closed after successful streaming request")
+        self._circuit_breaker.state = _CB_CLOSED
+        self._budget.monthly_cost += estimated_cost
+        if triggered_by == "auto":
+            self._rate_counters.auto_requests_today += 1
+        else:
+            self._rate_counters.manual_requests_today += 1
 
-            self._total_requests += 1
-            self._last_request_time = time.time()
+        self._total_requests += 1
+        self._last_request_time = time.time()
 
-            self.request_history.append(
-                {
-                    "timestamp": self._last_request_time,
-                    "skill_name": self._extract_skill_name(system_prompt),
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "estimated_cost": estimated_cost,
-                    "latency_ms": latency_ms,
-                    "success": True,
-                    "error": None,
-                }
-            )
-
-        except (RateLimitError, APITimeoutError, APIError, Exception):
-            self._circuit_breaker.consecutive_failures += 1
-            self._error_count += 1
-            if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
-                self._circuit_breaker.state = _CB_OPEN
-                self._circuit_breaker.opened_at = time.monotonic()
-                _LOGGER.error(
-                    "Circuit breaker opened after %d consecutive failures",
-                    self._circuit_breaker.consecutive_failures,
-                )
-            raise
+        self.request_history.append(
+            {
+                "timestamp": self._last_request_time,
+                "skill_name": self._extract_skill_name(system_prompt),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "estimated_cost": estimated_cost,
+                "latency_ms": latency_ms,
+                "success": True,
+                "error": None,
+            }
+        )
 
     async def async_test_connection(self) -> tuple[bool, str]:
         """Validate the configured API key with a minimal API call.
@@ -837,24 +873,22 @@ class ClaudeAPIClient:
             self._rate_counters.manual_requests_today = 0
             self._rate_counters.counter_date = today
 
-    async def _single_api_call(
+    def _build_request_kwargs(
         self,
         *,
-        system_prompt: str,
-        user_message: str,
         model: str,
         max_tokens: int,
         temperature: float,
         reasoning_effort: str,
-        start_time: float,
-    ) -> ClaudeResponse:
-        """Make exactly one call to the Anthropic messages API and parse the response.
+        system_prompt: str,
+        user_message: str,
+    ) -> dict[str, Any]:
+        """Build the kwargs dict for a single Anthropic messages API call.
 
-        Raises on failure (RateLimitError/APITimeoutError/APIError/Exception) — this
-        method has no retry/fallback policy of its own; callers (_async_call_with_retry's
-        backoff loop, and the tier-fallback single attempt) own that decision. Factored
-        out so the fallback attempt doesn't duplicate the kwargs-building/response-
-        parsing logic (Issue #563).
+        Single source of truth for both the non-streaming (_single_api_call) and
+        streaming (async_request_streaming) request paths — previously each built its
+        own copy, which is why a parameter-compatibility bug could be fixed in one
+        path and silently left broken in the other (Issue #563 follow-on).
         """
         kwargs: dict[str, Any] = {
             "model": model,
@@ -874,6 +908,44 @@ class ClaudeAPIClient:
             if kwargs["max_tokens"] <= budget:
                 kwargs["max_tokens"] = budget + 4096  # reserve room for output tokens
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+
+        # Reactive per-model parameter capability detection (Issue #563 follow-on):
+        # drop any parameter already learned to be unsupported for this model. Must
+        # run LAST, after the thinking-budget block above, so a model that doesn't
+        # accept `temperature` never gets it re-added even when high reasoning effort
+        # would otherwise force temperature=1.
+        for bad_param in self._unsupported_params.get(model, ()):
+            kwargs.pop(bad_param, None)
+
+        return kwargs
+
+    async def _single_api_call(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str,
+        start_time: float,
+    ) -> ClaudeResponse:
+        """Make exactly one call to the Anthropic messages API and parse the response.
+
+        Raises on failure (RateLimitError/APITimeoutError/APIError/Exception) — this
+        method has no retry/fallback policy of its own; callers (_async_call_with_retry's
+        backoff loop, and the tier-fallback single attempt) own that decision. Factored
+        out so the fallback attempt doesn't duplicate the kwargs-building/response-
+        parsing logic (Issue #563).
+        """
+        kwargs = self._build_request_kwargs(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            reasoning_effort=reasoning_effort,
+            system_prompt=system_prompt,
+            user_message=user_message,
+        )
 
         api_response = await self._client.messages.create(**kwargs)
 
@@ -1031,33 +1103,61 @@ class ClaudeAPIClient:
                     exc,
                 )
             except APIError as exc:
-                # Issue #563: an invalid/deprecated model won't succeed on retry —
-                # skip the backoff loop and try one same-tier replacement instead.
-                # isinstance() against NotFoundError only when it's actually
-                # importable (import-guarded at module load) — never a bare
-                # `except NotFoundError` clause, which would raise TypeError if
-                # NotFoundError were None.
-                if NotFoundError is not None and isinstance(exc, NotFoundError):
-                    fallback = await self._try_tier_fallback(
-                        original_model=model,
-                        system_prompt=system_prompt,
-                        user_message=user_message,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
-                        start_time=start_time,
+                # Issue #563 follow-on: a request parameter (e.g. temperature) the
+                # configured model no longer accepts won't succeed on retry either —
+                # learn it, drop it, and retry immediately with the same model. This
+                # and the NotFoundError branch below are mutually exclusive error
+                # shapes (a 400 param-deprecation vs a 404 model-not-found), so only
+                # one generic "last_error" tail is needed for whichever wasn't hit.
+                bad_param = _detect_deprecated_param(str(exc))
+                if bad_param is not None:
+                    self._unsupported_params.setdefault(model, set()).add(bad_param)
+                    _LOGGER.warning(
+                        "Model '%s' rejected parameter '%s' as deprecated — retrying without it",
+                        model,
+                        bad_param,
                     )
-                    if fallback is not None:
-                        return fallback
-                    # No usable same-tier replacement — fall through to the normal
-                    # error handling/backoff below, same as any other APIError.
-                last_error = f"API error: {exc}"
-                _LOGGER.warning(
-                    "Claude API error on attempt %d/%d: %s",
-                    attempt,
-                    AI_MAX_RETRIES,
-                    exc,
-                )
+                    try:
+                        return await self._single_api_call(
+                            system_prompt=system_prompt,
+                            user_message=user_message,
+                            model=model,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            reasoning_effort=reasoning_effort,
+                            start_time=start_time,
+                        )
+                    except Exception as retry_exc:  # noqa: BLE001
+                        last_error = f"API error even after dropping '{bad_param}': {retry_exc}"
+                        _LOGGER.warning("Retry without '%s' also failed: %s", bad_param, retry_exc)
+                else:
+                    # Issue #563: an invalid/deprecated model won't succeed on retry —
+                    # skip the backoff loop and try one same-tier replacement instead.
+                    # isinstance() against NotFoundError only when it's actually
+                    # importable (import-guarded at module load) — never a bare
+                    # `except NotFoundError` clause, which would raise TypeError if
+                    # NotFoundError were None.
+                    if NotFoundError is not None and isinstance(exc, NotFoundError):
+                        fallback = await self._try_tier_fallback(
+                            original_model=model,
+                            system_prompt=system_prompt,
+                            user_message=user_message,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            reasoning_effort=reasoning_effort,
+                            start_time=start_time,
+                        )
+                        if fallback is not None:
+                            return fallback
+                        # No usable same-tier replacement — fall through to the
+                        # normal error handling/backoff below.
+                    last_error = f"API error: {exc}"
+                    _LOGGER.warning(
+                        "Claude API error on attempt %d/%d: %s",
+                        attempt,
+                        AI_MAX_RETRIES,
+                        exc,
+                    )
             except Exception as exc:  # noqa: BLE001
                 last_error = f"Unexpected error: {exc}"
                 _LOGGER.warning(

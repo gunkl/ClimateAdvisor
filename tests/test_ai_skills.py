@@ -13,7 +13,9 @@ from custom_components.climate_advisor.claude_api import ClaudeResponse
 # ---------------------------------------------------------------------------
 
 
-def _success_response(content: str = "test response", truncated: bool = False) -> ClaudeResponse:
+def _success_response(
+    content: str = "test response", truncated: bool = False, truncated_empty: bool = False
+) -> ClaudeResponse:
     """Build a successful ClaudeResponse for use in tests."""
     return ClaudeResponse(
         success=True,
@@ -24,6 +26,7 @@ def _success_response(content: str = "test response", truncated: bool = False) -
         latency_ms=100.0,
         stop_reason="max_tokens" if truncated else "end_turn",
         truncated=truncated,
+        truncated_empty=truncated_empty,
     )
 
 
@@ -189,6 +192,35 @@ class TestAISkillRegistryExecute:
         result = asyncio.run(registry.async_execute("normal_skill", hass, coordinator, client))
 
         assert result["truncated"] is False
+
+    def test_execute_propagates_truncated_empty_flag(self):
+        """Issue #563 follow-on: zero-output truncation propagates truncated_empty=True."""
+        registry = AISkillRegistry()
+        skill = _make_skill(name="empty_truncated_skill")
+        registry.register(skill)
+
+        client = _make_claude_client(_success_response(content="", truncated=True, truncated_empty=True))
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        result = asyncio.run(registry.async_execute("empty_truncated_skill", hass, coordinator, client))
+
+        assert result["truncated"] is True
+        assert result["truncated_empty"] is True
+
+    def test_execute_truncated_empty_false_when_content_present(self):
+        registry = AISkillRegistry()
+        skill = _make_skill(name="partial_truncated_skill")
+        registry.register(skill)
+
+        client = _make_claude_client(_success_response(content="cut off mid-sen", truncated=True))
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        result = asyncio.run(registry.async_execute("partial_truncated_skill", hass, coordinator, client))
+
+        assert result["truncated"] is True
+        assert result["truncated_empty"] is False
 
     def test_execute_with_fallback_on_ai_failure(self):
         """When AI fails and a fallback is registered, result comes from fallback."""
@@ -386,13 +418,14 @@ def _make_streaming_client(
     raise_on_stream: Exception | None = None,
     thinking_chunks: list[str] | None = None,
     stop_reason: str | None = "end_turn",
+    truncated_empty: bool = False,
 ) -> MagicMock:
     """Build a mock client whose async_request_streaming yields typed event dicts.
 
     Yields ``{"type": "thinking", ...}`` events for each entry in *thinking_chunks*
     (if provided) before yielding ``{"type": "text", ...}`` events for *chunks*, then
-    a trailing ``{"type": "stop", "stop_reason": ...}`` event (unless *stop_reason* is
-    None, mimicking a client that predates the "stop" event).
+    a trailing ``{"type": "stop", "stop_reason": ..., "truncated_empty": ...}`` event
+    (unless *stop_reason* is None, mimicking a client that predates the "stop" event).
     """
 
     async def _streaming_gen(*_args, **_kwargs):
@@ -403,7 +436,7 @@ def _make_streaming_client(
         for chunk in chunks:
             yield {"type": "text", "text": chunk}
         if stop_reason is not None:
-            yield {"type": "stop", "stop_reason": stop_reason}
+            yield {"type": "stop", "stop_reason": stop_reason, "truncated_empty": truncated_empty}
 
     client = MagicMock()
     client.async_request_streaming = _streaming_gen
@@ -546,6 +579,53 @@ class TestAISkillRegistryStreaming:
 
         assert len(done_events) == 1
         assert done_events[0]["truncated"] is True
+
+    def test_streaming_truncated_empty_stop_propagates_to_done(self):
+        """Issue #563 follow-on: truncated_empty from the 'stop' event propagates to done."""
+        registry = AISkillRegistry()
+        skill = _make_skill(name="empty_truncated_stream_skill")
+        registry.register(skill)
+
+        client = _make_streaming_client([], stop_reason="max_tokens", truncated_empty=True)
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        async def _collect():
+            events = []
+            async for ev in registry.async_execute_streaming("empty_truncated_stream_skill", hass, coordinator, client):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_collect())
+        done_events = [e for e in events if e.get("type") == "done"]
+
+        assert len(done_events) == 1
+        assert done_events[0]["truncated"] is True
+        assert done_events[0]["truncated_empty"] is True
+        assert done_events[0]["raw_response"] == ""
+
+    def test_streaming_truncated_empty_false_when_text_present(self):
+        registry = AISkillRegistry()
+        skill = _make_skill(name="partial_truncated_stream_skill")
+        registry.register(skill)
+
+        client = _make_streaming_client(["cut off"], stop_reason="max_tokens", truncated_empty=False)
+        hass = MagicMock()
+        coordinator = MagicMock()
+
+        async def _collect():
+            events = []
+            async for ev in registry.async_execute_streaming(
+                "partial_truncated_stream_skill", hass, coordinator, client
+            ):
+                events.append(ev)
+            return events
+
+        events = asyncio.run(_collect())
+        done_events = [e for e in events if e.get("type") == "done"]
+
+        assert done_events[0]["truncated"] is True
+        assert done_events[0]["truncated_empty"] is False
 
     def test_streaming_end_turn_stop_marks_done_not_truncated(self):
         """A 'stop' event with stop_reason='end_turn' leaves truncated=False on the done event."""

@@ -1369,9 +1369,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if not (0.0 <= float(ai_temp) <= 1.0):
                 errors[CONF_AI_TEMPERATURE] = "ai_temperature_out_of_range"
 
-            # Validate max_tokens range
+            # Validate max_tokens range. Ceiling raised 8192 -> 16384 (Issue #563
+            # follow-on): claude-sonnet-5 was observed consuming the full 8192-token
+            # budget with zero visible output, and 8192 was already the old ceiling —
+            # there was no way for a user to try more headroom without this change.
             ai_max_tokens = int(user_input.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS))
-            if not (256 <= ai_max_tokens <= 8192):
+            if not (256 <= ai_max_tokens <= 16384):
                 errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
 
             if not errors and new_key and new_key != existing_key and ai_enabled:
@@ -1460,7 +1463,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     CONF_AI_MAX_TOKENS,
                     default=current.get(CONF_AI_MAX_TOKENS, DEFAULT_AI_MAX_TOKENS),
                 ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=256, max=8192, step=256, mode=selector.NumberSelectorMode.BOX)
+                    selector.NumberSelectorConfig(min=256, max=16384, step=256, mode=selector.NumberSelectorMode.BOX)
                 ),
                 vol.Optional(
                     CONF_AI_TEMPERATURE,

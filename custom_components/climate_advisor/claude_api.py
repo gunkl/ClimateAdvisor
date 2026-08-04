@@ -121,6 +121,10 @@ class ClaudeResponse:
     budget_exceeded: bool = False
     stop_reason: str | None = None
     truncated: bool = False
+    truncated_empty: bool = False  # truncated AND zero visible output — the whole
+    # max_tokens budget was consumed without producing an answer (Issue #563 follow-on).
+    # A distinct condition from ordinary truncation: there is no partial content to
+    # salvage, and raising max_tokens further may not even be the right lever.
     resolved_model: str = ""  # actual model used; differs from the requested model only
     # when a deprecated/invalid model triggered a same-tier fallback (Issue #563)
 
@@ -472,7 +476,11 @@ class ClaudeAPIClient:
         )
 
         start_time = time.monotonic()
-        any_content_yielded = False
+        any_content_yielded = False  # any delta at all (text or thinking) — used only to
+        # decide whether a fresh retry is safe (Issue #563 follow-on's param-fallback path)
+        any_text_yielded = False  # specifically visible answer text — used to detect the
+        # "burned the whole budget, produced no answer" case, since thinking output alone
+        # doesn't give the caller an answer either (Issue #563 follow-on)
         final_msg = None
         kwargs: dict[str, Any] = {}
 
@@ -499,6 +507,7 @@ class ClaudeAPIClient:
                             yield {"type": "thinking", "text": getattr(delta, "thinking", "")}
                         elif delta_type == "text_delta":
                             any_content_yielded = True
+                            any_text_yielded = True
                             yield {"type": "text", "text": getattr(delta, "text", "")}
                     final_msg = await stream.get_final_message()
                 break  # success
@@ -532,6 +541,7 @@ class ClaudeAPIClient:
 
         stop_reason = getattr(final_msg, "stop_reason", None)
         truncated = stop_reason == "max_tokens"
+        truncated_empty = truncated and not any_text_yielded
         skill_name = self._extract_skill_name(system_prompt)
         _LOGGER.debug(
             "Claude streaming response finished: skill=%s stop_reason=%s output_tokens=%d",
@@ -539,14 +549,29 @@ class ClaudeAPIClient:
             stop_reason,
             output_tokens,
         )
-        if truncated:
+        if truncated_empty:
+            # Issue #563 follow-on: the full max_tokens budget was billed and consumed,
+            # but no "text"/"thinking" delta was ever yielded — a different, more severe
+            # problem than ordinary truncation (there's no partial content to salvage).
+            _LOGGER.warning(
+                "Streaming response consumed the full max_tokens budget with zero visible "
+                "output: skill=%s model=%s output_tokens=%d max_tokens=%d "
+                "reasoning_effort=%s — model may need a larger max_tokens ceiling or a "
+                "different reasoning_effort",
+                skill_name,
+                resolved_model,
+                output_tokens,
+                kwargs["max_tokens"],
+                resolved_reasoning,
+            )
+        elif truncated:
             _LOGGER.warning(
                 "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
                 skill_name,
                 output_tokens,
                 kwargs["max_tokens"],
             )
-        yield {"type": "stop", "stop_reason": stop_reason}
+        yield {"type": "stop", "stop_reason": stop_reason, "truncated_empty": truncated_empty}
 
         # Update counters on success
         self._circuit_breaker.consecutive_failures = 0
@@ -962,6 +987,7 @@ class ClaudeAPIClient:
 
         stop_reason = getattr(api_response, "stop_reason", None)
         truncated = stop_reason == "max_tokens"
+        truncated_empty = truncated and not content_text
         skill_name = self._extract_skill_name(system_prompt)
         _LOGGER.debug(
             "Claude response finished: skill=%s stop_reason=%s output_tokens=%d",
@@ -969,7 +995,21 @@ class ClaudeAPIClient:
             stop_reason,
             output_tokens,
         )
-        if truncated:
+        if truncated_empty:
+            # Issue #563 follow-on: the full max_tokens budget was billed and consumed,
+            # but zero visible answer text came back — a different, more severe problem
+            # than ordinary truncation (there's no partial content to salvage).
+            _LOGGER.warning(
+                "Response consumed the full max_tokens budget with zero visible output: "
+                "skill=%s model=%s output_tokens=%d max_tokens=%d reasoning_effort=%s — "
+                "model may need a larger max_tokens ceiling or a different reasoning_effort",
+                skill_name,
+                model,
+                output_tokens,
+                kwargs["max_tokens"],
+                reasoning_effort,
+            )
+        elif truncated:
             _LOGGER.warning(
                 "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
                 skill_name,
@@ -986,6 +1026,7 @@ class ClaudeAPIClient:
             latency_ms=latency_ms,
             stop_reason=stop_reason,
             truncated=truncated,
+            truncated_empty=truncated_empty,
             resolved_model=model,
         )
 

@@ -2817,6 +2817,7 @@
               raw_response: event.raw_response || accumulated,
               input_context: event.input_context || '',
               truncated: !!event.truncated,
+              truncated_empty: !!event.truncated_empty,
             };
             _currentReport = {
               reportType: 'investigation',
@@ -2826,7 +2827,9 @@
             };
             console.log('[CA] Done event received, total=' + accumulated.length + ' chars, truncated=' + result.truncated);
             renderReportInPreview(_currentReport);
-            status.textContent = result.truncated
+            status.textContent = result.truncated_empty
+              ? '⚠ Model produced no visible output despite using the full response budget. Increasing max response length may not help — try a different reasoning effort or model.'
+              : result.truncated
               ? '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.'
               : 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
@@ -2938,7 +2941,10 @@
       ? ' <span style="background:var(--primary);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;vertical-align:middle;">refined</span>'
       : '';
     const tsSpan = ts ? '<div style="color:var(--text-secondary);font-size:0.82rem;margin-bottom:8px;">' + escapeHtml(ts) + refinedBadge + '</div>' : '';
-    const truncatedBanner = result.truncated
+    const truncatedBanner = result.truncated_empty
+      ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
+        + '⚠ Model produced no visible output despite using the full response budget. Increasing max response length may not help — try a different reasoning effort or model.</div>'
+      : result.truncated
       ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
         + '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.</div>'
       : '';
@@ -3157,7 +3163,9 @@
         : '<span style="background:var(--success);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;">Activity</span>';
       const result = entry.result || {};
       const source = result.source || 'unknown';
-      const truncatedBadge = result.truncated
+      const truncatedBadge = result.truncated_empty
+        ? '<span title="Model produced no visible output despite using the full response budget" style="background:var(--warning);color:#000;font-size:0.7rem;padding:1px 6px;border-radius:10px;">⚠ no output</span>'
+        : result.truncated
         ? '<span title="Report was cut off — hit max response length" style="background:var(--warning);color:#000;font-size:0.7rem;padding:1px 6px;border-radius:10px;">⚠ truncated</span>'
         : '';
       const summary = (result.data && result.data.summary)
@@ -3237,7 +3245,8 @@
     out += '| **Date** | ' + ts + ' |\n';
     out += '| **Source** | ' + source + ' |\n';
     if (focus) out += '| **Focus** | ' + focus + ' |\n';
-    if (result.truncated) out += '| **Truncated** | ⚠ Yes — hit max response length |\n';
+    if (result.truncated_empty) out += '| **Truncated** | ⚠ Yes — zero visible output despite using the full response budget |\n';
+    else if (result.truncated) out += '| **Truncated** | ⚠ Yes — hit max response length |\n';
     out += '\n---\n\n';
     for (const { key, label } of sections) {
       const content = (data[key] || '').trim();

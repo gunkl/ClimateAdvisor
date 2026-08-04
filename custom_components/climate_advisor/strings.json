@@ -358,7 +358,7 @@
           "ai_api_key": "Your Anthropic API key. Get one at console.anthropic.com. Leave blank to keep existing key.",
           "ai_model": "Which Claude model to use. Sonnet is recommended for cost/quality balance.",
           "ai_reasoning_effort": "How much reasoning effort Claude uses. Higher = better analysis but more cost.",
-          "ai_max_tokens": "Maximum length of AI responses in tokens (256-8192).",
+          "ai_max_tokens": "Maximum length of AI responses in tokens (256-16384).",
           "ai_temperature": "Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
           "ai_monthly_budget": "Maximum estimated monthly spend in USD. Set to 0 for no limit.",
           "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",

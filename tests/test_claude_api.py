@@ -652,8 +652,92 @@ class TestTruncationDetection:
             events = asyncio.run(_collect())
 
         stop_events = [e for e in events if e.get("type") == "stop"]
-        assert stop_events == [{"type": "stop", "stop_reason": "end_turn"}]
+        assert len(stop_events) == 1
+        assert stop_events[0]["stop_reason"] == "end_turn"
+        assert stop_events[0]["truncated_empty"] is False
         assert not any("truncated" in rec.message.lower() for rec in caplog.records)
+
+    def test_non_streaming_truncated_with_content_is_not_truncated_empty(self, caplog):
+        """Ordinary truncation (partial content) must NOT trip the empty-output warning."""
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message(
+            "partial report...", output_tokens=8192, stop_reason="max_tokens"
+        )
+        client = _make_client(mock_api)
+
+        with caplog.at_level("WARNING"):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.truncated is True
+        assert response.truncated_empty is False
+        assert not any("zero visible output" in rec.message.lower() for rec in caplog.records)
+
+    def test_non_streaming_truncated_with_no_content_is_truncated_empty(self, caplog):
+        mock_api = _make_mock_api_client()
+        empty_msg = _mock_message("", output_tokens=8192, stop_reason="max_tokens")
+        empty_msg.content = []  # no text blocks at all
+        mock_api.messages.create.return_value = empty_msg
+        client = _make_client(mock_api)
+
+        with caplog.at_level("WARNING"):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert response.truncated is True
+        assert response.truncated_empty is True
+        assert any("zero visible output" in rec.message.lower() for rec in caplog.records)
+
+    def test_streaming_truncated_with_no_text_delta_is_truncated_empty(self, caplog):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=8192)
+        final_msg.stop_reason = "max_tokens"
+        # No text_delta events at all — mimics the confirmed live failure shape.
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([], final_msg))
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert stop_events[0]["truncated_empty"] is True
+        assert not any(e.get("type") == "text" for e in events)
+        assert any("zero visible output" in rec.message.lower() for rec in caplog.records)
+
+    def test_streaming_thinking_only_is_still_truncated_empty(self, caplog):
+        """Thinking content alone doesn't count as an answer — truncated_empty tracks
+        visible answer text specifically, not any delta at all."""
+        mock_api = _make_mock_api_client()
+        thinking_event = MagicMock()
+        thinking_event.type = "content_block_delta"
+        thinking_event.delta = MagicMock()
+        thinking_event.delta.type = "thinking_delta"
+        thinking_event.delta.thinking = "pondering..."
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=8192)
+        final_msg.stop_reason = "max_tokens"
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([thinking_event], final_msg))
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        thinking_events = [e for e in events if e.get("type") == "thinking"]
+        assert len(thinking_events) == 1  # thinking content still forwarded to the caller
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert stop_events[0]["truncated_empty"] is True
 
 
 # ---------------------------------------------------------------------------

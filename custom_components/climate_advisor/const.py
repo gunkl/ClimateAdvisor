@@ -15,6 +15,26 @@ RELEASE_NOTES: dict[str, list[str]] = {
         " expanding some of that text by roughly 15x on top of that. Investigations should"
         " now run noticeably faster and cheaper, with no loss of the 'was this already"
         " fixed' cross-check the AI uses this data for.",
+        "Fix #563: the scheduled 'Generate with AI' activity narration was running the"
+        " same full audit-depth analysis as an on-demand investigation (including a live"
+        " GitHub fetch) — it now uses a lighter, current-activity-only context, which"
+        " should make it noticeably faster.",
+        "Fix #563: the Investigate report's progress display now shows real step-by-step"
+        " status from the backend and fills in the report as sections complete, instead"
+        " of a fake elapsed-seconds counter and raw unformatted text.",
+        "Fix #563: fixed a bug where the 'AI Activity Report' scheduled service call"
+        " silently failed on every run after a recent internal rename.",
+        "Fix #563: the AI model dropdown in settings now shows Anthropic's current"
+        " available models automatically instead of a fixed list, and if a configured"
+        " model is retired, Climate Advisor automatically switches to a comparable"
+        " replacement instead of failing.",
+        "Fix #563: fixed AI requests failing outright when a newer model no longer"
+        " accepts a setting (e.g. temperature) that older models required — Climate"
+        " Advisor now detects this and retries without it automatically.",
+        "Fix #563: raised the maximum AI response length setting from 8192 to 16384"
+        " tokens, and added a clearer warning when a response uses its full budget but"
+        " produces no visible output (rather than the generic 'truncated' message, which"
+        " incorrectly implied a bigger budget alone would fix it).",
     ],
     "0.5.50": [
         "Fix #561: the whole-house fan could turn itself on with every door and window"
@@ -1471,7 +1491,26 @@ KNOWN_FIXES: dict[int, dict] = {
             " source size of 327,000+ characters (169/169 entries, before the ~15x"
             " character-iteration inflation on top of that) to under 1,000 characters,"
             " bounded to at most 15 recent entries going forward — see"
-            " tests/test_ai_skills_context_known_fixes.py."
+            " tests/test_ai_skills_context_known_fixes.py. Follow-on work in the same"
+            " branch/issue: merged the retired activity_report skill into investigator"
+            " and scoped the silent narration path to a lighter priority<=1 provider set"
+            " (it was wrongly running the full 16-provider audit pipeline, including a"
+            " live GitHub fetch, on every scheduled narration); rewrote the streaming"
+            " report UI to render real backend step narration and progressive markdown"
+            " section cards instead of a fake elapsed-seconds counter and raw-text"
+            " painting; fixed a real regression where the merged skill's rename broke"
+            " the ai_activity_report service call outright; added dynamic Claude model"
+            " discovery (fetch_available_models(), cached, config-flow dropdown) plus"
+            " reactive per-model capability detection for both a deprecated/invalid"
+            " model ID (retries once with the newest live same-tier model, persisted) and"
+            " a deprecated request parameter (e.g. temperature rejected by a specific"
+            " model — retries once without it, learned per-model); raised the"
+            " ai_max_tokens ceiling 8192->16384; and added explicit detection/logging for"
+            " responses that consume the full max_tokens budget while producing zero"
+            " visible output, distinct from ordinary truncation. The zero-output cause"
+            " itself (observed with claude-sonnet-5 at reasoning_effort=medium) is not"
+            " yet root-caused — tracked as a separate follow-up issue rather than guessed"
+            " at further in this one."
         ),
     },
     561: {

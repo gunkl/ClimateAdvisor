@@ -1,22 +1,32 @@
-<!-- Nav: ← Context: [AI Integration Brief](ai-integration.md) | → Detail: [ai_skills.py](../custom_components/climate_advisor/ai_skills.py) · [ai_skills_activity.py](../custom_components/climate_advisor/ai_skills_activity.py) · [ai_skills_investigator.py](../custom_components/climate_advisor/ai_skills_investigator.py) (source) | ↔ Related: [claude_api.py spec](claude-api-spec.md) (pending) -->
+<!-- Nav: ← Context: [AI Integration Brief](ai-integration.md) | → Detail: [ai_skills.py](../custom_components/climate_advisor/ai_skills.py) · [ai_skills_investigator.py](../custom_components/climate_advisor/ai_skills_investigator.py) · [ai_skills_context.py](../custom_components/climate_advisor/ai_skills_context.py) (source) | ↔ Related: [claude_api.py spec](claude-api-spec.md) (pending) -->
 
 # AI Skill Framework — Territory Spec (Tier 3)
+
+**Issue #563 (this pass):** the former `"activity_report"` skill (`ai_skills_activity.py`) is
+retired — deleted entirely. The registry now holds exactly one skill, `"investigator"`, serving
+both the silent/scheduled narration use case (formerly `activity_report`, no `focus` kwarg) and
+the on-demand investigation use case (`focus` kwarg supplied). Its context is assembled from 16
+providers registered in `ai_skills_context.py`'s `ContextProviderRegistry` — including three
+ported from the retired activity context (state cross-validation, override/fan-ownership
+details, historical daily summaries) and three new deterministic pre-computed sections that
+replaced prompt-text rules the model previously had to re-derive (Issue #205 override
+false-positive detection, restart-cause-filtered history, and a bounded `KNOWN_FIXES`
+cross-check). See [Issue #563](https://github.com/gunkl/ClimateAdvisor/issues/563) for the full
+audit.
 
 ## Anchors
 
 | Question | Short answer (≤2 sentences) | → Full answer |
 |---|---|---|
-| What fields must an `AISkillDefinition` provide, and which are optional? | `name`, `description`, `system_prompt`, `context_builder`, and `response_parser` are required. `fallback`, `triggered_by`, `config_key_model`, `config_key_max_tokens`, and `config_key_reasoning` are optional (defaulting to `None`, `"manual"`, and three `None`s). | [AISkillDefinition contract](#aiskill-definition-contract) |
+| What fields must an `AISkillDefinition` provide, and which are optional? | `name`, `description`, `system_prompt`, `context_builder`, and `response_parser` are required. `fallback`, `triggered_by`, `config_key_model`, `config_key_max_tokens`, and `config_key_reasoning` are optional (defaulting to `None`, `"manual"`, and three `None`s). The merged `investigator` skill sets none of the three config-key overrides — it shares the global `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` defaults. | [AISkillDefinition contract](#aiskill-definition-contract) |
 | What happens when `register()` is called with a name that already exists? | A WARNING is logged and the existing entry is silently overwritten. No exception is raised. | [Registration — duplicate handling](#registration) |
 | What does `registry.get()` return for an unknown skill name? | It returns `None`. The caller is responsible for handling the `None` case; `async_execute()` handles it by returning a standard error dict. | [Lookup contract](#lookup-contract) |
 | What six keys does `async_execute()` always return, and what does each hold on the error path? | `success=False`, `source="error"`, `data={}`, `error="<message>"`, `input_context=""` (or the assembled context if available), `raw_response=""`. All six keys are always present regardless of which code path is taken. | [Return contract](#return-contract) |
-| When is the fallback invoked instead of returning an error result? | The fallback is invoked when: (a) the context builder raises and a fallback is defined, or (b) `ClaudeResponse.success=False` or the response parser raises, and a fallback is defined. If no fallback is defined, `_error_result()` is returned instead. | [Fallback trigger conditions](#fallback-trigger-conditions) |
-| What learning suggestion data does `activity_report` omit from its context? | Only the count of pending suggestions and the list of `suggestion_type` values are included. Raw suggestion text, evidence dicts, and confidence values are never sent to Claude by this skill. | [activity\_report — context omissions](#context-omissions) |
-| How does the `hours` parameter affect the `activity_report` context, and when are historical daily summaries included? | `hours` (default 24) controls the EVENT LOG cutoff window. When `hours > 36`, a HISTORICAL DAILY SUMMARIES section is appended covering daily records for the full window. | [§ Event Log](#event-log) · [§ Historical daily summaries](#12h-window-vs-full-day-coverage) |
-| When is the `activity_report` contradiction warning suppressed? | The `hvac_mode=off` + active `hvac_action` warning is suppressed when `fan_status` is any of `"active"`, `"running (manual override)"`, or `"running (untracked)"` — all cases where CA knowingly has the fan running. | [Cross-validation suppression](#cross-validation) |
-| What sensitive config key does the `investigator` strip before including config in context? | `ai_api_key` is removed via `.pop()` on a copy of `coordinator.config` before the config block is serialised into the context string. No other config keys are redacted. | [investigator — config redaction](#config-redaction) |
-| What does the `THERMAL OBSERVATION PIPELINE` section in the investigator context show? | Per-type committed/rejected counts with top reason codes, NEVER LEARNED flags when `k_active_cool` or `k_active_heat` is None, pending in-flight observations, and engine status. Added in v0.3.50. | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
-| What rules govern the AI investigator's thermal pipeline health diagnosis? | Three THERMAL PIPELINE HEALTH rules in the system prompt: flag 0 committed HVAC obs as pipeline failure; flag `k_active_cool=NEVER LEARNED` with recent AC history as failure; flag ≥ 3 `new_session_started` abandonments as short-cycling. | [§THERMAL PIPELINE HEALTH System Prompt Rules](#thermal-pipeline-health-system-prompt-rules) |
+| Is there still a separate `activity_report` skill? | No (Issue #563). It's retired; `ai_skills_activity.py` is deleted. The merged `investigator` skill's silent/no-`focus` call is its functional replacement. | [investigator Skill](#investigator-skill) |
+| Why did the KNOWN-FIXED ISSUES context section grow without bound before Issue #563? | `_fix_is_relevant()`'s first rule matched any entry with a non-empty `scope_not_covered` field, which was mandatory on every entry per the release checklist — so all 169 entries always passed regardless of the intended version-scoping. Fixed by removing the field and bounding by recency count (`_select_relevant_fixes()`, 15 most recent + any not-yet-deployed). | [Known Fixes Context](#known-fixes-context) |
+| What is the Issue #205 override false-positive pattern, and how is it detected now? | An `override_detected` event within 60 seconds of an automation-initiated event is a known code-path false positive, not a real user override. `_build_known_override_false_positives()` computes this deterministically and hands the model the result — the prompt no longer asks the model to re-derive it from raw timestamps. | [Event Log Provider](#event-log-provider) |
+| What sensitive config key does `investigator` strip before including config in context? | `ai_api_key` is removed via `.pop()` on a copy of `coordinator.config` before the config block is serialised into the context string. The config block itself is a curated ~11-field subset, not a full dump. | [Config Provider](#config-provider) |
+| What does the `THERMAL OBSERVATION PIPELINE` section in the investigator context show? | Per-type committed/rejected counts with top reason codes, NEVER LEARNED flags when `k_active_cool` or `k_active_heat` is None, pending in-flight observations, and engine status. The system prompt now points at these pre-computed markers directly rather than restating the diagnostic rules as prose (Issue #563). | [§Thermal Observation Pipeline Context](#thermal-observation-pipeline-context) |
 | Does the registry cache skill responses? | No. The registry has no response cache. Every `async_execute()` call builds a fresh context, calls Claude, and parses a new response. | [Caching](#caching) |
 | What invariant holds for `async_execute()` with respect to exceptions? | `async_execute()` never raises to the caller. Every exception inside context building, Claude call, parsing, and fallback invocation is caught and surfaced as a structured error dict. | [Invariants](#invariants) |
 | How does a caller know a report was cut off before Claude finished writing it? | `ClaudeAPIClient` inspects the Anthropic API's `stop_reason` on every request; `truncated=True` (present only on the AI success path) iff `stop_reason == "max_tokens"`. A stream ending on `max_tokens` is otherwise indistinguishable from a normal completion — no exception is raised (Issue #420). | [Return contract](#return-contract) |
@@ -25,16 +35,17 @@
 
 ## Scope
 
-This spec covers the AI skill framework — the registry, execution pipeline, and both built-in skill implementations.
+This spec covers the AI skill framework — the registry, execution pipeline, and the single
+built-in skill implementation.
 
-- **File 1:** `custom_components/climate_advisor/ai_skills.py` — `AISkillRegistry`, `AISkillDefinition`, `async_execute()`, `_run_fallback()`, `_error_result()` (L1–L184)
-- **File 2:** `custom_components/climate_advisor/ai_skills_activity.py` — `"activity_report"` skill: context builder, response parser, fallback, registration (L1–L347)
-- **File 3:** `custom_components/climate_advisor/ai_skills_investigator.py` — `"investigator"` skill: seven-source context builder, response parser, fallback, registration (L1–L773)
+- **File 1:** `custom_components/climate_advisor/ai_skills.py` — `AISkillRegistry`, `AISkillDefinition`, `async_execute()`, `async_execute_streaming()`, `_run_fallback()`, `_error_result()`
+- **File 2:** `custom_components/climate_advisor/ai_skills_investigator.py` — the merged `"investigator"` skill: system prompt, response parser, deterministic fallback, thin context-assembly orchestrator, registration
+- **File 3:** `custom_components/climate_advisor/ai_skills_context.py` — `ContextProviderRegistry` + all 16 individual context providers, including the render/timeline functions and the three providers ported from the retired `ai_skills_activity.py`
 
 **Does NOT cover:**
 - Anthropic API transport, circuit breaker, rate limiting, cost estimation — covered by `claude_api.py` (spec pending at `docs/claude-api-spec.md`)
 - HA service registration for `ai_activity_report` and `investigator` calls — owned by `coordinator.py`
-- Report history storage (`store_ai_report()`, `get_ai_report_history()`) — owned by `coordinator.py`
+- Report history storage (`store_investigation_report()`, `get_investigation_report_history()`; the legacy `get_ai_report_history()` is frozen, pre-merge history) — owned by `coordinator.py`
 
 ---
 
@@ -164,257 +175,96 @@ Response persistence (history storage, timestamps) is the responsibility of `coo
 
 ---
 
-## `activity_report` Skill
-
-**Registered name:** `"activity_report"` · **triggered_by:** `"manual"` · **No per-skill config overrides**
-
-### Context Builder
-
-`async_build_activity_context(hass, coordinator, **kwargs) → str`
-
-Assembles eleven to twelve labeled sections in fixed order (twelve when `hours > 36`). Data sources per section:
-
-| Section label | Data source | Notes |
-|---|---|---|
-| `STATE CROSS-VALIDATION` | Computed inline (see [Cross-Validation](#cross-validation)) | Always present; emits `[OK]`, `[FLAG]`, or `[WARNING]` tags |
-| `CLASSIFICATION` | `coordinator.data` + fresh runtime from `coordinator._today_record` + `coordinator._hvac_on_since` | `hvac_mode` and `current_temperature` read live from `hass.states.get(climate_entity_id)` |
-| `AUTOMATION STATE` | `coordinator.data` | `ATTR_AUTOMATION_STATUS`, `ATTR_LAST_ACTION_*`, `ATTR_NEXT_AUTOMATION_*` |
-| `OCCUPANCY` | `coordinator.data` | `ATTR_OCCUPANCY_MODE` |
-| `FAN` | `coordinator.data` + `coordinator.config` | `ATTR_FAN_STATUS`, `fan_mode` from config |
-| `CONTACT SENSORS` | `coordinator.data` | `ATTR_CONTACT_STATUS` |
-| `LEARNING` | `coordinator.data` | See [Context omissions](#context-omissions) |
-| `CONFIGURATION` | `coordinator.config` | Comfort temps, setback temps, wake/sleep/briefing times |
-| `ACTIVE FEATURES` | `coordinator.config` | Boolean feature flags |
-| `ACTIVE PREDICTION ENGINES` | `coordinator.learning.get_engine_status()` formatted by `_format_engine_status_for_ai()` | See [Active Prediction Engines](#active-prediction-engines) |
-| `EVENT LOG` | `coordinator._event_log` filtered to last N hours (`kwargs.get("hours", 24)`) | See [Event Log](#event-log) |
-| `MANUAL OVERRIDES TODAY` | `coordinator._today_record.override_details` + live `coordinator.automation_engine` state | See [Manual Overrides Today](#manual-overrides-today) |
-| `HISTORICAL DAILY SUMMARIES` | `coordinator.learning` daily records for the requested window | **Conditional:** only present when `kwargs.get("hours", 24) > 36`; omitted for standard ≤36h reports |
-
-**Fresh HVAC runtime** is computed as `_today_record.hvac_runtime_minutes + session_elapsed_minutes` where `session_elapsed` is computed from `coordinator._hvac_on_since` at call time. This makes the runtime accurate regardless of coordinator.data staleness (up to 30 min between coordinator update cycles).
-
-### Context Omissions
-
-The `LEARNING` section includes only:
-- Count of pending suggestions (`len(raw_suggestions)`)
-- List of `suggestion_type` values from each suggestion dict
-
-**Never included:**
-- Raw suggestion `text` field
-- Suggestion `evidence` dict
-- Confidence values or thresholds
-
-This enforces invariant 7 from `ai-integration.md`: suggestion text is not sent to Claude by this skill.
-
-### Event Log
-
-`coordinator._event_log` is a ring-buffer capped at `EVENT_LOG_CAP` entries. The activity report filters to events in the last N hours where N = `kwargs.get("hours", 24)` (v0.3.55+; previously hardcoded 12h). The cutoff is `datetime.now(UTC) - timedelta(hours=hours)`. If more than 60 events match, the oldest are dropped and a `(... N older events omitted)` note is prepended. Each entry renders as:
-
-```
-  HH:MM — <event_type>: key=value key=value ...
-```
-
-Times are converted to HA local timezone for display. The list is chronological (oldest first within the window). Representative event types:
-- `apply_classification` — automation applied a day classification setpoint
-- `override_confirm_pending` — debounce window started for detected setpoint change
-- `override_confirmed` — override accepted after 10-min confirmation; includes `confirmed_after_seconds`
-- `manual_override_cleared` — override cleared; includes `was_mode` and `duration_seconds`
-- `grace_expired` — grace period ended, automation may resume
-- `sensor_opened` / `door_pause` — contact sensor events
-- `incident_detected` — emitted by the coordinator's incident detector (not the automation engine); fields: `incident_class`, `incident_id`, `indoor_f`, `outdoor_f`, `hvac_mode`, `comfort_cool`, `comfort_heat`. At most one per incident class per 30-min cycle. The proactive variant (`setpoint_mode_inconsistency`) may appear at command time rather than post-cycle. See [Incident Classes](incident-classes.md) for the full class list.
-
-If the event log is empty or no events fall in the window, the section shows `(no events in last 12h)`. Any exception during log parsing is caught and logged at WARNING; the section shows `(unavailable)` rather than failing the context build.
-
-### Manual Overrides Today
-
-Provides a structured per-override record using two sources:
-
-**`coordinator._today_record.override_details`** — list of dicts appended each time a manual setpoint change is confirmed (distinct from automation commands). Each entry: `{time: "HH:MM", old_temp: float, new_temp: float, direction: "up"|"down", magnitude: float}`. This covers setpoint changes; for mode changes use the event log.
-
-**Current override state from `coordinator.automation_engine`:**
-- `_manual_override_active: bool` — is an override active right now?
-- `_manual_override_time: str | None` — ISO timestamp (HA local TZ) when the current override was confirmed
-
-Formatted output:
-```
-## MANUAL OVERRIDES TODAY
-  Count:             3
-  #1  17:02  72.0°F → 74.0°F  (+2.0°F, up)
-  #2  18:44  72.0°F → 75.0°F  (+3.0°F, up)
-  #3  21:10  72.0°F → 74.0°F  (+2.0°F, up)
-  Current override:  active since 21:10, duration 47 min (ongoing)
-```
-
-If `override_details` is empty: `(no setpoint overrides recorded today)`. If no override is currently active: `Current override: none active`. Duration is computed as `(dt_util.now() - override_dt).total_seconds() / 60` rounded to nearest minute. Any exception is caught and logged at WARNING.
-
-**`hours` window vs. full-day coverage:** The EVENT LOG window may exclude early-morning events for late-afternoon reports when `hours=24`. `override_details` is not window-filtered — it accumulates all day, so all setpoint override timestamps are always present in MANUAL OVERRIDES TODAY regardless of report time.
-
-**Historical daily summaries (>36h reports, v0.3.55+):** When `hours > 36`, the context builder appends a `HISTORICAL DAILY SUMMARIES` section drawn from `DailyRecord` history. Each daily row includes: date, day type, HVAC runtime minutes, comfort violations minutes, manual override count, and bedtime setback depth (if applied). This provides multi-day context without requiring the investigator skill. The section is appended after MANUAL OVERRIDES TODAY and is omitted entirely when `hours ≤ 36`.
-
-### Cross-Validation
-
-Two flags are computed and inserted into `STATE CROSS-VALIDATION` before the Claude call:
-
-**1. Contradiction warning:** fires when `hvac_mode == "off"` AND `hvac_action` is one of `{"heating", "cooling", "fan"}`.
-
-Suppression condition: if `hvac_action == "fan"` AND `fan_status` is any of `"active"`, `"running (manual override)"`, or `"running (untracked)"` → no flag is emitted (CA knowingly activated the fan). For heating and cooling actions, no suppression applies — the warning always fires.
-
-**2. Comfort band check (deadband-aware):** acquires thermostat swing values from `learning.get_thermal_model()` before the check — `swing_heat_f_display` and `swing_cool_f_display`. Falls back to `THERMAL_SWING_DEFAULT_F` (1.5°F) if the learning engine is unavailable or the model is not yet populated. Celsius conversion is applied when `temp_unit == "celsius"`.
-
-Then attempts `float(current_temp)`, `float(comfort_heat)`, `float(comfort_cool)`. If all three parse successfully:
-- `(comfort_heat - current_temp) > swing_heat` → `[FLAG] Indoor X°F < comfort_heat Y°F — below by N.M°F (deadband: D.D°F)`
-- `(current_temp - comfort_cool) > swing_cool` → `[FLAG] Indoor X°F > comfort_cool Y°F — above by N.M°F (deadband: D.D°F)`
-- Otherwise → `[OK] Indoor X°F is within comfort band [Y–Z°F]`
-
-The strict `>` (not `>=`) means a shortfall exactly equal to the swing does NOT flag — this matches thermostat deadband semantics where the measured offset is within expected thermal noise. A 1°F shortfall against a 1.5°F learned swing should never produce a false alarm.
-
-If any value fails `float()` conversion (e.g., `"unknown"`), the comfort band check is silently skipped. If `_swing_heat_f` or `_swing_cool_f` is not a valid float, the same try/except silently skips the check.
-
-### Active Prediction Engines
-
-`_format_engine_status_for_ai(engine_status: dict) → str`
-
-Formats the `get_engine_status()` return value from `LearningEngine` as a multi-line string for the `ACTIVE PREDICTION ENGINES` context section.
-
-**k_active_hvac shape exception:** All engines except `k_active_hvac` store their learned value directly in `engine_status["k_active_hvac"]["value"]` as a flat scalar. `k_active_hvac` is the exception — its `"value"` key is a `dict` with `"heat"` and `"cool"` sub-keys:
-
-```python
-# All other engines (flat scalar):
-engine_status["k_passive"]["value"]  # float | None
-
-# k_active_hvac only (nested dict):
-engine_status["k_active_hvac"]["value"]["heat"]  # float | None
-engine_status["k_active_hvac"]["value"]["cool"]  # float | None
-```
-
-**Active gate:** An engine is displayed as active when `value is not None` (or for k_active_hvac: either `heat is not None or cool is not None`). A `"since"` date is included when available; if the engine was active before date tracking was introduced (pre-v0.3.46), it displays as `"pre-v0.3.46"`.
-
-### System Prompt Deduplication Rule
-
-`_SYSTEM_PROMPT` includes a `DEDUPLICATION RULE` requiring each section to be exclusive:
-- `SUMMARY`: current state only — no analysis, no decisions
-- `TIMELINE`: chronological events built from the EVENT LOG — automation setpoint actions, manual overrides (with setpoint values from MANUAL OVERRIDES TODAY and durations), contact sensor events. Each override must state when it started, what setpoint was set, and how long it lasted ("ongoing" if still active). No "why" analysis.
-- `DECISIONS`: explain WHY each action was taken — do NOT re-describe Timeline content
-- `ANOMALIES`: deviations from expected behavior only — do NOT re-explain Decisions
-- `DIAGNOSTICS`: subsystem health only — do NOT repeat anomalies or decisions
-
-A one-line cross-reference (`"see Decisions"`) is acceptable; restating the same analysis verbatim is not.
-
-### Response Parser
-
-`parse_activity_response(raw_response: str) → dict[str, Any]`
-
-Splits on `## HEADER` lines. Expected headers and their output keys:
-
-| Claude header | Output key |
-|---|---|
-| `## SUMMARY` | `"summary"` |
-| `## TIMELINE` | `"timeline"` |
-| `## DECISIONS` | `"decisions"` |
-| `## ANOMALIES` | `"anomalies"` |
-| `## DIAGNOSTICS` | `"diagnostics"` |
-
-**Malformed response handling:**
-- Empty or `None` `raw_response` → all five keys default to `""`, no exception.
-- Unrecognised `## HEADER` → logged at DEBUG, content until next known header is discarded.
-- Partial response (some sections missing) → missing sections default to `""`, present sections are populated normally.
-- The parser never raises.
-
-**Output schema:**
-
-```python
-{
-    "summary": str,
-    "timeline": str,
-    "decisions": str,
-    "anomalies": str,
-    "diagnostics": str,
-}
-```
-
-### Fallback
-
-`activity_fallback(coordinator, **kwargs) → dict[str, Any]`
-
-Reads from `coordinator.data` only. Produces the same five-key output schema. Called when Claude is unavailable or the parser raises. Does not call Claude. Does not modify coordinator state.
-
----
-
 ## `investigator` Skill
 
-**Registered name:** `"investigator"` · **triggered_by:** `"manual"` · **Per-skill config overrides:** `CONF_AI_INVESTIGATOR_MODEL`, `CONF_AI_INVESTIGATOR_MAX_TOKENS`, `CONF_AI_INVESTIGATOR_REASONING`
+**Registered name:** `"investigator"` · **triggered_by:** `"manual"` · **No per-skill config overrides** (Issue #563 — shares the global `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` config; `CONF_AI_INVESTIGATOR_MODEL`/`_MAX_TOKENS`/`_REASONING` constants remain defined only so the historical v13→v14 config migration doesn't break old installs — nothing reads them)
 
-This is the only skill in the registry that uses per-skill config overrides.
+This is the sole skill in the registry — the former `activity_report` skill is retired. Two
+entry modes share this one definition:
+- **Silent / scheduled narration** — no `focus` kwarg (functional replacement for the retired
+  `activity_report`)
+- **On-demand investigation** — `focus` kwarg carries the user's described problem
 
 ### Context Builder
 
 `async_build_investigator_context(hass, coordinator, **kwargs) → str`
 
-Assembles context blocks via a `ContextProviderRegistry` (`ai_skills_context.py`), sorted by
-`priority` and optionally filtered by a `focus` keyword (`ContextProviderRegistry.select()`).
-Each block is wrapped in its own `try/except`. If a block fails, its section is replaced with
-`"  unavailable"` and assembly continues — a failure in one block never aborts the others. The
-table below lists the blocks as of Issue #518; the registry has grown since the original
-"seven blocks" description (it now also includes `known_fixes`, `version`, and `github`
-providers) — treat the registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`)
-as authoritative if this table and the code ever disagree.
+A thin orchestrator: calls `ContextProviderRegistry.select(focus)` (`ai_skills_context.py`),
+sorted by `priority` and optionally filtered by a `focus` keyword, then concatenates each
+provider's output. Each provider is wrapped in its own `try/except`. If a provider fails, its
+section is replaced with `"  unavailable"` and assembly continues — a failure in one provider
+never aborts the others. As of Issue #563 there are 16 registered providers; treat the
+registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`) as
+authoritative if this table and the code ever disagree.
 
-| Block # | Section label | Data source |
+| Provider name | Section label | Data source |
 |---|---|---|
-| 1 | `CURRENT STATE` | `coordinator.data` + fresh HVAC runtime |
-| 2 | `HVAC ENTITY` | `hass.states.get(climate_entity_id)` — `hvac_mode` and `current_temperature` |
-| 2b | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim (added Issue #518, so the investigator can review the user-facing briefing itself for internal contradictions, not just the structured state that produced it) |
-| 3 | `LEARNING — COMPLIANCE SUMMARY` | `learning.get_compliance_summary()` |
-| 3 | `LEARNING — THERMAL MODEL` | `learning.get_thermal_model()` |
-| 3 | `LEARNING — WEATHER BIAS` | `learning.get_weather_bias()` |
-| 3 | `LEARNING — ACTIVE SUGGESTIONS` | `learning.generate_suggestions()` — full suggestion text and evidence included |
-| 3 | `LEARNING — LAST 14 DAILY RECORDS` | `learning._state.records[-14:]` — direct internal access |
-| 3 | `THERMAL OBSERVATION PIPELINE` | `_build_thermal_pipeline_context(coordinator)` — per-type committed/rejected counts, top reason codes, pending observations, NEVER LEARNED flags (added v0.3.50, Issue #156) |
-| 4 | `EVENT LOG` | `coordinator._event_log[-200:]` filtered to last N hours (`kwargs.get("hours", 48)`) |
-| 5 | `RECENT AI ACTIVITY REPORTS` | `coordinator.get_ai_report_history()[-3:]` — timestamp and summary only |
-| 6 | `CONFIGURATION` | `coordinator.config` copy with `ai_api_key` stripped |
-| 7 | `CA OPERATIONAL DESIGN` | Hardcoded prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
+| `current_state` | `CURRENT STATE` | `coordinator.data` + fresh HVAC runtime |
+| `hvac_entity` | `HVAC ENTITY` | `hass.states.get(climate_entity_id)` — `hvac_mode` and `current_temperature` |
+| `state_cross_validation` | `STATE CROSS-VALIDATION` | HVAC mode/action contradiction check + comfort-band deadband/swing check — ported from the retired activity context (Issue #563) |
+| `last_briefing` | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim |
+| `learning` | `LEARNING — *` (5 sub-sections) | Compliance summary, thermal model, weather bias, active suggestions (full text + evidence, unfiltered), last N daily records |
+| `thermal_pipeline` | `THERMAL OBSERVATION PIPELINE` | Per-type committed/rejected counts, top reason codes, pending observations, `NEVER LEARNED` / `*** PIPELINE FAILURE ***` markers |
+| `event_log` | `EVENT LOG` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log[-200:]` filtered to last N hours (`kwargs.get("hours", 168)`, clamped 1–720); see [Event Log Provider](#event-log-provider) |
+| `activity_timeline` | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored |
+| `override_details` | `MANUAL OVERRIDES TODAY` + `FAN OWNERSHIP HISTORY` | Override count/history/current-duration, Issue #321 stuck-grace critical warning, fan ownership transitions — ported (Issue #563) |
+| `daily_summaries` | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
+| `ai_report_history` | `RECENT AI ACTIVITY REPORTS` | `coordinator.get_ai_report_history()[-3:]` — timestamp and summary only (legacy, pre-merge history) |
+| `config` | `CONFIGURATION` | See [Config Provider](#config-provider) |
+| `operational_design` | `CA OPERATIONAL DESIGN` | Static prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
+| `known_fixes` | `KNOWN-FIXED ISSUES` | See [Known Fixes Context](#known-fixes-context) |
+| `version` | `RUNNING VERSION` + `RECENT RELEASE NOTES` | Last 5 versions from `RELEASE_NOTES` in `const.py` |
+| `github` | `GITHUB REPOSITORY` + `RECENT GITHUB ISSUES` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching — Issue #563); silently omitted on network error |
+
+**Optional focus:** `kwargs.get("focus", "")` is prepended as `=== INVESTIGATION FOCUS (USER-DIRECTED) ===` if non-empty.
 
 ### Thermal Observation Pipeline Context
 
-`_build_thermal_pipeline_context(coordinator) → str`
+`build_thermal_pipeline_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
 
-Added in v0.3.50 (Issue #156). Builds the `=== THERMAL OBSERVATION PIPELINE ===` section appended at the end of block 3. Purpose: let the AI distinguish `k_active_cool=None because never tried` from `k_active_cool=None because every attempt failed` vs. `k_active_cool=None because pipeline bug silently discarded all observations`.
+Builds the `=== THERMAL OBSERVATION PIPELINE ===` section. Purpose: let the AI distinguish `k_active_cool=None because never tried` from `k_active_cool=None because every attempt failed` vs. `k_active_cool=None because pipeline bug silently discarded all observations`.
 
 **Per-type rows:** For each obs_type (`hvac_heat`, `hvac_cool`, `passive_decay`, `fan_only_decay`, `ventilated_decay`, `solar_gain`), the section shows:
 - Committed count / total attempts (committed + rejected)
 - Top rejection reason code and occurrence count (or `"no rejections"`)
 - `NEVER LEARNED — k_active_cool is None` flag when obs_type is `hvac_cool` and `k_active_cool` is `None`
 - `NEVER LEARNED — k_active_heat is None` flag when obs_type is `hvac_heat` and `k_active_heat` is `None`
+- `*** PIPELINE FAILURE INDICATOR ***` when 0 committed HVAC observations exist despite non-zero rejections
 
 **Pending observations:** Any in-flight observations from `coordinator._pending_observations` are listed with type, phase (`active`/`post_heat`), elapsed minutes, and sample count.
 
-**Engine status:** `get_engine_status()` output is appended via `_format_engine_status_for_ai()`.
+**Engine status:** `get_engine_status()` output is appended via `format_engine_status_for_ai()`.
 
-**Section-local guard:** The entire call is wrapped in a `try/except` in `async_build_investigator_context`. On failure, the section reads `"  unavailable"` and assembly continues.
+**System prompt no longer restates these rules (Issue #563).** The `THERMAL PIPELINE HEALTH rules:` prose block that used to ask the model to re-derive pipeline health from raw counts has been deleted; the prompt now instructs the model to trust the `***`/`NEVER LEARNED`/`NOTE:` markers this provider already computes, rather than re-deriving them.
 
-### THERMAL PIPELINE HEALTH System Prompt Rules
+### Event Log Provider
 
-The investigator's `_SYSTEM_PROMPT` includes `THERMAL PIPELINE HEALTH rules:` that instruct the AI to:
-- Flag `hvac_heat`/`hvac_cool` with 0 committed observations as a pipeline failure when HVAC has run — expected to learn within first few cycles under normal conditions
-- Flag `k_active_cool=NEVER LEARNED` when AC has run in recent history as a pipeline failure; suggest checking rejection log and pending observations for `hvac_cool`
-- Flag ≥ 3 `new_session_started` abandonments for an HVAC type as possible short-cycling thermostat (cycles too short to capture post-heat samples between 5-min ticks)
+`build_event_log_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
 
-These rules make pipeline failures explicit rather than leaving them to be inferred from null values in the thermal model section.
+Assembles four sub-sections from `coordinator._event_log`:
 
-**Appended after the seven blocks (not try/except guarded separately):**
-- Version/release notes: last 5 entries from `RELEASE_NOTES` in `const.py`
-- Behavioral invariant registry: all entries from `KNOWN_FIXES` in `const.py`, formatted with `[COVERED]` / `[NOT COVERED]` scope markers (Issue #144). The investigator system prompt instructs the AI to cross-check anomalies against this registry before hedging "could not verify."
-- GitHub issues: fetched live from the GitHub API via `async_build_github_context()`; silently omitted (returns `""`) on any network error
+1. **`EVENT LOG`** — event-type counts + extracted error/warning entries, last N hours.
+2. **`TIMING CORRELATIONS`** — manual events whose delay from a prior automation event matches a known automation cycle period (30/90/5/10 min ± 2 min tolerance) — suggests the "manual" event may actually be automation-caused.
+3. **`KNOWN OVERRIDE FALSE POSITIVES`** (Issue #563) — `_build_known_override_false_positives()` detects the Issue #205 pattern deterministically: an `override_detected` event within 60 seconds of an automation-initiated event (`nat_vent_*`, `ceiling_guard_fired`, `classification_applied`, `grace_started` with `source=automation`). This is a **different check** from `TIMING CORRELATIONS` above — matches an immediate ≤60s correlation, not a known cycle period — and was added specifically because the two are not interchangeable; the system prompt previously asked the model to re-derive this exact pattern from raw timestamps as ~15 lines of prose rules.
+4. **`RESTART HISTORY`** (Issue #563) — `_build_restart_summary()` breaks down `system_restarted` events by `cause` (already computed by `coordinator.py`'s restart classification, Issue #403/#413: `user_restart`/`version_changed`/`unknown`). Only `cause=unknown` restarts are presented as noteworthy; benign restarts are never narrated as problems — this closes the "6 restarts today" hallucination class, which previously happened because only a raw count was visible with no cause breakdown.
 
-**Optional focus:** `kwargs.get("focus", "")` is prepended as `=== INVESTIGATION FOCUS (USER-DIRECTED) ===` if non-empty.
+### Known Fixes Context
 
-### Config Redaction
+`build_known_fixes_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
 
-The `CONFIGURATION` block is assembled from a `dict(coordinator.config or {})` copy. Before serialisation, `cfg.pop("ai_api_key", None)` is called. This is the only key stripped; all other config keys including `ai_model`, `ai_enabled`, and notification service names are included verbatim.
+**Pre-Issue #563 bug:** `_fix_is_relevant()`'s first rule matched any `KNOWN_FIXES` entry with a non-empty `scope_not_covered` field. That field was mandatory on every entry per the release checklist, so the rule matched all 169 entries regardless of version — the intended version-scoping never actually bounded anything, and the section grew by one entry every release, forever.
+
+**Fix:** `scope_not_covered` removed from the schema entirely (all 169 entries + the checklist requirement to author it). `_select_relevant_fixes()` replaces the filter: always includes not-yet-deployed entries (`version_fixed > current`) plus the `_KNOWN_FIXES_RECENT_COUNT` (15) most recently fixed entries by count — bounded regardless of `KNOWN_FIXES` size or release cadence. Each entry renders as the matching `RELEASE_NOTES[version_fixed]` bullet (`"Fix #N: ..."`/`"Feat #N: ..."`, found by `_release_note_bullet()`) instead of the internal `title`/`scope_covered` engineering prose — shorter, already occupant-outcome phrased, already mandatory for every release. Falls back to `title` only if no matching bullet is found. Measured effect: the section went from a raw source of 327,000+ characters (169/169 entries, before a separate ~15x character-iteration rendering bug this fix also incidentally eliminated) to under 2,000 rendered characters.
+
+### Config Provider
+
+`build_config_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
+
+Assembled from `dict(coordinator.config or {})`. Before serialisation, `cfg.pop("ai_api_key", None)` is called. **This is a curated ~11-field subset** (`comfort_heat`, `comfort_cool`, `setback_heat`, `setback_cool`, `wake_time`, `sleep_time`, `briefing_time`, `ai_enabled`, `ai_model`, `learning_enabled`), not a full config dump — an earlier draft of this doc/investigation incorrectly described it as a full dump; verified against source during the Issue #563 pass.
 
 ### Daily Records Access Pattern
 
-Block 3's daily records section uses direct internal access:
+The `learning` provider's daily records sub-section uses direct internal access:
 ```python
 state_obj = getattr(learning, "_state", None)
 records = getattr(state_obj, "records", None)
@@ -439,7 +289,7 @@ Splits on `## HEADER` lines. Expected headers and output keys:
 
 `"full_text"` always holds the complete `raw_text` value, regardless of header parsing. The `_flush()` closure cannot overwrite `"full_text"` because that key is not in `_header_map`; `full_text` is explicitly restored after the loop.
 
-**Malformed response handling:** same pattern as `parse_activity_response` — missing sections default to `""`, unknown headers are logged at DEBUG and discarded, parser never raises.
+**Malformed response handling:** missing sections default to `""`, unknown headers are logged at DEBUG and discarded, parser never raises.
 
 **Output schema:**
 
@@ -481,11 +331,11 @@ Returns the same 8-key schema as `parse_investigation_response`. `full_text` is 
 
 4. **Duplicate registration overwrites silently.** The registry does not enforce unique names at a type level; duplicate registration is a WARNING, not an error. The last `register()` call wins.
 
-5. **Learning suggestion text is not sent to Claude by `activity_report`.** Only count and `suggestion_type` list are included. This is enforced in `async_build_activity_context()` at context assembly time, not at parse time.
+5. **Learning suggestion text and evidence ARE sent to Claude.** Corrected during Issue #563 doc convergence — this invariant previously claimed suggestion text was omitted, which was true only for the retired `activity_report` skill and was never true for `investigator` (the survivor): the `learning` provider's `ACTIVE SUGGESTIONS` sub-section includes each suggestion's full `text` and `evidence`. No suggestion-level filtering is currently applied.
 
-6. **`ai_api_key` is not sent to Claude by `investigator`.** The config copy is `.pop()`-cleaned before serialisation. The original `coordinator.config` is not mutated (a copy is made via `dict(coordinator.config or {})`).
+6. **`ai_api_key` is not sent to Claude.** The `config` provider's config copy is `.pop()`-cleaned before serialisation. The original `coordinator.config` is not mutated (a copy is made via `dict(coordinator.config or {})`).
 
-7. **Investigator context build failures are section-local.** Each of the seven context blocks is wrapped in its own `try/except`. A failure marks that section as `"  unavailable"` but does not abort remaining sections.
+7. **Investigator context build failures are provider-local.** Each of the 16 registered context providers is wrapped in its own `try/except`. A failure marks that provider's section as `"  unavailable"` but does not abort the others.
 
 8. **`parse_investigation_response()` always preserves `full_text`.** The loop's `_flush()` closure cannot overwrite `full_text` because it is not in `_header_map`; after the loop, `sections["full_text"] = raw_text` is re-assigned unconditionally.
 
@@ -520,12 +370,17 @@ The execution pipeline has no persistent state. From the registry's perspective,
 - [`AISkillRegistry.async_execute()`](../custom_components/climate_advisor/ai_skills.py#L56) — full execution pipeline
 - [`_run_fallback()`](../custom_components/climate_advisor/ai_skills.py#L148) — fallback invocation with exception guard
 - [`_error_result()`](../custom_components/climate_advisor/ai_skills.py#L174) — standard error dict builder
-- [`async_build_activity_context()`](../custom_components/climate_advisor/ai_skills_activity.py#L61) — nine-section context builder
-- [`parse_activity_response()`](../custom_components/climate_advisor/ai_skills_activity.py#L222) — five-section response parser
-- [`activity_fallback()`](../custom_components/climate_advisor/ai_skills_activity.py#L276) — deterministic fallback
-- [`register_activity_skill()`](../custom_components/climate_advisor/ai_skills_activity.py#L331) — wires activity_report into registry
-- [`async_build_investigator_context()`](../custom_components/climate_advisor/ai_skills_investigator.py#L155) — seven-source context builder
-- [`async_build_github_context()`](../custom_components/climate_advisor/ai_skills_investigator.py#L123) — live GitHub API fetch
-- [`parse_investigation_response()`](../custom_components/climate_advisor/ai_skills_investigator.py#L537) — eight-key response parser
-- [`investigation_fallback()`](../custom_components/climate_advisor/ai_skills_investigator.py#L598) — deterministic fallback scan
-- [`register_investigator_skill()`](../custom_components/climate_advisor/ai_skills_investigator.py#L754) — wires investigator into registry with config key overrides
+- [`async_build_investigator_context()`](../custom_components/climate_advisor/ai_skills_investigator.py) — thin orchestrator calling `ContextProviderRegistry.select(focus)`
+- [`parse_investigation_response()`](../custom_components/climate_advisor/ai_skills_investigator.py) — seven-section + `full_text` response parser
+- [`investigation_fallback()`](../custom_components/climate_advisor/ai_skills_investigator.py) — deterministic fallback scan
+- [`register_investigator_skill()`](../custom_components/climate_advisor/ai_skills_investigator.py) — registers the sole skill, no per-skill config overrides
+- [`ContextProviderRegistry`](../custom_components/climate_advisor/ai_skills_context.py) — provider registration, priority sort, `focus`-tag filtering (`select()`)
+- [`build_event_log_context()`](../custom_components/climate_advisor/ai_skills_context.py) — `EVENT LOG` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY`
+- [`_build_known_override_false_positives()`](../custom_components/climate_advisor/ai_skills_context.py) — Issue #205 deterministic false-positive detector (Issue #563)
+- [`_build_restart_summary()`](../custom_components/climate_advisor/ai_skills_context.py) — restart-cause-filtered history (Issue #563)
+- [`_select_relevant_fixes()`](../custom_components/climate_advisor/ai_skills_context.py) — count-bounded `KNOWN_FIXES` selection (Issue #563)
+- [`_release_note_bullet()`](../custom_components/climate_advisor/ai_skills_context.py) — `RELEASE_NOTES` lookup used in place of `scope_covered` (Issue #563)
+- [`build_state_cross_validation_context()`](../custom_components/climate_advisor/ai_skills_context.py) — ported from the retired activity context (Issue #563)
+- [`build_override_details_context()`](../custom_components/climate_advisor/ai_skills_context.py) — ported, includes Issue #321 stuck-grace detection (Issue #563)
+- [`build_daily_summaries_context()`](../custom_components/climate_advisor/ai_skills_context.py) — ported, `hours > 36` only (Issue #563)
+- [`build_activity_timeline_context()`](../custom_components/climate_advisor/ai_skills_context.py) — deterministic timeline table, ported (Issue #563)

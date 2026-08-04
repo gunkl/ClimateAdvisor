@@ -39,10 +39,10 @@ custom_components/climate_advisor/
 ├── switch.py            # Automation enable/disable switch (observe-only mode)
 ├── claude_api.py        # Centralized Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking. Provides async_request() for all AI features.
 ├── ai_skills.py         # AI skills framework: lightweight registry for pluggable AI analysis capabilities. Skills register a context builder, response parser, and optional fallback.
-├── ai_skills_activity.py  # Activity Report skill (first AI skill): gathers system state, sends to Claude for analysis, returns structured report with timeline, decisions, anomalies, diagnostics.
 ├── chart_log.py         # Chart state log: persistent 1-year ring buffer of HVAC/fan/temp data points and event markers, used by the Temperature Forecast chart.
 ├── repairs.py           # HA Repairs integration: surfaces actionable fix prompts when CA detects config or data problems.
-├── ai_skills_investigator.py  # AI Investigator skill: structured internal-state context builder for the Claude investigator.
+├── ai_skills_investigator.py  # The sole registered AI skill ("investigator"): system prompt, response parser, deterministic fallback, thin context-assembly orchestrator. Serves both silent/scheduled narration and on-demand investigation — the former separate "Activity Report" skill (ai_skills_activity.py) was retired and merged into this one, Issue #563.
+├── ai_skills_context.py  # ContextProviderRegistry + all 16 context providers the investigator's context is assembled from, including the event-timeline/renderer functions ported from the retired ai_skills_activity.py.
 └── frontend/            # Dashboard panel (iframe): index.html + locally bundled Chart.js v4 + zoom plugin + HammerJS
 ```
 
@@ -68,7 +68,8 @@ Weather Entity ──► Coordinator (every 30 min)
                                                        │
                                                   ai_skills.py (skill registry)
                                                        │
-                                             ai_skills_activity.py (Activity Report)
+                                       ai_skills_investigator.py ("investigator" — merged, Issue #563)
+                                             + ai_skills_context.py (context providers)
                                                        │
                                              AI Status Sensor + Report History
 ```

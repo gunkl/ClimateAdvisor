@@ -279,7 +279,7 @@ class TestEventSourceLabel:
 
     def test_system_restarted_source_label(self):
         """system_restarted events are labelled as 'system'."""
-        from custom_components.climate_advisor.ai_skills_activity import (
+        from custom_components.climate_advisor.ai_skills_context import (
             _event_source_label,
         )
 

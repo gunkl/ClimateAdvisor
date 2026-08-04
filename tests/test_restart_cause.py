@@ -412,7 +412,7 @@ class TestLearningStateRestartFields:
 
 class TestRenderSystemRestarted:
     def test_render_version_changed(self):
-        from custom_components.climate_advisor.ai_skills_activity import (
+        from custom_components.climate_advisor.ai_skills_context import (
             _render_system_restarted,
         )
 
@@ -425,7 +425,7 @@ class TestRenderSystemRestarted:
         assert "5 prior events recovered" in label
 
     def test_render_user_restart(self):
-        from custom_components.climate_advisor.ai_skills_activity import (
+        from custom_components.climate_advisor.ai_skills_context import (
             _render_system_restarted,
         )
 
@@ -434,7 +434,7 @@ class TestRenderSystemRestarted:
         assert "2 prior events recovered" in label
 
     def test_render_unknown_cause(self):
-        from custom_components.climate_advisor.ai_skills_activity import (
+        from custom_components.climate_advisor.ai_skills_context import (
             _render_system_restarted,
         )
 
@@ -443,7 +443,7 @@ class TestRenderSystemRestarted:
 
     def test_render_missing_cause_defaults_to_unknown(self):
         """Backward compat: old persisted events without a cause key render as unknown."""
-        from custom_components.climate_advisor.ai_skills_activity import (
+        from custom_components.climate_advisor.ai_skills_context import (
             _render_system_restarted,
         )
 

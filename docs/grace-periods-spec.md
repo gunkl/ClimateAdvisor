@@ -328,7 +328,7 @@ ae._grace_protects_override and not ae._manual_override_active and not ae._fan_o
 On match: logs an ERROR, calls `ae._cancel_grace_timers()`, and emits `"stuck_grace_recovered"`
 with `{"grace_end_time": ..., "reason": "grace_without_override"}`.
 
-**Renderer note:** `_render_stuck_grace_recovered()` (`ai_skills_activity.py`) branches on the
+**Renderer note:** `_render_stuck_grace_recovered()` (`ai_skills_context.py`) branches on the
 `reason` field — the pre-existing Issue #321 call site never sets it and keeps its original
 `"Stuck grace recovered (expired {grace_end})"` label; this call site renders `"Stuck grace
 recovered (no override was active to protect it)"` instead, since `grace_end` is misleadingly

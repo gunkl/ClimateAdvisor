@@ -83,7 +83,6 @@ from .const import (
     CHART_LOG_MAX_DAYS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
-    CONF_AI_INVESTIGATOR_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -388,19 +387,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # AI subsystem (only if enabled and API key present)
         self.claude_client: ClaudeAPIClient | None = None
         self.ai_skills: AISkillRegistry | None = None
+        # _ai_report_history: frozen, read-only — held for backward-compat display of
+        # reports persisted before the activity_report/investigator skill merge
+        # (Issue #563). New reports (both silent narration and on-demand investigation)
+        # write to _investigation_report_history going forward — see
+        # async_store_investigation_report().
         self._ai_report_history: list[dict] = []
         self._investigation_report_history: list[dict] = []
         if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
-            from .ai_skills_activity import register_activity_skill
             from .ai_skills_investigator import register_investigator_skill
             from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
 
             self.claude_client = _ClaudeAPIClient(config)
             self.ai_skills = _AISkillRegistry()
-            register_activity_skill(self.ai_skills)
-            if config.get(CONF_AI_INVESTIGATOR_ENABLED, False):
-                register_investigator_skill(self.ai_skills)
+            # Registers whenever AI is enabled (Issue #563) — the merged skill serves
+            # both the always-available narration mode (formerly "activity_report",
+            # ungated) and the on-demand investigation mode. CONF_AI_INVESTIGATOR_ENABLED
+            # no longer gates registration; api.py's ClimateAdvisorInvestigateView still
+            # checks it as a cost-control gate on the on-demand/focus-driven call path.
+            register_investigator_skill(self.ai_skills)
             _LOGGER.info("AI subsystem initialized — model: %s", config.get("ai_model", "unknown"))
         else:
             _LOGGER.debug(

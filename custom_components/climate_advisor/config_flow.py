@@ -18,9 +18,6 @@ from .const import (
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_ENABLED,
     CONF_AI_INVESTIGATOR_ENABLED,
-    CONF_AI_INVESTIGATOR_MAX_TOKENS,
-    CONF_AI_INVESTIGATOR_MODEL,
-    CONF_AI_INVESTIGATOR_REASONING,
     CONF_AI_INVESTIGATOR_RPD,
     CONF_AI_MANUAL_REQUESTS_PER_DAY,
     CONF_AI_MAX_TOKENS,
@@ -67,9 +64,6 @@ from .const import (
     DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
     DEFAULT_AI_ENABLED,
     DEFAULT_AI_INVESTIGATOR_ENABLED,
-    DEFAULT_AI_INVESTIGATOR_MAX_TOKENS,
-    DEFAULT_AI_INVESTIGATOR_MODEL,
-    DEFAULT_AI_INVESTIGATOR_REASONING,
     DEFAULT_AI_INVESTIGATOR_RPD,
     DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
     DEFAULT_AI_MAX_TOKENS,
@@ -1379,12 +1373,6 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             if not (256 <= ai_max_tokens <= 8192):
                 errors[CONF_AI_MAX_TOKENS] = "ai_max_tokens_out_of_range"
 
-            investigator_max_tokens = int(
-                user_input.get(CONF_AI_INVESTIGATOR_MAX_TOKENS, DEFAULT_AI_INVESTIGATOR_MAX_TOKENS)
-            )
-            if not (256 <= investigator_max_tokens <= 32768):
-                errors[CONF_AI_INVESTIGATOR_MAX_TOKENS] = "ai_max_tokens_out_of_range"
-
             if not errors and new_key and new_key != existing_key and ai_enabled:
                 try:
                     from .claude_api import ClaudeAPIClient
@@ -1412,7 +1400,6 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     CONF_AI_MONTHLY_BUDGET,
                     CONF_AI_AUTO_REQUESTS_PER_DAY,
                     CONF_AI_MANUAL_REQUESTS_PER_DAY,
-                    CONF_AI_INVESTIGATOR_MAX_TOKENS,
                     CONF_AI_INVESTIGATOR_RPD,
                 ):
                     if key in merged:
@@ -1489,30 +1476,9 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
                     CONF_AI_INVESTIGATOR_ENABLED,
                     default=current.get(CONF_AI_INVESTIGATOR_ENABLED, DEFAULT_AI_INVESTIGATOR_ENABLED),
                 ): selector.BooleanSelector(),
-                vol.Optional(
-                    CONF_AI_INVESTIGATOR_MODEL,
-                    default=current.get(CONF_AI_INVESTIGATOR_MODEL, DEFAULT_AI_INVESTIGATOR_MODEL),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[{"value": m, "label": m} for m in AI_MODELS],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_AI_INVESTIGATOR_REASONING,
-                    default=current.get(CONF_AI_INVESTIGATOR_REASONING, DEFAULT_AI_INVESTIGATOR_REASONING),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[{"value": r, "label": r.title()} for r in AI_REASONING_OPTIONS],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_AI_INVESTIGATOR_MAX_TOKENS,
-                    default=current.get(CONF_AI_INVESTIGATOR_MAX_TOKENS, DEFAULT_AI_INVESTIGATOR_MAX_TOKENS),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=256, max=32768, mode=selector.NumberSelectorMode.BOX)
-                ),
+                # Issue #563: investigator-specific model/reasoning/max_tokens fields removed —
+                # the investigator now shares the single AI Model/Reasoning/Max Tokens fields
+                # above instead of a separate persistent config block.
                 vol.Optional(
                     CONF_AI_INVESTIGATOR_RPD,
                     default=current.get(CONF_AI_INVESTIGATOR_RPD, DEFAULT_AI_INVESTIGATOR_RPD),

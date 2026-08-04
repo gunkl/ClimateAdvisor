@@ -3,17 +3,18 @@
 Verifies that:
 1. handle_manual_override() accepts old_setpoint_f/new_setpoint_f and
    passes them through to the override_detected event payload.
-2. ai_skills_activity.py annotation code reads old_setpoint_f/new_setpoint_f
-   (not old_temp/new_temp) and emits the [settings: setpoint: X°F→Y°F] annotation.
+2. _render_override_detected() (ai_skills_context.py, moved from the retired
+   ai_skills_activity.py — Issue #563) reads old_setpoint_f/new_setpoint_f
+   (not old_temp/new_temp) and emits the setpoint transition in its Settings
+   cell.
 
 Source:
   automation.py  handle_manual_override / start_override_confirmation
-  ai_skills_activity.py  async_build_activity_context event loop (~line 596)
+  ai_skills_context.py  _render_override_detected
 """
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import sys
 from unittest.mock import MagicMock, patch
@@ -27,10 +28,7 @@ if "homeassistant" not in sys.modules:
 # Patch dt_util.now before import (needed for isoformat() calls in start_override_confirmation)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime.datetime(2026, 6, 13, 14, 0, 0)
 
-import custom_components.climate_advisor.ai_skills_activity as _act_mod  # noqa: E402
-from custom_components.climate_advisor.ai_skills_activity import (  # noqa: E402
-    async_build_activity_context,
-)
+from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS  # noqa: E402
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.const import CONF_OVERRIDE_CONFIRM_PERIOD  # noqa: E402
 
@@ -144,153 +142,38 @@ class TestOverrideDetectedEventSetpointPayload:
 
 
 # ---------------------------------------------------------------------------
-# Activity context coordinator / hass stubs
+# TEST 2 — _render_override_detected fires with correct field names (Issue #563:
+# ported from the retired async_build_activity_context integration test, which
+# checked this through the now-defunct raw event-log annotation string instead
+# of the renderer directly)
 # ---------------------------------------------------------------------------
 
 
-def _make_coord_with_event(event_payload: dict) -> MagicMock:
-    """Build a coordinator mock whose _event_log contains one override_detected entry."""
-    coord = MagicMock()
-    coord.data = {
-        "day_type": "mild",
-        "trend_direction": "stable",
-        "automation_status": "active",
-        "occupancy_mode": "home",
-        "fan_status": "disabled",
-        "contact_status": "all_closed",
-        "last_action_time": None,
-        "last_action_reason": None,
-        "next_automation_action": None,
-        "next_automation_time": None,
-        "pending_suggestions": [],
-    }
-    coord.config = {
-        "comfort_heat": 68,
-        "comfort_cool": 76,
-        "setback_heat": 60,
-        "setback_cool": 82,
-        "wake_time": "06:30",
-        "sleep_time": "22:30",
-        "briefing_time": "06:00",
-        "climate_entity": "climate.thermostat",
-        "fan_mode": "disabled",
-        "learning_enabled": True,
-        "adaptive_preheat_enabled": False,
-        "adaptive_setback_enabled": False,
-        "weather_bias_enabled": False,
-    }
-    coord._today_record = MagicMock()
-    coord._today_record.hvac_runtime_minutes = 0.0
-    coord._hvac_on_since = None
-    coord.learning.get_thermal_model.return_value = None
-    coord.learning._state.records = []
+class TestOverrideDetectedRendererSetpointFields:
+    """Setpoint data for override_detected is surfaced via _render_override_detected's
+    Settings cell, keyed on old_setpoint_f/new_setpoint_f — not old_temp/new_temp."""
 
-    # Inject a recent override_detected event
-    now = datetime.datetime.now(datetime.UTC)
-    entry = {"time": (now - datetime.timedelta(hours=1)).isoformat(), "type": "override_detected"}
-    entry.update(event_payload)
-    coord._event_log = [entry]
-
-    return coord
-
-
-def _make_hass() -> MagicMock:
-    hass = MagicMock()
-    climate_state = MagicMock()
-    climate_state.state = "cool"
-    climate_state.attributes = {"current_temperature": 73, "temperature": 75}
-    hass.states.get.return_value = climate_state
-    return hass
-
-
-# ---------------------------------------------------------------------------
-# TEST 2 — annotation code fires with correct field names
-# ---------------------------------------------------------------------------
-
-
-class TestActivityAnnotationSetpointFields:
-    """Setpoint data for override_detected is now surfaced via the deterministic table.
-
-    #330: the old inline [settings: setpoint: 72.0°F→75.0°F] annotation in the raw
-    EVENT LOG prose block has been replaced by the deterministic timeline table whose
-    Settings cell is filled by _render_override_detected.  Tests now assert the table
-    path, not the raw annotation string.
-    """
-
-    def test_annotation_fires_with_setpoint_data(self):
-        """override_detected with old_setpoint_f/new_setpoint_f → Settings cell in table.
-
-        #330: the old assertion looked for '[settings: setpoint: 72.0°F→75.0°F]' in the
-        raw context string (EVENT LOG plain-text section).  The new deterministic table
-        populates the Settings cell via _render_override_detected, which is verified by
-        calling parse_activity_response after async_build_activity_context populates
-        _activity_parse_context.  The timeline result must contain 'setpoint:' plus
-        the two temperature values.
-        """
-        from custom_components.climate_advisor.ai_skills_activity import (
-            parse_activity_response,
+    def test_settings_cell_contains_setpoint_data(self):
+        _ev, settings = EVENT_RENDERERS["override_detected"](
+            {"old_setpoint_f": 72.0, "new_setpoint_f": 75.0, "source": "setpoint"},
+            "fahrenheit",
         )
+        assert "setpoint:" in settings
+        assert "72" in settings
+        assert "75" in settings
 
-        coord = _make_coord_with_event(
-            {
-                "old_setpoint_f": 72.0,
-                "new_setpoint_f": 75.0,
-                "source": "setpoint",
-            }
+    def test_settings_cell_empty_when_setpoint_fields_none(self):
+        _ev, settings = EVENT_RENDERERS["override_detected"](
+            {"old_setpoint_f": None, "new_setpoint_f": None, "old_mode": "heat", "new_mode": "cool"},
+            "fahrenheit",
         )
-        hass = _make_hass()
-        # Patch dt_util.now so _activity_parse_context["now"] is a real tz-aware datetime,
-        # not a MagicMock (the ha_stubs dt_util.now() returns MagicMock via __getattr__).
-        now_utc = datetime.datetime.now(datetime.UTC)
-        with patch.object(_act_mod.dt_util, "now", return_value=now_utc):
-            asyncio.run(async_build_activity_context(hass, coord, hours=24))
+        assert "setpoint:" not in settings
 
-        # parse_activity_response calls _override_timeline which uses _activity_parse_context
-        result = parse_activity_response("## SUMMARY\nTest.\n## DECISIONS\nNone.\n")
-        timeline = result["timeline"]
-
-        assert "setpoint:" in timeline, (
-            "#330: Settings cell for override_detected must contain 'setpoint:' "
-            f"(from _render_override_detected). Timeline:\n{timeline}"
-        )
-        assert "72" in timeline, (
-            f"#330: old_setpoint_f=72.0 must appear in the timeline Settings cell. Got:\n{timeline}"
-        )
-        assert "75" in timeline, (
-            f"#330: new_setpoint_f=75.0 must appear in the timeline Settings cell. Got:\n{timeline}"
-        )
-
-    def test_annotation_absent_when_setpoint_fields_none(self):
-        """override_detected event with None setpoint fields → no [settings:] annotation."""
-        coord = _make_coord_with_event(
-            {
-                "old_setpoint_f": None,
-                "new_setpoint_f": None,
-                "old_mode": "heat",
-                "new_mode": "cool",
-                "source": "normal",
-            }
-        )
-        hass = _make_hass()
-        context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
-
-        assert "[settings: setpoint:" not in context, "Expected no setpoint annotation when both fields are None"
-
-    def test_old_temp_key_does_not_trigger_annotation(self):
+    def test_old_temp_key_does_not_trigger_setpoint_annotation(self):
         """Legacy event with old_temp/new_temp keys (not old_setpoint_f) must NOT
-        produce the annotation — confirming the key rename closes the old gap."""
-        coord = _make_coord_with_event(
-            {
-                "old_temp": 72.0,
-                "new_temp": 75.0,
-                "source": "setpoint",
-            }
+        produce a setpoint annotation — confirming the key rename closes the old gap."""
+        _ev, settings = EVENT_RENDERERS["override_detected"](
+            {"old_temp": 72.0, "new_temp": 75.0, "source": "setpoint"},
+            "fahrenheit",
         )
-        hass = _make_hass()
-        context = asyncio.run(async_build_activity_context(hass, coord, hours=24))
-
-        # After the fix, only old_setpoint_f/new_setpoint_f trigger the annotation.
-        # old_temp/new_temp must not produce a false annotation.
-        assert "[settings: setpoint:" not in context, (
-            "old_temp/new_temp keys must not trigger the setpoint annotation after the fix"
-        )
+        assert "setpoint:" not in settings

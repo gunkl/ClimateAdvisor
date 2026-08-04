@@ -359,9 +359,6 @@
           "ai_auto_requests_per_day": "Auto Requests Per Day",
           "ai_manual_requests_per_day": "Manual Requests Per Day",
           "ai_investigator_enabled": "Enable Investigative Agent",
-          "ai_investigator_model": "Investigator AI Model",
-          "ai_investigator_reasoning_effort": "Investigator Reasoning Effort",
-          "ai_investigator_max_tokens": "Investigator Max Response Length (tokens)",
           "ai_investigator_requests_per_day": "Investigator Requests Per Day"
         },
         "data_description": {
@@ -375,9 +372,6 @@
           "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",
           "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight).",
           "ai_investigator_enabled": "Enable the investigative agent (requires AI to be enabled). Performs deep cross-source analysis to find incongruities and data issues.",
-          "ai_investigator_model": "Which Claude model the investigator uses. Opus recommended for deep analysis; Sonnet is more cost-effective.",
-          "ai_investigator_reasoning_effort": "How much extended thinking the investigator uses. High recommended \u00e2\u20ac\u201d the agent reasons through multiple hypotheses.",
-          "ai_investigator_max_tokens": "Maximum token length for investigator reports (256-16384). 8192 recommended.",
           "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
         }
       },

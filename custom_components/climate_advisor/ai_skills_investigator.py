@@ -19,11 +19,6 @@ from .ai_skills_context import (
 from .ai_skills_context import (
     build_version_context as _build_version_context_async,
 )
-from .const import (
-    CONF_AI_INVESTIGATOR_MAX_TOKENS,
-    CONF_AI_INVESTIGATOR_MODEL,
-    CONF_AI_INVESTIGATOR_REASONING,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,8 +72,39 @@ INVESTIGATION PROCEDURE
  1, this is consistent with EWMA flush lag (the model EWMA updates asynchronously after each\
  commit). Do NOT surface a gap of exactly 1 as an incongruity. Only flag if the gap exceeds 1\
  or if the same gap appears to have grown compared to a prior report.
+10. TRUST PRE-COMPUTED SECTIONS â€" DO NOT RE-DERIVE THEM: The THERMAL OBSERVATION PIPELINE,\
+ KNOWN OVERRIDE FALSE POSITIVES (Issue #205), and RESTART HISTORY sections already contain\
+ deterministically-verified facts, not raw data awaiting your interpretation:
+   - THERMAL OBSERVATION PIPELINE already flags pipeline failures with "***", never-learned\
+ parameters with "NEVER LEARNED", and missing backfill data with "NOTE:" â€" cite these markers\
+ directly rather than re-deriving pipeline health from the raw committed/rejected counts.
+   - KNOWN OVERRIDE FALSE POSITIVES already lists every override_detected event within 60\
+ seconds of an automation event, pre-labeled as a known false positive (Issue #205) â€" if an\
+ entry appears there, report it as a known false positive citing that section, not as a new\
+ incongruity you derived from timestamps.
+   - RESTART HISTORY already separates cause=unknown (potentially crash-like, worth mentioning)\
+ from cause=user_restart/version_changed (benign, expected) â€" never cite the raw restart count\
+ as if every restart were equally concerning; only cause=unknown restarts are noteworthy.
+11. TRACE AUTOMATION ACTIONS TO THEIR CAUSE, DON'T DESCRIBE STATE IN ISOLATION: When fan_status\
+ is active while hvac_mode is off, explicitly trace the fan state to the logged automation\
+ action that caused it (e.g., "Fan activated â€" natural ventilation: outdoor X°F <= threshold"),\
+ using the ACTIVITY TIMELINE and event log sections. Two specific patterns are expected,\
+ benign behavior, not incongruities:
+   - grace_started with trigger=dashboard_resume: the user manually resumed automation from the\
+ dashboard; the grace period prevents door/window sensors from immediately re-pausing.
+   - override_cleared and grace_started at the same timestamp: the user both cancelled an active\
+ override AND resumed from pause â€" one coordinated action, not two unrelated events.
 
 OUTPUT FORMAT
+HUMAN-READABLE-FIRST â€" every section's first sentence must be occupant-outcome language:\
+ what the person living in the home actually experienced or would experience, described\
+ in plain terms a reader who has never seen this codebase can understand without the\
+ citation. State the human-observable effect before the internal state that caused it.\
+ [source: key, value: X]-style citations are supporting evidence, not the subject of the\
+ sentence â€" attach them as a trailing parenthetical or a separate "Evidence:" sub-line,\
+ never lead with them. For example, write "Your fan is running even though nothing told\
+ it to â€" this looks like someone turned it on manually at the thermostat" before\
+ "(fan_status=off (manual override), hvac_action=fan)" â€" not the reverse.
 SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it:\
  do not repeat content already stated in a prior section.\
  A one-line cross-reference ("see Hypotheses above") is acceptable;\
@@ -101,16 +127,20 @@ SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it
 Return your investigation using these exact section headers (## prefix, exact capitalisation):
 
 ## INVESTIGATION SUMMARY
-3â€"5 sentence overview of the most important finding. If nothing is wrong, say so plainly\
- â€" do not fabricate issues.
+3â€"5 sentence overview of the most important finding, leading with what the occupant\
+ experienced or would experience. If nothing is wrong, say so plainly â€" do not fabricate\
+ issues.
 
 ## INCONGRUITIES FOUND
-List every place where two data sources contradict each other. Use bullet points. If none,\
- write "None detected."
+List every place where two data sources contradict each other. Lead each with the\
+ human-observable effect, not the raw field names. Use bullet points. If none, write\
+ "None detected."
 
 ## DATA QUALITY ISSUES
-List missing fields, implausible values, zeroed counters, timestamp anomalies, etc. Use\
- bullet points. If none, write "None detected."
+List missing fields, implausible values, zeroed counters, timestamp anomalies, etc. â€"\
+ stated in terms of what this means for the occupant or the system's ability to serve them\
+ (e.g. "the system can't yet predict how your home cools" not just "k_active_cool=None").\
+ Use bullet points. If none, write "None detected."
 
 ## SYSTEM ERRORS / WARNINGS
 Quote or paraphrase every event log entry with type containing "error" or "warning". Include\
@@ -128,43 +158,10 @@ Concrete steps to resolve each identified issue. Map each action to the relevant
 List every assumption made during this investigation and your overall confidence that the\
  analysis is complete given the available data.
 
-THERMAL PIPELINE HEALTH rules:
-- If hvac_heat or hvac_cool shows 0 committed observations AND HVAC has run: flag as observation\
- pipeline failure â€" expected to learn within first few cycles under normal conditions.
-- If k_active_cool = NEVER LEARNED and AC has run in recent history: flag as pipeline failure;\
- suggest checking rejection log and pending observations for the hvac_cool type.
-- If rejection log shows >=3 new_session_started abandonments for an HVAC type: flag as possible\
- short-cycling thermostat â€" HVAC cycles too short to capture post-heat samples between 5-min ticks.
-- If rejection log shows n=0 rejections with delta_t=0.00Â°F: flag as possible sensor quantization\
- issue â€" thermostat reports 1Â°F resolution; suggest using a finer-grained sensor entity.
-- If chart_log endpoint observations = 0: suggest running\
- python tools/thermal_replay.py --chart-log --write to backfill from historical data.
-- Do NOT report k_active_cool=None as normal gap if AC has been running â€" it is a diagnostic flag\
- requiring investigation, not a routine "not yet learned" state.
-- Source counts: "source_endpoint_count" and "source_block_ols_count" in the pipeline section\
- show how many observations came from the chart_log estimator vs online OLS. If both are 0,\
- no passive decay data has been committed at all.
-
-ANOMALY RULE: SIMULTANEOUS AUTOMATION + OVERRIDE EVENTS (Issue #205)
-If the thermal pipeline context or event log shows an `override_detected` event that occurs\
- within 60 seconds of an automation-initiated event (`nat_vent_*`, `ceiling_guard_fired`,\
- `classification_applied`, `grace_started` with source=automation), this is a false override\
- detection â€" automation actions must NEVER trigger override detection.
-
-Classification: ACTIONABLE â€" false override detection (Bug #205)
-
-Explanation: "An `override_detected` event at [time] followed/preceded by an automation event\
- at [time] (gap: Xs) indicates the override detection guard did not suppress the\
- automation-triggered thermostat state change. This is a code bug: the `_fan_command_pending`\
- or `_temp_command_pending` flag was not checked in the override detection guard.\
- Reference: Issue #205."
-
-This should appear as a separate finding in the triage table under "Automation/Override Events"\
- regardless of whether the user mentions it.
-
 TONE
-Scientific, evidence-based, methodical. Prefer "no evidence of X" over "X is fine". Never\
- fabricate data or invent explanations â€" if the data does not support a conclusion, say so.\
+Scientific, evidence-based, methodical, and occupant-first. Prefer "no evidence of X" over\
+ "X is fine". Never fabricate data or invent explanations â€" if the data does not support a\
+ conclusion, say so.\
 """
 
 
@@ -588,7 +585,16 @@ async def async_build_github_context(hass: Any) -> str:
 
 
 def register_investigator_skill(registry: AISkillRegistry) -> None:
-    """Create and register the investigator skill with the given registry."""
+    """Create and register the investigator skill with the given registry.
+
+    Issue #563: no per-skill model/max_tokens/reasoning config overrides — the
+    investigator now shares the single `ai_model` (+ its reasoning/token-budget
+    defaults) used everywhere else, instead of a separate persistent
+    `ai_investigator_model` config block. `AISkillRegistry.async_execute()`/
+    `async_execute_streaming()` already fall through to `ClaudeAPIClient`'s
+    general `CONF_AI_MODEL`/`CONF_AI_MAX_TOKENS`/`CONF_AI_REASONING_EFFORT`
+    defaults when a skill sets no `config_key_*` override.
+    """
     skill = AISkillDefinition(
         name=_SKILL_NAME,
         description=(
@@ -601,8 +607,5 @@ def register_investigator_skill(registry: AISkillRegistry) -> None:
         response_parser=parse_investigation_response,
         fallback=investigation_fallback,
         triggered_by="manual",
-        config_key_model=CONF_AI_INVESTIGATOR_MODEL,
-        config_key_max_tokens=CONF_AI_INVESTIGATOR_MAX_TOKENS,
-        config_key_reasoning=CONF_AI_INVESTIGATOR_REASONING,
     )
     registry.register(skill)

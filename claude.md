@@ -685,14 +685,25 @@ This replaces the old pattern of separate `release/X.Y.Z` branches for patch fix
 
 **What goes in RELEASE_NOTES**: One line per issue in the version dict, describing the user-visible change. Format: `"Fix #N: <what the user now experiences differently>."` or `"Feat #N: ..."`.
 
-**What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry must have `scope_covered` (exact code paths fixed) and `scope_not_covered` (explicit gaps).
+**What goes in KNOWN_FIXES**: Every closed issue that changed system behavior. The entry
+must have `title` and `scope_covered` (exact code paths fixed) — technical detail for a
+developer or dev-stack session doing archaeology, not for the AI Investigator, which reads
+the matching `RELEASE_NOTES` bullet instead (see Issue #563). Do **not** add a
+`scope_not_covered`/gaps field: it was removed entirely (Issue #563) after audit showed it
+had exactly one functional consumer in the codebase — a version-scoping filter in the AI
+Investigator's context builder that the field's mandatory presence on every entry silently
+defeated (169 of 169 entries always matched, so the "filter" never actually excluded
+anything and the KNOWN_FIXES context block grew unboundedly with every release). If a fix
+leaves a genuinely open gap worth tracking, file or keep open a GitHub issue for it instead
+— the Investigator already reads live open issues (bounded, TTL-cached) and that avoids
+recreating an unbounded duplicate store.
 
 **What goes in CHANGELOG.md**: Same user-visible bullet(s) as `RELEASE_NOTES`, Keep-a-Changelog formatted under a new `## [X.Y.Z] — <date>` section, newest on top.
 
 #### PR checklist (before `gh pr create`)
 1. Bump `VERSION` in `const.py` and `manifest.json` to the next patch version
 2. Add `RELEASE_NOTES["X.Y.Z"]` entry with one bullet per fixed issue
-3. Add `KNOWN_FIXES[<issue_number>]` entry with `version_fixed`, `title`, `scope_covered`, `scope_not_covered`
+3. Add `KNOWN_FIXES[<issue_number>]` entry with `version_fixed`, `title`, `scope_covered`
 4. Add a matching `CHANGELOG.md` entry
 5. Run `python -m pytest tests/test_version_sync.py` to confirm versions match
 6. Then open the PR

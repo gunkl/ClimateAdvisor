@@ -1,4 +1,8 @@
-"""Tests for AI activity report context building (Issue #91).
+"""Tests for the STATE CROSS-VALIDATION context section (Issue #91).
+
+Ported from async_build_activity_context() (retired, Issue #563) to
+build_state_cross_validation_context() (ai_skills_context.py), which the
+merged investigator skill now uses instead — same logic, moved verbatim.
 
 Covers:
 - STATE CROSS-VALIDATION section presence in context output
@@ -25,8 +29,8 @@ if "homeassistant" not in sys.modules:
 # Patch dt_util.now before import
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 4, 7, 14, 0, 0)
 
-from custom_components.climate_advisor.ai_skills_activity import (  # noqa: E402
-    async_build_activity_context,
+from custom_components.climate_advisor.ai_skills_context import (  # noqa: E402
+    build_state_cross_validation_context,
 )
 from custom_components.climate_advisor.const import (  # noqa: E402
     ATTR_FAN_STATUS,
@@ -64,20 +68,7 @@ def _make_coordinator(
         "climate_entity": "climate.thermostat",
         "comfort_heat": comfort_heat,
         "comfort_cool": comfort_cool,
-        "setback_heat": 60.0,
-        "setback_cool": 82.0,
-        "wake_time": "06:30",
-        "sleep_time": "22:30",
-        "briefing_time": "06:00",
-        "learning_enabled": True,
-        "adaptive_preheat_enabled": False,
-        "adaptive_setback_enabled": False,
-        "weather_bias_enabled": False,
-        "fan_mode": "disabled",
     }
-    coord._today_record = MagicMock()
-    coord._today_record.hvac_runtime_minutes = 0.0
-    coord._hvac_on_since = None
     # Return None from get_thermal_model so the swing acquisition try-block falls
     # back to THERMAL_SWING_DEFAULT_F instead of a MagicMock that breaks :.1f formatting.
     coord.learning.get_thermal_model.return_value = None
@@ -92,7 +83,7 @@ def _build_context(
     comfort_cool: float = 76.0,
     fan_status: str = "inactive",
 ) -> str:
-    """Run async_build_activity_context and return the string."""
+    """Run build_state_cross_validation_context and return the string."""
     hass = _make_hass(hvac_mode=hvac_mode, current_temp=current_temp)
     coord = _make_coordinator(
         hvac_action=hvac_action,
@@ -101,7 +92,7 @@ def _build_context(
         fan_status=fan_status,
         hvac_mode=hvac_mode,
     )
-    return asyncio.run(async_build_activity_context(hass, coord))
+    return asyncio.run(build_state_cross_validation_context(hass, coord))
 
 
 # ---------------------------------------------------------------------------
@@ -110,12 +101,12 @@ def _build_context(
 
 
 class TestActivityCrossValidationSection:
-    """async_build_activity_context includes ## STATE CROSS-VALIDATION (Issue #91)."""
+    """build_state_cross_validation_context produces the STATE CROSS-VALIDATION section."""
 
     def test_section_always_present(self):
         """STATE CROSS-VALIDATION section header is always in the context."""
         ctx = _build_context()
-        assert "## STATE CROSS-VALIDATION" in ctx
+        assert "STATE CROSS-VALIDATION" in ctx
 
     def test_no_flags_when_consistent(self):
         """No [WARNING]/[FLAG] when hvac_mode matches action and temp is in-band."""
@@ -278,49 +269,26 @@ class TestActivityCrossValidationSection:
         assert "[FLAG]" not in ctx
         assert "[OK]" not in ctx
 
-    def test_classification_section_still_present(self):
-        """## CLASSIFICATION section is still present after adding cross-validation."""
-        ctx = _build_context()
-        assert "## CLASSIFICATION" in ctx
 
-    def test_cross_validation_appears_before_classification(self):
-        """STATE CROSS-VALIDATION section precedes CLASSIFICATION in the output."""
-        ctx = _build_context()
-        idx_cv = ctx.index("## STATE CROSS-VALIDATION")
-        idx_cl = ctx.index("## CLASSIFICATION")
-        assert idx_cv < idx_cl
-
-
-class TestHvacModeAndSetpointsFromCoordinatorData:
-    """Issue #466: hvac_mode/target_temp/target_temp_low/target_temp_high are read
-    from coordinator.data now, not hass.states.get() — only current_temp still
-    needs a live read (it isn't one of the fields coordinator.data exposes)."""
+class TestHvacModeFromCoordinatorData:
+    """Issue #466: hvac_mode is read from coordinator.data now, not hass.states.get()."""
 
     def test_hvac_mode_read_from_coordinator_data_not_hass(self):
         """hass.states.get()'s climate_state.state must be ignored for hvac_mode —
         only coordinator.data['hvac_mode'] is authoritative."""
         hass = _make_hass(hvac_mode="cool", current_temp=72.0)
         coord = _make_coordinator(hvac_action="heating", hvac_mode="heat")
-        ctx = asyncio.run(async_build_activity_context(hass, coord))
+        ctx = asyncio.run(build_state_cross_validation_context(hass, coord))
         # hvac_mode=heat + hvac_action=heating is CONSISTENT -> no contradiction warning,
         # proving "heat" (from coordinator.data) was used, not "cool" (from hass mock).
         assert "[WARNING]" not in ctx
 
-    def test_target_temps_appear_from_coordinator_data(self):
-        coord = _make_coordinator()
-        coord.data["target_temp"] = 71.0
-        coord.data["target_temp_low"] = 68.0
-        coord.data["target_temp_high"] = 76.0
-        hass = _make_hass()
-        ctx = asyncio.run(async_build_activity_context(hass, coord))
-        assert "71.0" in ctx or "68.0" in ctx or "76.0" in ctx
-
     def test_only_one_hass_states_get_call_for_current_temp(self):
-        """Regression guard: hvac_mode/target_temp* must not silently reintroduce a
-        second independent hass.states.get() call."""
+        """Regression guard: current_temp must not trigger more than one
+        independent hass.states.get() call."""
         coord = _make_coordinator()
         hass = _make_hass()
-        asyncio.run(async_build_activity_context(hass, coord))
+        asyncio.run(build_state_cross_validation_context(hass, coord))
         assert hass.states.get.call_count == 1
 
 
@@ -338,6 +306,6 @@ class TestSwingAcquisitionThreadsLearningHealth:
         }
         hass = _make_hass()
 
-        asyncio.run(async_build_activity_context(hass, coord))
+        asyncio.run(build_state_cross_validation_context(hass, coord))
 
         coord.learning.get_thermal_model.assert_called_once_with(learning_health=_health)

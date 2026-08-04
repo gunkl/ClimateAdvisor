@@ -659,7 +659,7 @@ A chart_log window is eligible for a phase observation only when all six conditi
 
 ## Engine Visibility
 
-**Scope:** `get_engine_status()` in `learning.py`; REST endpoint in `api.py`; dashboard card in `index.html`; AI context in `ai_skills_activity.py`; CLI tool `tools/engine_status.py`.
+**Scope:** `get_engine_status()` in `learning.py`; REST endpoint in `api.py`; dashboard card in `index.html`; AI context in `ai_skills_context.py`; CLI tool `tools/engine_status.py`.
 
 ### `get_engine_status()` Return Shape
 
@@ -710,12 +710,12 @@ A chart_log window is eligible for a phase observation only when all six conditi
 |---|---|
 | REST API | `GET /api/climate_advisor/engines` returns `get_engine_status()` JSON directly |
 | Dashboard Debug tab | "Prediction Engines" card in `index.html`; table: engine \| active \| value \| confidence; auto-refreshes with status panel |
-| AI investigator | `ACTIVE_PREDICTION_ENGINES` section prepended to activity context in `ai_skills_activity.py`; plain-text table for LLM consumption |
+| AI investigator | `ACTIVE_PREDICTION_ENGINES` section prepended to activity context in `ai_skills_context.py`; plain-text table for LLM consumption |
 | CLI tool | `tools/engine_status.py` reads learning DB via SSH (same pattern as `tools/learning_db.py`), prints formatted table; `--history` flag also tails `ha_logs.py --thermal` and greps for engine activation events |
 
 ### `get_thermal_model()` additions
 
-`solar_phase_offset_h` is included in the `get_thermal_model()` return dict. Downstream consumers (`coordinator.py`, `api.py`, `ai_skills_activity.py`) read from this output, not from `thermal_model_cache` directly.
+`solar_phase_offset_h` is included in the `get_thermal_model()` return dict. Downstream consumers (`coordinator.py`, `api.py`, `ai_skills_context.py`) read from this output, not from `thermal_model_cache` directly.
 
 ---
 

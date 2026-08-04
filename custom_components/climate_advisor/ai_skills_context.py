@@ -14,11 +14,14 @@ Phase 2: providers are focus-filtered by semantic tags; KNOWN_FIXES is version-s
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     pass
@@ -35,13 +38,18 @@ from .const import (
     ATTR_NEXT_AUTOMATION_TIME,
     ATTR_OCCUPANCY_MODE,
     ATTR_TREND,
+    FAN_MODE_BOTH,
+    FAN_MODE_WHOLE_HOUSE,
     OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
     OBS_TYPE_PASSIVE_DECAY,
     OBS_TYPE_SOLAR_GAIN,
     OBS_TYPE_VENTILATED_DECAY,
+    THERMAL_SWING_DEFAULT_F,
 )
+from .fan_status import is_ca_fan_running
+from .temperature import format_temp
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -173,6 +181,127 @@ _TIMING_MANUAL_EVENT_TYPES: frozenset[str] = frozenset(
         "fan_manual_override",
     }
 )
+
+# Issue #205: automation event types whose immediate proximity to an
+# override_detected event indicates a known false-positive override detection,
+# not a genuine user override. `grace_started` only counts when automation-sourced.
+_OVERRIDE_FALSE_POSITIVE_WINDOW_S = 60
+_ISSUE_205_AUTOMATION_TYPE_PREFIXES: tuple[str, ...] = ("nat_vent_",)
+_ISSUE_205_AUTOMATION_TYPES: frozenset[str] = frozenset(
+    {"ceiling_guard_fired", "classification_applied", "grace_started"}
+)
+
+
+def _is_issue_205_automation_event(entry: dict) -> bool:
+    """Return True if `entry` is an automation event type relevant to Issue #205."""
+    etype = str(entry.get("type", ""))
+    if etype.startswith(_ISSUE_205_AUTOMATION_TYPE_PREFIXES):
+        return True
+    if etype in _ISSUE_205_AUTOMATION_TYPES:
+        if etype == "grace_started":
+            return entry.get("source") == "automation"
+        return True
+    return False
+
+
+def _build_known_override_false_positives(events: list) -> str:
+    """Detect the Issue #205 false-override pattern deterministically.
+
+    An `override_detected` event within 60 seconds of an automation-initiated
+    event (`nat_vent_*`, `ceiling_guard_fired`, `classification_applied`,
+    `grace_started` with source=automation) is a known code-path false positive —
+    automation actions must never trigger override detection. Previously this was
+    encoded as ~15 lines of prompt text the model had to re-derive from raw
+    timestamps every run; this computes the match once, deterministically, so the
+    model only has to cite the result instead of re-doing the arithmetic (and
+    risking getting the 60-second window wrong).
+
+    Returns a formatted string starting with '=== KNOWN OVERRIDE FALSE POSITIVES
+    (Issue #205) ==='.
+    """
+    import datetime as _dt
+
+    lines: list[str] = ["=== KNOWN OVERRIDE FALSE POSITIVES (Issue #205) ==="]
+
+    resolved: list[tuple[_dt.datetime | None, dict]] = []
+    for entry in events:
+        if not isinstance(entry, dict):
+            continue
+        raw_time = entry.get("time")
+        event_dt = None
+        if isinstance(raw_time, _dt.datetime):
+            event_dt = raw_time
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=_dt.UTC)
+        elif raw_time is not None:
+            try:
+                event_dt = _dt.datetime.fromisoformat(str(raw_time))
+                if event_dt.tzinfo is None:
+                    event_dt = event_dt.replace(tzinfo=_dt.UTC)
+            except ValueError:
+                pass
+        resolved.append((event_dt, entry))
+
+    automation_events = [(dt, e) for dt, e in resolved if dt is not None and _is_issue_205_automation_event(e)]
+    override_events = [
+        (dt, e) for dt, e in resolved if dt is not None and str(e.get("type", "")) == "override_detected"
+    ]
+
+    matches: list[str] = []
+    for evt_dt, _evt in override_events:
+        for auto_dt, auto_evt in automation_events:
+            delta_s = abs((evt_dt - auto_dt).total_seconds())
+            if delta_s <= _OVERRIDE_FALSE_POSITIVE_WINDOW_S:
+                matches.append(
+                    f"  override_detected at {evt_dt.strftime('%H:%M:%S')} is {delta_s:.0f}s from"
+                    f" {auto_evt.get('type')} at {auto_dt.strftime('%H:%M:%S')} — known false override"
+                    " detection (Issue #205), not a genuine incongruity"
+                )
+                break
+
+    lines.extend(matches if matches else ["  None detected in this window."])
+    return "\n".join(lines)
+
+
+def _build_restart_summary(events: list) -> str:
+    """Summarize `system_restarted` events by cause (Issue #563).
+
+    `coordinator.py`'s restart-cause classification (Issue #403/#413) already
+    distinguishes `user_restart`/`version_changed` (benign — a deploy or a normal
+    restart) from `unknown` (crash-like, worth flagging) and stamps it as the
+    event's `cause` field. Previously nothing surfaced that breakdown to the
+    investigator — only a raw `system_restarted` count was visible via
+    `event_type_counts` — so a day of routine deploys could get narrated as
+    an alarming number of restarts. This hands the model the breakdown directly.
+
+    Returns a formatted string starting with '=== RESTART HISTORY ==='.
+    """
+    lines: list[str] = ["=== RESTART HISTORY ==="]
+    restarts = [e for e in events if isinstance(e, dict) and str(e.get("type", "")) == "system_restarted"]
+    if not restarts:
+        lines.append("  No restarts in this window.")
+        return "\n".join(lines)
+
+    by_cause: dict[str, int] = {}
+    unknown_times: list[str] = []
+    for entry in restarts:
+        cause = str(entry.get("cause", "unknown"))
+        by_cause[cause] = by_cause.get(cause, 0) + 1
+        if cause == "unknown":
+            unknown_times.append(str(entry.get("time", "?")))
+
+    breakdown = ", ".join(f"{cause}={count}" for cause, count in sorted(by_cause.items()))
+    lines.append(f"  {len(restarts)} restart(s) in this window: {breakdown}")
+    lines.append(
+        "  Only cause=unknown restarts are potentially crash-like and worth mentioning;"
+        " user_restart (a normal restart) and version_changed (a deploy) are expected,"
+        " benign events — do not narrate them as problems or cite the raw restart count"
+        " as if every restart were equally concerning."
+    )
+    if unknown_times:
+        lines.append(f"  cause=unknown restart timestamps: {', '.join(unknown_times)}")
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Helper functions (moved from ai_skills_investigator.py)
@@ -771,11 +900,13 @@ async def build_thermal_pipeline_context(hass: Any, coordinator: Any, **kwargs: 
 
 
 async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
-    """Build EVENT LOG and TIMING CORRELATIONS sections."""
+    """Build EVENT LOG, TIMING CORRELATIONS, and KNOWN OVERRIDE FALSE POSITIVES sections."""
     hours: int = min(max(int(kwargs.get("hours", 168)), 1), 720)
 
     event_section_lines: list[str] = []
     timing_section: str = ""
+    false_positives_section: str = ""
+    restart_section: str = ""
 
     # --- Event log ---
     try:
@@ -837,7 +968,32 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
         _LOGGER.warning("investigator: failed to build timing correlations -- skipping")
         timing_section = "=== TIMING CORRELATIONS ===\n  unavailable"
 
-    return "\n".join(event_section_lines) + "\n" + timing_section + "\n"
+    # --- Known override false positives (Issue #205) ---
+    try:
+        raw_log_fp: list[Any] = getattr(coordinator, "_event_log", []) or []
+        false_positives_section = _build_known_override_false_positives(raw_log_fp)
+    except Exception:
+        _LOGGER.warning("investigator: failed to build override false-positive check -- skipping")
+        false_positives_section = "=== KNOWN OVERRIDE FALSE POSITIVES (Issue #205) ===\n  unavailable"
+
+    # --- Restart history by cause ---
+    try:
+        raw_log_restart: list[Any] = getattr(coordinator, "_event_log", []) or []
+        restart_section = _build_restart_summary(raw_log_restart)
+    except Exception:
+        _LOGGER.warning("investigator: failed to build restart summary -- skipping")
+        restart_section = "=== RESTART HISTORY ===\n  unavailable"
+
+    return (
+        "\n".join(event_section_lines)
+        + "\n"
+        + timing_section
+        + "\n"
+        + false_positives_section
+        + "\n"
+        + restart_section
+        + "\n"
+    )
 
 
 async def build_ai_report_history_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
@@ -912,47 +1068,82 @@ def _parse_version(version_str: str) -> tuple[int, ...]:
         return (0,)
 
 
-def _fix_is_relevant(fix: dict, current_tuple: tuple[int, ...]) -> bool:
-    """Return True if a KNOWN_FIXES entry should be included in investigator context.
+_KNOWN_FIXES_RECENT_COUNT = 15  # bound by count, same pattern as GITHUB_ISSUES_LIMIT
 
-    Inclusion rules (any one is sufficient):
-    1. scope_not_covered is non-empty  — still partially unfixed, always relevant.
-    2. version_fixed >= current version — just fixed in current release (tell Claude
-       not to re-flag) OR fix not yet deployed (known open issue).
 
-    Entries that are fully covered AND were fixed in a prior version are excluded —
-    Claude has no actionable reason to see them and they add noise.
+def _select_relevant_fixes(known_fixes: dict, current_tuple: tuple[int, ...]) -> dict:
+    """Return the KNOWN_FIXES entries relevant to the investigator's cross-check.
+
+    Bounded by count, not by an exact version-equality threshold. An earlier version
+    of this filter kept an entry only when `version_fixed >= current version` — but on
+    a real running install `current version` is pinned to whatever's actually deployed,
+    so that threshold only ever matches the single most-recent release's fixes
+    (verified directly: one release after a fix ships, its entry already drops out of
+    context). That's too narrow to usefully answer "was this already fixed" for a user
+    who hasn't updated in a few releases — the entire purpose of this section.
+
+    Instead: always include any not-yet-deployed entry (version_fixed > current — a
+    known, still-open gap Claude should recognize rather than "discover" fresh), plus
+    the `_KNOWN_FIXES_RECENT_COUNT` most recently fixed entries. This stays properly
+    bounded regardless of how large KNOWN_FIXES grows or how often releases ship — the
+    two things the prior `scope_not_covered`-based rule failed at (see Issue #563:
+    that field was mandatory on every entry, so the rule matched all 169 of them).
     """
-    if fix.get("scope_not_covered"):
-        return True
-    fix_tuple = _parse_version(fix.get("version_fixed", "0"))
-    return fix_tuple >= current_tuple
+    not_yet_deployed = {
+        num: fix for num, fix in known_fixes.items() if _parse_version(fix.get("version_fixed", "0")) > current_tuple
+    }
+    already_fixed_nums = sorted(
+        (num for num in known_fixes if num not in not_yet_deployed),
+        key=lambda num: _parse_version(known_fixes[num].get("version_fixed", "0")),
+        reverse=True,
+    )
+    recent = {num: known_fixes[num] for num in already_fixed_nums[:_KNOWN_FIXES_RECENT_COUNT]}
+    return {**not_yet_deployed, **recent}
+
+
+def _release_note_bullet(release_notes: dict, version: str, issue_num: int) -> str:
+    """Find the RELEASE_NOTES bullet for a given issue number within a version's notes.
+
+    Matches bullets formatted "Fix #N: ..." or "Feat #N: ...". Returns "" if no match,
+    so the caller can fall back to the KNOWN_FIXES title.
+    """
+    prefix_fix = f"Fix #{issue_num}:"
+    prefix_feat = f"Feat #{issue_num}:"
+    for note in release_notes.get(version, []):
+        if note.startswith(prefix_fix) or note.startswith(prefix_feat):
+            return note
+    return ""
 
 
 async def build_known_fixes_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
-    """Build KNOWN-FIXED ISSUES section, version-scoped to relevant entries only."""
-    from .const import KNOWN_FIXES, VERSION  # noqa: PLC0415
+    """Build KNOWN-FIXED ISSUES section, bounded to a recent-and-relevant subset.
+
+    Each entry is rendered as its RELEASE_NOTES bullet (short, occupant-outcome
+    language, already mandatory for every release) rather than the KNOWN_FIXES
+    `title`/`scope_covered` fields, which are internal engineering detail aimed at
+    a PR reviewer, not the investigator's cross-check use case. Falls back to
+    `title` only when no matching RELEASE_NOTES bullet is found.
+    """
+    from .const import KNOWN_FIXES, RELEASE_NOTES, VERSION  # noqa: PLC0415
 
     if not KNOWN_FIXES:
         return ""
 
     current_tuple = _parse_version(VERSION)
-    relevant = {issue_num: fix for issue_num, fix in KNOWN_FIXES.items() if _fix_is_relevant(fix, current_tuple)}
+    relevant = _select_relevant_fixes(KNOWN_FIXES, current_tuple)
 
     if not relevant:
         return ""
 
     lines = [
-        f"## KNOWN-FIXED ISSUES (version-scoped to v{VERSION} — {len(relevant)} of {len(KNOWN_FIXES)} entries)"
+        f"## KNOWN-FIXED ISSUES (most recent {len(relevant)} of {len(KNOWN_FIXES)} entries)"
         " (scope-bounded — use for cross-check, step 8)"
     ]
     for issue_num in sorted(relevant.keys(), reverse=True):
         fix = relevant[issue_num]
-        lines.append(f"\nIssue #{issue_num} — fixed in v{fix['version_fixed']}: {fix['title']}")
-        for covered in fix.get("scope_covered", []):
-            lines.append(f"  [COVERED] {covered}")
-        for gap in fix.get("scope_not_covered", []):
-            lines.append(f"  [NOT COVERED] {gap}")
+        version_fixed = fix.get("version_fixed", "")
+        summary = _release_note_bullet(RELEASE_NOTES, version_fixed, issue_num) or fix.get("title", "")
+        lines.append(f"\nIssue #{issue_num} — fixed in v{version_fixed}: {summary}")
     lines.append("")
     return "\n".join(lines)
 
@@ -968,6 +1159,27 @@ async def build_version_context(hass: Any, coordinator: Any, **kwargs: Any) -> s
         for note in notes:
             lines.append(f"- {note}")
     return "\n".join(lines)
+
+
+def _trim_issue_fields(issues: list[dict]) -> list[dict]:
+    """Keep only the GitHub issue fields the context renderer actually uses.
+
+    A raw GitHub API issue object carries 30+ fields (body, assignees, milestone,
+    reactions, timestamps, etc.). Only number/title/state/labels are ever rendered
+    — caching the full response wastes coordinator memory on every live install for
+    up to 30 days (the closed-issue cache TTL) for data nothing reads.
+    """
+    trimmed = []
+    for issue in issues or []:
+        trimmed.append(
+            {
+                "number": issue.get("number"),
+                "title": issue.get("title", ""),
+                "state": issue.get("state", "?"),
+                "labels": [{"name": lbl.get("name", "")} for lbl in issue.get("labels", [])],
+            }
+        )
+    return trimmed
 
 
 async def _fetch_github_issues(hass: Any, coordinator: Any = None) -> str:
@@ -1021,7 +1233,7 @@ async def _fetch_github_issues(hass: Any, coordinator: Any = None) -> str:
             url = f"{base}?state=open&per_page={GITHUB_ISSUES_LIMIT}&sort=updated"
             async with session.get(url, timeout=timeout) as resp:
                 if resp.status == 200:
-                    open_issues = await resp.json()
+                    open_issues = _trim_issue_fields(await resp.json())
                     if coordinator is not None:
                         coordinator._github_open_cache = open_issues
                         coordinator._github_open_cache_ts = now
@@ -1032,7 +1244,7 @@ async def _fetch_github_issues(hass: Any, coordinator: Any = None) -> str:
             url = f"{base}?state=closed&per_page={GITHUB_ISSUES_LIMIT}&sort=updated"
             async with session.get(url, timeout=timeout) as resp:
                 if resp.status == 200:
-                    closed_issues = await resp.json()
+                    closed_issues = _trim_issue_fields(await resp.json())
                     if coordinator is not None:
                         coordinator._github_closed_cache = closed_issues
                         coordinator._github_closed_cache_ts = now
@@ -1067,6 +1279,1410 @@ async def build_github_context(hass: Any, coordinator: Any, **kwargs: Any) -> st
 # ---------------------------------------------------------------------------
 # Global registry instance
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Activity timeline rendering (moved from ai_skills_activity.py, Issue #563)
+# ---------------------------------------------------------------------------
+
+
+def _first_temp(entry: dict, *keys: str) -> Any:
+    """Return first non-None temp value from the given keys in an event dict."""
+    for k in keys:
+        v = entry.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def _fmt_temp_cell(val: Any, unit: str) -> str:
+    """Format a temperature value for a timeline table cell; em-dash when unavailable."""
+    try:
+        return format_temp(float(val), unit)
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_hours(h: float) -> str:
+    """Format a float hours value as a human-readable string."""
+    if h < 24:
+        return f"{int(h)}h"
+    days = h / 24
+    return f"{int(days)}d" if days == int(days) else f"{days:.1f}d"
+
+
+def _build_daily_summaries(coordinator: Any, hours: float) -> list[str]:
+    """Return context lines for historical daily records when hours > 36."""
+    try:
+        days_back = max(1, int(hours / 24))
+        today_str = datetime.date.today().isoformat()
+        cutoff_date = (datetime.date.today() - datetime.timedelta(days=days_back)).isoformat()
+        records: list[dict] = (
+            getattr(coordinator, "learning", None)
+            and getattr(coordinator.learning, "_state", None)
+            and getattr(coordinator.learning._state, "records", [])
+            or []
+        )
+        past = [
+            r
+            for r in records
+            if isinstance(r, dict) and r.get("date", "") > cutoff_date and r.get("date", "") < today_str
+        ]
+        if not past:
+            return ["", "## HISTORICAL DAILY SUMMARIES", "  (no past records available)"]
+
+        header = f"## HISTORICAL DAILY SUMMARIES (last {days_back} days, excluding today)"
+        col_hdr = "  Date       | DayType | HVAC(min) | Overrides | Viol(min) | AvgIndoor | ObsHigh/Low"
+        sep = "  -----------|---------|-----------|-----------|-----------|-----------|------------"
+        rows = []
+        for r in sorted(past, key=lambda x: x.get("date", "")):
+            date = r.get("date", "?")
+            day_type = str(r.get("day_type", "?"))[:7]
+            hvac_min = int(r.get("hvac_runtime_minutes", 0) or 0)
+            overrides = int(r.get("manual_overrides", 0) or 0)
+            viol_min = int(r.get("comfort_violations_minutes", 0) or 0)
+            avg_in = r.get("avg_indoor_temp")
+            avg_in_str = f"{avg_in:.1f}F" if isinstance(avg_in, (int, float)) else "n/a"
+            obs_high = r.get("observed_high_f")
+            obs_low = r.get("observed_low_f")
+            hl_str = (
+                f"{obs_high:.0f}F/{obs_low:.0f}F"
+                if isinstance(obs_high, (int, float)) and isinstance(obs_low, (int, float))
+                else "n/a"
+            )
+            row = (
+                f"  {date} | {day_type:<7} | {hvac_min:<9} | {overrides:<9}"
+                f" | {viol_min:<9} | {avg_in_str:<9} | {hl_str}"
+            )
+            rows.append(row)
+
+        note = "  Note: event log ring buffer covers ~50-60h; use daily summaries for context beyond that."
+        return ["", header, col_hdr, sep, *rows, note]
+    except Exception:
+        _LOGGER.warning("activity_report: failed to build daily summaries -- skipping")
+        return []
+
+
+_AUTO_EVENT_TYPES = frozenset(
+    {
+        "ceiling_guard_fired",
+        "classification_applied",
+        "classification_suppressed_paused",
+        "warm_day_state_confirmed",
+        "warm_day_setback_applied",
+        "warm_day_comfort_gap",
+        "nat_vent_ceiling_escalation",
+        "nat_vent_away_ceiling_exit",
+        "nat_vent_ac_assist_armed",
+        "occupancy_setback",
+        "occupancy_comfort_restored",
+        "morning_wakeup",
+    }
+)
+
+_MANUAL_EVENT_TYPES = frozenset(
+    {
+        "override_detected",
+        "override_confirmed",
+        "override_cleared",
+        "override_self_resolved",
+        "override_adopted",
+        "fan_manual_override",
+    }
+)
+
+_UNKNOWN_EVENT_TYPES = frozenset(
+    {
+        "sensor_opened",
+        "sensor_all_closed",
+    }
+)
+
+_SYSTEM_EVENT_TYPES: frozenset[str] = frozenset({"system_restarted"})
+
+
+def _event_source_label(event_type: str, data: dict) -> str | None:
+    """Return source label for an event, or None if unknown/default.
+
+    Returns one of 'automation', 'manual', 'system', or None (caller treats None as unknown).
+    """
+    if event_type in _SYSTEM_EVENT_TYPES:
+        return "system"
+
+    # Explicit source field takes precedence
+    source = data.get("source")
+    if source in ("automation", "manual"):
+        return source
+
+    # nat_vent_* prefix -> automation
+    if event_type.startswith("nat_vent_"):
+        return "automation"
+
+    # grace_started / grace_expired with source field
+    if event_type in ("grace_started", "grace_expired"):
+        if source in ("automation", "manual"):
+            return source
+        return None
+
+    if event_type in _AUTO_EVENT_TYPES:
+        return "automation"
+
+    if event_type in _MANUAL_EVENT_TYPES:
+        return "manual"
+
+    if event_type in _UNKNOWN_EVENT_TYPES:
+        return "sensor"  # physical HA sensor state change (door/window open/close)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Deterministic per-event timeline table (Issue #330)
+# ---------------------------------------------------------------------------
+
+
+def _fmt_time(raw_time: Any) -> str:
+    """Format a raw timestamp from the event log as HH:MM (local)."""
+    if raw_time is None:
+        return "??:??"
+    if isinstance(raw_time, datetime.datetime):
+        dt = raw_time
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.UTC)
+        return dt_util.as_local(dt).strftime("%H:%M")
+    try:
+        dt = datetime.datetime.fromisoformat(str(raw_time))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.UTC)
+        return dt_util.as_local(dt).strftime("%H:%M")
+    except (ValueError, TypeError):
+        return str(raw_time)
+
+
+def _humanize_type(event_type: str) -> str:
+    """Convert snake_case event type to a human-readable label."""
+    return event_type.replace("_", " ").capitalize()
+
+
+def _format_band_setpoint(floor: Any, ceiling: Any, active: Any, unit: str) -> str:
+    """Render a ComfortBand as a single-setpoint Settings cell.
+
+    active == "ceiling" -> the cool setpoint is the guarded edge.
+    active == "floor"   -> the heat setpoint is the guarded edge.
+    """
+    try:
+        floor_f = float(floor)
+        ceiling_f = float(ceiling)
+    except (TypeError, ValueError):
+        return ""
+    if active == "ceiling":
+        return f"setpoint: {format_temp(ceiling_f, unit)} Cool ({format_temp(floor_f, unit)} Heat)"
+    if active == "floor":
+        return f"setpoint: {format_temp(floor_f, unit)} Heat ({format_temp(ceiling_f, unit)} Cool)"
+    # active unknown -- show both
+    return f"setpoint: {format_temp(floor_f, unit)} Heat / {format_temp(ceiling_f, unit)} Cool"
+
+
+# ---------------------------------------------------------------------------
+# EVENT_RENDERERS: (payload, unit) -> (event_text, settings_text)
+# All renderers read structured payload fields -- never parse prose strings.
+# ---------------------------------------------------------------------------
+
+
+def _render_comfort_band_applied(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    reason = p.get("reason", "")
+    label = f"Comfort band applied ({mode})" if mode else "Comfort band applied"
+    if reason:
+        label = f"{label} -- {reason}"
+    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
+    return label, settings
+
+
+def _render_bedtime_setback(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    label = f"Bedtime setback ({mode} mode)" if mode else "Bedtime setback"
+    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
+    return label, settings
+
+
+def _render_morning_wakeup(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    label = f"Morning wake-up -- comfort restored ({mode})" if mode else "Morning wake-up -- comfort restored"
+    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), p.get("active"), unit)
+    return label, settings
+
+
+def _render_occupancy_setback(p: dict, unit: str) -> tuple[str, str]:
+    occ = p.get("occupancy") or p.get("mode", "")
+    label = f"Occupancy setback ({occ})" if occ else "Occupancy setback"
+    settings = _format_band_setpoint(p.get("floor"), p.get("ceiling"), None, unit)
+    return label, settings
+
+
+def _render_occupancy_comfort_restored(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    target = p.get("target_f")
+    label = f"Occupancy -- comfort restored ({mode})" if mode else "Occupancy -- comfort restored"
+    settings = ""
+    if target is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = f"setpoint: {format_temp(float(target), unit)}"
+    return label, settings
+
+
+def _render_pre_cool_applied(p: dict, unit: str) -> tuple[str, str]:
+    target = p.get("target")
+    label = "Pre-cool applied"
+    settings = ""
+    if target is not None:
+        try:
+            floor = p.get("floor")
+            if floor is not None:
+                settings = _format_band_setpoint(floor, float(target), "ceiling", unit)
+            else:
+                settings = f"setpoint: {format_temp(float(target), unit)} Cool"
+        except (TypeError, ValueError):
+            pass
+    return label, settings
+
+
+def _render_override_detected(p: dict, unit: str) -> tuple[str, str]:
+    old_t = p.get("old_setpoint_f")
+    new_t = p.get("new_setpoint_f")
+    old_m = p.get("old_mode") or p.get("old_hvac_mode")
+    new_m = p.get("new_mode") or p.get("new_hvac_mode")
+    source = p.get("source", "")
+    label = f"Setpoint override detected ({source})" if source else "Setpoint override detected"
+    parts = []
+    if old_m and new_m and old_m != new_m:
+        parts.append(f"mode: {old_m}->{new_m}")
+    if old_t is not None and new_t is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}")
+    return label, ", ".join(parts)
+
+
+def _render_ceiling_guard_fired(p: dict, unit: str) -> tuple[str, str]:
+    breach = p.get("breach_time", "")
+    lead = p.get("lead_time_min")
+    label = f"ODE ceiling guard fired (breach {breach}, lead {lead} min)" if lead else "ODE ceiling guard fired"
+    old_m = p.get("old_hvac_mode")
+    new_m = p.get("new_hvac_mode", "cool")
+    old_t = p.get("old_setpoint_f")
+    new_t = p.get("new_setpoint_f")
+    parts = []
+    if old_m and new_m and old_m != new_m:
+        parts.append(f"mode: {old_m}->{new_m}")
+    if old_t is not None and new_t is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}")
+    elif new_t is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"setpoint: {format_temp(float(new_t), unit)}")
+    return label, ", ".join(parts)
+
+
+def _render_classification_applied(p: dict, unit: str) -> tuple[str, str]:
+    day_type = p.get("day_type", "")
+    trend = p.get("trend", "")
+    hvac = p.get("hvac_mode", "")
+    old_m = p.get("old_hvac_mode")
+    label = f"Classification applied: {day_type}" if day_type else "Classification applied"
+    if trend:
+        label = f"{label} ({trend})"
+    settings = ""
+    if old_m and hvac and old_m != hvac:
+        settings = f"mode: {old_m}->{hvac}"
+    return label, settings
+
+
+def _render_setpoint_rejected(p: dict, unit: str) -> tuple[str, str]:
+    commanded = p.get("commanded")
+    reported = p.get("reported")
+    label = "Setpoint validation failed -- retry scheduled"
+    settings = ""
+    if commanded is not None and reported is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = (
+                f"commanded {format_temp(float(commanded), unit)}, "
+                f"thermostat reports {format_temp(float(reported), unit)}"
+            )
+    return label, settings
+
+
+def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
+    nudge_value = p.get("nudge_value")
+    real_target = p.get("real_target")
+    mode = p.get("mode", "")
+    label = "Reconciling stuck setpoint -- nudging thermostat"
+    settings = ""
+    if nudge_value is not None and real_target is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = (
+                f"nudge to {format_temp(float(nudge_value), unit)} ({mode}),"
+                f" then {format_temp(float(real_target), unit)} in 30s"
+            )
+    return label, settings
+
+
+def _render_override_cleared(p: dict, unit: str) -> tuple[str, str]:
+    was_mode = p.get("was_mode", "")
+    old_t = p.get("old_setpoint_f")
+    label = f"Override cleared (was {was_mode})" if was_mode else "Override cleared"
+    settings = ""
+    if old_t is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = f"was {format_temp(float(old_t), unit)} (manual setpoint)"
+    return label, settings
+
+
+def _render_override_confirmed(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    label = f"Override confirmed ({mode} mode)" if mode else "Override confirmed"
+    return label, ""
+
+
+def _render_override_self_resolved(p: dict, unit: str) -> tuple[str, str]:
+    detected = p.get("detected_mode", "")
+    current = p.get("current_mode", "")
+    if detected and current:
+        return f"Override self-resolved: {detected}->{current} (transient)", ""
+    return "Override self-resolved (transient)", ""
+
+
+def _render_override_adopted(p: dict, unit: str) -> tuple[str, str]:
+    mode = p.get("mode", "")
+    src = p.get("source", "")
+    pre_expiry = p.get("pre_expiry", False)
+    label = f"Override adopted ({mode} mode)" if mode else "Override adopted"
+    label = f"{label} -- automation agrees" + (", ended grace early" if pre_expiry else ", grace ended cleanly")
+    settings = f"trigger: {src}" if src else ""
+    return label, settings
+
+
+_GRACE_TRIGGER_LABELS: dict[str, str] = {
+    "fan_manual_override": "fan override (manual fan change)",
+    "override_confirmed": "HVAC mode override",
+    "dashboard_resume": "user resumed from dashboard",
+    "sensor_closed_resume": "all sensors closed",
+    "nat_vent_exit_resume": "natural ventilation ended",
+}
+
+
+def _render_grace_started(p: dict, unit: str) -> tuple[str, str]:
+    trigger = p.get("trigger", "")
+    source = p.get("source", "")
+    duration = p.get("duration_seconds")
+    dur_str = f" ({duration // 60} min)" if isinstance(duration, int) else ""
+    label = f"Grace period started{dur_str}"
+    if source:
+        label = f"{label} ({source})"
+    # Settings cell: human-readable trigger label for known triggers; empty otherwise.
+    trigger_label = _GRACE_TRIGGER_LABELS.get(trigger, "")
+    return label, trigger_label
+
+
+def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
+    source = p.get("source", "")
+    re_paused = p.get("re_paused", False)
+    label = f"Grace period expired ({source})" if source else "Grace period expired"
+    if re_paused:
+        label = f"{label} -- sensor still open, re-paused"
+    return label, ""
+
+
+def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor_temp")
+    on_thr = p.get("on_threshold")
+    fan_device = p.get("fan_device", "fan")
+    label = "Nat-vent fan on (cycling)"
+    if indoor is not None and on_thr is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent fan on -- indoor {format_temp(float(indoor), unit)} >= {format_temp(float(on_thr), unit)}"
+            )
+    return label, f"{fan_device}: auto->on"
+
+
+def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor_temp")
+    off_thr = p.get("off_threshold")
+    fan_device = p.get("fan_device", "fan")
+    label = "Nat-vent fan off (cycling)"
+    if indoor is not None and off_thr is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent fan off -- indoor {format_temp(float(indoor), unit)} <= {format_temp(float(off_thr), unit)}"
+            )
+    return label, f"{fan_device}: on->auto"
+
+
+def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
+    reason = str(p.get("reason", "")).strip()
+    fan_device = p.get("fan_device", "fan")
+    label = f"Fan activated -- {reason}" if reason else "Fan activated"
+    return label, f"{fan_device}: off->on"
+
+
+def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
+    reason = str(p.get("reason", "")).strip()
+    fan_device = p.get("fan_device", "fan")
+    label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
+    return label, f"{fan_device}: on->off"
+
+
+def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #392 Fix 1b: choke-point guard intercepted an HVAC write while WHF owns the thermostat.
+
+    Makes the structural WHF/AC mutual-exclusion guarantee visible in the Activity Log
+    instead of silently dropping the blocked write.
+    """
+    attempted_mode = str(p.get("attempted_mode", "")).strip()
+    reason = str(p.get("reason", "")).strip()
+    label = f"HVAC write blocked (whole-house fan active) -- {reason}" if reason else "HVAC write blocked"
+    settings = f"hvac: blocked ({attempted_mode})" if attempted_mode else ""
+    return label, settings
+
+
+def _render_whf_hvac_suppressed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #495: HVAC suppressed for a whole-house-fan session — CA-initiated OR a
+    manual/remote fan-on detection (both now route through the same suppress helper).
+    """
+    prior_mode = str(p.get("prior_mode", "")).strip()
+    reason = str(p.get("reason", "")).strip()
+    label = f"HVAC suppressed (whole-house fan) -- {reason}" if reason else "HVAC suppressed (whole-house fan)"
+    settings = f"hvac: {prior_mode}->off" if prior_mode else "hvac: ->off"
+    return label, settings
+
+
+def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #495: a manual/remote WHF session ended — HVAC suppression released and CA's
+    current classification reasserted (not a blind restore of the mode captured at activation,
+    since a remote-timer session can span hours).
+    """
+    reason = str(p.get("reason", "")).strip()
+    label = f"HVAC suppression released -- {reason}" if reason else "HVAC suppression released"
+    return label, "hvac: reclassifying"
+
+
+def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #524: append remote speed/timer context when the override was armed by an RF
+    remote press (`automation.py::handle_fan_manual_override`'s `remote_speed`/
+    `remote_timer_hours` kwargs) -- without it, this row looked identical whether a specific
+    speed/timer choice drove the override or a thermostat-detected toggle did. A plain
+    (non-remote) override has neither field set and renders exactly as before."""
+    fan_before = str(p.get("fan_before", "")).strip()
+    fan_after = str(p.get("fan_after", "")).strip()
+    fan_device = p.get("fan_device", "fan")
+    change = f"{fan_before}->{fan_after}" if fan_before and fan_after else ""
+    settings = f"{fan_device}: {change}" if change else ""
+    remote_speed = p.get("remote_speed")
+    if remote_speed:
+        settings = f"{settings}, remote: {remote_speed} speed" if settings else f"remote: {remote_speed} speed"
+    remote_timer_hours = p.get("remote_timer_hours")
+    if remote_timer_hours is not None:
+        settings = (
+            f"{settings}, remote timer: {remote_timer_hours}h" if settings else f"remote timer: {remote_timer_hours}h"
+        )
+    return "Fan manual override", settings
+
+
+def _render_fan_speed_observed(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #519: a comfort-only remote speed change — NOT a manual override (the fan was
+    already running; the user just adjusted speed, so no grace/HVAC-suppression armed)."""
+    speed = str(p.get("speed", "")).strip()
+    fan_device = p.get("fan_device", "fan")
+    settings = f"{fan_device}: speed->{speed}" if speed else ""
+    return "Fan speed observed (comfort-only)", settings
+
+
+def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
+    source = str(p.get("source", "")).strip() or "thermostat-initiated"
+    action = str(p.get("hvac_action", "")).strip()
+    label = f"Fan running (untracked) -- {source}"
+    settings = f"fan: on (untracked; hvac_action={action})" if action else "fan: on (untracked)"
+    return label, settings
+
+
+def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
+    return "Fan stopped (untracked fan ended)", "fan: off"
+
+
+def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
+    fan_before = str(p.get("fan_before", "?")).strip()
+    fan_after = str(p.get("fan_after", "?")).strip()
+    fan_device = p.get("fan_device", "fan")
+    settings = f"{fan_device}: {fan_before}->{fan_after}" if fan_before and fan_after else ""
+    return "Fan cancel (user turned off)", settings
+
+
+def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[str, str]:
+    outdoor = p.get("outdoor")
+    indoor = p.get("indoor")
+    label = "Nat-vent exit -- outdoor warmer than indoor"
+    if outdoor is not None and indoor is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent exit -- outdoor {format_temp(float(outdoor), unit)}"
+                f" > indoor {format_temp(float(indoor), unit)}"
+            )
+    return label, ""
+
+
+def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor_temp")
+    heat = p.get("comfort_heat")
+    label = "Nat-vent exit -- comfort floor reached"
+    if indoor is not None and heat is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent exit -- indoor {format_temp(float(indoor), unit)} <= floor {format_temp(float(heat), unit)}"
+            )
+    parts = []
+    hvac_restored = p.get("hvac_mode_restored", "")
+    fan_change = p.get("fan_mode_change", "")
+    if hvac_restored and hvac_restored not in ("unknown", ""):
+        parts.append(f"mode: off->{hvac_restored}")
+    if fan_change:
+        parts.append(f"fan: {fan_change}")
+    return label, ", ".join(parts)
+
+
+def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[str, str]:
+    label = "Nat-vent exit -- fan found running without a CA-owned session"
+    reason = p.get("reason", "")
+    return label, reason
+
+
+def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor")
+    cool = p.get("comfort_cool")
+    label = "Nat-vent exit -- away-mode ceiling reached"
+    if indoor is not None and cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent exit (away) -- indoor {format_temp(float(indoor), unit)}"
+                f" >= ceiling {format_temp(float(cool), unit)}"
+            )
+    return label, ""
+
+
+def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]:
+    ttf = p.get("time_to_floor_hr")
+    label = "Nat-vent proactive exit -- floor predicted"
+    if ttf is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = f"Nat-vent proactive exit -- floor in {float(ttf):.2f} hr"
+    parts = []
+    hvac_restored = p.get("hvac_mode_restored", "")
+    fan_change = p.get("fan_mode_change", "")
+    if hvac_restored and hvac_restored not in ("unknown", ""):
+        parts.append(f"mode: off->{hvac_restored}")
+    if fan_change:
+        parts.append(f"fan: {fan_change}")
+    return label, ", ".join(parts)
+
+
+def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[str, str]:
+    outdoor = p.get("outdoor")
+    indoor = p.get("indoor")
+    label = "Nat-vent soft-start -- purge/comfort at parity"
+    if outdoor is not None and indoor is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent soft-start -- outdoor {format_temp(float(outdoor), unit)}"
+                f" <= indoor {format_temp(float(indoor), unit)}, past today's peak"
+            )
+    peak = p.get("outdoor_today_peak")
+    detail = f"today's peak: {format_temp(float(peak), unit)}" if peak is not None else ""
+    return label, detail
+
+
+def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor")
+    cool = p.get("comfort_cool")
+    label = "Nat-vent escalated to AC cooling"
+    if indoor is not None and cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent escalated to AC -- indoor {format_temp(float(indoor), unit)}"
+                f" > ceiling {format_temp(float(cool), unit)}"
+            )
+    return label, "mode: off->cool"
+
+
+def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
+    return "Nat-vent + AC assist armed (full band)", ""
+
+
+def _render_nat_vent_sleep_ceiling_reached(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor_temp")
+    cool = p.get("sleep_cool")
+    label = "Nat-vent exit -- sleep ceiling reached"
+    if indoor is not None and cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent exit (sleep) -- indoor {format_temp(float(indoor), unit)}"
+                f" <= sleep ceiling {format_temp(float(cool), unit)}"
+            )
+    return label, ""
+
+
+def _render_nat_vent_bedtime_continue(p: dict, unit: str) -> tuple[str, str]:
+    outdoor = p.get("outdoor_temp")
+    cool = p.get("sleep_cool")
+    label = "Nat-vent continues through bedtime"
+    if outdoor is not None and cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent continues at bedtime -- outdoor {format_temp(float(outdoor), unit)}"
+                f" < sleep ceiling {format_temp(float(cool), unit)}"
+            )
+    return label, ""
+
+
+def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
+    entity = p.get("entity", "")
+    result = p.get("result", "")
+    trigger = p.get("trigger", "")
+    label = f"Sensor opened -- {result}" if result else "Sensor opened"
+    if entity and entity not in ("re-check", "natural_vent_reeval"):
+        label = f"Sensor opened: {entity} ({result})" if result else f"Sensor opened: {entity}"
+    elif trigger:
+        label = f"Sensor opened -- {trigger}"
+    hvac_change = p.get("hvac_mode_change", "")
+    fan_change = p.get("fan_mode_change", "")
+    parts = []
+    if hvac_change:
+        parts.append(f"mode: {hvac_change}")
+    if fan_change:
+        parts.append(f"fan: {fan_change}")
+    return label, ", ".join(parts)
+
+
+def _render_sensor_all_closed(p: dict, unit: str) -> tuple[str, str]:
+    was_paused = p.get("was_paused", False)
+    was_nat_vent = p.get("was_nat_vent", False)
+    fan_device = p.get("fan_device", "fan")
+    if was_nat_vent:
+        # Issue #504: the fan really did turn off here (via _exit_nat_vent(), whose own
+        # fan_deactivated event is intentionally suppressed per Issue #411) — show that
+        # transition in Settings instead of leaving it blank.
+        return "All sensors closed -- ending nat-vent", f"{fan_device}: on->off"
+    if was_paused:
+        return "All sensors closed -- resuming HVAC", ""
+    return "All sensors closed", ""
+
+
+def _render_nat_vent_forecast_skip(p: dict, unit: str) -> tuple[str, str]:
+    peak = p.get("forecast_peak")
+    thr = p.get("threshold")
+    label = "Nat-vent skipped -- forecast too warm"
+    if peak is not None and thr is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent skipped -- forecast peak {format_temp(float(peak), unit)}"
+                f" > threshold {format_temp(float(thr), unit)}"
+            )
+    return label, ""
+
+
+def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[str, str]:
+    ttf = p.get("time_to_floor_hr")
+    label = "Nat-vent skipped -- floor imminent"
+    if ttf is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = f"Nat-vent skipped -- floor in {float(ttf):.2f} hr (thermal model)"
+    return label, ""
+
+
+def _render_bedtime_setback_skipped(p: dict, unit: str) -> tuple[str, str]:
+    reason = p.get("reason", "")
+    occ = p.get("occupancy", "")
+    if reason == "occupancy" and occ:
+        return f"Bedtime setback skipped -- {occ} mode active", ""
+    if reason:
+        return f"Bedtime setback skipped -- {reason}", ""
+    return "Bedtime setback skipped", ""
+
+
+def _render_morning_wakeup_skipped(p: dict, unit: str) -> tuple[str, str]:
+    reason = p.get("reason", "")
+    return (f"Morning wake-up skipped -- {reason}" if reason else "Morning wake-up skipped"), ""
+
+
+def _render_pre_cool_suppressed_nat_vent(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor")
+    target = p.get("target")
+    label = "Pre-cool suppressed -- nat-vent already achieved target"
+    if indoor is not None and target is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Pre-cool suppressed -- nat-vent: indoor {format_temp(float(indoor), unit)}"
+                f" <= target {format_temp(float(target), unit)}"
+            )
+    return label, ""
+
+
+def _render_pre_cool_overshoot(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor")
+    heat = p.get("comfort_heat")
+    label = "Pre-cool overshoot -- indoor below comfort floor at wake-up"
+    if indoor is not None and heat is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Pre-cool overshoot -- indoor {format_temp(float(indoor), unit)}"
+                f" < floor {format_temp(float(heat), unit)}"
+            )
+    return label, ""
+
+
+def _render_system_restarted(p: dict, unit: str) -> tuple[str, str]:
+    recovered = p.get("recovered_events", 0)
+    cause = p.get("cause", "unknown")
+    if cause == "version_changed":
+        old = p.get("old_version")
+        new = p.get("new_version")
+        return (
+            f"--- HA restart boundary (version_changed {old}->{new}, {recovered} prior events recovered) ---",
+            "",
+        )
+    if cause == "user_restart":
+        return f"--- HA restart boundary (user_restart, {recovered} prior events recovered) ---", ""
+    return f"--- HA restart boundary (unknown, {recovered} prior events recovered) ---", ""
+
+
+def _render_version_changed(p: dict, unit: str) -> tuple[str, str]:
+    old = p.get("old_version")
+    new = p.get("new_version")
+    return f"Version changed: {old} -> {new}", ""
+
+
+def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
+    nv = p.get("nat_vent_activated", False)
+    hvac = p.get("hvac_commanded", False)
+    sensors = p.get("sensors_open_count", 0)
+    notes = []
+    if nv:
+        notes.append("nat-vent activated")
+    if hvac:
+        notes.append("HVAC commanded")
+    if sensors:
+        notes.append(f"{sensors} sensor(s) open")
+    suffix = " -- " + ", ".join(notes) if notes else ""
+    return f"Startup coalescing complete{suffix}", ""
+
+
+def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
+    grace_end = p.get("grace_end_time", "")
+    if p.get("reason") == "grace_without_override":
+        # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
+        # (the timer would have fired correctly on its own) — "expired" would be misleading.
+        return "Stuck grace recovered (no override was active to protect it)", ""
+    return f"Stuck grace recovered (expired {grace_end})", ""
+
+
+def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[str, str]:
+    hvac_mode = p.get("hvac_mode", "")
+    hvac_action = p.get("hvac_action", "")
+    return f"State contradiction: mode={hvac_mode} but action={hvac_action}", ""
+
+
+def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[str, str]:
+    runtime = p.get("hvac_runtime_minutes", "")
+    if runtime:
+        label = f"Thermal learning: no observations despite {runtime} min HVAC runtime"
+    else:
+        label = "Thermal learning: no observations recorded"
+    return label, ""
+
+
+def _render_incident_detected(p: dict, unit: str) -> tuple[str, str]:
+    cls = p.get("incident_class", "")
+    label = f"Incident detected: {cls}" if cls else "Incident detected"
+    return label, ""
+
+
+# Legacy warm_day events (pre-P3, may appear in persisted event logs)
+def _render_warm_day_setback_applied(p: dict, unit: str) -> tuple[str, str]:
+    old_t = p.get("old_setpoint_f")
+    new_t = p.get("new_setpoint_f")
+    label = "Warm-day setback applied"
+    settings = ""
+    if old_t is not None and new_t is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}"
+    return label, settings
+
+
+def _render_warm_day_state_confirmed(p: dict, unit: str) -> tuple[str, str]:
+    return "Warm-day state confirmed (heartbeat)", ""
+
+
+def _render_warm_day_comfort_gap(p: dict, unit: str) -> tuple[str, str]:
+    return "Warm-day comfort gap -- heating before shutoff", ""
+
+
+def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
+    return "Classification suppressed (windows open)", ""
+
+
+def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
+    occupancy = p.get("occupancy", "away")
+    return f"Occupancy setback suppressed (windows open, {occupancy})", ""
+
+
+# Registry: event_type -> renderer
+EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
+    "comfort_band_applied": _render_comfort_band_applied,
+    "bedtime_setback": _render_bedtime_setback,
+    "morning_wakeup": _render_morning_wakeup,
+    "occupancy_setback": _render_occupancy_setback,
+    "occupancy_comfort_restored": _render_occupancy_comfort_restored,
+    "pre_cool_applied": _render_pre_cool_applied,
+    "override_detected": _render_override_detected,
+    "ceiling_guard_fired": _render_ceiling_guard_fired,
+    "classification_applied": _render_classification_applied,
+    "classification_suppressed_paused": _render_classification_suppressed_paused,
+    "occupancy_setback_suppressed_paused": _render_occupancy_setback_suppressed_paused,
+    "setpoint_rejected": _render_setpoint_rejected,
+    "setpoint_nudge": _render_setpoint_nudge,
+    "override_cleared": _render_override_cleared,
+    "override_confirmed": _render_override_confirmed,
+    "override_self_resolved": _render_override_self_resolved,
+    "override_adopted": _render_override_adopted,
+    "grace_started": _render_grace_started,
+    "grace_expired": _render_grace_expired,
+    "nat_vent_fan_on": _render_nat_vent_fan_on,
+    "nat_vent_fan_off": _render_nat_vent_fan_off,
+    "fan_activated": _render_fan_activated,
+    "fan_deactivated": _render_fan_deactivated,
+    "fan_manual_override": _render_fan_manual_override,
+    "fan_speed_observed": _render_fan_speed_observed,
+    "hvac_write_blocked_whf_active": _render_hvac_write_blocked_whf_active,
+    "whf_hvac_suppressed": _render_whf_hvac_suppressed,
+    "whf_hvac_released": _render_whf_hvac_released,
+    "fan_running_untracked": _render_fan_running_untracked,
+    "fan_untracked_cleared": _render_fan_untracked_cleared,
+    "fan_cancel": _render_fan_cancel,
+    "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,
+    "nat_vent_reconcile_exit": _render_nat_vent_reconcile_exit,
+    "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
+    "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
+    "nat_vent_soft_start_entered": _render_nat_vent_soft_start_entered,
+    "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,
+    "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
+    "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,
+    "nat_vent_sleep_ceiling_reached": _render_nat_vent_sleep_ceiling_reached,
+    "nat_vent_bedtime_continue": _render_nat_vent_bedtime_continue,
+    "sensor_opened": _render_sensor_opened,
+    "sensor_all_closed": _render_sensor_all_closed,
+    "nat_vent_forecast_skip": _render_nat_vent_forecast_skip,
+    "nat_vent_floor_imminent_skip": _render_nat_vent_floor_imminent_skip,
+    "bedtime_setback_skipped": _render_bedtime_setback_skipped,
+    "morning_wakeup_skipped": _render_morning_wakeup_skipped,
+    "pre_cool_suppressed_nat_vent": _render_pre_cool_suppressed_nat_vent,
+    "pre_cool_overshoot": _render_pre_cool_overshoot,
+    "system_restarted": _render_system_restarted,
+    "version_changed": _render_version_changed,
+    "startup_coalesced": _render_startup_coalesced,
+    "stuck_grace_recovered": _render_stuck_grace_recovered,
+    "state_contradiction_warning": _render_state_contradiction_warning,
+    "thermal_learning_no_observations": _render_thermal_learning_no_observations,
+    "incident_detected": _render_incident_detected,
+    # Legacy warm_day events (pre-P3 persisted logs)
+    "warm_day_setback_applied": _render_warm_day_setback_applied,
+    "warm_day_state_confirmed": _render_warm_day_state_confirmed,
+    "warm_day_comfort_gap": _render_warm_day_comfort_gap,
+}
+
+
+def _default_renderer(event_type: str, payload: dict, unit: str) -> tuple[str, str]:
+    """Surprise-safe fallback for unregistered event types.
+
+    Event cell: humanized type + reason if present.
+    Settings cell: generic extraction of recognized fields -- never blank-broken, never raises.
+    """
+    label = _humanize_type(event_type)
+    reason = payload.get("reason")
+    if reason:
+        label = f"{label} -- {reason}"
+
+    # Generic settings extraction
+    parts: list[str] = []
+    old_m = payload.get("old_hvac_mode") or payload.get("old_mode")
+    new_m = payload.get("new_hvac_mode") or payload.get("new_mode")
+    if old_m and new_m and old_m != new_m:
+        parts.append(f"mode: {old_m}->{new_m}")
+    old_t = payload.get("old_setpoint_f")
+    new_t = payload.get("new_setpoint_f")
+    if old_t is not None and new_t is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"setpoint: {format_temp(float(old_t), unit)}->{format_temp(float(new_t), unit)}")
+    floor = payload.get("floor")
+    ceiling = payload.get("ceiling")
+    active = payload.get("active")
+    if floor is not None and ceiling is not None:
+        s = _format_band_setpoint(floor, ceiling, active, unit)
+        if s:
+            parts.append(s)
+    fan = payload.get("fan") or payload.get("fan_mode_change")
+    if fan:
+        parts.append(f"fan: {fan}")
+    trigger = payload.get("trigger")
+    if trigger and not any("trigger" in p for p in parts):
+        parts.append(f"trigger: {trigger}")
+
+    return label, ", ".join(parts)
+
+
+# Types that should NOT be deduplicated (each has meaningful individual payload)
+_NO_DEDUP: frozenset[str] = frozenset(
+    {
+        "system_restarted",
+        "version_changed",
+        "override_detected",
+        "override_confirmed",
+        "override_cleared",
+        "override_adopted",
+        "ceiling_guard_fired",
+        "incident_detected",
+        "setpoint_rejected",
+        "comfort_band_applied",
+        "bedtime_setback",
+        "morning_wakeup",
+        "occupancy_comfort_restored",
+        "pre_cool_applied",
+        "classification_applied",
+    }
+)
+
+
+def _maybe_prepend_whf_warning(table: str, config: dict[str, Any]) -> str:
+    """Prepend a WHF command-only warning banner when fan_state_feedback is disabled."""
+    _fsf = config.get("fan_state_feedback", False)
+    _fmode = config.get("fan_mode", "disabled")
+    _fentity = config.get("fan_entity", "")
+    if _fmode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and bool(_fentity) and not _fsf:
+        return (
+            "⚠ Whole house fan state feedback disabled (command-only mode) "
+            "-- physical fan state is unverifiable; events below reflect CA commands.\n\n" + table
+        )
+    return table
+
+
+def build_event_timeline_table(
+    raw_event_log: list[Any],
+    config: dict[str, Any],
+    hours: float,
+    now: datetime.datetime,
+) -> str:
+    """Build a deterministic markdown timeline table from the event log.
+
+    Returns a markdown table string:
+      | Time | Event | Settings | Source |
+
+    Consecutive same-type events (excluding types in _NO_DEDUP) are collapsed
+    into a single row with a xN count and time range.  The Settings cell of the
+    collapsed row is taken from the LAST event in the run (most recent setpoint wins).
+    """
+    unit: str = config.get("temp_unit", "fahrenheit")
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.UTC)
+    cutoff = now - datetime.timedelta(hours=hours)
+
+    # ---- filter within window ----
+    filtered: list[dict] = []
+    for entry in raw_event_log[-200:]:
+        if not isinstance(entry, dict):
+            continue
+        raw_time = entry.get("time")
+        if raw_time is not None:
+            if isinstance(raw_time, datetime.datetime):
+                event_dt: datetime.datetime | None = raw_time
+                if event_dt.tzinfo is None:
+                    event_dt = event_dt.replace(tzinfo=datetime.UTC)
+            else:
+                try:
+                    event_dt = datetime.datetime.fromisoformat(str(raw_time))
+                    if event_dt.tzinfo is None:
+                        event_dt = event_dt.replace(tzinfo=datetime.UTC)
+                except (ValueError, TypeError):
+                    event_dt = None
+            if event_dt is not None and event_dt < cutoff:
+                continue
+        filtered.append(entry)
+
+    if not filtered:
+        table = (
+            "| Time | Event | Settings | Source | Indoor | Outdoor |\n"
+            "|---|---|---|---|---|---|\n"
+            "| -- | (no events in window) | | | | |"
+        )
+        return _maybe_prepend_whf_warning(table, config)
+
+    # ---- render & deduplicate ----
+    rows: list[
+        tuple[str, str, str, str, str, str]
+    ] = []  # (time_str, event_text, settings_text, source, indoor, outdoor)
+
+    # Dedup state
+    run_type: str | None = None
+    run_count = 0
+    run_first_time: str = ""
+    run_last_time: str = ""
+    run_ev_text: str = ""
+    run_settings: str = ""
+    run_source: str = ""
+    run_indoor: str = ""
+    run_outdoor: str = ""
+
+    def _flush_run() -> None:
+        nonlocal \
+            run_type, \
+            run_count, \
+            run_first_time, \
+            run_last_time, \
+            run_ev_text, \
+            run_settings, \
+            run_source, \
+            run_indoor, \
+            run_outdoor
+        if run_type is None or run_count == 0:
+            return
+        if run_count == 1:
+            # A run of exactly one event was never actually deduplicated with anything —
+            # this is the common case, not a collapsed group. Use the renderer's real
+            # event text (which carries the descriptive reason) instead of the bare
+            # _humanize_type(run_type) fallback, which silently discarded it for every
+            # event type not on the small _NO_DEDUP allowlist.
+            rows.append((run_first_time, run_ev_text, run_settings, run_source, run_indoor, run_outdoor))
+        else:
+            time_range = f"{run_first_time}-{run_last_time}" if run_first_time != run_last_time else run_first_time
+            event_text = f"{_humanize_type(run_type)} x{run_count} ({time_range})"
+            rows.append((run_first_time, event_text, run_settings, run_source, run_indoor, run_outdoor))
+        run_type = None
+        run_count = 0
+
+    # Fan ownership tracker: updated per-event to detect when nat_vent_fan_off fires
+    # while the user is still running the fan manually (misleading if shown as CA fan-off).
+    _fan_ca_owns = False
+    _fan_user_owns = False
+
+    for entry in filtered:
+        event_type = str(entry.get("type", "unknown"))
+        payload = {k: v for k, v in entry.items() if k not in ("time", "type")}
+        time_str = _fmt_time(entry.get("time"))
+
+        # Update fan ownership state before rendering
+        if event_type in ("nat_vent_fan_on", "fan_activated"):
+            _fan_ca_owns = True
+            _fan_user_owns = False
+        elif event_type == "fan_manual_override" and str(payload.get("fan_after", "")).strip() == "on":
+            _fan_user_owns = True
+            _fan_ca_owns = False
+        elif event_type == "fan_cancel":
+            _fan_user_owns = False
+        elif event_type in ("nat_vent_fan_off", "fan_deactivated"):
+            _fan_ca_owns = False
+
+        renderer = EVENT_RENDERERS.get(event_type)
+        try:
+            if renderer is not None:
+                ev_text, settings_text = renderer(payload, unit)
+            else:
+                ev_text, settings_text = _default_renderer(event_type, payload, unit)
+            # When nat_vent_fan_off fires while the user owns the fan, annotate the label
+            # so the developer knows the physical fan may still be running under user control.
+            if event_type == "nat_vent_fan_off" and _fan_user_owns:
+                ev_text = ev_text + " [NOTE: fan may still be running -- user-controlled]"
+        except Exception:
+            _LOGGER.warning("activity_report: renderer raised for event type %r -- using fallback", event_type)
+            ev_text = _humanize_type(event_type)
+            settings_text = ""
+
+        source = _event_source_label(event_type, payload) or "sensor"
+        indoor_cell = _fmt_temp_cell(_first_temp(entry, "indoor_f", "indoor_temp", "indoor"), unit)
+        outdoor_cell = _fmt_temp_cell(_first_temp(entry, "outdoor_f", "outdoor_temp", "outdoor"), unit)
+
+        # Flush run when type changes or type is not deduplicated
+        if event_type in _NO_DEDUP or event_type != run_type:
+            _flush_run()
+            if event_type in _NO_DEDUP:
+                rows.append((time_str, ev_text, settings_text, source, indoor_cell, outdoor_cell))
+            else:
+                # Start a new run; temps are from the first event in the run
+                run_type = event_type
+                run_count = 1
+                run_first_time = time_str
+                run_last_time = time_str
+                run_ev_text = ev_text
+                run_settings = settings_text
+                run_source = source
+                run_indoor = indoor_cell
+                run_outdoor = outdoor_cell
+        else:
+            # Continue run -- update last time and settings (last setpoint wins); temps stay from first event
+            run_count += 1
+            run_last_time = time_str
+            if settings_text:
+                run_settings = settings_text
+
+    _flush_run()
+
+    if not rows:
+        table = (
+            "| Time | Event | Settings | Source | Indoor | Outdoor |\n"
+            "|---|---|---|---|---|---|\n"
+            "| -- | (no events in window) | | | | |"
+        )
+        return _maybe_prepend_whf_warning(table, config)
+
+    # ---- format as markdown ----
+    header = "| Time | Event | Settings | Source | Indoor | Outdoor |"
+    sep = "|---|---|---|---|---|---|"
+    row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in rows]
+    table = "\n".join([header, sep, *row_lines])
+
+    return _maybe_prepend_whf_warning(table, config)
+
+
+async def build_daily_summaries_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
+    """Build a HISTORICAL DAILY SUMMARIES section for multi-day investigations
+    (moved from ai_skills_activity.py, Issue #563).
+
+    Wraps `_build_daily_summaries()`. Only meaningful once the requested window
+    exceeds ~36 hours — for a same-day question the event log already covers it,
+    so this stays empty below that threshold rather than adding noise.
+    """
+    hours = float(kwargs.get("hours", 24))
+    if hours <= 36:
+        return ""
+    return "\n".join(_build_daily_summaries(coordinator, hours)) + "\n"
+
+
+async def build_activity_timeline_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
+    """Build a deterministic event timeline table for investigator context (Issue #563).
+
+    Wraps `build_event_timeline_table()` — a markdown table of what happened,
+    generated programmatically (never LLM-authored) — so both the silent/scheduled
+    narration mode and the on-demand investigation mode of the merged skill can
+    ground their narrative in an actual chronological record instead of re-deriving
+    one from raw event-log counts.
+    """
+    hours = float(kwargs.get("hours", 24))
+    hours = max(1.0, min(hours, 720.0))
+    raw_event_log = list(getattr(coordinator, "_event_log", []) or [])
+    config = getattr(coordinator, "config", {}) or {}
+    table = build_event_timeline_table(raw_event_log, config, hours, dt_util.now())
+    return f"=== ACTIVITY TIMELINE (last {hours:g}h) ===\n{table}\n"
+
+
+async def build_state_cross_validation_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
+    """Build a STATE CROSS-VALIDATION section (moved from ai_skills_activity.py, Issue #563).
+
+    Two deterministic checks, pre-computed so the model cites them rather than
+    re-deriving: (1) hvac_mode=off but hvac_action reports active — flagged unless
+    it's the expected CA-fan-only-mode case (is_ca_fan_running() is the single
+    source of truth here, Issue #458); (2) indoor temp vs. comfort band, using the
+    thermostat's own swing/deadband so a within-deadband shortfall isn't flagged.
+    """
+    data: dict[str, Any] = coordinator.data or {}
+    options: dict[str, Any] = coordinator.config or {}
+
+    hvac_mode = data.get("hvac_mode") or "unknown"
+    hvac_action = data.get(ATTR_HVAC_ACTION, "unknown")
+    fan_status = data.get(ATTR_FAN_STATUS, "unknown")
+
+    climate_entity_id: str = options.get("climate_entity", "")
+    current_temp: Any = "unknown"
+    if climate_entity_id:
+        climate_state = hass.states.get(climate_entity_id) if hass is not None else None
+        if climate_state is not None:
+            current_temp = climate_state.attributes.get("current_temperature", "unknown")
+
+    state_flags: list[str] = []
+    active_actions = {"heating", "cooling", "fan"}
+    if hvac_mode == "off" and str(hvac_action).lower() in active_actions:
+        ca_fan_running = is_ca_fan_running(fan_status)
+        if not (str(hvac_action).lower() == "fan" and ca_fan_running):
+            state_flags.append(
+                f"[WARNING] hvac_mode=off but hvac_action={hvac_action!r} -- "
+                "possible stale coordinator data or thermostat reporting bug"
+            )
+
+    _swing_heat_f = THERMAL_SWING_DEFAULT_F
+    _swing_cool_f = THERMAL_SWING_DEFAULT_F
+    _temp_unit = options.get("temp_unit", "fahrenheit")
+    learning = getattr(coordinator, "learning", None)
+    if learning is not None and callable(getattr(learning, "get_thermal_model", None)):
+        try:
+            _build_health = getattr(coordinator, "_build_learning_health", None)
+            _health = _build_health() if callable(_build_health) else {}
+            _thermal = learning.get_thermal_model(learning_health=_health)
+            _swing_heat_f = _thermal.get("swing_heat_f_display", THERMAL_SWING_DEFAULT_F)
+            _swing_cool_f = _thermal.get("swing_cool_f_display", THERMAL_SWING_DEFAULT_F)
+            if _temp_unit == "celsius":
+                _swing_heat_f *= 5.0 / 9.0
+                _swing_cool_f *= 5.0 / 9.0
+        except Exception:
+            pass
+
+    try:
+        ch = float(options.get("comfort_heat", "unknown"))
+        cc = float(options.get("comfort_cool", "unknown"))
+        ct = float(current_temp)
+        if (ch - ct) > _swing_heat_f:
+            state_flags.append(
+                f"[FLAG] Indoor {ct}F < comfort_heat {ch}F -- below by {ch - ct:.1f}F (deadband: {_swing_heat_f:.1f}F)"
+            )
+        elif (ct - cc) > _swing_cool_f:
+            state_flags.append(
+                f"[FLAG] Indoor {ct}F > comfort_cool {cc}F -- above by {ct - cc:.1f}F (deadband: {_swing_cool_f:.1f}F)"
+            )
+        else:
+            state_flags.append(f"[OK] Indoor {ct}F is within comfort band [{ch}-{cc}F]")
+    except (ValueError, TypeError):
+        pass
+
+    lines = ["=== STATE CROSS-VALIDATION ===", *(state_flags if state_flags else ["  No contradictions detected."])]
+    return "\n".join(lines) + "\n"
+
+
+async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
+    """Build MANUAL OVERRIDES TODAY + FAN OWNERSHIP HISTORY (moved from
+    ai_skills_activity.py, Issue #563).
+
+    Includes the Issue #321 stuck-grace detection: manual_override_active=True but
+    grace already expired without clearing — a critical system error the occupant
+    experiences as "the HVAC won't return to automatic," pre-flagged as top priority
+    rather than left for the model to notice from raw timestamps.
+    """
+    lines: list[str] = ["=== MANUAL OVERRIDES TODAY ==="]
+    try:
+        today_record = getattr(coordinator, "_today_record", None)
+        override_count = 0
+        override_details: list[dict] = []
+        if today_record is not None:
+            override_count = getattr(today_record, "manual_overrides", 0)
+            override_details = list(getattr(today_record, "override_details", []) or [])
+
+        lines.append(f"  Count:             {override_count}")
+        if override_details:
+            for i, d in enumerate(override_details, 1):
+                t = d.get("time", "??:??")
+                old_t = d.get("old_temp", "?")
+                new_t = d.get("new_temp", "?")
+                direction = d.get("direction", "?")
+                magnitude = d.get("magnitude", "?")
+                sign = "+" if direction == "up" else "-"
+                lines.append(f"  #{i}  {t}  {old_t}F -> {new_t}F  ({sign}{magnitude}F, {direction})")
+        else:
+            lines.append("  (no setpoint overrides recorded today)")
+
+        ae = getattr(coordinator, "automation_engine", None)
+        if ae is not None and getattr(ae, "_manual_override_active", False):
+            override_time_str = getattr(ae, "_manual_override_time", None)
+            if override_time_str:
+                try:
+                    override_dt = datetime.datetime.fromisoformat(str(override_time_str))
+                    now_local = dt_util.now()
+                    duration_seconds = (now_local - override_dt).total_seconds()
+                    duration_min = max(0, round(duration_seconds / 60))
+                    local_start = dt_util.as_local(override_dt) if override_dt.tzinfo else override_dt
+                    lines.append(
+                        f"  Current override:  active since {local_start.strftime('%H:%M')}, "
+                        f"duration {duration_min} min (ongoing)"
+                    )
+                except Exception:
+                    lines.append("  Current override:  active (duration unknown)")
+            else:
+                lines.append("  Current override:  active (start time unknown)")
+        else:
+            lines.append("  Current override:  none active")
+
+        if ae is not None:
+            _ae_grace_end = getattr(ae, "_grace_end_time", None)
+            _ae_override = getattr(ae, "_manual_override_active", False)
+            _ae_grace = getattr(ae, "_grace_active", False)
+            if _ae_override and not _ae_grace and _ae_grace_end is not None:
+                try:
+                    _grace_end_dt = datetime.datetime.fromisoformat(str(_ae_grace_end))
+                    if _grace_end_dt.tzinfo is None:
+                        _grace_end_dt = _grace_end_dt.replace(tzinfo=datetime.UTC)
+                    if dt_util.now() > _grace_end_dt:
+                        lines.append(
+                            "  WARNING STUCK GRACE DETECTED: manual_override_active=True but "
+                            f"grace_end_time ({_ae_grace_end}) is in the past and no grace timer "
+                            "is active. This is a critical system error -- the override should "
+                            "have been cleared. Recommend flagging as top priority incongruity."
+                        )
+                except Exception:
+                    pass
+    except Exception:
+        _LOGGER.warning("investigator: failed to build override detail section -- skipping")
+        lines = ["=== MANUAL OVERRIDES TODAY ===", "  (unavailable)"]
+
+    # --- Fan ownership history ---
+    try:
+        hours = float(kwargs.get("hours", 24))
+        hours = max(1.0, min(hours, 720.0))
+        cutoff = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+        raw_event_log: list[Any] = getattr(coordinator, "_event_log", []) or []
+        _own_ca = False
+        _own_user = False
+        fan_ownership_lines: list[str] = []
+        for entry in raw_event_log[-200:]:
+            if not isinstance(entry, dict):
+                continue
+            raw_time = entry.get("time")
+            if raw_time is not None:
+                if isinstance(raw_time, datetime.datetime):
+                    _odt = raw_time
+                    if _odt.tzinfo is None:
+                        _odt = _odt.replace(tzinfo=datetime.UTC)
+                else:
+                    try:
+                        _odt = datetime.datetime.fromisoformat(str(raw_time))
+                        if _odt.tzinfo is None:
+                            _odt = _odt.replace(tzinfo=datetime.UTC)
+                    except ValueError:
+                        _odt = None
+                if _odt is not None and _odt < cutoff:
+                    continue
+
+            _etype = str(entry.get("type", "unknown"))
+            _edata = {k: v for k, v in entry.items() if k not in ("time", "type")}
+            _ts_str = _fmt_time(entry.get("time"))
+
+            if _etype in ("nat_vent_fan_on", "fan_activated"):
+                if not _own_ca:
+                    _own_ca = True
+                    _own_user = False
+                    fan_ownership_lines.append(f"  {_ts_str}: CA owns fan ({_etype})")
+            elif _etype == "fan_manual_override" and str(_edata.get("fan_after", "")).strip() == "on":
+                if not _own_user:
+                    _own_user = True
+                    _own_ca = False
+                    fan_ownership_lines.append(f"  {_ts_str}: User owns fan (fan_manual_override, fan->on)")
+            elif _etype == "fan_cancel":
+                if _own_user:
+                    _own_user = False
+                    fan_ownership_lines.append(f"  {_ts_str}: Fan ownership cleared (fan_cancel)")
+            elif _etype in ("nat_vent_fan_off", "fan_deactivated") and _own_ca:
+                _own_ca = False
+                fan_ownership_lines.append(f"  {_ts_str}: CA released fan ({_etype})")
+
+        lines += [
+            "",
+            "=== FAN OWNERSHIP HISTORY ===",
+            *(fan_ownership_lines if fan_ownership_lines else ["  (no fan ownership transitions in window)"]),
+        ]
+    except Exception:
+        _LOGGER.warning("investigator: failed to build fan ownership history -- skipping")
+
+    return "\n".join(lines) + "\n"
+
 
 _PROVIDER_REGISTRY = ContextProviderRegistry()
 
@@ -1116,6 +2732,38 @@ _PROVIDER_REGISTRY.register(
         tags=frozenset({"events"}),
         priority=1,
         builder=build_event_log_context,
+    )
+)
+_PROVIDER_REGISTRY.register(
+    ContextProvider(
+        name="activity_timeline",
+        tags=frozenset({"events", "system"}),
+        priority=1,
+        builder=build_activity_timeline_context,
+    )
+)
+_PROVIDER_REGISTRY.register(
+    ContextProvider(
+        name="state_cross_validation",
+        tags=frozenset({"system", "hvac"}),
+        priority=0,
+        builder=build_state_cross_validation_context,
+    )
+)
+_PROVIDER_REGISTRY.register(
+    ContextProvider(
+        name="override_details",
+        tags=frozenset({"events", "system"}),
+        priority=1,
+        builder=build_override_details_context,
+    )
+)
+_PROVIDER_REGISTRY.register(
+    ContextProvider(
+        name="daily_summaries",
+        tags=frozenset({"learning", "events"}),
+        priority=2,
+        builder=build_daily_summaries_context,
     )
 )
 _PROVIDER_REGISTRY.register(

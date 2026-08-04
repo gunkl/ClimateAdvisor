@@ -1122,4 +1122,227 @@ class TestDeprecatedParameterFallback:
             raised = True
 
         assert raised is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #565 — claude-sonnet-5 rejects the legacy thinking shape and performs
+# uncapped implicit reasoning at reasoning tiers that never request thinking
+# control, silently consuming the full max_tokens budget with zero visible
+# output. Confirmed live: the model 400s on `thinking.type.enabled` and names
+# the replacement directly ("thinking.type.adaptive" + "output_config.effort").
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveThinkingKwargsShape:
+    """Once a model is known to need adaptive thinking, every reasoning tier — not
+    just 'high' — must send the new shape, since the failure was observed at medium."""
+
+    def test_learned_model_uses_adaptive_shape_at_medium_reasoning(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+        client._adaptive_thinking_models.add("claude-sonnet-5")
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-5",
+            max_tokens=8192,
+            temperature=0.3,
+            reasoning_effort="medium",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert kwargs["temperature"] == 1
+        assert kwargs["max_tokens"] == 8192  # adaptive mode needs no headroom bump
+
+    def test_learned_model_maps_effort_from_reasoning_tier(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+        client._adaptive_thinking_models.add("claude-sonnet-5")
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-5",
+            max_tokens=8192,
+            temperature=0.3,
+            reasoning_effort="low",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert kwargs["output_config"] == {"effort": "low"}
+
+    def test_unlearned_model_keeps_legacy_high_only_behavior(self):
+        """A model never seen to need adaptive thinking must be unaffected — no
+        regression for models this session never confirmed the failure on."""
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            temperature=0.3,
+            reasoning_effort="medium",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert "thinking" not in kwargs
+        assert "output_config" not in kwargs
+        assert kwargs["temperature"] == 0.3
+
+    def test_dropped_param_strip_still_runs_after_adaptive_shape(self):
+        """Same ordering guarantee as the legacy high-tier case: a param learned
+        unsupported for this model must never be re-added by the adaptive branch."""
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+        client._adaptive_thinking_models.add("claude-sonnet-5")
+        client._unsupported_params["claude-sonnet-5"] = {"temperature"}
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-5",
+            max_tokens=8192,
+            temperature=0.3,
+            reasoning_effort="medium",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert "temperature" not in kwargs
+        assert kwargs["thinking"] == {"type": "adaptive"}
+
+
+class TestAdaptiveThinkingReactiveFallback:
+    """A 400 naming 'thinking.type.adaptive' must be learned and switched to,
+    not blindly retried with backoff (Issue #565)."""
+
+    def test_non_streaming_retries_with_adaptive_shape_and_learns_it(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiAPIError(
+                '"thinking.type.enabled" is not supported for this model. Use '
+                '"thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
+            ),
+            _mock_message("recovered with adaptive thinking"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            response = asyncio.run(client.async_request("System.", "User.", reasoning_effort="high"))
+
+        assert response.success is True
+        assert mock_api.messages.create.call_count == 2
+        second_kwargs = mock_api.messages.create.call_args.kwargs
+        assert second_kwargs["thinking"] == {"type": "adaptive"}
+        assert second_kwargs["output_config"] == {"effort": "high"}
+        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
+        mock_sleep.assert_not_called()
+
+    def test_streaming_retries_with_adaptive_shape_before_any_content_yielded(self):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=10, output_tokens=20)
+        final_msg.stop_reason = "end_turn"
+        good_stream = _FakeStreamCM([_mock_text_delta_event("recovered")], final_msg)
+        bad_stream = _FakeFailingStreamCM(
+            Exception(
+                '"thinking.type.enabled" is not supported for this model. Use '
+                '"thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
+            )
+        )
+        mock_api.messages.stream = MagicMock(side_effect=[bad_stream, good_stream])
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User.", reasoning_effort="high"):
+                events.append(event)
+            return events
+
+        events = asyncio.run(_collect())
+
+        text_events = [e for e in events if e.get("type") == "text"]
+        assert text_events == [{"type": "text", "text": "recovered"}]
+        assert mock_api.messages.stream.call_count == 2
+        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
+
+    def test_unrelated_400_error_does_not_learn_adaptive_thinking(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = _ClaudeApiAPIError("invalid_request_error: bad JSON")
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is False
+        assert client._adaptive_thinking_models == set()
+
+
+class TestAdaptiveThinkingTruncatedEmptyRecovery:
+    """The confirmed production symptom (full budget, zero visible text, no explicit
+    thinking param ever sent) must self-heal — the model never raises an exception
+    here, it just returns an unusable 'successful' response."""
+
+    def test_non_streaming_truncated_empty_response_retries_with_adaptive_thinking(self, caplog):
+        mock_api = _make_mock_api_client()
+        empty_msg = _mock_message("", output_tokens=8192, stop_reason="max_tokens")
+        empty_msg.content = []
+        mock_api.messages.create.side_effect = [
+            empty_msg,
+            _mock_message("recovered on retry", stop_reason="end_turn"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        with caplog.at_level("WARNING"):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert response.content == "recovered on retry"
+        assert response.truncated_empty is False
+        assert mock_api.messages.create.call_count == 2
+        second_kwargs = mock_api.messages.create.call_args.kwargs
+        assert second_kwargs["thinking"] == {"type": "adaptive"}
+        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
+
+    def test_second_request_after_learning_uses_adaptive_shape_from_the_start(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+        client._adaptive_thinking_models.add("claude-sonnet-5")
+        mock_api.messages.create.return_value = _mock_message("clean response", stop_reason="end_turn")
+
+        response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert mock_api.messages.create.call_count == 1
+        assert mock_api.messages.create.call_args.kwargs["thinking"] == {"type": "adaptive"}
+
+    def test_streaming_truncated_empty_learns_for_next_call_but_cannot_retry_in_place(self, caplog):
+        """Thinking deltas may already be visible to the caller by the time truncation
+        is detected — this call surfaces the same failure as today, but arms the
+        capability flag so the *next* call (streaming or non-streaming) is fixed."""
+        mock_api = _make_mock_api_client()
+        thinking_event = MagicMock()
+        thinking_event.type = "content_block_delta"
+        thinking_event.delta = MagicMock()
+        thinking_event.delta.type = "thinking_delta"
+        thinking_event.delta.thinking = "pondering..."
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=8192)
+        final_msg.stop_reason = "max_tokens"
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([thinking_event], final_msg))
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert stop_events[0]["truncated_empty"] is True
+        assert mock_api.messages.stream.call_count == 1  # no mid-stream retry
+        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
         assert mock_api.messages.stream.call_count == 1

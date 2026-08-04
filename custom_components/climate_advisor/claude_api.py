@@ -92,6 +92,20 @@ def _detect_deprecated_param(error_message: str) -> str | None:
     return match.group(1) if match else None
 
 
+# Issue #565 — some newer models (confirmed: claude-sonnet-5) reject the legacy
+# `thinking: {"type": "enabled", "budget_tokens": N}` shape outright with a 400 whose
+# message names the replacement directly: '"thinking.type.enabled" is not supported for
+# this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking
+# behavior.' Matched on the literal replacement-parameter name Anthropic's own error text
+# points at, not on the full sentence, so minor message wording changes don't break this.
+_ADAPTIVE_THINKING_RE = re.compile(r"thinking\.type\.adaptive")
+
+
+def _detect_adaptive_thinking_required(error_message: str) -> bool:
+    """Return True if Anthropic's API just rejected the legacy thinking shape for this model."""
+    return _ADAPTIVE_THINKING_RE.search(error_message) is not None
+
+
 # Per-model cost rates (USD per million tokens)
 _MODEL_COSTS: dict[str, dict[str, float]] = {
     "claude-sonnet": {"input": 3.0, "output": 15.0},
@@ -236,6 +250,11 @@ class ClaudeAPIClient:
         # rejected as deprecated for that model. In-memory only, per client instance —
         # same acceptable cost as _models_cache (resets on integration reload).
         self._unsupported_params: dict[str, set[str]] = {}
+        # Issue #565: model_ids confirmed (either reactively, via a 400 naming
+        # "thinking.type.adaptive", or after observing a zero-output full-budget
+        # truncation) to need the newer adaptive thinking shape instead of the legacy
+        # enabled/budget_tokens one. In-memory only, same lifecycle as _unsupported_params.
+        self._adaptive_thinking_models: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -513,7 +532,15 @@ class ClaudeAPIClient:
                 break  # success
 
             except (RateLimitError, APITimeoutError, APIError, Exception) as exc:
+                # Both checks are gated on "no content streamed yet" — a retry can only be
+                # safe before anything has been yielded to the caller, since a streaming
+                # generator can't un-yield partial content already shown in the UI.
                 bad_param = None if any_content_yielded else _detect_deprecated_param(str(exc))
+                needs_adaptive = (
+                    not any_content_yielded
+                    and resolved_model not in self._adaptive_thinking_models
+                    and _detect_adaptive_thinking_required(str(exc))
+                )
                 if attempt == 1 and bad_param is not None:
                     self._unsupported_params.setdefault(resolved_model, set()).add(bad_param)
                     _LOGGER.warning(
@@ -522,6 +549,15 @@ class ClaudeAPIClient:
                         bad_param,
                     )
                     continue  # next loop iteration rebuilds kwargs without bad_param
+                if attempt == 1 and needs_adaptive:
+                    # Issue #565: model rejected the legacy thinking shape outright — learn
+                    # it and retry with thinking.type.adaptive + output_config.effort.
+                    self._adaptive_thinking_models.add(resolved_model)
+                    _LOGGER.warning(
+                        "Model '%s' rejected the legacy thinking shape — retrying stream with adaptive thinking",
+                        resolved_model,
+                    )
+                    continue  # next loop iteration rebuilds kwargs with the adaptive shape
 
                 self._circuit_breaker.consecutive_failures += 1
                 self._error_count += 1
@@ -551,8 +587,9 @@ class ClaudeAPIClient:
         )
         if truncated_empty:
             # Issue #563 follow-on: the full max_tokens budget was billed and consumed,
-            # but no "text"/"thinking" delta was ever yielded — a different, more severe
-            # problem than ordinary truncation (there's no partial content to salvage).
+            # but no visible answer text was ever yielded (thinking deltas may still have
+            # streamed) — a different, more severe problem than ordinary truncation
+            # (there's no partial content to salvage).
             _LOGGER.warning(
                 "Streaming response consumed the full max_tokens budget with zero visible "
                 "output: skill=%s model=%s output_tokens=%d max_tokens=%d "
@@ -564,6 +601,20 @@ class ClaudeAPIClient:
                 kwargs["max_tokens"],
                 resolved_reasoning,
             )
+            # Issue #565: this exact symptom (full budget, zero visible text) is what
+            # uncapped implicit thinking on a newer model looks like at reasoning tiers
+            # that never requested thinking control at all — arm the adaptive-thinking
+            # capability for this model so the NEXT call (streaming or non-streaming)
+            # applies bounded thinking from the start instead of repeating this failure.
+            # This call already streamed thinking deltas to the caller and can't be
+            # retried in place.
+            if resolved_model not in self._adaptive_thinking_models:
+                self._adaptive_thinking_models.add(resolved_model)
+                _LOGGER.warning(
+                    "Model '%s' will use adaptive thinking control on future requests "
+                    "to recover from zero-output truncation",
+                    resolved_model,
+                )
         elif truncated:
             _LOGGER.warning(
                 "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
@@ -923,11 +974,23 @@ class ClaudeAPIClient:
             "temperature": temperature,
         }
 
-        # Extended thinking for high reasoning effort
-        # Claude API requirements when thinking is enabled:
-        #   1. temperature must be exactly 1
-        #   2. max_tokens must exceed budget_tokens
-        if reasoning_effort == AI_REASONING_HIGH:
+        if model in self._adaptive_thinking_models:
+            # Issue #565: this model rejects the legacy enabled/budget_tokens shape and
+            # performs its own uncapped internal reasoning whenever no thinking control is
+            # sent at all — confirmed to silently consume the entire max_tokens budget on
+            # real-sized prompts, at every reasoning_effort tier, not just "high" (unlike
+            # older models, where only "high" ever requested extended thinking). Apply the
+            # newer thinking.type.adaptive + output_config.effort shape at every tier so
+            # thinking is always bounded and some max_tokens headroom is left for the
+            # visible answer. `effort` maps directly from the configured reasoning_effort.
+            kwargs["temperature"] = 1  # same API requirement as the legacy shape below
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": reasoning_effort}
+        elif reasoning_effort == AI_REASONING_HIGH:
+            # Extended thinking for high reasoning effort (legacy shape).
+            # Claude API requirements when thinking is enabled:
+            #   1. temperature must be exactly 1
+            #   2. max_tokens must exceed budget_tokens
             budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
             kwargs["temperature"] = 1  # required by API — overrides configured value
             if kwargs["max_tokens"] <= budget:
@@ -1117,7 +1180,7 @@ class ClaudeAPIClient:
 
         for attempt in range(1, AI_MAX_RETRIES + 1):
             try:
-                return await self._single_api_call(
+                response = await self._single_api_call(
                     system_prompt=system_prompt,
                     user_message=user_message,
                     model=model,
@@ -1126,6 +1189,28 @@ class ClaudeAPIClient:
                     reasoning_effort=reasoning_effort,
                     start_time=start_time,
                 )
+                if response.truncated_empty and model not in self._adaptive_thinking_models:
+                    # Issue #565: full max_tokens budget consumed with zero visible
+                    # answer text — a newer model's uncapped implicit thinking left no
+                    # room for the answer. Unlike the streaming path, nothing has been
+                    # shown to the caller yet (this is a single atomic response), so a
+                    # same-attempt retry with bounded thinking is safe.
+                    self._adaptive_thinking_models.add(model)
+                    _LOGGER.warning(
+                        "Model '%s' consumed the full budget with zero output — retrying "
+                        "with adaptive thinking control",
+                        model,
+                    )
+                    return await self._single_api_call(
+                        system_prompt=system_prompt,
+                        user_message=user_message,
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        reasoning_effort=reasoning_effort,
+                        start_time=start_time,
+                    )
+                return response
 
             except RateLimitError as exc:
                 last_error = f"Rate limit error: {exc}"
@@ -1151,6 +1236,11 @@ class ClaudeAPIClient:
                 # shapes (a 400 param-deprecation vs a 404 model-not-found), so only
                 # one generic "last_error" tail is needed for whichever wasn't hit.
                 bad_param = _detect_deprecated_param(str(exc))
+                needs_adaptive = (
+                    bad_param is None
+                    and model not in self._adaptive_thinking_models
+                    and _detect_adaptive_thinking_required(str(exc))
+                )
                 if bad_param is not None:
                     self._unsupported_params.setdefault(model, set()).add(bad_param)
                     _LOGGER.warning(
@@ -1171,6 +1261,27 @@ class ClaudeAPIClient:
                     except Exception as retry_exc:  # noqa: BLE001
                         last_error = f"API error even after dropping '{bad_param}': {retry_exc}"
                         _LOGGER.warning("Retry without '%s' also failed: %s", bad_param, retry_exc)
+                elif needs_adaptive:
+                    # Issue #565: model rejected the legacy thinking shape outright —
+                    # learn it and retry with thinking.type.adaptive + output_config.effort.
+                    self._adaptive_thinking_models.add(model)
+                    _LOGGER.warning(
+                        "Model '%s' rejected the legacy thinking shape — retrying with adaptive thinking",
+                        model,
+                    )
+                    try:
+                        return await self._single_api_call(
+                            system_prompt=system_prompt,
+                            user_message=user_message,
+                            model=model,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            reasoning_effort=reasoning_effort,
+                            start_time=start_time,
+                        )
+                    except Exception as retry_exc:  # noqa: BLE001
+                        last_error = f"API error even after switching to adaptive thinking: {retry_exc}"
+                        _LOGGER.warning("Retry with adaptive thinking also failed: %s", retry_exc)
                 else:
                     # Issue #563: an invalid/deprecated model won't succeed on retry —
                     # skip the backoff loop and try one same-tier replacement instead.

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.52] — 2026-08-04
+
+- Fix #565: the AI Investigator and AI Activity Report could silently burn their entire response budget with no visible answer at all on newer Claude models (confirmed with claude-sonnet-5) — the model was doing its own internal reasoning with no cap on it, and that reasoning alone could use up the whole response length before ever getting to write an actual answer. Climate Advisor now detects this and automatically applies a bounded-reasoning setting so the model always leaves room for a real answer; it also learns per-model going forward so this self-heals after the first occurrence instead of repeating on every request.
+
 ## [0.5.51] — 2026-08-03
 
 - Fix #563: the AI Investigator was sending nearly the entire history of every fixed issue to Claude on every single run — a version-scoping check that was supposed to limit this to only recently-relevant fixes had a bug that let all 169 fixed-issue records through every time, and a separate rendering bug was expanding some of that text by roughly 15x on top of that. Investigations should now run noticeably faster and cheaper, with no loss of the "was this already fixed" cross-check the AI uses this data for.

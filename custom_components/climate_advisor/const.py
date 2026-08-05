@@ -4,17 +4,24 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.57"
+VERSION = "0.5.58"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.58": [
+        'Feat #573 follow-up: replaced the menu-based "Save"/"Save and Reload" options'
+        " added in 0.5.57 — Home Assistant's options-flow menu can't render an actual"
+        " button (only a plain list row), so those looked identical to the settings"
+        " sections instead of a real action. Each settings section now just has its"
+        " normal Submit again; saving a section raises a repair notice (Settings ->"
+        " System -> Repairs) telling you Climate Advisor has changes waiting, with a"
+        " one-click Reload right from there.",
+    ],
     "0.5.57": [
         "Feat #573: editing several AI/comfort/schedule settings sections in one visit"
         " to Configure used to reload Climate Advisor after every single section's"
         " Submit, rebuilding the coordinator and AI client each time. Each section now"
-        ' just saves; the main Options menu has two new entries — "Save" (closes the'
-        " settings screen; changes are stored and will apply next time Climate Advisor"
-        ' reloads or Home Assistant restarts) and "Save and Reload" (closes the screen'
-        " and applies everything you just changed in one reload, right away).",
+        " just saves; applying pending changes is done via a repair notice guiding you"
+        " to reload.",
     ],
     "0.5.56": [
         "Fix #572: claude-sonnet-5's first request after being selected could silently"
@@ -1507,7 +1514,7 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     573: {
-        "version_fixed": "0.5.57",
+        "version_fixed": "0.5.58",
         "title": (
             "The options-flow menu-based navigation added in Issue #50, and the"
             " immediate-persist-on-Submit behavior added in Issue #557, together meant"
@@ -1517,25 +1524,35 @@ KNOWN_FIXES: dict[int, dict] = {
             " down and rebuilt the coordinator/AI client once per section instead of"
             " once per session. Changed by explicit user request during the Issue #572"
             " investigation, once it became clear the same reload was involved in that"
-            " AI capability-persistence chain of bugs."
+            " AI capability-persistence chain of bugs. First shipped (0.5.57) with"
+            ' menu-item "Save"/"Save and Reload" entries, but HA\'s options-flow menu'
+            " step can only render a plain list row — verified against HA frontend"
+            " source (step-flow-menu.ts, dialog-data-entry-flow.ts) — so there was no way"
+            " to make either one look or behave like an actual button, distinct from a"
+            " settings-section row. Replaced (0.5.58) with a repair-issue notice instead."
         ),
         "scope_covered": (
             "config_flow.py: _commit_section() no longer calls async_reload() — it only"
             " calls hass.config_entries.async_update_entry(), same as before, so"
             " re-opening a section within the same options-flow session still shows the"
-            " just-saved value (the original Issue #557 fix this preserves). Two new"
-            " terminal steps in OPTIONS_MENU_OPTIONS: async_step_save() closes the flow"
-            " with no reload (every section already wrote its own fields); async_step_"
-            " save_reload() closes the flow and reloads the entry exactly once, applying"
-            " every section edited during the session in a single coordinator rebuild."
-            " This is a config-entry reload only (config_entries.async_reload(), the same"
-            " mechanism Submit already used) — not a homeassistant.restart service call,"
-            " which would be an out-of-scope HA Boundary Rule violation; that alternative"
-            " was explicitly considered and rejected during design. strings.json and"
-            " translations/en.json both updated with the new menu labels. Test coverage:"
-            " tests/test_config_flow.py (TestOptionsFlowMenu — section Submit no longer"
-            " reloads, Save closes without reloading, Save and Reload reloads exactly"
-            " once and reflects all pending section edits)."
+            " just-saved value (the original Issue #557 fix this preserves). Every"
+            " section's Submit behaves exactly as it did before #573 (writes only,"
+            " already true since 0.5.57) and OPTIONS_MENU_OPTIONS has no save/reload"
+            " entries at all. Instead, _commit_section() raises a fixable, persistent"
+            ' repair issue ("reload_needed", WARNING severity) via'
+            " homeassistant.helpers.issue_registry — visible directly on the integration's"
+            " Devices & Services page. repairs.py: new ReloadNeededRepairFlow whose confirm"
+            " step calls hass.config_entries.async_reload() (the same mechanism Submit"
+            " used pre-#573 — not a homeassistant.restart service call, which would be an"
+            " out-of-scope HA Boundary Rule violation; that alternative was explicitly"
+            " considered and rejected) and deletes the issue. __init__.py:"
+            " async_setup_entry() also unconditionally clears the issue on every setup, so"
+            ' a reload/restart through any path (Repairs "Fix", HA\'s own generic'
+            ' "Reload" action, or a full HA restart) clears the notice. strings.json and'
+            " translations/en.json carry the issues.reload_needed translation. Test"
+            " coverage: tests/test_config_flow.py (section Submit never reloads, raises the"
+            " repair issue), tests/test_repairs.py (TestReloadNeededRepairFlow — confirm"
+            " reloads and clears the issue; graceful no-op with no config entries)."
         ),
     },
     572: {

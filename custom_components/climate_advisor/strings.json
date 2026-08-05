@@ -146,9 +146,7 @@
           "advanced": "Learning & Behavior",
           "classification_thresholds": "Day-Type Thresholds",
           "ai_settings": "AI Settings (Claude)",
-          "github_settings": "GitHub Integration",
-          "save": "Save",
-          "save_reload": "Save and Reload"
+          "github_settings": "GitHub Integration"
         }
       },
       "core": {
@@ -409,6 +407,17 @@
             "data_description": {
               "weather_entity": "The weather integration that provides forecasts and outdoor conditions."
             }
+          }
+        }
+      }
+    },
+    "reload_needed": {
+      "title": "Reload to apply config changes required.",
+      "fix_flow": {
+        "step": {
+          "init": {
+            "title": "Apply saved settings",
+            "description": "You've saved changes in Climate Advisor's options that haven't taken effect yet. Reload Climate Advisor now to apply them."
           }
         }
       }

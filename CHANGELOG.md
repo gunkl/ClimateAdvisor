@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.56] — 2026-08-05
+
+- Fix #572: claude-sonnet-5's first request after being selected could silently hang for up to 90 seconds with no visible output at all before failing — a known model quirk that #565/#568/#569 tried to work around by learning it from a live failure and remembering that lesson, but a genuine Home Assistant restart could silently erase the lesson, so the failure kept coming back. Climate Advisor now ships pre-verified, correct settings for every supported Claude model instead of learning them from a failure — so a supported model's very first request already works correctly, no failed attempt required.
+
 ## [0.5.55] — 2026-08-05
 
 - Fix #571: a legitimate whole-house-fan nat-vent exit was being misread as an externally-owned fan and force-corrected by an emergency reconcile — every single cycle, all morning. The Activity Report showed "Fan running (untracked)" and "fan found running without a CA-owned session" moments after Climate Advisor's own clean exit, instead of just the clean exit itself. Also fixed a related gap: the HVAC-fan dashboard status could get stuck showing "active" even after the fan genuinely stopped, on HVAC-integrated-fan configurations.

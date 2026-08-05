@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.55"
+VERSION = "0.5.56"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.56": [
+        "Fix #572: claude-sonnet-5's first request after being selected could silently"
+        " hang for up to 90 seconds with no visible output at all before failing — a"
+        " known model quirk that #565/#568/#569 tried to work around by learning it from"
+        " a live failure and remembering that lesson, but a genuine Home Assistant"
+        " restart could silently erase the lesson, so the failure kept coming back."
+        " Climate Advisor now ships pre-verified, correct settings for every supported"
+        " Claude model instead of learning them from a failure — so a supported model's"
+        " very first request already works correctly, no failed attempt required.",
+    ],
     "0.5.55": [
         "Fix #571: a legitimate whole-house-fan nat-vent exit was being misread as an"
         " externally-owned fan and force-corrected by an emergency reconcile — every"
@@ -1487,6 +1497,47 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    572: {
+        "version_fixed": "0.5.56",
+        "title": (
+            "claude-sonnet-5's first request against the reactive-learning system built"
+            " by #563/#565/#568/#569 was guaranteed to silently burn the full max_tokens"
+            " budget with zero visible output for up to ~90 seconds — the model does"
+            " uncapped internal reasoning whenever no thinking control is sent, and"
+            " medium/low reasoning tiers never sent any. #565's reactive fix only learned"
+            " this from the live failure itself, and #568/#569's persistence fix (which"
+            " made the lesson survive an options-flow reload) never covered a genuine HA"
+            " restart (EVENT_HOMEASSISTANT_STOP never called _async_save_state()), so on"
+            " an install that restarts/redeploys regularly the '90s silent hang' kept"
+            " recurring instead of staying fixed after the first occurrence. Traced with"
+            " live evidence: ha_logs.py timeline correlating the 2026-08-04 learning event"
+            " with restart-signature log bursts before the 2026-08-05 recurrence, plus the"
+            " live climate_advisor_state.json pulled via SSH. Root design flaw identified:"
+            " no live request should ever be the mechanism that discovers a model's"
+            " correct shape."
+        ),
+        "scope_covered": (
+            "claude_api.py: entire reactive-learning subsystem removed"
+            " (_unsupported_params, _adaptive_thinking_models, _detect_deprecated_param(),"
+            " _detect_adaptive_thinking_required(), the same-call retry loops in both"
+            " async_request_streaming() and _async_call_with_retry(), their"
+            " get_persistent_stats()/restore_persistent_stats() entries). Replaced with"
+            " AI_MODEL_CAPABILITIES, a static per-model table in const.py"
+            " (thinking_shape: legacy/adaptive, supports_temperature), verified 2026-08-05"
+            " via direct Anthropic Messages API calls for claude-sonnet-4-6/opus-4-6/"
+            " haiku-4-5-20251001 (legacy, temperature works — unchanged) and"
+            " claude-sonnet-5/opus-5/fable-5 (adaptive, temperature rejected — confirmed"
+            " both at a small test prompt and at production scale, max_tokens=8192)."
+            " claude-haiku-5 confirmed not to exist (404) and intentionally omitted."
+            " _build_request_kwargs() is now a pure table lookup; a model not in the"
+            " table falls back to the legacy shape (proven safe for years) and logs a"
+            " WARNING naming it. truncated_empty is still detected and logged for a"
+            " table-verified model, but only as a signal that Anthropic changed something"
+            " — no automatic retry or relearning. Test coverage: tests/test_claude_api.py"
+            " (TestBuildRequestKwargsFromCapabilityTable, TestUnexpectedApiErrorObservability,"
+            " TestRequestKwargsDecisionLogging)."
+        ),
+    },
     571: {
         "version_fixed": "0.5.55",
         "title": (
@@ -6330,6 +6381,56 @@ AI_MODEL_SONNET = "claude-sonnet-4-6"
 AI_MODEL_OPUS = "claude-opus-4-6"
 AI_MODEL_HAIKU = "claude-haiku-4-5-20251001"
 AI_MODELS = [AI_MODEL_SONNET, AI_MODEL_OPUS, AI_MODEL_HAIKU]
+
+# Per-model request-shape capabilities (Issue #572) — replaces the reactive
+# learn-from-a-live-failure approach (#563/#565/#568/#569), which guaranteed a silent,
+# ~90s zero-output failure on a model's first-ever request before it could "learn" the
+# correct shape, and whose learned state could be lost on a real HA restart (the
+# #568/#569 persistence fix only covered the config-reload shutdown path, not
+# EVENT_HOMEASSISTANT_STOP). This product supports a small, known set of Claude
+# models, not an arbitrary universe of them, so the correct shape is hardcoded here
+# instead of discovered live.
+#
+# Verified 2026-08-05 via direct calls to the Anthropic Messages API (not simulated):
+#   - claude-sonnet-4-6 / claude-opus-4-6 / claude-haiku-4-5-20251001: accept
+#     `temperature`; no thinking control needed at low/medium; legacy
+#     `thinking:{type:enabled,budget_tokens:N}` shape used at "high" only — the
+#     behavior this integration has always used for these models, unchanged.
+#   - claude-sonnet-5 / claude-opus-5: reject `temperature` outright (400,
+#     "`temperature` is deprecated for this model"); reject the legacy thinking shape
+#     outright (400, "`thinking.type.enabled` is not supported for this model. Use
+#     `thinking.type.adaptive`..."); confirmed producing real visible output with the
+#     adaptive shape at both a small test prompt and full production scale
+#     (max_tokens=8192) — claude-sonnet-5's silent zero-output failure without any
+#     thinking control was also independently confirmed at production scale by
+#     Issue #565's own live diagnostic and in live HA logs (2026-08-05).
+#   - claude-fable-5: rejects `temperature` (same family pattern); adaptive shape
+#     assumed by family consistency with sonnet-5/opus-5, not independently
+#     re-confirmed this session.
+#   - claude-haiku-5: does not exist (404 not_found_error as of 2026-08-05) — not a
+#     real model ID, intentionally omitted.
+#
+# A model not in this table (e.g. a brand-new Anthropic release picked from the live
+# model list before this table is updated) falls back to the "legacy" shape — the
+# behavior proven safe for years prior to claude-sonnet-5 — and logs a WARNING naming
+# the model, rather than silently guessing or reactively probing it live.
+AI_THINKING_SHAPE_LEGACY = "legacy"
+AI_THINKING_SHAPE_ADAPTIVE = "adaptive"
+
+AI_MODEL_CAPABILITIES: dict[str, dict] = {
+    AI_MODEL_SONNET: {"thinking_shape": AI_THINKING_SHAPE_LEGACY, "supports_temperature": True},
+    AI_MODEL_OPUS: {"thinking_shape": AI_THINKING_SHAPE_LEGACY, "supports_temperature": True},
+    AI_MODEL_HAIKU: {"thinking_shape": AI_THINKING_SHAPE_LEGACY, "supports_temperature": True},
+    "claude-sonnet-5": {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
+    "claude-opus-5": {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
+    "claude-fable-5": {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
+}
+
+# Default capabilities for a model not present in AI_MODEL_CAPABILITIES.
+AI_MODEL_CAPABILITIES_DEFAULT: dict = {
+    "thinking_shape": AI_THINKING_SHAPE_LEGACY,
+    "supports_temperature": True,
+}
 
 # Reasoning effort options and budget_tokens mapping
 AI_REASONING_LOW = "low"

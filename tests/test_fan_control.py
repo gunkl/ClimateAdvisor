@@ -2944,12 +2944,65 @@ class TestDualFanStatus:
         mock_logger.warning.assert_called_once()
 
     def test_hvac_fan_status_active_when_fan_active(self):
-        """_compute_hvac_fan_status returns 'active' when _fan_active=True."""
+        """_compute_hvac_fan_status returns 'active' when _fan_active=True and the
+        thermostat confirms the fan is running (Issue #571 — this function gained a
+        ground-truth cross-check mirroring _compute_whf_status(), so climate_hvac_action
+        must now say 'fan' the same way physical_state=True does for the WHF sibling)."""
         coord = _make_coordinator_for_fan_status(
             fan_mode=FAN_MODE_HVAC,
             fan_active=True,
+            climate_hvac_action="fan",
         )
         assert coord._compute_hvac_fan_status() == "active"
+
+    def test_hvac_fan_status_active_unconfirmed_when_thermostat_off(self):
+        """Issue #571: mirrors test_whf_status_active_unconfirmed_when_physical_off() —
+        _fan_active=True but the thermostat doesn't yet confirm it, within the
+        recent-command transient window -> 'active (unconfirmed)', not a stale-flag warning."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=True,
+            climate_hvac_action="",
+            recent_fan_command=True,
+        )
+        assert coord._compute_hvac_fan_status() == "active (unconfirmed)"
+
+    def test_hvac_fan_status_settles_to_inactive_once_stale(self):
+        """Issue #571: mirrors test_whf_status_settles_to_inactive_once_stale() — once NOT
+        within the recent-command window, ground truth wins and a WARNING is logged."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=True,
+            climate_hvac_action="",
+            recent_fan_command=False,
+        )
+        with patch("custom_components.climate_advisor.coordinator._LOGGER") as mock_logger:
+            result = coord._compute_hvac_fan_status()
+        assert result == "inactive"
+        mock_logger.warning.assert_called_once()
+
+    def test_hvac_fan_status_running_untracked_respects_recent_command_guard(self):
+        """Issue #571: the OFF-direction fallback (fan not CA-owned, thermostat says on)
+        must NOT report 'running (untracked)' within 30s of CA's own most recent fan
+        command — mirrors the WHF/general fan_status coverage for the same guard."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            climate_hvac_action="fan",
+            recent_fan_command=True,
+        )
+        assert coord._compute_hvac_fan_status() == "inactive"
+
+    def test_hvac_fan_status_running_untracked_when_not_recent(self):
+        """Companion to the guard test above — proves the guard doesn't over-suppress
+        genuine untracked detection once outside the recent-command window."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            climate_hvac_action="fan",
+            recent_fan_command=False,
+        )
+        assert coord._compute_hvac_fan_status() == "running (untracked)"
 
     def test_both_mode_returns_whf_active_and_hvac_active(self):
         """FAN_MODE_BOTH: both _compute_whf_status and _compute_hvac_fan_status return 'active'."""
@@ -2957,6 +3010,7 @@ class TestDualFanStatus:
             fan_mode=FAN_MODE_BOTH,
             fan_active=True,
             physical_state=True,
+            climate_hvac_action="fan",
         )
         assert coord._compute_whf_status() == "active"
         assert coord._compute_hvac_fan_status() == "active"
@@ -2986,6 +3040,50 @@ class TestDualFanStatus:
             result = coord._compute_fan_status()
         assert result == "inactive"
         mock_logger.warning.assert_called_once()
+
+    def test_compute_fan_status_whf_untracked_respects_recent_command_guard(self):
+        """Issue #571: _compute_fan_status's WHF ground-truth fallback must NOT report
+        'running (untracked)' within 30s of CA's own most recent fan command."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=True,
+            recent_fan_command=True,
+        )
+        assert coord._compute_fan_status() == "inactive"
+
+    def test_compute_fan_status_whf_untracked_when_not_recent(self):
+        """Companion to the guard test above -- proves the guard doesn't over-suppress
+        genuine untracked detection once outside the recent-command window."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=True,
+            recent_fan_command=False,
+        )
+        assert coord._compute_fan_status() == "running (untracked)"
+
+    def test_compute_fan_status_hvac_untracked_respects_recent_command_guard(self):
+        """Issue #571: _compute_fan_status's HVAC/BOTH ground-truth fallback (thermostat
+        attributes) must NOT report 'running (untracked)' within 30s of CA's own most
+        recent fan command."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            climate_hvac_action="fan",
+            recent_fan_command=True,
+        )
+        assert coord._compute_fan_status() == "inactive"
+
+    def test_compute_fan_status_hvac_untracked_when_not_recent(self):
+        """Companion to the guard test above for the HVAC/BOTH branch."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_HVAC,
+            fan_active=False,
+            climate_hvac_action="fan",
+            recent_fan_command=False,
+        )
+        assert coord._compute_fan_status() == "running (untracked)"
 
     def test_whf_status_nat_vent_idle(self):
         """_compute_whf_status returns 'nat-vent (session active, fan idle)' when nat-vent active, fan idle."""
@@ -3046,6 +3144,18 @@ class TestDualFanStatus:
             physical_state=True,
         )
         assert coord._compute_whf_status() == "running (untracked)"
+
+    def test_whf_status_untracked_respects_recent_command_guard(self):
+        """Issue #571: _compute_whf_status must NOT report 'running (untracked)' within 30s
+        of CA's own most recent fan command -- the physical entity simply hasn't caught up
+        to CA's own just-issued off-command yet."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=True,
+            recent_fan_command=True,
+        )
+        assert coord._compute_whf_status() == "inactive"
 
     def test_hvac_fan_status_running_untracked_via_thermostat(self):
         """_compute_hvac_fan_status returns 'running (untracked)' when thermostat fan_mode='on'."""

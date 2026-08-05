@@ -176,7 +176,6 @@ def _make_coordinator(learning=None) -> MagicMock:
     }
     coord.learning = learning if learning is not None else _make_learning_mock()
     coord._event_log = []
-    coord.get_ai_report_history.return_value = []
     coord._today_record = None
     coord._hvac_on_since = None
     coord.hass = MagicMock()

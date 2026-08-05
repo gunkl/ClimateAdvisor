@@ -53,8 +53,9 @@ INVESTIGATION PROCEDURE
    - Zeroed counters that should accumulate over time (runtime, observation counts)
    - Thermal rates (heating/cooling Â°F per hour) outside physically plausible bounds
    - Weather bias corrections that exceed the configured cap
-4. Check the event log for any entries whose type contains "error" or "warning". Quote the\
- relevant event fields verbatim.
+4. Check the SYSTEM LOG RECORDS section for any captured WARNING/ERROR log entries (these are\
+ real logger output, not CA event-log entries whose type merely happens to contain the word\
+ "error" or "warning"). Quote the relevant record fields verbatim.
 5. Generate 2â€"5 ranked hypotheses about what may be wrong or inconsistent. Rank by confidence\
  (highest first). Each hypothesis must cite at least one evidence item.
 6. For every cited data value use the format: [source: <data_key>, value: <X>]
@@ -66,7 +67,10 @@ INVESTIGATION PROCEDURE
  resolved unless current data directly contradicts." If [NOT COVERED]: state "Issue #X\
  was scoped to path A; path B was explicitly not covered â€" candidate gap or incomplete fix."\
  When scope metadata is available, do not write "could not verify" â€" name the path and its\
- coverage status.
+ coverage status. Also compare the flagged event's own timestamp to any version-change entries\
+ in ACTIVITY TIMELINE: if the event predates the version boundary where a matching\
+ KNOWN-FIXED ISSUES entry was deployed, state explicitly that the event is likely explained by\
+ the pre-fix code path rather than presenting it as a live, currently-reproducible discrepancy.
 9. COUNT DISCREPANCY SUPPRESSION RULE: If `observation_count_heat` or `observation_count_cool`\
  in LEARNING â€" THERMAL MODEL differs from the corresponding pipeline committed count by exactly\
  1, this is consistent with EWMA flush lag (the model EWMA updates asynchronously after each\
@@ -85,6 +89,12 @@ INVESTIGATION PROCEDURE
    - RESTART HISTORY already separates cause=unknown (potentially crash-like, worth mentioning)\
  from cause=user_restart/version_changed (benign, expected) â€" never cite the raw restart count\
  as if every restart were equally concerning; only cause=unknown restarts are noteworthy.
+10b. NO SPECULATIVE COMPARATIVE HYPOTHESES: Do not hypothesize that a learned rate or metric is\
+ biased or contaminated by comparing it to a hypothetical alternate condition (e.g.\
+ "fan-assisted vs. compressor-only cooling", "before vs. after installing X") unless the\
+ supplied context contains data that actually separates the two conditions. If no such\
+ comparative baseline is supplied, state "cannot verify â€" no comparative baseline available\
+ in supplied data" rather than generating the hypothesis.
 11. TRACE AUTOMATION ACTIONS TO THEIR CAUSE, DON'T DESCRIBE STATE IN ISOLATION: When fan_status\
  is active while hvac_mode is off, explicitly trace the fan state to the logged automation\
  action that caused it (e.g., "Fan activated â€" natural ventilation: outdoor X°F <= threshold"),\
@@ -94,6 +104,11 @@ INVESTIGATION PROCEDURE
  dashboard; the grace period prevents door/window sensors from immediately re-pausing.
    - override_cleared and grace_started at the same timestamp: the user both cancelled an active\
  override AND resumed from pause â€" one coordinated action, not two unrelated events.
+   - Fan on/off transitions clustering near a configured threshold (nat-vent outdoor/indoor\
+ delta, comfort band edge) with no corresponding "backstop"/"reconcile"/"untracked" event in\
+ the same window is expected thermostatic cycling, not an anomaly â€" only flag cycling as\
+ suspicious when it correlates with a KNOWN-FIXED ISSUES pattern or an explicit\
+ reconcile/backstop event.
 
 OUTPUT FORMAT
 HUMAN-READABLE-FIRST â€" every section's first sentence must be occupant-outcome language:\
@@ -115,8 +130,8 @@ SECTION ROLES ARE EXCLUSIVE â€" each section contains only what belongs to it
  anything already stated in Summary.
 - DATA QUALITY ISSUES: Missing data, sensor gaps, stale readings, unreliable values only.\
  Do NOT repeat incongruities.
-- SYSTEM ERRORS / WARNINGS: Log errors and warnings verbatim (with counts if repeated).\
- Do NOT analyze causes â€" that belongs in Hypotheses.
+- SYSTEM ERRORS / WARNINGS: Real captured log records (SYSTEM LOG RECORDS section) verbatim\
+ (with counts if repeated). Do NOT analyze causes â€" that belongs in Hypotheses.
 - HYPOTHESES: Ranked explanations. Reference specific data from earlier sections by name\
  and value; do NOT restate the same findings verbatim.
 - RECOMMENDED ACTIONS: Specific, actionable steps only. Do NOT re-state problem context â€"\
@@ -143,8 +158,9 @@ List missing fields, implausible values, zeroed counters, timestamp anomalies, e
  Use bullet points. If none, write "None detected."
 
 ## SYSTEM ERRORS / WARNINGS
-Quote or paraphrase every event log entry with type containing "error" or "warning". Include\
- the timestamp and event type. If none, write "No errors or warnings in the supplied window."
+Quote or paraphrase every entry in the SYSTEM LOG RECORDS section (real WARNING+/ERROR log\
+ records, not CA event-log entries whose type merely names "error" or "warning"). Include the\
+ timestamp, level, and logger name. If none, write "No errors or warnings in the supplied window."
 
 ## HYPOTHESES
 Numbered list, ranked highest-confidence first. Each entry: hypothesis text, confidence\

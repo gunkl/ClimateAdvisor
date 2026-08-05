@@ -15,9 +15,7 @@ from homeassistant.core import HomeAssistant
 
 from .ai_skills_context import build_event_timeline_table
 from .const import (
-    API_AI_ACTIVITY,
     API_AI_INVESTIGATE,
-    API_AI_REPORTS,
     API_AI_STATUS,
     API_AUTOMATION_STATE,
     API_BRIEFING,
@@ -717,67 +715,6 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
         )
 
 
-class ClimateAdvisorAIActivityView(HomeAssistantView):
-    """API endpoint to execute the (silent/scheduled-narration mode of the merged)
-    investigator skill (Issue #563 — this endpoint used to run a separate
-    "activity_report" skill; that skill has been retired and merged into
-    "investigator". No `focus` is passed, so the model narrates rather than
-    investigates a specific complaint. New reports write to the unified
-    investigation report history — see `async_store_investigation_report()`."""
-
-    url = API_AI_ACTIVITY
-    name = "api:climate_advisor:ai_activity"
-    requires_auth = True
-
-    async def post(self, request: web.Request) -> web.Response:
-        hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
-        if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
-
-        if not coordinator.claude_client or not coordinator.ai_skills:
-            return self.json({"error": "AI features are disabled"}, status_code=503)
-
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-
-        hours = data.get("hours", 24)
-
-        # Validate inputs from REST API (service call path uses vol.Schema)
-        if not isinstance(hours, (int, float)) or not (1 <= hours <= 168):
-            hours = 24
-
-        result = await coordinator.ai_skills.async_execute(
-            "investigator",
-            coordinator.hass,
-            coordinator,
-            coordinator.claude_client,
-            hours=hours,
-            narration=True,
-        )
-
-        # Store the result in the unified report history
-        await coordinator.async_store_investigation_report(result)
-
-        if result.get("truncated_empty"):
-            # Issue #563 follow-on: distinct from ordinary truncation — the model
-            # produced zero visible output despite consuming the full response budget.
-            _LOGGER.warning(
-                "AI activity report produced zero visible output despite consuming the "
-                "full response budget — raising AI Response Length may not fix this; "
-                "consider trying a different reasoning effort for this model"
-            )
-        elif result.get("truncated"):
-            _LOGGER.warning("AI activity report truncated: hit max_tokens limit")
-
-        if result.get("rate_limited") or (not result.get("success") and "rate" in str(result.get("error", "")).lower()):
-            return self.json({"error": "Rate limit exceeded"}, status_code=429)
-
-        return self.json(result)
-
-
 class ClimateAdvisorActivityRecordView(HomeAssistantView):
     """Deterministic activity record endpoint — no AI required."""
 
@@ -814,26 +751,6 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
         )
 
 
-class ClimateAdvisorAIReportsView(HomeAssistantView):
-    """API endpoint for persisted AI report history."""
-
-    url = API_AI_REPORTS
-    name = "api:climate_advisor:ai_reports"
-    requires_auth = True
-
-    async def get(self, request: web.Request) -> web.Response:
-        hass = request.app["hass"]
-        coordinator = _get_coordinator(hass)
-        if not coordinator:
-            return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
-
-        return self.json(
-            {
-                "reports": coordinator.get_ai_report_history(),
-            }
-        )
-
-
 class ClimateAdvisorInvestigateView(HomeAssistantView):
     """POST /api/climate_advisor/ai_investigate — run an investigation."""
 
@@ -855,9 +772,9 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
 
         focus: str = str(body.get("focus", ""))
         try:
-            hours: int = max(1, min(int(body.get("hours", 168)), 720))
+            hours: int = max(1, min(int(body.get("hours", 24)), 720))
         except (ValueError, TypeError):
-            hours = 168
+            hours = 24
 
         if not coordinator.config.get(CONF_AI_ENABLED, DEFAULT_AI_ENABLED):
             return self.json_message("AI features are not enabled", status_code=403)
@@ -1062,11 +979,7 @@ class ClimateAdvisorDeleteReportView(HomeAssistantView):
         if not timestamp:
             return self.json({"error": "missing_timestamp"}, status_code=400)
 
-        if report_type == "activity":
-            found = coordinator.delete_ai_report(timestamp)
-            if found:
-                await hass.async_add_executor_job(coordinator._save_ai_reports)
-        elif report_type == "investigation":
+        if report_type == "investigation":
             found = coordinator.delete_investigation_report(timestamp)
             if found:
                 await hass.async_add_executor_job(coordinator._save_investigation_reports)
@@ -1159,9 +1072,7 @@ API_VIEWS = [
     ClimateAdvisorResumeFromPauseView,
     ClimateAdvisorToggleAutomationView,
     ClimateAdvisorAIStatusView,
-    ClimateAdvisorAIActivityView,
     ClimateAdvisorActivityRecordView,
-    ClimateAdvisorAIReportsView,
     ClimateAdvisorInvestigateView,
     ClimateAdvisorInvestigationReportsView,
     ClimateAdvisorDeleteReportView,

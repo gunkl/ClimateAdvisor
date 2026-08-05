@@ -11,7 +11,7 @@ An intelligent HVAC management integration that uses weather forecasts, occupanc
 |---|---|
 | ![Temperature Forecast — 3-day view showing predicted vs actual indoor/outdoor temperatures with HVAC and window activity bars](docs/screenshots/forecast_3d.png) | ![Status tab showing current day type, HVAC mode, compliance score, and today's strategy briefing](docs/screenshots/status.png) |
 
-| 24-hour View (prediction accuracy) | AI Investigation & Activity Reports |
+| 24-hour View (prediction accuracy) | AI Investigative Analysis |
 |---|---|
 | ![24-hour forecast showing overnight prediction vs actual with target band](docs/screenshots/forecast_24h.png) | ![AI tab showing status, learning suggestions, and report generation controls](docs/screenshots/ai.png) |
 
@@ -114,13 +114,11 @@ After 14+ days of data, the learning engine starts analyzing patterns:
 
 ### AI Features
 
-Climate Advisor includes two Claude-powered AI capabilities, each requiring a Claude API key in settings:
+Climate Advisor includes one Claude-powered AI capability, requiring a Claude API key in settings:
 
-**Activity Report** (`ai_enabled`) — analyzes recent system activity and returns a structured report with a timeline, HVAC decision rationale, anomalies, and thermal performance diagnostics. Triggered on demand from the Analysis tab or via the `climate_advisor.ai_activity_report` service.
+**AI Investigator** (`ai_investigator_enabled`) — performs deep cross-source analysis to detect incongruities between the thermal model, pipeline statistics, compliance data, and event log. Returns hypotheses with confidence levels and recommended actions. Context is assembled from independently-testable provider functions with focus-aware selection — specifying a focus keyword (thermal, fan, nat-vent, etc.) skips irrelevant providers and reduces token usage. Results stream over SSE, so text appears within a few seconds instead of waiting for the full report. GitHub issue history used for known-fix matching is cached (24h open / 30d closed) to avoid a live API call on every run. Results appear in the Investigation panel on the Analysis tab, where findings can be submitted directly as GitHub issues (requires GitHub token configured under Settings → GitHub Integration).
 
-**AI Investigator** (`ai_investigator_enabled`) — performs deep cross-source analysis to detect incongruities between the thermal model, pipeline statistics, compliance data, and event log. Returns hypotheses with confidence levels and recommended actions. Context is assembled from independently-testable provider functions with focus-aware selection — specifying a focus keyword (thermal, fan, nat-vent, etc.) skips irrelevant providers and reduces token usage. Both the Investigator and Activity Report stream results over SSE, so text appears within a few seconds instead of waiting for the full report. GitHub issue history used for known-fix matching is cached (24h open / 30d closed) to avoid a live API call on every run. Results appear in the Investigation panel on the Analysis tab, where findings can be submitted directly as GitHub issues (requires GitHub token configured under Settings → GitHub Integration).
-
-**Activity Record** — a deterministic (non-AI) event timeline with indoor/outdoor temperature at each decision point. Available alongside the two AI reports on the Analysis tab; no API key required.
+**Activity Record** — a deterministic (non-AI) event timeline with indoor/outdoor temperature at each decision point. Available alongside the AI Investigator report on the Analysis tab; no API key required. (The separate, Claude-powered "AI Activity Report" skill was retired in Issue #578 — it had not written new data since being merged into the AI Investigator in Issue #563, and is superseded by this deterministic report.)
 
 ### Sleep Temperature Configuration
 
@@ -294,14 +292,6 @@ Log a comprehensive diagnostic snapshot to HA logs at INFO level for troubleshoo
 service: climate_advisor.dump_diagnostics
 ```
 
-### `climate_advisor.ai_activity_report`
-
-Trigger an on-demand AI activity report analysis. Requires AI Investigator to be enabled and a Claude API key configured.
-
-```yaml
-service: climate_advisor.ai_activity_report
-```
-
 ### `climate_advisor.reset_learning_data`
 
 Reset some or all learned data — useful after changing HVAC equipment or moving to a new location.
@@ -320,7 +310,7 @@ Climate Advisor includes a built-in dashboard panel accessible from the HA sideb
 - **Daily Briefing** — Full briefing with TLDR summary table, verbosity control (tldr_only/normal/verbose)
 - **Classification Details** — Forecast data, window schedules, trend analysis
 - **Learning** — Today's record, suggestions, compliance tracking
-- **Analysis** (renamed from "AI") — Single report-type dropdown covering the deterministic Activity Record, the Claude-powered Activity Report, and the AI Investigator's deep analysis; all three support Copy, Download .md, and Submit GitHub Issue
+- **Analysis** (renamed from "AI") — Single report-type dropdown covering the deterministic Activity Record and the AI Investigator's deep analysis; both support Copy, Download .md, and Submit GitHub Issue
 - **Settings** — Read-only view of all configuration grouped by category
 - **Debug** — Automation state, force reclassify, resend briefing, diagnostics dump, prediction engine confidence levels
 
@@ -337,9 +327,7 @@ The dashboard is powered by 23 REST API endpoints under `/api/climate_advisor/`:
 | `/learning` | GET | Learning records and suggestions |
 | `/config` | GET | All settings with metadata |
 | `/ai_status` | GET | AI feature status, model, request counts, and cost |
-| `/ai_activity` | GET/POST | Trigger or retrieve activity report (SSE streaming) |
 | `/activity_record` | GET | Deterministic (non-AI) event timeline with indoor/outdoor temps |
-| `/ai_reports` | GET | Persisted activity report history |
 | `/ai_investigate` | POST | Trigger deep investigator analysis (SSE streaming) |
 | `/investigation_reports` | GET | Persisted investigation report history |
 | `/engines` | GET | Prediction engine status and thermal model parameters |

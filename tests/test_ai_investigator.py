@@ -147,10 +147,6 @@ def _make_coordinator(
 
     coord.learning = learning if learning is not None else _make_learning_mock()
     coord._event_log = event_log or []
-    coord.get_ai_report_history.return_value = [
-        {"timestamp": "2026-04-05T10:00:00", "result": {"data": {"summary": "All fine yesterday."}}},
-        {"timestamp": "2026-04-06T06:00:00", "result": {"data": {"summary": "Mild day, no issues."}}},
-    ]
     return coord
 
 
@@ -519,15 +515,6 @@ class TestAsyncBuildInvestigatorContext:
         context = asyncio.run(async_build_investigator_context(hass, coord, focus=""))
 
         assert "INVESTIGATION FOCUS" not in context
-
-    def test_context_contains_ai_report_history(self):
-        """The recent AI activity reports section appears in the context."""
-        coord = _make_coordinator()
-        hass = _make_hass()
-
-        context = asyncio.run(async_build_investigator_context(hass, coord))
-
-        assert "RECENT AI ACTIVITY REPORTS" in context
 
     def test_context_contains_configuration_section(self):
         """Configuration section appears and includes comfort temps."""

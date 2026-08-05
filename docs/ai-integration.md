@@ -41,9 +41,8 @@ for the full audit of what was ported vs. retired as redundant.
 - The deterministic fallback path when Claude is unavailable or returns an error
 
 **Explicitly does NOT own:**
-- HA service registration for `ai_activity_report`, `get_ai_report`, `clear_ai_reports` — owned by `coordinator.py` / `__init__.py`
 - Sensor entity for `sensor.climate_advisor_ai_status` — owned by `sensor.py`
-- Report history storage (`get_investigation_report_history()`, `store_investigation_report()`; the legacy `get_ai_report_history()` is frozen, read-only, pre-merge history) — owned by `coordinator.py`
+- Report history storage (`get_investigation_report_history()`, `store_investigation_report()`) — owned by `coordinator.py`. The AI Activity Report skill/service and its separate `get_ai_report_history()`/`_ai_report_history` storage were retired entirely in Issue #578 (superseded by the deterministic, non-AI Activity Record).
 - Thermal model computation — owned by `learning.py`
 - Daily record persistence — owned by `coordinator.py` + `learning.py`
 - REST API endpoints — owned by `api.py`
@@ -242,11 +241,10 @@ and assembly continues.
 | `last_briefing` | Most recent daily briefing text |
 | `learning` | Compliance summary, thermal model, weather bias, suggestions, recent daily records |
 | `thermal_pipeline` | Per-obs-type rejection/commit counts, `NEVER LEARNED`/`***PIPELINE FAILURE***` markers, engine status |
-| `event_log` | Last 200 event-log entries filtered to last N hours (`kwargs["hours"]`, default 168, clamped 1–720); event-type counts, extracted error/warning entries, `TIMING CORRELATIONS` (manual events near known automation cycle periods), `KNOWN OVERRIDE FALSE POSITIVES` (Issue #205 pattern: `override_detected` within 60s of an automation event), `RESTART HISTORY` (restart count by cause — `user_restart`/`version_changed` filtered out as benign, only `cause=unknown` is noteworthy) |
+| `event_log` | Last 200 event-log entries filtered to last N hours (`kwargs["hours"]`, default 168, clamped 1–720); event-type counts, `SYSTEM LOG RECORDS` (real captured WARNING+/ERROR log records via `log_capture.py`, Issue #578 — replaces an earlier check that only matched the substring "error"/"warning" in a CA event's `type` field), `TIMING CORRELATIONS` (manual events near known automation cycle periods), `KNOWN OVERRIDE FALSE POSITIVES` (Issue #205 pattern: `override_detected` within 60s of an automation event), `RESTART HISTORY` (restart count by cause — `user_restart`/`version_changed` filtered out as benign, only `cause=unknown` is noteworthy) |
 | `activity_timeline` | Deterministic markdown event timeline table (ported from the retired activity context; never LLM-authored) |
-| `override_details` | Manual override count/history/current-override-duration, Issue #321 stuck-grace critical warning, fan ownership transitions (ported, Issue #563) |
+| `override_details` | Setpoint override count/history/current-override-duration, Issue #321 stuck-grace critical warning, fan ownership transitions plus a fan override count (Issue #578) (ported, Issue #563) |
 | `daily_summaries` | Historical multi-day trend summary, only populated when `hours > 36` (ported, Issue #563) |
-| `ai_report_history` | Last 3 prior reports (timestamp + summary only) via `coordinator.get_ai_report_history()` |
 | `config` | ~11 curated `coordinator.config` fields (comfort/setback temps, schedule, `ai_model`, `learning_enabled`) — not a full config dump |
 | `operational_design` | Static prose block explaining fan_status values, deadband behavior, warm-day comfort guard, natural vent mode, contradiction suppression logic |
 | `known_fixes` | `KNOWN_FIXES` entries bounded to the most recent `_KNOWN_FIXES_RECENT_COUNT` (15) plus any not-yet-deployed entry — rendered as the matching `RELEASE_NOTES` bullet, not the internal `title`/`scope_covered` engineering prose (Issue #563; see anchor above) |
@@ -293,7 +291,7 @@ Key public entry points called by external modules:
 | `ClaudeAPIClient.get_persistent_stats()` / `restore_persistent_stats()` | `claude_api.py` | `coordinator.py` (startup/shutdown) | Persist counters and monthly cost across reboots |
 | `ClaudeAPIClient.check_investigator_rate_limit()` | `claude_api.py` | `api.py` (`ClimateAdvisorInvestigateView`) | Gate the on-demand/focus-driven call path only — not skill registration (Issue #563) |
 | `AISkillRegistry.register()` | `ai_skills.py` | `ai_skills_investigator.py` (module init, via `coordinator.py`) | Register the merged skill definition |
-| `AISkillRegistry.async_execute()` / `async_execute_streaming()` | `ai_skills.py` | `api.py` (`ClimateAdvisorAIActivityView`, `ClimateAdvisorInvestigateView`) | Run the skill end-to-end for either entry mode |
+| `AISkillRegistry.async_execute()` / `async_execute_streaming()` | `ai_skills.py` | `api.py` (`ClimateAdvisorInvestigateView`) | Run the skill end-to-end |
 
 ---
 

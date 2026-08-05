@@ -664,7 +664,6 @@
       <label style="font-size:0.85rem;color:var(--text-secondary);">Report type:</label>
       <select id="report-type" onchange="updateReportTypeUI()" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
         <option value="activity_record">Activity Record</option>
-        <option value="activity">AI Activity Report</option>
         <option value="investigation">AI Investigative Analysis</option>
       </select>
     </div>
@@ -728,7 +727,6 @@
     <h2>AI Report History</h2>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
       <button class="btn secondary" id="hist-filter-all" onclick="setHistoryFilter('all')" style="font-size:0.8rem;">All</button>
-      <button class="btn secondary" id="hist-filter-activity" onclick="setHistoryFilter('activity')" style="font-size:0.8rem;opacity:0.55;">Activity</button>
       <button class="btn secondary" id="hist-filter-investigation" onclick="setHistoryFilter('investigation')" style="font-size:0.8rem;opacity:0.55;">Investigation</button>
       <input type="date" id="hist-from-date" onchange="window.renderHistory()" oninput="window.renderHistory()" style="padding:3px 6px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);font-size:0.8rem;" title="From date">
       <span style="font-size:0.8rem;color:var(--text-secondary);">to</span>
@@ -2579,16 +2577,9 @@
         + '<option value="168">Last 7 days</option>';
       focusControls.style.display = 'none';
       btn.textContent = 'Generate';
-    } else if (type === 'activity') {
-      twSelect.innerHTML = '<option value="6">Last 6 hours</option>'
-        + '<option value="12">Last 12 hours</option>'
-        + '<option value="24" selected>Last 24 hours</option>'
-        + '<option value="48">Last 48 hours</option>';
-      focusControls.style.display = 'none';
-      btn.textContent = 'Generate with AI';
     } else {
-      twSelect.innerHTML = '<option value="24">Last 1 day</option>'
-        + '<option value="168" selected>Last 7 days</option>'
+      twSelect.innerHTML = '<option value="24" selected>Last 1 day</option>'
+        + '<option value="168">Last 7 days</option>'
         + '<option value="720">Last 30 days</option>';
       focusControls.style.display = 'block';
       btn.textContent = 'Investigate';
@@ -2599,7 +2590,6 @@
   async function runReport() {
     const type = document.getElementById('report-type').value;
     if (type === 'activity_record') await _runActivityRecord();
-    else if (type === 'activity') await _runAIActivityReport();
     else await _runAIInvestigation();
   }
 
@@ -2635,29 +2625,6 @@
       status.textContent = 'Error: ' + e.message;
     } finally {
       _resetReportControls(btn, loading, 'Generate');
-    }
-  }
-
-  // ---- AI Activity Report ----
-
-  async function _runAIActivityReport() {
-    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 24;
-    const btn = document.getElementById('run-report-btn');
-    const loading = document.getElementById('report-loading');
-    const status = document.getElementById('report-status');
-    btn.disabled = true;
-    btn.textContent = 'Running\u2026';
-    loading.style.display = 'block';
-    status.textContent = '';
-    try {
-      const result = await apiPost('ai_activity', { hours });
-      _currentReport = { reportType: 'activity', timestamp: new Date().toISOString(), result };
-      renderReportInPreview(_currentReport);
-      loadUnifiedHistory();
-    } catch (e) {
-      status.textContent = 'Error: ' + e.message;
-    } finally {
-      _resetReportControls(btn, loading, 'Generate with AI');
     }
   }
 
@@ -2745,7 +2712,7 @@
     const content = document.getElementById('report-content');
     const actions = document.getElementById('report-actions');
     const focus = document.getElementById('investigation-focus').value.trim();
-    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 168;
+    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 24;
 
     btn.disabled = true;
     btn.textContent = 'Running\u2026';
@@ -3080,18 +3047,14 @@
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.textContent = 'Downloading...'; btn.disabled = true; }
     try {
-      const [logData, reportData, investigationData] = await Promise.allSettled([
+      const [logData, investigationData] = await Promise.allSettled([
         apiFetch('event_log?hours=24'),
-        apiFetch('ai_reports'),
         apiFetch('investigation_reports'),
       ]);
       const bundle = {
         downloaded_at: new Date().toISOString(),
         events: logData.status === 'fulfilled' ? (logData.value.events || []) : [],
       };
-      if (reportData.status === 'fulfilled' && reportData.value.reports && reportData.value.reports.length) {
-        bundle.ai_summary = reportData.value.reports[0];
-      }
       if (investigationData.status === 'fulfilled') {
         bundle.investigation_reports = investigationData.value;
       }
@@ -3115,17 +3078,11 @@
 
   async function loadUnifiedHistory() {
     try {
-      const [activityData, investigationData] = await Promise.allSettled([
-        apiFetch('ai_reports'),
-        apiFetch('investigation_reports'),
-      ]);
-      const activityReports = (activityData.status === 'fulfilled' && activityData.value && activityData.value.reports)
-        ? activityData.value.reports.map(e => Object.assign({}, e, { report_type: e.report_type || 'activity' }))
+      const investigationData = await apiFetch('investigation_reports');
+      const investigationReports = Array.isArray(investigationData)
+        ? investigationData.map(e => Object.assign({}, e, { report_type: e.report_type || 'investigation' }))
         : [];
-      const investigationReports = (investigationData.status === 'fulfilled' && Array.isArray(investigationData.value))
-        ? investigationData.value.map(e => Object.assign({}, e, { report_type: e.report_type || 'investigation' }))
-        : [];
-      _allHistoryEntries = activityReports.concat(investigationReports)
+      _allHistoryEntries = investigationReports
         .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       renderHistory();
     } catch (_e) {
@@ -3198,7 +3155,7 @@
   function setHistoryFilter(type) {
     _historyTypeFilter = type;
     _historyShowing = 5;
-    ['all', 'activity', 'investigation'].forEach(t => {
+    ['all', 'investigation'].forEach(t => {
       const btn = document.getElementById('hist-filter-' + t);
       if (btn) btn.style.opacity = t === type ? '1' : '0.55';
     });
@@ -3336,14 +3293,9 @@
     const modal = document.getElementById('github-issue-modal');
     if (!opts || !opts.skipCurrentReport) {
       if (!_currentReport) return;
-      const result = _currentReport.result || {};
-      const data = result.data || {};
-      const rType = _currentReport.reportType === 'investigation' ? 'Investigative Analysis' : 'Activity Report';
-      const ts = _currentReport.timestamp ? new Date(_currentReport.timestamp).toLocaleString() : '';
-      const summary = (data.summary || '').replace(/\s+/g, ' ').trim().substring(0, 120);
-      document.getElementById('github-issue-title').value = summary
-        ? summary.substring(0, 100)
-        : rType + ' — ' + ts;
+      const rType = 'Investigative Analysis';
+      const ts = _currentReport.timestamp ? new Date(_currentReport.timestamp).toLocaleDateString() : new Date().toLocaleDateString();
+      document.getElementById('github-issue-title').value = 'AI ' + rType + ' - ' + ts;
       document.getElementById('github-issue-body').value = _formatCurrentReport();
       document.getElementById('github-issue-labels').value = 'bug';
     }

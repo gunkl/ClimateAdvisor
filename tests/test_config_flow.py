@@ -1489,7 +1489,7 @@ class TestMigrationV12ToV13:
         assert result is True
         assert entry.version == 17
         assert final_data.get("ai_enabled") is False
-        assert final_data.get("ai_model") == "claude-sonnet-4-6"
+        assert final_data.get("ai_model") == "claude-sonnet-5"
         assert final_data.get("ai_max_tokens") == 4096
 
 

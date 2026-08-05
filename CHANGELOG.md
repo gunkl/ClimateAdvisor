@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.59] — 2026-08-05
+
+- Fix #578: several AI Investigative Analysis report-quality fixes from user feedback — the "Submit GitHub Issue" button now titles the issue "AI Investigative Analysis - <date>" instead of grabbing the first sentence of the report as the title; target_temp_low/high reading "unknown" while the HVAC is legitimately off (e.g. running whole-house-fan/nat-vent only) is now labeled as expected instead of flagged as a data-quality issue; the weather bias cap is now included in the report's context so the AI can actually check against it; "Manual Overrides Today" now shows a separate fan override count alongside the setpoint override count so the two no longer look contradictory; and "System Errors/Warnings" now reflects real captured WARNING/ERROR log records instead of a name-matching quirk that almost never caught anything. The AI Activity Report feature (separate from AI Investigative Analysis) has been retired entirely — it was superseded by the deterministic, non-AI Activity Record and had not written new data since the #563 skill merge. The Investigative Analysis report's default time window is now "Last 1 day" instead of 7 days, and new installs now default to Sonnet 5 at low reasoning effort instead of an outdated model at medium effort.
+
 ## [0.5.58] — 2026-08-05
 
 - Feat #573 follow-up: replaced the menu-based "Save"/"Save and Reload" options added in 0.5.57 — Home Assistant's options-flow menu can't render an actual button (only a plain list row), so those looked identical to the settings sections instead of a real action. Each settings section now just has its normal Submit again; saving a section raises a repair notice (Settings -> System -> Repairs) telling you Climate Advisor has changes waiting, with a one-click Reload right from there.

@@ -4,9 +4,28 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.58"
+VERSION = "0.5.59"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.59": [
+        "Fix #578: several AI Investigative Analysis report-quality fixes from user"
+        ' feedback — the "Submit GitHub Issue" button now titles the issue'
+        ' "AI Investigative Analysis - <date>" instead of grabbing the first sentence'
+        ' of the report as the title; target_temp_low/high reading "unknown" while the'
+        " HVAC is legitimately off (e.g. running whole-house-fan/nat-vent only) is now"
+        " labeled as expected instead of flagged as a data-quality issue; the weather"
+        " bias cap is now included in the report's context so the AI can actually check"
+        ' against it; "Manual Overrides Today" now shows a separate fan override count'
+        " alongside the setpoint override count so the two no longer look contradictory;"
+        ' and "System Errors/Warnings" now reflects real captured WARNING/ERROR log'
+        " records instead of a name-matching quirk that almost never caught anything."
+        " The AI Activity Report feature (separate from AI Investigative Analysis) has"
+        " been retired entirely — it was superseded by the deterministic, non-AI"
+        " Activity Record and had not written new data since the #563 skill merge."
+        ' The Investigative Analysis report\'s default time window is now "Last 1 day"'
+        " instead of 7 days, and new installs now default to Sonnet 5 at low reasoning"
+        " effort instead of an outdated model at medium effort.",
+    ],
     "0.5.58": [
         'Feat #573 follow-up: replaced the menu-based "Save"/"Save and Reload" options'
         " added in 0.5.57 — Home Assistant's options-flow menu can't render an actual"
@@ -1513,6 +1532,92 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    578: {
+        "version_fixed": "0.5.59",
+        "title": (
+            "User inline-annotated feedback on an AI Investigative Analysis report"
+            " surfaced several distinct report-quality and methodology gaps: the"
+            " GitHub-issue-submission title grabbed the first sentence of the report"
+            " summary instead of a stable title; target_temp_low/high reading unknown"
+            " while hvac_mode=off (e.g. WHF/nat-vent only) was flagged as a data-quality"
+            " issue with no off-mode context; the weather bias cap"
+            " (MAX_WEATHER_BIAS_APPLY_F) was referenced by the prompt's own instructions"
+            " but never actually supplied in context, making that check unperformable;"
+            ' "Manual Overrides Today" only counted setpoint overrides, so a genuine fan'
+            " takeover made the counter look wrong without any accompanying explanation;"
+            ' "System Errors/Warnings" checked whether a CA-internal event\'s `type`'
+            ' string happened to contain the substring "error"/"warning" (coincidental'
+            " naming, not severity — CA event-log entries have no severity field at all),"
+            " so it almost never caught anything real; and the investigator had no"
+            " prompt-level guidance distinguishing routine thermostatic/nat-vent"
+            " hysteresis cycling from a known-bug signature, nor any rule against"
+            " generating unfalsifiable comparative hypotheses (e.g. claiming a learned"
+            " rate is contaminated by mixing two conditions) when no data actually"
+            " separates those conditions. Separately, the AI Activity Report — a distinct"
+            " skill/service from AI Investigative Analysis — was retired entirely at the"
+            " user's request; it had not written new data since the #563 skill merge"
+            " (both its callers already stored into the unified investigation report"
+            " history instead), and is superseded by the deterministic, non-AI Activity"
+            " Record. The Investigative Analysis default time window was changed to Last"
+            " 1 day (previously silently defaulted to 7 days once a user actually"
+            " selected the Investigative Analysis report type, despite the static HTML"
+            " markup appearing to already say 24h), and new-install AI defaults changed"
+            " from an outdated model at medium reasoning effort to Sonnet 5 at low effort."
+        ),
+        "scope_covered": (
+            "index.html: openGithubIssueModal() title derivation (report type + date,"
+            " never report summary text); dropped the now-dead `data`/`result` locals."
+            " ai_skills_context.py: build_hvac_entity_context() appends an"
+            ' "(expected — hvac_mode=off, no active setpoint)" note instead of a bare'
+            " unknown; weather-bias context gains a cap_f line sourced from"
+            " MAX_WEATHER_BIAS_APPLY_F; build_override_details_context() relabels the"
+            ' setpoint override "Count:" and adds a "Fan override count:" line computed'
+            " from the existing FAN OWNERSHIP HISTORY scan (no duplicate scan added);"
+            " build_event_log_context()'s EVENT LOG section no longer does substring"
+            ' matching for "error"/"warning" — a new SYSTEM LOG RECORDS section reads'
+            " real captured log records instead; build_ai_report_history_context() and"
+            " its ai_report_history provider registration removed entirely (dead —"
+            " nothing wrote to coordinator._ai_report_history since #563)."
+            " ai_skills_investigator.py: _SYSTEM_PROMPT rule 4 and the SYSTEM"
+            " ERRORS/WARNINGS output-format section reworded for real log records; rule"
+            " 8 (KNOWN-FIXED cross-check) extended to compare a flagged event's timestamp"
+            " against ACTIVITY TIMELINE version-change boundaries; new rule 10b forbids"
+            " speculative comparative hypotheses without a supplied comparative baseline;"
+            " rule 11 gains a third benign-pattern bullet for threshold-adjacent fan"
+            " hysteresis cycling with no reconcile/backstop event in the same window."
+            " log_capture.py (new): ClimateAdvisorLogRingBuffer, a logging.Handler"
+            " (collections.deque(maxlen=LOG_CAPTURE_CAP) ring buffer) attached to the"
+            " custom_components.climate_advisor logger namespace once at"
+            " async_setup_entry() via log_capture.install()/uninstall(), capturing every"
+            " existing _LOGGER.warning()/.error() call site automatically — no per-call-"
+            " site changes needed. AI Activity Report removal (coordinator.py: deleted"
+            " _ai_report_history, async_store_ai_report, _save_ai_reports,"
+            " _load_ai_reports, get_ai_report_history, delete_ai_report, and the"
+            " load-on-init call — all dead since #563; api.py: deleted"
+            " ClimateAdvisorAIActivityView and ClimateAdvisorAIReportsView (the latter"
+            " also called the now-deleted get_ai_report_history() — caught during"
+            " implementation, not part of the original plan), their API_VIEWS"
+            ' registrations, and the delete_report "activity" branch; __init__.py:'
+            " deleted the ai_activity_report service registration/handler;"
+            " services.yaml: deleted the ai_activity_report service block; const.py:"
+            " deleted API_AI_ACTIVITY, API_AI_REPORTS, AI_REPORT_HISTORY_CAP,"
+            " AI_REPORTS_FILE; index.html: deleted the AI Activity Report dropdown"
+            " option, dispatch branch, _runAIActivityReport(), the Activity history-"
+            " filter button, and the dead ai_reports fetch in loadUnifiedHistory()/"
+            " downloadDebugLogs()). Default time window: index.html"
+            " updateReportTypeUI()'s investigation branch now defaults report-time-"
+            " window to 24h (was 168h — this was the actual live default, not the static"
+            " HTML markup a prior read of the code suggested); api.py"
+            " ClimateAdvisorInvestigateView and the JS hours fallback in"
+            " _runAIInvestigation() changed from 168 to 24. AI defaults: const.py"
+            " DEFAULT_AI_MODEL -> claude-sonnet-5, DEFAULT_AI_REASONING_EFFORT -> low;"
+            " added AI_MODEL_SONNET_5 to the static AI_MODELS fallback dropdown list"
+            " (caught during implementation: the static list used when no API key is"
+            " configured yet — i.e. exactly the first-install scenario — did not"
+            " previously include claude-sonnet-5 at all, which would have broken the"
+            " config-flow model selector's default the moment this file changed)."
+        ),
+    },
     573: {
         "version_fixed": "0.5.58",
         "title": (
@@ -5585,6 +5690,9 @@ REVISIT_DELAY_SECONDS = 300  # 5 minutes
 # Event log ring buffer cap (Issue #76)
 EVENT_LOG_CAP = 500  # keep last 500 events
 
+# Real WARNING+/ERROR log-record ring buffer cap (Issue #578) — see log_capture.py
+LOG_CAPTURE_CAP = 200
+
 # API paths for dashboard panel
 API_BASE = "/api/climate_advisor"
 API_STATUS = f"{API_BASE}/status"
@@ -6121,7 +6229,7 @@ CONFIG_METADATA = {
         "label": "Manual Requests Per Day",
         "description": (
             "Maximum user-triggered AI requests per day."
-            " Limits on-demand usage from features like the Activity Report."
+            " Limits on-demand usage from features like the Investigative Analysis report."
             " Resets at midnight."
         ),
         "category": "ai_settings",
@@ -6146,7 +6254,7 @@ CONFIG_METADATA = {
         "label": "Investigator Requests Per Day",
         "description": (
             "Maximum investigative analysis runs per day."
-            " Each investigation uses extended thinking and is more expensive than activity reports."
+            " Each investigation uses extended thinking and is more expensive than other AI requests."
             " Resets at midnight."
         ),
         "category": "ai_settings",
@@ -6416,8 +6524,8 @@ CONF_AI_INVESTIGATOR_RPD = "ai_investigator_requests_per_day"
 
 # Defaults
 DEFAULT_AI_ENABLED = False
-DEFAULT_AI_MODEL = "claude-sonnet-4-6"
-DEFAULT_AI_REASONING_EFFORT = "medium"
+DEFAULT_AI_MODEL = "claude-sonnet-5"
+DEFAULT_AI_REASONING_EFFORT = "low"
 DEFAULT_AI_MAX_TOKENS = 4096
 DEFAULT_AI_TEMPERATURE = 0.3
 DEFAULT_AI_MONTHLY_BUDGET = 0  # 0 = no cap
@@ -6435,10 +6543,11 @@ DEFAULT_AI_INVESTIGATOR_RPD = 3
 # this static list is only used when that live fetch fails (no network, no API key yet,
 # unsupported SDK version, etc.) — keep it reasonably current, but it is a safety net,
 # not the source of truth for what models are actually available.
+AI_MODEL_SONNET_5 = "claude-sonnet-5"
 AI_MODEL_SONNET = "claude-sonnet-4-6"
 AI_MODEL_OPUS = "claude-opus-4-6"
 AI_MODEL_HAIKU = "claude-haiku-4-5-20251001"
-AI_MODELS = [AI_MODEL_SONNET, AI_MODEL_OPUS, AI_MODEL_HAIKU]
+AI_MODELS = [AI_MODEL_SONNET_5, AI_MODEL_SONNET, AI_MODEL_OPUS, AI_MODEL_HAIKU]
 
 # Per-model request-shape capabilities (Issue #572) — replaces the reactive
 # learn-from-a-live-failure approach (#563/#565/#568/#569), which guaranteed a silent,
@@ -6479,7 +6588,7 @@ AI_MODEL_CAPABILITIES: dict[str, dict] = {
     AI_MODEL_SONNET: {"thinking_shape": AI_THINKING_SHAPE_LEGACY, "supports_temperature": True},
     AI_MODEL_OPUS: {"thinking_shape": AI_THINKING_SHAPE_LEGACY, "supports_temperature": True},
     AI_MODEL_HAIKU: {"thinking_shape": AI_THINKING_SHAPE_LEGACY, "supports_temperature": True},
-    "claude-sonnet-5": {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
+    AI_MODEL_SONNET_5: {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
     "claude-opus-5": {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
     "claude-fable-5": {"thinking_shape": AI_THINKING_SHAPE_ADAPTIVE, "supports_temperature": False},
 }
@@ -6512,10 +6621,6 @@ AI_RETRY_BASE_DELAY_SECONDS = 1.0  # exponential backoff: 1s, 2s, 4s
 # Request history cap (metadata-only deque)
 AI_REQUEST_HISTORY_CAP = 50
 
-# Persisted report history
-AI_REPORT_HISTORY_CAP = 60
-AI_REPORTS_FILE = "climate_advisor_ai_reports.json"
-
 # Investigation report history (Issue #82)
 INVESTIGATION_REPORT_HISTORY_CAP = 60
 INVESTIGATION_REPORTS_FILE = "climate_advisor_investigation_reports.json"
@@ -6525,8 +6630,6 @@ ATTR_AI_STATUS = "ai_status"
 
 # API paths for AI endpoints
 API_AI_STATUS = f"{API_BASE}/ai_status"
-API_AI_ACTIVITY = f"{API_BASE}/ai_activity"
-API_AI_REPORTS = f"{API_BASE}/ai_reports"
 API_AI_INVESTIGATE = f"{API_BASE}/ai_investigate"
 API_INVESTIGATION_REPORTS = f"{API_BASE}/investigation_reports"
 API_DELETE_REPORT = f"{API_BASE}/delete_report"

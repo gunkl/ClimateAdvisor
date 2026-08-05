@@ -48,8 +48,6 @@ from .briefing import _derive_warm_day_events, generate_briefing
 from .chart_log import ChartStateLog
 from .classifier import DayClassification, ForecastSnapshot, classify_day
 from .const import (
-    AI_REPORT_HISTORY_CAP,
-    AI_REPORTS_FILE,
     ATTR_AI_STATUS,
     ATTR_AUTOMATION_STATUS,
     ATTR_BRIEFING,
@@ -399,12 +397,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # AI subsystem (only if enabled and API key present)
         self.claude_client: ClaudeAPIClient | None = None
         self.ai_skills: AISkillRegistry | None = None
-        # _ai_report_history: frozen, read-only — held for backward-compat display of
-        # reports persisted before the activity_report/investigator skill merge
-        # (Issue #563). New reports (both silent narration and on-demand investigation)
-        # write to _investigation_report_history going forward — see
-        # async_store_investigation_report().
-        self._ai_report_history: list[dict] = []
         self._investigation_report_history: list[dict] = []
         if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
@@ -999,7 +991,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         # Load AI report history if AI subsystem is active
         if self.claude_client:
-            await self.hass.async_add_executor_job(self._load_ai_reports)
             await self.hass.async_add_executor_job(self._load_investigation_reports)
 
         # Restore event log ring buffer and emit restart boundary marker
@@ -1121,72 +1112,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """Persist current operational state to disk."""
         state_dict = self._build_state_dict()
         await self.hass.async_add_executor_job(self._state_persistence.save, state_dict)
-
-    async def async_store_ai_report(self, result: dict) -> None:
-        """Store an AI activity report result and persist to disk."""
-        import json  # noqa: F401 — imported for _save_ai_reports called via executor
-
-        report_entry = {
-            "timestamp": dt_util.now().isoformat(),
-            "report_type": "activity",
-            "result": result,
-        }
-        self._ai_report_history.append(report_entry)
-        # Cap the list
-        if len(self._ai_report_history) > AI_REPORT_HISTORY_CAP:
-            self._ai_report_history = self._ai_report_history[-AI_REPORT_HISTORY_CAP:]
-        # Persist to disk via executor (blocking I/O)
-        await self.hass.async_add_executor_job(self._save_ai_reports)
-
-    def _save_ai_reports(self) -> None:
-        """Save AI report history to disk (atomic write)."""
-        import json
-        import os
-
-        filepath = self.hass.config.path(AI_REPORTS_FILE)
-        tmp_path = filepath + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self._ai_report_history, f, indent=2, default=str)
-            os.replace(tmp_path, filepath)
-        except Exception:
-            _LOGGER.exception("Failed to save AI reports to %s", filepath)
-            import contextlib
-
-            with contextlib.suppress(OSError):
-                os.remove(tmp_path)
-
-    def _load_ai_reports(self) -> None:
-        """Load AI report history from disk."""
-        import json
-
-        filepath = self.hass.config.path(AI_REPORTS_FILE)
-        try:
-            with open(filepath, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
-                recent = [e for e in data if isinstance(e, dict) and e.get("timestamp", "") >= cutoff]
-                self._ai_report_history = recent[-AI_REPORT_HISTORY_CAP:]
-                _LOGGER.debug("Loaded %d AI reports from disk", len(self._ai_report_history))
-            else:
-                _LOGGER.warning("AI reports file has unexpected format, starting fresh")
-                self._ai_report_history = []
-        except FileNotFoundError:
-            self._ai_report_history = []
-        except Exception:
-            _LOGGER.exception("Failed to load AI reports from %s", filepath)
-            self._ai_report_history = []
-
-    def get_ai_report_history(self) -> list[dict]:
-        """Return the AI report history for dashboard display."""
-        return list(self._ai_report_history)
-
-    def delete_ai_report(self, timestamp: str) -> bool:
-        """Remove an activity report by timestamp. Returns True if removed."""
-        before = len(self._ai_report_history)
-        self._ai_report_history = [e for e in self._ai_report_history if e.get("timestamp") != timestamp]
-        return len(self._ai_report_history) < before
 
     async def async_store_investigation_report(self, result: dict) -> None:
         """Store an investigation report result in history and persist to disk."""

@@ -10,9 +10,10 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.repairs import (
+    ReloadNeededRepairFlow,
     WeatherEntityRepairFlow,
     async_create_fix_flow,
 )
@@ -114,6 +115,57 @@ class TestAsyncCreateFixFlow:
         flow = asyncio.run(async_create_fix_flow(hass, "some_other_issue", None))
         assert isinstance(flow, ConfirmRepairFlow)
         assert not isinstance(flow, WeatherEntityRepairFlow)
+
+    def test_returns_reload_needed_repair_flow(self):
+        hass = _make_hass()
+        flow = asyncio.run(async_create_fix_flow(hass, "reload_needed", None))
+        assert isinstance(flow, ReloadNeededRepairFlow)
+
+
+# ---------------------------------------------------------------------------
+# ReloadNeededRepairFlow (Issue #573 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestReloadNeededRepairFlow:
+    """Confirming this repair reloads Climate Advisor and clears the issue."""
+
+    def test_shows_form_when_no_input(self):
+        flow = ReloadNeededRepairFlow()
+        flow.hass = _make_hass()
+
+        result = asyncio.run(flow.async_step_init(user_input=None))
+
+        assert result["type"] == "form"
+        assert result["step_id"] == "init"
+
+    def test_confirm_reloads_entry_and_clears_issue(self):
+        flow = ReloadNeededRepairFlow()
+        hass = _make_hass()
+        entry = _make_config_entry(FULL_CONFIG)
+        hass.config_entries.async_entries = MagicMock(return_value=[entry])
+        hass.config_entries.async_reload = AsyncMock()
+        flow.hass = hass
+
+        with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue") as mock_delete:
+            result = asyncio.run(flow.async_step_init(user_input={}))
+
+        assert result["type"] == "create_entry"
+        hass.config_entries.async_reload.assert_called_once_with(entry.entry_id)
+        mock_delete.assert_called_once_with(hass, "climate_advisor", "reload_needed")
+
+    def test_no_config_entries_graceful(self):
+        """If no config entries exist, flow completes without error (no reload attempted)."""
+        flow = ReloadNeededRepairFlow()
+        hass = _make_hass()
+        hass.config_entries.async_entries = MagicMock(return_value=[])
+        flow.hass = hass
+
+        with patch("custom_components.climate_advisor.repairs.ir.async_delete_issue"):
+            result = asyncio.run(flow.async_step_init(user_input={}))
+
+        assert result["type"] == "create_entry"
+        hass.config_entries.async_reload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

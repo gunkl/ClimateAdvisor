@@ -352,6 +352,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Climate Advisor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
+    # Issue #573: any setup (reload or HA restart) means whatever was saved via
+    # the options flow is now the active config — clear the "reload needed"
+    # notice raised by ClimateAdvisorOptionsFlow._commit_section().
+    ir.async_delete_issue(hass, DOMAIN, "reload_needed")
+
     # Defer weather entity validation until HA is fully started so all
     # entities are loaded — avoids false "not found" on startup race.
     async def _validate_weather_entity(_event=None):

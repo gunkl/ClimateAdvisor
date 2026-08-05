@@ -3,9 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.58] — 2026-08-05
+
+- Feat #573 follow-up: replaced the menu-based "Save"/"Save and Reload" options added in 0.5.57 — Home Assistant's options-flow menu can't render an actual button (only a plain list row), so those looked identical to the settings sections instead of a real action. Each settings section now just has its normal Submit again; saving a section raises a repair notice (Settings -> System -> Repairs) telling you Climate Advisor has changes waiting, with a one-click Reload right from there.
+
 ## [0.5.57] — 2026-08-05
 
-- Feat #573: editing several AI/comfort/schedule settings sections in one visit to Configure used to reload Climate Advisor after every single section's Submit, rebuilding the coordinator and AI client each time. Each section now just saves; the main Options menu has two new entries — "Save" (closes the settings screen; changes are stored and will apply next time Climate Advisor reloads or Home Assistant restarts) and "Save and Reload" (closes the screen and applies everything you just changed in one reload, right away).
+- Feat #573: editing several AI/comfort/schedule settings sections in one visit to Configure used to reload Climate Advisor after every single section's Submit, rebuilding the coordinator and AI client each time. Each section now just saves; applying pending changes is done via a repair notice guiding you to reload.
 
 ## [0.5.56] — 2026-08-05
 

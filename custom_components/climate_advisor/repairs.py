@@ -59,8 +59,34 @@ class WeatherEntityRepairFlow(RepairsFlow):
         )
 
 
+class ReloadNeededRepairFlow(RepairsFlow):
+    """Repair flow offering to reload Climate Advisor to apply saved-but-pending settings.
+
+    Raised by ClimateAdvisorOptionsFlow._commit_section() (Issue #573) every time
+    an options-flow section is saved — the write is immediate, but the running
+    coordinator/AI client only pick up the change on an actual reload. Rather
+    than build a dedicated in-flow reload control (HA's menu-step UI can't
+    render a real button, and a form step allows only one submit action — see
+    #573's design history), this points at HA's own generic "Reload" action,
+    which the confirm step here performs directly.
+    """
+
+    async def async_step_init(self, user_input: dict[str, str] | None = None) -> data_entry_flow.FlowResult:
+        """Confirm and reload."""
+        if user_input is not None:
+            entries = self.hass.config_entries.async_entries(DOMAIN)
+            if entries:
+                await self.hass.config_entries.async_reload(entries[0].entry_id)
+            ir.async_delete_issue(self.hass, DOMAIN, "reload_needed")
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(step_id="init", data_schema=vol.Schema({}))
+
+
 async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict | None) -> RepairsFlow:
     """Create a fix flow for the given issue."""
     if issue_id == "weather_entity_not_found":
         return WeatherEntityRepairFlow()
+    if issue_id == "reload_needed":
+        return ReloadNeededRepairFlow()
     return ConfirmRepairFlow()

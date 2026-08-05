@@ -10,6 +10,7 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers import selector
 
 from .const import (
@@ -124,9 +125,11 @@ INDOOR_SOURCE_OPTIONS = [
     selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
 ]
 
-# Menu options for the options flow (Issue #50). "save"/"save_reload" (Issue #573)
-# are the terminal actions — every other entry is a settings section whose Submit
-# only writes the config entry, no reload.
+# Menu options for the options flow (Issue #50). Each entry's own Submit
+# persists that section only (Issue #573) — no reload menu items live here at
+# all; applying pending changes happens via HA's own generic "Reload" action
+# on the integration's page, which the "reload_needed" repair issue points at
+# (see _commit_section() and repairs.py).
 OPTIONS_MENU_OPTIONS = [
     "core",
     "setpoints",
@@ -139,8 +142,6 @@ OPTIONS_MENU_OPTIONS = [
     "classification_thresholds",
     "ai_settings",
     "github_settings",
-    "save",
-    "save_reload",
 ]
 
 TEMP_UNIT_OPTIONS = [
@@ -622,9 +623,12 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         settings session tore down and rebuilt the coordinator/AI client once
         per section. Submit now writes only — ``hass.config_entries.async_update_entry()``
         makes the change visible immediately if a section is reopened before
-        closing the flow (still solving the original #557 staleness problem),
-        but the running coordinator keeps using the old config until the user
-        explicitly reloads via the "Save and Reload" menu option.
+        closing the flow (still solving the original #557 staleness problem).
+        The running coordinator keeps using the old config until the entry is
+        actually reloaded (HA's built-in "Reload" action on the integration's
+        page) or HA restarts — a "reload_needed" repair issue is raised to make
+        that visible on the integration's page rather than requiring a
+        dedicated in-flow reload control.
         """
         if clearable_keys:
             self._apply_step_input(user_input, clearable_keys)
@@ -636,6 +640,15 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             data.pop(key, None)
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            "reload_needed",
+            is_fixable=True,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="reload_needed",
+        )
         _LOGGER.info("Options section saved (cleared=%d) — reload not yet applied", len(self._removed))
 
         # Everything just flushed to config_entry.data; reset scratch state so
@@ -651,23 +664,6 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             menu_options=OPTIONS_MENU_OPTIONS,
         )
-
-    async def async_step_save(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """Close the options flow without reloading (Issue #573).
-
-        Every section already wrote its own fields on Submit — this just ends
-        the flow cleanly. The running coordinator keeps using its current
-        (pre-this-session) config until "Save and Reload" is used instead, or
-        the entry is reloaded/HA is restarted some other way.
-        """
-        _LOGGER.info("Options flow closed via Save — no reload")
-        return self.async_create_entry(title="", data={})
-
-    async def async_step_save_reload(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
-        """Close the options flow and reload once, applying every section edited this session."""
-        await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        _LOGGER.info("Options flow closed via Save and Reload — reload triggered")
-        return self.async_create_entry(title="", data={})
 
     # ---- Core Settings ----
 

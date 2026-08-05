@@ -19,6 +19,7 @@
 | Can a stale/repeated remote event trigger a false override? | It used to. The `event.*` entity flaps to `unavailable` at arbitrary times (not just restart) and re-announces its STALE last `event_type` with the SAME state (the entity's `state` field IS the event timestamp). Issue #495 added a dedup guard (`_last_fan_remote_event_ts`) that ignores a re-announced identical timestamp — confirmed live: without it, a phantom 2h override fired with zero user action when the entity restored a 6-hour-stale `timer_2h`. | [§ Stale-Event Dedup](#stale-event-dedup) |
 | Does the dashboard's remote-timer display stay accurate? | As of Issue #495, yes. Previously `handle_fan_manual_override()` unconditionally overwrote `_fan_remote_timer_hours` on every call — including plain non-remote re-stamps (e.g. the WHF fan entity re-reporting "on") — which nulled an active remote timer within seconds of a genuine press. Fixed by only overwriting when the caller is the remote itself (`is_remote_event=True`) or supplies a genuine value. `_fan_remote_speed` (Issue #519) uses the identical guarded-overwrite idiom. | [§ Timer Value Durability](#timer-value-durability) |
 | How does CA find the ambient speed sensor without new config? | Auto-discovery via HA's entity/device registry, keyed off the already-configured `fan_remote_entity` — resolves its `device_id`, then scans sibling entities for a `sensor.*` matching an object-id hint. No new user-facing config field; a discovery miss (older firmware, or registry not yet populated at startup) degrades to "speed unknown," which IS the auto-detect + fallback mechanism. | [§ Ambient Speed Sensor Discovery](#ambient-speed-sensor-discovery-issue-519) |
+| Can CA's OWN fan command be misread as a remote press? | It used to. The QuietCool device transmits AND receives on the same RF channel, so a CA-issued command can be heard back by this same receive-side entity within ~1-2 seconds. Issue #567 added an echo guard (`_is_recent_fan_command()`, the same 30s-window primitive `_async_fan_entity_changed()` already used) at the top of `_async_fan_remote_changed()` — event-context matching isn't available here since CA never calls a service on this receive-only entity. | [§ CA's Own Command Echo Suppression](#cas-own-command-echo-suppression-issue-567) |
 
 ---
 
@@ -27,7 +28,8 @@
 **Files:**
 - `custom_components/climate_advisor/fan_status.py` — `parse_remote_timer_event()`, the single source of truth for the event-token → hours mapping; `parse_remote_speed_event()` (Issue #519), the sibling for the speed-token family
 - `custom_components/climate_advisor/const.py` — `CONF_FAN_REMOTE_ENTITY`, `REMOTE_TIMER_EVENT_HOURS`; `REMOTE_SPEED_TOKENS`, `REMOTE_BURST_WINDOW_SECONDS`, `REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS` (Issue #519)
-- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup); `_PendingFanRemoteBurst`, `_arm_fan_remote_burst()`/`_cancel_fan_remote_burst()`/`_flush_fan_remote_burst()` (Issue #519 burst combining + classification); `_resolve_fan_remote_speed_sensor()`/`_read_fan_remote_speed()` (Issue #519 ambient sensor discovery)
+- `custom_components/climate_advisor/coordinator.py` — subscription (`async_setup`) + `_async_fan_remote_changed()` dispatch handler; `_last_fan_remote_event_ts` (Issue #495 stale-event dedup); `_PendingFanRemoteBurst`, `_arm_fan_remote_burst()`/`_cancel_fan_remote_burst()`/`_flush_fan_remote_burst()` (Issue #519 burst combining + classification); `_resolve_fan_remote_speed_sensor()`/`_read_fan_remote_speed()` (Issue #519 ambient sensor discovery); `_is_recent_fan_command()` echo guard at ingestion (Issue #567)
+- `custom_components/climate_advisor/ai_skills_context.py` — `_render_fan_cancel()` branches on the `fan_cancel` event's `trigger` field so CA's own drift-reconciliation self-correction (`physical_drift_correction`) doesn't render as "user turned off" (Issue #567)
 - `custom_components/climate_advisor/automation.py` — `handle_fan_manual_override(duration_override=..., is_remote_event=..., remote_speed=...)`, `_start_grace_period(duration_override=...)`, the suppression WARNING at `_deactivate_fan()` and `fan_thermostat_check()`, `_suppress_hvac_for_whf()`/`_release_whf_and_reclassify()` (Issue #495 HVAC suppression + reclassify-on-exit); `handle_fan_speed_observed()` (Issue #519 comfort-only path)
 - `custom_components/climate_advisor/api.py` + `custom_components/climate_advisor/frontend/index.html` — `fan_remote_speed` status field + dashboard display (Issue #519)
 - `gunkl/quietcool-house-fan` `component.yaml` (separate repo) — the new `text_sensor.quietcool_speed` ambient entity (Issue #519)
@@ -338,6 +340,45 @@ apart from a fresh button press by inspecting the event alone, so it now calls
 5-minute window `_async_thermostat_changed()` already used (Issue #321), now shared. A
 real remote press in the first 5 minutes after a restart is not acted on during that
 window — an accepted tradeoff, consistent with the existing thermostat-override behavior.
+
+---
+
+## CA's Own Command Echo Suppression (Issue #567)
+
+**Occupant impact:** CA turns the fan on for a legitimate reason (e.g. resuming a nat-vent
+cycle at the end of the night). Without this guard, that automation action could get
+misread as the occupant pressing the physical remote, be relabeled "manual override" in the
+Activity Report, and hand fan control away from CA for hours on the strength of a false
+detection — precisely the confusion this section closes.
+
+**Why this is possible:** the QuietCool ESPHome device is a single transceiver — the same
+component that exposes CA's control entity also decodes RF traffic for `event.quietcool_remote`
+(see [§ Firmware Event Contract](#firmware-event-contract): "extends the upstream
+**transmit-only** component with **receive** capability"). A command CA transmits can be heard
+back on the same channel and decoded indistinguishably from a real remote press — confirmed
+live: a `nat_vent_cycling_on` command at `T` was followed 1.742 seconds later by a `low` speed
+token on `event.quietcool_remote`, which the (unguarded) burst classifier treated as a fresh
+press and armed a 3-hour manual override with zero actual user involvement (Issue #567).
+
+**Fix:** `_async_fan_remote_changed()` now checks `_is_recent_fan_command(threshold_seconds=30.0)`
+at ingestion, before any burst is opened — the same shared primitive
+`_async_fan_entity_changed()` already used for the physical fan-entity path since Fix #239. See
+`_is_recent_fan_command()`'s docstring in `coordinator.py` for the full list of guarded call
+sites; this project has shipped the "a new fan-state listener forgot this guard" defect twice
+(#417, #567), so any new listener should consult that list before assuming its own event source
+is exempt.
+
+**Why not `event.context` matching** (the *primary*, stronger signal
+`_async_fan_entity_changed()` uses)? Structurally unavailable here: `event.quietcool_remote` is
+receive-only — CA never calls an HA service on it, so HA never attaches a CA-issued `Context` to
+its state-changed events. The time-window heuristic is the correct mechanism for this entity, not
+a fallback shortcut.
+
+**Tradeoff:** a genuine human remote press landing within 30 seconds of a CA-issued fan command
+is silently dropped instead of acted on. This is the same tradeoff already accepted for the
+physical-entity path since Fix #239 — timer/speed presses are deliberate, non-urgent actions, so
+a 30s silent window is a small cost against a guaranteed-false override every time CA's own
+command echoes back.
 
 ---
 

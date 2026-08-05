@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.53"
+VERSION = "0.5.54"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.54": [
+        "Fix #567: the whole-house fan's own automation-issued commands could get heard"
+        " back on the QuietCool remote's RF channel and misread as a person pressing the"
+        " physical remote — falsely handing fan control away from Climate Advisor for up"
+        " to 3 hours and mislabeling the Activity Report as a manual action that never"
+        " happened. Also fixed a related report-only issue: when Climate Advisor quietly"
+        " corrects its own stale fan-tracking (no user involved at all), the Activity"
+        " Report now says so instead of also claiming 'user turned off'.",
+    ],
     "0.5.53": [
         "Fix #568: the AI model-compatibility learning added in #565 (so Climate Advisor"
         " adapts automatically to a newer Claude model's quirks after the first request)"
@@ -1468,6 +1477,42 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    567: {
+        "version_fixed": "0.5.54",
+        "title": (
+            "WHF automation actions were being confused as manual ones. The QuietCool device"
+            " transmits AND receives on the same RF channel, so a CA-issued fan command"
+            " (confirmed live: nat_vent_cycling_on) could be heard back by the same"
+            " receive-side event.quietcool_remote entity ~1.7s later and misread as a fresh"
+            " remote press. _async_fan_remote_changed()/_flush_fan_remote_burst() (added in"
+            " #486/#519) never called the existing _is_recent_fan_command() echo guard that"
+            " the sibling physical-fan-entity handler has used since Fix #239 — an original"
+            " design gap, not a regression. The false override then cascaded: a later"
+            " legitimate nat-vent exit deferred to the (false) active override and skipped"
+            " deactivating the fan, so a genuine physical fan-off ~18 minutes later wasn't"
+            " caught until the 2-tick drift-reconciliation backstop fired 10 minutes after"
+            " that — and that backstop's own fan_cancel event was unconditionally rendered"
+            " 'Fan cancel (user turned off)' regardless of its actual trigger, a second,"
+            " independent mislabeling bug surfaced by the same investigation."
+        ),
+        "scope_covered": (
+            "coordinator.py: _async_fan_remote_changed() now calls _is_recent_fan_command"
+            "(threshold_seconds=30.0) at ingestion, before any burst is opened — mirrors the"
+            " existing guard in _async_fan_entity_changed() (Fix #239); event.context matching"
+            " isn't usable here since CA never calls a service on this receive-only entity."
+            " _is_recent_fan_command()'s docstring and the Issue #417 sibling-comment in"
+            " _async_thermostat_changed() now cross-reference this call site so a future new"
+            " fan-state listener doesn't repeat the same missed-guard defect a third time."
+            " ai_skills_context.py: _render_fan_cancel() branches on the fan_cancel event's"
+            " existing trigger field (fan_off / timer_boundary_settle / physical_drift_correction"
+            " — all three already emitted by automation.py, previously ignored by the renderer)"
+            " so CA's own drift-reconciliation self-correction no longer renders as a user"
+            " action. tests: TestFanRemoteEchoGuard in test_fan_remote.py (4 cases, revert-tested);"
+            " TestFanOwnershipAnnotations additions in test_activity_renderers.py (4 cases,"
+            " revert-tested); fixed a latent MagicMock-truthiness gap this change exposed in"
+            " test_restart_coalescing_fan_guard.py's coordinator stub."
+        ),
+    },
     568: {
         "version_fixed": "0.5.53",
         "title": (

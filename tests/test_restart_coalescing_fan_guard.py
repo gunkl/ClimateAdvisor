@@ -183,6 +183,7 @@ def _make_fan_remote_coord(*, startup_coalesce_active: bool) -> object:
 
     ae = MagicMock()
     ae.handle_fan_manual_override = MagicMock()
+    ae._fan_command_time = None  # Issue #567: no recent CA command by default (echo guard)
     coord.automation_engine = ae
 
     coord._startup_coalesce_active = startup_coalesce_active
@@ -204,6 +205,10 @@ def _make_fan_remote_coord(*, startup_coalesce_active: bool) -> object:
     coord._arm_fan_remote_burst = types.MethodType(ClimateAdvisorCoordinator._arm_fan_remote_burst, coord)
     coord._cancel_fan_remote_burst = types.MethodType(ClimateAdvisorCoordinator._cancel_fan_remote_burst, coord)
     coord._flush_fan_remote_burst = types.MethodType(ClimateAdvisorCoordinator._flush_fan_remote_burst, coord)
+    # Issue #567: bind the REAL echo guard so it reads automation_engine._fan_command_time
+    # exactly as production does, instead of a MagicMock auto-attr (truthy, would swallow
+    # every dispatch in this class).
+    coord._is_recent_fan_command = types.MethodType(ClimateAdvisorCoordinator._is_recent_fan_command, coord)
     return coord
 
 

@@ -25,7 +25,7 @@ import asyncio
 import importlib
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Ensure HA stubs are installed before any coordinator import.
@@ -51,6 +51,7 @@ from custom_components.climate_advisor.fan_status import (  # noqa: E402
 _PATCH_CALL_LATER = "custom_components.climate_advisor.automation.async_call_later"
 _PATCH_CALLBACK = "custom_components.climate_advisor.automation.callback"
 _PATCH_DT_NOW = "custom_components.climate_advisor.automation.dt_util.now"
+_PATCH_COORDINATOR_DT_NOW = "custom_components.climate_advisor.coordinator.dt_util.now"
 _FIXED_NOW = datetime(2026, 7, 12, 20, 0, 0)
 
 
@@ -109,6 +110,7 @@ def _make_mock_engine() -> MagicMock:
     ae._override_confirm_pending = False
     ae._fan_remote_timer_hours = None
     ae._fan_remote_speed = None
+    ae._fan_command_time = None  # Issue #567: default to "no recent CA command" for the echo guard
     ae.handle_fan_manual_override = MagicMock()
     ae.handle_fan_speed_observed = MagicMock()
     return ae
@@ -160,6 +162,10 @@ def _make_coordinator_stub(config: dict | None = None, *, physical_on: bool | No
     coord._arm_fan_remote_burst = types.MethodType(mod.ClimateAdvisorCoordinator._arm_fan_remote_burst, coord)
     coord._cancel_fan_remote_burst = types.MethodType(mod.ClimateAdvisorCoordinator._cancel_fan_remote_burst, coord)
     coord._flush_fan_remote_burst = types.MethodType(mod.ClimateAdvisorCoordinator._flush_fan_remote_burst, coord)
+    # Issue #567: bind the REAL echo guard (not a MagicMock auto-attr, which would be
+    # truthy and silently swallow every dispatch in this file) so it reads
+    # automation_engine._fan_command_time exactly as production does.
+    coord._is_recent_fan_command = types.MethodType(mod.ClimateAdvisorCoordinator._is_recent_fan_command, coord)
     return coord
 
 
@@ -975,3 +981,75 @@ class TestFanRemoteStatusFieldsWiring:
         result = coord._compute_fan_remote_status_fields()
         assert result["fan_remote_timer_hours"] is None
         assert result["fan_remote_timer_ends"] is None
+
+
+# ---------------------------------------------------------------------------
+# 11. Issue #567: CA-command echo guard on _async_fan_remote_changed
+# ---------------------------------------------------------------------------
+
+
+class TestFanRemoteEchoGuard:
+    """The QuietCool device transmits AND receives on the same RF channel, so a CA-issued
+    fan command can be heard back by this same receive-side entity and misread as a fresh
+    manual press. Mirrors the existing _is_recent_fan_command() echo guard already used by
+    _async_fan_entity_changed() (Fix #239) -- see the sibling-site list at
+    _is_recent_fan_command()'s definition in coordinator.py.
+    """
+
+    def test_event_within_30s_of_ca_command_is_ignored(self):
+        coord = _make_coordinator_stub(physical_on=True)
+        ae = coord.automation_engine
+        ae._fan_command_time = _FIXED_NOW - timedelta(seconds=5)  # CA just issued a command
+
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "low"})
+        with patch(_PATCH_COORDINATOR_DT_NOW, return_value=_FIXED_NOW):
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_not_called()
+        ae.handle_fan_speed_observed.assert_not_called()
+
+    def test_timer_event_within_30s_of_ca_command_is_also_ignored(self):
+        """The guard applies before any burst-combining logic runs -- a timer press
+        (normally an unconditional override, see TestFanRemoteBurstClassification) must be
+        suppressed too when it lands inside the echo window."""
+        coord = _make_coordinator_stub(physical_on=True)
+        ae = coord.automation_engine
+        ae._fan_command_time = _FIXED_NOW - timedelta(seconds=1)
+
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_8h"})
+        with patch(_PATCH_COORDINATOR_DT_NOW, return_value=_FIXED_NOW):
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_event_outside_30s_window_still_classifies_normally(self):
+        """Proves the guard doesn't over-suppress -- a remote press well clear of any CA
+        command still drives the shared override entry point as before."""
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        ae._fan_command_time = _FIXED_NOW - timedelta(seconds=45)
+
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "high"})
+        with patch(_PATCH_COORDINATOR_DT_NOW, return_value=_FIXED_NOW):
+            asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="?",
+            fan_after="on",
+            duration_override=None,
+            remote_timer_hours=None,
+            remote_speed="high",
+            is_remote_event=True,
+        )
+
+    def test_no_recent_command_still_classifies_normally(self):
+        """Default state (no CA command ever issued) must behave exactly as before this
+        fix -- the guard is opt-in via a real recent timestamp, not opt-out."""
+        coord = _make_coordinator_stub(physical_on=False)
+        ae = coord.automation_engine
+        assert ae._fan_command_time is None
+
+        new_state = _make_fake_state("2026-07-12T20:00:00+00:00", {"event_type": "timer_2h"})
+        asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
+
+        ae.handle_fan_manual_override.assert_called_once()

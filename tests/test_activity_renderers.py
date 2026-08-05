@@ -974,6 +974,40 @@ class TestFanOwnershipAnnotations:
         # The renderer defaults to "?" for missing fan states — settings is non-empty but informative
         assert isinstance(st, str)  # no crash, returns a string
 
+    def test_fan_cancel_renderer_physical_drift_correction_is_not_user_turned_off(self):
+        """Issue #567: a fan_cancel emitted by the drift-reconciliation backstop
+        (trigger=physical_drift_correction) is CA correcting its OWN stale bookkeeping —
+        no user touched anything. Must not render as "user turned off"."""
+        ev, _st = _act_mod.EVENT_RENDERERS["fan_cancel"](
+            {"trigger": "physical_drift_correction"},
+            "fahrenheit",
+        )
+        assert "user turned off" not in ev.lower()
+
+    def test_fan_cancel_renderer_timer_boundary_settle_is_not_user_turned_off(self):
+        """trigger=timer_boundary_settle is the tail of an RF-timer session ending, not a
+        fresh user action distinct from the timer press that already started it."""
+        ev, _st = _act_mod.EVENT_RENDERERS["fan_cancel"](
+            {"trigger": "timer_boundary_settle"},
+            "fahrenheit",
+        )
+        assert "user turned off" not in ev.lower()
+
+    def test_fan_cancel_renderer_genuine_fan_off_still_says_user_turned_off(self):
+        """trigger=fan_off is a genuine externally-detected physical fan-off — the one case
+        that IS a real user action. Must render unchanged from before this fix."""
+        ev, _st = _act_mod.EVENT_RENDERERS["fan_cancel"](
+            {"fan_before": "on", "fan_after": "off", "trigger": "fan_off"},
+            "fahrenheit",
+        )
+        assert "user turned off" in ev.lower()
+
+    def test_fan_cancel_renderer_no_trigger_defaults_to_user_turned_off(self):
+        """Missing/unknown trigger falls back to the pre-existing label — never less
+        informative than before this fix."""
+        ev, _st = _act_mod.EVENT_RENDERERS["fan_cancel"]({}, "fahrenheit")
+        assert "user turned off" in ev.lower()
+
     def test_nat_vent_fan_off_ownership_annotation_in_ev_text(self):
         """When user owns fan, the NOTE annotation is added to ev_text in the renderer block.
 

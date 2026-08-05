@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.52"
+VERSION = "0.5.53"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.53": [
+        "Fix #568: the AI model-compatibility learning added in #565 (so Climate Advisor"
+        " adapts automatically to a newer Claude model's quirks after the first request)"
+        " was being silently wiped every time AI settings were saved or Home Assistant"
+        " restarted — so it could never actually stick. It's now saved the same way as"
+        " other AI usage stats, so it survives both. Also added clearer AI request"
+        " logging so any future model-compatibility issue can be diagnosed directly from"
+        " the logs.",
+    ],
     "0.5.52": [
         "Fix #565: the AI Investigator and AI Activity Report could silently burn their"
         " entire response budget with no visible answer at all on newer Claude models"
@@ -1459,6 +1468,51 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    568: {
+        "version_fixed": "0.5.53",
+        "title": (
+            "After #565 shipped, the user reported claude-sonnet-5 'still doesn't work' while"
+            " claude-sonnet-4-6 kept working. Root-caused from live log evidence (not a live"
+            " retest): the two per-model capability caches (#563's _unsupported_params, #565's"
+            " _adaptive_thinking_models) were pure in-memory ClaudeAPIClient instance state."
+            " Direct log evidence: 'Options section saved — reload triggered (cleared=0)' fired"
+            " 4 seconds after the model had just learned it needed adaptive thinking —"
+            " hass.config_entries.async_reload() (triggered by any options-flow save, immediate"
+            " since #557) tears down and reconstructs the entire coordinator including a"
+            " brand-new ClaudeAPIClient, silently discarding everything just learned."
+            " ClaudeAPIClient.update_config() — the one method that updates config without"
+            " discarding capability state — was confirmed to have zero production call sites;"
+            " every real config change goes through async_reload() instead. So the reactive"
+            " self-heal from #565 could only ever survive within a single process lifetime,"
+            " which routine restarts and any settings change reset — a user actively testing"
+            " which model works would never observe it."
+        ),
+        "scope_covered": (
+            "claude_api.py: both self._unsupported_params and self._adaptive_thinking_models are"
+            " now included in get_persistent_stats() (serialized as JSON-safe dict[str,"
+            " list[str]] / list[str]) and restored by restore_persistent_stats() (type-validated"
+            " per the project's JSON-from-disk convention — any malformed shape degrades to"
+            " empty rather than raising). This reuses the same bridge already wired through"
+            " coordinator._async_save_state()/async_restore_state() for monthly_cost/rate"
+            " counters, so both caches now survive config reloads and HA restarts, not just the"
+            " lifetime of one ClaudeAPIClient instance. Also added observability requested"
+            " during investigation, so a future occurrence is diagnosable from logs alone rather"
+            " than needing another live diagnostic: _log_request_kwargs_decision() logs the"
+            " resolved model/reasoning_effort/adaptive-thinking-active/unsupported-params/"
+            " max_tokens/thinking-and-output_config-presence before every API call (both"
+            " request paths); 'response finished' log lines now include input_tokens alongside"
+            " output_tokens (claude-sonnet-5's updated tokenizer is documented to parse the same"
+            " text into meaningfully more input tokens than claude-sonnet-4-6 — a distinct,"
+            " not-yet-observed, input-side context-window risk this makes visible in trend"
+            " data); and any APIError matching neither known capability-detection regex (and not"
+            " a NotFoundError) now logs a distinct 'Unrecognized API error shape' WARNING with"
+            " the full raw message, so a genuinely new failure mode is immediately greppable"
+            " instead of blending into generic retry-failure text. Test coverage:"
+            " tests/test_claude_api.py (TestPersistentStats capability-cache round-trip +"
+            " malformed-data cases, TestUnrecognizedApiErrorObservability,"
+            " TestRequestKwargsDecisionLogging)."
+        ),
+    },
     565: {
         "version_fixed": "0.5.52",
         "title": (

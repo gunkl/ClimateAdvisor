@@ -512,6 +512,7 @@ class ClaudeAPIClient:
                 system_prompt=system_prompt,
                 user_message=user_message,
             )
+            self._log_request_kwargs_decision(resolved_model, resolved_reasoning, kwargs)
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
                     async for event in stream:
@@ -559,6 +560,19 @@ class ClaudeAPIClient:
                     )
                     continue  # next loop iteration rebuilds kwargs with the adaptive shape
 
+                if isinstance(exc, APIError) and bad_param is None and not needs_adaptive:
+                    # Issue #568: a 400-class error that matches neither known
+                    # capability-detection pattern — e.g. a genuinely new failure shape
+                    # (a context-length-exceeded error is a documented risk for newer
+                    # models with a different tokenizer). Mark it distinctly so it's
+                    # immediately greppable and never mistaken for one of the two known,
+                    # already-handled shapes.
+                    _LOGGER.warning(
+                        "Unrecognized API error shape for model '%s' (streaming) — full message: %s",
+                        resolved_model,
+                        exc,
+                    )
+
                 self._circuit_breaker.consecutive_failures += 1
                 self._error_count += 1
                 if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
@@ -580,9 +594,10 @@ class ClaudeAPIClient:
         truncated_empty = truncated and not any_text_yielded
         skill_name = self._extract_skill_name(system_prompt)
         _LOGGER.debug(
-            "Claude streaming response finished: skill=%s stop_reason=%s output_tokens=%d",
+            "Claude streaming response finished: skill=%s stop_reason=%s input_tokens=%d output_tokens=%d",
             skill_name,
             stop_reason,
+            input_tokens,
             output_tokens,
         )
         if truncated_empty:
@@ -742,6 +757,14 @@ class ClaudeAPIClient:
             "counter_date": self._rate_counters.counter_date.isoformat(),
             "investigator_requests_today": self._investigator_requests_today,
             "investigator_requests_date": self._investigator_requests_date,
+            # Issue #568: without this, learned per-model capability (Issue #563's
+            # _unsupported_params, Issue #565's _adaptive_thinking_models) was pure
+            # in-memory state, wiped by any config reload (e.g. an options-flow save —
+            # Issue #557 made these save+reload immediately) or HA restart, forcing the
+            # first-call-fails-once discovery cost to repeat indefinitely instead of
+            # self-healing once and staying healed.
+            "unsupported_params": {model: sorted(params) for model, params in self._unsupported_params.items()},
+            "adaptive_thinking_models": sorted(self._adaptive_thinking_models),
         }
 
     def restore_persistent_stats(self, data: dict[str, Any]) -> None:
@@ -767,6 +790,17 @@ class ClaudeAPIClient:
             self._rate_counters.counter_date = date.today()
         self._investigator_requests_today = int(data.get("investigator_requests_today", 0))
         self._investigator_requests_date = data.get("investigator_requests_date", "")
+        # Issue #568: type-validated per the project's JSON-from-disk convention — any
+        # malformed shape (hand-edited state file, downgrade from a future version)
+        # degrades to "nothing learned yet" rather than raising.
+        raw_unsupported = data.get("unsupported_params", {})
+        self._unsupported_params = (
+            {model: set(params) for model, params in raw_unsupported.items() if isinstance(params, list)}
+            if isinstance(raw_unsupported, dict)
+            else {}
+        )
+        raw_adaptive = data.get("adaptive_thinking_models", [])
+        self._adaptive_thinking_models = set(raw_adaptive) if isinstance(raw_adaptive, list) else set()
         # Apply daily reset if rebooted after midnight
         self._reset_daily_counters_if_needed()
         _LOGGER.debug(
@@ -1007,6 +1041,25 @@ class ClaudeAPIClient:
 
         return kwargs
 
+    def _log_request_kwargs_decision(self, model: str, reasoning_effort: str, kwargs: dict[str, Any]) -> None:
+        """Log the resolved request-shape decision right before an API call (Issue #568).
+
+        Answers "did the adaptive-thinking branch actually fire, and was the learned
+        unsupported-parameter strip applied" directly from `ha_logs.py`, for every future
+        request — no special live test or diagnostic script needed to see this.
+        """
+        _LOGGER.debug(
+            "Claude request kwargs decision: model=%s reasoning_effort=%s adaptive_thinking=%s "
+            "unsupported_params=%s max_tokens=%d has_thinking=%s has_output_config=%s",
+            model,
+            reasoning_effort,
+            model in self._adaptive_thinking_models,
+            sorted(self._unsupported_params.get(model, ())),
+            kwargs.get("max_tokens", 0),
+            "thinking" in kwargs,
+            "output_config" in kwargs,
+        )
+
     async def _single_api_call(
         self,
         *,
@@ -1034,6 +1087,7 @@ class ClaudeAPIClient:
             system_prompt=system_prompt,
             user_message=user_message,
         )
+        self._log_request_kwargs_decision(model, reasoning_effort, kwargs)
 
         api_response = await self._client.messages.create(**kwargs)
 
@@ -1053,9 +1107,10 @@ class ClaudeAPIClient:
         truncated_empty = truncated and not content_text
         skill_name = self._extract_skill_name(system_prompt)
         _LOGGER.debug(
-            "Claude response finished: skill=%s stop_reason=%s output_tokens=%d",
+            "Claude response finished: skill=%s stop_reason=%s input_tokens=%d output_tokens=%d",
             skill_name,
             stop_reason,
+            input_tokens,
             output_tokens,
         )
         if truncated_empty:
@@ -1303,6 +1358,18 @@ class ClaudeAPIClient:
                             return fallback
                         # No usable same-tier replacement — fall through to the
                         # normal error handling/backoff below.
+                    else:
+                        # Issue #568: a 400-class error that matches neither known
+                        # capability-detection pattern and isn't a NotFoundError — e.g. a
+                        # genuinely new failure shape (a context-length-exceeded error is
+                        # a documented risk for newer models with a different tokenizer).
+                        # Mark it distinctly so it's immediately greppable and never
+                        # mistaken for one of the two known, already-handled shapes.
+                        _LOGGER.warning(
+                            "Unrecognized API error shape for model '%s' — full message: %s",
+                            model,
+                            exc,
+                        )
                     last_error = f"API error: {exc}"
                     _LOGGER.warning(
                         "Claude API error on attempt %d/%d: %s",

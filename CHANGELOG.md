@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.53] — 2026-08-05
+
+- Fix #568: the AI model-compatibility learning added in #565 (so Climate Advisor adapts automatically to a newer Claude model's quirks after the first request) was being silently wiped every time AI settings were saved or Home Assistant restarted — so it could never actually stick. It's now saved the same way as other AI usage stats, so it survives both. Also added clearer AI request logging so any future model-compatibility issue can be diagnosed directly from the logs.
+
 ## [0.5.52] — 2026-08-04
 
 - Fix #565: the AI Investigator and AI Activity Report could silently burn their entire response budget with no visible answer at all on newer Claude models (confirmed with claude-sonnet-5) — the model was doing its own internal reasoning with no cap on it, and that reasoning alone could use up the whole response length before ever getting to write an actual answer. Climate Advisor now detects this and automatically applies a bounded-reasoning setting so the model always leaves room for a real answer; it also learns per-model going forward so this self-heals after the first occurrence instead of repeating on every request.

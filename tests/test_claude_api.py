@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import time
@@ -542,6 +543,55 @@ class TestPersistentStats:
         client = ClaudeAPIClient(_make_config())
         client.restore_persistent_stats({"counter_date": "not-a-date"})
         assert client._rate_counters.counter_date == date.today()
+
+    def test_roundtrip_preserves_capability_caches(self):
+        """Issue #568: learned capability must survive a save/restore cycle — this is what
+        makes it survive a config reload or HA restart, not just live in memory."""
+        client = ClaudeAPIClient(_make_config())
+        client._unsupported_params = {"claude-sonnet-5": {"temperature"}, "claude-opus-5": {"top_p", "top_k"}}
+        client._adaptive_thinking_models = {"claude-sonnet-5"}
+
+        stats = client.get_persistent_stats()
+
+        client2 = ClaudeAPIClient(_make_config())
+        client2.restore_persistent_stats(stats)
+
+        assert client2._unsupported_params == {
+            "claude-sonnet-5": {"temperature"},
+            "claude-opus-5": {"top_p", "top_k"},
+        }
+        assert client2._adaptive_thinking_models == {"claude-sonnet-5"}
+
+    def test_empty_dict_restores_capability_caches_to_empty(self):
+        """Old state files (pre-#568) lack these keys entirely — must not crash."""
+        client = ClaudeAPIClient(_make_config())
+        client.restore_persistent_stats({})
+        assert client._unsupported_params == {}
+        assert client._adaptive_thinking_models == set()
+
+    def test_malformed_capability_cache_data_degrades_to_empty(self):
+        """Type-validated per project convention: a hand-edited or corrupted state file
+        must never crash restore — degrade to 'nothing learned yet' instead."""
+        client = ClaudeAPIClient(_make_config())
+        client.restore_persistent_stats(
+            {
+                "unsupported_params": "not-a-dict",
+                "adaptive_thinking_models": "not-a-list",
+            }
+        )
+        assert client._unsupported_params == {}
+        assert client._adaptive_thinking_models == set()
+
+    def test_malformed_capability_cache_entry_is_skipped(self):
+        """A single malformed entry (e.g. params not a list) is skipped, not fatal to the
+        whole restore."""
+        client = ClaudeAPIClient(_make_config())
+        client.restore_persistent_stats(
+            {
+                "unsupported_params": {"claude-sonnet-5": ["temperature"], "claude-opus-5": "not-a-list"},
+            }
+        )
+        assert client._unsupported_params == {"claude-sonnet-5": {"temperature"}}
 
 
 # ---------------------------------------------------------------------------
@@ -1346,3 +1396,150 @@ class TestAdaptiveThinkingTruncatedEmptyRecovery:
         assert mock_api.messages.stream.call_count == 1  # no mid-stream retry
         assert client._adaptive_thinking_models == {"claude-sonnet-5"}
         assert mock_api.messages.stream.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Issue #568 — observability: an API error matching neither known
+# capability-detection pattern must be marked distinctly, not logged as
+# indistinguishable generic text (e.g. a documented context-length-exceeded
+# risk on newer models with a different tokenizer, never yet seen live).
+# ---------------------------------------------------------------------------
+
+
+class TestUnrecognizedApiErrorObservability:
+    def test_non_streaming_unrecognized_error_gets_distinct_marker(self, caplog):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = _ClaudeApiAPIError(
+            "invalid_request_error: prompt is too long: 205000 tokens > 200000 maximum"
+        )
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is False
+        assert any("Unrecognized API error shape" in rec.message for rec in caplog.records)
+
+    def test_non_streaming_known_deprecated_param_error_does_not_get_marker(self, caplog):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
+            _mock_message("recovered"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
+            asyncio.run(client.async_request("System.", "User."))
+
+        assert not any("Unrecognized API error shape" in rec.message for rec in caplog.records)
+
+    def test_non_streaming_known_adaptive_thinking_error_does_not_get_marker(self, caplog):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiAPIError(
+                '"thinking.type.enabled" is not supported for this model. Use '
+                '"thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
+            ),
+            _mock_message("recovered"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
+            asyncio.run(client.async_request("System.", "User.", reasoning_effort="high"))
+
+        assert not any("Unrecognized API error shape" in rec.message for rec in caplog.records)
+
+    def test_streaming_unrecognized_error_gets_distinct_marker(self, caplog):
+        mock_api = _make_mock_api_client()
+        bad_stream = _FakeFailingStreamCM(
+            _ClaudeApiAPIError("invalid_request_error: prompt is too long: 205000 tokens > 200000 maximum")
+        )
+        mock_api.messages.stream = MagicMock(return_value=bad_stream)
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"), contextlib.suppress(Exception):
+            asyncio.run(_collect())
+
+        assert any("Unrecognized API error shape" in rec.message for rec in caplog.records)
+
+
+class TestRequestKwargsDecisionLogging:
+    """Issue #568: the resolved request shape must be visible in DEBUG logs for every
+    call, without needing a special live test to know whether adaptive thinking fired."""
+
+    def test_non_streaming_logs_kwargs_decision(self, caplog):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message("ok")
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
+        client._adaptive_thinking_models.add("claude-sonnet-5")
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(client.async_request("System.", "User."))
+
+        decision_lines = [rec.message for rec in caplog.records if "kwargs decision" in rec.message]
+        assert len(decision_lines) == 1
+        assert "adaptive_thinking=True" in decision_lines[0]
+        assert "has_thinking=True" in decision_lines[0]
+        assert "has_output_config=True" in decision_lines[0]
+
+    def test_streaming_logs_kwargs_decision(self, caplog):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=10, output_tokens=20)
+        final_msg.stop_reason = "end_turn"
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([_mock_text_delta_event("ok")], final_msg))
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_collect())
+
+        decision_lines = [rec.message for rec in caplog.records if "kwargs decision" in rec.message]
+        assert len(decision_lines) == 1
+        assert "adaptive_thinking=False" in decision_lines[0]
+
+    def test_non_streaming_finished_log_includes_input_tokens(self, caplog):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message("ok", input_tokens=4961, output_tokens=20)
+        client = _make_client(mock_api)
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(client.async_request("System.", "User."))
+
+        finished_lines = [rec.message for rec in caplog.records if "response finished" in rec.message]
+        assert len(finished_lines) == 1
+        assert "input_tokens=4961" in finished_lines[0]
+        assert "output_tokens=20" in finished_lines[0]
+
+    def test_streaming_finished_log_includes_input_tokens(self, caplog):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=4961, output_tokens=20)
+        final_msg.stop_reason = "end_turn"
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([_mock_text_delta_event("ok")], final_msg))
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("DEBUG"):
+            asyncio.run(_collect())
+
+        finished_lines = [rec.message for rec in caplog.records if "response finished" in rec.message]
+        assert len(finished_lines) == 1
+        assert "input_tokens=4961" in finished_lines[0]
+        assert "output_tokens=20" in finished_lines[0]

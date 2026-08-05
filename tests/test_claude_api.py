@@ -544,55 +544,6 @@ class TestPersistentStats:
         client.restore_persistent_stats({"counter_date": "not-a-date"})
         assert client._rate_counters.counter_date == date.today()
 
-    def test_roundtrip_preserves_capability_caches(self):
-        """Issue #568: learned capability must survive a save/restore cycle — this is what
-        makes it survive a config reload or HA restart, not just live in memory."""
-        client = ClaudeAPIClient(_make_config())
-        client._unsupported_params = {"claude-sonnet-5": {"temperature"}, "claude-opus-5": {"top_p", "top_k"}}
-        client._adaptive_thinking_models = {"claude-sonnet-5"}
-
-        stats = client.get_persistent_stats()
-
-        client2 = ClaudeAPIClient(_make_config())
-        client2.restore_persistent_stats(stats)
-
-        assert client2._unsupported_params == {
-            "claude-sonnet-5": {"temperature"},
-            "claude-opus-5": {"top_p", "top_k"},
-        }
-        assert client2._adaptive_thinking_models == {"claude-sonnet-5"}
-
-    def test_empty_dict_restores_capability_caches_to_empty(self):
-        """Old state files (pre-#568) lack these keys entirely — must not crash."""
-        client = ClaudeAPIClient(_make_config())
-        client.restore_persistent_stats({})
-        assert client._unsupported_params == {}
-        assert client._adaptive_thinking_models == set()
-
-    def test_malformed_capability_cache_data_degrades_to_empty(self):
-        """Type-validated per project convention: a hand-edited or corrupted state file
-        must never crash restore — degrade to 'nothing learned yet' instead."""
-        client = ClaudeAPIClient(_make_config())
-        client.restore_persistent_stats(
-            {
-                "unsupported_params": "not-a-dict",
-                "adaptive_thinking_models": "not-a-list",
-            }
-        )
-        assert client._unsupported_params == {}
-        assert client._adaptive_thinking_models == set()
-
-    def test_malformed_capability_cache_entry_is_skipped(self):
-        """A single malformed entry (e.g. params not a list) is skipped, not fatal to the
-        whole restore."""
-        client = ClaudeAPIClient(_make_config())
-        client.restore_persistent_stats(
-            {
-                "unsupported_params": {"claude-sonnet-5": ["temperature"], "claude-opus-5": "not-a-list"},
-            }
-        )
-        assert client._unsupported_params == {"claude-sonnet-5": {"temperature"}}
-
 
 # ---------------------------------------------------------------------------
 # Truncation detection (Issue #420)
@@ -981,15 +932,32 @@ class _FakeFailingStreamCM:
         return False
 
 
-class TestBuildRequestKwargsOrdering:
-    """The unsupported-params strip must run AFTER the thinking-budget special case,
-    so a model known not to support temperature never gets it re-added even under
-    high reasoning effort."""
+class TestBuildRequestKwargsFromCapabilityTable:
+    """Issue #572: request shape is a pure lookup against AI_MODEL_CAPABILITIES —
+    no per-model learned state, no retries. A model that needs the adaptive shape
+    (or doesn't support temperature) must build the correct kwargs on its very first
+    request, at every reasoning tier."""
 
-    def test_strip_runs_after_thinking_budget_forces_temperature(self):
+    def test_legacy_model_medium_effort_sends_no_thinking_control(self):
         mock_api = _make_mock_api_client()
         client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-        client._unsupported_params["claude-sonnet-4-6"] = {"temperature"}
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            temperature=0.3,
+            reasoning_effort="medium",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert "thinking" not in kwargs
+        assert "output_config" not in kwargs
+        assert kwargs["temperature"] == 0.3
+
+    def test_legacy_model_high_effort_uses_legacy_thinking_shape(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
 
         kwargs = client._build_request_kwargs(
             model="claude-sonnet-4-6",
@@ -1000,122 +968,92 @@ class TestBuildRequestKwargsOrdering:
             user_message="User.",
         )
 
-        assert "temperature" not in kwargs
         assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+        assert kwargs["temperature"] == 1
 
-    def test_no_unsupported_params_leaves_temperature_in_place(self):
+    def test_adaptive_model_medium_effort_sends_adaptive_shape_on_first_call(self):
+        """The whole point of Issue #572: no learning step — the very first request
+        to a known-adaptive model already builds the correct shape."""
         mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
 
         kwargs = client._build_request_kwargs(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
+            model="claude-sonnet-5",
+            max_tokens=8192,
             temperature=0.3,
             reasoning_effort="medium",
             system_prompt="System.",
             user_message="User.",
         )
 
-        assert kwargs["temperature"] == 0.3
+        assert kwargs["thinking"] == {"type": "adaptive"}
+        assert kwargs["output_config"] == {"effort": "medium"}
+        assert "temperature" not in kwargs  # claude-sonnet-5 rejects temperature
+        assert kwargs["max_tokens"] == 8192
 
-    def test_strip_only_applies_to_the_matching_model(self):
+    def test_adaptive_model_maps_effort_from_reasoning_tier(self):
         mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-        client._unsupported_params["claude-opus-4-6"] = {"temperature"}
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
 
         kwargs = client._build_request_kwargs(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
+            model="claude-sonnet-5",
+            max_tokens=8192,
             temperature=0.3,
-            reasoning_effort="medium",
+            reasoning_effort="low",
             system_prompt="System.",
             user_message="User.",
         )
 
+        assert kwargs["output_config"] == {"effort": "low"}
+
+    def test_unknown_model_falls_back_to_legacy_default_and_warns(self, caplog):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with caplog.at_level("WARNING"):
+            kwargs = client._build_request_kwargs(
+                model="claude-nonexistent-9",
+                max_tokens=4096,
+                temperature=0.3,
+                reasoning_effort="medium",
+                system_prompt="System.",
+                user_message="User.",
+            )
+
+        assert "thinking" not in kwargs
         assert kwargs["temperature"] == 0.3
+        assert any("claude-nonexistent-9" in rec.message for rec in caplog.records)
+        assert any("AI_MODEL_CAPABILITIES" in rec.message for rec in caplog.records)
 
 
-class TestDeprecatedParameterFallback:
-    """A 'parameter deprecated for this model' 400 should be learned and stripped,
-    not blindly retried with backoff (Issue #563 follow-on)."""
+class TestUnexpectedApiErrorObservability:
+    """Issue #572: since request shape is always table-verified, an APIError is
+    always unexpected — no known/unknown-shape distinction to make anymore."""
 
-    def test_non_streaming_retries_without_param_and_learns_it(self):
+    def test_non_streaming_api_error_is_logged_and_not_retried_with_a_new_shape(self, caplog):
         mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = [
-            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
-            _mock_message("recovered without temperature"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+        mock_api.messages.create.side_effect = _ClaudeApiAPIError(
+            "invalid_request_error: prompt is too long: 205000 tokens > 200000 maximum"
+        )
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
 
-        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is True
-        assert mock_api.messages.create.call_count == 2
-        assert "temperature" not in mock_api.messages.create.call_args.kwargs
-        assert client._unsupported_params["claude-sonnet-4-6"] == {"temperature"}
-        mock_sleep.assert_not_called()
-
-    def test_second_request_to_same_model_proactively_skips_param(self):
-        """Once learned, the param must never be sent again for that model — not
-        just reactively stripped after another failure."""
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = [
-            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
-            _mock_message("first request recovered"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            asyncio.run(client.async_request("System.", "User."))
-
-        mock_api.messages.create.side_effect = None
-        mock_api.messages.create.return_value = _mock_message("second request")
-        response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is True
-        assert "temperature" not in mock_api.messages.create.call_args.kwargs
-        # Only one extra call from the first request's retry — this one didn't need it.
-        assert mock_api.messages.create.call_count == 3
-
-    def test_retry_failure_after_dropping_param_falls_through_to_normal_backoff(self):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = [
-            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
-            Exception("still broken"),
-            _mock_message("recovered on attempt 3"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-
-        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is True
-        assert mock_api.messages.create.call_count == 3
-        # The second (fallback) call failed too — normal backoff before attempt 3.
-        mock_sleep.assert_called()
-
-    def test_unrelated_400_error_is_not_treated_as_capability_issue(self):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = _ClaudeApiAPIError("invalid_request_error: bad JSON")
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
+        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
             response = asyncio.run(client.async_request("System.", "User."))
 
         assert response.success is False
-        assert client._unsupported_params == {}
-        assert mock_api.messages.create.call_count == 3
+        assert any("Unexpected API error" in rec.message for rec in caplog.records)
+        # All 3 attempts used the identical, table-derived shape — no mid-retry mutation.
+        first_kwargs = mock_api.messages.create.call_args_list[0].kwargs
+        last_kwargs = mock_api.messages.create.call_args_list[-1].kwargs
+        assert first_kwargs["thinking"] == last_kwargs["thinking"] == {"type": "adaptive"}
 
-    def test_streaming_retries_without_param_before_any_content_yielded(self):
+    def test_streaming_api_error_is_logged_and_reraised(self, caplog):
         mock_api = _make_mock_api_client()
-        final_msg = MagicMock()
-        final_msg.usage = MagicMock(input_tokens=10, output_tokens=20)
-        final_msg.stop_reason = "end_turn"
-        good_stream = _FakeStreamCM([_mock_text_delta_event("recovered")], final_msg)
-        bad_stream = _FakeFailingStreamCM(Exception("`temperature` is deprecated for this model."))
-
-        mock_api.messages.stream = MagicMock(side_effect=[bad_stream, good_stream])
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+        bad_stream = _FakeFailingStreamCM(
+            _ClaudeApiAPIError("invalid_request_error: prompt is too long: 205000 tokens > 200000 maximum")
+        )
+        mock_api.messages.stream = MagicMock(return_value=bad_stream)
+        client = _make_client(mock_api, ai_model="claude-sonnet-5")
 
         async def _collect():
             events = []
@@ -1123,35 +1061,11 @@ class TestDeprecatedParameterFallback:
                 events.append(event)
             return events
 
-        events = asyncio.run(_collect())
-
-        text_events = [e for e in events if e.get("type") == "text"]
-        assert text_events == [{"type": "text", "text": "recovered"}]
-        assert mock_api.messages.stream.call_count == 2
-        assert client._unsupported_params["claude-sonnet-4-6"] == {"temperature"}
-
-    def test_streaming_second_failure_reraises_normally(self):
-        mock_api = _make_mock_api_client()
-        bad_stream_1 = _FakeFailingStreamCM(Exception("`temperature` is deprecated for this model."))
-        bad_stream_2 = _FakeFailingStreamCM(Exception("still broken"))
-        mock_api.messages.stream = MagicMock(side_effect=[bad_stream_1, bad_stream_2])
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-
-        async def _collect():
-            events = []
-            async for event in client.async_request_streaming("System.", "User."):
-                events.append(event)
-            return events
-
-        try:
+        with caplog.at_level("WARNING"), contextlib.suppress(Exception):
             asyncio.run(_collect())
-            raised = False
-        except Exception as exc:  # noqa: BLE001
-            raised = True
-            assert "still broken" in str(exc)
 
-        assert raised is True
-        assert mock_api.messages.stream.call_count == 2
+        assert any("Unexpected API error" in rec.message for rec in caplog.records)
+        assert mock_api.messages.stream.call_count == 1  # no retry
 
     def test_streaming_unrelated_error_never_retries(self):
         mock_api = _make_mock_api_client()
@@ -1174,318 +1088,21 @@ class TestDeprecatedParameterFallback:
         assert raised is True
 
 
-# ---------------------------------------------------------------------------
-# Issue #565 — claude-sonnet-5 rejects the legacy thinking shape and performs
-# uncapped implicit reasoning at reasoning tiers that never request thinking
-# control, silently consuming the full max_tokens budget with zero visible
-# output. Confirmed live: the model 400s on `thinking.type.enabled` and names
-# the replacement directly ("thinking.type.adaptive" + "output_config.effort").
-# ---------------------------------------------------------------------------
-
-
-class TestAdaptiveThinkingKwargsShape:
-    """Once a model is known to need adaptive thinking, every reasoning tier — not
-    just 'high' — must send the new shape, since the failure was observed at medium."""
-
-    def test_learned_model_uses_adaptive_shape_at_medium_reasoning(self):
-        mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-        client._adaptive_thinking_models.add("claude-sonnet-5")
-
-        kwargs = client._build_request_kwargs(
-            model="claude-sonnet-5",
-            max_tokens=8192,
-            temperature=0.3,
-            reasoning_effort="medium",
-            system_prompt="System.",
-            user_message="User.",
-        )
-
-        assert kwargs["thinking"] == {"type": "adaptive"}
-        assert kwargs["output_config"] == {"effort": "medium"}
-        assert kwargs["temperature"] == 1
-        assert kwargs["max_tokens"] == 8192  # adaptive mode needs no headroom bump
-
-    def test_learned_model_maps_effort_from_reasoning_tier(self):
-        mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-        client._adaptive_thinking_models.add("claude-sonnet-5")
-
-        kwargs = client._build_request_kwargs(
-            model="claude-sonnet-5",
-            max_tokens=8192,
-            temperature=0.3,
-            reasoning_effort="low",
-            system_prompt="System.",
-            user_message="User.",
-        )
-
-        assert kwargs["output_config"] == {"effort": "low"}
-
-    def test_unlearned_model_keeps_legacy_high_only_behavior(self):
-        """A model never seen to need adaptive thinking must be unaffected — no
-        regression for models this session never confirmed the failure on."""
-        mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-
-        kwargs = client._build_request_kwargs(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            temperature=0.3,
-            reasoning_effort="medium",
-            system_prompt="System.",
-            user_message="User.",
-        )
-
-        assert "thinking" not in kwargs
-        assert "output_config" not in kwargs
-        assert kwargs["temperature"] == 0.3
-
-    def test_dropped_param_strip_still_runs_after_adaptive_shape(self):
-        """Same ordering guarantee as the legacy high-tier case: a param learned
-        unsupported for this model must never be re-added by the adaptive branch."""
-        mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-        client._adaptive_thinking_models.add("claude-sonnet-5")
-        client._unsupported_params["claude-sonnet-5"] = {"temperature"}
-
-        kwargs = client._build_request_kwargs(
-            model="claude-sonnet-5",
-            max_tokens=8192,
-            temperature=0.3,
-            reasoning_effort="medium",
-            system_prompt="System.",
-            user_message="User.",
-        )
-
-        assert "temperature" not in kwargs
-        assert kwargs["thinking"] == {"type": "adaptive"}
-
-
-class TestAdaptiveThinkingReactiveFallback:
-    """A 400 naming 'thinking.type.adaptive' must be learned and switched to,
-    not blindly retried with backoff (Issue #565)."""
-
-    def test_non_streaming_retries_with_adaptive_shape_and_learns_it(self):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = [
-            _ClaudeApiAPIError(
-                '"thinking.type.enabled" is not supported for this model. Use '
-                '"thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
-            ),
-            _mock_message("recovered with adaptive thinking"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            response = asyncio.run(client.async_request("System.", "User.", reasoning_effort="high"))
-
-        assert response.success is True
-        assert mock_api.messages.create.call_count == 2
-        second_kwargs = mock_api.messages.create.call_args.kwargs
-        assert second_kwargs["thinking"] == {"type": "adaptive"}
-        assert second_kwargs["output_config"] == {"effort": "high"}
-        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
-        mock_sleep.assert_not_called()
-
-    def test_streaming_retries_with_adaptive_shape_before_any_content_yielded(self):
-        mock_api = _make_mock_api_client()
-        final_msg = MagicMock()
-        final_msg.usage = MagicMock(input_tokens=10, output_tokens=20)
-        final_msg.stop_reason = "end_turn"
-        good_stream = _FakeStreamCM([_mock_text_delta_event("recovered")], final_msg)
-        bad_stream = _FakeFailingStreamCM(
-            Exception(
-                '"thinking.type.enabled" is not supported for this model. Use '
-                '"thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
-            )
-        )
-        mock_api.messages.stream = MagicMock(side_effect=[bad_stream, good_stream])
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        async def _collect():
-            events = []
-            async for event in client.async_request_streaming("System.", "User.", reasoning_effort="high"):
-                events.append(event)
-            return events
-
-        events = asyncio.run(_collect())
-
-        text_events = [e for e in events if e.get("type") == "text"]
-        assert text_events == [{"type": "text", "text": "recovered"}]
-        assert mock_api.messages.stream.call_count == 2
-        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
-
-    def test_unrelated_400_error_does_not_learn_adaptive_thinking(self):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = _ClaudeApiAPIError("invalid_request_error: bad JSON")
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        with patch("asyncio.sleep", new_callable=AsyncMock):
-            response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is False
-        assert client._adaptive_thinking_models == set()
-
-
-class TestAdaptiveThinkingTruncatedEmptyRecovery:
-    """The confirmed production symptom (full budget, zero visible text, no explicit
-    thinking param ever sent) must self-heal — the model never raises an exception
-    here, it just returns an unusable 'successful' response."""
-
-    def test_non_streaming_truncated_empty_response_retries_with_adaptive_thinking(self, caplog):
-        mock_api = _make_mock_api_client()
-        empty_msg = _mock_message("", output_tokens=8192, stop_reason="max_tokens")
-        empty_msg.content = []
-        mock_api.messages.create.side_effect = [
-            empty_msg,
-            _mock_message("recovered on retry", stop_reason="end_turn"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        with caplog.at_level("WARNING"):
-            response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is True
-        assert response.content == "recovered on retry"
-        assert response.truncated_empty is False
-        assert mock_api.messages.create.call_count == 2
-        second_kwargs = mock_api.messages.create.call_args.kwargs
-        assert second_kwargs["thinking"] == {"type": "adaptive"}
-        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
-
-    def test_second_request_after_learning_uses_adaptive_shape_from_the_start(self):
-        mock_api = _make_mock_api_client()
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-        client._adaptive_thinking_models.add("claude-sonnet-5")
-        mock_api.messages.create.return_value = _mock_message("clean response", stop_reason="end_turn")
-
-        response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is True
-        assert mock_api.messages.create.call_count == 1
-        assert mock_api.messages.create.call_args.kwargs["thinking"] == {"type": "adaptive"}
-
-    def test_streaming_truncated_empty_learns_for_next_call_but_cannot_retry_in_place(self, caplog):
-        """Thinking deltas may already be visible to the caller by the time truncation
-        is detected — this call surfaces the same failure as today, but arms the
-        capability flag so the *next* call (streaming or non-streaming) is fixed."""
-        mock_api = _make_mock_api_client()
-        thinking_event = MagicMock()
-        thinking_event.type = "content_block_delta"
-        thinking_event.delta = MagicMock()
-        thinking_event.delta.type = "thinking_delta"
-        thinking_event.delta.thinking = "pondering..."
-        final_msg = MagicMock()
-        final_msg.usage = MagicMock(input_tokens=50, output_tokens=8192)
-        final_msg.stop_reason = "max_tokens"
-        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([thinking_event], final_msg))
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        async def _collect():
-            events = []
-            async for event in client.async_request_streaming("System.", "User."):
-                events.append(event)
-            return events
-
-        with caplog.at_level("WARNING"):
-            events = asyncio.run(_collect())
-
-        stop_events = [e for e in events if e.get("type") == "stop"]
-        assert stop_events[0]["truncated_empty"] is True
-        assert mock_api.messages.stream.call_count == 1  # no mid-stream retry
-        assert client._adaptive_thinking_models == {"claude-sonnet-5"}
-        assert mock_api.messages.stream.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# Issue #568 — observability: an API error matching neither known
-# capability-detection pattern must be marked distinctly, not logged as
-# indistinguishable generic text (e.g. a documented context-length-exceeded
-# risk on newer models with a different tokenizer, never yet seen live).
-# ---------------------------------------------------------------------------
-
-
-class TestUnrecognizedApiErrorObservability:
-    def test_non_streaming_unrecognized_error_gets_distinct_marker(self, caplog):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = _ClaudeApiAPIError(
-            "invalid_request_error: prompt is too long: 205000 tokens > 200000 maximum"
-        )
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
-            response = asyncio.run(client.async_request("System.", "User."))
-
-        assert response.success is False
-        assert any("Unrecognized API error shape" in rec.message for rec in caplog.records)
-
-    def test_non_streaming_known_deprecated_param_error_does_not_get_marker(self, caplog):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = [
-            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
-            _mock_message("recovered"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
-
-        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
-            asyncio.run(client.async_request("System.", "User."))
-
-        assert not any("Unrecognized API error shape" in rec.message for rec in caplog.records)
-
-    def test_non_streaming_known_adaptive_thinking_error_does_not_get_marker(self, caplog):
-        mock_api = _make_mock_api_client()
-        mock_api.messages.create.side_effect = [
-            _ClaudeApiAPIError(
-                '"thinking.type.enabled" is not supported for this model. Use '
-                '"thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'
-            ),
-            _mock_message("recovered"),
-        ]
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        with caplog.at_level("WARNING"), patch("asyncio.sleep", new_callable=AsyncMock):
-            asyncio.run(client.async_request("System.", "User.", reasoning_effort="high"))
-
-        assert not any("Unrecognized API error shape" in rec.message for rec in caplog.records)
-
-    def test_streaming_unrecognized_error_gets_distinct_marker(self, caplog):
-        mock_api = _make_mock_api_client()
-        bad_stream = _FakeFailingStreamCM(
-            _ClaudeApiAPIError("invalid_request_error: prompt is too long: 205000 tokens > 200000 maximum")
-        )
-        mock_api.messages.stream = MagicMock(return_value=bad_stream)
-        client = _make_client(mock_api, ai_model="claude-sonnet-5")
-
-        async def _collect():
-            events = []
-            async for event in client.async_request_streaming("System.", "User."):
-                events.append(event)
-            return events
-
-        with caplog.at_level("WARNING"), contextlib.suppress(Exception):
-            asyncio.run(_collect())
-
-        assert any("Unrecognized API error shape" in rec.message for rec in caplog.records)
-
-
 class TestRequestKwargsDecisionLogging:
-    """Issue #568: the resolved request shape must be visible in DEBUG logs for every
-    call, without needing a special live test to know whether adaptive thinking fired."""
+    """The resolved request shape must be visible in DEBUG logs for every call,
+    without needing a special live test to know what shape was actually sent."""
 
     def test_non_streaming_logs_kwargs_decision(self, caplog):
         mock_api = _make_mock_api_client()
         mock_api.messages.create.return_value = _mock_message("ok")
         client = _make_client(mock_api, ai_model="claude-sonnet-5")
-        client._adaptive_thinking_models.add("claude-sonnet-5")
 
         with caplog.at_level("DEBUG"):
             asyncio.run(client.async_request("System.", "User."))
 
         decision_lines = [rec.message for rec in caplog.records if "kwargs decision" in rec.message]
         assert len(decision_lines) == 1
-        assert "adaptive_thinking=True" in decision_lines[0]
-        assert "has_thinking=True" in decision_lines[0]
+        assert "thinking_type=adaptive" in decision_lines[0]
         assert "has_output_config=True" in decision_lines[0]
 
     def test_streaming_logs_kwargs_decision(self, caplog):
@@ -1507,7 +1124,7 @@ class TestRequestKwargsDecisionLogging:
 
         decision_lines = [rec.message for rec in caplog.records if "kwargs decision" in rec.message]
         assert len(decision_lines) == 1
-        assert "adaptive_thinking=False" in decision_lines[0]
+        assert "thinking_type=none" in decision_lines[0]
 
     def test_non_streaming_finished_log_includes_input_tokens(self, caplog):
         mock_api = _make_mock_api_client()

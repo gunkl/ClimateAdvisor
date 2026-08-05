@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
-import re
 import time
 from collections import deque
 from collections.abc import AsyncIterator
@@ -17,11 +16,14 @@ from .const import (
     AI_CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     AI_CIRCUIT_BREAKER_THRESHOLD,
     AI_MAX_RETRIES,
+    AI_MODEL_CAPABILITIES,
+    AI_MODEL_CAPABILITIES_DEFAULT,
     AI_MODELS,
     AI_REASONING_BUDGET_TOKENS,
     AI_REASONING_HIGH,
     AI_REQUEST_HISTORY_CAP,
     AI_RETRY_BASE_DELAY_SECONDS,
+    AI_THINKING_SHAPE_ADAPTIVE,
     CONF_AI_API_KEY,
     CONF_AI_AUTO_REQUESTS_PER_DAY,
     CONF_AI_INVESTIGATOR_ENABLED,
@@ -75,36 +77,6 @@ _MODEL_TIER_KEYWORDS: tuple[str, ...] = ("opus", "sonnet", "haiku")
 # this client has no coordinator reference). Matches the precedent set by
 # ai_skills_context.py's GitHub-issue cache (_GITHUB_OPEN_TTL).
 _MODEL_LIST_CACHE_TTL_SECONDS = 86_400  # 24 hours
-
-# Issue #563 follow-on — reactive per-model parameter capability detection. Anthropic's
-# Models API exposes id/display_name/created_at, not a per-model sampling-parameter
-# schema, so there's no way to know ahead of time that e.g. a given model no longer
-# accepts `temperature`. This regex matches the one confirmed error shape
-# ("`temperature` is deprecated for this model."); a future differently-worded
-# deprecation message would not be caught by this pattern — known limitation, not
-# hidden.
-_DEPRECATED_PARAM_RE = re.compile(r"`(\w+)` is deprecated for this model")
-
-
-def _detect_deprecated_param(error_message: str) -> str | None:
-    """Return the parameter name Anthropic's API just rejected as deprecated, if any."""
-    match = _DEPRECATED_PARAM_RE.search(error_message)
-    return match.group(1) if match else None
-
-
-# Issue #565 — some newer models (confirmed: claude-sonnet-5) reject the legacy
-# `thinking: {"type": "enabled", "budget_tokens": N}` shape outright with a 400 whose
-# message names the replacement directly: '"thinking.type.enabled" is not supported for
-# this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking
-# behavior.' Matched on the literal replacement-parameter name Anthropic's own error text
-# points at, not on the full sentence, so minor message wording changes don't break this.
-_ADAPTIVE_THINKING_RE = re.compile(r"thinking\.type\.adaptive")
-
-
-def _detect_adaptive_thinking_required(error_message: str) -> bool:
-    """Return True if Anthropic's API just rejected the legacy thinking shape for this model."""
-    return _ADAPTIVE_THINKING_RE.search(error_message) is not None
-
 
 # Per-model cost rates (USD per million tokens)
 _MODEL_COSTS: dict[str, dict[str, float]] = {
@@ -246,15 +218,6 @@ class ClaudeAPIClient:
         self._investigator_requests_date: str = ""
         self._models_cache: list[str] | None = None
         self._models_cache_ts: float = 0.0
-        # Issue #563 follow-on: model_id -> set of request-parameter names Anthropic has
-        # rejected as deprecated for that model. In-memory only, per client instance —
-        # same acceptable cost as _models_cache (resets on integration reload).
-        self._unsupported_params: dict[str, set[str]] = {}
-        # Issue #565: model_ids confirmed (either reactively, via a 400 naming
-        # "thinking.type.adaptive", or after observing a zero-output full-budget
-        # truncation) to need the newer adaptive thinking shape instead of the legacy
-        # enabled/budget_tokens one. In-memory only, same lifecycle as _unsupported_params.
-        self._adaptive_thinking_models: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -444,12 +407,9 @@ class ClaudeAPIClient:
 
         After all events are yielded the method records the request in history,
         updates budget/rate counters, and resets the circuit breaker on success.
-        Streaming does not retry on error, with one narrow exception (Issue #563
-        follow-on): if the API rejects a request parameter as deprecated for the
-        configured model before any content has been yielded, the request is retried
-        exactly once without that parameter. Any other failure — or a second failure,
-        or one that occurs after content has already streamed to the caller —
-        increments the circuit-breaker counter and re-raises, as before.
+        Streaming never retries on error (Issue #572) — the request shape is built
+        from the verified AI_MODEL_CAPABILITIES table up front, so any API error
+        increments the circuit-breaker counter and re-raises immediately.
 
         Args:
             system_prompt: System-level instructions for the model.
@@ -495,94 +455,59 @@ class ClaudeAPIClient:
         )
 
         start_time = time.monotonic()
-        any_content_yielded = False  # any delta at all (text or thinking) — used only to
-        # decide whether a fresh retry is safe (Issue #563 follow-on's param-fallback path)
-        any_text_yielded = False  # specifically visible answer text — used to detect the
-        # "burned the whole budget, produced no answer" case, since thinking output alone
-        # doesn't give the caller an answer either (Issue #563 follow-on)
+        any_text_yielded = False  # visible answer text — used to detect the "burned
+        # the whole budget, produced no answer" case (Issue #563 follow-on); thinking
+        # output alone doesn't give the caller an answer either
         final_msg = None
-        kwargs: dict[str, Any] = {}
 
-        for attempt in (1, 2):
-            kwargs = self._build_request_kwargs(
-                model=resolved_model,
-                max_tokens=resolved_max_tokens,
-                temperature=resolved_temperature,
-                reasoning_effort=resolved_reasoning,
-                system_prompt=system_prompt,
-                user_message=user_message,
-            )
-            self._log_request_kwargs_decision(resolved_model, resolved_reasoning, kwargs)
-            try:
-                async with self._client.messages.stream(**kwargs) as stream:
-                    async for event in stream:
-                        if getattr(event, "type", None) != "content_block_delta":
-                            continue
-                        delta = getattr(event, "delta", None)
-                        if delta is None:
-                            continue
-                        delta_type = getattr(delta, "type", None)
-                        if delta_type == "thinking_delta":
-                            any_content_yielded = True
-                            yield {"type": "thinking", "text": getattr(delta, "thinking", "")}
-                        elif delta_type == "text_delta":
-                            any_content_yielded = True
-                            any_text_yielded = True
-                            yield {"type": "text", "text": getattr(delta, "text", "")}
-                    final_msg = await stream.get_final_message()
-                break  # success
+        kwargs = self._build_request_kwargs(
+            model=resolved_model,
+            max_tokens=resolved_max_tokens,
+            temperature=resolved_temperature,
+            reasoning_effort=resolved_reasoning,
+            system_prompt=system_prompt,
+            user_message=user_message,
+        )
+        self._log_request_kwargs_decision(resolved_model, resolved_reasoning, kwargs)
+        try:
+            async with self._client.messages.stream(**kwargs) as stream:
+                async for event in stream:
+                    if getattr(event, "type", None) != "content_block_delta":
+                        continue
+                    delta = getattr(event, "delta", None)
+                    if delta is None:
+                        continue
+                    delta_type = getattr(delta, "type", None)
+                    if delta_type == "thinking_delta":
+                        yield {"type": "thinking", "text": getattr(delta, "thinking", "")}
+                    elif delta_type == "text_delta":
+                        any_text_yielded = True
+                        yield {"type": "text", "text": getattr(delta, "text", "")}
+                final_msg = await stream.get_final_message()
 
-            except (RateLimitError, APITimeoutError, APIError, Exception) as exc:
-                # Both checks are gated on "no content streamed yet" — a retry can only be
-                # safe before anything has been yielded to the caller, since a streaming
-                # generator can't un-yield partial content already shown in the UI.
-                bad_param = None if any_content_yielded else _detect_deprecated_param(str(exc))
-                needs_adaptive = (
-                    not any_content_yielded
-                    and resolved_model not in self._adaptive_thinking_models
-                    and _detect_adaptive_thinking_required(str(exc))
+        except (RateLimitError, APITimeoutError, APIError, Exception) as exc:
+            # Issue #572: capability-appropriate kwargs are built from
+            # AI_MODEL_CAPABILITIES up front, so an APIError here means a genuinely
+            # new/unexpected failure for a model this table claims to have verified —
+            # not a known, retryable capability mismatch. Log it distinctly and
+            # re-raise; no in-place retry.
+            if isinstance(exc, APIError):
+                _LOGGER.warning(
+                    "Unexpected API error for model '%s' (streaming): %s",
+                    resolved_model,
+                    exc,
                 )
-                if attempt == 1 and bad_param is not None:
-                    self._unsupported_params.setdefault(resolved_model, set()).add(bad_param)
-                    _LOGGER.warning(
-                        "Model '%s' rejected parameter '%s' as deprecated — retrying stream without it",
-                        resolved_model,
-                        bad_param,
-                    )
-                    continue  # next loop iteration rebuilds kwargs without bad_param
-                if attempt == 1 and needs_adaptive:
-                    # Issue #565: model rejected the legacy thinking shape outright — learn
-                    # it and retry with thinking.type.adaptive + output_config.effort.
-                    self._adaptive_thinking_models.add(resolved_model)
-                    _LOGGER.warning(
-                        "Model '%s' rejected the legacy thinking shape — retrying stream with adaptive thinking",
-                        resolved_model,
-                    )
-                    continue  # next loop iteration rebuilds kwargs with the adaptive shape
 
-                if isinstance(exc, APIError) and bad_param is None and not needs_adaptive:
-                    # Issue #568: a 400-class error that matches neither known
-                    # capability-detection pattern — e.g. a genuinely new failure shape
-                    # (a context-length-exceeded error is a documented risk for newer
-                    # models with a different tokenizer). Mark it distinctly so it's
-                    # immediately greppable and never mistaken for one of the two known,
-                    # already-handled shapes.
-                    _LOGGER.warning(
-                        "Unrecognized API error shape for model '%s' (streaming) — full message: %s",
-                        resolved_model,
-                        exc,
-                    )
-
-                self._circuit_breaker.consecutive_failures += 1
-                self._error_count += 1
-                if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
-                    self._circuit_breaker.state = _CB_OPEN
-                    self._circuit_breaker.opened_at = time.monotonic()
-                    _LOGGER.error(
-                        "Circuit breaker opened after %d consecutive failures",
-                        self._circuit_breaker.consecutive_failures,
-                    )
-                raise
+            self._circuit_breaker.consecutive_failures += 1
+            self._error_count += 1
+            if self._circuit_breaker.consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD:
+                self._circuit_breaker.state = _CB_OPEN
+                self._circuit_breaker.opened_at = time.monotonic()
+                _LOGGER.error(
+                    "Circuit breaker opened after %d consecutive failures",
+                    self._circuit_breaker.consecutive_failures,
+                )
+            raise
 
         latency_ms = (time.monotonic() - start_time) * 1000.0
         input_tokens: int = getattr(final_msg.usage, "input_tokens", 0)
@@ -601,35 +526,22 @@ class ClaudeAPIClient:
             output_tokens,
         )
         if truncated_empty:
-            # Issue #563 follow-on: the full max_tokens budget was billed and consumed,
-            # but no visible answer text was ever yielded (thinking deltas may still have
-            # streamed) — a different, more severe problem than ordinary truncation
-            # (there's no partial content to salvage).
+            # Issue #572: kwargs were built from AI_MODEL_CAPABILITIES, so this model's
+            # request shape is supposed to already be correct — this symptom (full
+            # budget billed, zero visible answer text) means Anthropic changed this
+            # model's behavior out from under a known-good table entry. Log-only: no
+            # automatic learning/retry. Verify AI_MODEL_CAPABILITIES in const.py.
             _LOGGER.warning(
                 "Streaming response consumed the full max_tokens budget with zero visible "
-                "output: skill=%s model=%s output_tokens=%d max_tokens=%d "
-                "reasoning_effort=%s — model may need a larger max_tokens ceiling or a "
-                "different reasoning_effort",
+                "output despite a verified request shape: skill=%s model=%s "
+                "output_tokens=%d max_tokens=%d reasoning_effort=%s — Anthropic may have "
+                "changed this model's behavior; check AI_MODEL_CAPABILITIES in const.py",
                 skill_name,
                 resolved_model,
                 output_tokens,
                 kwargs["max_tokens"],
                 resolved_reasoning,
             )
-            # Issue #565: this exact symptom (full budget, zero visible text) is what
-            # uncapped implicit thinking on a newer model looks like at reasoning tiers
-            # that never requested thinking control at all — arm the adaptive-thinking
-            # capability for this model so the NEXT call (streaming or non-streaming)
-            # applies bounded thinking from the start instead of repeating this failure.
-            # This call already streamed thinking deltas to the caller and can't be
-            # retried in place.
-            if resolved_model not in self._adaptive_thinking_models:
-                self._adaptive_thinking_models.add(resolved_model)
-                _LOGGER.warning(
-                    "Model '%s' will use adaptive thinking control on future requests "
-                    "to recover from zero-output truncation",
-                    resolved_model,
-                )
         elif truncated:
             _LOGGER.warning(
                 "Response truncated: skill=%s stop_reason=max_tokens output_tokens=%d max_tokens=%d",
@@ -757,14 +669,6 @@ class ClaudeAPIClient:
             "counter_date": self._rate_counters.counter_date.isoformat(),
             "investigator_requests_today": self._investigator_requests_today,
             "investigator_requests_date": self._investigator_requests_date,
-            # Issue #568: without this, learned per-model capability (Issue #563's
-            # _unsupported_params, Issue #565's _adaptive_thinking_models) was pure
-            # in-memory state, wiped by any config reload (e.g. an options-flow save —
-            # Issue #557 made these save+reload immediately) or HA restart, forcing the
-            # first-call-fails-once discovery cost to repeat indefinitely instead of
-            # self-healing once and staying healed.
-            "unsupported_params": {model: sorted(params) for model, params in self._unsupported_params.items()},
-            "adaptive_thinking_models": sorted(self._adaptive_thinking_models),
         }
 
     def restore_persistent_stats(self, data: dict[str, Any]) -> None:
@@ -790,17 +694,6 @@ class ClaudeAPIClient:
             self._rate_counters.counter_date = date.today()
         self._investigator_requests_today = int(data.get("investigator_requests_today", 0))
         self._investigator_requests_date = data.get("investigator_requests_date", "")
-        # Issue #568: type-validated per the project's JSON-from-disk convention — any
-        # malformed shape (hand-edited state file, downgrade from a future version)
-        # degrades to "nothing learned yet" rather than raising.
-        raw_unsupported = data.get("unsupported_params", {})
-        self._unsupported_params = (
-            {model: set(params) for model, params in raw_unsupported.items() if isinstance(params, list)}
-            if isinstance(raw_unsupported, dict)
-            else {}
-        )
-        raw_adaptive = data.get("adaptive_thinking_models", [])
-        self._adaptive_thinking_models = set(raw_adaptive) if isinstance(raw_adaptive, list) else set()
         # Apply daily reset if rebooted after midnight
         self._reset_daily_counters_if_needed()
         _LOGGER.debug(
@@ -996,28 +889,38 @@ class ClaudeAPIClient:
         """Build the kwargs dict for a single Anthropic messages API call.
 
         Single source of truth for both the non-streaming (_single_api_call) and
-        streaming (async_request_streaming) request paths — previously each built its
-        own copy, which is why a parameter-compatibility bug could be fixed in one
-        path and silently left broken in the other (Issue #563 follow-on).
+        streaming (async_request_streaming) request paths. Issue #572: the request
+        shape is a pure lookup against the hardcoded AI_MODEL_CAPABILITIES table — no
+        live discovery, no per-model learned state. A model not in the table falls
+        back to AI_MODEL_CAPABILITIES_DEFAULT (the legacy shape, proven safe for years
+        prior to claude-sonnet-5) and logs a WARNING naming it.
         """
+        caps = AI_MODEL_CAPABILITIES.get(model)
+        if caps is None:
+            _LOGGER.warning(
+                "Model '%s' is not in AI_MODEL_CAPABILITIES — using the safe legacy "
+                "default request shape; add a verified entry to const.py for this model",
+                model,
+            )
+            caps = AI_MODEL_CAPABILITIES_DEFAULT
+
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_message}],
-            "temperature": temperature,
         }
+        if caps["supports_temperature"]:
+            kwargs["temperature"] = temperature
 
-        if model in self._adaptive_thinking_models:
-            # Issue #565: this model rejects the legacy enabled/budget_tokens shape and
-            # performs its own uncapped internal reasoning whenever no thinking control is
-            # sent at all — confirmed to silently consume the entire max_tokens budget on
-            # real-sized prompts, at every reasoning_effort tier, not just "high" (unlike
-            # older models, where only "high" ever requested extended thinking). Apply the
-            # newer thinking.type.adaptive + output_config.effort shape at every tier so
-            # thinking is always bounded and some max_tokens headroom is left for the
-            # visible answer. `effort` maps directly from the configured reasoning_effort.
-            kwargs["temperature"] = 1  # same API requirement as the legacy shape below
+        if caps["thinking_shape"] == AI_THINKING_SHAPE_ADAPTIVE:
+            # Newer models (confirmed: claude-sonnet-5, claude-opus-5) reject the
+            # legacy enabled/budget_tokens shape outright and perform their own
+            # uncapped internal reasoning whenever no thinking control is sent at all,
+            # at every reasoning_effort tier — not just "high" like older models.
+            # `effort` maps directly from the configured reasoning_effort.
+            if caps["supports_temperature"]:
+                kwargs["temperature"] = 1  # required by the API when thinking is active
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": reasoning_effort}
         elif reasoning_effort == AI_REASONING_HIGH:
@@ -1026,37 +929,29 @@ class ClaudeAPIClient:
             #   1. temperature must be exactly 1
             #   2. max_tokens must exceed budget_tokens
             budget = AI_REASONING_BUDGET_TOKENS.get(AI_REASONING_HIGH, 16384)
-            kwargs["temperature"] = 1  # required by API — overrides configured value
+            if caps["supports_temperature"]:
+                kwargs["temperature"] = 1  # required by the API — overrides configured value
             if kwargs["max_tokens"] <= budget:
                 kwargs["max_tokens"] = budget + 4096  # reserve room for output tokens
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
 
-        # Reactive per-model parameter capability detection (Issue #563 follow-on):
-        # drop any parameter already learned to be unsupported for this model. Must
-        # run LAST, after the thinking-budget block above, so a model that doesn't
-        # accept `temperature` never gets it re-added even when high reasoning effort
-        # would otherwise force temperature=1.
-        for bad_param in self._unsupported_params.get(model, ()):
-            kwargs.pop(bad_param, None)
-
         return kwargs
 
     def _log_request_kwargs_decision(self, model: str, reasoning_effort: str, kwargs: dict[str, Any]) -> None:
-        """Log the resolved request-shape decision right before an API call (Issue #568).
+        """Log the resolved request-shape decision right before an API call.
 
-        Answers "did the adaptive-thinking branch actually fire, and was the learned
-        unsupported-parameter strip applied" directly from `ha_logs.py`, for every future
-        request — no special live test or diagnostic script needed to see this.
+        Answers "what shape did this request actually use" directly from
+        `ha_logs.py`, for every request — no special live test or diagnostic script
+        needed to see this.
         """
         _LOGGER.debug(
-            "Claude request kwargs decision: model=%s reasoning_effort=%s adaptive_thinking=%s "
-            "unsupported_params=%s max_tokens=%d has_thinking=%s has_output_config=%s",
+            "Claude request kwargs decision: model=%s reasoning_effort=%s "
+            "thinking_type=%s max_tokens=%d has_temperature=%s has_output_config=%s",
             model,
             reasoning_effort,
-            model in self._adaptive_thinking_models,
-            sorted(self._unsupported_params.get(model, ())),
+            kwargs.get("thinking", {}).get("type", "none"),
             kwargs.get("max_tokens", 0),
-            "thinking" in kwargs,
+            "temperature" in kwargs,
             "output_config" in kwargs,
         )
 
@@ -1244,26 +1139,17 @@ class ClaudeAPIClient:
                     reasoning_effort=reasoning_effort,
                     start_time=start_time,
                 )
-                if response.truncated_empty and model not in self._adaptive_thinking_models:
-                    # Issue #565: full max_tokens budget consumed with zero visible
-                    # answer text — a newer model's uncapped implicit thinking left no
-                    # room for the answer. Unlike the streaming path, nothing has been
-                    # shown to the caller yet (this is a single atomic response), so a
-                    # same-attempt retry with bounded thinking is safe.
-                    self._adaptive_thinking_models.add(model)
+                if response.truncated_empty:
+                    # Issue #572: kwargs were built from AI_MODEL_CAPABILITIES, so this
+                    # model's request shape is supposed to already be correct — this
+                    # symptom (full budget billed, zero visible answer text) means
+                    # Anthropic changed this model's behavior out from under a
+                    # known-good table entry. Log-only: no automatic retry.
                     _LOGGER.warning(
-                        "Model '%s' consumed the full budget with zero output — retrying "
-                        "with adaptive thinking control",
+                        "Model '%s' consumed the full budget with zero output despite a "
+                        "verified request shape — Anthropic may have changed this "
+                        "model's behavior; check AI_MODEL_CAPABILITIES in const.py",
                         model,
-                    )
-                    return await self._single_api_call(
-                        system_prompt=system_prompt,
-                        user_message=user_message,
-                        model=model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        reasoning_effort=reasoning_effort,
-                        start_time=start_time,
                     )
                 return response
 
@@ -1284,99 +1170,47 @@ class ClaudeAPIClient:
                     exc,
                 )
             except APIError as exc:
-                # Issue #563 follow-on: a request parameter (e.g. temperature) the
-                # configured model no longer accepts won't succeed on retry either —
-                # learn it, drop it, and retry immediately with the same model. This
-                # and the NotFoundError branch below are mutually exclusive error
-                # shapes (a 400 param-deprecation vs a 404 model-not-found), so only
-                # one generic "last_error" tail is needed for whichever wasn't hit.
-                bad_param = _detect_deprecated_param(str(exc))
-                needs_adaptive = (
-                    bad_param is None
-                    and model not in self._adaptive_thinking_models
-                    and _detect_adaptive_thinking_required(str(exc))
-                )
-                if bad_param is not None:
-                    self._unsupported_params.setdefault(model, set()).add(bad_param)
-                    _LOGGER.warning(
-                        "Model '%s' rejected parameter '%s' as deprecated — retrying without it",
-                        model,
-                        bad_param,
+                # Issue #572: request shape is built from the verified
+                # AI_MODEL_CAPABILITIES table up front, so an APIError here is not a
+                # known, retryable capability mismatch — except a deprecated/invalid
+                # model ID (404), which won't succeed on retry either and gets one
+                # same-tier replacement attempt instead.
+                # isinstance() against NotFoundError only when it's actually
+                # importable (import-guarded at module load) — never a bare
+                # `except NotFoundError` clause, which would raise TypeError if
+                # NotFoundError were None.
+                if NotFoundError is not None and isinstance(exc, NotFoundError):
+                    fallback = await self._try_tier_fallback(
+                        original_model=model,
+                        system_prompt=system_prompt,
+                        user_message=user_message,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        reasoning_effort=reasoning_effort,
+                        start_time=start_time,
                     )
-                    try:
-                        return await self._single_api_call(
-                            system_prompt=system_prompt,
-                            user_message=user_message,
-                            model=model,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            reasoning_effort=reasoning_effort,
-                            start_time=start_time,
-                        )
-                    except Exception as retry_exc:  # noqa: BLE001
-                        last_error = f"API error even after dropping '{bad_param}': {retry_exc}"
-                        _LOGGER.warning("Retry without '%s' also failed: %s", bad_param, retry_exc)
-                elif needs_adaptive:
-                    # Issue #565: model rejected the legacy thinking shape outright —
-                    # learn it and retry with thinking.type.adaptive + output_config.effort.
-                    self._adaptive_thinking_models.add(model)
-                    _LOGGER.warning(
-                        "Model '%s' rejected the legacy thinking shape — retrying with adaptive thinking",
-                        model,
-                    )
-                    try:
-                        return await self._single_api_call(
-                            system_prompt=system_prompt,
-                            user_message=user_message,
-                            model=model,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            reasoning_effort=reasoning_effort,
-                            start_time=start_time,
-                        )
-                    except Exception as retry_exc:  # noqa: BLE001
-                        last_error = f"API error even after switching to adaptive thinking: {retry_exc}"
-                        _LOGGER.warning("Retry with adaptive thinking also failed: %s", retry_exc)
+                    if fallback is not None:
+                        return fallback
+                    # No usable same-tier replacement — fall through to the
+                    # normal error handling/backoff below.
                 else:
-                    # Issue #563: an invalid/deprecated model won't succeed on retry —
-                    # skip the backoff loop and try one same-tier replacement instead.
-                    # isinstance() against NotFoundError only when it's actually
-                    # importable (import-guarded at module load) — never a bare
-                    # `except NotFoundError` clause, which would raise TypeError if
-                    # NotFoundError were None.
-                    if NotFoundError is not None and isinstance(exc, NotFoundError):
-                        fallback = await self._try_tier_fallback(
-                            original_model=model,
-                            system_prompt=system_prompt,
-                            user_message=user_message,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            reasoning_effort=reasoning_effort,
-                            start_time=start_time,
-                        )
-                        if fallback is not None:
-                            return fallback
-                        # No usable same-tier replacement — fall through to the
-                        # normal error handling/backoff below.
-                    else:
-                        # Issue #568: a 400-class error that matches neither known
-                        # capability-detection pattern and isn't a NotFoundError — e.g. a
-                        # genuinely new failure shape (a context-length-exceeded error is
-                        # a documented risk for newer models with a different tokenizer).
-                        # Mark it distinctly so it's immediately greppable and never
-                        # mistaken for one of the two known, already-handled shapes.
-                        _LOGGER.warning(
-                            "Unrecognized API error shape for model '%s' — full message: %s",
-                            model,
-                            exc,
-                        )
-                    last_error = f"API error: {exc}"
+                    # A 400-class error for a model this table claims to have
+                    # verified — a genuinely new/unexpected failure shape (e.g. a
+                    # context-length-exceeded error is a documented risk for newer
+                    # models with a different tokenizer). Log it distinctly so it's
+                    # immediately greppable, and check AI_MODEL_CAPABILITIES.
                     _LOGGER.warning(
-                        "Claude API error on attempt %d/%d: %s",
-                        attempt,
-                        AI_MAX_RETRIES,
+                        "Unexpected API error for model '%s': %s",
+                        model,
                         exc,
                     )
+                last_error = f"API error: {exc}"
+                _LOGGER.warning(
+                    "Claude API error on attempt %d/%d: %s",
+                    attempt,
+                    AI_MAX_RETRIES,
+                    exc,
+                )
             except Exception as exc:  # noqa: BLE001
                 last_error = f"Unexpected error: {exc}"
                 _LOGGER.warning(

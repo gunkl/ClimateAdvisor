@@ -729,9 +729,9 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
             return self.json({"error": "Climate Advisor not loaded"}, status_code=503)
 
         try:
-            hours = float(request.query.get("hours", 24))
+            hours = float(request.query.get("hours", 12))
         except (TypeError, ValueError):
-            hours = 24.0
+            hours = 12.0
         hours = max(1.0, min(hours, 168.0))
 
         from homeassistant.util import dt as dt_util
@@ -741,6 +741,7 @@ class ClimateAdvisorActivityRecordView(HomeAssistantView):
             coordinator.config or {},
             hours,
             dt_util.now(),
+            newest_first=True,
         )
         return self.json(
             {

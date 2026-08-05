@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.59"
+VERSION = "0.5.60"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.60": [
+        "Feat #580: the dashboard's Activity Record report now defaults to the"
+        ' "Last 12 hours" time window instead of 24, and lists events newest-first'
+        " (most recent at the top, oldest at the bottom) instead of oldest-first —"
+        " so the events you actually care about no longer require scrolling past a"
+        " full day of history to find. The AI Investigative Analysis report type is"
+        " unaffected and keeps its own separate time-window defaults.",
+    ],
     "0.5.59": [
         "Fix #578: several AI Investigative Analysis report-quality fixes from user"
         ' feedback — the "Submit GitHub Issue" button now titles the issue'
@@ -1532,6 +1540,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    580: {
+        "version_fixed": "0.5.60",
+        "title": (
+            "Dashboard Activity Record report defaulted to a 24-hour window and"
+            " rendered events oldest-first (ascending), putting the most recent"
+            " activity at the bottom of a potentially long table."
+        ),
+        "scope_covered": (
+            "api.py: ClimateAdvisorActivityRecordView.get() default `hours` query"
+            " param changed from 24 to 12, and now calls build_event_timeline_table()"
+            " with newest_first=True. ai_skills_context.py: build_event_timeline_table()"
+            " gained an opt-in `newest_first` parameter (default False) that reverses"
+            " the already-deduplicated row list immediately before markdown rendering —"
+            " the dedup/collapse loop itself still iterates forward-chronologically,"
+            " since that's what the run-collapsing logic depends on. The AI"
+            " investigation context caller (build_activity_timeline_context()) does"
+            " not pass newest_first, so LLM-facing context keeps chronological order."
+            " frontend/index.html: the Activity Record time-window dropdown (both the"
+            " static markup and the updateReportTypeUI() rebuild) now defaults to"
+            ' "Last 12 hours", and the JS fallback in _runActivityRecord() changed from'
+            " `|| 24` to `|| 12`. The separate AI Investigative Analysis report type's"
+            " dropdown and defaults are untouched."
+        ),
+    },
     578: {
         "version_fixed": "0.5.59",
         "title": (

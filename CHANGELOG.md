@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.57] — 2026-08-05
+
+- Feat #573: editing several AI/comfort/schedule settings sections in one visit to Configure used to reload Climate Advisor after every single section's Submit, rebuilding the coordinator and AI client each time. Each section now just saves; the main Options menu has two new entries — "Save" (closes the settings screen; changes are stored and will apply next time Climate Advisor reloads or Home Assistant restarts) and "Save and Reload" (closes the screen and applies everything you just changed in one reload, right away).
+
 ## [0.5.56] — 2026-08-05
 
 - Fix #572: claude-sonnet-5's first request after being selected could silently hang for up to 90 seconds with no visible output at all before failing — a known model quirk that #565/#568/#569 tried to work around by learning it from a live failure and remembering that lesson, but a genuine Home Assistant restart could silently erase the lesson, so the failure kept coming back. Climate Advisor now ships pre-verified, correct settings for every supported Claude model instead of learning them from a failure — so a supported model's very first request already works correctly, no failed attempt required.

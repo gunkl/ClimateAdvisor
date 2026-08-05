@@ -150,7 +150,9 @@
           "advanced": "Learning & Behavior",
           "classification_thresholds": "Day-Type Thresholds",
           "ai_settings": "AI Settings (Claude)",
-          "github_settings": "GitHub Integration"
+          "github_settings": "GitHub Integration",
+          "save": "Save",
+          "save_reload": "Save and Reload"
         }
       },
       "core": {

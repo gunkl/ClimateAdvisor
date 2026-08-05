@@ -1859,6 +1859,8 @@ class TestOptionsFlowMenu:
             "classification_thresholds",
             "ai_settings",
             "github_settings",
+            "save",
+            "save_reload",
         ]
         assert expected == OPTIONS_MENU_OPTIONS
 
@@ -1868,20 +1870,21 @@ class TestOptionsFlowMenu:
 
         assert "notifications" in OPTIONS_MENU_OPTIONS
 
-    def test_menu_has_no_separate_save_step(self):
-        """Issue #557 — there is no separate "Save & Close" menu item or step.
+    def test_menu_has_save_and_save_reload_steps(self):
+        """Issue #573 — Save and Save and Reload are real terminal menu steps.
 
-        Each section persists immediately on submit; a distinct save step
-        re-introduces the stage-then-save design whose stale-value bug this
-        issue fixed.
+        Section Submit only writes now (no reload); these two are the only
+        ways to close the options flow.
         """
         from custom_components.climate_advisor.config_flow import (
             OPTIONS_MENU_OPTIONS,
             ClimateAdvisorOptionsFlow,
         )
 
-        assert "save" not in OPTIONS_MENU_OPTIONS
-        assert not hasattr(ClimateAdvisorOptionsFlow, "async_step_save")
+        assert "save" in OPTIONS_MENU_OPTIONS
+        assert "save_reload" in OPTIONS_MENU_OPTIONS
+        assert hasattr(ClimateAdvisorOptionsFlow, "async_step_save")
+        assert hasattr(ClimateAdvisorOptionsFlow, "async_step_save_reload")
 
     def test_section_commit_merges_updates(self):
         """A single section's commit merges into entry data and preserves untouched fields."""
@@ -1894,18 +1897,42 @@ class TestOptionsFlowMenu:
         # Untouched fields preserved
         assert data["weather_entity"] == "weather.forecast_home"
 
-    def test_section_submit_persists_without_separate_save(self):
-        """Issue #557 regression guard: submitting ONE section must itself persist and
-        reload — re-opening that section must not require a separate save step to see
-        the new value, since config_entry.data is what forms read their defaults from.
-        """
+    def test_section_submit_persists_but_does_not_reload(self):
+        """Issue #573: submitting a section writes config_entry.data immediately (so
+        re-opening that section shows the new value — the original #557 fix this
+        preserves) but must NOT reload the coordinator. Reload is deferred to an
+        explicit "Save and Reload" menu action."""
         flow, captured = _make_options_flow(dict(FULL_CONFIG))
 
         asyncio.run(flow.async_step_advanced({"learning_enabled": False, "aggressive_savings": True}))
 
-        assert "data" in captured, "async_update_entry must be called on section submit, not deferred"
+        assert "data" in captured, "async_update_entry must be called on section submit"
         assert flow.config_entry.data["learning_enabled"] is False
+        flow.hass.config_entries.async_reload.assert_not_called()
+
+    def test_save_closes_flow_without_reload(self):
+        """ "Save" ends the options flow without reloading — every section already
+        wrote its own fields on Submit."""
+        flow, _ = _make_options_flow(dict(FULL_CONFIG))
+
+        result = asyncio.run(flow.async_step_save())
+
+        flow.hass.config_entries.async_reload.assert_not_called()
+        assert result["type"] == "create_entry"
+
+    def test_save_reload_closes_flow_and_reloads_once(self):
+        """ "Save and Reload" ends the flow and reloads the entry exactly once,
+        applying every section edited during the session."""
+        flow, captured = _make_options_flow(dict(FULL_CONFIG))
+
+        asyncio.run(flow.async_step_advanced({"learning_enabled": False, "aggressive_savings": True}))
+        asyncio.run(flow.async_step_notifications({"push_briefing": False}))
+        result = asyncio.run(flow.async_step_save_reload())
+
+        assert flow.config_entry.data["learning_enabled"] is False
+        assert flow.config_entry.data["push_briefing"] is False
         flow.hass.config_entries.async_reload.assert_called_once_with(flow.config_entry.entry_id)
+        assert result["type"] == "create_entry"
 
 
 # ---------------------------------------------------------------------------

@@ -124,7 +124,9 @@ INDOOR_SOURCE_OPTIONS = [
     selector.SelectOptionDict(value=TEMP_SOURCE_INPUT_NUMBER, label="Input helper (input_number)"),
 ]
 
-# Menu options for the options flow (Issue #50)
+# Menu options for the options flow (Issue #50). "save"/"save_reload" (Issue #573)
+# are the terminal actions — every other entry is a settings section whose Submit
+# only writes the config entry, no reload.
 OPTIONS_MENU_OPTIONS = [
     "core",
     "setpoints",
@@ -137,6 +139,8 @@ OPTIONS_MENU_OPTIONS = [
     "classification_thresholds",
     "ai_settings",
     "github_settings",
+    "save",
+    "save_reload",
 ]
 
 TEMP_UNIT_OPTIONS = [
@@ -611,13 +615,16 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
         self._updates.update(user_input)
 
     async def _commit_section(self, user_input: dict[str, Any], clearable_keys: tuple[str, ...] = ()) -> None:
-        """Persist one section's submitted values immediately and reload (Issue #557).
+        """Persist one section's submitted values immediately — write only, no reload (Issue #573).
 
-        Previously, section steps only staged values into ``self._updates`` and
-        a separate "Save & Close" menu step was the only thing that ever wrote
-        to the config entry — so re-opening a section before hitting Save showed
-        stale data. Submit now commits directly: every section step's success
-        branch calls this instead of staging, so "Submit" always means "saved."
+        Previously (Issue #557), Submit both wrote the config entry AND
+        immediately reloaded the coordinator, so editing several sections in one
+        settings session tore down and rebuilt the coordinator/AI client once
+        per section. Submit now writes only — ``hass.config_entries.async_update_entry()``
+        makes the change visible immediately if a section is reopened before
+        closing the flow (still solving the original #557 staleness problem),
+        but the running coordinator keeps using the old config until the user
+        explicitly reloads via the "Save and Reload" menu option.
         """
         if clearable_keys:
             self._apply_step_input(user_input, clearable_keys)
@@ -629,8 +636,7 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             data.pop(key, None)
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=data)
-        await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-        _LOGGER.info("Options section saved — reload triggered (cleared=%d)", len(self._removed))
+        _LOGGER.info("Options section saved (cleared=%d) — reload not yet applied", len(self._removed))
 
         # Everything just flushed to config_entry.data; reset scratch state so
         # the next section's commit starts clean.
@@ -645,6 +651,23 @@ class ClimateAdvisorOptionsFlow(config_entries.OptionsFlow):
             step_id="init",
             menu_options=OPTIONS_MENU_OPTIONS,
         )
+
+    async def async_step_save(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """Close the options flow without reloading (Issue #573).
+
+        Every section already wrote its own fields on Submit — this just ends
+        the flow cleanly. The running coordinator keeps using its current
+        (pre-this-session) config until "Save and Reload" is used instead, or
+        the entry is reloaded/HA is restarted some other way.
+        """
+        _LOGGER.info("Options flow closed via Save — no reload")
+        return self.async_create_entry(title="", data={})
+
+    async def async_step_save_reload(self, user_input: dict[str, Any] | None = None) -> config_entries.ConfigFlowResult:
+        """Close the options flow and reload once, applying every section edited this session."""
+        await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        _LOGGER.info("Options flow closed via Save and Reload — reload triggered")
+        return self.async_create_entry(title="", data={})
 
     # ---- Core Settings ----
 

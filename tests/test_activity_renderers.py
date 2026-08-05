@@ -42,7 +42,7 @@ def _make_event(
     return {"time": ts.isoformat(), "type": event_type, **payload}
 
 
-def _build_table(events: list[dict], hours: float = 24.0, unit: str = "fahrenheit") -> str:
+def _build_table(events: list[dict], hours: float = 24.0, unit: str = "fahrenheit", newest_first: bool = False) -> str:
     """Call build_event_timeline_table with a fixed now and return the result."""
     from custom_components.climate_advisor.ai_skills_context import (
         build_event_timeline_table,
@@ -55,6 +55,7 @@ def _build_table(events: list[dict], hours: float = 24.0, unit: str = "fahrenhei
             config=config,
             hours=hours,
             now=_REAL_NOW,
+            newest_first=newest_first,
         )
 
 
@@ -1131,3 +1132,44 @@ class TestCeilingGuardFiredRenderer:
         )
         assert "mode:" not in st
         assert "78" in st
+
+
+# ---------------------------------------------------------------------------
+# TestNewestFirstOrdering (Activity Record newest-first display order)
+# ---------------------------------------------------------------------------
+
+
+class TestNewestFirstOrdering:
+    """build_event_timeline_table(newest_first=...) controls display row order.
+
+    The Activity Record endpoint (api.py) requests newest_first=True so the most
+    recent event renders at the top. The AI investigation context builder keeps
+    the default (chronological / oldest-first) so the LLM sees cause-before-effect.
+    """
+
+    def _data_rows(self, table: str) -> list[str]:
+        lines = table.splitlines()
+        return lines[2:]  # skip header + separator
+
+    def test_default_is_chronological_oldest_first(self):
+        events = [
+            _make_event("fan_activated", hours_ago=3.0, trigger="natural_vent"),
+            _make_event("sensor_opened", hours_ago=1.0),
+        ]
+        rows = self._data_rows(_build_table(events))
+        # First row is the earlier (3h ago) event, last row is the later (1h ago) event.
+        assert rows[0].split("|")[1].strip() < rows[-1].split("|")[1].strip()
+
+    def test_newest_first_reverses_row_order(self):
+        events = [
+            _make_event("fan_activated", hours_ago=3.0, trigger="natural_vent"),
+            _make_event("sensor_opened", hours_ago=1.0),
+        ]
+        chrono_rows = self._data_rows(_build_table(events, newest_first=False))
+        newest_rows = self._data_rows(_build_table(events, newest_first=True))
+        assert newest_rows == list(reversed(chrono_rows))
+        # Most recent event's time cell should now be first.
+        assert newest_rows[0].split("|")[1].strip() > newest_rows[-1].split("|")[1].strip()
+
+    def test_newest_first_empty_log_unaffected(self):
+        assert _build_table([], newest_first=True) == _build_table([], newest_first=False)

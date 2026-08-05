@@ -671,8 +671,8 @@
       <label style="font-size:0.85rem;color:var(--text-secondary);">Time window:</label>
       <select id="report-time-window" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);">
         <option value="6">Last 6 hours</option>
-        <option value="12">Last 12 hours</option>
-        <option value="24" selected>Last 24 hours</option>
+        <option value="12" selected>Last 12 hours</option>
+        <option value="24">Last 24 hours</option>
         <option value="48">Last 48 hours</option>
         <option value="168">Last 7 days</option>
       </select>
@@ -2571,8 +2571,8 @@
     const btn = document.getElementById('run-report-btn');
     if (type === 'activity_record') {
       twSelect.innerHTML = '<option value="6">Last 6 hours</option>'
-        + '<option value="12">Last 12 hours</option>'
-        + '<option value="24" selected>Last 24 hours</option>'
+        + '<option value="12" selected>Last 12 hours</option>'
+        + '<option value="24">Last 24 hours</option>'
         + '<option value="48">Last 48 hours</option>'
         + '<option value="168">Last 7 days</option>';
       focusControls.style.display = 'none';
@@ -2604,7 +2604,7 @@
   // ---- Activity Record (deterministic, no AI) ----
 
   async function _runActivityRecord() {
-    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 24;
+    const hours = parseInt(document.getElementById('report-time-window').value, 10) || 12;
     const btn = document.getElementById('run-report-btn');
     const loading = document.getElementById('report-loading');
     const status = document.getElementById('report-status');

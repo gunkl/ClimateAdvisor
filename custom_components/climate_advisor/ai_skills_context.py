@@ -2297,6 +2297,7 @@ def build_event_timeline_table(
     config: dict[str, Any],
     hours: float,
     now: datetime.datetime,
+    newest_first: bool = False,
 ) -> str:
     """Build a deterministic markdown timeline table from the event log.
 
@@ -2306,6 +2307,10 @@ def build_event_timeline_table(
     Consecutive same-type events (excluding types in _NO_DEDUP) are collapsed
     into a single row with a xN count and time range.  The Settings cell of the
     collapsed row is taken from the LAST event in the run (most recent setpoint wins).
+
+    Rows are built in chronological order internally (dedup depends on forward
+    iteration). When `newest_first` is True, the final row order is reversed for
+    display — most recent event first, oldest last.
     """
     unit: str = config.get("temp_unit", "fahrenheit")
     if now.tzinfo is None:
@@ -2462,7 +2467,8 @@ def build_event_timeline_table(
     # ---- format as markdown ----
     header = "| Time | Event | Settings | Source | Indoor | Outdoor |"
     sep = "|---|---|---|---|---|---|"
-    row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in rows]
+    ordered_rows = list(reversed(rows)) if newest_first else rows
+    row_lines = [f"| {t} | {ev} | {st} | {src} | {ind} | {out} |" for t, ev, st, src, ind, out in ordered_rows]
     table = "\n".join([header, sep, *row_lines])
 
     return _maybe_prepend_whf_warning(table, config)

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.55] — 2026-08-05
+
+- Fix #571: a legitimate whole-house-fan nat-vent exit was being misread as an externally-owned fan and force-corrected by an emergency reconcile — every single cycle, all morning. The Activity Report showed "Fan running (untracked)" and "fan found running without a CA-owned session" moments after Climate Advisor's own clean exit, instead of just the clean exit itself. Also fixed a related gap: the HVAC-fan dashboard status could get stuck showing "active" even after the fan genuinely stopped, on HVAC-integrated-fan configurations.
+
 ## [0.5.54] — 2026-08-05
 
 - Fix #567: the whole-house fan's own automation-issued commands could get heard back on the QuietCool remote's RF channel and misread as a person pressing the physical remote — falsely handing fan control away from Climate Advisor for up to 3 hours and mislabeling the Activity Report as a manual action that never happened. Also fixed a related report-only issue: when Climate Advisor quietly corrects its own stale fan-tracking (no user involved at all), the Activity Report now says so instead of also claiming "user turned off".

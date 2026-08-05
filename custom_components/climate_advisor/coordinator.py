@@ -225,7 +225,12 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
-from .fan_status import is_ca_fan_running, parse_remote_speed_event, parse_remote_timer_event
+from .fan_status import (
+    is_ca_fan_running,
+    parse_remote_speed_event,
+    parse_remote_timer_event,
+    resolve_untracked_fan_status,
+)
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .state import StatePersistence
@@ -2265,6 +2270,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # The one-shot trigger in _async_thermostat_changed (~line 2826) is guarded by
         # not _fan_override_active, but that flag may already be True from Block 3 in the same
         # event, leaving the untracked fan permanently unresolved.  This backstop catches it.
+        #
+        # Issue #571: this backstop no longer fires in the few seconds right after CA's own
+        # nat-vent exit commands the fan off — _is_untracked is derived from
+        # _compute_fan_status(), and that function's ground-truth fallbacks now route through
+        # resolve_untracked_fan_status(), which returns "inactive" (not "running (untracked)")
+        # while a very recent CA-issued off-command's propagation to the physical entity is
+        # still pending. Previously every legitimate exit briefly looked externally-owned to
+        # this backstop, triggering a spurious reconcile_fan_on_startup() adopt/re-exit right
+        # after the real exit already happened.
         #
         # Issue #510 0.2: this backstop now ALSO catches the mirror-direction drift bug
         # (a stale _natural_vent_active flag masking a physically-running WHF) with zero
@@ -6788,6 +6802,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         fan_state_feedback) now wins over CA's own internal session flags wherever it's
         available, rather than being consulted only as a last resort — see 0.1b (nat-vent
         branch) and 0.1c (active-unconfirmed settling) below.
+
+        Issue #571: the ground-truth fallbacks (WHF and HVAC/BOTH) route through
+        ``resolve_untracked_fan_status()`` — the OFF-direction mirror of 0.1c's ON-direction
+        guard. When CA has just cleared its own ownership flags and commanded the fan off,
+        the physical/thermostat signal may not have caught up yet; without this guard that
+        brief propagation window was misread as an externally-owned fan and force-corrected
+        by the ``backstop_30min`` reconcile (see that block's comment below).
         """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -6839,7 +6860,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # WHF ground-truth fallback: reads fan_state_entity (Type 2) or fan_entity (Type 1).
         # Catches post-restart and externally-run WHF when CA's internal flags are all clear.
         if _physical_on() is True:
-            return "running (untracked)"
+            return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))
         # Ground-truth fallback: CA's flag says inactive, but check what the
         # thermostat is actually doing. Catches post-restart and externally-run fan.
         if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
@@ -6849,7 +6870,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 thermostat_fan_mode = cs.attributes.get("fan_mode", "")
                 thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
                 if thermostat_fan_mode == "on" or thermostat_hvac_action == "fan":
-                    return "running (untracked)"
+                    return resolve_untracked_fan_status(
+                        recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0)
+                    )
         return "inactive"
 
     def _compute_whf_status(self) -> str | None:
@@ -6883,31 +6906,55 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 return "running (untracked)"
             return "nat-vent (session active, fan idle)"
         if physical_on is True:
-            return "running (untracked)"
+            return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))
         return "inactive"
 
     def _compute_hvac_fan_status(self) -> str | None:
-        """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured."""
+        """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured.
+
+        Issue #571: mirrors _compute_whf_status()'s ground-truth-first shape — including
+        the ON-direction "active (unconfirmed)"/stale-flag guard, which this function never
+        had until now (unlike its two siblings, which gained it under Issue #510). Reads the
+        thermostat fan_mode/hvac_action ground truth via a memoized closure so it's computed
+        at most once per call, shared between the ON-direction guard and the OFF-direction
+        fallback below.
+        """
         ae = self.automation_engine
         fan_mode = ae.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode not in (FAN_MODE_HVAC, FAN_MODE_BOTH):
             return None
+
+        _thermostat_on_cache: list[bool | None] = []
+
+        def _thermostat_fan_on() -> bool | None:
+            if not _thermostat_on_cache:
+                climate_entity_id = self.config.get("climate_entity", "")
+                cs = self.hass.states.get(climate_entity_id) if climate_entity_id else None
+                if cs is None:
+                    _thermostat_on_cache.append(None)
+                else:
+                    thermostat_fan_mode = cs.attributes.get("fan_mode", "")
+                    thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
+                    _thermostat_on_cache.append(thermostat_fan_mode == "on" or thermostat_hvac_action == "fan")
+            return _thermostat_on_cache[0]
+
         if ae._fan_override_active:
             if ae._fan_active:
                 return "running (manual override)"
             return "off (manual override)"
         if ae._fan_active:
+            if _thermostat_fan_on() is False:
+                if self._is_recent_fan_command(threshold_seconds=30.0):
+                    return "active (unconfirmed)"
+                _LOGGER.warning(
+                    "HVAC fan _fan_active=True but thermostat reports fan off — possible stale flag after manual stop"
+                )
+                return "inactive"
             return "active"
         if ae._natural_vent_active:
             return "nat-vent (session active, fan idle)"
-        # Ground-truth fallback via thermostat
-        climate_entity_id = self.config.get("climate_entity", "")
-        cs = self.hass.states.get(climate_entity_id) if climate_entity_id else None
-        if cs is not None:
-            thermostat_fan_mode = cs.attributes.get("fan_mode", "")
-            thermostat_hvac_action = str(cs.attributes.get("hvac_action", "")).lower()
-            if thermostat_fan_mode == "on" or thermostat_hvac_action == "fan":
-                return "running (untracked)"
+        if _thermostat_fan_on() is True:
+            return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))
         return "inactive"
 
     def _compute_contact_status(self) -> str:

@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.54"
+VERSION = "0.5.55"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.55": [
+        "Fix #571: a legitimate whole-house-fan nat-vent exit was being misread as an"
+        " externally-owned fan and force-corrected by an emergency reconcile — every"
+        " single cycle, all morning. The Activity Report showed 'Fan running"
+        " (untracked)' and 'fan found running without a CA-owned session' moments"
+        " after Climate Advisor's own clean exit, instead of just the clean exit"
+        " itself. Also fixed a related gap: the HVAC-fan dashboard status could get"
+        " stuck showing 'active' even after the fan genuinely stopped, on"
+        " HVAC-integrated-fan configurations.",
+    ],
     "0.5.54": [
         "Fix #567: the whole-house fan's own automation-issued commands could get heard"
         " back on the QuietCool remote's RF channel and misread as a person pressing the"
@@ -1477,6 +1487,43 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    571: {
+        "version_fixed": "0.5.55",
+        "title": (
+            "A legitimate nat-vent exit (CA turning its own WHF off) was being misread as an"
+            " externally-owned/untracked fan every single cycle, then force-corrected by the"
+            " 'backstop_30min' periodic reconcile — despite the name, this reconcile is not"
+            " actually gated on a 30-minute timer; it runs on every coordinator update cycle."
+            " Root cause: _compute_fan_status()'s ground-truth fallbacks (and two sibling"
+            " functions, _compute_whf_status()/_compute_hvac_fan_status(), which had the"
+            " identical gap) had no OFF-direction confirmation guard — the mirror of the"
+            " existing ON-direction 'active (unconfirmed)' guard from Issue #510. When CA"
+            " cleared its own ownership flags and commanded the fan off, but the physical"
+            " entity/thermostat attribute hadn't caught up yet, the fallback unconditionally"
+            " read as 'running (untracked)', and since the periodic backstop derives its"
+            " trigger condition directly from that same value, it fired reconcile_fan_on_"
+            " startup() moments after every legitimate exit. Separately, _compute_hvac_fan_"
+            " status() (HVAC-integrated-fan mode) had NO ground-truth cross-check on the ON"
+            " direction at all — unlike its two siblings, which gained one under Issue #510 —"
+            " so _fan_active=True rendered as 'active' unconditionally and forever, even if the"
+            " HVAC fan later genuinely stopped."
+        ),
+        "scope_covered": (
+            "fan_status.py: new resolve_untracked_fan_status(recent_fan_command: bool) -> str,"
+            " the single shared OFF-direction predicate. coordinator.py: the 4 ground-truth"
+            " fallback sites (2 in _compute_fan_status(), 1 each in _compute_whf_status()/"
+            " _compute_hvac_fan_status()) now route through it instead of independently"
+            " hand-rolling the same 'physical/thermostat signal says on -> running (untracked)'"
+            " branch — centralizing logic these two specific functions have needed synchronized"
+            " parallel fixes for before (Issue #510). _compute_hvac_fan_status() additionally"
+            " rewritten to add the ON-direction 'active (unconfirmed)'/stale-flag guard,"
+            " mirroring _compute_whf_status()'s shape exactly, via a memoized thermostat-ground-"
+            " truth closure shared between the ON and OFF branches. Cross-reference comments"
+            " added at _is_recent_fan_command()'s call-site history and the backstop_30min"
+            " block. tests: TestDualFanStatus in test_fan_control.py gained 11 new cases across"
+            " all three functions and both directions (all revert-tested)."
+        ),
+    },
     567: {
         "version_fixed": "0.5.54",
         "title": (

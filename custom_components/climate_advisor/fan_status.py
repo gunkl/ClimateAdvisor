@@ -43,6 +43,24 @@ def is_ca_fan_running(fan_status: str) -> bool:
     return fan_status in FAN_STATUS_ACTIVE_VALUES
 
 
+def resolve_untracked_fan_status(*, recent_fan_command: bool) -> str:
+    """Resolve the ground-truth 'physical signal says on, CA owns nothing' fallback
+    to 'running (untracked)' or 'inactive' (Issue #571).
+
+    Call only once the caller has already confirmed the raw signal (WHF physical
+    entity state, or thermostat fan_mode/hvac_action) looks like "on" and every CA
+    ownership flag (_fan_active, _natural_vent_active, _fan_override_active) is
+    False. If CA very recently issued its own off-command, the physical signal
+    simply hasn't caught up yet — that's the expected propagation window, not a
+    real untracked fan (the OFF-direction mirror of the "active (unconfirmed)"
+    guard these same call sites already apply in the ON direction). Shared by
+    _compute_fan_status()/_compute_whf_status()/_compute_hvac_fan_status() so the
+    three don't drift out of sync again (see Issue #510's history of needing
+    parallel fixes across the first two).
+    """
+    return "inactive" if recent_fan_command else "running (untracked)"
+
+
 def parse_remote_timer_event(event_type: str | None) -> tuple[bool, float | None]:
     """Parse a QuietCool RF remote ``event_type`` token into a timer decision.
 

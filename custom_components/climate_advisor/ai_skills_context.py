@@ -1819,10 +1819,22 @@ def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
 
 
 def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #567: branch on `trigger` — not every fan_cancel event is a user action.
+
+    `physical_drift_correction` is CA noticing its own _fan_active bookkeeping was stale
+    (the fan had already stopped) and correcting it — no user touched anything. Rendering
+    that identically to a genuine user-detected fan-off misled the Activity Report into
+    implying a manual action that never happened.
+    """
     fan_before = str(p.get("fan_before", "?")).strip()
     fan_after = str(p.get("fan_after", "?")).strip()
     fan_device = p.get("fan_device", "fan")
     settings = f"{fan_device}: {fan_before}->{fan_after}" if fan_before and fan_after else ""
+    trigger = p.get("trigger")
+    if trigger == "physical_drift_correction":
+        return "Fan ownership corrected -- stale flag cleared (was already off)", settings
+    if trigger == "timer_boundary_settle":
+        return "Fan cancel -- RF timer session ended", settings
     return "Fan cancel (user turned off)", settings
 
 

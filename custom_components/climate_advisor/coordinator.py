@@ -1512,7 +1512,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return (dt_util.now() - cmd_time).total_seconds() < threshold_seconds
 
     def _is_recent_fan_command(self, threshold_seconds: float = 30.0) -> bool:
-        """Check if a fan command was issued recently (race guard)."""
+        """Check if a fan command was issued recently (race guard).
+
+        Adding a new fan-state listener (physical entity, RF remote, or otherwise)?
+        This is the shared echo-suppression primitive — call it before treating any
+        transition/event as external. Current call sites: coordinator.py ~3627/3785/3862
+        (see the Issue #417 sibling list at ~3621), coordinator.py ~4029
+        (_async_fan_entity_changed), and coordinator.py ~4106 (_async_fan_remote_changed,
+        Issue #567). Missing this guard on a new listener has shipped as a production bug
+        twice (#417, #567) — don't add a third.
+        """
         cmd_time = self.automation_engine._fan_command_time
         if cmd_time is None:
             return False
@@ -3619,10 +3628,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not _ae_347._natural_vent_active
             and not _ae_347._fan_override_active
             # Issue #417: every sibling race-sensitive check in this file (e.g. lines
-            # ~2875, ~2916, ~2939, ~3225, ~3300) guards against CA's own in-flight fan
-            # commands with these two checks — this was the one place that didn't,
-            # letting a CA-issued nat-vent cycle-on transiently look "unowned" to this
-            # listener before _activate_fan()'s flags settle.
+            # ~2875, ~2916, ~2939, ~3225, ~3300, and _async_fan_remote_changed() ~4106,
+            # added for Issue #567) guards against CA's own in-flight fan commands with
+            # these two checks — this was the one place that didn't, letting a CA-issued
+            # nat-vent cycle-on transiently look "unowned" to this listener before
+            # _activate_fan()'s flags settle.
             and not _ae_347._fan_command_pending
             and not self._is_recent_fan_command(threshold_seconds=30.0)
         ):
@@ -4101,6 +4111,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # entity can re-announce its last retained event_type (a stale timer press) while
         # HA is still settling right after restart, indistinguishable from a fresh press.
         if self._suppress_during_startup_coalescing(f"fan remote event_type={event_type}"):
+            return
+
+        # Issue #567: echo guard — the QuietCool device transmits AND receives on the same
+        # RF channel (see fan-remote-spec.md), so a CA-issued fan command can be heard back
+        # by this same receive-side entity and misread as a fresh manual press. Mirrors the
+        # existing echo guard in _async_fan_entity_changed() (see the sibling-site list at
+        # _is_recent_fan_command()'s definition) — event.context matching isn't available
+        # here since CA never calls a service on this receive-only entity.
+        if self._is_recent_fan_command(threshold_seconds=30.0):
+            _LOGGER.debug(
+                "Fan RF remote event ignored — recent CA-issued fan command (echo guard), event_type=%s",
+                event_type,
+            )
             return
 
         is_timer, hours = parse_remote_timer_event(event_type)

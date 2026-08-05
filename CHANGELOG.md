@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.54] — 2026-08-05
+
+- Fix #567: the whole-house fan's own automation-issued commands could get heard back on the QuietCool remote's RF channel and misread as a person pressing the physical remote — falsely handing fan control away from Climate Advisor for up to 3 hours and mislabeling the Activity Report as a manual action that never happened. Also fixed a related report-only issue: when Climate Advisor quietly corrects its own stale fan-tracking (no user involved at all), the Activity Report now says so instead of also claiming "user turned off".
+
 ## [0.5.53] — 2026-08-05
 
 - Fix #568: the AI model-compatibility learning added in #565 (so Climate Advisor adapts automatically to a newer Claude model's quirks after the first request) was being silently wiped every time AI settings were saved or Home Assistant restarted — so it could never actually stick. It's now saved the same way as other AI usage stats, so it survives both. Also added clearer AI request logging so any future model-compatibility issue can be diagnosed directly from the logs.

@@ -13,14 +13,15 @@
 | Which error types cause a retry, and what is the backoff schedule for `AI_MAX_RETRIES = 3`? | All four exception types retry: `RateLimitError`, `APITimeoutError`, `APIError`, and bare `Exception`. Delays are `1.0 s`, `2.0 s` between attempts 1→2 and 2→3; no sleep after attempt 3. | [Rate Limiting and Retry](#rate-limiting-and-retry) |
 | What happens to the circuit breaker failure counter when the circuit is half-open and the probe fails? | The failure counter increments (`consecutive_failures += 1`) via the same post-call path as any other failure. If it meets or exceeds `AI_CIRCUIT_BREAKER_THRESHOLD` (5), the breaker transitions back to `"open"` and `opened_at` is reset. | [Circuit Breaker State Machine](#circuit-breaker-state-machine) |
 | What config keys does `ClaudeAPIClient.__init__()` read, and what happens if `CONF_AI_API_KEY` is absent or empty? | It reads only `CONF_AI_API_KEY` at init time. If absent or empty, `self._client` remains `None` and a WARNING is logged; all subsequent `async_request()` calls return `ClaudeResponse(success=False, error="Anthropic client not initialized…")`. | [Initialization and Configuration](#initialization-and-configuration) |
+| A configured model rejects a request parameter, or needs a different extended-thinking shape, or silently returns zero visible text while consuming the full `max_tokens` budget — does the client keep failing forever? | No. `_build_request_kwargs()` is the single source of truth for both request paths; two per-model in-memory capability caches (`_unsupported_params`, `_adaptive_thinking_models`) are populated reactively — from a 400 error naming the rejected parameter/shape, or (for the zero-output case, which is a "successful" empty response, not an exception) from observing `truncated_empty=True`. Once learned, every subsequent request for that model is built correctly from the start; only the first occurrence per model per client-instance lifetime pays the cost of discovering it. | [Reactive Per-Model Capability Detection](#reactive-per-model-capability-detection) |
 
 ---
 
 ## Scope
 
 - **File:** `custom_components/climate_advisor/claude_api.py`
-- **Approximate line range:** L1 – L742 (entire file)
-- **Primary entry points:** `ClaudeAPIClient.async_request()` (L150), `ClaudeAPIClient.__init__()` (L113)
+- **Approximate line range:** L1 – L1365 (entire file)
+- **Primary entry points:** `ClaudeAPIClient.async_request()` (L278), `ClaudeAPIClient.__init__()` (L215)
 
 This spec covers `ClaudeAPIClient` and the supporting dataclasses (`ClaudeResponse`, `_CircuitBreaker`, `_RateLimitCounters`, `_BudgetTracker`). It does NOT cover:
 
@@ -89,7 +90,7 @@ After a failed `async_request()` call (`response.success = False`):
 
 9. **Request history is capped.** `self.request_history` is a `deque(maxlen=AI_REQUEST_HISTORY_CAP)` — Python enforces the cap automatically; no explicit eviction logic is required.
 
-10. **Extended thinking forces `temperature=1`.** When `reasoning_effort == AI_REASONING_HIGH`, the `kwargs["temperature"]` value is overwritten to `1` inside `_async_call_with_retry()`, regardless of the caller-supplied temperature. This is the only code path that does so.
+10. **Extended thinking forces `temperature=1`.** `_build_request_kwargs()` (the single kwargs-building source for both the streaming and non-streaming paths — see [Reactive Per-Model Capability Detection](#reactive-per-model-capability-detection)) overwrites `kwargs["temperature"]` to `1`, regardless of the caller-supplied temperature, whenever it attaches a `thinking` parameter: unconditionally at `reasoning_effort == AI_REASONING_HIGH` (legacy `{"type": "enabled", "budget_tokens": N}` shape), and at every reasoning tier once a model has been learned to need the newer `{"type": "adaptive"}` + `output_config.effort` shape (Issue #565). The per-model unsupported-parameter strip always runs last, after this override, so a model already known to reject `temperature` never has it silently re-added.
 
 11. **The circuit breaker failure counter is never decremented.** It is only zeroed (on success, in `async_request()`) or incremented (on failure, in `async_request()`). There is no partial-credit decay.
 
@@ -155,6 +156,32 @@ async def async_request(
 - Success: zero `consecutive_failures`, set state `"closed"`, add cost to `monthly_cost`, increment appropriate daily counter
 - Failure: increment `consecutive_failures` and `_error_count`; if `consecutive_failures >= AI_CIRCUIT_BREAKER_THRESHOLD`: set state `"open"`, record `opened_at`
 - Always: increment `_total_requests`, record `_last_request_time`, append to `request_history`
+
+---
+
+## Reactive Per-Model Capability Detection
+
+Anthropic's Models API exposes `id`/`display_name`/`created_at` — never a per-model sampling-parameter or extended-thinking-shape schema. There is no way to know ahead of time that a given model no longer accepts `temperature`, or that it requires a different `thinking` parameter shape than an older model in the same family. `ClaudeAPIClient` handles this by learning per-model, in-memory, from the API's own error responses (or from a symptom that isn't an error at all — see below) — never by hardcoding a model-ID list.
+
+Two per-model capability caches, both `dict`/`set` keyed on the resolved model ID, both reset on integration reload (in-memory only, same acceptable cost as `_models_cache`):
+
+| Cache | Populated when | Effect on `_build_request_kwargs()` |
+|---|---|---|
+| `self._unsupported_params: dict[str, set[str]]` | A 400 whose message matches `` `(\w+)` is deprecated for this model `` (`_detect_deprecated_param()`, Issue #563 follow-on) | Every key ever learned for that model is popped from `kwargs` — this strip always runs LAST, after every other kwargs-building step, so a forced value (e.g. `temperature=1` from extended thinking) is never silently re-added |
+| `self._adaptive_thinking_models: set[str]` | A 400 whose message names `thinking.type.adaptive` (`_detect_adaptive_thinking_required()`, Issue #565), OR a "successful" response with `truncated_empty=True` (see below) | At every `reasoning_effort` tier (not just `"high"`), `kwargs["thinking"] = {"type": "adaptive"}` and `kwargs["output_config"] = {"effort": reasoning_effort}` are attached instead of the legacy `{"type": "enabled", "budget_tokens": N}` shape |
+
+### Why `_adaptive_thinking_models` exists (Issue #565)
+
+Confirmed live (`claude-sonnet-5`, direct-API diagnostic bypassing this client entirely): some newer models reject the legacy `thinking.type.enabled` shape outright, and — critically — before that's discovered, they still perform their own internal reasoning even when `reasoning_effort != "high"` and no `thinking` parameter is sent at all. Because `_build_request_kwargs()` previously only ever attached thinking control at the `"high"` tier, a `"medium"`/`"low"` request to such a model left its internal reasoning completely uncapped. On a production-sized prompt this reasoning alone consumed the *entire* `max_tokens` budget before the model ever started the visible answer — `stop_reason == "max_tokens"`, `response.truncated_empty == True` (or, for streaming, `any_text_yielded == False` — see the `ClaudeResponse`/stream `"stop"` event fields), with no exception raised anywhere; the API call is a "successful" HTTP response that is simply unusable. This is the failure mode `_adaptive_thinking_models` exists to self-heal from — see the retry rules below.
+
+### Retry rules (asymmetric between the two request paths)
+
+Both `_async_call_with_retry()` (non-streaming) and `async_request_streaming()` (streaming) catch a 400 matching either detector and learn the corresponding cache entry, then retry once with corrected kwargs — mirroring each other exactly for the exception case. They diverge only for the *non-exception* `truncated_empty` symptom, because a streaming generator cannot un-yield content already shown to the caller:
+
+- **Non-streaming** (`_async_call_with_retry()`): nothing is exposed to the caller until the whole `ClaudeResponse` is returned, so a `truncated_empty` result is safe to retry in place — one extra `_single_api_call()` with `_adaptive_thinking_models` now including this model, same call.
+- **Streaming** (`async_request_streaming()`): thinking deltas may already have streamed to the caller (visible in the UI) by the time `truncated_empty` is known, at the very end of the generator. This call surfaces the failure exactly as before the fix; the only thing that changes is `self._adaptive_thinking_models.add(resolved_model)` fires before the generator ends, so the *next* call for this model — streaming or non-streaming, same client instance — builds corrected kwargs from the start and does not repeat the failure.
+
+A brand-new model's very first streaming call can therefore still exhibit one zero-output truncation before self-healing; every call after that (for that model, for the lifetime of this client instance) does not.
 
 ---
 
@@ -313,21 +340,29 @@ If `from anthropic import ...` raises `ImportError`:
 | Unexpected exception | `_async_call_with_retry()` | Same retry/backoff | `ClaudeResponse(success=False, error="Unexpected error: …")` after all retries |
 | `restore_persistent_stats()` with bad `counter_date` string | `date.fromisoformat()` | `except (KeyError, ValueError)`: resets `counter_date = date.today()` | Counter starts fresh for the day |
 | `_estimate_cost()` with unrecognized model | Prefix lookup miss | Falls through to Sonnet rates as default | Cost estimate uses $3.00/$15.00 per 1M tokens |
+| 400 naming a deprecated request parameter (e.g. `` `temperature` is deprecated for this model `` ) | `_detect_deprecated_param()` in the `APIError` branch of `_async_call_with_retry()` / `async_request_streaming()` | Learn into `_unsupported_params[model]`; retry once immediately (no backoff) with that param stripped | Success on retry: normal response. Retry also fails: falls through to the generic `APIError` last-error path |
+| 400 naming the adaptive thinking shape (`thinking.type.adaptive`) | `_detect_adaptive_thinking_required()`, same branches as above | Learn into `_adaptive_thinking_models`; retry once immediately with `thinking.type.adaptive` + `output_config.effort` | Same success/failure shape as the deprecated-parameter case |
+| Full `max_tokens` budget consumed with zero visible answer text (`truncated_empty=True`), no exception at all — see [Reactive Per-Model Capability Detection](#reactive-per-model-capability-detection) | Computed post-response in `_single_api_call()` / after the stream completes in `async_request_streaming()` | Non-streaming: learn + retry once in place. Streaming: learn only (cannot retry in place); this call still surfaces the empty result | Non-streaming: usually a real answer on retry. Streaming: `{"type": "stop", "truncated_empty": True}`; caller must treat this as no usable content, same as before the fix, but only once per model |
 
 ---
 
 ## Code Reference
 
-- [`ClaudeAPIClient.__init__`](../custom_components/climate_advisor/claude_api.py#L113) — construction, client init, dataclass setup
-- [`ClaudeAPIClient.async_request`](../custom_components/climate_advisor/claude_api.py#L150) — main public entry point; guard sequence + counter updates
-- [`_check_circuit_breaker`](../custom_components/climate_advisor/claude_api.py#L505) — state machine query; transitions `"open"` → `"half_open"` on cooldown expiry
-- [`_async_call_with_retry`](../custom_components/climate_advisor/claude_api.py#L595) — retry loop with exponential backoff; extended thinking injection
-- [`_check_budget`](../custom_components/climate_advisor/claude_api.py#L533) — month-roll detection and cap check
-- [`_check_rate_limit`](../custom_components/climate_advisor/claude_api.py#L460) — daily counter check for `"auto"` vs `"manual"` callers
-- [`check_investigator_rate_limit`](../custom_components/climate_advisor/claude_api.py#L477) — separate investigator gate; also checks `CONF_AI_INVESTIGATOR_ENABLED`
-- [`update_config`](../custom_components/climate_advisor/claude_api.py#L434) — hot-reload config; tears down and recreates client on key change
-- [`get_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L368) — serializes counters + monthly cost for HA state persistence
-- [`restore_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L390) — rehydrates counters after HA restart
-- [`ClaudeResponse`](../custom_components/climate_advisor/claude_api.py#L68) — response dataclass; all fields documented above
-- [`_CircuitBreaker`](../custom_components/climate_advisor/claude_api.py#L84) — state machine storage dataclass
-- [`_MODEL_COSTS`](../custom_components/climate_advisor/claude_api.py#L56) — per-model-prefix cost rates
+- [`ClaudeAPIClient.__init__`](../custom_components/climate_advisor/claude_api.py#L215) — construction, client init, dataclass setup, capability-cache init
+- [`ClaudeAPIClient.async_request`](../custom_components/climate_advisor/claude_api.py#L278) — main public entry point; guard sequence + counter updates
+- [`async_request_streaming`](../custom_components/climate_advisor/claude_api.py#L425) — streaming entry point; capability-detection retry loop (before any content yielded), post-hoc `truncated_empty` handling
+- [`_check_circuit_breaker`](../custom_components/climate_advisor/claude_api.py#L862) — state machine query; transitions `"open"` → `"half_open"` on cooldown expiry
+- [`_build_request_kwargs`](../custom_components/climate_advisor/claude_api.py#L952) — single kwargs-building source for both request paths; extended-thinking shape selection + unsupported-parameter strip (see [Reactive Per-Model Capability Detection](#reactive-per-model-capability-detection))
+- [`_single_api_call`](../custom_components/climate_advisor/claude_api.py#L1010) — one atomic non-streaming API call + response parsing; no retry policy of its own
+- [`_async_call_with_retry`](../custom_components/climate_advisor/claude_api.py#L1154) — non-streaming retry loop with exponential backoff; capability-detection retries; `truncated_empty` in-place retry
+- [`_detect_deprecated_param`](../custom_components/climate_advisor/claude_api.py#L89) — regex match for a "param deprecated for this model" 400 (Issue #563 follow-on)
+- [`_detect_adaptive_thinking_required`](../custom_components/climate_advisor/claude_api.py#L104) — regex match for a "use thinking.type.adaptive" 400 (Issue #565)
+- [`_check_budget`](../custom_components/climate_advisor/claude_api.py#L890) — month-roll detection and cap check
+- [`_check_rate_limit`](../custom_components/climate_advisor/claude_api.py#L817) — daily counter check for `"auto"` vs `"manual"` callers
+- [`check_investigator_rate_limit`](../custom_components/climate_advisor/claude_api.py#L834) — separate investigator gate; also checks `CONF_AI_INVESTIGATOR_ENABLED`
+- [`update_config`](../custom_components/climate_advisor/claude_api.py#L791) — hot-reload config; tears down and recreates client on key change
+- [`get_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L725) — serializes counters + monthly cost for HA state persistence
+- [`restore_persistent_stats`](../custom_components/climate_advisor/claude_api.py#L747) — rehydrates counters after HA restart
+- [`ClaudeResponse`](../custom_components/climate_advisor/claude_api.py#L123) — response dataclass; all fields documented above
+- [`_CircuitBreaker`](../custom_components/climate_advisor/claude_api.py#L147) — state machine storage dataclass
+- [`_MODEL_COSTS`](../custom_components/climate_advisor/claude_api.py#L110) — per-model-prefix cost rates

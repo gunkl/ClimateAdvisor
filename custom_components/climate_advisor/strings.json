@@ -351,9 +351,6 @@
           "ai_auto_requests_per_day": "Auto Requests Per Day",
           "ai_manual_requests_per_day": "Manual Requests Per Day",
           "ai_investigator_enabled": "Enable Investigative Agent",
-          "ai_investigator_model": "Investigator AI Model",
-          "ai_investigator_reasoning_effort": "Investigator Reasoning Effort",
-          "ai_investigator_max_tokens": "Investigator Max Response Length (tokens)",
           "ai_investigator_requests_per_day": "Investigator Requests Per Day"
         },
         "data_description": {
@@ -361,15 +358,12 @@
           "ai_api_key": "Your Anthropic API key. Get one at console.anthropic.com. Leave blank to keep existing key.",
           "ai_model": "Which Claude model to use. Sonnet is recommended for cost/quality balance.",
           "ai_reasoning_effort": "How much reasoning effort Claude uses. Higher = better analysis but more cost.",
-          "ai_max_tokens": "Maximum length of AI responses in tokens (256-8192).",
+          "ai_max_tokens": "Maximum length of AI responses in tokens (256-16384).",
           "ai_temperature": "Controls randomness. 0 = deterministic, 1.0 = most creative. 0.3 recommended.",
           "ai_monthly_budget": "Maximum estimated monthly spend in USD. Set to 0 for no limit.",
           "ai_auto_requests_per_day": "Maximum automated AI requests per day (resets at midnight).",
           "ai_manual_requests_per_day": "Maximum user-triggered AI requests per day (resets at midnight).",
           "ai_investigator_enabled": "Enable the investigative agent (requires AI to be enabled). Performs deep cross-source analysis to find incongruities and data issues.",
-          "ai_investigator_model": "Which Claude model the investigator uses. Opus recommended for deep analysis; Sonnet is more cost-effective.",
-          "ai_investigator_reasoning_effort": "How much extended thinking the investigator uses. High recommended \u00e2\u20ac\u201d the agent reasons through multiple hypotheses.",
-          "ai_investigator_max_tokens": "Maximum token length for investigator reports (256-16384). 8192 recommended.",
           "ai_investigator_requests_per_day": "Maximum investigative analysis runs per day. Each investigation uses extended thinking. Resets at midnight."
         }
       },

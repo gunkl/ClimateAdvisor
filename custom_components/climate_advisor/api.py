@@ -13,7 +13,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .ai_skills_activity import build_event_timeline_table
+from .ai_skills_context import build_event_timeline_table
 from .const import (
     API_AI_ACTIVITY,
     API_AI_INVESTIGATE,
@@ -718,7 +718,12 @@ class ClimateAdvisorAIStatusView(HomeAssistantView):
 
 
 class ClimateAdvisorAIActivityView(HomeAssistantView):
-    """API endpoint to execute the AI activity report skill."""
+    """API endpoint to execute the (silent/scheduled-narration mode of the merged)
+    investigator skill (Issue #563 — this endpoint used to run a separate
+    "activity_report" skill; that skill has been retired and merged into
+    "investigator". No `focus` is passed, so the model narrates rather than
+    investigates a specific complaint. New reports write to the unified
+    investigation report history — see `async_store_investigation_report()`."""
 
     url = API_AI_ACTIVITY
     name = "api:climate_advisor:ai_activity"
@@ -739,25 +744,33 @@ class ClimateAdvisorAIActivityView(HomeAssistantView):
             data = {}
 
         hours = data.get("hours", 24)
-        detail_level = data.get("detail_level", "full")
 
         # Validate inputs from REST API (service call path uses vol.Schema)
         if not isinstance(hours, (int, float)) or not (1 <= hours <= 168):
             hours = 24
-        if detail_level not in ("brief", "full"):
-            detail_level = "full"
 
         result = await coordinator.ai_skills.async_execute(
-            "activity_report",
+            "investigator",
             coordinator.hass,
             coordinator,
             coordinator.claude_client,
             hours=hours,
-            detail_level=detail_level,
+            narration=True,
         )
 
-        # Store the result for history
-        await coordinator.async_store_ai_report(result)
+        # Store the result in the unified report history
+        await coordinator.async_store_investigation_report(result)
+
+        if result.get("truncated_empty"):
+            # Issue #563 follow-on: distinct from ordinary truncation — the model
+            # produced zero visible output despite consuming the full response budget.
+            _LOGGER.warning(
+                "AI activity report produced zero visible output despite consuming the "
+                "full response budget — raising AI Response Length may not fix this; "
+                "consider trying a different reasoning effort for this model"
+            )
+        elif result.get("truncated"):
+            _LOGGER.warning("AI activity report truncated: hit max_tokens limit")
 
         if result.get("rate_limited") or (not result.get("success") and "rate" in str(result.get("error", "")).lower()):
             return self.json({"error": "Rate limit exceeded"}, status_code=429)
@@ -903,8 +916,22 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
                         "input_context": event.get("input_context", ""),
                         "raw_response": event.get("raw_response", ""),
                         "truncated": event.get("truncated", False),
+                        "truncated_empty": event.get("truncated_empty", False),
                     }
-                    if final_result["truncated"]:
+                    if final_result["truncated_empty"]:
+                        # Issue #563 follow-on: distinct from ordinary truncation — the
+                        # model produced zero visible answer text despite consuming the
+                        # full response budget. "Raise max response length" is misleading
+                        # here since there's no partial content that a bigger budget would
+                        # have salvaged; the model itself may need a different
+                        # reasoning_effort or a much larger ceiling to answer at all.
+                        _LOGGER.warning(
+                            "Investigation report produced zero visible output despite "
+                            "consuming the full response budget — raising Investigator "
+                            "Max Response Length may not fix this; consider trying a "
+                            "different reasoning effort for this model"
+                        )
+                    elif final_result["truncated"]:
                         _LOGGER.warning(
                             "Investigation report truncated: hit max_tokens limit; "
                             "consider raising Investigator Max Response Length"
@@ -928,7 +955,14 @@ class ClimateAdvisorInvestigateView(HomeAssistantView):
         )
 
         if result.get("success") or result.get("source") == "fallback":
-            if result.get("truncated"):
+            if result.get("truncated_empty"):
+                _LOGGER.warning(
+                    "Investigation report produced zero visible output despite "
+                    "consuming the full response budget — raising Investigator "
+                    "Max Response Length may not fix this; consider trying a "
+                    "different reasoning effort for this model"
+                )
+            elif result.get("truncated"):
                 _LOGGER.warning(
                     "Investigation report truncated: hit max_tokens limit; "
                     "consider raising Investigator Max Response Length"

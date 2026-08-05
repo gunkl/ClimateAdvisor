@@ -422,7 +422,7 @@ class TestWarningBannerScope:
     def _build_table(self, config: dict) -> str:
         import datetime as _dt
 
-        from custom_components.climate_advisor.ai_skills_activity import (
+        from custom_components.climate_advisor.ai_skills_context import (
             build_event_timeline_table,
         )
 

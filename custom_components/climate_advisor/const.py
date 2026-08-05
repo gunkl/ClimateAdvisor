@@ -4,9 +4,38 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.50"
+VERSION = "0.5.51"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.51": [
+        "Fix #563: the AI Investigator was sending nearly the entire history of every"
+        " fixed issue to Claude on every single run — a version-scoping check that was"
+        " supposed to limit this to only recently-relevant fixes had a bug that let all"
+        " 169 fixed-issue records through every time, and a separate rendering bug was"
+        " expanding some of that text by roughly 15x on top of that. Investigations should"
+        " now run noticeably faster and cheaper, with no loss of the 'was this already"
+        " fixed' cross-check the AI uses this data for.",
+        "Fix #563: the scheduled 'Generate with AI' activity narration was running the"
+        " same full audit-depth analysis as an on-demand investigation (including a live"
+        " GitHub fetch) — it now uses a lighter, current-activity-only context, which"
+        " should make it noticeably faster.",
+        "Fix #563: the Investigate report's progress display now shows real step-by-step"
+        " status from the backend and fills in the report as sections complete, instead"
+        " of a fake elapsed-seconds counter and raw unformatted text.",
+        "Fix #563: fixed a bug where the 'AI Activity Report' scheduled service call"
+        " silently failed on every run after a recent internal rename.",
+        "Fix #563: the AI model dropdown in settings now shows Anthropic's current"
+        " available models automatically instead of a fixed list, and if a configured"
+        " model is retired, Climate Advisor automatically switches to a comparable"
+        " replacement instead of failing.",
+        "Fix #563: fixed AI requests failing outright when a newer model no longer"
+        " accepts a setting (e.g. temperature) that older models required — Climate"
+        " Advisor now detects this and retries without it automatically.",
+        "Fix #563: raised the maximum AI response length setting from 8192 to 16384"
+        " tokens, and added a clearer warning when a response uses its full budget but"
+        " produces no visible output (rather than the generic 'truncated' message, which"
+        " incorrectly implied a bigger budget alone would fix it).",
+    ],
     "0.5.50": [
         "Fix #561: the whole-house fan could turn itself on with every door and window"
         " closed, briefly switching the thermostat off for no reason — and the log"
@@ -1409,11 +1438,81 @@ RELEASE_NOTES: dict[str, list[str]] = {
 }
 
 # Behavioral invariant registry for the investigative analyzer.
-# Each entry documents which code paths a fix covered and which it explicitly
-# did NOT cover, so the analyzer can say "[COVERED] — resolved" or
-# "[NOT COVERED] — potential gap" instead of "could not verify."
+# Each entry documents which code paths a fix covered, so the analyzer can say
+# "Issue #X fixed this — treat as resolved" instead of "could not verify."
+# The AI Investigator renders the matching RELEASE_NOTES bullet for each entry
+# (not title/scope_covered — those are for a human/dev-stack session reading this
+# file directly). No scope_not_covered field — see Issue #563: it was mandatory on
+# every entry, which silently defeated the version-scoping filter below (all 169
+# entries always matched). If a fix leaves a genuinely open gap, track it as a
+# GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    563: {
+        "version_fixed": "0.5.51",
+        "title": (
+            "The AI Investigator's KNOWN-FIXED ISSUES context section was effectively"
+            " unbounded: _fix_is_relevant()'s first rule matched any entry with a"
+            " non-empty scope_not_covered field, and every entry had one (mandatory per"
+            " the release checklist), so all 169 entries passed on every run regardless"
+            " of the intended version-scoping. Separately, build_known_fixes_context()"
+            " rendered scope_covered/scope_not_covered by iterating them with a bare"
+            " `for x in fix.get(...)` — both fields are plain strings, not lists, so this"
+            " iterated character-by-character, inflating rendered size by roughly 15x for"
+            " affected entries (measured: issue #561 alone went from 3,536 raw characters"
+            " to 53,595 rendered characters of single-character garbage lines)."
+        ),
+        "scope_covered": (
+            "Removed scope_not_covered from the KNOWN_FIXES schema entirely (all 169"
+            " existing entries) and from the CLAUDE.md release checklist requirement to"
+            " author it — audit found it had exactly one functional consumer in the"
+            " codebase (this same broken filter/renderer) and no test enforced its"
+            " presence. The replacement filter went through two iterations: first"
+            " _fix_is_relevant() (version_fixed >= current_tuple), then found during"
+            " manual verification to be too narrow — on a real running install that only"
+            " ever matches the single most-recent release's fixes, so a fix from even one"
+            " release earlier drops out of context immediately, defeating the 'was this"
+            " already fixed' cross-check for anyone not on the latest release. Replaced"
+            " with _select_relevant_fixes(): always includes not-yet-deployed entries"
+            " (version_fixed > current) plus the _KNOWN_FIXES_RECENT_COUNT (15) most"
+            " recently fixed entries by count, not version-equality — bounded regardless"
+            " of KNOWN_FIXES size or release cadence, and useful across more than one"
+            " release. build_known_fixes_context() no longer renders title/scope_covered"
+            " at all; it looks up the matching RELEASE_NOTES[version_fixed] bullet"
+            " ('Fix #N: ...'/'Feat #N: ...') via the new _release_note_bullet() and uses"
+            " that instead — shorter, already occupant-outcome phrased, and already"
+            " mandatory for every release, so no new authoring burden. Falls back to"
+            " title only if no RELEASE_NOTES bullet matches. Also trimmed"
+            " coordinator._github_open_cache/_github_closed_cache (ai_skills_context.py"
+            " _fetch_github_issues) to only the fields actually rendered (number, title,"
+            " state, labels) via the new _trim_issue_fields(), instead of caching the"
+            " full raw GitHub API response. Measured real-world effect: the rendered"
+            " KNOWN-FIXED ISSUES context block for the current version went from a raw"
+            " source size of 327,000+ characters (169/169 entries, before the ~15x"
+            " character-iteration inflation on top of that) to under 1,000 characters,"
+            " bounded to at most 15 recent entries going forward — see"
+            " tests/test_ai_skills_context_known_fixes.py. Follow-on work in the same"
+            " branch/issue: merged the retired activity_report skill into investigator"
+            " and scoped the silent narration path to a lighter priority<=1 provider set"
+            " (it was wrongly running the full 16-provider audit pipeline, including a"
+            " live GitHub fetch, on every scheduled narration); rewrote the streaming"
+            " report UI to render real backend step narration and progressive markdown"
+            " section cards instead of a fake elapsed-seconds counter and raw-text"
+            " painting; fixed a real regression where the merged skill's rename broke"
+            " the ai_activity_report service call outright; added dynamic Claude model"
+            " discovery (fetch_available_models(), cached, config-flow dropdown) plus"
+            " reactive per-model capability detection for both a deprecated/invalid"
+            " model ID (retries once with the newest live same-tier model, persisted) and"
+            " a deprecated request parameter (e.g. temperature rejected by a specific"
+            " model — retries once without it, learned per-model); raised the"
+            " ai_max_tokens ceiling 8192->16384; and added explicit detection/logging for"
+            " responses that consume the full max_tokens budget while producing zero"
+            " visible output, distinct from ordinary truncation. The zero-output cause"
+            " itself (observed with claude-sonnet-5 at reasoning_effort=medium) is not"
+            " yet root-caused — tracked as a separate follow-up issue rather than guessed"
+            " at further in this one."
+        ),
+    },
     561: {
         "version_fixed": "0.5.50",
         "title": (
@@ -1471,21 +1570,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " generation-counter supersession, overlapping-context matching, stale-context"
             " expiry) in tests/test_nat_vent_activation.py and tests/test_fan_control.py."
         ),
-        "scope_not_covered": (
-            "No golden simulation scenario was added — the exact stale-flag-with-closed-sensors"
-            " condition arises from an internal timing race (concurrent reconcile calls plus a"
-            " multi-hour drift-correction window) that the synchronous event-replay harness"
-            " cannot deterministically reproduce without inventing a synthetic engine-state-"
-            "injection event type, which would violate the harness's 'never invent a decision"
-            " type/state the engine does not emit' principle. Coverage instead relies on unit"
-            " tests exercising the exact production functions directly, matching how Issue #423's"
-            " analogous internal drift-reconciliation mechanism was tested. The exact tick at"
-            " which _natural_vent_active last went stale in the reported incident's live logs"
-            " was not pinpointed with certainty — static log/code analysis established the"
-            " mechanism and ruled out version skew, a second engine instance, and every other"
-            " known reactivation code path, but confirming the precise trigger would require"
-            " live id(self)/state-dump instrumentation this fix did not add."
-        ),
     },
     557: {
         "version_fixed": "0.5.49",
@@ -1520,13 +1604,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " step. TestOptionsFlowMultiStep and TestOptionsFlowClearing (Issue #434)"
             " continued passing unchanged against the new harness, confirming multi-section"
             " accumulation and clearable-field semantics are preserved."
-        ),
-        "scope_not_covered": (
-            "Editing multiple sections in one sitting now triggers one coordinator reload per"
-            " section submitted (was one reload total, at Save & Close) — an accepted,"
-            " bounded tradeoff for always-correct display, not a regression fix in itself."
-            " No mechanism was added to batch or debounce reloads across rapid consecutive"
-            " section edits."
         ),
     },
     558: {
@@ -1566,16 +1643,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " the removed daytime mechanism) to tools/simulations/unsupported/. Added golden"
             " scenario hot_plateau_pre_cool_applied covering the new hot-day-fallback-only case."
         ),
-        "scope_not_covered": (
-            "The overnight pre-cool mechanism's target formula (compute_pre_cool_target()) is"
-            " unchanged — only its trigger eligibility and the modifier fed into it were"
-            " broadened. The sleep band (sleep_cool, always active overnight) is unchanged and"
-            " still the primary nightly floor for all day types. Cross-field config validation"
-            " between comfort_cool and sleep_cool (the fragile coincidence that made the old"
-            " daytime offset appear to 'work silently' on ordinary nights) was not added — the"
-            " mechanism that depended on that coincidence was removed instead, not the"
-            " coincidence itself."
-        ),
     },
     555: {
         "version_fixed": "0.5.47",
@@ -1600,14 +1667,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " covering the away/vacation + dual-window worst case, and"
             " tests/test_briefing_sensor.py covering the sensor's truncation/fallback logic"
             " directly."
-        ),
-        "scope_not_covered": (
-            "The full multi-section briefing (ATTR_BRIEFING, non-tldr_only verbosity) already"
-            " had its own truncate-on-fallback handling and is unchanged. Conversational body"
-            " sections (_hot_day_plan() etc.) are unchanged. Column alignment is lost in the"
-            " full-briefing text display — not reliably rendered as aligned columns in either"
-            " UI surface today (dashboard and notify-service bodies are both proportional-"
-            " font), so not treated as a regression. Table label wording is unchanged."
         ),
     },
     553: {
@@ -1657,19 +1716,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " mismatch, now exactly 35=35). docs/SSH-SETUP.md rewritten to document the 3"
             " connections precisely and record both superseded approaches (#549, #551) and why."
         ),
-        "scope_not_covered": (
-            "Does not add automated test coverage for the new tar-piping/temp-swap logic"
-            " (tests/ stubs Home Assistant and has no live-SSH test harness) — validated"
-            " entirely through live manual testing against the real production HA instance"
-            " per explicit instruction, not through the automated test suite. Does not handle"
-            " backup files created by deploy.py before this fix (they use the old wrapped tar"
-            " format); if a user has pre-#553 backups and needs to roll back to one after"
-            " upgrading, they'd need to extract it manually — a narrow, low-likelihood edge"
-            " case judged acceptable rather than adding dual-format-detection complexity for"
-            " it. Still no guarantee against an arbitrarily strict SSH add-on rate limit — 3"
-            " (or 1) is a large reduction, not a mathematical zero; the add-on's own"
-            " Protection-mode setting remains the authoritative fix if hit."
-        ),
     },
     551: {
         "version_fixed": "0.5.45",
@@ -1706,24 +1752,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " reversion and why, so a future contributor doesn't re-attempt the same fix"
             " without knowing it was already tried and found unreliable here."
         ),
-        "scope_not_covered": (
-            "Command batching is a best-effort mitigation, not a guaranteed fix — it reduces"
-            " connection count (~10-11 to ~8) but doesn't eliminate SSH connections entirely,"
-            " so a sufficiently strict rate limit on the HA SSH add-on's Protection mode could"
-            " still trip. The authoritative fix (raising or disabling that setting) remains a"
-            " manual, server-side step documented in docs/SSH-SETUP.md, outside this repo's"
-            " control. Does not investigate root-causing exactly why ControlMaster fails on"
-            " this specific client/server combination (e.g. whether it's a Git-for-Windows"
-            " MSYS AF_UNIX socket emulation issue specifically) — the live evidence was"
-            " sufficient to conclude it's unreliable here without further diagnosis, but the"
-            " underlying mechanism remains unconfirmed. A pre-existing cosmetic issue was"
-            " observed but not fixed: the remote login shell appears to be zsh, whose default"
-            " NOMATCH option prints a 'zsh:1: no matches found: ...' stderr line when the"
-            " legacy-backup glob pattern matches nothing (harmless — the surrounding command"
-            " sequence still completes correctly via xargs -r's empty-input no-op — but noisy"
-            " in logs); this behavior predates this fix (same glob pattern was already used by"
-            " the original clean_legacy_backups()) and was left as-is to avoid scope creep."
-        ),
     },
     549: {
         "version_fixed": "0.5.44",
@@ -1752,18 +1780,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " Troubleshooting entry describing the rate-limit signature and pointing at this"
             " fix plus the add-on's own Protection mode setting as a second line of defense."
         ),
-        "scope_not_covered": (
-            "Does not change or configure the HA SSH add-on's rate-limit/Protection mode"
-            " settings — that's server-side configuration outside this repo's control; docs"
-            " point users at it as a manual step. Live end-to-end verification of a full"
-            " deploy run completing under multiplexing was inconclusive at review time — a"
-            " manual multiplexed connection attempt hit 'Connection reset by peer' while the"
-            " host was still inside the rate-limit cooldown window from an earlier failed"
-            " full-deploy attempt (confirmed via a bare non-multiplexed connection succeeding"
-            " immediately before it, then failing immediately after — consistent with a"
-            " still-recovering rate limit, not a multiplexing defect) — re-verify with a real"
-            " deploy run once enough time has passed since the last rate-limit trip."
-        ),
     },
     547: {
         "version_fixed": "0.5.43",
@@ -1784,15 +1800,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " identities differently depending on invocation context) recommending explicit"
             " HA_SSH_KEY as a zero-downside way to remove the ambiguity, plus a"
             " self-diagnostic (ssh -G user@host) users can run themselves."
-        ),
-        "scope_not_covered": (
-            "Does not root-cause the original #543/#545 deploy connection resets/timeouts —"
-            " those were separately diagnosed (via ssh -v and Test-NetConnection) as a"
-            " connection-churn/rate-limit reaction on the HA SSH add-on side (deploy.py opens"
-            " ~6-8 sequential SSH connections per run), not a key-resolution problem; not"
-            " addressed here since it's server-side add-on configuration, outside this repo's"
-            " control. No user-visible or runtime behavior change — deployment tooling and"
-            " docs only."
         ),
     },
     545: {
@@ -1834,17 +1841,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " pre-fix pattern, that it correctly flags a blocking call in an async method"
             " while correctly ignoring the same call in a sync method and a properly-wrapped"
             " async_add_executor_job reference."
-        ),
-        "scope_not_covered": (
-            "No runtime behavior change — this is entirely contributor-facing tooling/docs."
-            " The _BLOCKING_METHODS registry is manually maintained, not auto-discovered — a"
-            " new I/O sub-component's blocking methods must be added to it by whoever"
-            " introduces them; nothing currently enforces that the registry itself stays"
-            " complete. Does not add a generic taint-analysis-style blocking-call detector"
-            " (out of scope, not this project's established testing style). Does not extend"
-            " ruff ASYNC or the registry check to files outside custom_components/coordinator.py"
-            " (e.g. api.py, automation.py) — those are covered only by the older, narrower"
-            " TestODEExecutorOffload checks where applicable."
         ),
     },
     543: {
@@ -1891,22 +1887,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " same-day multi-version merge sequence and is folded into 0.5.32 with that"
             " ambiguity noted inline)."
         ),
-        "scope_not_covered": (
-            "Does not address any other reviewer feedback from HACS PR #8117 beyond these two"
-            " specific items — if additional review comments exist, they need their own"
-            " tracking issue. Does not audit other modules for un-offloaded blocking I/O beyond"
-            " chart_log.py; state.py's StatePersistence and learning.py's LearningEngine I/O"
-            " were already offloaded via the executor pattern prior to this fix, but a full"
-            " sweep of the rest of the integration for similar gaps was not performed. Does not"
-            " add locking around the now-concurrent _chart_log.save() executor calls — two"
-            " call sites that were previously serialized by the single-threaded event loop can"
-            " now run on different executor threads; each write is still atomic"
-            " (tempfile+os.replace) so this cannot corrupt the file, and it's consistent with"
-            " the existing no-lock convention already accepted for learning.save_state()/"
-            " _state_persistence.save() elsewhere in this file, but it is a real (very narrow)"
-            " behavior change — a single asyncio.Lock() around the two call sites would close"
-            " it if wanted later."
-        ),
     },
     540: {
         "version_fixed": "0.5.40",
@@ -1935,19 +1915,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " (purge)' distinctly (no new card); nat_vent_soft_start_entered event rendered in"
             " the Activity Report."
         ),
-        "scope_not_covered": (
-            "Does not add a humidity/dew-point guard (Issue #533 Related Condition (E)) — no"
-            " such sensor exists in the integration today; parity-triggered activation inherits"
-            " the same unaddressed risk the original issue flagged, and defaulting this on"
-            " (rather than opt-in as #533 recommended) means every WHF install is exposed to"
-            " that gap unless the user explicitly disables the setting. Does not extend soft-start"
-            " to HVAC-only fan archetypes or decouple it into a general comfort-fan mode (Issue"
-            " #533 Related Condition (C)) — that is a larger philosophical scope change needing"
-            " explicit owner sign-off, deliberately not folded in here. reconcile_fan_on_startup()"
-            " always adopts a found-running fan as full nat-vent, never as soft-start — a cosmetic"
-            " status-label gap only, self-corrects via the upgrade check on the next cycle if the"
-            " full gate is already satisfied, otherwise persists until conditions change."
-        ),
     },
     538: {
         "version_fixed": "0.5.39",
@@ -1966,12 +1933,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " mechanism-flag leaks (is_paused_by_door, _grace_active, _manual_override_active,"
             " _override_confirm_pending) — none found outside the diagnostic log line, which is"
             " not user-facing."
-        ),
-        "scope_not_covered": (
-            "Did not re-audit _compute_automation_status() or"
-            " _compute_next_automation_action() for the same duplication class — those own"
-            " different questions in the Issue #527 card ontology and were not implicated in"
-            " this report."
         ),
     },
     534: {
@@ -1999,21 +1960,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " forecast when available, falling back to the static classifier hour otherwise —"
             " closing a gap where docs/08-COMPUTATION-REFERENCE.md §6d already claimed this"
             " behavior existed but it never had been wired up."
-        ),
-        "scope_not_covered": (
-            "_derive_warm_day_events()'s nat_vent_cutoff prediction (outdoor >= indoor - 1°F)"
-            " still has no comfort-floor term, unlike the real activation gate"
-            " decide_nat_vent_gate() in nat_vent_gate.py. In this incident the outdoor-crossing"
-            " prediction was the correct binding constraint anyway, so this did not cause the"
-            " reported symptom, but it could produce a wrong prediction in a scenario where the"
-            " floor would bind first. No incident has confirmed this firing — tracked as a"
-            " separate defensive-hardening follow-up (Issue #535) rather than bundled into this"
-            " fix."
-            " _derive_natural_vent_events() (the MILD-day hour-indexed sibling of the warm-day"
-            " function) remains dead code — it was never wired up (the fix above uses"
-            " _derive_warm_day_events() instead, since it matches the actual curve shape"
-            " _build_predicted_indoor_future() produces; _derive_natural_vent_events()'s"
-            " documented list[float] hour-indexed input shape does not)."
         ),
     },
     530: {
@@ -2068,23 +2014,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " RF-Timer Boundary Settle Window section, Fan-Off Grace and Shared"
             " Scheduled-Band Gate sections cross-referenced."
         ),
-        "scope_not_covered": (
-            "No golden simulation scenario was added — the Tier A production harness"
-            " (tools/sim_harness/run_production.py) has no event dispatch path for the"
-            " QuietCool RF-remote entity (_async_fan_remote_changed()/"
-            " handle_fan_manual_override() with duration_override), only for the plain"
-            " fan_entity on/off transition (external_fan_state_change). Adding that dispatch"
-            " path is a harness feature, not a production fix, and was intentionally left"
-            " out of this change's scope; regression coverage is the unit tests against the"
-            " real AutomationEngine/coordinator instead. H3 from the investigation (whether"
-            " the FAN_MODE_HVAC archetype's fan-off path also gets an immediate coordinator"
-            " refresh the way the WHF fan_entity path does, per Issue #510) was checked and"
-            " disproven — that path never calls async_request_refresh() — but fix (1) above"
-            " protects that archetype's fan-off grace regardless, since it no longer depends"
-            " on refresh timing at all. The 'startup reconcile' -> trigger-labeled reason"
-            " string change is cosmetic/observability only and does not itself change any"
-            " HVAC or fan decision."
-        ),
     },
     528: {
         "version_fixed": "0.5.36",
@@ -2119,13 +2048,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " (classifier.py, already-computed static fields) surfaced as fixed-schedule"
             " candidates for the first time. docs/08-COMPUTATION-REFERENCE.md: §7 WARM row"
             " now discloses the same ODE-override caveat the MILD row already had; new §9f."
-        ),
-        "scope_not_covered": (
-            "No sanity/plausibility bound was added inside find_temperature_crossing() or"
-            " _derive_warm_day_events() itself — a genuinely malformed forecast curve could"
-            " still produce an implausible crossing; the fix addresses the confirmed root"
-            " cause (index-based pairing) rather than adding a second, independent"
-            " correctness check on top of it."
         ),
     },
     527: {
@@ -2166,12 +2088,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " duplication; that patch didn't hold when a third function grew the same problem"
             " independently)."
         ),
-        "scope_not_covered": (
-            "No new predictive next-automation event types were added (e.g. a forecast-based"
-            " ETA for when the whole-house fan/nat-vent will start) — Next Automation still"
-            " only predicts the four pre-existing fixed-schedule events (briefing, wake,"
-            " bedtime, pre-cool). Tracked separately in issue #528."
-        ),
     },
     523: {
         "version_fixed": "0.5.34",
@@ -2208,17 +2124,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " vent opportunity for a sensor open with HVAC genuinely idle, since _paused_by_door"
             " alone is no longer sufficient to mean 'HVAC was actively interrupted.'"
         ),
-        "scope_not_covered": (
-            "The production-harness (Tier A) scenario"
-            " (tools/simulations/pending/startup_coalesce_sensor_open_nat_vent_gate_false.json)"
-            " calls coordinator._do_startup_coalesce() directly via a new 'startup_coalesce'"
-            " harness event type rather than driving it through the full periodic-refresh/"
-            " weather-retry machinery via the 300s timer + scheduler.advance_to() — reaching"
-            " it that way was found to require more DataUpdateCoordinator polling fidelity"
-            " than the fake scheduler currently drives reliably. The method under test is"
-            " real production code either way; only the surrounding timer/refresh indirection"
-            " is bypassed, matching the existing reconcile_fan_on_startup event precedent."
-        ),
     },
     524: {
         "version_fixed": "0.5.33",
@@ -2243,15 +2148,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " docs/activity-report-table.md gained catalog rows for fan_manual_override and"
             " fan_speed_observed (both previously undocumented despite being registered"
             " EVENT_RENDERERS entries)."
-        ),
-        "scope_not_covered": (
-            "No new automated test exercises the full _async_update_data_impl() pipeline"
-            " end-to-end for this field — consistent with this codebase's existing test"
-            " granularity for that ~700-line method (no other field in it has one either);"
-            " the extracted helper's own logic is directly unit-tested, and"
-            " get_debug_state()'s continued correctness is covered via the same coordinator"
-            " stub test_nat_vent_dashboard_target.py already uses for"
-            " compute_nat_vent_cycling_band()."
         ),
     },
     518: {
@@ -2285,13 +2181,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " docs/04-BRIEFING-EXAMPLES.md's warm-day example with 08-COMPUTATION-REFERENCE.md,"
             " and corrected every other example's stale 5-minute debounce reference to the"
             " actual 10-minute default (constant changed in Issue #504)."
-        ),
-        "scope_not_covered": (
-            "The issue's broader 'no action needed'-family audit was scoped to the literal"
-            " phrase; near-variant phrasing that explains an actual consequence (e.g."
-            " leaving_home_section's 'nothing really changes today') was left as-is since"
-            " it's informative, not boilerplate. learning.py:1862 (narrative help text, not"
-            " a per-cycle status line) was not changed."
         ),
     },
     519: {
@@ -2340,21 +2229,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " fan_speed_observed event (required by the #330 event-renderer-coverage"
             " guardrail)."
         ),
-        "scope_not_covered": (
-            "No CA-initiated speed-SETTING capability was implemented — this is purely"
-            " detect-and-respect. The discovery/read methods, _fan_remote_speed, and"
-            " handle_fan_speed_observed() are the seam a future speed-comfort feature would"
-            " build on; fan:'s on_speed_set already transmits the needed RF commands"
-            " (0x1f/0x3f) in the firmware, so no firmware work would be needed for that"
-            " future feature either. The medium-speed byte families (0xA_) remain speculative"
-            " in the firmware, inferred from the confirmed low/high pattern, never"
-            " independently captured (the reference fan is 2-speed). REMOTE_BURST_WINDOW_"
-            "SECONDS is a provisional value pending live-hardware confirmation after the"
-            " firmware ships — flagged for tuning against real capture data, not a final"
-            " number. The POWER-family (0xBF/0xB0) speed-context extraction in the firmware is"
-            " an extrapolation from the confirmed TIMER-family pattern, not independently"
-            " verified via a dedicated capture."
-        ),
     },
     510: {
         "version_fixed": "0.5.30",
@@ -2400,19 +2274,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " drafted for this and deliberately discarded once this was discovered, in favor of"
             " reusing the already-shipped, already-tested mechanism."
         ),
-        "scope_not_covered": (
-            "Command-only WHF installs (no dedicated fan_state_entity, fan_state_feedback="
-            "False) are unaffected by any of these fixes -- there is no ground truth to prefer"
-            " in that mode, matching the reporter's own point that the ambiguity only exists"
-            " where it's actually resolvable. The dedup fix (0.4) only covers the specific"
-            " duplicate-computation call sites within _async_update_data_impl that have no"
-            " intervening awaits/state-mutating calls between them -- later call sites in the"
-            " same method (the main ATTR_FAN_STATUS/ATTR_WHF_STATUS assignment, and a later"
-            " chart-log block) were deliberately left as fresh, uncached computations, since"
-            " real state-mutating awaits (reconcile_fan_on_startup, fan activation/"
-            "deactivation commands) occur between them and the earlier computation -- caching"
-            " across that boundary would itself be a staleness bug, not an optimization."
-        ),
     },
     511: {
         "version_fixed": "0.5.29",
@@ -2446,26 +2307,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " inherit the fix automatically since they all read the same"
             " _last_outdoor_temp/coordinator.data fields this change updates — no separate"
             " code changes were needed in automation.py, sensor.py, or api.py."
-        ),
-        "scope_not_covered": (
-            "The 'Predicted Outdoor' line (_extract_current_hour_forecast_temp/"
-            "_build_future_forecast_outdoor) still uses nearest-neighbor selection, not"
-            " interpolation — its own ~30-60 min offset is unchanged; fixing it would make"
-            " predicted and actual nearly coincide for weather-service installs, defeating"
-            " the point of two separate lines, and the user's stated mental model (predicted"
-            " = a frozen morning snapshot, actual = live-tracking) is a distinct feature"
-            " needing new persisted state, tracked separately. A likely pre-existing Celsius-"
-            " unit bug was found (not fixed) in that same predicted-outdoor path: it never"
-            " applies to_fahrenheit() to raw forecast values before they reach get_chart_data()'s"
-            " _conv()/from_fahrenheit() conversion, unlike every other outdoor-temp read path"
-            " in the file — flagged for a separate issue, not touched here to keep this PR's"
-            " blast radius scoped to the reported bug. Target Band chart history has zero"
-            " persistence (confirmed, unrelated pre-existing gap) and the no-HVAC counterfactual"
-            " prediction question is undecided — both tracked as separate follow-up issues, not"
-            " addressed in this change. The nat-vent threshold arithmetic duplication"
-            " (comfort_cool + nat_vent_delta, computed independently at 4 sites) was identified"
-            " during design but deliberately deferred/not touched, to keep this PR's diff"
-            " minimal for a live-HVAC-controlling production deploy."
         ),
     },
     508: {
@@ -2503,16 +2344,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " known call sites. _render_stuck_grace_recovered() now distinguishes the two"
             " watchdog shapes so the new condition doesn't render a misleading 'expired' label"
             " when the grace timer was actually still validly scheduled in the future."
-        ),
-        "scope_not_covered": (
-            "handle_bedtime()/handle_morning_wakeup()/occupancy handlers' existing behavior of"
-            " clearing an override without cancelling its grace timer is unchanged by design —"
-            " docs/grace-periods-spec.md documents this as intentional (grace runs to natural"
-            " expiry regardless of occupancy transitions), not a gap. No frontend change was"
-            " required or made; index.html's cancelFanOverride() calling loadStatus() (not"
-            " loadAutomationState()) means the Debug tab's own grace-period row may lag the"
-            " Status tab's next-action text by one manual refresh — cosmetic, not investigated"
-            " further here."
         ),
     },
     505: {
@@ -2558,21 +2389,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " proves active reapplication, by perturbing the setpoint with a manual"
             " override before asserting the setback returns."
         ),
-        "scope_not_covered": (
-            "The status card's simultaneous display of contradictory values during the"
-            " stale window (reported alongside the setpoint bug) was not independently"
-            " investigated as a separate display bug — it is expected to self-resolve as"
-            " a consequence of the automation converging within one 30-minute cycle (or"
-            " ~10s via the dashboard cancel-override button) instead of staying stale for"
-            " hours or days, matching the margin AWAY mode already operates within."
-            " handle_pre_cool()'s reapply path has unit-test coverage"
-            " (test_grace_convergence.py) but no dedicated golden simulation scenario —"
-            " it is a single optional pre-dawn trigger backstopped by the same"
-            " apply_classification() cycle as everything else. incident-classes.md was"
-            " not given a new detection-code-backed incident class for this failure"
-            " pattern; doing so accurately would require new coordinator.py detection"
-            " logic (a distinct feature), not just a documentation row."
-        ),
     },
     504: {
         "version_fixed": "0.5.26",
@@ -2606,19 +2422,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " meant this was the only place that transition could surface, and it wasn't"
             " being passed through)."
         ),
-        "scope_not_covered": (
-            "An initial pass of this investigation incorrectly attributed the bug to PR"
-            " #489 (Doors/Windows status card refresh-on-close) based on a still-truncated"
-            " ha_logs.py fetch and the coarser HA sensor-history REST endpoint; re-fetching"
-            " real logs after merging #503 (the truncation fix) showed #489 plays no role."
-            " No changes were made there. Does not touch the other 4"
-            " _nat_vent_may_reactivate() call sites (handle_door_window_open(), the"
-            " paused-by-door reactivation block, reconcile_fan_on_startup()) — none share"
-            " this bug, each already only runs post-debounce or in a different (startup"
-            " adoption) context. Does not address the root cause of the physical sensor"
-            " bounce itself (flaky hardware/wiring) — only prevents the automation from"
-            " reacting to it as if it were a stable, real state change."
-        ),
     },
     485: {
         "version_fixed": "0.5.25",
@@ -2645,17 +2448,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " unchanged, separated by intervening override events) that the fix does not"
             " suppress legitimate re-applies — only truly consecutive identical rows"
             " collapse."
-        ),
-        "scope_not_covered": (
-            "The underlying 5-minute revisit-after-any-action loop and the unconditional"
-            " climate.set_temperature re-assertion inside _apply_comfort_band() are"
-            " unchanged — both are deliberate, documented, shared design (revisit"
-            " plumbing is needed for nat-vent/pre-cool eligibility re-checks even while"
-            " away; free cooling is not occupancy-gated) and were explicitly scoped out"
-            " by the user. The real thermostat still receives a redundant"
-            " climate.set_temperature call roughly every 5-10 minutes while occupancy"
-            " stays away/vacation with nothing else changing; this fix only stops the"
-            " Activity Report from showing every one of those as a separate row."
         ),
     },
     498: {
@@ -2705,24 +2497,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " target already manage the session's lifetime correctly without help from"
             " bedtime."
         ),
-        "scope_not_covered": (
-            "handle_pre_cool()'s new nat-vent/WHF deferral (finding #8) still lets the"
-            " low-level _whf_owns_hvac() choke-point guard silently no-op the actual write"
-            " for WHF/BOTH archetypes — this fix only makes that deferral observable via"
-            " logging/event emission, it does not change the underlying write path."
-            " If nat-vent ends early (before wake_time) after pre-cool already deferred to"
-            " it, nothing re-applies the pre-cool thermal-mass-banking ceiling — this is a"
-            " pre-existing gap (pre-cool is a one-shot scheduled trigger with no re-arm"
-            " mechanism), not a regression from this fix, and is not addressed here."
-            " A tools/simulate.py harness-level (production-coordinator) pending scenario"
-            " for the wake-up WHF-override bug was attempted but removed — the coordinator's"
-            " real fan-entity state-change listener did not engage as expected via the"
-            " harness's external_fan_state_change driving event within the time available"
-            " this session; the fix is covered by direct unit tests"
-            " (tests/test_bedtime_override.py::TestMorningWakeupFanOverrideGuard) instead,"
-            " which reproduce the exact reported bug and were verified to fail without the"
-            " fix. Wiring a harness-level scenario for this is left as follow-up work."
-        ),
     },
     495: {
         "version_fixed": "0.5.23",
@@ -2769,25 +2543,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " override-confirm and fan-override-grace no longer produce two contradictory"
             " status lines — display-only, the two override mechanisms remain independent."
         ),
-        "scope_not_covered": (
-            "Does not change _deactivate_fan()'s restore-mode behavior for the short"
-            " CA-initiated nat-vent cycle — only the NEW manual-path exit uses reclassify;"
-            " unifying _deactivate_fan() onto the same reclassify pattern is a reasonable but"
-            " separate, test-heavy follow-up (30+ existing tests assert restore-mode"
-            " semantics for that path). Does not fix a genuinely dropped remote press (the RF"
-            " link/entity never producing an HA event at all) — confirmed via live remote"
-            " event history as a device/firmware reliability issue outside CA's scope; CA"
-            " cannot act on an event it never receives. Does not persist _fan_remote_timer_hours"
-            " across HA restart — this remains intentionally cleared on restart per the"
-            " existing clean-slate policy (Issue #327/#282); only in-session durability"
-            " (surviving unrelated re-stamps) was fixed. Does not address the unrelated"
-            " ecobee/HomeKit presence-driven comfort-program setpoint conflict observed"
-            " during the originating investigation (CA sleep-band 72°F vs. ecobee 'Home'"
-            " comfort-program 77°F) — investigated and confirmed external to CA and any HA"
-            " automation, deliberately left out of scope for this fix; turning HVAC off"
-            " during the WHF session (this fix) makes that setpoint conflict moot regardless"
-            " of which value wins."
-        ),
     },
     493: {
         "version_fixed": "0.5.22",
@@ -2808,14 +2563,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " suppressed), matching state.py's failure-path behavior. Serialization"
             " failures (TypeError/ValueError from json.dumps) are now caught separately"
             " before any tmp file is created, also matching state.py."
-        ),
-        "scope_not_covered": (
-            "Does not add locking/synchronization to serialize concurrent save_state()"
-            " calls — under genuine concurrency, the last os.replace() to run still wins"
-            " (whichever save started last determines the final on-disk state), matching"
-            " state.py's existing accepted behavior for the same scenario. This fix"
-            " eliminates the crash/lost-save failure mode, not the (already accepted,"
-            " lower-severity) last-write-wins ordering under true concurrency."
         ),
     },
     491: {
@@ -2847,14 +2594,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " unavailable' status banner (added by Fix #480/0.5.17, which is what made this"
             " 2.5-month-old bug, from Issue #121, visible for the first time)."
         ),
-        "scope_not_covered": (
-            "Does not change CONF_SENSOR_DEBOUNCE, grace-period duration semantics, or any"
-            " HVAC command/decision logic — both fixes are restart-timing/plumbing-only."
-            " A real remote press or real manual fan/thermostat use in the first 5 minutes"
-            " after a restart is still not detected as an override during that window — the"
-            " same accepted tradeoff Issue #321 established for the thermostat listener,"
-            " now applied consistently instead of partially."
-        ),
     },
     489: {
         "version_fixed": "0.5.20",
@@ -2873,14 +2612,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " existing post-handle_door_window_open() refresh in the open branch — covers"
             " a real, debounce-confirmed pause/resume cycle (HVAC mode/temp restored, grace"
             " started) getting reflected promptly too, not just the raw contact reading."
-        ),
-        "scope_not_covered": (
-            "Does not touch CONF_SENSOR_DEBOUNCE, pause/resume decision timing, nat-vent"
-            " logic, or any HVAC command behavior. Does not address the separate, confirmed"
-            " pre-existing test-order-dependent flakiness in"
-            " TestGracePeriodDuration/TestGracePeriodExpiry in test_door_window.py (fails"
-            " when that file is run in isolation, passes in the full suite) — unrelated to"
-            " this fix, reproduces identically on main before this change."
         ),
     },
     486: {
@@ -2909,18 +2640,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " persistence; the RF timer state does not survive an HA restart, consistent with the"
             " existing clean-slate override/grace reset in restore_state() (Issue #327/#282)."
         ),
-        "scope_not_covered": (
-            "Speed tokens (low/medium/high) and explicit on/off event handling are NOT decoded or"
-            " acted on in this feature — only the timer_* family. The off/clear path depends on"
-            " fan_entity/fan_state_entity already being configured for physical fan-off detection;"
-            " if the WHF entity isn't configured, an RF-started override will only clear via grace"
-            " expiry, never via the remote's own hardware timer completing early. Because firmware"
-            " events are edge-triggered, a bare power-on that does not also change the timer field"
-            " may not emit timer_none, so CA may not start a grace period from a plain 'on' press"
-            " until an explicit timer token is sent. No safety-exception path was added: the"
-            " timer is fully absolute per the locked #486 decision — genuine safety conditions are"
-            " not modeled here and will log-only, same as any other manual fan override today."
-        ),
     },
     434: {
         "version_fixed": "0.5.18",
@@ -2946,17 +2665,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " both clear-when-blank and store-when-set, and the prior mirror-style option-flow tests were"
             " converted to real invocation."
         ),
-        "scope_not_covered": (
-            "The initial setup flow (ClimateAdvisorConfigFlow) is unaffected — there is no prior value to"
-            " clear during first-time setup, so the bug does not manifest there and it was not modified."
-            " Preserve-when-blank secret fields (ai_api_key, github_token, github_repo) intentionally keep"
-            " their existing value when submitted blank and are NOT made clearable. No cross-field"
-            " validation was added to block clearing outdoor/indoor temperature-source entities when the"
-            " paired source dropdown is set to a custom-entity option — clearing them while that source"
-            " requires an entity remains a pre-existing user misconfiguration risk (already possible at"
-            " first setup); consumers fall back gracefully. door_window_sensors was already clearable"
-            " (multi-select returns [] on clear) and is unchanged."
-        ),
     },
     480: {
         "version_fixed": "0.5.17",
@@ -2980,16 +2688,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " '⚠ Climate Advisor unavailable since HH:MM — <error>' when coordinator_healthy is false,"
             " using the existing status-item card (no new card added), following the same conditional-line"
             " pattern already used for pause_suppressed_classification/nat_vent_active."
-        ),
-        "scope_not_covered": (
-            "tools/sim_harness/ has no failure-injection mechanism for _async_update_data() (confirmed"
-            " by inspection — the fake coordinator's async_config_entry_first_refresh() unconditionally"
-            " sets last_update_success=True after calling _async_update_data(), no try/except), so this"
-            " fix is covered by a pytest unit test (tests/test_coordinator_health.py) exercising the"
-            " wrapper's failure/recovery persistence and the api.py gating logic directly, rather than a"
-            " tools/simulations/pending/ scenario. The trigger for the original 06:35 coordinator crash"
-            " itself remains unknown — this only ensures the next occurrence is diagnosable, per the"
-            " Issue #478 investigation's Stage 1 scope."
         ),
     },
     481: {
@@ -3031,14 +2729,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " (pending/issue-481-sleep-band-no-false-undertemp-incident.json) verified"
             " load-bearing via a real revert test."
         ),
-        "scope_not_covered": (
-            "Does not change any setpoint-writing/HVAC-control logic — strictly scoped to"
-            " incident *detection* (the diagnostic/telemetry event log), not automation"
-            " behavior. Does not address the other three findings from the Issue #478"
-            " investigation (coordinator health observability, WHF fan-off bookkeeping/"
-            " provenance, grace-period adopt-on-match) — those are separate, independently"
-            " tracked stages of that plan."
-        ),
     },
     482: {
         "version_fixed": "0.5.17",
@@ -3075,27 +2765,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " genuine external actor. New golden-harness assertion types in outcomes.py"
             " (fan_ca_command_not_misclassified, fan_external_change_classified) and a new"
             " external_fan_state_change scenario event type in run_production.py."
-        ),
-        "scope_not_covered": (
-            "Part 1 does not close every theoretically-reachable misclassification race — careful"
-            " tracing of the harness's scheduler task-queue ordering found that if a same-tick"
-            " nat-vent reactivation (_activate_fan(), itself a sibling command site) races the"
-            " still-queued drift-reconciliation off-command, _activate_fan()'s own pre-existing"
-            " unconditional finally-clear of _fan_command_pending can stomp the flag before the"
-            " queued off-command's own resulting event is evaluated. This is a deeper"
-            " single-shared-boolean reentrancy limitation common to EVERY existing WHF command site"
-            " (not unique to this fix, and pre-existing before this change), out of scope for the"
-            " literal 'match every other command site' fix requested — a proper fix would need a"
-            " reentrancy-safe scheme (e.g. a per-command token instead of one shared boolean) applied"
-            " uniformly across _activate_fan/_deactivate_fan/the drift-reconciliation path together,"
-            " tracked as a candidate follow-up issue, not attempted here. Part 2's event.context check"
-            " is corroborating only — a context MISMATCH or absent context does not prove a change was"
-            " external (never used to suppress evaluation), only a MATCH is treated as authoritative;"
-            " the pre-existing 30-second timing heuristic and _fan_command_pending flag are unchanged"
-            " and still evaluated for every fan-entity state change. Command-only mode"
-            " (_async_command_fan_entity() in coordinator.py, fan_state_feedback=False) is untouched —"
-            " confirmed out of scope, since _async_fan_entity_changed() already early-returns before"
-            " any bookkeeping/context check is reached whenever fan_state_feedback is disabled."
         ),
     },
     483: {
@@ -3140,27 +2809,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " does not change production_outcome_at()'s existing same-timestamp last-decision-wins"
             " tie-break semantics."
         ),
-        "scope_not_covered": (
-            "Fan-on overrides (_fan_override_active, handle_fan_manual_override()) are NOT"
-            " eligible for adoption — they never set _manual_override_mode, and the only"
-            " comparable 'would automation want the fan on right now' check is"
-            " check_natural_vent_conditions(), which is async and mutates engine state as part of"
-            " its own evaluation (not a pure/side-effect-free predicate safe to call just for"
-            " comparison) — deliberately left out per the conservative-when-in-doubt directive."
-            " Fan-off grace (on_fan_turned_off()) is not an override at all (_fan_override_active is"
-            " explicitly NOT set for this path) — there is nothing to 'adopt', it is a re-activation"
-            " gate, not a disagreement. Door/window pause/resume grace"
-            " (handle_all_doors_windows_closed(), resume_from_pause()) is automation-sourced"
-            " (source='automation') or already restores _current_classification.hvac_mode directly"
-            " at resume time (resume_from_pause()) — by construction there is no divergence left to"
-            " adopt for these paths; the adopt check is gated on source=='manual' and never reached"
-            " for automation-sourced grace. The pre-expiry check in apply_classification() only"
-            " re-evaluates when apply_classification() itself is called (each classification cycle,"
-            " ~30 min, or an explicit re-classification trigger) — it is not a new polling loop"
-            " during an active grace period (matching docs/grace-periods-spec.md's documented"
-            " no-polling invariant); a match that occurs between classification cycles is only"
-            " picked up at the next cycle or at natural grace expiry, whichever comes first."
-        ),
     },
     476: {
         "version_fixed": "0.5.16",
@@ -3198,23 +2846,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " real harness), and grace/override-window config extended where the harness default"
             " (300-900s) would auto-clear state before a later scenario event needed it still active."
         ),
-        "scope_not_covered": (
-            "No changes to coordinator.py or automation.py — test-infrastructure only. The 3 golden"
-            " scenarios (cancel_override_then_resume, grace_prevents_sensor_repause,"
-            " grace_timer_expired_on_restart) were moved to pending/ rather than staying in golden/"
-            " because they were substantially rewritten (not just flag-added) and need fresh user"
-            " review per the Golden Simulation Test Policy before re-promotion."
-            " grace_timer_expired_on_restart's restart behavior could not be genuinely tested within"
-            " the standard single-coordinator JSON event-stream format (a fresh coordinator never had an"
-            " override to begin with) — verified separately via a standalone two-coordinator-instance"
-            " construction (documented in the scenario's notes), which also found the real mechanism is"
-            " an unconditional clean-slate wipe on every restart (Issue #282/#327), not the"
-            " grace_end_time-conditional check the scenario's original description claimed. Building"
-            " genuine JSON-scenario restart coverage (swapping coordinator/engine/scheduler references"
-            " mid-run) is separate future work, not done here. The 6 remaining unsupported/ scenarios"
-            " (ceiling_guard_*, nat_vent_restore_uses_dual_setpoint, warm-day-setback-*) were never in"
-            " #472/#476's scope and are untouched."
-        ),
     },
     474: {
         "version_fixed": "0.5.15",
@@ -3242,16 +2873,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " to tools/simulations/pending/ as the proving-slice scenario (both assertions load-bearing,"
             " verified via revert test)."
         ),
-        "scope_not_covered": (
-            "No changes to coordinator.py or automation.py — this is test-infrastructure only."
-            " The remaining 11 unsupported/integration-tier scenarios (grace-period lifecycle,"
-            " override confirm/self-resolve, the 3 deferred integration-tier goldens) are not yet"
-            " migrated — tracked in #476, including a genuine production-behavior gap found in"
-            " override_self_resolve_transient.json (the confirm timer doesn't proactively cancel"
-            " on early return-to-expected-mode; it only re-checks at timer expiry) that must NOT be"
-            " closed by further harness changes. Tier B (Docker/real-HA) scope reduction tracked"
-            " separately in #475."
-        ),
     },
     470: {
         "version_fixed": "0.5.14",
@@ -3275,12 +2896,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " proving the band_schedule parameter is honored, and a test exercising the"
             " previously-diverging adaptive-sleep-floor scenario."
         ),
-        "scope_not_covered": (
-            "Does not change _compute_target_band_schedule()'s own logic. Direct unit-test callers of"
-            " _build_predicted_indoor_future() that don't pass band_schedule are unaffected — the"
-            " internal fallback computation path is preserved unchanged for full backward"
-            " compatibility."
-        ),
     },
     468: {
         "version_fixed": "0.5.13",
@@ -3296,13 +2911,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " same health dict a few lines above for its own per-type display but never passed it to"
             " the adjacent get_thermal_model() call. All three now receive the same"
             " coordinator._build_learning_health() output the dashboard/sensor sees."
-        ),
-        "scope_not_covered": (
-            "Does not change get_thermal_model()'s own logic or return shape — only ensures callers"
-            " supply the same optional argument the canonical call sites already did. Does not add"
-            " outdoor_temp_f/solar_factor (the other two optional get_thermal_model() args) to these"
-            " 3 sites — thermal_equilibrium_f will populate once learning_health flows through, but"
-            " those two remaining args are a separate, not-yet-scoped concern."
         ),
     },
     466: {
@@ -3323,11 +2931,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " routing it through coordinator.data's ~30-min-stale cache would compare CA's belief"
             " against CA's own stale snapshot of the thermostat, defeating the check."
         ),
-        "scope_not_covered": (
-            "Does not touch current_temperature (out of scope — not one of the 3 setpoint fields, and"
-            " both AI-context sites still need a live read for it). Does not change api.py's setpoint"
-            " display behavior at all — deliberately left live."
-        ),
     },
     464: {
         "version_fixed": "0.5.11",
@@ -3343,12 +2946,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " no-record/no-session, base-only, active-session, and rounding cases, plus updated 3"
             " tests in test_ai_investigator.py that previously patched dt_util on the now-unused"
             " ai_skills_context module directly instead of configuring the new method."
-        ),
-        "scope_not_covered": (
-            "Does not change the runtime formula itself (still base + elapsed session time, no"
-            " exclusion for paused/away time). Does not address Phase B's remaining sub-items"
-            " (setpoint fields on coordinator.data, learning_health threading, target-band-schedule"
-            " dedup) — those are separate issues."
         ),
     },
     462: {
@@ -3370,13 +2967,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " fallback was comfort_heat/comfort_cool, not the documented DEFAULT_SLEEP_HEAT/"
             " DEFAULT_SLEEP_COOL (64/72°F) select_comfort_band() actually uses."
         ),
-        "scope_not_covered": (
-            "Does not change select_comfort_band() itself or any live setpoint-writing behavior — this"
-            " endpoint is read-only display. Does not touch _compute_target_band_schedule() (the chart's"
-            " band-schedule builder, already a separate concern per #333) or compute_bedtime_setback()"
-            " (the adaptive resolver) — those remain intentionally distinct from the live-setpoint"
-            " resolver this fix routes through."
-        ),
     },
     460: {
         "version_fixed": "0.5.9",
@@ -3394,12 +2984,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " control: corrupting the predicate to always return False was independently caught"
             " by 9 unit test failures across all 4 call sites AND 2 golden scenario divergences"
             " (54/56), proving the extraction is load-bearing in production."
-        ),
-        "scope_not_covered": (
-            "Does not change which occupancy modes defer (still exactly AWAY/VACATION) or add a"
-            " 5th occupancy mode. Does not touch the display/status-label occupancy checks in"
-            " coordinator.py (next_human_action, status-string builders) — those are a different,"
-            " lower-risk kind of duplication (labeling, not control-flow gating), out of scope here."
         ),
     },
     458: {
@@ -3423,12 +3007,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " ('nat-vent (session active, fan idle)') — deliberately not one of the four canonical"
             " active values, since the physical fan genuinely isn't running then."
         ),
-        "scope_not_covered": (
-            "Does not add a fan_status.py constant for every _compute_fan_status() literal — only the"
-            " suppression-check subset needed here. Does not change dashboard/status-card fan display"
-            " logic, which already handled 'active (unconfirmed)' correctly before this fix; only the"
-            " AI Activity Report and the coordinator's internal contradiction-warning event were wrong."
-        ),
     },
     456: {
         "version_fixed": "0.5.7",
@@ -3447,13 +3025,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " combinations, plus a positive control: corrupting resolve_hard_exit_floor() was"
             " independently caught by 3 unit test failures AND a golden scenario divergence"
             " (55/56), proving the extraction is load-bearing in production, not just in tests."
-        ),
-        "scope_not_covered": (
-            "Does not touch the cycling-midpoint logic (nat_vent_target/on_threshold/off_threshold)"
-            " in nat_vent_temperature_check() — that's a distinct concept (how far past the target"
-            " the fan is allowed to cycle), not the hard-exit floor this issue consolidates. Does"
-            " not change any threshold value or boundary — confirmed behavior-identical, not a"
-            " behavior fix."
         ),
     },
     454: {
@@ -3474,13 +3045,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " the base — its production method returns nothing (outcome inferred from side-effect"
             " calls) and requires pre-call input capture, a genuinely different instrumentation"
             " shape; verified unaffected (228/228 calls still agree)."
-        ),
-        "scope_not_covered": (
-            "Does not add comparators for any of the four upcoming Phase A extractions (sleep-aware"
-            " floor resolver, fan-suppression predicate, occupancy-defer predicate, comfort-band"
-            " branch) — this issue only builds the reusable base those will consume. Does not touch"
-            " fan_thermostat_decision_compare.py's instrumentation (only its module docstring, to"
-            " cross-reference the new base and explain why it's excluded)."
         ),
     },
     452: {
@@ -3507,12 +3071,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " real method has read for some time, so two tests were passing against logic production no"
             " longer runs."
         ),
-        "scope_not_covered": (
-            "Does not touch any production behavior — this is test-infrastructure only. Does not convert"
-            " the remaining source-text-inspection tests (e.g. TestContactStatusSensorSource) or extend"
-            " coverage to the ~18 API view classes that still have no logic-level test at all; both are"
-            " separate follow-ups, not blocked by this fix."
-        ),
     },
     449: {
         "version_fixed": "0.5.4",
@@ -3533,11 +3091,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " command is sent at all. Scoped narrowly: single-entity/command-only WHF setups and all"
             " FAN_MODE_HVAC fan-mode control are completely untouched — the helper only activates when"
             " a live dual-entity ground-truth reading is available to justify it."
-        ),
-        "scope_not_covered": (
-            "Does not change the drift-detection cadence or thresholds (already confirmed correct) —"
-            " only the correction's command reliability. Does not add any new configuration; relies"
-            " entirely on the existing fan_state_entity/fan_state_feedback dual-entity setup."
         ),
     },
     446: {
@@ -3566,13 +3119,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " applies regardless of which caller triggered it; a suppressed correction still"
             " logs at INFO so a persistently-stray fan stays visible."
         ),
-        "scope_not_covered": (
-            "The true root cause of the repeating 10-minute physical-state disagreement"
-            " (Finding 2b) is NOT fixed — only instrumented. The retry behavior itself (CA"
-            " keeps trying to reactivate the fan every cycle when conditions favor free"
-            " cooling) was deliberately left unchanged per explicit user direction — a"
-            " genuine free-cooling opportunity should keep being retried, not abandoned."
-        ),
     },
     444: {
         "version_fixed": "0.5.2",
@@ -3592,13 +3138,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " COMFORT_BAND_EVENT_DEDUP_SECONDS in const.py; new _last_comfort_band_signature /"
             " _last_comfort_band_event_at instance state on AutomationEngine. The underlying"
             " _set_temperature() thermostat command is never suppressed — only the redundant event."
-        ),
-        "scope_not_covered": (
-            "Does not touch the overlapping-trigger structure itself (coalesce's own"
-            " async_request_refresh() call, or the grace-expiry/regular-cycle overlap) — the dedup is a"
-            " choke-point fix at the single emission site, not a change to when apply_classification()"
-            " is invoked. A genuine re-announcement of an unchanged band after the dedup window (e.g. the"
-            " next real 30-min cycle) still fires normally by design."
         ),
     },
     440: {
@@ -3623,13 +3162,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " coordinator-level load-bearing positive control proving the _emit_event() transition"
             " detection genuinely drives the reschedule."
         ),
-        "scope_not_covered": (
-            "Does not add any mechanism to actively EXTEND a nat-vent session (e.g. delaying an"
-            " already-favorable exit to bank more free cooling before pre-cool would fire) — only pulls"
-            " the AC trigger earlier when a real exit already happened ahead of schedule."
-            " handle_pre_cool()'s own nat-vent bypass check (whether indoor already reached the target"
-            " at fire time) is unchanged."
-        ),
     },
     439: {
         "version_fixed": "0.5.1",
@@ -3648,11 +3180,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " DEFAULT_* Fahrenheit constants directly, converting to Celsius via from_fahrenheit()"
             " rounded to the 0.5 step. 4 new regression tests in test_config_flow.py pin both branches'"
             " defaults against the named constants."
-        ),
-        "scope_not_covered": (
-            "Only the INITIAL setup wizard's setpoint defaults were touched. The options/edit flow was"
-            " already correct and was not modified. Slider min/max bounds (not the defaults) were not"
-            " audited for staleness."
         ),
     },
     437: {
@@ -3675,12 +3202,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " status text, the chart target-band dip, and the ODE predicted-indoor curve) — all 5 now"
             " route through the one shared function. PRE_COOL_MIN_HEADROOM_F removed (dead)."
         ),
-        "scope_not_covered": (
-            "The nat-vent-preference behavior itself (pre-cool is a single scheduled trigger that"
-            " checks after the fact whether nat-vent already reached the target, not an actively"
-            " extended/preferred free-cooling window before falling back to AC) was not changed —"
-            " only the target/floor computation."
-        ),
     },
     438: {
         "version_fixed": "0.5.0",
@@ -3699,11 +3220,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " natural_vent_delta fallback of 5.0 (vs the real default 3.0), and briefing.py's"
             " away/vacation display using a stray setback_heat fallback of 62 (vs 60/63 elsewhere)."
             " 5 locked golden scenarios depending on the old default values were reviewed and re-signed."
-        ),
-        "scope_not_covered": (
-            "config_flow.py's UI slider bounds and initial-setup default tuple (still a separate"
-            " hardcoded (69, 89, 78, 1) for sleep_cool's first-run slider) were not audited or changed"
-            " as part of this sweep."
         ),
     },
     435: {
@@ -3736,13 +3252,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " legitimately cycling off mid-session) to expect nat_vent_fan_off at the point indoor"
             " reaches the cycling off-threshold."
         ),
-        "scope_not_covered": (
-            "Only the two cycling branches in nat_vent_temperature_check() were touched. Other"
-            " event emissions elsewhere in automation.py (fan_activated, fan_deactivated,"
-            " nat_vent_outdoor_rise_exit, nat_vent_comfort_floor_exit, etc.) were not audited for"
-            " the same class of unconditional-emit-after-no-op-call pattern — this fix does not"
-            " claim they're safe, only that this specific pair was found and fixed."
-        ),
     },
     427: {
         "version_fixed": "0.4.74",
@@ -3773,18 +3282,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " verified to fail against the pre-fix code (reproduces the exact -2.09h churn"
             " reading from the reported activity log)."
         ),
-        "scope_not_covered": (
-            "Two related items were identified but deliberately deferred: (1) Priority-1's hard"
-            " comfort-floor exit (~line 2288-2312) has its own separate inline sleep-window"
-            " calculation rather than calling _nat_vent_reactivation_floor() directly — it"
-            " computes the same value today so it did not contribute to this bug, but it is the"
-            " same class of duplicate-threshold risk documented for #400/#402; left alone in this"
-            " fix to avoid widening the diff for a path that isn't broken. (2) Activity-log"
-            " truncation on 'last 12 hours' dashboard views (EVENT_LOG_CAP=500, a flat count cap"
-            " that this bug's ~100+ events/night likely helped exceed) was investigated but split"
-            " into a separate issue (#432) — it needs its own right-sizing decision independent of"
-            " whatever event volume this fix produces, not a bolt-on cap bump here."
-        ),
     },
     428: {
         "version_fixed": "0.4.73",
@@ -3807,16 +3304,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " through 20+ existing tests) — full matrix of new test cases added, including the"
             " exact reported repro (indoor 75°F / outdoor 80°F)."
         ),
-        "scope_not_covered": (
-            "Two related gaps were identified but deliberately deferred to separate tracked"
-            " issues rather than bundled here: (1) automation.py's existing duplicate direction-gate"
-            " copies (economizer ~line 4360, fan/nat-vent check ~line 2695) are not yet"
-            " consolidated onto the new shared free_cooling_direction_ok() — they remain their own"
-            " separate, already-correct, already-tested implementations. (2) briefing.py's daily"
-            " window-advice prose does not yet get a live-outdoor cross-check — it still relies"
-            " solely on forecast-time DayClassification data, which is lower-risk since the"
-            " briefing is a point-in-time narrative rather than a continuously-displayed sensor."
-        ),
     },
     424: {
         "version_fixed": "0.4.72",
@@ -3829,17 +3316,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " it does so. const.py: updated the fan_mode CONFIG_METADATA description to drop the"
             " 'Both' mention. translations/en.json and strings.json: dropped the 'Both' mention"
             " from both the setup-step and options-step fan_mode field descriptions."
-        ),
-        "scope_not_covered": (
-            "The per-device independent-signal redesign originally proposed in #424 (tracking"
-            " whole-house fan and HVAC fan as two independent physical signals instead of a"
-            " single OR'd boolean) was NOT implemented — deliberately superseded by removing the"
-            " 'Both' option entirely instead, since building that redesign on top of the"
-            " already-fragile fan-reconcile logic (site of the recent #423 incident) was judged"
-            " too risky for the benefit. All existing FAN_MODE_BOTH branch logic in automation.py"
-            " and coordinator.py (~13 shared conditionals per file) is left exactly as-is —"
-            " stubbed and unreachable for new configs, not deleted — since ripping it out is not"
-            " worth the risk for a value nobody can select anymore."
         ),
     },
     423: {
@@ -3875,15 +3351,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " stale _fan_active — _compute_fan_status()/_compute_whf_status() already compared"
             " it against physical reality, but only to render 'active (unconfirmed)' in the UI."
         ),
-        "scope_not_covered": (
-            "FAN_MODE_BOTH's OR-based signal cannot represent two independent physical devices"
-            " (WHF, HVAC blower) in different states with a single boolean — a proper per-device"
-            " redesign (independent adopt/turn-off decisions per device) is tracked in a separate"
-            " follow-up issue, not implemented here. Command-only mode (fan_state_feedback"
-            " disabled) has no independent physical ground truth for WHF, so both the archetype"
-            " helper and the drift-correction check are no-ops there by design — unchanged from"
-            " prior behavior, not a regression."
-        ),
     },
     418: {
         "version_fixed": "0.4.70",
@@ -3907,11 +3374,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " — a deliberate tradeoff accepted for full unification, reviewed with the user"
             " before implementation."
         ),
-        "scope_not_covered": (
-            "The classification-aware restore behavior itself (apply_classification()'s"
-            " warm/hot-day mode-setting logic) is unchanged — only its timing after a"
-            " sensor-all-close event moved from instant to grace-period-later."
-        ),
     },
     420: {
         "version_fixed": "0.4.69",
@@ -3932,16 +3394,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " Root cause: stop_reason was never inspected anywhere in the stack, so a"
             " response cut off at the configured max_tokens cap was indistinguishable from"
             " a normal completion — no exception, no log line, UI showed 'Completed'."
-        ),
-        "scope_not_covered": (
-            "Does not change the actual token budget or system-prompt verbosity — a"
-            " Investigator Max Response Length that is genuinely too low for the report"
-            " content will still truncate the report; it is now visibly flagged instead of"
-            " silent. Does not distinguish an early legitimate stop_reason == 'end_turn'"
-            " from a complete report — that case was not observed and could not be"
-            " confirmed without production log evidence (none was retrievable during this"
-            " investigation), but is now always logged at DEBUG so a future occurrence is"
-            " diagnosable."
         ),
     },
     417: {
@@ -3969,13 +3421,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " _is_recent_fan_command), matching every sibling race-sensitive check in"
             " coordinator.py — defense in depth, not the primary fix."
         ),
-        "scope_not_covered": (
-            "Two other direct manipulators of _natural_vent_active that bypass"
-            " _exit_nat_vent() (handle_all_doors_windows_closed() and the fast-loop"
-            " fan_thermostat_check() outdoor-reversal check) were found during this"
-            " investigation but neither reads comfort_heat and neither was implicated in"
-            " this bug — tracked separately in issue #418, not fixed here."
-        ),
     },
     415: {
         "version_fixed": "0.4.67",
@@ -3993,12 +3438,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " means there is nothing left to desync — the live cycling-band line is now the"
             " sole place this temperature is shown."
         ),
-        "scope_not_covered": (
-            "compute_nat_vent_cycling_band() itself and the 30-minute coordinator update_interval"
-            " are unchanged — this fix removes the redundant, cache-timing-vulnerable display of"
-            " the same number, it does not change how or how often the underlying value is"
-            " computed."
-        ),
     },
     413: {
         "version_fixed": "0.4.66",
@@ -4014,15 +3453,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " added in #403 were only ever written on the entry-unload path, so a real restart"
             " (deploy, or a user clicking 'Restart Home Assistant') never persisted them, and"
             " async_restore_state() always fell through to the 'unknown' cause bucket."
-        ),
-        "scope_not_covered": (
-            "A true crash or container OOM/kill still fires neither EVENT_HOMEASSISTANT_STOP"
-            " nor async_unload_entry, so it correctly still classifies as 'unknown' — this is"
-            " expected behavior, not a gap. The persist task scheduled from the STOP listener"
-            " runs via hass.async_create_task() and is not guaranteed to complete before the"
-            " process exits on an unusually fast shutdown; this mirrors the reliability"
-            " envelope of every other async_create_task-scheduled cleanup task in this"
-            " integration and was not treated as a new risk introduced by this fix."
         ),
     },
     411: {
@@ -4069,17 +3499,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " identical setpoint rejections (2+ setpoint_rejected events for the same commanded"
             " value) as generalized patterns, not hardcoded to the #411 timeline specifically."
         ),
-        "scope_not_covered": (
-            "Away-mode ceiling exit is intentionally NOT routed through _exit_nat_vent() — it"
-            " has no pause/grace state machine and is a genuinely different concept by design."
-            " There is no runtime timeout backstop if the setpoint nudge itself also gets"
-            " rejected (the retry loop would still cycle on the nudged value); flag as a"
-            " follow-up if that recurs in practice. The ODE ceiling-escalation guard"
-            " (automation.py ~L1288) intentionally still calls _ceiling_threshold() directly"
-            " rather than _nat_vent_may_reactivate() — it is a different decision (escalate to"
-            " AC, not start nat-vent) and only the ceiling sub-condition is shared with it, not"
-            " the full 4-part reactivation gate."
-        ),
     },
     409: {
         "version_fixed": "0.4.64",
@@ -4096,12 +3515,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " automation_status) or the 'Natural ventilation' name (already named 'nat-vent'"
             " in automation_status) — it now shows only the mode qualifier (AC assist / savings"
             " mode) and the cycling band."
-        ),
-        "scope_not_covered": (
-            "Does not touch the other branches of _compute_automation_status() that"
-            " legitimately reference window/door state (e.g. 'windows open (as planned)',"
-            " 'paused — door/window open') — those describe genuinely door/window-driven"
-            " states. Does not touch automation.py or api.py, both already correct."
         ),
     },
     407: {
@@ -4124,13 +3537,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " Status card instead, and the standalone card was removed, per the project's"
             " existing 'no new cards, extend existing ones' dashboard convention."
         ),
-        "scope_not_covered": (
-            "Does not touch automation.py's nat_vent_temperature_check() (the fan's actual"
-            " cycling logic, already correct since #374) or api.py's status endpoint (already"
-            " correct since #402's extraction of compute_nat_vent_cycling_band()). Does not"
-            " touch the unrelated, pre-existing stale test replica of _compute_automation_status()"
-            " in tests/test_status_sensors.py — that is a separate, already-known issue."
-        ),
     },
     405: {
         "version_fixed": "0.4.61",
@@ -4148,18 +3554,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " or manual fan cycling. The fix reuses the existing 'already inactive but restore"
             " pending' branch inside _deactivate_fan() (built for the #402 follow-up) — no new"
             " restore-write logic was added, only a new caller of the existing correct path."
-        ),
-        "scope_not_covered": (
-            "If _fan_override_active is True at the moment a no-fan reconcile fires (user"
-            " manually turned the fan off while a WHF suppression session was active),"
-            " _deactivate_fan()'s override guard returns before reaching the restore logic —"
-            " the stranded flag is not released until the override clears and a later reconcile"
-            " runs. This mirrors existing, intentional behavior everywhere else _deactivate_fan()"
-            " is called (CA never fights a manual override) and is not new to this fix. Also:"
-            " this fix does not address the repeated HA-restart-boundary churn itself observed"
-            " in the issue #405 activity log (4 restarts within about an hour) — that instability"
-            " is tracked separately (see #403's restart-cause classification work, added the"
-            " same morning) and was not investigated as part of this fix."
         ),
     },
     402: {
@@ -4187,15 +3581,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " 'Priority 0 sleep-ceiling reached' description (removed from code in #371, docs"
             " never updated until now)."
         ),
-        "scope_not_covered": (
-            "The floor/cycling threshold formula is now duplicated across three functions"
-            " (check_natural_vent_conditions(), fan_thermostat_check(),"
-            " nat_vent_temperature_check()) rather than extracted into one shared helper — a"
-            " future formula change must be applied to all three or this exact class of bug can"
-            " recur. Not extracted here to keep the fix minimal and reviewable. Root cause of"
-            " the 7 unexplained system restarts observed during this incident's investigation is"
-            " tracked separately in #403 (restart identity / version logging), not fixed here."
-        ),
     },
     403: {
         "version_fixed": "0.4.60",
@@ -4216,12 +3601,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " fields with defensive type-checked load. ai_skills_activity.py's"
             " _render_system_restarted() renders the cause on the restart boundary marker."
         ),
-        "scope_not_covered": (
-            "Cannot retroactively diagnose the 6 other unexplained restarts observed during the"
-            " #402 incident night — this only classifies restarts going forward. The 'unknown'"
-            " bucket cannot distinguish an OS/container kill from an HA core crash; both look"
-            " identical (no clean shutdown, no service-call event observed)."
-        ),
     },
     400: {
         "version_fixed": "0.4.59",
@@ -4236,12 +3615,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " coordinator.py independently recomputed these three fields with a hardcoded"
             " daytime-only formula, so the dashboard never reflected the #374 fix even"
             " though the fan's actual cycling behavior was already correct."
-        ),
-        "scope_not_covered": (
-            "The formula is still duplicated between automation.py and coordinator.py"
-            " (not extracted into one shared helper) — a future change to the sleep-window"
-            " target formula in one file could again silently drift from the other. Not"
-            " extracted in this fix to keep the change minimal and reviewable."
         ),
     },
     396: {
@@ -4264,15 +3637,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " 'starting — waiting for weather data' instead of the generic 'starting —"
             " initializing' when the 5-minute timer has fired but classification is still unset,"
             " so this specific case is diagnosable from the status card alone."
-        ),
-        "scope_not_covered": (
-            "This does not change how long CA waits for weather data or add a hard fallback if the"
-            " weather entity never recovers (existing retry-then-30-min-poll behavior is"
-            " unchanged) — it only makes the wait accurately labeled instead of silently generic."
-            " Whether the user's weather integration itself needs investigation (why it didn't"
-            " report back in after restart) is a separate, not-yet-investigated question — this"
-            " fix addresses the misleading status message CA showed while that was happening, not"
-            " the weather integration's own recovery time."
         ),
     },
     392: {
@@ -4312,16 +3676,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " (fan_activated/deactivated, fan_manual_override, fan_cancel, nat_vent_fan_on/off)"
             " now show the fan archetype (hvac_fan/whf/both) instead of a generic 'fan' label."
         ),
-        "scope_not_covered": (
-            "No runtime/safety timeout backstop was added for a WHF session that never converges"
-            " (e.g. outdoor stays just barely below indoor for hours) — WHF is governed purely by"
-            " outdoor/indoor direction by design decision, not a gap. The underlying"
-            " _natural_vent_active/_fan_active/_pre_fan_hvac_mode state is still tracked as loose"
-            " engine attributes rather than a single owning object — Issue #393 tracks the deferred"
-            " extraction of a FanSession abstraction that would own this state and its invariants;"
-            " _whf_owns_hvac() is written as the seed of that future object but the full extraction"
-            " was intentionally not done in this fix to keep it reviewable."
-        ),
     },
     390: {
         "version_fixed": "0.4.55",
@@ -4336,12 +3690,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " next scheduled 30-minute poll. handle_fan_manual_override()/on_fan_turned_off() are"
             " still correctly skipped on this path — only the display-refresh trigger was added."
         ),
-        "scope_not_covered": (
-            "Does not change the coordinator's update_interval (still 30 minutes); only removes"
-            " the silent-drop that made this specific confirmation event invisible between polls."
-            " Command-only mode (fan_state_feedback=False) is unaffected — that path already"
-            " returns before reaching this branch."
-        ),
     },
     388: {
         "version_fixed": "0.4.54",
@@ -4353,11 +3701,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " 'helper' is excluded from that query and routed to the separate Helpers tab instead."
             " docs/hacs-compliance.md and CLAUDE.md HACS Compliance Requirements updated to match."
         ),
-        "scope_not_covered": (
-            "Users who already have the v0.4.53 entry showing under the Helpers tab may need to"
-            " restart Home Assistant after updating for the entry to reappear under Integrations;"
-            " no automatic migration moves it back without a restart."
-        ),
     },
     384: {
         "version_fixed": "0.4.53",
@@ -4365,10 +3708,6 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_covered": (
             "manifest.json integration_type field, README dynamic version badge, "
             "state.py file permissions (chmod 0o600), docs/hacs-compliance.md, CLAUDE.md HACS section"
-        ),
-        "scope_not_covered": (
-            "PR merge conflict monitoring (manual rebase needed if hacs/default advances), "
-            "HACS PR #8117 human review (pending Frenck FIFO queue)"
         ),
     },
     382: {
@@ -4381,11 +3720,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " api.py: chunk_count DEBUG logging added (first chunk, stream complete)."
             " index.html: console.log at stream open / first chunk / done for browser DevTools visibility."
         ),
-        "scope_not_covered": (
-            "Reverse proxy buffering (nginx/HAOS ingress) is not addressed — drain() flushes"
-            " to the HA aiohttp layer; proxies between HA and the browser may still buffer."
-            " The X-Accel-Buffering: no response header is already set to mitigate nginx buffering."
-        ),
     },
     380: {
         "version_fixed": "0.4.51",
@@ -4394,10 +3728,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "index.html: break added after done event so finally block runs immediately;"
             " loading overlay hidden on first chunk so streaming pre is visible."
             " api.py: write_eof() called before return so TCP connection closes promptly."
-        ),
-        "scope_not_covered": (
-            "Buffering between Claude API and HA server is not addressed — if all chunks arrive"
-            " in a single burst, the pre goes from empty to full with no visible intermediate state."
         ),
     },
     376: {
@@ -4419,12 +3749,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " ascending-order validation, config entry migration v15→v16."
             " const.py: CONF_THRESHOLD_* + DEFAULT_THRESHOLD_* + 4 CONFIG_METADATA entries (category=advanced)."
         ),
-        "scope_not_covered": (
-            "get_chart_data() still calls self.learning.get_thermal_model() + chart_log.get_entries()"
-            " synchronously inside the executor — these are I/O and could be further optimized,"
-            " but are already off the event loop after this fix."
-            " HACS Issue #5 (repo description phrasing) is a manual gh repo edit — not tracked in code."
-        ),
     },
     377: {
         "version_fixed": "0.4.48",
@@ -4442,11 +3766,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " ai_skills.py: async_execute_streaming() SSE event generator."
             " api.py: SSE branch in ClimateAdvisorInvestigateView."
             " index.html: apiFetchStream() + streaming _runAIInvestigation()."
-        ),
-        "scope_not_covered": (
-            "No tests for the SSE path in api.py (aiohttp StreamResponse requires integration"
-            " environment). Streaming does not support extended thinking (AI_REASONING_HIGH)."
-            " Focus keyword matching is keyword-based substring search, not NLP."
         ),
     },
     374: {
@@ -4467,12 +3786,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " whf_status and hvac_fan_status added to coordinator data dict and API response."
             " frontend: dual Fan (WHF) / Fan (HVAC) rows in status card."
         ),
-        "scope_not_covered": (
-            "Stale _fan_active flag is only detected via physical state cross-check — auto-clearing"
-            " the flag is not implemented (would require a second callback). Multi-zone not covered."
-            " nat_vent_sleep_ceiling_reached event no longer emitted — callers relying on it must"
-            " migrate to nat_vent_fan_off with fan_device field."
-        ),
     },
     370: {
         "version_fixed": "0.4.46",
@@ -4486,14 +3799,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " on bedtime fan deactivation (was left True when _deactivate_fan ran)."
             " New activity-log events: nat_vent_bedtime_continue, nat_vent_sleep_ceiling_reached."
         ),
-        "scope_not_covered": (
-            "Nat-vent activation at bedtime when not already active (separate activation question)."
-            " outdoor == sleep_cool exactly: gate uses strict <, fan deactivates (conservative)."
-            " Priority 0 sleep-ceiling exit requires sleep_time/wake_time to be configured —"
-            " _in_sleep_window() returns False without them; fan runs to comfort_heat instead of"
-            " sleep_cool for users with sleep_cool set but no sleep schedule."
-            " Multi-zone scope not covered."
-        ),
     },
     369: {
         "version_fixed": "0.4.45",
@@ -4502,10 +3807,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Adds DEBUG logging at lockout check and temperature gate failure paths"
             " in check_natural_vent_conditions() paused-by-door block (automation.py ~line 2182)."
             " Each gate condition (delta, floor, ceiling) now logs its value and pass/fail status."
-        ),
-        "scope_not_covered": (
-            "Behavioral root cause of 15-min activation delay not yet confirmed."
-            " Monitoring issue filed to review logs at next occurrence."
         ),
     },
     367: {
@@ -4522,11 +3823,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " None handling, and Fahrenheit passthrough. "
             "docs/rest-api.md: status endpoint field list updated."
         ),
-        "scope_not_covered": (
-            "nat_vent_active and pause_suppressed_classification remain absent from the status API"
-            " response (pre-existing gap — those fields exist in coordinator.data but were not"
-            " wired into api.py before this PR and are not part of this scope)."
-        ),
     },
     365: {
         "version_fixed": "0.4.43",
@@ -4538,13 +3834,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " 'off (manual override)' if physically off. "
             "tests/test_whf_dual_entity.py: TestComputeFanStatusOverride — 3 new tests. "
             "docs/08-COMPUTATION-REFERENCE.md §9d updated."
-        ),
-        "scope_not_covered": (
-            "FAN_MODE_HVAC: no physical-state check added (HVAC fan physical state is read"
-            " from thermostat attributes, not a separate entity; existing ground-truth fallback"
-            " at priority 6 covers the untracked case for HVAC fans). "
-            "Command-only mode (fan_state_feedback=False): _get_fan_physical_state() returns"
-            " None; 'off (manual override)' remains the result."
         ),
     },
     363: {
@@ -4559,12 +3848,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "tests/test_whf_dual_entity.py: TestComputeFanStatusWHF — 4 new tests. "
             "docs/08-COMPUTATION-REFERENCE.md §9d updated."
         ),
-        "scope_not_covered": (
-            "_compute_fan_status() HVAC-fan untracked path still reads thermostat attributes"
-            " directly (no change). "
-            "fan_state_entity not yet surfaced in _compute_fan_status() for the 'running (manual override)'"
-            " display — that path still relies on CA's internal _fan_active/_fan_override_active flags."
-        ),
     },
     361: {
         "version_fixed": "0.4.41",
@@ -4574,10 +3857,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "command-only reconcile loop asserts desired fan state idempotently; "
             "post-grace reconcile uses command assertion not state-read; "
             "whf_mode/whf_last_commanded/whf_desired exposed in coordinator data"
-        ),
-        "scope_not_covered": (
-            "Physical wall-switch overrides remain undetectable in command-only mode; "
-            "fan_entity relay failures cannot be confirmed without a state sensor"
         ),
     },
     359: {
@@ -4618,15 +3897,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Golden simulation scenario:"
             " tools/simulations/pending/issue-359-fan-state-machine.json."
         ),
-        "scope_not_covered": (
-            "HVAC-driven fan coalescing (CA tries set_fan_mode=auto while HVAC blower is"
-            " running autonomously, retries if ignored) — deferred to a separate issue. "
-            "WHF Type 2 wiring into _compute_fan_status() — reads thermostat entity"
-            " attributes directly, not a separate fan_entity; _get_fan_physical_state()"
-            " serves the override-detection path only. "
-            "Golden scenario does not cover the 13:35 setpoint-echo suppression phase —"
-            " coordinator-level logic; covered by test_fan_cancel.py instead."
-        ),
     },
     354: {
         "version_fixed": "0.4.39",
@@ -4644,15 +3914,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "occupancy_setback (vacation), override_detected. "
             "tests/test_activity_renderers.py: TestAltKeyTempFallback (3 tests)."
         ),
-        "scope_not_covered": (
-            "Events emitted by coordinator.py directly (e.g. startup_coalesced, fan_running_untracked) "
-            "already receive indoor_f/outdoor_f from the setdefault block in _emit_event — no change needed. "
-            "Events emitted by automation.py that do not have a meaningful indoor temp "
-            "(e.g. grace_started, nat_vent_fan_off) rely on coordinator's setdefault enrichment. "
-            "_indoor_f_for_event() reads climate entity attributes only (not the configured "
-            "indoor_temp_entity sensor) — temperature may differ slightly from what _get_indoor_temp_f() "
-            "would return if a dedicated sensor is configured."
-        ),
     },
     352: {
         "version_fixed": "0.4.37",
@@ -4666,12 +3927,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Analysis), Download .md buttons on all sections, Full/Brief stub removed, AI disabled state "
             "wired to loadAIStatus(); tests/test_activity_renderers.py: TestTempColumns (3 tests)."
         ),
-        "scope_not_covered": (
-            "Activity Record has no server-side pagination — all events in the window are returned. "
-            "Download .md uses Blob/URL.createObjectURL which is unavailable in some non-browser contexts. "
-            "The AI disabled state only reflects the ai_status endpoint response — it does not prevent "
-            "the API call if a user manipulates the DOM directly."
-        ),
     },
     347: {
         "version_fixed": "0.4.36",
@@ -4684,14 +3939,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "test_fan_command_guard.py: TestPostStartupUntrackedFanReconcile (3 tests); "
             "docs/08-COMPUTATION-REFERENCE.md: Anchors row 28 and section 9e updated."
         ),
-        "scope_not_covered": (
-            "Fan running from fan_mode='on' attribute change (not hvac_action='fan') is "
-            "handled by the §9b fan_mode override detection block in _async_thermostat_changed "
-            "(Issue #37) — no change needed there. The #347 block skips events where fan_mode "
-            "also changed, routing them to the existing override path. "
-            "Post-startup hvac_action='fan' while _fan_override_active=True is intentionally "
-            "skipped (override is timed; it resolves when grace expires)."
-        ),
     },
     345: {
         "version_fixed": "0.4.35",
@@ -4703,10 +3950,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "k_active_hvac entry now includes a 'confidence' key computed from total "
             "heat+cool observation count (none/<5, low/5-9, medium/10-19, high/20+); "
             "index.html hvacRow(): appends confidence string after heat/cool values."
-        ),
-        "scope_not_covered": (
-            "solar_phase_offset_h and k_vent_window have no confidence grade in "
-            "get_thermal_model() either — no change needed for those parameters."
         ),
     },
     343: {
@@ -4725,11 +3968,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "removed since assertions from test_inactive_before_observations, "
             "test_active_after_first_observation, and test_engine_status_response_shape."
         ),
-        "scope_not_covered": (
-            "Existing first_active_date_* values in persisted learning DB JSON files are left in "
-            "place — they become orphaned fields that are no longer read or written. No migration "
-            "removes them; they harmlessly persist until the cache is reset."
-        ),
     },
     341: {
         "version_fixed": "0.4.33",
@@ -4743,13 +3981,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "_render_fan_manual_override(): dedicated renderer added to EVENT_RENDERERS; "
             "fan_manual_override added to _MANUAL_EVENT_TYPES and _TIMING_MANUAL_EVENT_TYPES."
         ),
-        "scope_not_covered": (
-            "activity report timeline Event cell still shows 'Grace started' (humanized type) "
-            "rather than the full rendered label — dedup-eligible events use _humanize_type for "
-            "the Event cell; trigger info now in Settings column as the practical fix. "
-            "Grace started triggered by chat_log or direct API call without fan state available "
-            "will show empty fan state fields."
-        ),
     },
     339: {
         "version_fixed": "0.4.32",
@@ -4759,11 +3990,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "after _occupancy_mode is recorded; skips _apply_comfort_band() call; emits "
             "occupancy_setback_suppressed_paused event. _compute_automation_status() returns combined "
             "paused+occupancy string when both conditions are active."
-        ),
-        "scope_not_covered": (
-            "handle_occupancy_home() on hot/cool days while paused — if day classification is 'cool' "
-            "or 'heat', _set_temperature_for_mode() may set comfort temps while windows open. "
-            "Separate issue tracked."
         ),
     },
     338: {
@@ -4775,10 +4001,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "floor-only (aggressive_savings=on) at all activation sites; "
             "handle_all_doors_windows_closed() re-arms comfort band immediately for warm/mild days."
         ),
-        "scope_not_covered": (
-            "FAN_MODE_BOTH archetype not separately tested; "
-            "Tier B integration tests for coordinator state-listener timing not covered."
-        ),
     },
     337: {
         "version_fixed": "0.4.30",
@@ -4788,10 +4010,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "classification cycle when windows/doors are open, regardless of whether pause was "
             "entered via direct door-sensor path or nat-vent exit path. Applies to both hot days "
             "(AC suppression) and cold days (heat suppression). Emits classification_suppressed_paused event."
-        ),
-        "scope_not_covered": (
-            "Immediate shutoff at nat-vent exit moment — up to 30-min delay between nat-vent exit "
-            "and next classification cycle remains possible. Tracked as a separate improvement."
         ),
     },
     335: {
@@ -4805,11 +4023,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "in_sleep_window=True explicitly). Regression tests added to test_thermostat_program.py "
             "TestInSleepWindow: hhmmss_format_in_window, hhmmss_format_after_sleep_time_in_window, "
             "hhmmss_format_out_of_window."
-        ),
-        "scope_not_covered": (
-            "Config entries with 'HH:MM' format (existing users) were never broken and continue to work. "
-            "wake_time receives the same fix but wake_time parse failure was not the reported symptom "
-            "(sleep_time is evaluated first in the or-chain). No migration to normalize stored format."
         ),
     },
     330: {
@@ -4825,11 +4038,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "type lacks a renderer. parse_activity_response overrides the timeline section; the LLM still "
             "writes summary/decisions/anomalies/diagnostics. Documented in docs/activity-report-table.md."
         ),
-        "scope_not_covered": (
-            "LLM still authors summary/decisions/anomalies. Historical event-log entries already stored "
-            "are rendered by the new renderers (not retroactively rewritten). Non-English locale "
-            "formatting not specifically tested."
-        ),
     },
     331: {
         "version_fixed": "0.4.25",
@@ -4840,11 +4048,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "OR-aggregate both. Frontend drawActivityTimeline merges Fan + Win Rec into one Vent bar "
             "(blue=fan_running, green=nat_vent_active||windows_recommended); HVAC bar restricted to "
             "heating/cooling. Back-compat: pre-#331 entries without the new fields fall back to legacy fan."
-        ),
-        "scope_not_covered": (
-            "Historical chart_log entries on disk carry only the legacy fan field; their Vent bar uses the "
-            "back-compat fallback (fan->blue, no armed/green distinction). No JS-level test harness for the "
-            "frontend; the Vent color decision is covered by the backend field-contract tests."
         ),
     },
     327: {
@@ -4867,14 +4070,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "coordinator logs 'Fan control: watching indoor=… outdoor=… thermostat=…' at listener"
             " registration (post-deploy validation signal)",
         ],
-        "scope_not_covered": [
-            "No JS-level dashboard test for fan status rendering",
-            "Fast indoor path relies on the thermostat reporting current_temperature as an"
-            " attribute; thermostats that do not populate it fall back to the outdoor listener +"
-            " backstop timer",
-            "End-to-end restart/coalesce reconciliation is exercised via unit tests; the Tier-A"
-            " harness does not restart the engine",
-        ],
     },
     147: {
         "version_fixed": "0.3.46",
@@ -4890,7 +4085,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "MILD day window scheduling uses MILD_WINDOW_OPEN_HOUR/MILD_WINDOW_CLOSE_HOUR constants",
             "_solar_factor phase_offset_h parameter shifts ODE peak",
         ],
-        "scope_not_covered": [],
     },
     146: {
         "version_fixed": "0.3.45",
@@ -4901,10 +4095,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Dynamic per-night selection via decision table — no one-way door",
             "Backfill v2: 30-day chart_log reprocessed, EWMA converges vs stale v1 values",
             "Daytime solar guard: passive windows restricted to 20:00–08:00",
-        ],
-        "scope_not_covered": [
-            "Thermal mass / phase lag — ODE is still first-order, solar peak timing not addressed",
-            "In-memory consecutive-pair OLS on 5-min samples — still structurally limited by 1°F quantization",
         ],
     },
     190: {
@@ -4917,9 +4107,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " — API's intended date is preserved without timezone conversion",
             "briefing tomorrow-high — correct at all hours in all timezones",
         ],
-        "scope_not_covered": [
-            "_get_hourly_forecast_data() — hourly entries use per-hour timestamps and were not affected by this bug",
-        ],
     },
     193: {
         "version_fixed": "0.3.55",
@@ -4930,9 +4117,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " from _today_record.override_details",
             "_event_source_label() annotates each event line with source_label=automation/manual/unknown",
         ],
-        "scope_not_covered": [
-            "Historical override details from past days (only today's overrides included)",
-        ],
     },
     197: {
         "version_fixed": "0.3.55",
@@ -4942,9 +4126,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "handle_setpoint_override() enters grace period immediately (no confirmation window)",
             "Override detection correctly fires for temperature-only user adjustments",
         ],
-        "scope_not_covered": [
-            "Setpoint changes initiated by CA itself — guarded by _temp_command_pending flag",
-        ],
     },
     203: {
         "version_fixed": "0.3.55",
@@ -4953,7 +4134,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "sensor.py _compute_sensor_health(): isinstance(k, str) guard on key iteration",
             "Prevents TypeError when coordinator.data contains numeric keys from HA instrumentation",
         ],
-        "scope_not_covered": [],
     },
     204: {
         "version_fixed": "0.3.55",
@@ -4962,9 +4142,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "automation.py apply_bedtime_setback(): checks _manual_override_active before setting setpoints",
             "automation.py apply_morning_wakeup(): same guard applied symmetrically",
             "clear_manual_override() callsites audited — override cleared at correct lifecycle points",
-        ],
-        "scope_not_covered": [
-            "Mid-day scheduled classification re-application — already guarded separately",
         ],
     },
     206: {
@@ -4979,10 +4156,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "frontend index.html renderMarkdown() added — parses | table | syntax to HTML <table>",
             "renderMarkdown() also converts **bold** to <strong> in all AI report sections",
         ],
-        "scope_not_covered": [
-            "Retroactive correction of prior false override_detected events in learning DB",
-            "Residual race if _hvac_command_pending clears before HA state propagates (>3s latency)",
-        ],
     },
     208: {
         "version_fixed": "0.3.55",
@@ -4994,10 +4167,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Reports with hours>36 include HISTORICAL DAILY SUMMARIES from learning._state.records",
             "System prompt updated: two-part Timeline when historical summaries present",
         ],
-        "scope_not_covered": [
-            "Event log ring buffer covers only ~50-60h — 7d event detail unavailable for older days",
-            "Chart log temperature trend not included (DailyRecord high/low used instead)",
-        ],
     },
     143: {
         "version_fixed": "0.3.44",
@@ -5008,10 +4177,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " their UTC calendar day instead of being shifted to the previous local day",
             "briefing tomorrow-high — reads date-verified tomorrow_fc for correct calendar day",
         ],
-        "scope_not_covered": [
-            "_get_hourly_forecast_data() datetime handling — hourly entries use per-hour"
-            " local timestamps and were not affected by this bug",
-        ],
     },
     141: {
         "version_fixed": "0.3.43",
@@ -5019,7 +4184,6 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_covered": [
             "chart_log endpoint — estimator uses chart_log data for R² calculation",
         ],
-        "scope_not_covered": [],
     },
     139: {
         "version_fixed": "0.3.42",
@@ -5028,7 +4192,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "coordinator._pred_archive — persisted across HA restarts",
             "chart_log timestamp keys — UTC rounding applied consistently",
         ],
-        "scope_not_covered": [],
     },
     135: {
         "version_fixed": "0.3.37",
@@ -5036,9 +4199,6 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_covered": [
             "chart_log endpoint — hourly forecast lookup uses nearest-entry not exact-hour match",
             "pred_indoor/pred_outdoor — non-null after this fix",
-        ],
-        "scope_not_covered": [
-            "_get_forecast() fallback branch — not addressed in this fix; fixed separately in Issue #143",
         ],
     },
     134: {
@@ -5048,7 +4208,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "automation._apply_classification() — nat-vent fan preserved when classification sets HVAC off",
             "automation._resume_from_grace() — nat-vent re-entry allowed when indoor exceeds comfort_cool",
         ],
-        "scope_not_covered": [],
     },
     121: {
         "version_fixed": "0.3.31",
@@ -5061,7 +4220,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "ODE extended with k_vent and k_solar terms",
             "investigator — fixed 6th fan_status state, warm_day event frequency, window compliance scope",
         ],
-        "scope_not_covered": [],
     },
     119: {
         "version_fixed": "0.3.29",
@@ -5074,7 +4232,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "chart band — setback_modifier reflected",
             "adaptive sleep temps — compute_bedtime_setback() used in chart and prediction",
         ],
-        "scope_not_covered": [],
     },
     108: {
         "version_fixed": "0.3.22",
@@ -5082,7 +4239,6 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_covered": [
             "config_flow — sleep_heat/sleep_cool ordering validation removed",
         ],
-        "scope_not_covered": [],
     },
     107: {
         "version_fixed": "0.3.22",
@@ -5093,9 +4249,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "prediction — predicted indoor schedule uses local time not UTC hour",
             "overnight setpoints — sleep_heat/sleep_cool used instead of setback floor",
             "ai_skills_investigator — activity report timestamps use local time",
-        ],
-        "scope_not_covered": [
-            "_get_forecast() fallback branch — fallback block not addressed in this fix; fixed in Issue #143",
         ],
     },
     156: {
@@ -5112,11 +4265,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "get_engine_status() included in investigator context",
             "learning_db --pending flag shows in-flight observations",
         ],
-        "scope_not_covered": [
-            "Real-time rejection streaming (capped in-memory log)",
-            "Chart_log backfill auto-trigger (still manual or restart-triggered)",
-            "Automatic sensor resolution upgrade (still manual config)",
-        ],
     },
     149: {
         "version_fixed": "0.3.47",
@@ -5130,7 +4278,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Activity report section deduplication rule added to system prompt",
             "HVAC peak temperature captured at exact HVAC-off moment for accurate swing measurement",
         ],
-        "scope_not_covered": [],
     },
     158: {
         "version_fixed": "0.3.51",
@@ -5139,7 +4286,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Investigation history panel shows full report text (not just summary)",
             "AI system prompt gains deduplication rule — findings not repeated across sections",
         ],
-        "scope_not_covered": [],
     },
     160: {
         "version_fixed": "0.3.52",
@@ -5149,9 +4295,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Chart backward '<' navigation fetches historical window anchored before current view",
             "Chart log lookback bounded by available chart_log retention (~365 days)",
         ],
-        "scope_not_covered": [
-            "Forward navigation into future (addressed in Issue #164)",
-        ],
     },
     162: {
         "version_fixed": "0.3.52",
@@ -5160,7 +4303,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Chart '>' button after backward navigation re-anchors to the retrieved window"
             " rather than jumping directly to current time",
         ],
-        "scope_not_covered": [],
     },
     164: {
         "version_fixed": "0.3.52",
@@ -5170,7 +4312,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " predicted indoor ODE window",
             "Predicted window fetched via before_ts pointing past current time",
         ],
-        "scope_not_covered": [],
     },
     166: {
         "version_fixed": "0.3.52",
@@ -5182,7 +4323,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Feedback outcome stored in investigation history record",
             "Cancel button in GitHub issue modal closes the dialog without submitting",
         ],
-        "scope_not_covered": [],
     },
     170: {
         "version_fixed": "0.3.53",
@@ -5199,10 +4339,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " both mode-change and setpoint-change trigger paths",
             "docs/08-COMPUTATION-REFERENCE.md Section 11 updated with setpoint override path",
         ],
-        "scope_not_covered": [
-            "Setpoint changes made by HA automations (treated same as user changes;"
-            " will trigger grace — use _temp_command_pending guard to suppress if needed)",
-        ],
     },
     180: {
         "version_fixed": "0.3.54",
@@ -5215,10 +4351,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "_formatCurrentReport() — formats current investigation report as issue body",
             "Default GitHub issue title changed to 'Climate Advisor: <report_type>'",
         ],
-        "scope_not_covered": [
-            "API_REFINE_REPORT / investigation refinement — excluded from this PR",
-            "Annotation toolbar and rating buttons — excluded from this PR",
-        ],
     },
     172: {
         "version_fixed": "0.3.54",
@@ -5230,7 +4362,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " explicit mode dispatch replaces threshold inference; legacy fallback preserved",
             "Both ODE call sites in _build_predicted_indoor_future pass hvac_mode=mode",
         ],
-        "scope_not_covered": [],
     },
     174: {
         "version_fixed": "0.3.54",
@@ -5241,7 +4372,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "test_chart_historical_nav.py: autouse fixtures freeze chart_log.dt_util.now to _FAKE_NOW",
             "test_chart_log.py: dt_util.now patched on the already-bound module object",
         ],
-        "scope_not_covered": [],
     },
     176: {
         "version_fixed": "0.3.54",
@@ -5252,7 +4382,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " occupancy_away_minutes, windows_opened, window_open_actual_time, override_details",
             "State saved via async_create_task(_async_save_state()) after each HVAC on→off transition",
         ],
-        "scope_not_covered": [],
     },
     177: {
         "version_fixed": "0.3.54",
@@ -5267,7 +4396,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " 5-phase triage with ACTIONABLE/TIME-DEPENDENT/CONTEXTUAL/NOISE/RESOLVED taxonomy,"
             " monitoring issue workflow, HISTORICAL ARTIFACT rule, 6-column triage table",
         ],
-        "scope_not_covered": [],
     },
     186: {
         "version_fixed": "0.3.54",
@@ -5278,7 +4406,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "_fmt_window_compliance() formats as '0.6667 (2 of 3 windows-recommended days)'"
             " — prevents AI from treating denominator as total recording window",
         ],
-        "scope_not_covered": [],
     },
     220: {
         "issue": 220,
@@ -5289,9 +4416,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " active manual override before applying setback",
             "Override flag cleared prevents setback being silently skipped on classification cycles while away",
         ],
-        "scope_not_covered": [
-            "Override clearing on guest mode transition (guest mode maintains comfort, no setback)",
-        ],
     },
     221: {
         "issue": 221,
@@ -5300,9 +4424,6 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_covered": [
             "_temp_command_time guard added to setpoint-only override detector",
             "Away setback no longer starts spurious 90-minute grace period",
-        ],
-        "scope_not_covered": [
-            "Coordinator-level listener timing (integration-track) — simulator cannot fully exercise this path",
         ],
     },
     222: {
@@ -5315,7 +4436,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Cool-mode thermostat receives setback_cool (79°F); heat-mode receives setback_heat (61°F)",
             "June 5 incident (AC targeted 61°F in cool mode while away) cannot recur",
         ],
-        "scope_not_covered": [],
     },
     223: {
         "issue": 223,
@@ -5330,10 +4450,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Incident package auto-appended to existing Submit GitHub Issue button",
             "--from-issue flag on build_historical_scenario.py for developer workflow",
         ],
-        "scope_not_covered": [
-            "Multi-user scenario submission (Phase 2 — architecture supports it)",
-            "Scheduled automatic loop (requires schedule skill setup by user)",
-        ],
     },
     227: {
         "issue": 227,
@@ -5343,9 +4459,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "async_restore_state() re-schedules grace timer with remaining duration on startup",
             "If grace already expired during restart: override cleared immediately on startup",
             "Exception path: clears override as safety fallback",
-        ],
-        "scope_not_covered": [
-            "Restart during active nat-vent (nat-vent flag already handled by separate restore logic)",
         ],
     },
     230: {
@@ -5358,10 +4471,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Otherwise: applies current classification",
             "Occupant wakes to scheduled temperature even when manual adjustment happened within grace window",
         ],
-        "scope_not_covered": [
-            "Morning wakeup convergence (wakeup time is close to grace expiry — edge case deferred)",
-            "Multiple suppressed events during grace window (only most recent scheduled state applied)",
-        ],
     },
     231: {
         "issue": 231,
@@ -5371,9 +4480,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "check_natural_vent_conditions() adds ceiling exit when occupancy=away and indoor >= comfort_cool",
             "nat_vent_away_ceiling_exit event emitted; fan deactivated; HVAC setback takes over",
             "Free cooling within home comfort band (70-74°F) while away; setback (79°F) handles drift above that",
-        ],
-        "scope_not_covered": [
-            "Vacation mode ceiling exit (vacation setback is higher; same principle applies but not yet implemented)",
         ],
     },
     247: {
@@ -5394,11 +4500,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Warning-only no-op in check_natural_vent_conditions() replaced with an INFO log"
             " noting the guard will escalate",
         ],
-        "scope_not_covered": [
-            "Predictive pre-emption (firing before indoor crosses the ceiling based on the ODE curve under nat-vent)"
-            " — deferred; the fix is reactive once indoor breaches the ceiling threshold",
-            "Coordinator cadence (re-evaluation still every 30 min + 5-min revisit) — unchanged",
-        ],
     },
     249: {
         "issue": 249,
@@ -5418,12 +4519,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "away/vacation/sleep keep setback/sleep bands; §6b/§6c demoted to passive backstops",
             "Thermostat capability detection (P1: ThermostatCapabilities) + sim harness arms the band",
         ],
-        "scope_not_covered": [
-            "Adaptive bedtime setback depth (compute_bedtime_setback) — the sleep band uses configured"
-            " sleep_heat/sleep_cool; adaptive depth is a follow-up",
-            "Heat-only thermostat on a warm day (cannot defend the ceiling) — band no-ops with an INFO log",
-            "Single-setpoint mid-day edge re-selection — the band holds both edges via the device's shape",
-        ],
     },
     264: {
         "issue": 264,
@@ -5437,12 +4532,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " through the open window); maintain phase unchanged (band stays armed, #249)",
             "Thermostat stays in the stable heat_cool band on hot days — one controller, no mode flip",
         ],
-        "scope_not_covered": [
-            "Full economizer retirement (its fan role overlaps natural ventilation) — deferred",
-            "No economizer on/off toggle added — it remains gated only by hot-day + window-open +"
-            " outdoor<=comfort_cool+delta + time-window eligibility",
-            "Restart re-evaluation (home sits paused after restart with an open contact) — tracked in #263",
-        ],
     },
     266: {
         "issue": 266,
@@ -5453,9 +4542,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " heat_cool mode; displays as 'Band: Xf / Yf' instead of a single target_temperature",
             "Status card is now status-only (no inline activity report) — activity report is a separate"
             " on-demand panel",
-        ],
-        "scope_not_covered": [
-            "Historical band setpoint display in chart overlay — chart uses target_band time-series",
         ],
     },
     269: {
@@ -5471,12 +4557,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Bug D: setpoint detection reads target_temp_high/target_temp_low in heat_cool mode"
             " (temperature attribute is None); grace trigger uses _last_commanded_hvac_mode",
         ],
-        "scope_not_covered": [
-            "Bug A false-negative: genuine fan change within 120s of a CA mode command (and while mode"
-            " still matches last commanded) will be suppressed — bounded and documented trade-off",
-            "Dual setpoint override recording uses the cooling setpoint (target_temp_high) as the"
-            " representative value; independent heat-floor change has magnitude but no dedicated label",
-        ],
     },
     239: {
         "issue": 239,
@@ -5490,11 +4570,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "_async_thermostat_changed fan_mode detection guard: now includes"
             " not _is_recent_fan_command(30.0) — suppresses echoes from CA's own set_fan_mode calls",
             "_async_fan_entity_changed guard: same guard added as belt-and-suspenders",
-        ],
-        "scope_not_covered": [
-            "Restart race: if HA restarts mid-fan-session, _fan_command_time resets to None;"
-            " an echo arriving immediately after restart is not suppressed (30-second window is"
-            " acceptable given infrequency of restart-coincident echoes)",
         ],
     },
     277: {
@@ -5517,11 +4592,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "Bug H: fan detection diagnostic logging — old/new fan_mode, fan_cmd age, hvac_cmd age,"
             " expected_confirmation value logged at INFO when handle_fan_manual_override() fires",
         ],
-        "scope_not_covered": [
-            "06:41 grace period root cause — unconfirmed; Bug H logging will make next occurrence"
-            " diagnosable from HA logs",
-            "FAN_MODE_HVAC (HVAC blower) HVAC behavior — band stays armed per Issue #249 §4; no change in this fix",
-        ],
     },
     282: {
         "issue": 282,
@@ -5541,12 +4611,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "_async_thermostat_changed: new branch detects mode change during active grace"
             " (different mode than current override) — clears override and restarts confirmation",
         ],
-        "scope_not_covered": [
-            "If user deliberately overrides and HA restarts, the override is lost (accepted"
-            " trade-off — clean slate is simpler and more predictable than partial restoration)",
-            "Override state is still NOT restored after restart — users must re-override"
-            " post-restart if they want CA paused",
-        ],
     },
     284: {
         "issue": 284,
@@ -5565,13 +4629,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "frontend/index.html: conflict indicator (CA: X/Y) shown when live thermostat"
             " setpoints diverge from CA's comfort band by >1°F",
         ],
-        "scope_not_covered": [
-            "The 30-min coordinator cycle path (_apply_comfort_band) was already correct — this"
-            " fix only affects event-driven restore paths outside the main cycle",
-            "Setpoint tolerance / deadband not implemented — CA still overwrites if the Ecobee's"
-            " own schedule applies different values; the correct fix is to update CA's comfort"
-            " band config to match the desired setpoints",
-        ],
     },
     286: {
         "issue": 286,
@@ -5586,13 +4643,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " log showed internal °F strings regardless of what was actually sent to HA",
             "coordinator.py: DEBUG log at startup includes temp_unit, comfort_heat, comfort_cool"
             " — surfaces unit misconfiguration without requiring a config audit",
-        ],
-        "scope_not_covered": [
-            "Post-command confirmation check not implemented — if the Ecobee still reverts after"
-            " the hvac_mode fix (e.g., due to remaining internal hold programs), CA has no retry"
-            " mechanism; investigate via startup log and thermostat state history",
-            "Ecobee SmartAway / comfort program conflicts not addressed — if the Ecobee's own"
-            " occupancy detection fires during a CA write, it may still override CA's setpoints",
         ],
     },
     290: {
@@ -5620,18 +4670,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "fake_hass.py: set_temperature service handler now updates entity state from"
             " hvac_mode in payload, matching real HA behavior",
         ],
-        "scope_not_covered": [
-            "Retry mechanism if setpoint validation fails — CA logs the mismatch but does not"
-            " re-send the command; a subsequent classification cycle (30 min) will re-apply",
-            "Grace period stuck-at-0 display issue in the dashboard when _cancel_grace_timers()"
-            " is called without clearing _grace_end_time — cosmetic only, not addressed here",
-            "Setpoint validation silently no-ops when thermostat drops the temperature attribute"
-            " entirely (entity unavailable) — avoids false ERROR but means the failure goes"
-            " undetected until the next classification cycle",
-            "Startup bedtime recovery skipped when thermostat mode diverges from classification"
-            " on restart — the mode-mismatch branch sets an override instead; this may be correct"
-            " (real mode divergence is a legitimate override signal) but is untested",
-        ],
     },
     293: {
         "version_fixed": "0.4.8",
@@ -5652,15 +4690,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "tests/test_nat_vent_restore_dual_setpoint.py TestNatVentRestoreDualSetpoint:"
             " dual-setpoint cool/pre-condition uses dual call, single-setpoint thermostat uses"
             " single call, heat mode dual call",
-        ],
-        "scope_not_covered": [
-            "heat_cool startup state when the thermostat is in heat_cool but classification"
-            " is 'off' — treated as incompatible (legitimate override signal) and not changed",
-            "Nat-vent restore for thermostats that support heat_cool but currently in 'off' mode"
-            " — _set_temperature_for_mode() does not handle the off→heat_cool transition",
-            "pre_condition_target design question: 72°F ceiling persists all day on hot days by"
-            " design (thermal buffer); making it morning-only (cease offset once indoor ≤ target)"
-            " is out of scope for this fix",
         ],
     },
     299: {
@@ -5689,14 +4718,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "All caller test files updated: 11 test files revised to expect 2 service calls"
             " per setpoint write (pre-write + target) and verify values at the correct call index",
         ],
-        "scope_not_covered": [
-            "Two-step mode transition (set_hvac_mode then set_temperature with delay) — not"
-            " needed after hold-type change to 'hold until I change again' on the Ecobee device",
-            "Celsius homes: pre-write offset is ±1°C (≈1.8°F); functionally identical dedup"
-            " bypass behavior, no additional change needed",
-            "Ecobee comfort-program reversion triggered by Ecobee app or physical thermostat"
-            " control — CA will detect and re-apply on the next 30-min coordinator cycle",
-        ],
     },
     263: {
         "version_fixed": "0.4.11",
@@ -5710,12 +4731,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " weather or thermostat services are slow to reconnect (Issue #263)",
             "tests/test_paused_restart_recovery.py: 7 new TDD tests covering clean-slate behavior",
             "docs/08-COMPUTATION-REFERENCE.md §11: documents the design decision and debounce timing",
-        ],
-        "scope_not_covered": [
-            "Sensor entity that never re-registers after restart (broken sensor) — HVAC stays"
-            " armed; user must manually re-pause or re-configure the sensor",
-            "Debounce window (5 min) during which HVAC briefly runs — acceptable trade-off vs"
-            " indefinite pause; no shorter debounce path is implemented",
         ],
     },
     295: {
@@ -5733,11 +4748,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "tests/test_pre_condition_achieved.py: 18 new unit tests covering flag lifecycle,"
             " ceiling guard, daily reset, and state persistence",
             "Pending simulation scenario: hot_day_precool_achieved_reverts_to_comfort",
-        ],
-        "scope_not_covered": [
-            "Hot days where indoor never reaches the pre-cool target — ceiling continues to"
-            " apply for the full day (intended; home hasn't been pre-cooled yet)",
-            "Consecutive hot days — flag resets at midnight so each day starts fresh",
         ],
     },
     301: {
@@ -5760,14 +4770,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "README.md: Thermostat Setup Requirements section added — disable built-in"
             " schedules/comfort programs; set hold type to indefinite",
         ],
-        "scope_not_covered": [
-            "Persistent rejection loop cap — if a thermostat indefinitely rejects CA's setpoint"
-            " the 15-min retry fires indefinitely (bounded to one write per 15 min, emits"
-            " setpoint_rejected event each cycle; 30-min classification cycle issues new commands"
-            " that cancel stale retries in practice)",
-            "Tier B integration test for off→cool echo suppression — coordinator confirmation"
-            " logic is correct but no headless test drives the state-listener layer for this path",
-        ],
     },
     310: {
         "version_fixed": "0.4.13",
@@ -5786,13 +4788,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " calling real _build_state_dict() / async_restore_state()",
             "docs/08-COMPUTATION-REFERENCE.md §5e-v: Two-tier fit scheduling subsection documenting"
             " one-shot backfill gate and periodic daily re-fit",
-        ],
-        "scope_not_covered": [
-            "If no chart_log passive-daytime windows qualify (HVAC almost always on in summer),"
-            " the daily re-fit will find nothing to learn — the #308 structured logging makes this"
-            " visible via 'Solar phase fit: 0 windows passed quality filter' in ha_logs",
-            "solar_gain abandonment rate — still 99/100 'abandoned' (flat indoor temps); addressed"
-            " separately if #185 logging confirms HVAC-on is blocking all passive windows",
         ],
     },
     312: {
@@ -5814,12 +4809,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " paths + pass), AC phase estimator, 4 resolver precedence tests, 8 staleness tests",
             "docs/08-COMPUTATION-REFERENCE.md §5e-viii: two-EWMA architecture and 5-tier resolver documented",
         ],
-        "scope_not_covered": [
-            "Days with setpoint variance >1.5°F during 11-18h window are rejected — homes"
-            " with frequent away/vacation setpoint changes learn the secondary EWMA slowly",
-            "k_solar staleness gate — not yet implemented; tracked as future investigation"
-            " in #314 (closed as working-as-designed for k_passive; only k_solar is at risk)",
-        ],
     },
     318: {
         "title": "Sleep setpoint ordering constraint regression",
@@ -5827,9 +4816,6 @@ KNOWN_FIXES: dict[int, dict] = {
         "scope_covered": [
             "config_flow.py async_step_setpoints — removed 4 incorrect cross-field constraints"
             " on sleep_cool/sleep_heat vs comfort/setback bounds",
-        ],
-        "scope_not_covered": [
-            "No runtime impact — automation.py uses sleep setpoints as-is; this fix is config flow validation only",
         ],
     },
     313: {
@@ -5855,18 +4841,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " tests (schedule on activate, schedule on deactivate, repair on drift, skip on"
             " write_seq advance, skip on manual override, skip within tolerance)",
         ],
-        "scope_not_covered": [
-            "Ecobee setpoint reversion >60s after the fan command (i.e., after the 30s verify"
-            " fires but before the next classify cycle): the existing 15-min retry (#301) covers"
-            " persistent drift; a second occurrence in the same session will be caught by the"
-            " next classify cycle's setpoint re-assertion",
-            "Pre-fan state validation (check thermostat matches expected setpoint BEFORE fan"
-            " command): not needed for the #313 incident (setpoint was correct before fan-on);"
-            " can be added if pre-drift becomes observed in production",
-            "Tier B integration test for the full cascade (fan command → Ecobee revert →"
-            " verify fires → re-assert): requires the coordinator state-listener layer;"
-            " deferred to Tier B",
-        ],
     },
     308: {
         "version_fixed": "0.4.12",
@@ -5882,15 +4856,6 @@ KNOWN_FIXES: dict[int, dict] = {
             " and rejection summary (attempts / committed / dominant reason / last 3 events)",
             "tests/test_solar_learning.py: 11 TDD tests — 9 confidence ladder, 2 logging",
             "docs/08-COMPUTATION-REFERENCE.md §5e: confidence_k_solar table + logging note",
-        ],
-        "scope_not_covered": [
-            "Root cause of solar_phase_offset_h not updating (#185) — logging added in this PR;"
-            " check 'Solar phase fit:' lines in ha_logs after deploy to determine if no qualifying"
-            " chart_log windows exist (HVAC almost always on in summer) or peak-finding is failing."
-            " A follow-up fix issue will be opened based on what the logs reveal.",
-            "solar_gain abandonment rate (#184 context) — 99/100 rejections are 'abandoned' due to"
-            " flat indoor temps; this is a data quality issue (HVAC prevents free-decay windows),"
-            " not addressed by the confidence fix alone",
         ],
     },
     258: {
@@ -5914,12 +4879,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "CLAUDE.md: Observability Requirements (logging + status page + chart) codified as"
             " universal standing standard for all future features",
         ],
-        "scope_not_covered": [
-            "Adaptive trigger timing from thermal model (wake-4h fallback is fixed, not k_active_cool-derived)",
-            "Pre-cool depth does not account for forecast peak hour or solar gains",
-            "Cooling-trend nights (setback_modifier > 0): relaxed setback sign fix also corrects"
-            " those (higher ceiling = less cooling = energy savings) but no new timed phase added",
-        ],
     },
     333: {
         "version_fixed": "0.4.28",
@@ -5932,12 +4891,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "CONF_SLEEP_COOL from config instead of calling compute_bedtime_setback()",
             "chart sleep band: _compute_target_band_schedule() calls compute_bedtime_setback()"
             " for the band bounds — now returns configured temp, not trend-shifted temp",
-        ],
-        "scope_not_covered": [
-            "handle_pre_cool() warming-trend path is intentionally unchanged"
-            " — pre-cool still adjusts the mid-night ceiling via sleep_cool + setback_modifier",
-            "future pre-heat feature (heat + cooling trend) not implemented — documented as"
-            " design intent in issue #333 comment",
         ],
     },
     326: {
@@ -5952,10 +4905,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "index.html: Status card no longer shows pre_cool_status secondary text",
             "index.html: 'Next Action' label renamed to 'Next User Action'",
         ],
-        "scope_not_covered": [
-            "pre_cool_status field still returned by API (used by briefing and debug tab)",
-            "pre-cool suppressed / active text remains in automation_status when relevant",
-        ],
     },
     325: {
         "version_fixed": "0.4.22",
@@ -5965,10 +4914,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "automation.py line 1421: lambda for _check_single_setpoint_accepted → @callback _schedule_check",
             "automation.py line 2913: _verify_setpoint_after_fan_on decorated with @callback",
             "automation.py line 3011: _verify_setpoint_after_fan_off decorated with @callback",
-        ],
-        "scope_not_covered": [
-            "coordinator.py:245 _request_refresh_callback lambda — safe; only invoked from @callback context",
-            "_on_grace_expired / clear_fan_override async_create_task — safe; always called from @callback chain",
         ],
     },
     321: {
@@ -5987,12 +4932,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "fan_status: new value 'nat-vent (session active, fan idle)' for cycling-paused state",
             "ai_skills_activity.py: stuck-grace warning flag in investigator context",
         ],
-        "scope_not_covered": [
-            "Nat-vent cycling not tested against real thermostat hardware (Tier B only)",
-            "Startup coalesce timer requires coordinator integration test (Tier B);"
-            " unit tests cover _do_startup_coalesce() logic directly",
-            "Stuck grace requires coordinator 30-min update cycle for integration test (Tier B)",
-        ],
     },
     320: {
         "title": "Nat vent debounce visibility — step logging and next_automation surfacing",
@@ -6003,11 +4942,6 @@ KNOWN_FIXES: dict[int, dict] = {
             "coordinator.py _compute_next_automation_action — returns 'Evaluating door/window sensors'"
             " with expiry time when debounce is pending",
             "automation.py handle_door_window_open — DEBUG log of gate values; INFO log when primary gates fail",
-        ],
-        "scope_not_covered": [
-            "Nat vent blocked by forecast/thermal guards still produces a 30-min retry window"
-            " (30-min coordinator cycle is the retry cadence)",
-            "HA restart with sensors open: clean-slate behavior preserved — no automatic re-evaluation on restart",
         ],
     },
 }
@@ -6872,30 +5806,13 @@ CONFIG_METADATA = {
         ),
         "category": "ai_settings",
     },
-    "ai_investigator_model": {
-        "label": "Investigator AI Model",
-        "description": (
-            "Which Claude model the investigative agent uses."
-            " Opus is recommended for deep analysis. Sonnet is a cost-effective alternative."
-        ),
-        "category": "ai_settings",
-    },
-    "ai_investigator_reasoning_effort": {
-        "label": "Investigator Reasoning Effort",
-        "description": (
-            "How much extended thinking the investigator uses."
-            " High is recommended — the agent needs to reason through multiple hypotheses."
-        ),
-        "category": "ai_settings",
-    },
-    "ai_investigator_max_tokens": {
-        "label": "Investigator Max Response Length (tokens)",
-        "description": (
-            "Maximum token length for investigator reports."
-            " Larger values allow more detailed findings. 8192 recommended."
-        ),
-        "category": "ai_settings",
-    },
+    # ai_investigator_model / ai_investigator_reasoning_effort / ai_investigator_max_tokens
+    # removed from the options UI (Issue #563) — the investigator now shares the single
+    # `ai_model` config used everywhere else, instead of a separate persistent
+    # model/reasoning/token-budget block. The CONF_AI_INVESTIGATOR_MODEL/_REASONING/
+    # _MAX_TOKENS constants and their config-entry migration defaults are kept (not
+    # deleted) purely so the historical v13->v14 config migration in __init__.py
+    # doesn't break for very old installs — nothing reads these values anymore.
     "ai_investigator_requests_per_day": {
         "label": "Investigator Requests Per Day",
         "description": (
@@ -7183,7 +6100,12 @@ DEFAULT_AI_INVESTIGATOR_REASONING = "medium"
 DEFAULT_AI_INVESTIGATOR_MAX_TOKENS = 8192  # must exceed MEDIUM reasoning budget (4096) + output buffer
 DEFAULT_AI_INVESTIGATOR_RPD = 3
 
-# Model options
+# Model options — Issue #563: these are the OFFLINE FALLBACK defaults, not "the" list.
+# claude_api.py's fetch_available_models() fetches the live registry from Anthropic at
+# runtime for both the config flow dropdown and capability-tier deprecation fallback;
+# this static list is only used when that live fetch fails (no network, no API key yet,
+# unsupported SDK version, etc.) — keep it reasonably current, but it is a safety net,
+# not the source of truth for what models are actually available.
 AI_MODEL_SONNET = "claude-sonnet-4-6"
 AI_MODEL_OPUS = "claude-opus-4-6"
 AI_MODEL_HAIKU = "claude-haiku-4-5-20251001"

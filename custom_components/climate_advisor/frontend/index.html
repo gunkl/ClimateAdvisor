@@ -2603,6 +2603,14 @@
     else await _runAIInvestigation();
   }
 
+  // Shared button/loading-overlay reset used by every report-generation path.
+  function _resetReportControls(btn, loading, idleLabel) {
+    btn.disabled = false;
+    btn.textContent = idleLabel;
+    loading.textContent = 'Generating…';
+    loading.style.display = 'none';
+  }
+
   // ---- Activity Record (deterministic, no AI) ----
 
   async function _runActivityRecord() {
@@ -2626,9 +2634,7 @@
     } catch (e) {
       status.textContent = 'Error: ' + e.message;
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Generate';
-      loading.style.display = 'none';
+      _resetReportControls(btn, loading, 'Generate');
     }
   }
 
@@ -2651,13 +2657,86 @@
     } catch (e) {
       status.textContent = 'Error: ' + e.message;
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Generate with AI';
-      loading.style.display = 'none';
+      _resetReportControls(btn, loading, 'Generate with AI');
     }
   }
 
   // ---- AI Investigative Analysis ----
+
+  // Section keys/labels shared between the final structured render and the
+  // progressive in-flight render, mirroring parse_investigation_response()'s
+  // header map in ai_skills_investigator.py.
+  const _INVESTIGATION_SECTION_DEFS = [
+    { key: 'summary', label: '📊 Summary' },
+    { key: 'incongruities', label: '⚠️ Incongruities Found' },
+    { key: 'data_quality', label: '🔢 Data Quality Issues' },
+    { key: 'errors_warnings', label: '🚨 System Errors / Warnings' },
+    { key: 'hypotheses', label: '🔬 Hypotheses' },
+    { key: 'recommended_actions', label: '✅ Recommended Actions' },
+    { key: 'assumptions', label: '📝 Assumptions & Confidence' },
+  ];
+  const _INVESTIGATION_HEADER_MAP = {
+    'INVESTIGATION SUMMARY': 'summary',
+    'INCONGRUITIES FOUND': 'incongruities',
+    'DATA QUALITY ISSUES': 'data_quality',
+    'SYSTEM ERRORS / WARNINGS': 'errors_warnings',
+    'HYPOTHESES': 'hypotheses',
+    'RECOMMENDED ACTIONS': 'recommended_actions',
+    'ASSUMPTIONS & CONFIDENCE': 'assumptions',
+  };
+
+  // Split accumulated streamed text on '## HEADER' lines. Returns the text
+  // collected per recognized section, the order sections first appeared in,
+  // and which section (if any) is still being written (the last one open).
+  function _parseInvestigationSections(text) {
+    const sections = {};
+    const order = [];
+    let currentKey = null;
+    let currentLines = [];
+    const flush = () => {
+      if (currentKey !== null) sections[currentKey] = currentLines.join('\n').trim();
+    };
+    for (const line of text.split('\n')) {
+      const stripped = line.trim();
+      if (stripped.startsWith('## ')) {
+        flush();
+        currentLines = [];
+        const key = _INVESTIGATION_HEADER_MAP[stripped.slice(3).trim().toUpperCase()] || null;
+        currentKey = key;
+        if (key && order.indexOf(key) === -1) order.push(key);
+      } else if (currentKey !== null) {
+        currentLines.push(line);
+      }
+    }
+    flush();
+    return { sections, order, activeKey: currentKey };
+  }
+
+  // Render whatever sections have arrived so far, in the same card layout as
+  // the final report, instead of painting raw markdown into a <pre>. The
+  // still-streaming section gets a "writing..." marker; finished sections
+  // render exactly like the final view will.
+  function _renderInvestigationProgress(content, accumulated) {
+    const { sections, order, activeKey } = _parseInvestigationSections(accumulated);
+    if (!order.length) {
+      content.innerHTML = '<p style="color:var(--text-secondary);font-size:0.85rem;">Writing investigation…</p>';
+      return;
+    }
+    let html = '';
+    for (const key of order) {
+      const def = _INVESTIGATION_SECTION_DEFS.find((d) => d.key === key);
+      if (!def) continue;
+      const text = sections[key] || '';
+      const isActive = key === activeKey;
+      const writingTag = isActive
+        ? ' <span style="font-size:0.7rem;font-weight:400;color:var(--text-secondary);">writing…</span>'
+        : '';
+      html += '<details open style="margin-bottom:0.5rem;">'
+        + '<summary style="cursor:pointer;font-weight:600;padding:0.25rem 0;">' + escapeHtml(def.label) + writingTag + '</summary>'
+        + '<div style="font-size:0.85rem;line-height:1.5;margin:0.5rem 0 0;">' + renderMarkdown(text) + '</div></details>';
+    }
+    content.innerHTML = html;
+  }
 
   async function _runAIInvestigation() {
     const btn = document.getElementById('run-report-btn');
@@ -2671,13 +2750,12 @@
     btn.disabled = true;
     btn.textContent = 'Running\u2026';
     loading.style.display = 'block';
-    status.textContent = 'Connecting\u2026';
+    loading.textContent = 'Connecting\u2026';
+    status.textContent = '';
+    if (content) content.innerHTML = '';
     if (actions) actions.style.display = 'none';
 
     let accumulated = '';
-    let streamPre = null;
-    let waitTimer = null;
-    const waitStart = Date.now();
 
     try {
       const body = { hours };
@@ -2687,12 +2765,6 @@
         method: 'POST',
         body: JSON.stringify(body),
       });
-
-      // Show live streaming area
-      if (content) {
-        content.innerHTML = '<pre id="stream-output" style="white-space:pre-wrap;font-size:0.8rem;padding:0.5rem;background:var(--bg);border-radius:4px;min-height:4rem;"></pre>';
-        streamPre = document.getElementById('stream-output');
-      }
 
       console.log('[CA] SSE stream opened');
       const reader = resp.body.getReader();
@@ -2715,32 +2787,28 @@
 
           if (event.type === 'thinking') {
             // Show tail of Claude's reasoning chain so user sees it's actively working
-            if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
-            const tail = event.text.replace(/\n+/g, ' ').trim().slice(-180);
+            const tail = event.text.replace(/[\n]+/g, ' ').trim().slice(-180);
             loading.textContent = 'Thinking… ' + tail;
 
           } else if (event.type === 'status') {
+            // Real step narration from the backend (e.g. "Gathering system
+            // data…", per-context-provider progress) — no fake elapsed timer.
             loading.textContent = event.text;
-            // Restart elapsed-time timer on each status event so it counts from the last status
-            if (waitTimer) clearInterval(waitTimer);
-            waitTimer = setInterval(() => {
-              const s = Math.round((Date.now() - waitStart) / 1000);
-              if (loading.style.display !== 'none') loading.textContent = event.text + ' (' + s + 's)';
-            }, 1000);
 
           } else if (event.type === 'chunk') {
+            const firstChunk = accumulated.length === 0;
             accumulated += event.text;
-            if (streamPre) streamPre.textContent = accumulated;
-            if (accumulated.length === event.text.length) {
-              // First chunk \u2014 stop timer, hide loading overlay so streaming pre is the visual focus
-              if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
+            if (content) _renderInvestigationProgress(content, accumulated);
+            if (firstChunk) {
+              // Report body is now visible and self-narrating (“writing…”) —
+              // the loading overlay has nothing left to add.
               loading.style.display = 'none';
               console.log('[CA] First chunk received, len=' + event.text.length);
             }
-            status.textContent = 'Receiving response\u2026 (' + accumulated.length + ' chars)';
+            status.textContent = 'Receiving response… (' + accumulated.length + ' chars)';
 
           } else if (event.type === 'done') {
-            // Replace streaming pre with structured report
+            // Final structured render replaces the progressive section-card view
             const result = {
               success: event.success !== false,
               source: event.source || 'ai',
@@ -2749,6 +2817,7 @@
               raw_response: event.raw_response || accumulated,
               input_context: event.input_context || '',
               truncated: !!event.truncated,
+              truncated_empty: !!event.truncated_empty,
             };
             _currentReport = {
               reportType: 'investigation',
@@ -2758,7 +2827,9 @@
             };
             console.log('[CA] Done event received, total=' + accumulated.length + ' chars, truncated=' + result.truncated);
             renderReportInPreview(_currentReport);
-            status.textContent = result.truncated
+            status.textContent = result.truncated_empty
+              ? '⚠ Model produced no visible output despite using the full response budget. Increasing max response length may not help — try a different reasoning effort or model.'
+              : result.truncated
               ? '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.'
               : 'Completed at ' + new Date().toLocaleTimeString() + ' (source: ' + (result.source || 'ai') + ')';
             loadUnifiedHistory();
@@ -2783,11 +2854,7 @@
       status.textContent = 'Error: ' + err.message + hint;
       if (content) content.innerHTML = '';
     } finally {
-      if (waitTimer) { clearInterval(waitTimer); waitTimer = null; }
-      btn.disabled = false;
-      btn.textContent = 'Investigate';
-      loading.textContent = 'Generating…';
-      loading.style.display = 'none';
+      _resetReportControls(btn, loading, 'Investigate');
     }
   }
 
@@ -2874,7 +2941,10 @@
       ? ' <span style="background:var(--primary);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;vertical-align:middle;">refined</span>'
       : '';
     const tsSpan = ts ? '<div style="color:var(--text-secondary);font-size:0.82rem;margin-bottom:8px;">' + escapeHtml(ts) + refinedBadge + '</div>' : '';
-    const truncatedBanner = result.truncated
+    const truncatedBanner = result.truncated_empty
+      ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
+        + '⚠ Model produced no visible output despite using the full response budget. Increasing max response length may not help — try a different reasoning effort or model.</div>'
+      : result.truncated
       ? '<div style="background:var(--warning);color:#000;font-size:0.82rem;padding:6px 10px;border-radius:4px;margin-bottom:8px;">'
         + '⚠ Report truncated — hit max response length. Increase ‘Investigator Max Response Length’ in AI settings and re-run.</div>'
       : '';
@@ -2894,27 +2964,17 @@
           + '<div style="font-size:0.85rem;line-height:1.5">' + renderMarkdown(text) + '</div></div>';
       });
     } else {
-      const sections = [
-        { key: 'summary', label: '\ud83d\udcca Summary' },
-        { key: 'incongruities', label: '\u26a0\ufe0f Incongruities Found' },
-        { key: 'data_quality', label: '\ud83d\udd22 Data Quality Issues' },
-        { key: 'errors_warnings', label: '\ud83d\udea8 System Errors / Warnings' },
-        { key: 'hypotheses', label: '\ud83d\udd2c Hypotheses' },
-        { key: 'recommended_actions', label: '\u2705 Recommended Actions' },
-        { key: 'assumptions', label: '\ud83d\udcdd Assumptions & Confidence' },
-      ];
       let hasSection = false;
-      for (const { key, label } of sections) {
+      for (const { key, label } of _INVESTIGATION_SECTION_DEFS) {
         const text = data[key] || '';
         if (!text) continue;
         hasSection = true;
         html += '<details open style="margin-bottom:0.5rem;">'
           + '<summary style="cursor:pointer;font-weight:600;padding:0.25rem 0;">' + escapeHtml(label) + '</summary>'
-          + '<pre style="white-space:pre-wrap;font-size:0.8rem;margin:0.5rem 0 0;padding:0.5rem;background:var(--bg);border-radius:4px;">'
-          + escapeHtml(text) + '</pre></details>';
+          + '<div style="font-size:0.85rem;line-height:1.5;margin:0.5rem 0 0;">' + renderMarkdown(text) + '</div></details>';
       }
       if (!hasSection && result.raw_response) {
-        html += '<pre style="white-space:pre-wrap;font-size:0.8rem;">' + escapeHtml(result.raw_response) + '</pre>';
+        html += '<div style="font-size:0.85rem;line-height:1.5;">' + renderMarkdown(result.raw_response) + '</div>';
       }
     }
     content.innerHTML = html;
@@ -3103,7 +3163,9 @@
         : '<span style="background:var(--success);color:#fff;font-size:0.7rem;padding:1px 6px;border-radius:10px;">Activity</span>';
       const result = entry.result || {};
       const source = result.source || 'unknown';
-      const truncatedBadge = result.truncated
+      const truncatedBadge = result.truncated_empty
+        ? '<span title="Model produced no visible output despite using the full response budget" style="background:var(--warning);color:#000;font-size:0.7rem;padding:1px 6px;border-radius:10px;">⚠ no output</span>'
+        : result.truncated
         ? '<span title="Report was cut off — hit max response length" style="background:var(--warning);color:#000;font-size:0.7rem;padding:1px 6px;border-radius:10px;">⚠ truncated</span>'
         : '';
       const summary = (result.data && result.data.summary)
@@ -3183,7 +3245,8 @@
     out += '| **Date** | ' + ts + ' |\n';
     out += '| **Source** | ' + source + ' |\n';
     if (focus) out += '| **Focus** | ' + focus + ' |\n';
-    if (result.truncated) out += '| **Truncated** | ⚠ Yes — hit max response length |\n';
+    if (result.truncated_empty) out += '| **Truncated** | ⚠ Yes — zero visible output despite using the full response budget |\n';
+    else if (result.truncated) out += '| **Truncated** | ⚠ Yes — hit max response length |\n';
     out += '\n---\n\n';
     for (const { key, label } of sections) {
       const content = (data[key] || '').trim();

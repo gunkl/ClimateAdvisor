@@ -1,6 +1,15 @@
-<!-- Nav: ← Context: [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) | → Detail: [claude_api.py](../custom_components/climate_advisor/claude_api.py) · [ai_skills.py](../custom_components/climate_advisor/ai_skills.py) · [ai_skills_activity.py](../custom_components/climate_advisor/ai_skills_activity.py) · [ai_skills_investigator.py](../custom_components/climate_advisor/ai_skills_investigator.py) | ↔ Related: [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md) · [Computation Reference](08-COMPUTATION-REFERENCE.md) -->
+<!-- Nav: ← Context: [Architecture Reference](02-ARCHITECTURE-REFERENCE.md) | → Detail: [claude_api.py](../custom_components/climate_advisor/claude_api.py) · [ai_skills.py](../custom_components/climate_advisor/ai_skills.py) · [ai_skills_investigator.py](../custom_components/climate_advisor/ai_skills_investigator.py) · [ai_skills_context.py](../custom_components/climate_advisor/ai_skills_context.py) | ↔ Related: [Learning Engine Design](05-LEARNING-ENGINE-DESIGN.md) · [Computation Reference](08-COMPUTATION-REFERENCE.md) -->
 
 # AI Integration — Architecture Brief (Tier 2)
+
+**Issue #563 (this pass):** the former `"activity_report"` and `"investigator"` skills have
+been merged into one `"investigator"` skill with two entry modes — silent/scheduled
+narration (no `focus`) and on-demand investigation (`focus` supplied). The old
+`ai_skills_activity.py` module is deleted; its genuinely non-redundant context (state
+cross-validation, override/fan-ownership details, historical daily summaries) now lives as
+context providers in `ai_skills_context.py`, registered in the same `ContextProviderRegistry`
+the investigator already used. See [Issue #563](https://github.com/gunkl/ClimateAdvisor/issues/563)
+for the full audit of what was ported vs. retired as redundant.
 
 ## Anchors
 
@@ -10,10 +19,11 @@
 | How are auto and manual AI requests counted separately, and what resets them? | `auto_requests_today` and `manual_requests_today` are distinct daily counters; `_reset_daily_counters_if_needed()` zeroes both at the top of every `async_request()` call when the date has changed. | [Rate Limiting](#rate-limiting) |
 | What happens when a monthly budget is set and the cap is reached? | `_check_budget()` returns `ClaudeResponse(success=False, budget_exceeded=True)` and the API call is never made; the cap resets at calendar month boundary. Value `0` means no cap. | [Monthly Budget](#monthly-budget) |
 | What is the fixed return shape from every skill execution, regardless of success or fallback? | Every `async_execute()` call returns a 6-key dict: `{success, source, data, error, input_context, raw_response}`. Source is `"ai"`, `"fallback"`, or `"error"`. | [Return Contract](#return-contract) |
-| What context does the activity report build, and how does it guard against false contradiction alerts? | It assembles nine labeled sections from coordinator.data, live climate state, and config. A contradiction warning (`hvac_mode=off` but action in `{heating, cooling, fan}`) is suppressed when the CA fan is actively running. | [activity\_report](#activity_report) |
-| What makes the investigator skill different from the activity report skill? | The investigator resolves seven independent context sources (including GitHub issues and CA design prose), uses per-skill model/token/reasoning overrides, and gates on a separate `_investigator_requests_today` counter. | [investigator](#investigator) |
+| Is there still a separate "activity report" skill? | No (Issue #563) — it was merged into `"investigator"`. The dashboard's silent/scheduled report and the on-demand focus-driven investigation are now two entry modes of the same skill, same prompt, same context-provider registry. | [investigator](#investigator) |
+| Does the investigator still have its own model/token/reasoning config overrides? | No (Issue #563) — it shares the single `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` config used everywhere else. `CONF_AI_INVESTIGATOR_MODEL`/`_MAX_TOKENS`/`_REASONING` constants remain defined (unused) only so the historical v13→v14 config migration doesn't break old installs. | [investigator](#investigator) |
+| Why did the KNOWN-FIXED ISSUES context section used to grow without bound? | `_fix_is_relevant()`'s escape-hatch rule matched any entry with a non-empty `scope_not_covered` field, which was mandatory on every entry — so all 169 entries always passed regardless of the intended version-scoping. Fixed by removing the field entirely and bounding by recency count instead. | [Known Fixes Context](#known-fixes-context) |
 | What are the full pre/post/invariant contracts for `ClaudeAPIClient.async_request()` and the circuit breaker? | The Tier 3 spec covers the 5-row circuit breaker transition table, guard sequence for `async_request()`, `ClaudeResponse` mutual-exclusivity invariants, budget reset trigger, and all four retried exception types. | [Claude API Client — Territory Spec](claude-api-spec.md) |
-| What are the full contracts for the skill registry, execution pipeline, and both registered skills? | The Tier 3 spec covers `AISkillRegistry` registration and lookup, the 6-step execution pipeline, return contract enforcement, `activity_report` and `investigator` context/parse/fallback contracts, and caching behavior. | [AI Skills Framework — Territory Spec](ai-skills-spec.md) |
+| What are the full contracts for the skill registry, execution pipeline, and the registered skill? | The Tier 3 spec covers `AISkillRegistry` registration and lookup, the 6-step execution pipeline, return contract enforcement, the merged `investigator` skill's context/parse/fallback contracts, and caching behavior. | [AI Skills Framework — Territory Spec](ai-skills-spec.md) |
 
 ---
 
@@ -26,15 +36,14 @@
 - Persistence of stats (counters, monthly cost) across HA restarts
 - AI skill registry: registration, lookup, and execution pipeline (`AISkillRegistry` in `ai_skills.py`)
 - Skill definitions: `AISkillDefinition` blueprints including context builders, response parsers, and fallbacks
-- Context assembly for the `"activity_report"` skill (`ai_skills_activity.py`)
-- Context assembly for the `"investigator"` skill (`ai_skills_investigator.py`)
+- Context assembly for the merged `"investigator"` skill (`ai_skills_investigator.py` orchestrates; individual context providers live in `ai_skills_context.py`)
 - Cross-validation logic (HVAC contradiction check, comfort band flag) before each Claude call
-- Fallback paths for both skills when Claude is unavailable or returns an error
+- The deterministic fallback path when Claude is unavailable or returns an error
 
 **Explicitly does NOT own:**
 - HA service registration for `ai_activity_report`, `get_ai_report`, `clear_ai_reports` — owned by `coordinator.py` / `__init__.py`
 - Sensor entity for `sensor.climate_advisor_ai_status` — owned by `sensor.py`
-- Report history storage (`get_ai_report_history()`, `store_ai_report()`) — owned by `coordinator.py`
+- Report history storage (`get_investigation_report_history()`, `store_investigation_report()`; the legacy `get_ai_report_history()` is frozen, read-only, pre-merge history) — owned by `coordinator.py`
 - Thermal model computation — owned by `learning.py`
 - Daily record persistence — owned by `coordinator.py` + `learning.py`
 - REST API endpoints — owned by `api.py`
@@ -46,7 +55,7 @@
 - Authenticate with the Anthropic API using the HA config-entry API key; recreate the client when the key changes via `update_config()`
 - Enforce a circuit breaker: count consecutive failures, open the breaker on threshold, block calls while open, probe with one request in half-open state
 - Enforce daily rate limits independently for auto-triggered and manual-triggered requests
-- Enforce a separate investigator rate limit gated also on `CONF_AI_INVESTIGATOR_ENABLED`
+- Enforce a separate investigator rate limit gated also on `CONF_AI_INVESTIGATOR_ENABLED` — this now gates only the on-demand/focus-driven call path (`ClimateAdvisorInvestigateView`), not skill registration itself, so the silent/narration mode stays available to anyone with AI enabled (Issue #563)
 - Enforce a monthly cost cap; accumulate `estimated_cost` on every successful call; reset at calendar month boundary
 - Retry failed API calls with exponential backoff (`AI_MAX_RETRIES` attempts); skip backoff after the final attempt
 - Estimate cost per request from a model-prefix lookup table (`_MODEL_COSTS`)
@@ -56,9 +65,8 @@
 - Provide a skill registry: register, overwrite-with-warning, and execute skills by name
 - Execute the skill pipeline: context build → config-override resolution → Claude call → response parse → fallback on failure
 - Always return a fixed 6-key dict from `async_execute()`, never raise
-- Assemble nine-section context for the `"activity_report"` skill; compute pre-call cross-validation flags
-- Assemble seven-section context for the `"investigator"` skill; append version notes and live GitHub issues
-- Provide deterministic fallbacks for both skills that return the same output schema without calling Claude
+- Assemble the merged `"investigator"` skill's context from the `ContextProviderRegistry` (current state, HVAC entity, learning, thermal pipeline, event log + timing correlations + override false-positives + restart history, activity timeline, state cross-validation, override details, daily summaries, AI report history, config, operational design, known-fixed issues, version notes, live GitHub issues); compute pre-call cross-validation flags
+- Provide a deterministic fallback that returns the same output schema without calling Claude
 
 ---
 
@@ -68,8 +76,8 @@
 |---|---|
 | `claude_api.py` | `ClaudeAPIClient`: all Anthropic API access, circuit breaker, rate limits, budget, retry, cost estimation, persistence |
 | `ai_skills.py` | `AISkillRegistry` + `AISkillDefinition`: skill registration, lookup, execution pipeline, return contract enforcement |
-| `ai_skills_activity.py` | `"activity_report"` skill: context builder, HVAC cross-validation, output schema parser, deterministic fallback |
-| `ai_skills_investigator.py` | `"investigator"` skill: seven-source context builder, GitHub context, per-skill model overrides, deterministic fallback |
+| `ai_skills_investigator.py` | The merged `"investigator"` skill: system prompt, response parser, deterministic fallback, thin context-assembly orchestrator |
+| `ai_skills_context.py` | `ContextProviderRegistry` + every individual context provider (16, as of Issue #563) the investigator's context is assembled from, including the render/timeline functions and the state-cross-validation/override-details/daily-summaries providers ported from the retired `ai_skills_activity.py` |
 
 ---
 
@@ -203,84 +211,47 @@ Every `async_execute()` call returns exactly this shape, regardless of path take
 
 ## Skills
 
-### activity_report
+### investigator (merged, Issue #563)
 
-**Skill name:** `"activity_report"` · **triggered_by:** `"manual"` · **No per-skill model overrides**
+**Skill name:** `"investigator"` · **triggered_by:** `"manual"` · **No per-skill model overrides** — shares
+the single `ai_model`/`ai_reasoning_effort`/`ai_max_tokens` config used everywhere else.
+
+This is the only skill in the registry. It replaces the former `"activity_report"` and
+`"investigator"` skills, which duplicated prompts, config, context assembly, and frontend
+streaming code. Two entry modes share one prompt, one context-provider registry, one parser,
+one fallback:
+
+- **Silent / scheduled narration** — no `focus` kwarg. Reads as an occupant-facing activity
+  readout (what happened, why, anything worth knowing).
+- **On-demand investigation** — `focus` kwarg carries the user's described problem. The
+  `focus` text is prepended to the assembled context as a user-directed investigation target.
 
 #### Context Sources
 
-The context builder assembles nine labeled sections in order:
+Sixteen context providers are registered in `ai_skills_context.py`'s `ContextProviderRegistry`
+(`ai_skills_investigator.py:async_build_investigator_context` is a thin orchestrator that calls
+`registry.select(focus)` and concatenates the result). Each provider is wrapped in its own
+`try/except`; a failure in one does not abort the others — the section is marked unavailable
+and assembly continues.
 
-| Section | Data source |
+| Provider | Data source |
 |---|---|
-| STATE CROSS-VALIDATION | Computed locally before Claude call (see below) |
-| CLASSIFICATION | `coordinator.data`: day type, trend direction/magnitude, hvac_mode, windows recommended |
-| AUTOMATION STATE | `coordinator.data`: automation status, last action, next action |
-| OCCUPANCY | `coordinator.data`: occupancy mode |
-| FAN | `coordinator.data`: fan status |
-| CONTACT SENSORS | `coordinator.data`: contact status |
-| LEARNING | `coordinator.data`: learning suggestions (count + type list only — no suggestion text or evidence) |
-| CONFIGURATION | `coordinator.config`: comfort temps, schedule times, feature flags |
-| ACTIVE FEATURES | `coordinator.config`: enabled/disabled feature flags |
-
-Additional data woven into context: fresh HVAC runtime from `coordinator._today_record` and live climate entity state from HA.
-
-#### Cross-Validation
-
-Before the Claude call, two flags are computed and inserted into the STATE CROSS-VALIDATION section:
-
-1. **Contradiction warning:** `hvac_mode=off` but `hvac_action` is one of `{heating, cooling, fan}`. Suppressed (no flag emitted) when the CA fan status is `"active"`, `"running (manual override)"`, or `"running (untracked)"`.
-2. **Comfort band check:** numeric comparison of `current_indoor_temp` vs `comfort_heat` (lower bound) and `comfort_cool` (upper bound). Emits `[FLAG]` if out of band, `[OK]` if within band.
-
-#### Output Schema
-
-The response parser splits Claude's response on `## HEADER` lines to produce:
-
-```python
-{
-    "summary": str,
-    "timeline": str,
-    "decisions": str,
-    "anomalies": str,
-    "diagnostics": str,
-}
-```
-
-Missing sections default to `""`.
-
-#### Fallback
-
-The fallback is deterministic: it reads the same `coordinator.data` fields and assembles a plain-text response in the same five-key output shape. No Claude call is made.
-
----
-
-### investigator
-
-**Skill name:** `"investigator"` · **triggered_by:** `"manual"` · **Has per-skill overrides:** `CONF_AI_INVESTIGATOR_MODEL`, `CONF_AI_INVESTIGATOR_MAX_TOKENS`, `CONF_AI_INVESTIGATOR_REASONING`
-
-This is the only skill in the registry with per-skill config key overrides.
-
-#### Context Sources
-
-Seven context blocks are assembled independently. Each is wrapped in its own `try/except`; a failure in one block does not abort the others — the section is marked as unavailable and assembly continues.
-
-| # | Block | Data source |
-|---|---|---|
-| 1 | Current state | `coordinator.data` + fresh HVAC runtime |
-| 2 | Live HVAC entity state | `hass.states.get(climate_entity_id)` |
-| 3 | Learning engine data | Compliance summary, thermal model, weather bias, suggestions, last 14 daily records |
-| 4 | Event log | Last 200 event log entries filtered to last N hours (`kwargs["hours"]`, default 48); includes counts by type and extracted error/warning entries |
-| 5 | Recent AI report history | Last 3 activity reports (timestamp + summary only) via `coordinator.get_ai_report_history()` |
-| 6 | Configuration | All `coordinator.config` entries — `ai_api_key` stripped via `.pop()` before inclusion |
-| 7 | CA operational design | Hardcoded prose block explaining: fan_status values, deadband behavior, warm-day comfort guard, natural vent mode, contradiction suppression logic |
-
-**Additional context appended after the seven blocks:**
-- Version/release notes (last 5 versions)
-- Live GitHub issues (fetched from the GitHub API via HTTP; silently omitted on network error)
-
-#### Optional Focus
-
-`kwargs.get("focus", "")` is prepended to the assembled context as a user-directed investigation focus if present.
+| `current_state` | `coordinator.data` + fresh HVAC runtime |
+| `hvac_entity` | `hass.states.get(climate_entity_id)` |
+| `state_cross_validation` | HVAC mode/action contradiction check + comfort-band deadband/swing check (ported from the retired activity context, Issue #563) |
+| `last_briefing` | Most recent daily briefing text |
+| `learning` | Compliance summary, thermal model, weather bias, suggestions, recent daily records |
+| `thermal_pipeline` | Per-obs-type rejection/commit counts, `NEVER LEARNED`/`***PIPELINE FAILURE***` markers, engine status |
+| `event_log` | Last 200 event-log entries filtered to last N hours (`kwargs["hours"]`, default 168, clamped 1–720); event-type counts, extracted error/warning entries, `TIMING CORRELATIONS` (manual events near known automation cycle periods), `KNOWN OVERRIDE FALSE POSITIVES` (Issue #205 pattern: `override_detected` within 60s of an automation event), `RESTART HISTORY` (restart count by cause — `user_restart`/`version_changed` filtered out as benign, only `cause=unknown` is noteworthy) |
+| `activity_timeline` | Deterministic markdown event timeline table (ported from the retired activity context; never LLM-authored) |
+| `override_details` | Manual override count/history/current-override-duration, Issue #321 stuck-grace critical warning, fan ownership transitions (ported, Issue #563) |
+| `daily_summaries` | Historical multi-day trend summary, only populated when `hours > 36` (ported, Issue #563) |
+| `ai_report_history` | Last 3 prior reports (timestamp + summary only) via `coordinator.get_ai_report_history()` |
+| `config` | ~11 curated `coordinator.config` fields (comfort/setback temps, schedule, `ai_model`, `learning_enabled`) — not a full config dump |
+| `operational_design` | Static prose block explaining fan_status values, deadband behavior, warm-day comfort guard, natural vent mode, contradiction suppression logic |
+| `known_fixes` | `KNOWN_FIXES` entries bounded to the most recent `_KNOWN_FIXES_RECENT_COUNT` (15) plus any not-yet-deployed entry — rendered as the matching `RELEASE_NOTES` bullet, not the internal `title`/`scope_covered` engineering prose (Issue #563; see anchor above) |
+| `version` | Last 5 versions' `RELEASE_NOTES` |
+| `github` | Live open + closed GitHub issues (TTL-cached; trimmed to `number`/`title`/`state`/`labels` before caching, Issue #563), silently omitted on network error |
 
 #### Output Schema
 
@@ -297,15 +268,17 @@ Seven context blocks are assembled independently. Each is wrapped in its own `tr
 }
 ```
 
-`full_text` is always populated; the other keys are section-split from that text. Missing sections default to `""`.
+`full_text` is always populated; the other keys are section-split from that text. Missing
+sections default to `""`. Every section's leading sentence is required (by prompt contract,
+Issue #563) to be occupant-outcome language — the human-observable effect before the internal
+state that caused it — with `[source: key, value: X]`-style citations demoted to a trailing
+parenthetical rather than the subject of the sentence.
 
 #### Fallback
 
-The fallback is deterministic: scans the event log for errors in the last 48 hours, checks window compliance issues, and counts overrides. Returns the same 8-key dict with `source="fallback"`. Does not call Claude.
-
-#### Cross-Skill Dependency
-
-The investigator does NOT import or invoke `ai_skills_activity`. It reads the same raw coordinator data independently. It uses `coordinator.get_ai_report_history()` to include prior activity report summaries, enabling contradiction-checking between successive reports.
+The fallback is deterministic: scans the event log for errors in the last 48 hours, checks
+window compliance issues, and counts overrides. Returns the same 8-key dict with
+`source="fallback"`. Does not call Claude.
 
 ---
 
@@ -318,9 +291,9 @@ Key public entry points called by external modules:
 | `ClaudeAPIClient.async_request()` | `claude_api.py` | `ai_skills.py` (`async_execute`) | Single gate for all Anthropic API calls |
 | `ClaudeAPIClient.update_config()` | `claude_api.py` | `coordinator.py` (options flow update) | Hot-reload config; recreates client on key change |
 | `ClaudeAPIClient.get_persistent_stats()` / `restore_persistent_stats()` | `claude_api.py` | `coordinator.py` (startup/shutdown) | Persist counters and monthly cost across reboots |
-| `ClaudeAPIClient.check_investigator_rate_limit()` | `claude_api.py` | `coordinator.py` (investigator service handler) | Gate investigator calls before dispatching |
-| `AISkillRegistry.register()` | `ai_skills.py` | `ai_skills_activity.py`, `ai_skills_investigator.py` (module init) | Register a skill definition |
-| `AISkillRegistry.async_execute()` | `ai_skills.py` | `coordinator.py` (service handlers) | Run a named skill end-to-end |
+| `ClaudeAPIClient.check_investigator_rate_limit()` | `claude_api.py` | `api.py` (`ClimateAdvisorInvestigateView`) | Gate the on-demand/focus-driven call path only — not skill registration (Issue #563) |
+| `AISkillRegistry.register()` | `ai_skills.py` | `ai_skills_investigator.py` (module init, via `coordinator.py`) | Register the merged skill definition |
+| `AISkillRegistry.async_execute()` / `async_execute_streaming()` | `ai_skills.py` | `api.py` (`ClimateAdvisorAIActivityView`, `ClimateAdvisorInvestigateView`) | Run the skill end-to-end for either entry mode |
 
 ---
 
@@ -395,9 +368,9 @@ class AISkillDefinition:
 
 6. **The API key is never recorded.** It is not written to request history entries, not logged in any log statement, and not included in any API response or sensor attribute.
 
-7. **Learning suggestion text is never sent to Claude by the activity report.** Only the count and type list are included in context; raw suggestion text and evidence are filtered out before context assembly.
+7. **Learning suggestion text and evidence ARE sent to Claude.** Corrected during Issue #563 doc convergence — this invariant previously claimed suggestion text was filtered to count+type only, which was true for the retired `activity_report` skill but was never true for `investigator` (the survivor): `build_learning_context()`'s `ACTIVE SUGGESTIONS` section includes each suggestion's full `text` and `evidence` dict. No suggestion-level filtering is currently applied.
 
-8. **Investigator config block strips `ai_api_key` before inclusion.** `coordinator.config.pop("ai_api_key")` is called on a copy before the config is serialised into context.
+8. **Config block strips `ai_api_key` before inclusion.** `coordinator.config.pop("ai_api_key")` is called on a copy before the config is serialised into context (`build_config_context()`, which sends a curated ~11-field subset, not the full config).
 
 9. **Request history deque is capped.** Entries beyond `AI_REQUEST_HISTORY_CAP` are evicted from the left; the deque never grows without bound.
 

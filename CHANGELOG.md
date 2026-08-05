@@ -3,6 +3,16 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.51] — 2026-08-03
+
+- Fix #563: the AI Investigator was sending nearly the entire history of every fixed issue to Claude on every single run — a version-scoping check that was supposed to limit this to only recently-relevant fixes had a bug that let all 169 fixed-issue records through every time, and a separate rendering bug was expanding some of that text by roughly 15x on top of that. Investigations should now run noticeably faster and cheaper, with no loss of the "was this already fixed" cross-check the AI uses this data for.
+- Fix #563: the scheduled "Generate with AI" activity narration was running the same full audit-depth analysis as an on-demand investigation (including a live GitHub fetch) — it now uses a lighter, current-activity-only context, which should make it noticeably faster.
+- Fix #563: the Investigate report's progress display now shows real step-by-step status from the backend and fills in the report as sections complete, instead of a fake elapsed-seconds counter and raw unformatted text.
+- Fix #563: fixed a bug where the "AI Activity Report" scheduled service call silently failed on every run after a recent internal rename.
+- Fix #563: the AI model dropdown in settings now shows Anthropic's current available models automatically instead of a fixed list, and if a configured model is retired, Climate Advisor automatically switches to a comparable replacement instead of failing.
+- Fix #563: fixed AI requests failing outright when a newer model no longer accepts a setting (e.g. temperature) that older models required — Climate Advisor now detects this and retries without it automatically.
+- Fix #563: raised the maximum AI response length setting from 8192 to 16384 tokens, and added a clearer warning when a response uses its full budget but produces no visible output (rather than the generic "truncated" message, which incorrectly implied a bigger budget alone would fix it).
+
 ## [0.5.50] — 2026-08-03
 
 - Fix #561: the whole-house fan could turn itself on with every door and window closed, briefly switching the thermostat off for no reason — and the log misleadingly claimed "whole-house fan manually turned on" even though nobody touched it. The fan-cycling logic now re-checks that a monitored sensor is actually open before ever turning the fan back on, instead of trusting an internal flag that could go stale for hours. Also fixed the underlying causes: a self-healing check that could keep a ventilation "session" alive after windows closed, and a rare timing gap that could start two duplicate internal timers, both of which could leave the system briefly confused about whether it or the user caused a fan change.

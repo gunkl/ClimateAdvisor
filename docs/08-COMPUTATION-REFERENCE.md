@@ -736,7 +736,7 @@ Fire paths emit `bedtime_setback` with `{mode, target_f, depth_f, adaptive, modi
 | `occupancy_comfort_restored` | `handle_occupancy_home()` | Classification `hvac_mode` is `heat` or `cool` | `{mode: "cool"\|"heat", target_f: float}` (comfort setpoint) |
 | `morning_wakeup` | `handle_morning_wakeup()` | Classification `hvac_mode` is `heat` or `cool` | `{mode: "cool"\|"heat", target_f: float}` (comfort setpoint) |
 
-No event is emitted when HVAC is `off` (mild/warm day) — no setpoint change occurs in those cases. All four event types are categorised as `source_label=automation` by `_event_source_label()` in `ai_skills_activity.py`. The skip path (HVAC off, occupancy away at wakeup) continues to emit `morning_wakeup_skipped` as before.
+No event is emitted when HVAC is `off` (mild/warm day) — no setpoint change occurs in those cases. All four event types are categorised as `source_label=automation` by `_event_source_label()` in `ai_skills_context.py`. The skip path (HVAC off, occupancy away at wakeup) continues to emit `morning_wakeup_skipped` as before.
 
 **DailyRecord setback fields (Issue #151):** `handle_bedtime()` writes the following fields to `DailyRecord` on every bedtime pass — fire or skip:
 
@@ -2356,7 +2356,7 @@ re-entering soft-start on a later temperature dip is intentionally out of scope 
 returns `"nat-vent — soft-start (purge)"` instead of `"nat-vent"` — no new card, per the
 Status Card Ontology in the root `CLAUDE.md`). Entry is logged at INFO and emits
 `nat_vent_soft_start_entered` (rendered in the Activity Report via
-`ai_skills_activity.py`'s `EVENT_RENDERERS`).
+`ai_skills_context.py`'s `EVENT_RENDERERS`).
 
 **Timezone/day-boundary note:** `coordinator._outdoor_temp_history` is written and
 cleared entirely in HA local time (`dt_util.now()`, `async_track_time_change` at

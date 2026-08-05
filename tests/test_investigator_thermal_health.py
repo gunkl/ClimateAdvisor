@@ -23,6 +23,7 @@ if "anthropic" not in sys.modules:
     _mock_anthropic.APIError = type("APIError", (Exception,), {})
     _mock_anthropic.APITimeoutError = type("APITimeoutError", (Exception,), {})
     _mock_anthropic.RateLimitError = type("RateLimitError", (Exception,), {})
+    _mock_anthropic.NotFoundError = type("NotFoundError", (_mock_anthropic.APIError,), {})
     _mock_anthropic.AsyncAnthropic = MagicMock()
     sys.modules["anthropic"] = _mock_anthropic
 
@@ -292,18 +293,27 @@ class TestThermalPipelineSection:
         # Engine status section must appear (already exists in activity report; investigator needs it too)
         assert "k_passive" in ctx, "k_passive not found in investigator context"
 
-    def test_system_prompt_has_thermal_health_rules(self):
-        """_SYSTEM_PROMPT must document thermal pipeline diagnostic rules."""
+    def test_system_prompt_points_at_precomputed_thermal_markers(self):
+        """_SYSTEM_PROMPT must point at the pre-computed pipeline markers, not
+        restate the diagnostic rules as prose (Issue #563).
+
+        `build_thermal_pipeline_context()` already computes and marks pipeline
+        failures ("***"), never-learned parameters ("NEVER LEARNED"), and missing
+        backfill data ("NOTE:") directly in the context — the prompt used to
+        duplicate this as ~15 lines of rules the model had to re-derive from raw
+        counts every run. It now just tells the model to trust those markers.
+        """
         from custom_components.climate_advisor.ai_skills_investigator import _SYSTEM_PROMPT
 
-        assert "THERMAL PIPELINE HEALTH" in _SYSTEM_PROMPT, (
-            "_SYSTEM_PROMPT missing THERMAL PIPELINE HEALTH rules section"
+        assert "THERMAL PIPELINE HEALTH rules" not in _SYSTEM_PROMPT, (
+            "The old hardcoded thermal-health rule block should be removed — the underlying"
+            " facts are now pre-computed in THERMAL OBSERVATION PIPELINE context instead"
         )
-        assert "k_active_cool" in _SYSTEM_PROMPT or "NEVER LEARNED" in _SYSTEM_PROMPT, (
-            "_SYSTEM_PROMPT must mention k_active_cool=None / NEVER LEARNED diagnostic rule"
+        assert "THERMAL OBSERVATION PIPELINE" in _SYSTEM_PROMPT, (
+            "_SYSTEM_PROMPT must point at the pre-computed THERMAL OBSERVATION PIPELINE section"
         )
-        assert "new_session_started" in _SYSTEM_PROMPT, (
-            "_SYSTEM_PROMPT must mention new_session_started abandonment pattern"
+        assert "NEVER LEARNED" in _SYSTEM_PROMPT, (
+            "_SYSTEM_PROMPT must instruct the model to trust the NEVER LEARNED marker directly"
         )
 
     def test_pending_observations_shown_in_context(self):

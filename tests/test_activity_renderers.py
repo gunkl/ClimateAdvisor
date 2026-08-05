@@ -27,7 +27,7 @@ if "homeassistant" not in sys.modules:
 
 # Patch dt_util.as_local to be identity so _fmt_time comparisons use real datetimes
 # rather than MagicMock objects (same pattern as test_coordinator.py).
-import custom_components.climate_advisor.ai_skills_activity as _act_mod  # noqa: E402
+import custom_components.climate_advisor.ai_skills_context as _act_mod  # noqa: E402
 
 _REAL_NOW = datetime.datetime(2026, 6, 17, 14, 0, 0, tzinfo=datetime.UTC)
 
@@ -44,7 +44,7 @@ def _make_event(
 
 def _build_table(events: list[dict], hours: float = 24.0, unit: str = "fahrenheit") -> str:
     """Call build_event_timeline_table with a fixed now and return the result."""
-    from custom_components.climate_advisor.ai_skills_activity import (
+    from custom_components.climate_advisor.ai_skills_context import (
         build_event_timeline_table,
     )
 
@@ -68,7 +68,7 @@ class TestFormatBandSetpoint:
 
     def test_active_ceiling_shows_cool_first(self):
         """active='ceiling' → 'setpoint: 72°F Cool (64°F Heat)' — cool edge is prominent."""
-        from custom_components.climate_advisor.ai_skills_activity import _format_band_setpoint
+        from custom_components.climate_advisor.ai_skills_context import _format_band_setpoint
 
         result = _format_band_setpoint(floor=64, ceiling=72, active="ceiling", unit="fahrenheit")
         assert result == "setpoint: 72°F Cool (64°F Heat)", (
@@ -77,7 +77,7 @@ class TestFormatBandSetpoint:
 
     def test_active_floor_shows_heat_first(self):
         """active='floor' → 'setpoint: 64°F Heat (72°F Cool)' — heat edge is prominent."""
-        from custom_components.climate_advisor.ai_skills_activity import _format_band_setpoint
+        from custom_components.climate_advisor.ai_skills_context import _format_band_setpoint
 
         result = _format_band_setpoint(floor=64, ceiling=72, active="floor", unit="fahrenheit")
         assert result == "setpoint: 64°F Heat (72°F Cool)", (
@@ -86,7 +86,7 @@ class TestFormatBandSetpoint:
 
     def test_active_unknown_shows_both(self):
         """active=None/'other' → 'setpoint: 64°F Heat / 72°F Cool' (no ordering bias)."""
-        from custom_components.climate_advisor.ai_skills_activity import _format_band_setpoint
+        from custom_components.climate_advisor.ai_skills_context import _format_band_setpoint
 
         result = _format_band_setpoint(floor=64, ceiling=72, active=None, unit="fahrenheit")
         assert "64°F Heat" in result and "72°F Cool" in result, (
@@ -95,7 +95,7 @@ class TestFormatBandSetpoint:
 
     def test_celsius_conversion(self):
         """Fahrenheit inputs are converted to Celsius display (18°C Heat / 22°C Cool)."""
-        from custom_components.climate_advisor.ai_skills_activity import _format_band_setpoint
+        from custom_components.climate_advisor.ai_skills_context import _format_band_setpoint
 
         # 64°F ≈ 17.8°C → rounds to 18°C; 72°F = 22.2°C → rounds to 22°C
         result = _format_band_setpoint(floor=64, ceiling=72, active="floor", unit="celsius")
@@ -105,7 +105,7 @@ class TestFormatBandSetpoint:
 
     def test_invalid_values_return_empty(self):
         """Non-numeric floor/ceiling → empty string (no crash, no partial output)."""
-        from custom_components.climate_advisor.ai_skills_activity import _format_band_setpoint
+        from custom_components.climate_advisor.ai_skills_context import _format_band_setpoint
 
         result = _format_band_setpoint(floor="n/a", ceiling=None, active="ceiling", unit="fahrenheit")
         assert result == "", f"Invalid inputs must return empty string, got: {result!r}"
@@ -452,7 +452,7 @@ class TestDefaultRenderer:
 
     def test_unknown_type_event_cell_is_non_empty(self):
         """Unknown event type → Event cell is the humanized type name (non-empty)."""
-        from custom_components.climate_advisor.ai_skills_activity import _default_renderer
+        from custom_components.climate_advisor.ai_skills_context import _default_renderer
 
         ev_text, _settings = _default_renderer("some_new_event_type", {}, "fahrenheit")
         assert ev_text, "Event cell must not be empty for unknown event type"
@@ -462,14 +462,14 @@ class TestDefaultRenderer:
 
     def test_unknown_type_with_reason(self):
         """Unknown event with 'reason' field → reason appended to event text."""
-        from custom_components.climate_advisor.ai_skills_activity import _default_renderer
+        from custom_components.climate_advisor.ai_skills_context import _default_renderer
 
         ev_text, _ = _default_renderer("my_event", {"reason": "test_reason"}, "fahrenheit")
         assert "test_reason" in ev_text, f"reason must appear in Event cell. Got: {ev_text!r}"
 
     def test_unknown_type_with_mode_change_in_settings(self):
         """Unknown event with old/new hvac_mode → Settings shows mode transition."""
-        from custom_components.climate_advisor.ai_skills_activity import _default_renderer
+        from custom_components.climate_advisor.ai_skills_context import _default_renderer
 
         _, settings = _default_renderer(
             "my_event",
@@ -482,7 +482,7 @@ class TestDefaultRenderer:
 
     def test_unknown_type_with_setpoint_in_settings(self):
         """Unknown event with old/new setpoint → Settings shows setpoint transition."""
-        from custom_components.climate_advisor.ai_skills_activity import _default_renderer
+        from custom_components.climate_advisor.ai_skills_context import _default_renderer
 
         _, settings = _default_renderer(
             "my_event",
@@ -493,7 +493,7 @@ class TestDefaultRenderer:
 
     def test_unknown_type_with_band_fields_in_settings(self):
         """Unknown event with floor/ceiling → Settings shows band setpoint."""
-        from custom_components.climate_advisor.ai_skills_activity import _default_renderer
+        from custom_components.climate_advisor.ai_skills_context import _default_renderer
 
         _, settings = _default_renderer(
             "my_event",
@@ -504,7 +504,7 @@ class TestDefaultRenderer:
 
     def test_unknown_type_no_crash_with_empty_payload(self):
         """Empty payload → no crash; returns (non_empty_label, '') without raising."""
-        from custom_components.climate_advisor.ai_skills_activity import _default_renderer
+        from custom_components.climate_advisor.ai_skills_context import _default_renderer
 
         try:
             ev_text, settings = _default_renderer("weird_event", {}, "fahrenheit")
@@ -571,7 +571,7 @@ class TestEventRenderersCoverage:
         Forward-compat guardrail (#330): adding a new emit call without a renderer
         causes a blank Settings cell and an unhelpful Event label in the AI timeline.
         """
-        from custom_components.climate_advisor.ai_skills_activity import EVENT_RENDERERS
+        from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS
 
         emitted = self._extract_emitted_types()
         covered = set(EVENT_RENDERERS.keys()) | self._DEFAULT_RENDERER_ALLOWLIST
@@ -595,7 +595,7 @@ class TestEventRenderersCoverage:
         The three warm_day_* legacy types are grandfathered — they appear in
         persisted event logs from pre-P3 instances.
         """
-        from custom_components.climate_advisor.ai_skills_activity import EVENT_RENDERERS
+        from custom_components.climate_advisor.ai_skills_context import EVENT_RENDERERS
 
         _LEGACY_TYPES = frozenset(
             {
@@ -1074,3 +1074,26 @@ class TestStuckGraceRecoveredRenderer:
         )
         assert "expired" not in ev
         assert "no override" in ev.lower()
+
+
+class TestCeilingGuardFiredRenderer:
+    """ceiling_guard_fired's Settings cell must carry old_hvac_mode/new_hvac_mode and
+    new_setpoint_f fields verbatim (Issue #563 — ported from the retired
+    async_build_activity_context integration test, which checked this through
+    the now-defunct raw event-log dump instead of the renderer directly)."""
+
+    def test_mode_change_and_setpoint_both_appear_in_settings(self):
+        ev, st = _act_mod.EVENT_RENDERERS["ceiling_guard_fired"](
+            {"old_hvac_mode": "off", "new_hvac_mode": "cool", "new_setpoint_f": 78.0},
+            "fahrenheit",
+        )
+        assert "mode: off->cool" in st
+        assert "78" in st
+
+    def test_no_mode_change_omits_mode_segment(self):
+        ev, st = _act_mod.EVENT_RENDERERS["ceiling_guard_fired"](
+            {"old_hvac_mode": "cool", "new_hvac_mode": "cool", "new_setpoint_f": 78.0},
+            "fahrenheit",
+        )
+        assert "mode:" not in st
+        assert "78" in st

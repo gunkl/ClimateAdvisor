@@ -29,14 +29,34 @@ _mock_anthropic.__package__ = "anthropic"
 _mock_anthropic.APIError = type("APIError", (Exception,), {})
 _mock_anthropic.APITimeoutError = type("APITimeoutError", (Exception,), {})
 _mock_anthropic.RateLimitError = type("RateLimitError", (Exception,), {})
+_mock_anthropic.NotFoundError = type("NotFoundError", (_mock_anthropic.APIError,), {})
 _mock_anthropic.AsyncAnthropic = MagicMock()
 
 sys.modules["anthropic"] = _mock_anthropic
 
 # Now it is safe to import the module under test.
-from custom_components.climate_advisor.claude_api import ClaudeAPIClient  # noqa: E402
+from custom_components.climate_advisor.claude_api import (  # noqa: E402
+    APIError as _ClaudeApiAPIError,
+)
+from custom_components.climate_advisor.claude_api import (  # noqa: E402
+    ClaudeAPIClient,
+    detect_model_tier,
+    fetch_available_models,
+)
+from custom_components.climate_advisor.claude_api import (  # noqa: E402
+    NotFoundError as _ClaudeApiNotFoundError,
+)
+
+# NOTE: claude_api.py's module-level `NotFoundError` name is bound to whichever test
+# file's mocked `anthropic` module happened to be in sys.modules the FIRST time
+# claude_api.py was imported in this test session — not necessarily this file's own
+# _mock_anthropic (see CLAUDE.md's "Module-Level sys.modules Mocking" testing note).
+# Tests that need to trigger the isinstance(exc, NotFoundError) branch must raise
+# _ClaudeApiNotFoundError (the identity claude_api.py actually holds), not
+# _mock_anthropic.NotFoundError.
 from custom_components.climate_advisor.const import (  # noqa: E402
     AI_CIRCUIT_BREAKER_THRESHOLD,
+    AI_MODELS,
     AI_REQUEST_HISTORY_CAP,
     DEFAULT_AI_AUTO_REQUESTS_PER_DAY,
     DEFAULT_AI_MANUAL_REQUESTS_PER_DAY,
@@ -632,5 +652,474 @@ class TestTruncationDetection:
             events = asyncio.run(_collect())
 
         stop_events = [e for e in events if e.get("type") == "stop"]
-        assert stop_events == [{"type": "stop", "stop_reason": "end_turn"}]
+        assert len(stop_events) == 1
+        assert stop_events[0]["stop_reason"] == "end_turn"
+        assert stop_events[0]["truncated_empty"] is False
         assert not any("truncated" in rec.message.lower() for rec in caplog.records)
+
+    def test_non_streaming_truncated_with_content_is_not_truncated_empty(self, caplog):
+        """Ordinary truncation (partial content) must NOT trip the empty-output warning."""
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message(
+            "partial report...", output_tokens=8192, stop_reason="max_tokens"
+        )
+        client = _make_client(mock_api)
+
+        with caplog.at_level("WARNING"):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.truncated is True
+        assert response.truncated_empty is False
+        assert not any("zero visible output" in rec.message.lower() for rec in caplog.records)
+
+    def test_non_streaming_truncated_with_no_content_is_truncated_empty(self, caplog):
+        mock_api = _make_mock_api_client()
+        empty_msg = _mock_message("", output_tokens=8192, stop_reason="max_tokens")
+        empty_msg.content = []  # no text blocks at all
+        mock_api.messages.create.return_value = empty_msg
+        client = _make_client(mock_api)
+
+        with caplog.at_level("WARNING"):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert response.truncated is True
+        assert response.truncated_empty is True
+        assert any("zero visible output" in rec.message.lower() for rec in caplog.records)
+
+    def test_streaming_truncated_with_no_text_delta_is_truncated_empty(self, caplog):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=8192)
+        final_msg.stop_reason = "max_tokens"
+        # No text_delta events at all — mimics the confirmed live failure shape.
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([], final_msg))
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert stop_events[0]["truncated_empty"] is True
+        assert not any(e.get("type") == "text" for e in events)
+        assert any("zero visible output" in rec.message.lower() for rec in caplog.records)
+
+    def test_streaming_thinking_only_is_still_truncated_empty(self, caplog):
+        """Thinking content alone doesn't count as an answer — truncated_empty tracks
+        visible answer text specifically, not any delta at all."""
+        mock_api = _make_mock_api_client()
+        thinking_event = MagicMock()
+        thinking_event.type = "content_block_delta"
+        thinking_event.delta = MagicMock()
+        thinking_event.delta.type = "thinking_delta"
+        thinking_event.delta.thinking = "pondering..."
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=50, output_tokens=8192)
+        final_msg.stop_reason = "max_tokens"
+        mock_api.messages.stream = MagicMock(return_value=_FakeStreamCM([thinking_event], final_msg))
+        client = _make_client(mock_api)
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        with caplog.at_level("WARNING"):
+            events = asyncio.run(_collect())
+
+        thinking_events = [e for e in events if e.get("type") == "thinking"]
+        assert len(thinking_events) == 1  # thinking content still forwarded to the caller
+        stop_events = [e for e in events if e.get("type") == "stop"]
+        assert stop_events[0]["truncated_empty"] is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #563 — dynamic model discovery + capability-tier deprecation fallback
+# ---------------------------------------------------------------------------
+
+
+class TestModelTierDetection:
+    """detect_model_tier() must recognize every currently-offered model plus future ones."""
+
+    def test_detects_all_current_models(self):
+        for model_id in AI_MODELS:
+            assert detect_model_tier(model_id) in ("opus", "sonnet", "haiku"), model_id
+
+    def test_detects_sonnet_variants(self):
+        assert detect_model_tier("claude-sonnet-4-6") == "sonnet"
+        assert detect_model_tier("claude-sonnet-5") == "sonnet"  # synthetic future model
+
+    def test_detects_opus_and_haiku(self):
+        assert detect_model_tier("claude-opus-5") == "opus"
+        assert detect_model_tier("claude-haiku-4-5-20251001") == "haiku"
+
+    def test_unknown_model_returns_none(self):
+        assert detect_model_tier("some-other-vendor-model") is None
+
+    def test_case_insensitive(self):
+        assert detect_model_tier("Claude-SONNET-4-6") == "sonnet"
+
+
+class TestFetchAvailableModels:
+    """fetch_available_models() must never raise and always fall back to AI_MODELS."""
+
+    def test_no_api_key_returns_static_list(self):
+        result = asyncio.run(fetch_available_models(""))
+        assert result == list(AI_MODELS)
+
+    def test_live_fetch_success_returns_live_list(self):
+        fake_model = MagicMock()
+        fake_model.id = "claude-sonnet-5"
+        fake_page = MagicMock()
+        fake_page.data = [fake_model]
+        fake_client = MagicMock()
+        fake_client.models.list = AsyncMock(return_value=fake_page)
+
+        with patch("custom_components.climate_advisor.claude_api.AsyncAnthropic", return_value=fake_client):
+            result = asyncio.run(fetch_available_models(_TEST_KEY))
+
+        assert result == ["claude-sonnet-5"]
+
+    def test_network_error_falls_back_to_static_list(self):
+        fake_client = MagicMock()
+        fake_client.models.list = AsyncMock(side_effect=Exception("network down"))
+
+        with patch("custom_components.climate_advisor.claude_api.AsyncAnthropic", return_value=fake_client):
+            result = asyncio.run(fetch_available_models(_TEST_KEY))
+
+        assert result == list(AI_MODELS)
+
+    def test_missing_models_attribute_falls_back_to_static_list(self):
+        fake_client = MagicMock(spec=["messages"])  # no .models attribute at all
+
+        with patch("custom_components.climate_advisor.claude_api.AsyncAnthropic", return_value=fake_client):
+            result = asyncio.run(fetch_available_models(_TEST_KEY))
+
+        assert result == list(AI_MODELS)
+
+    def test_empty_live_list_falls_back_to_static_list(self):
+        fake_page = MagicMock()
+        fake_page.data = []
+        fake_client = MagicMock()
+        fake_client.models.list = AsyncMock(return_value=fake_page)
+
+        with patch("custom_components.climate_advisor.claude_api.AsyncAnthropic", return_value=fake_client):
+            result = asyncio.run(fetch_available_models(_TEST_KEY))
+
+        assert result == list(AI_MODELS)
+
+
+class TestAsyncListModelsCache:
+    """ClaudeAPIClient.async_list_models() caches the live fetch for the TTL window."""
+
+    def test_second_call_within_ttl_uses_cache(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api)
+
+        with patch(
+            "custom_components.climate_advisor.claude_api.fetch_available_models",
+            new_callable=AsyncMock,
+            return_value=["claude-sonnet-5"],
+        ) as mock_fetch:
+            first = asyncio.run(client.async_list_models())
+            second = asyncio.run(client.async_list_models())
+
+        assert first == ["claude-sonnet-5"]
+        assert second == ["claude-sonnet-5"]
+        mock_fetch.assert_called_once()
+
+    def test_cache_expires_after_ttl(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api)
+
+        with patch(
+            "custom_components.climate_advisor.claude_api.fetch_available_models",
+            new_callable=AsyncMock,
+            return_value=["claude-sonnet-5"],
+        ) as mock_fetch:
+            asyncio.run(client.async_list_models())
+            # Force the cache timestamp far enough in the past to expire it.
+            client._models_cache_ts = time.monotonic() - 90_000
+            asyncio.run(client.async_list_models())
+
+        assert mock_fetch.call_count == 2
+
+
+class TestDeprecatedModelFallback:
+    """A NotFoundError on the configured model should trigger one same-tier retry, not backoff."""
+
+    def test_deprecated_model_falls_back_to_same_tier_replacement(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiNotFoundError("model not found"),
+            _mock_message("recovered on new model"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            patch.object(client, "async_list_models", new_callable=AsyncMock, return_value=["claude-sonnet-5"]),
+        ):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert response.resolved_model == "claude-sonnet-5"
+        assert mock_api.messages.create.call_count == 2
+        # No backoff sleep for a not-found error — it's not worth retrying the same model.
+        mock_sleep.assert_not_called()
+
+    def test_no_same_tier_candidate_falls_through_to_normal_retry(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = _ClaudeApiNotFoundError("model not found")
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with (
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch.object(client, "async_list_models", new_callable=AsyncMock, return_value=[]),
+        ):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is False
+        # Falls through to the normal APIError retry path (still bounded by AI_MAX_RETRIES).
+        assert mock_api.messages.create.call_count == 3
+
+    def test_successful_request_without_fallback_sets_resolved_model_to_requested(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.return_value = _mock_message("normal response")
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert response.resolved_model == "claude-sonnet-4-6"
+
+    def test_notfounderror_unavailable_degrades_to_normal_retry_behavior(self):
+        """If the SDK doesn't expose NotFoundError, the special-case must be skipped, not crash."""
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = _ClaudeApiNotFoundError("model not found")
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with (
+            patch("custom_components.climate_advisor.claude_api.NotFoundError", None),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is False
+        assert mock_api.messages.create.call_count == 3
+
+
+class _FakeFailingStreamCM:
+    """Fake async context manager that raises on entry — mimics Anthropic rejecting
+    a stream request outright (e.g. a 400 invalid_request_error), before any content
+    is produced."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aenter__(self):
+        raise self._exc
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class TestBuildRequestKwargsOrdering:
+    """The unsupported-params strip must run AFTER the thinking-budget special case,
+    so a model known not to support temperature never gets it re-added even under
+    high reasoning effort."""
+
+    def test_strip_runs_after_thinking_budget_forces_temperature(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+        client._unsupported_params["claude-sonnet-4-6"] = {"temperature"}
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            temperature=0.3,
+            reasoning_effort="high",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert "temperature" not in kwargs
+        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+
+    def test_no_unsupported_params_leaves_temperature_in_place(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            temperature=0.3,
+            reasoning_effort="medium",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert kwargs["temperature"] == 0.3
+
+    def test_strip_only_applies_to_the_matching_model(self):
+        mock_api = _make_mock_api_client()
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+        client._unsupported_params["claude-opus-4-6"] = {"temperature"}
+
+        kwargs = client._build_request_kwargs(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            temperature=0.3,
+            reasoning_effort="medium",
+            system_prompt="System.",
+            user_message="User.",
+        )
+
+        assert kwargs["temperature"] == 0.3
+
+
+class TestDeprecatedParameterFallback:
+    """A 'parameter deprecated for this model' 400 should be learned and stripped,
+    not blindly retried with backoff (Issue #563 follow-on)."""
+
+    def test_non_streaming_retries_without_param_and_learns_it(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
+            _mock_message("recovered without temperature"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert mock_api.messages.create.call_count == 2
+        assert "temperature" not in mock_api.messages.create.call_args.kwargs
+        assert client._unsupported_params["claude-sonnet-4-6"] == {"temperature"}
+        mock_sleep.assert_not_called()
+
+    def test_second_request_to_same_model_proactively_skips_param(self):
+        """Once learned, the param must never be sent again for that model — not
+        just reactively stripped after another failure."""
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
+            _mock_message("first request recovered"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            asyncio.run(client.async_request("System.", "User."))
+
+        mock_api.messages.create.side_effect = None
+        mock_api.messages.create.return_value = _mock_message("second request")
+        response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert "temperature" not in mock_api.messages.create.call_args.kwargs
+        # Only one extra call from the first request's retry — this one didn't need it.
+        assert mock_api.messages.create.call_count == 3
+
+    def test_retry_failure_after_dropping_param_falls_through_to_normal_backoff(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = [
+            _ClaudeApiAPIError("`temperature` is deprecated for this model."),
+            Exception("still broken"),
+            _mock_message("recovered on attempt 3"),
+        ]
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is True
+        assert mock_api.messages.create.call_count == 3
+        # The second (fallback) call failed too — normal backoff before attempt 3.
+        mock_sleep.assert_called()
+
+    def test_unrelated_400_error_is_not_treated_as_capability_issue(self):
+        mock_api = _make_mock_api_client()
+        mock_api.messages.create.side_effect = _ClaudeApiAPIError("invalid_request_error: bad JSON")
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            response = asyncio.run(client.async_request("System.", "User."))
+
+        assert response.success is False
+        assert client._unsupported_params == {}
+        assert mock_api.messages.create.call_count == 3
+
+    def test_streaming_retries_without_param_before_any_content_yielded(self):
+        mock_api = _make_mock_api_client()
+        final_msg = MagicMock()
+        final_msg.usage = MagicMock(input_tokens=10, output_tokens=20)
+        final_msg.stop_reason = "end_turn"
+        good_stream = _FakeStreamCM([_mock_text_delta_event("recovered")], final_msg)
+        bad_stream = _FakeFailingStreamCM(Exception("`temperature` is deprecated for this model."))
+
+        mock_api.messages.stream = MagicMock(side_effect=[bad_stream, good_stream])
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        events = asyncio.run(_collect())
+
+        text_events = [e for e in events if e.get("type") == "text"]
+        assert text_events == [{"type": "text", "text": "recovered"}]
+        assert mock_api.messages.stream.call_count == 2
+        assert client._unsupported_params["claude-sonnet-4-6"] == {"temperature"}
+
+    def test_streaming_second_failure_reraises_normally(self):
+        mock_api = _make_mock_api_client()
+        bad_stream_1 = _FakeFailingStreamCM(Exception("`temperature` is deprecated for this model."))
+        bad_stream_2 = _FakeFailingStreamCM(Exception("still broken"))
+        mock_api.messages.stream = MagicMock(side_effect=[bad_stream_1, bad_stream_2])
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        try:
+            asyncio.run(_collect())
+            raised = False
+        except Exception as exc:  # noqa: BLE001
+            raised = True
+            assert "still broken" in str(exc)
+
+        assert raised is True
+        assert mock_api.messages.stream.call_count == 2
+
+    def test_streaming_unrelated_error_never_retries(self):
+        mock_api = _make_mock_api_client()
+        bad_stream = _FakeFailingStreamCM(Exception("connection reset"))
+        mock_api.messages.stream = MagicMock(return_value=bad_stream)
+        client = _make_client(mock_api, ai_model="claude-sonnet-4-6")
+
+        async def _collect():
+            events = []
+            async for event in client.async_request_streaming("System.", "User."):
+                events.append(event)
+            return events
+
+        try:
+            asyncio.run(_collect())
+            raised = False
+        except Exception:  # noqa: BLE001
+            raised = True
+
+        assert raised is True
+        assert mock_api.messages.stream.call_count == 1

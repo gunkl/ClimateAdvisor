@@ -427,7 +427,7 @@ See [Issue #11](https://github.com/gunkl/ClimateAdvisor/issues/11) for full trac
 - [x] Optimized pre-heat/pre-cool timing and setback depth based on thermal performance
 - [x] Claude API client with circuit breaker, retry, rate limiting, and budget tracking (`claude_api.py`)
 - [x] AI skills framework — pluggable registry for AI analysis capabilities (`ai_skills.py`)
-- [x] AI Activity Report: timeline, HVAC decisions, anomalies, diagnostics (`ai_skills_activity.py`)
+- [x] AI Activity Report: timeline, HVAC decisions, anomalies, diagnostics (merged into the AI Investigator as one skill, Issue #563 — see `ai_skills_investigator.py` + `ai_skills_context.py`)
 - [x] Persistent 1-year chart log ring buffer for temperature/HVAC/fan/event data (`chart_log.py`)
 - [x] Sleep temperature setpoints (`sleep_heat` / `sleep_cool`) distinct from away setback
 - [x] Natural ventilation directional guard with hysteresis and reactivation lockout (#115)
@@ -559,9 +559,8 @@ custom_components/climate_advisor/
 ├── repairs.py           # HA repairs flow for config issues
 ├── claude_api.py        # Claude API client: auth, retry, circuit breaker, rate limiting, budget tracking
 ├── ai_skills.py         # Lightweight skill registry framework for pluggable AI capabilities
-├── ai_skills_activity.py  # Activity Report skill: timeline, decisions, anomalies, diagnostics
-├── ai_skills_investigator.py  # AI Investigator skill: deep cross-source analysis, hypothesis generation
-├── ai_skills_context.py # Context providers for AI skills — focus-aware, independently testable
+├── ai_skills_investigator.py  # The sole registered AI skill ("investigator"): deep cross-source analysis on demand, plus silent/scheduled activity narration — merged from two separate skills, Issue #563
+├── ai_skills_context.py # Context providers for AI skills — focus-aware, independently testable (16 providers, incl. the event-timeline renderers ported from the retired activity skill)
 ├── temperature.py       # Fahrenheit/Celsius conversion and formatting helpers
 ├── chart_log.py         # Persistent 1-year ring buffer of HVAC/fan/temperature data + event markers
 ├── nat_vent_gate.py     # Pure decision: nat-vent reactivation gate (direction/floor/ceiling)

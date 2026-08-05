@@ -83,7 +83,6 @@ from .const import (
     CHART_LOG_MAX_DAYS,
     CONF_AI_API_KEY,
     CONF_AI_ENABLED,
-    CONF_AI_INVESTIGATOR_ENABLED,
     CONF_AUTOMATION_GRACE_PERIOD,
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -322,7 +321,7 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     """Coordinate all Climate Advisor activities."""
 
-    def __init__(self, hass: HomeAssistant, config: dict[str, Any]) -> None:
+    def __init__(self, hass: HomeAssistant, config: dict[str, Any], entry_id: str = "") -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
@@ -331,6 +330,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=30),
         )
         self.config = config
+        # Issue #563: DataUpdateCoordinator.config_entry is intentionally never set
+        # (see class docstring/CLAUDE.md — always None), so a plain entry_id is kept
+        # separately for the one case that needs to write back to the config entry
+        # at runtime: async_persist_model_fallback(). Empty string when not supplied
+        # (e.g. the simulation harness, which has no real ConfigEntry) — callers that
+        # need it check for a resolvable entry via hass.config_entries.async_get_entry.
+        self._entry_id: str = entry_id
         self._unsub_listeners: list[Any] = []
         self._unsub_dw_listeners: list[Any] = []
         self._resolved_sensors: list[str] = []
@@ -388,19 +394,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # AI subsystem (only if enabled and API key present)
         self.claude_client: ClaudeAPIClient | None = None
         self.ai_skills: AISkillRegistry | None = None
+        # _ai_report_history: frozen, read-only — held for backward-compat display of
+        # reports persisted before the activity_report/investigator skill merge
+        # (Issue #563). New reports (both silent narration and on-demand investigation)
+        # write to _investigation_report_history going forward — see
+        # async_store_investigation_report().
         self._ai_report_history: list[dict] = []
         self._investigation_report_history: list[dict] = []
         if config.get(CONF_AI_ENABLED) and config.get(CONF_AI_API_KEY):
             from .ai_skills import AISkillRegistry as _AISkillRegistry
-            from .ai_skills_activity import register_activity_skill
             from .ai_skills_investigator import register_investigator_skill
             from .claude_api import ClaudeAPIClient as _ClaudeAPIClient
 
             self.claude_client = _ClaudeAPIClient(config)
             self.ai_skills = _AISkillRegistry()
-            register_activity_skill(self.ai_skills)
-            if config.get(CONF_AI_INVESTIGATOR_ENABLED, False):
-                register_investigator_skill(self.ai_skills)
+            # Registers whenever AI is enabled (Issue #563) — the merged skill serves
+            # both the always-available narration mode (formerly "activity_report",
+            # ungated) and the on-demand investigation mode. CONF_AI_INVESTIGATOR_ENABLED
+            # no longer gates registration; api.py's ClimateAdvisorInvestigateView still
+            # checks it as a cost-control gate on the on-demand/focus-driven call path.
+            register_investigator_skill(self.ai_skills)
             _LOGGER.info("AI subsystem initialized — model: %s", config.get("ai_model", "unknown"))
         else:
             _LOGGER.debug(
@@ -1182,6 +1195,49 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if len(self._investigation_report_history) > INVESTIGATION_REPORT_HISTORY_CAP:
             self._investigation_report_history = self._investigation_report_history[-INVESTIGATION_REPORT_HISTORY_CAP:]
         await self.hass.async_add_executor_job(self._save_investigation_reports)
+
+    async def async_persist_model_fallback(self, new_model: str) -> None:
+        """Persist an automatic AI-model deprecation fallback (Issue #563).
+
+        Called when claude_api.py's ClaudeResponse.resolved_model differs from the
+        model that was actually requested — meaning a configured model was rejected
+        as invalid/deprecated and claude_api.py substituted a same-tier replacement
+        for that one request. This updates the persisted config entry so future
+        requests use the replacement directly, and updates the in-memory config dict
+        immediately so this doesn't need a full integration reload. Silent + logged
+        (WARNING) — no user-facing notification, per design decision.
+        """
+        from .const import CONF_AI_MODEL  # noqa: PLC0415
+
+        old_model = self.config.get(CONF_AI_MODEL, "")
+        if not self._entry_id:
+            _LOGGER.warning(
+                "AI model auto-migrated %s -> %s (previous model no longer available), "
+                "but no config entry id is available to persist it — will re-detect next request",
+                old_model,
+                new_model,
+            )
+            self.config[CONF_AI_MODEL] = new_model
+            return
+
+        entry = self.hass.config_entries.async_get_entry(self._entry_id)
+        if entry is None:
+            _LOGGER.warning(
+                "AI model auto-migrated %s -> %s, but config entry '%s' could not be found — not persisted",
+                old_model,
+                new_model,
+                self._entry_id,
+            )
+            return
+
+        new_data = {**entry.data, CONF_AI_MODEL: new_model}
+        self.hass.config_entries.async_update_entry(entry, data=new_data)
+        self.config[CONF_AI_MODEL] = new_model
+        _LOGGER.warning(
+            "AI model auto-migrated: %s -> %s (previous model no longer available)",
+            old_model,
+            new_model,
+        )
 
     def get_investigation_report_history(self) -> list[dict]:
         """Return a copy of the investigation report history."""

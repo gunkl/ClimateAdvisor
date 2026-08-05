@@ -139,11 +139,11 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_status,sensor
 - **`disabled`** — AI features are turned off in configuration
 - **`circuit_open`** — circuit breaker has tripped after 5 consecutive failures; will auto-reset after 5 minutes
 
-### Activity Report Service
+### AI Investigative Analysis
 
-The `ai_activity_report` service triggers an on-demand AI analysis of recent automation behavior. This is useful for diagnosing unexpected HVAC decisions — the report includes a timeline, key decisions, anomalies, and diagnostics drawn from current system state.
+The dashboard's "AI Investigative Analysis" report (`/api/climate_advisor/ai_investigate`, or the deterministic-analysis-only equivalent) triggers an on-demand AI analysis of recent automation behavior. This is useful for diagnosing unexpected HVAC decisions — the report includes a timeline, key decisions, anomalies, and diagnostics drawn from current system state. (The separate AI Activity Report skill/service was retired in Issue #578 — superseded by this investigator report and the deterministic, non-AI Activity Record.)
 
-**`hours` parameter (v0.3.55+):** The service accepts an optional `hours` parameter that controls how far back the event log and context window reach. Default is 24h. For reports requesting more than 36 hours, the report automatically appends **HISTORICAL DAILY SUMMARIES** — a per-day rollup from the DailyRecord history covering the requested window. This provides useful context for multi-day investigations without requiring the user to run the investigator skill.
+**`hours` parameter:** Controls how far back the event log and context window reach; the dashboard defaults to 24h. For requests spanning more than 36 hours, the report automatically appends **HISTORICAL DAILY SUMMARIES** — a per-day rollup from the DailyRecord history covering the requested window.
 
 ```bash
 # Check report history file directly
@@ -152,7 +152,7 @@ python3 tools/ha_logs.py --history --entity sensor.climate_advisor_ai_status --h
 
 ### AI Report Persistence
 
-AI reports are stored at `climate_advisor_ai_reports.json` in the HA config root directory. The file is capped at 10 reports (`AI_REPORT_HISTORY_CAP`). Request history is capped at 50 entries (`AI_REQUEST_HISTORY_CAP`).
+Investigation reports are stored at `climate_advisor_investigation_reports.json` in the HA config root directory, capped at `INVESTIGATION_REPORT_HISTORY_CAP` entries. Request history is capped at 50 entries (`AI_REQUEST_HISTORY_CAP`). (The separate `climate_advisor_ai_reports.json` file from the retired AI Activity Report feature — Issue #578 — is no longer read or written; it may still exist on disk from before the upgrade and can be safely deleted.)
 
 ### Circuit Breaker
 

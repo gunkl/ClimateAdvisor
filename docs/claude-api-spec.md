@@ -149,8 +149,8 @@ async def async_request(
 |---|---|---|---|
 | `max_tokens` | `max_tokens` arg | `CONF_AI_MAX_TOKENS` | `DEFAULT_AI_MAX_TOKENS` (4096) |
 | `temperature` | `temperature` arg | `CONF_AI_TEMPERATURE` | `DEFAULT_AI_TEMPERATURE` (0.3) |
-| `model` | `model` arg | `CONF_AI_MODEL` | `DEFAULT_AI_MODEL` ("claude-sonnet-4-6") |
-| `reasoning_effort` | `reasoning_effort` arg | `CONF_AI_REASONING_EFFORT` | `DEFAULT_AI_REASONING_EFFORT` ("medium") |
+| `model` | `model` arg | `CONF_AI_MODEL` | `DEFAULT_AI_MODEL` ("claude-sonnet-5") |
+| `reasoning_effort` | `reasoning_effort` arg | `CONF_AI_REASONING_EFFORT` | `DEFAULT_AI_REASONING_EFFORT` ("low") |
 
 **Post-call counter updates (applied regardless of retry count):**
 

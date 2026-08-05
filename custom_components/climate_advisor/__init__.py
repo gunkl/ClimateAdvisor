@@ -21,6 +21,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 
+from . import log_capture
 from .api import API_VIEWS
 from .const import (
     CONF_AI_API_KEY,
@@ -352,6 +353,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Climate Advisor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
+    # Issue #578: capture real WARNING+/ERROR log records for the AI
+    # Investigator's "System Errors/Warnings" section (see log_capture.py).
+    # Stored outside hass.data[DOMAIN] on purpose — _get_coordinator() in
+    # api.py does next(iter(hass.data[DOMAIN].values())), and dicts are
+    # insertion-ordered, so putting this handler in that dict before the
+    # coordinator is added would make every REST view resolve the log
+    # handler instead of the coordinator.
+    log_capture.install(hass)
+
     # Issue #573: any setup (reload or HA restart) means whatever was saved via
     # the options flow is now the active config — clear the "reload needed"
     # notice raised by ClimateAdvisorOptionsFlow._commit_section().
@@ -503,36 +513,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=RESET_LEARNING_SCHEMA,
     )
 
-    AI_ACTIVITY_SCHEMA = vol.Schema(
-        {
-            vol.Optional("hours", default=24): vol.All(vol.Coerce(int), vol.Range(min=1, max=168)),
-        }
-    )
-
-    async def handle_ai_activity_report(call):
-        """Handle the ai_activity_report service call.
-
-        Issue #563: the "activity_report" skill was retired and merged into
-        "investigator" — this must call the merged skill name, or every
-        invocation silently stores an "Unknown skill" error report.
-        """
-        if not coordinator.claude_client or not coordinator.ai_skills:
-            _LOGGER.warning("AI activity report requested but AI features are disabled")
-            return
-        hours = call.data.get("hours", 24)
-        result = await coordinator.ai_skills.async_execute(
-            "investigator",
-            hass,
-            coordinator,
-            coordinator.claude_client,
-            hours=hours,
-            narration=True,
-        )
-        # Store the result in the unified investigation report history
-        await coordinator.async_store_investigation_report(result)
-
-    hass.services.async_register(DOMAIN, "ai_activity_report", handle_ai_activity_report, schema=AI_ACTIVITY_SCHEMA)
-
     # Register REST API views for the dashboard panel
     for view_cls in API_VIEWS:
         hass.http.register_view(view_cls())
@@ -566,6 +546,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Climate Advisor config entry."""
     coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
     await coordinator.async_shutdown()
+
+    # The log-capture handler is process-wide, not per-entry — only detach it
+    # once no other config entries (this integration is effectively single-
+    # instance, but guard the general case) are still using it.
+    if not hass.data[DOMAIN]:
+        log_capture.uninstall(hass)
 
     # Remove the dashboard panel
     from homeassistant.components.frontend import async_remove_panel

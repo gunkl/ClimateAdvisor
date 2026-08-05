@@ -167,9 +167,6 @@ Both are rendered in the dashboard as a stepped purple/magenta line: solid past,
 | Service | Data | Purpose |
 |---------|------|---------|
 | `climate_advisor.respond_to_suggestion` | action (accept/dismiss), suggestion_key | User responds to learning suggestion |
-| `climate_advisor.ai_activity_report` | (none) | Trigger an on-demand AI activity report analysis |
-| `climate_advisor.get_ai_report` | (none) | Retrieve the most recent AI activity report |
-| `climate_advisor.clear_ai_reports` | (none) | Clear persisted AI report history |
 
 ## Configuration Data (from config flow)
 

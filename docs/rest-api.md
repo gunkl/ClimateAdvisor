@@ -16,7 +16,7 @@
 ## Scope
 
 **Owns:**
-- HTTP view registration for all 19 Climate Advisor REST endpoints
+- HTTP view registration for all 21 Climate Advisor REST endpoints
 - Auth enforcement (`requires_auth = True` on every view)
 - Input validation and HTTP error responses (400, 403, 429, 500, 503)
 - Response serialisation: field selection, display transforms, sensitive-field redaction
@@ -31,7 +31,7 @@
 
 ## Authentication
 
-All 19 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
+All 21 view classes set `requires_auth = True`. HA handles token validation before the view handler is invoked. No endpoint is reachable without a valid HA long-lived access token. There is no per-endpoint permission model beyond HA authentication.
 
 ## Endpoints
 
@@ -46,7 +46,6 @@ All 19 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/learning` | Learning engine summary | `today_record`, `yesterday_record`, `tomorrow_plan`, `suggestions`, `compliance`, `comfort_range_low`, `comfort_range_high`, `unit` |
 | `/api/climate_advisor/config` | Integration configuration | `settings` list of `{key, value, label, description, category}` — sensitive values redacted |
 | `/api/climate_advisor/ai_status` | AI client health and budget | `status` (api_key removed), `recent_requests` (last 10) |
-| `/api/climate_advisor/ai_reports` | AI activity report history | `reports` list from `coordinator.get_ai_report_history()` |
 | `/api/climate_advisor/investigation_reports` | AI investigator report history | Direct return from `coordinator.get_investigation_report_history()` |
 | `/api/climate_advisor/event_log` | Internal event log | `events`, `total`, `hours` — `hours` param silently clamped if out of range |
 
@@ -61,7 +60,6 @@ All 19 view classes set `requires_auth = True`. HA handles token validation befo
 | `/api/climate_advisor/resume_from_pause` | Resume automation from door/window pause | `status`, `message`, `restored_mode` |
 | `/api/climate_advisor/cancel_fan_override` | Cancel active fan override | `status`, `message` |
 | `/api/climate_advisor/toggle_automation` | Enable or disable automation engine | `status`, `automation_enabled`, `message` |
-| `/api/climate_advisor/ai_activity` | Run AI Activity Report skill | Delegated — returns `coordinator.ai_skills.async_execute(...)` result dict |
 | `/api/climate_advisor/ai_investigate` | Run AI Investigator skill | Delegated — returns `coordinator.ai_skills.async_execute(...)` result dict |
 
 ## Sensitive Field Redaction

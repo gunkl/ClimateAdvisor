@@ -26,6 +26,7 @@ from homeassistant.util import dt as dt_util
 if TYPE_CHECKING:
     pass
 
+from . import log_capture
 from .const import (
     ATTR_AUTOMATION_STATUS,
     ATTR_CONTACT_STATUS,
@@ -40,6 +41,7 @@ from .const import (
     ATTR_TREND,
     FAN_MODE_BOTH,
     FAN_MODE_WHOLE_HOUSE,
+    MAX_WEATHER_BIAS_APPLY_F,
     OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
@@ -613,9 +615,10 @@ async def build_hvac_entity_context(hass: Any, coordinator: Any, **kwargs: Any) 
         climate_entity_id: str = (coordinator.config or {}).get("climate_entity", "")
         hvac_mode = data.get("hvac_mode") or "unknown"
         _target_temp_low = data.get("target_temp_low")
-        target_temp_low = "unknown" if _target_temp_low is None else _target_temp_low
         _target_temp_high = data.get("target_temp_high")
-        target_temp_high = "unknown" if _target_temp_high is None else _target_temp_high
+        _off_note = " (expected — hvac_mode=off, no active setpoint)" if hvac_mode == "off" else ""
+        target_temp_low = f"unknown{_off_note}" if _target_temp_low is None else _target_temp_low
+        target_temp_high = f"unknown{_off_note}" if _target_temp_high is None else _target_temp_high
         current_temp = "unknown"
         if climate_entity_id:
             climate_state = hass.states.get(climate_entity_id)
@@ -701,6 +704,7 @@ async def build_learning_context(hass: Any, coordinator: Any, **kwargs: Any) -> 
                 "=== LEARNING — WEATHER BIAS ===",
                 f"  high_bias:          {bias.get('high_bias', 'unknown')}",
                 f"  low_bias:           {bias.get('low_bias', 'unknown')}",
+                f"  cap_f:              {MAX_WEATHER_BIAS_APPLY_F}",
                 f"  confidence:         {bias.get('confidence', 'unknown')}",
                 f"  observation_count:  {bias.get('observation_count', 'unknown')}",
                 "",
@@ -949,26 +953,46 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
 
         # Count by type
         type_counts: dict[str, int] = {}
-        errors_and_warnings: list[dict[str, Any]] = []
         for entry in recent_events:
             etype = str(entry.get("type", "unknown"))
             type_counts[etype] = type_counts.get(etype, 0) + 1
-            if "error" in etype.lower() or "warning" in etype.lower():
-                errors_and_warnings.append(entry)
 
         event_section_lines += [
             f"=== EVENT LOG (last {hours}h, {len(recent_events)} events) ===",
             f"  event_type_counts: {type_counts}",
-            f"  errors_and_warnings_count: {len(errors_and_warnings)}",
+            "",
         ]
-        if errors_and_warnings:
-            event_section_lines.append("  ERROR/WARNING ENTRIES:")
-            for entry in errors_and_warnings:
-                event_section_lines.append(f"    {entry}")
-        event_section_lines.append("")
     except Exception:
         _LOGGER.warning("investigator: failed to read event log — skipping")
         event_section_lines += ["=== EVENT LOG ===", "  unavailable", ""]
+
+    # --- Real captured log records (Issue #578 — see log_capture.py) ---
+    try:
+        handler = log_capture.get_handler(hass) if hass is not None else None
+        records = handler.get_records() if handler is not None else []
+        cutoff_dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+        recent_records: list[dict[str, Any]] = []
+        for r in records:
+            try:
+                record_dt = datetime.datetime.fromisoformat(str(r.get("time"))).astimezone(datetime.UTC)
+            except ValueError:
+                recent_records.append(r)
+                continue
+            if record_dt >= cutoff_dt:
+                recent_records.append(r)
+        event_section_lines += [
+            f"=== SYSTEM LOG RECORDS (WARNING+, last {hours}h, {len(recent_records)} records) ===",
+        ]
+        if recent_records:
+            for r in recent_records:
+                local_time = _fmt_time(r.get("time"))
+                event_section_lines.append(f"  {local_time} {r['level']} [{r['logger_name']}] {r['message']}")
+        else:
+            event_section_lines.append("  (none captured in window)")
+        event_section_lines.append("")
+    except Exception:
+        _LOGGER.warning("investigator: failed to read captured log records — skipping")
+        event_section_lines += ["=== SYSTEM LOG RECORDS ===", "  unavailable", ""]
 
     # --- Timing correlations ---
     try:
@@ -1004,31 +1028,6 @@ async def build_event_log_context(hass: Any, coordinator: Any, **kwargs: Any) ->
         + restart_section
         + "\n"
     )
-
-
-async def build_ai_report_history_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
-    """Build RECENT AI ACTIVITY REPORTS section."""
-    try:
-        report_history_fn = getattr(coordinator, "get_ai_report_history", None)
-        if callable(report_history_fn):
-            report_history: list[Any] = report_history_fn() or []
-            last_reports = report_history[-3:]
-            lines = ["=== RECENT AI ACTIVITY REPORTS (last 3) ==="]
-            if last_reports:
-                for rpt in last_reports:
-                    if isinstance(rpt, dict):
-                        ts = rpt.get("timestamp", "unknown")
-                        result = rpt.get("result", {})
-                        summary_text = result.get("data", {}).get("summary", "") if isinstance(result, dict) else ""
-                        lines.append(f"  [{ts}] summary: {summary_text or '(no summary)'}")
-            else:
-                lines.append("  (no prior reports)")
-            lines.append("")
-            return "\n".join(lines)
-        return "=== RECENT AI ACTIVITY REPORTS ===\n  get_ai_report_history not available\n"
-    except Exception:
-        _LOGGER.warning("investigator: failed to read AI report history — skipping")
-        return "=== RECENT AI ACTIVITY REPORTS ===\n  unavailable\n"
 
 
 async def build_config_context(hass: Any, coordinator: Any, **kwargs: Any) -> str:
@@ -2589,7 +2588,7 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
             override_count = getattr(today_record, "manual_overrides", 0)
             override_details = list(getattr(today_record, "override_details", []) or [])
 
-        lines.append(f"  Count:             {override_count}")
+        lines.append(f"  Setpoint override count: {override_count}")
         if override_details:
             for i, d in enumerate(override_details, 1):
                 t = d.get("time", "??:??")
@@ -2654,6 +2653,7 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
         _own_ca = False
         _own_user = False
         fan_ownership_lines: list[str] = []
+        _fan_override_count = 0
         for entry in raw_event_log[-200:]:
             if not isinstance(entry, dict):
                 continue
@@ -2686,6 +2686,7 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
                 if not _own_user:
                     _own_user = True
                     _own_ca = False
+                    _fan_override_count += 1
                     fan_ownership_lines.append(f"  {_ts_str}: User owns fan (fan_manual_override, fan->on)")
             elif _etype == "fan_cancel":
                 if _own_user:
@@ -2698,6 +2699,7 @@ async def build_override_details_context(hass: Any, coordinator: Any, **kwargs: 
         lines += [
             "",
             "=== FAN OWNERSHIP HISTORY ===",
+            f"  Fan override count (window): {_fan_override_count}",
             *(fan_ownership_lines if fan_ownership_lines else ["  (no fan ownership transitions in window)"]),
         ]
     except Exception:
@@ -2786,14 +2788,6 @@ _PROVIDER_REGISTRY.register(
         tags=frozenset({"learning", "events"}),
         priority=2,
         builder=build_daily_summaries_context,
-    )
-)
-_PROVIDER_REGISTRY.register(
-    ContextProvider(
-        name="ai_report_history",
-        tags=frozenset({"context"}),
-        priority=2,
-        builder=build_ai_report_history_context,
     )
 )
 _PROVIDER_REGISTRY.register(

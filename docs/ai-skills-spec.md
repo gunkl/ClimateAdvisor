@@ -40,12 +40,12 @@ built-in skill implementation.
 
 - **File 1:** `custom_components/climate_advisor/ai_skills.py` — `AISkillRegistry`, `AISkillDefinition`, `async_execute()`, `async_execute_streaming()`, `_run_fallback()`, `_error_result()`
 - **File 2:** `custom_components/climate_advisor/ai_skills_investigator.py` — the merged `"investigator"` skill: system prompt, response parser, deterministic fallback, thin context-assembly orchestrator, registration
-- **File 3:** `custom_components/climate_advisor/ai_skills_context.py` — `ContextProviderRegistry` + all 16 individual context providers, including the render/timeline functions and the three providers ported from the retired `ai_skills_activity.py`
+- **File 3:** `custom_components/climate_advisor/ai_skills_context.py` — `ContextProviderRegistry` + all 15 individual context providers, including the render/timeline functions and the providers ported from the retired `ai_skills_activity.py`
 
 **Does NOT cover:**
 - Anthropic API transport, circuit breaker, rate limiting, cost estimation — covered by `claude_api.py` (spec pending at `docs/claude-api-spec.md`)
-- HA service registration for `ai_activity_report` and `investigator` calls — owned by `coordinator.py`
-- Report history storage (`store_investigation_report()`, `get_investigation_report_history()`; the legacy `get_ai_report_history()` is frozen, pre-merge history) — owned by `coordinator.py`
+- HA service registration for the `investigator` skill's calls — owned by `coordinator.py`. The separate `ai_activity_report` service and skill entry point were retired entirely in Issue #578 (superseded by the deterministic, non-AI Activity Record).
+- Report history storage (`store_investigation_report()`, `get_investigation_report_history()`) — owned by `coordinator.py`
 
 ---
 
@@ -194,16 +194,17 @@ A thin orchestrator: calls `ContextProviderRegistry.select(focus, narration=...)
 for the narration path, by a flat `priority <= 1` cutoff, then concatenates each provider's
 output. Each provider is wrapped in its own `try/except`. If a provider fails, its section is
 replaced with `"  unavailable"` and assembly continues — a failure in one provider never
-aborts the others. As of Issue #563 there are 16 registered providers; treat the
+aborts the others. As of Issue #578 there are 15 registered providers; treat the
 registration list in `ai_skills_context.py` (search `_PROVIDER_REGISTRY.register`) as
 authoritative if this table and the code ever disagree.
 
-**Narration vs investigation scope (Issue #563):** the silent/scheduled narration path
-(`ClimateAdvisorAIActivityView`/`ai_activity_report` — never sets `focus`) passes
-`narration=True`, which caps providers to `priority <= 1` — current-state and
-recent-activity data only. The on-demand `ai_investigate` (SSE) path never sets
-`narration`, so an empty `focus` there still means "audit everything" (all 16 providers) —
-that's a deliberate user action, not a scheduled narration, and is unchanged. The `Narration`
+**Narration vs investigation scope (historical, Issue #563):** the skill's `narration=True`
+kwarg caps providers to `priority <= 1` (current-state and recent-activity data only). Its only
+callers — `ClimateAdvisorAIActivityView` and the `ai_activity_report` service — were retired in
+Issue #578 along with the AI Activity Report feature, so no live code path currently sets
+`narration=True`; the `priority` gating remains in `ai_skills_investigator.py` in case a future
+skill entry point needs it. The on-demand `ai_investigate` (SSE) path never sets `narration`, so
+an empty `focus` there means "audit everything" (all 15 providers). The `Narration`
 column below reflects the `priority` cutoff, not a separately maintained list.
 
 | Provider name | Priority | Narration | Section label | Data source |
@@ -214,11 +215,10 @@ column below reflects the `priority` cutoff, not a separately maintained list.
 | `last_briefing` | 1 | ✅ | `LAST BRIEFING` | `coordinator._last_briefing` — the most recently rendered daily briefing text, verbatim |
 | `learning` | 1 | ✅ | `LEARNING — *` (5 sub-sections) | Compliance summary, thermal model, weather bias, active suggestions (full text + evidence, unfiltered), last N daily records |
 | `thermal_pipeline` | 1 | ✅ | `THERMAL OBSERVATION PIPELINE` | Per-type committed/rejected counts, top reason codes, pending observations, `NEVER LEARNED` / `*** PIPELINE FAILURE ***` markers |
-| `event_log` | 1 | ✅ | `EVENT LOG` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log[-200:]` filtered to last N hours (`kwargs.get("hours", 168)`, clamped 1–720); see [Event Log Provider](#event-log-provider) |
+| `event_log` | 1 | ✅ | `EVENT LOG` + `SYSTEM LOG RECORDS` + `TIMING CORRELATIONS` + `KNOWN OVERRIDE FALSE POSITIVES` + `RESTART HISTORY` | `coordinator._event_log[-200:]` + `log_capture` ring buffer, filtered to last N hours (`kwargs.get("hours", 168)`, clamped 1–720); see [Event Log Provider](#event-log-provider) |
 | `activity_timeline` | 1 | ✅ | `ACTIVITY TIMELINE` | Deterministic markdown event timeline table — ported from the retired activity context (Issue #563); never LLM-authored |
 | `override_details` | 1 | ✅ | `MANUAL OVERRIDES TODAY` + `FAN OWNERSHIP HISTORY` | Override count/history/current-duration, Issue #321 stuck-grace critical warning, fan ownership transitions — ported (Issue #563) |
 | `daily_summaries` | 2 | ❌ | `HISTORICAL DAILY SUMMARIES` | Only populated when `hours > 36` — ported (Issue #563) |
-| `ai_report_history` | 2 | ❌ | `RECENT AI ACTIVITY REPORTS` | `coordinator.get_ai_report_history()[-3:]` — timestamp and summary only (legacy, pre-merge history) |
 | `config` | 2 | ❌ | `CONFIGURATION` | See [Config Provider](#config-provider) |
 | `operational_design` | 3 | ❌ | `CA OPERATIONAL DESIGN` | Static prose block (fan_status values, deadband, warm-day guard, natural vent, contradiction logic) |
 | `known_fixes` | 3 | ❌ | `KNOWN-FIXED ISSUES` | See [Known Fixes Context](#known-fixes-context) |
@@ -250,9 +250,10 @@ Builds the `=== THERMAL OBSERVATION PIPELINE ===` section. Purpose: let the AI d
 
 `build_event_log_context(hass, coordinator, **kwargs) → str` (`ai_skills_context.py`)
 
-Assembles four sub-sections from `coordinator._event_log`:
+Assembles five sub-sections:
 
-1. **`EVENT LOG`** — event-type counts + extracted error/warning entries, last N hours.
+1. **`EVENT LOG`** (from `coordinator._event_log`) — event-type counts only, last N hours. Prior to Issue #578 this section also tried to extract "error"/"warning" entries by checking whether a CA event's `type` string happened to contain those substrings (coincidental naming, not severity — CA event-log entries have no severity field) — that check is now `SYSTEM LOG RECORDS` below.
+1b. **`SYSTEM LOG RECORDS`** (Issue #578, `log_capture.py`) — real WARNING+/ERROR Python `LogRecord`s captured by a `logging.Handler` attached to the `custom_components.climate_advisor` logger namespace at integration setup (see `log_capture.install()` in `__init__.py`), filtered to the last N hours. Captures every existing `_LOGGER.warning()`/`.error()` call site in the package automatically.
 2. **`TIMING CORRELATIONS`** — manual events whose delay from a prior automation event matches a known automation cycle period (30/90/5/10 min ± 2 min tolerance) — suggests the "manual" event may actually be automation-caused.
 3. **`KNOWN OVERRIDE FALSE POSITIVES`** (Issue #563) — `_build_known_override_false_positives()` detects the Issue #205 pattern deterministically: an `override_detected` event within 60 seconds of an automation-initiated event (`nat_vent_*`, `ceiling_guard_fired`, `classification_applied`, `grace_started` with `source=automation`). This is a **different check** from `TIMING CORRELATIONS` above — matches an immediate ≤60s correlation, not a known cycle period — and was added specifically because the two are not interchangeable; the system prompt previously asked the model to re-derive this exact pattern from raw timestamps as ~15 lines of prose rules.
 4. **`RESTART HISTORY`** (Issue #563) — `_build_restart_summary()` breaks down `system_restarted` events by `cause` (already computed by `coordinator.py`'s restart classification, Issue #403/#413: `user_restart`/`version_changed`/`unknown`). Only `cause=unknown` restarts are presented as noteworthy; benign restarts are never narrated as problems — this closes the "6 restarts today" hallucination class, which previously happened because only a raw count was visible with no cause breakdown.
@@ -344,7 +345,7 @@ Returns the same 8-key schema as `parse_investigation_response`. `full_text` is 
 
 6. **`ai_api_key` is not sent to Claude.** The `config` provider's config copy is `.pop()`-cleaned before serialisation. The original `coordinator.config` is not mutated (a copy is made via `dict(coordinator.config or {})`).
 
-7. **Investigator context build failures are provider-local.** Each of the 16 registered context providers is wrapped in its own `try/except`. A failure marks that provider's section as `"  unavailable"` but does not abort the others.
+7. **Investigator context build failures are provider-local.** Each of the 15 registered context providers is wrapped in its own `try/except`. A failure marks that provider's section as `"  unavailable"` but does not abort the others.
 
 8. **`parse_investigation_response()` always preserves `full_text`.** The loop's `_flush()` closure cannot overwrite `full_text` because it is not in `_header_map`; after the loop, `sections["full_text"] = raw_text` is re-assigned unconditionally.
 

@@ -117,7 +117,7 @@ class TestBuildOverrideDetailsContext:
     def test_no_overrides_shows_count_zero(self):
         coord = _make_coordinator()
         ctx = asyncio.run(build_override_details_context(None, coord))
-        assert "Count:             0" in ctx
+        assert "Setpoint override count: 0" in ctx
         assert "no setpoint overrides recorded today" in ctx
 
     def test_no_active_override_reported(self):

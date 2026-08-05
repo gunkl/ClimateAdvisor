@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.51"
+VERSION = "0.5.52"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.52": [
+        "Fix #565: the AI Investigator and AI Activity Report could silently burn their"
+        " entire response budget with no visible answer at all on newer Claude models"
+        " (confirmed with claude-sonnet-5) — the model was doing its own internal"
+        " reasoning with no cap on it, and that reasoning alone could use up the whole"
+        " response length before ever getting to write an actual answer. Climate Advisor"
+        " now detects this and automatically applies a bounded-reasoning setting so the"
+        " model always leaves room for a real answer; it also learns per-model going"
+        " forward so this self-heals after the first occurrence instead of repeating on"
+        " every request.",
+    ],
     "0.5.51": [
         "Fix #563: the AI Investigator was sending nearly the entire history of every"
         " fixed issue to Claude on every single run — a version-scoping check that was"
@@ -1448,6 +1459,69 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    565: {
+        "version_fixed": "0.5.52",
+        "title": (
+            "Both the AI Investigator (streaming) and AI Activity Report (non-streaming)"
+            " could return stop_reason=max_tokens with zero visible answer text on"
+            " claude-sonnet-5, at reasoning_effort=medium — the exact zero-output cause"
+            " Issue #563 left as an open follow-up. Root-caused via a live diagnostic"
+            " bypassing claude_api.py entirely (direct AsyncAnthropic calls dumping the"
+            " full raw response, all content block types, and the complete usage object):"
+            " claude-sonnet-5 (A) rejects the `temperature` parameter outright — already"
+            " self-healed correctly by #563's reactive capability detection, confirmed"
+            " working in production logs, NOT the cause of this issue — and (B) rejects"
+            " the legacy `thinking: {type: enabled, budget_tokens: N}` shape outright with"
+            " a 400 naming the replacement directly ('Use thinking.type.adaptive and"
+            " output_config.effort'). Because claude_api.py only ever sent thinking"
+            " control at reasoning_effort=='high' (using the now-incompatible legacy"
+            " shape), medium/low requests sent no thinking control at all — leaving this"
+            " model's own internal reasoning completely uncapped. Reproduced live: on a"
+            " production-sized context, claude-sonnet-5 consumed the entire 8192-token"
+            " (and separately the entire 16384-token) budget purely on invisible internal"
+            " reasoning, stop_reason=max_tokens, zero text, matching live HA logs exactly"
+            " (8192 output_tokens, ~93s streaming call, zero visible output). Confirmed"
+            " fix live: sending thinking={'type':'adaptive'}, output_config={'effort':"
+            " reasoning_effort} on the same context returned stop_reason=end_turn with a"
+            " real answer."
+        ),
+        "scope_covered": (
+            "claude_api.py: added _detect_adaptive_thinking_required() (matches the"
+            " 'thinking.type.adaptive' replacement-parameter name in Anthropic's 400"
+            " message body, mirroring the existing _detect_deprecated_param() pattern) and"
+            " a new self._adaptive_thinking_models: set[str] per-model capability cache"
+            " (same in-memory, per-client-instance lifecycle as self._unsupported_params)."
+            " _build_request_kwargs() now applies thinking={'type':'adaptive'},"
+            " output_config={'effort': reasoning_effort} at EVERY reasoning tier (not just"
+            " 'high') for any model in _adaptive_thinking_models — output_config.effort"
+            " maps directly from the configured low/medium/high reasoning_effort, so no"
+            " separate budget_tokens table is needed for adaptive-shape models. The"
+            " unsupported-params strip still runs last, after this block, so a model"
+            " already known not to accept temperature never gets it re-added (same"
+            " ordering guarantee as the existing high-tier legacy path). Reactive"
+            " learning: both the streaming retry loop (async_request_streaming, gated on"
+            " 'no content yielded yet' — a stream can't un-yield thinking deltas already"
+            " shown to the caller) and the non-streaming retry loop"
+            " (_async_call_with_retry's APIError branch) now catch a 400 naming"
+            " thinking.type.adaptive, learn the model, and retry once with the adaptive"
+            " shape, mirroring the existing deprecated-parameter retry exactly."
+            " Additionally — since the medium/low failure mode never raises an exception"
+            " at all (it's a 'successful' HTTP response with truncated_empty=True) —"
+            " _async_call_with_retry now also detects a truncated_empty response after a"
+            " successful call and retries once in place (safe: nothing has been shown to"
+            " the caller yet, unlike streaming). The streaming path cannot retry"
+            " truncated_empty in place for the reason above, but arms"
+            " _adaptive_thinking_models on that detection so the *next* call (streaming or"
+            " non-streaming, same client instance) applies the adaptive shape from the"
+            " start. Test coverage: tests/test_claude_api.py"
+            " (TestAdaptiveThinkingKwargsShape, TestAdaptiveThinkingReactiveFallback,"
+            " TestAdaptiveThinkingTruncatedEmptyRecovery) — kwargs-shape correctness at"
+            " every reasoning tier, parameter-strip ordering, both reactive-retry paths,"
+            " both truncated_empty-recovery paths, and confirms an unlearned model (e.g."
+            " claude-sonnet-4-6) is completely unaffected — no regression risk for models"
+            " never observed to need this."
+        ),
+    },
     563: {
         "version_fixed": "0.5.51",
         "title": (

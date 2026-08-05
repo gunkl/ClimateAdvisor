@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.56"
+VERSION = "0.5.57"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.57": [
+        "Feat #573: editing several AI/comfort/schedule settings sections in one visit"
+        " to Configure used to reload Climate Advisor after every single section's"
+        " Submit, rebuilding the coordinator and AI client each time. Each section now"
+        ' just saves; the main Options menu has two new entries — "Save" (closes the'
+        " settings screen; changes are stored and will apply next time Climate Advisor"
+        ' reloads or Home Assistant restarts) and "Save and Reload" (closes the screen'
+        " and applies everything you just changed in one reload, right away).",
+    ],
     "0.5.56": [
         "Fix #572: claude-sonnet-5's first request after being selected could silently"
         " hang for up to 90 seconds with no visible output at all before failing — a"
@@ -1497,6 +1506,38 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    573: {
+        "version_fixed": "0.5.57",
+        "title": (
+            "The options-flow menu-based navigation added in Issue #50, and the"
+            " immediate-persist-on-Submit behavior added in Issue #557, together meant"
+            " every single section's Submit both wrote the config entry AND immediately"
+            " called hass.config_entries.async_reload() — so a settings session touching"
+            " several sections (e.g. Core Settings then AI Settings then Schedule) tore"
+            " down and rebuilt the coordinator/AI client once per section instead of"
+            " once per session. Changed by explicit user request during the Issue #572"
+            " investigation, once it became clear the same reload was involved in that"
+            " AI capability-persistence chain of bugs."
+        ),
+        "scope_covered": (
+            "config_flow.py: _commit_section() no longer calls async_reload() — it only"
+            " calls hass.config_entries.async_update_entry(), same as before, so"
+            " re-opening a section within the same options-flow session still shows the"
+            " just-saved value (the original Issue #557 fix this preserves). Two new"
+            " terminal steps in OPTIONS_MENU_OPTIONS: async_step_save() closes the flow"
+            " with no reload (every section already wrote its own fields); async_step_"
+            " save_reload() closes the flow and reloads the entry exactly once, applying"
+            " every section edited during the session in a single coordinator rebuild."
+            " This is a config-entry reload only (config_entries.async_reload(), the same"
+            " mechanism Submit already used) — not a homeassistant.restart service call,"
+            " which would be an out-of-scope HA Boundary Rule violation; that alternative"
+            " was explicitly considered and rejected during design. strings.json and"
+            " translations/en.json both updated with the new menu labels. Test coverage:"
+            " tests/test_config_flow.py (TestOptionsFlowMenu — section Submit no longer"
+            " reloads, Save closes without reloading, Save and Reload reloads exactly"
+            " once and reflects all pending section edits)."
+        ),
+    },
     572: {
         "version_fixed": "0.5.56",
         "title": (

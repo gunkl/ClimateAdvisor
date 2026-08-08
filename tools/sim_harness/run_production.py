@@ -522,6 +522,13 @@ def _dispatch_event(
         # engine._current_classification) to know what mode CA expects.
         if coordinator is not None:
             coordinator._current_classification = classification
+            # Issue #602: mirrors the real production hook (coordinator.py's regular
+            # classification cycle) that ensures today's DailyRecord exists — without
+            # this, self._today_record stays None for the whole scenario (it's
+            # otherwise only created by the once-daily _async_send_briefing() trigger,
+            # which this harness never fires unless a scenario explicitly seeds
+            # weather), silently blocking setpoint-only override detection.
+            coordinator._ensure_today_record(classification)
         run_coro(engine.apply_classification(classification, indoor_temp=_cls_indoor_f))
 
     elif etype == "occupancy_away":

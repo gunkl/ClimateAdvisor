@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.66] — 2026-08-08
+
+- Fix #602: the daily learning record (which gates manual-override detection for setpoint-only changes, HVAC runtime tracking, comfort-violation minutes, occupancy-away minutes, door/window pause counts, and the thermal-learning watchdog) was only ever created once a day by the morning briefing — if the weather integration happened to be unavailable at that one fixed moment, all of that silently stopped working for the rest of the day, with no warning. It now also gets created by the regular classification cycle, which already retries weather forever — the gap shrinks from up to 24 hours to about 30 minutes. Fix #598: a test scenario covering Issue #505's vacation-override-cleared fix was passing by coincidence rather than exercising the real behavior — this fix gives it real coverage.
+
 ## [0.5.65] — 2026-08-08
 
 - Fix #600: after an HA restart or grace-period expiry with the whole-house fan already running for natural ventilation, the Activity Record no longer shows the same "Fan activated" adoption logged 2-3 times in the same minute — the fan itself only ever turned on once; only the redundant log/event entries are gone. Also fixes the displayed nat-vent session start time silently jumping forward on each redundant re-confirmation.

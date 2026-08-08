@@ -4,9 +4,22 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.65"
+VERSION = "0.5.66"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.66": [
+        "Fix #602: the daily learning record (which gates manual-override detection for"
+        " setpoint-only changes, HVAC runtime tracking, comfort-violation minutes,"
+        " occupancy-away minutes, door/window pause counts, and the thermal-learning"
+        " watchdog) was only ever created once a day by the morning briefing — if the"
+        " weather integration happened to be unavailable at that one fixed moment, all of"
+        " that silently stopped working for the rest of the day, with no warning. It now"
+        " also gets created by the regular classification cycle, which already retries"
+        " weather forever — the gap shrinks from up to 24 hours to about 30 minutes."
+        " Fix #598: a test scenario covering Issue #505's vacation-override-cleared fix"
+        " was passing by coincidence rather than exercising the real behavior — this fix"
+        " gives it real coverage.",
+    ],
     "0.5.65": [
         "Fix #600: after an HA restart or grace-period expiry with the whole-house fan"
         " already running for natural ventilation, the Activity Record no longer shows"
@@ -1589,6 +1602,45 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    602: {
+        "version_fixed": "0.5.66",
+        "title": (
+            "self._today_record (coordinator.py) — which gates setpoint-only manual"
+            " override detection, HVAC runtime tracking, comfort-violation minutes,"
+            " occupancy-away minutes, door/window pause counts, and the thermal-learning"
+            " watchdog — was created in exactly one place: _async_send_briefing(), a"
+            " once-daily scheduled trigger with no retry, which bails out early whenever"
+            " the weather entity has no forecast at that one fixed moment. A weather"
+            " outage overlapping briefing_time silently blacked out all of the above for"
+            " the rest of that calendar day, unlike the classification/comfort-band"
+            " forecast dependency (Issue #588), which already retries every 30-minute"
+            " regular cycle forever. Found while root-causing Issue #598 (a pending test"
+            " scenario passing by coincidence because this exact gap silently disabled"
+            " the override detection it was meant to exercise)."
+        ),
+        "scope_covered": (
+            "coordinator.py: new _ensure_today_record(classification) method, extracting"
+            " the existing DailyRecord creation/counter-preservation logic verbatim out"
+            " of _async_send_briefing() (which now calls it instead of inlining"
+            " creation). Also called from the regular classification cycle"
+            " (_async_update_data_impl(), immediately after a successful classify_day())"
+            " — the same self-healing, every-30-min path Issue #588 already proved"
+            " retries forecast forever, so the gap shrinks from up to 24 hours to about"
+            " 30 minutes. Idempotent: no-ops when a record for today already exists, so"
+            " calling it every cycle cannot reset same-day accumulated counters (unlike"
+            " the pre-existing once-daily rebuild, which only mattered once a day)."
+            " tools/sim_harness/run_production.py: the harness's classification-event"
+            " dispatch now mirrors the same real production hook. Issue #598's pending"
+            " scenario (tools/simulations/pending/vacation_occupancy_override_cleared.json)"
+            " now passes for real — needed one added reconfirmation classification event"
+            " after the midnight day-rollover (the harness has no periodic auto-tick the"
+            " way production does) and manual_grace_seconds raised from 3600 to 7200 (the"
+            " original 1-hour grace was auto-expiring 11 minutes before the scenario's"
+            " own explicit cancel_override event, once override detection actually"
+            " started working — so the assertion was at risk of passing via grace-expiry"
+            " instead of the cancel-override path it exists to test)."
+        ),
+    },
     600: {
         "version_fixed": "0.5.65",
         "title": (

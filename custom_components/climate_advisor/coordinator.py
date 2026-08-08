@@ -1769,6 +1769,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "threshold_cool": self.config.get(CONF_THRESHOLD_COOL, DEFAULT_THRESHOLD_COOL),
             }
             self._current_classification = classify_day(forecast, previous_day_type=prev_type, **_thresh)
+            # Issue #602: ensure today's DailyRecord exists on this already-resilient,
+            # every-30-min classification path — not only the once-daily briefing_time
+            # trigger, which has no retry and previously left setpoint-override detection
+            # (and every other _today_record-gated bookkeeping counter) silently dark for
+            # the rest of the day whenever weather was unavailable at that one moment.
+            self._ensure_today_record(self._current_classification)
             # record_history=True here; the 5-min tick (Issue #511) always passes False
             # so _outdoor_temp_history keeps its existing 30-min cadence.
             self._apply_outdoor_temp(forecast.current_outdoor_temp, record_history=True)
@@ -2841,6 +2847,46 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         return generate_briefing(**briefing_kwargs), generate_briefing(**briefing_kwargs, verbosity="tldr_only")
 
+    def _ensure_today_record(self, classification: DayClassification) -> None:
+        """Create or roll over today's ``DailyRecord`` if needed (Issue #602).
+
+        Extracted verbatim from ``_async_send_briefing()`` so it can also be called
+        from the regular (every-30-min, self-healing per Issue #588) classification
+        cycle, not only from the once-daily ``briefing_time`` trigger. Previously
+        ``_today_record`` was created ONLY inside ``_async_send_briefing()``, which
+        bails out early whenever the weather entity has no forecast at that one
+        fixed daily moment — silently blocking manual-override detection and every
+        other ``_today_record``-gated bookkeeping counter for the rest of that day.
+        Idempotent: no-ops when a record for today already exists.
+        """
+        _today_str = dt_util.now().strftime("%Y-%m-%d")
+        if self._today_record is not None and self._today_record.date == _today_str:
+            return
+        _prev = self._today_record if (self._today_record and self._today_record.date == _today_str) else None
+        self._today_record = DailyRecord(
+            date=_today_str,
+            day_type=classification.day_type,
+            trend_direction=classification.trend_direction,
+            windows_recommended=classification.windows_recommended,
+            window_open_time=(classification.window_open_time.isoformat() if classification.window_open_time else None),
+            window_close_time=(
+                classification.window_close_time.isoformat() if classification.window_close_time else None
+            ),
+            hvac_mode_recommended=classification.hvac_mode,
+            hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
+            comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
+            manual_overrides=_prev.manual_overrides if _prev else 0,
+            thermal_session_count=_prev.thermal_session_count if _prev else 0,
+            occupancy_away_minutes=_prev.occupancy_away_minutes if _prev else 0.0,
+            windows_opened=_prev.windows_opened if _prev else False,
+            window_open_actual_time=_prev.window_open_actual_time if _prev else None,
+            override_details=list(_prev.override_details) if _prev else [],
+        )
+        # Capture raw forecast high/low for weather bias learning
+        if self.config.get("learning_enabled", True):
+            self._today_record.forecast_high_f = classification.today_high
+            self._today_record.forecast_low_f = classification.today_low
+
     async def _async_send_briefing(self, now: datetime) -> None:
         """Generate and send the daily briefing."""
         if self._briefing_sent_today:
@@ -2916,37 +2962,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
 
         # Initialize today's learning record, preserving any counters already accumulated
-        # today (e.g. after an HA restart mid-day that fires briefing again).
-        _today_str = dt_util.now().strftime("%Y-%m-%d")
-        _prev = self._today_record if (self._today_record and self._today_record.date == _today_str) else None
-        self._today_record = DailyRecord(
-            date=_today_str,
-            day_type=classification.day_type,
-            trend_direction=classification.trend_direction,
-            windows_recommended=classification.windows_recommended,
-            window_open_time=(classification.window_open_time.isoformat() if classification.window_open_time else None),
-            window_close_time=(
-                classification.window_close_time.isoformat() if classification.window_close_time else None
-            ),
-            hvac_mode_recommended=classification.hvac_mode,
-            hvac_runtime_minutes=_prev.hvac_runtime_minutes if _prev else 0.0,
-            comfort_violations_minutes=_prev.comfort_violations_minutes if _prev else 0.0,
-            manual_overrides=_prev.manual_overrides if _prev else 0,
-            thermal_session_count=_prev.thermal_session_count if _prev else 0,
-            occupancy_away_minutes=_prev.occupancy_away_minutes if _prev else 0.0,
-            windows_opened=_prev.windows_opened if _prev else False,
-            window_open_actual_time=_prev.window_open_actual_time if _prev else None,
-            override_details=list(_prev.override_details) if _prev else [],
-        )
-
-        # Capture raw forecast high/low for weather bias learning
-        if (
-            self.config.get("learning_enabled", True)
-            and self._today_record is not None
-            and self._current_classification
-        ):
-            self._today_record.forecast_high_f = self._current_classification.today_high
-            self._today_record.forecast_low_f = self._current_classification.today_low
+        # today (e.g. after an HA restart mid-day that fires briefing again). Issue #602:
+        # extracted to _ensure_today_record() so the regular classification cycle can also
+        # call it — this call site is now just the once-daily "make sure it's current" path.
+        self._ensure_today_record(classification)
 
         # Generate briefing text and track which suggestions were sent
         suggestions = self.learning.generate_suggestions()

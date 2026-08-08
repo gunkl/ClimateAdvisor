@@ -20,6 +20,7 @@
 | Where is the Tier 3 spec for the Activity Report per-event table — event vocabulary, setpoint convention, renderer runbook? | The Territory spec covers 34 event types in 6 groups, `_format_band_setpoint` single-setpoint convention, `EVENT_RENDERERS` registry, `_default_renderer` contract, dedup mechanics, and the four-step runbook for adding a new renderer. | [Activity Report Table Spec](activity-report-table.md) |
 | What replaced the ClimateSimulator and how does the production harness work? | Issue #236 eliminated the standalone simulator engine. `tools/sim_harness/` drives the real `AutomationEngine` headless via FakeHass + FakeScheduler. `tools/simulate.py` is now a CLI/MANIFEST shell only. | [Sim Harness Brief](sim-harness-brief.md) |
 | What are the full contracts for FakeHass, FakeScheduler, run_production, and outcomes? | FakeHass service-bus interception + state-feedback loop; FakeScheduler virtual clock patching contract; run_production event dispatch table including predicted_indoor ODE re-classification; outcomes custom assertion types. | [Sim Harness Spec](sim-harness-spec.md) |
+| Is it safe to construct a second `AutomationEngine` instance, and what must a future shadow engine never share with production? | `AutomationEngine` has no hidden shared state — safe to instantiate twice. The coordinator's 9 callback attributes are not: 4 reach into real production state/side effects regardless of which engine fired them. `AutomationEngineCallbacks` (Issue #604) makes isolation structural, not a runtime check. | [§Engine Callback Isolation](02-ARCHITECTURE-REFERENCE.md#engine-callback-isolation-issue-604-block-5-subtask-n2) |
 
 ## File Structure
 
@@ -310,6 +311,53 @@ INFO  [DRY RUN] Would send notification: Climate Advisor — 🏠 Welcome home! 
 ### Implementation
 
 Guards are placed at the 3 thermostat primitives (`_set_hvac_mode`, `_set_temperature`, `_notify`) in `AutomationEngine` plus the briefing notification in the coordinator. Higher-level logic (classification application, door/window pause tracking, grace periods, occupancy handling) continues unaffected.
+
+## Engine Callback Isolation (Issue #604, Block 5 subtask N2)
+
+`AutomationEngine` itself has no hidden shared/global mutable state — every grace/timer
+cancel-token, flag, and its `_decision_lock` (a per-instance `asyncio.Lock`) live on the
+instance. It is safe to construct more than one. What is **not** safe by default is the
+coordinator's callback wiring: `ClimateAdvisorCoordinator.__init__` wires 9 callback
+attributes onto `self.automation_engine` (`_revisit_callback`, `_sensor_check_callback`,
+`_sensor_debounce_pending_callback`, `_emit_event_callback`, `_request_refresh_callback`,
+`_post_grace_fan_check_callback`, `_get_fan_physical_state_callback`,
+`_is_recent_fan_command_callback`, `_reclassify_callback`) — all closures/bound methods over
+the single coordinator instance, not parameterized by which engine invoked them. At least 4
+of these reach into real production state or trigger real side effects regardless of which
+engine fired them:
+
+- `coordinator._on_post_grace_fan_check` (→ `_async_post_grace_fan_reconcile`) hardcodes
+  `ae = self.automation_engine` and can issue a real `_activate_fan`/`_deactivate_fan` command.
+- `coordinator._emit_event` reads `self.automation_engine._natural_vent_active` — the
+  hardcoded production engine's attribute — to decide whether to call a real,
+  non-dry-run-gated side effect (`_maybe_reschedule_pre_cool_on_nat_vent_exit`).
+- `coordinator.async_request_refresh` and the `_request_refresh_callback` lambda that wraps
+  it both trigger a full real `_async_update_data_impl()` cycle.
+
+**The contract**: `AutomationEngine.__init__` takes an optional keyword-only
+`callbacks: AutomationEngineCallbacks | None = None` (a 9-field dataclass, one field per
+callback above) and `role: str = "production"` (a label for logging/future observability
+only — never branched on inside the engine or inside any of the 9 coordinator methods).
+Isolation between the production engine and any future second ("shadow") engine is
+**structural**, not a runtime check someone can forget: a shadow engine simply is never
+given a bundle containing the 4 hazardous callables above, so there is nothing to check.
+
+The coordinator's own wiring is built by `_build_production_automation_callbacks()` — a
+behavior-preserving extraction of what used to be 9 individual post-construction
+assignments, now one bundle passed at construction time
+(`AutomationEngine(..., callbacks=self._build_production_automation_callbacks(),
+role="production")`). `coordinator.shadow_automation_engine` exists as a placeholder
+(`None` until Block 5 subtask Q) so the schema field is stable from N2 onward.
+
+**Rule for any future second `AutomationEngine` instance (Block 5 subtask Q and beyond)**:
+build a dedicated `AutomationEngineCallbacks` bundle for it. It must **never** reuse
+`coordinator._on_post_grace_fan_check`, `coordinator._emit_event`,
+`coordinator.async_request_refresh`, or the `_request_refresh_callback` lambda that wraps
+it — reusing any of those lets the second engine's events/decisions mutate real production
+state and event history regardless of the second engine's own `dry_run`/`role`.
+`tests/test_engine_callback_isolation.py::TestHazardCharacterization` reproduces this exact
+hazard today (a second engine built with the production bundle leaks an event into the
+production event log) as a concrete negative example for review.
 
 ## Automation Engine — Occupancy Methods
 

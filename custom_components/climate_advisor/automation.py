@@ -491,6 +491,29 @@ def compute_bedtime_setback(
         return min(raw, floor)
 
 
+@dataclass
+class AutomationEngineCallbacks:
+    """Bundle of the 9 callbacks the coordinator wires onto an AutomationEngine.
+
+    Issue #604 (Block 5, subtask N2): named-bundle form of the callback wiring the
+    coordinator has always done post-construction, so a future second ("shadow")
+    engine instance can be given its own dedicated set of callables instead of
+    reusing the production coordinator's real bound methods. Passing this bundle
+    doesn't change behavior for the existing single (production) engine — it is
+    the same 9 attributes, assigned in one step instead of nine.
+    """
+
+    revisit: Callable[[], Any] | None = None
+    sensor_check: Callable[[], bool] | None = None
+    sensor_debounce_pending: Callable[[], bool] | None = None
+    emit_event: Callable[..., None] | None = None
+    request_refresh: Callable[[], None] | None = None
+    post_grace_fan_check: Callable[[], None] | None = None
+    get_fan_physical_state: Callable[[], Any] | None = None
+    is_recent_fan_command: Callable[[], bool] | None = None
+    reclassify: Callable[[], None] | None = None
+
+
 class AutomationEngine:
     """Manages HVAC automations based on daily classification."""
 
@@ -503,6 +526,9 @@ class AutomationEngine:
         notify_service: str,
         config: dict[str, Any],
         sensor_polarity_inverted: bool = False,
+        *,
+        callbacks: AutomationEngineCallbacks | None = None,
+        role: str = "production",
     ) -> None:
         """Initialize the automation engine."""
         self.hass = hass
@@ -512,6 +538,11 @@ class AutomationEngine:
         self.notify_service = notify_service
         self.config = config
         self.sensor_polarity_inverted = sensor_polarity_inverted
+        # Issue #604: label only, for logging/future observability — never branched on
+        # inside this class or the 9 coordinator callback methods. Isolation between a
+        # production and a future shadow engine is structural (which callables get wired
+        # in, via AutomationEngineCallbacks), not a runtime role check.
+        self.role = role
         self._active_listeners: list[Any] = []
         self._current_classification: DayClassification | None = None
         self._paused_by_door = False
@@ -761,6 +792,21 @@ class AutomationEngine:
 
         # Occupancy mode — synced by coordinator (Issue #85)
         self._occupancy_mode: str = OCCUPANCY_HOME
+
+        # Issue #604: seed the 9 callback attributes from the bundle, if one was given.
+        # Omitted (None) → every _x_callback attribute stays None, exactly as before this
+        # dataclass existed. Applied last so it can't be shadowed by any of the plain
+        # `self._x_callback: Any | None = None` assignments above.
+        if callbacks is not None:
+            self._revisit_callback = callbacks.revisit
+            self._sensor_check_callback = callbacks.sensor_check
+            self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
+            self._emit_event_callback = callbacks.emit_event
+            self._request_refresh_callback = callbacks.request_refresh
+            self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
+            self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
+            self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
+            self._reclassify_callback = callbacks.reclassify
 
     async def _notify(self, message: str, title: str, notification_type: str) -> None:
         """Send a notification via configured channels, filtered by per-event preferences."""

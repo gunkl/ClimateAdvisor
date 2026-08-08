@@ -107,6 +107,11 @@ from .fan_thermostat_decision import (
     decide_fan_thermostat_check,
     resolve_hard_exit_floor,
 )
+from .nat_vent_exit import (
+    NatVentExitInputs,
+    NatVentExitReason,
+    decide_nat_vent_exit,
+)
 from .nat_vent_gate import (
     NatVentGateInputs,
     NatVentSoftStartGateInputs,
@@ -3010,6 +3015,11 @@ class AutomationEngine:
                     return
 
             outdoor = self._last_outdoor_temp
+            # Issue #608: computed unconditionally (not only inside the
+            # `if self._natural_vent_active:` exit-chain block below) because the
+            # later paused-reactivation-lockout check also reads it, matching the
+            # original code's own unconditional read at its outdoor-rise-exit site.
+            indoor = self._get_indoor_temp_f()
             comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             threshold = comfort_cool + nat_vent_delta
@@ -3131,18 +3141,18 @@ class AutomationEngine:
                         _hysteresis_upg,
                     )
 
-            # Issue #99: Comfort-floor exit — check BEFORE outdoor warmth to avoid conflicting
-            # transitions. If indoor drops to comfort_heat, stop fan and restore heat.
-            # Do NOT enter pause — the house needs to warm up, not wait for nat vent re-evaluation.
+            # Issue #608 (Block 5 Phase 2): the 5-check priority-ordered exit chain
+            # (comfort-floor, away-ceiling, proactive-floor, outdoor-rise,
+            # ceiling-threshold) previously inline here now lives in
+            # nat_vent_exit.decide_nat_vent_exit() — same conditions, same
+            # priority order, differentially validated (tests/test_nat_vent_exit.py
+            # + unchanged golden/pending assertions on these exact exit events).
+            # Side effects (fan/HVAC calls, event emission, logging) stay here;
+            # only the branching condition moved.
             if self._natural_vent_active:
                 comfort_heat = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
                 indoor = self._get_indoor_temp_f()
-                if (
-                    self._natural_vent_active
-                    and indoor is not None
-                    and comfort_cool is not None
-                    and indoor > comfort_cool
-                ):
+                if indoor is not None and comfort_cool is not None and indoor > comfort_cool:
                     # Issue #247: the ODE ceiling guard now ESCALATES to AC on the classification cycle
                     # when indoor breaches the ceiling under active nat-vent (its three-condition dormancy
                     # lifts), so this is an informational heads-up, not a stuck state.
@@ -3152,26 +3162,32 @@ class AutomationEngine:
                         indoor,
                         comfort_cool,
                     )
-                # Hard exit floor — single source of truth in resolve_hard_exit_floor()
-                # (Issue #456), also used by fan_thermostat_check()/nat_vent_temperature_check().
-                _hysteresis_cv = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
-                _vent_floor = resolve_hard_exit_floor(
-                    comfort_heat_raw=comfort_heat,
-                    sleep_heat=float(self.config.get(CONF_SLEEP_HEAT, comfort_heat)),
-                    in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
-                    hysteresis=_hysteresis_cv,
+
+                thermal = self._thermal_model or {}
+                exit_decision = decide_nat_vent_exit(
+                    NatVentExitInputs(
+                        indoor=indoor,
+                        outdoor=outdoor,
+                        comfort_heat_raw=comfort_heat,
+                        sleep_heat=float(self.config.get(CONF_SLEEP_HEAT, comfort_heat)),
+                        in_sleep_window=_in_sleep_window(dt_util.now(), self.config),
+                        hysteresis=float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F)),
+                        comfort_cool=comfort_cool,
+                        nat_vent_delta=nat_vent_delta,
+                        occupancy_mode=self._occupancy_mode,
+                        thermal_confidence=thermal.get("confidence", "none"),
+                        k_passive=thermal.get("k_passive"),
+                    )
                 )
-                if indoor is not None and indoor <= _vent_floor:
+
+                if exit_decision.reason == NatVentExitReason.COMFORT_FLOOR:
+                    _vent_floor = exit_decision.vent_floor
                     self._natural_vent_active = False
                     await self._deactivate_fan(
-                        reason=(
-                            f"natural vent exit: indoor {indoor:.1f}\u00b0F \u2264 comfort floor"
-                            f" {_vent_floor:.1f}\u00b0F"
-                        )
+                        reason=(f"natural vent exit: indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor:.1f}°F")
                     )
                     _LOGGER.info(
-                        "Natural vent exit (comfort floor): indoor %.1f\u00b0F"
-                        " \u2264 floor %.1f\u00b0F \u2014 restoring heat",
+                        "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring heat",
                         indoor,
                         _vent_floor,
                     )
@@ -3195,140 +3211,105 @@ class AutomationEngine:
                         if c.hvac_mode in ("heat", "cool"):
                             await self._set_hvac_mode(
                                 c.hvac_mode,
-                                reason=f"natural vent comfort-floor exit \u2014 restoring {c.hvac_mode} mode",
+                                reason=f"natural vent comfort-floor exit — restoring {c.hvac_mode} mode",
                             )
                             await self._set_temperature_for_mode(
                                 c,
-                                reason="natural vent comfort-floor exit \u2014 restoring comfort",
+                                reason="natural vent comfort-floor exit — restoring comfort",
                             )
                             self._start_grace_period("automation", trigger="nat_vent_exit_resume")
                     return
 
-            # Priority 2b: Away mode ceiling exit — nat-vent exits at home comfort ceiling while away
-            # (away setback is higher than comfort_cool, but nat-vent only free-cools within home band)
-            if self._natural_vent_active and self._occupancy_mode == OCCUPANCY_AWAY:
-                _indoor_away = self._get_indoor_temp_f()
-                if _indoor_away is not None and comfort_cool is not None and _indoor_away >= comfort_cool:
+                if exit_decision.reason == NatVentExitReason.AWAY_CEILING:
                     _LOGGER.info(
                         "Nat-vent away-mode ceiling exit: indoor %.1fF >= comfort_cool %.1fF while away",
-                        _indoor_away,
+                        indoor,
                         comfort_cool,
                     )
                     self._natural_vent_active = False
                     self._nat_vent_soft_start = False
                     await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
-                    # Do NOT pause — just let away setback handle HVAC
+                    # Do NOT pause -- just let away setback handle HVAC
                     if self._emit_event_callback:
                         self._emit_event_callback(
                             "nat_vent_away_ceiling_exit",
                             {
-                                "indoor": _indoor_away,
+                                "indoor": indoor,
                                 "comfort_cool": comfort_cool,
                                 "fan_device": _fan_device_label(self.config),
                             },
                         )
                     return
 
-            # Phase 2: proactive floor exit — predict floor crossing before it happens
-            if self._natural_vent_active:
-                thermal = self._thermal_model or {}
-                if thermal.get("confidence", "none") in ("medium", "high"):
+                if exit_decision.reason == NatVentExitReason.PROACTIVE_FLOOR:
+                    time_to_floor = exit_decision.time_to_floor_hr
+                    comfort_heat_now = exit_decision.comfort_heat_now
                     k_passive = thermal.get("k_passive")
-                    _indoor_now = self._get_indoor_temp_f()
-                    if (
-                        k_passive is not None
-                        and k_passive < 0
-                        and _indoor_now is not None
-                        and outdoor is not None
-                        and outdoor < _indoor_now
-                    ):
-                        passive_rate = k_passive * (_indoor_now - outdoor)  # °F/hr, negative
-                        if passive_rate < 0:
-                            # Issue #427: use the same sleep-aware canonical floor as
-                            # Priority-1 hard exit and reconcile (_nat_vent_reactivation_floor,
-                            # added in #417) instead of the flat daytime comfort_heat. The old
-                            # hardcoded read disagreed with every other exit/reactivation site
-                            # during the sleep window, causing this block to believe the floor
-                            # was already breached while Priority-1/cycling correctly still
-                            # considered the session in-band — a repeating exit/reconcile-adopt
-                            # loop every ~5-15 min all night.
-                            comfort_heat_now = self._nat_vent_reactivation_floor()
-                            time_to_floor = (_indoor_now - comfort_heat_now) / abs(passive_rate)
-                            # A negative/zero time_to_floor means the floor is already at or
-                            # below current indoor — that's not a *prediction*, it's already
-                            # reality, and belongs to the Priority-1 hard-exit or the in-session
-                            # thermostatic cycling (nat_vent_temperature_check), not to this
-                            # proactive/anticipatory check. Firing here as well is what produced
-                            # the nonsensical "floor in -2.09 hr" log text in #427.
-                            if 0 <= time_to_floor < MIN_VIABLE_NAT_VENT_HOURS:
-                                _LOGGER.info(
-                                    "Natural vent proactive exit: floor predicted in %.2f hr"
-                                    " < %.1f hr threshold — exiting nat-vent session",
-                                    time_to_floor,
-                                    MIN_VIABLE_NAT_VENT_HOURS,
-                                )
-                                if self._emit_event_callback:
-                                    self._emit_event_callback(
-                                        "nat_vent_predicted_floor_exit",
-                                        {
-                                            "time_to_floor_hr": round(time_to_floor, 2),
-                                            "indoor_temp": round(_indoor_now, 1),
-                                            "comfort_heat": round(comfort_heat_now, 1),
-                                            "k_passive": round(k_passive, 4),
-                                            "fan_mode_change": "on→auto",
-                                            "fan_device": _fan_device_label(self.config),
-                                            "hvac_mode_restored": (
-                                                self._current_classification.hvac_mode
-                                                if self._current_classification
-                                                else "unknown"
-                                            ),
-                                        },
-                                    )
-                                await self._exit_nat_vent(
-                                    reason=(
-                                        f"nat-vent proactive floor exit: indoor {_indoor_now:.1f}°F"
-                                        f" predicted to reach comfort_heat {comfort_heat_now:.1f}°F"
-                                        f" in {time_to_floor:.2f}h"
-                                    )
-                                )
-                                return
-
-            # NEW (Issue #115): exit if outdoor > indoor — airflow now strictly heating
-            indoor = self._get_indoor_temp_f()
-            if self._natural_vent_active and outdoor is not None and indoor is not None and outdoor > indoor:
-                _LOGGER.info(
-                    "Natural vent exit: outdoor %.1f°F > indoor %.1f°F — airflow reversed",
-                    outdoor,
-                    indoor,
-                )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_outdoor_rise_exit",
-                        {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
+                    _LOGGER.info(
+                        "Natural vent proactive exit: floor predicted in %.2f hr"
+                        " < %.1f hr threshold — exiting nat-vent session",
+                        time_to_floor,
+                        MIN_VIABLE_NAT_VENT_HOURS,
                     )
-                # set_outdoor_exit_time=True: this is the only exit path whose
-                # _nat_vent_outdoor_exit_time is consumed by the reactivation lockout below.
-                await self._exit_nat_vent(
-                    reason=(f"nat vent exit: outdoor {outdoor:.1f}°F > indoor {indoor:.1f}°F — airflow reversed"),
-                    set_outdoor_exit_time=True,
-                )
-                return
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_predicted_floor_exit",
+                            {
+                                "time_to_floor_hr": round(time_to_floor, 2),
+                                "indoor_temp": round(indoor, 1),
+                                "comfort_heat": round(comfort_heat_now, 1),
+                                "k_passive": round(k_passive, 4),
+                                "fan_mode_change": "on→auto",
+                                "fan_device": _fan_device_label(self.config),
+                                "hvac_mode_restored": (
+                                    self._current_classification.hvac_mode
+                                    if self._current_classification
+                                    else "unknown"
+                                ),
+                            },
+                        )
+                    await self._exit_nat_vent(
+                        reason=(
+                            f"nat-vent proactive floor exit: indoor {indoor:.1f}°F"
+                            f" predicted to reach comfort_heat {comfort_heat_now:.1f}°F"
+                            f" in {time_to_floor:.2f}h"
+                        )
+                    )
+                    return
 
-            if self._natural_vent_active and outdoor is not None and outdoor > threshold:
-                # Outdoor got too warm — exit nat vent.
-                # Issue #411: routing this through _exit_nat_vent() is an intentional behavior
-                # change, not a no-op refactor — this path previously never captured
-                # _pre_pause_mode before pausing (unlike the door-open pause path). It now does,
-                # via _exit_nat_vent()'s sensor-open branch.
-                _LOGGER.info(
-                    "Natural vent exit: outdoor %.1f°F > threshold %.1f°F",
-                    outdoor,
-                    threshold,
-                )
-                await self._exit_nat_vent(
-                    reason=f"natural vent exit: outdoor {outdoor:.1f}°F > threshold {threshold:.1f}°F"
-                )
-                return
+                if exit_decision.reason == NatVentExitReason.OUTDOOR_RISE:
+                    _LOGGER.info(
+                        "Natural vent exit: outdoor %.1f°F > indoor %.1f°F — airflow reversed",
+                        outdoor,
+                        indoor,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_outdoor_rise_exit",
+                            {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
+                        )
+                    # set_outdoor_exit_time=True: this is the only exit path whose
+                    # _nat_vent_outdoor_exit_time is consumed by the reactivation lockout below.
+                    await self._exit_nat_vent(
+                        reason=(f"nat vent exit: outdoor {outdoor:.1f}°F > indoor {indoor:.1f}°F — airflow reversed"),
+                        set_outdoor_exit_time=True,
+                    )
+                    return
+
+                if exit_decision.reason == NatVentExitReason.CEILING_THRESHOLD:
+                    # Issue #411: routing this through _exit_nat_vent() is an intentional behavior
+                    # change, not a no-op refactor -- this path previously never captured
+                    # _pre_pause_mode before pausing (unlike the door-open pause path). It now does,
+                    # via _exit_nat_vent()'s sensor-open branch.
+                    _LOGGER.info(
+                        "Natural vent exit: outdoor %.1f°F > threshold %.1f°F",
+                        outdoor,
+                        threshold,
+                    )
+                    await self._exit_nat_vent(
+                        reason=f"natural vent exit: outdoor {outdoor:.1f}°F > threshold {threshold:.1f}°F"
+                    )
+                    return
 
             if self._paused_by_door and outdoor is not None and indoor is not None:
                 hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))

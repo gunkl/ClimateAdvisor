@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.1] — 2026-08-08
+
+- Feat #608: internal refactor only, no user-visible behavior change — the natural-ventilation exit logic (why a free-cooling session ends: comfort reached, ceiling reached, prediction, outdoor warming) is now a single, tested, verified-behavior-preserving decision instead of inline logic. Along the way, this also surfaced (documented, not yet consolidated) that natural ventilation currently evaluates some of these same exit conditions in up to three separate places — a known duplication pattern in this area; consolidating them is flagged as follow-up work.
+
 ## [0.6.0] — 2026-08-08
 
 - Feat #606: internal refactor only, no user-visible behavior change — the natural-ventilation on/off/purge-mode logic now has a single, named, automatically-verified description of its own state (checked against every regression-test scenario), laying groundwork for safer future automation-logic changes in this area.

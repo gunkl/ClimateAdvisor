@@ -24,7 +24,6 @@ from .const import (
     CEILING_ESCALATION_SAVINGS_MARGIN_F,
     CEILING_PRECOOL_FALLBACK_MIN,
     CLIMATE_FEATURE_TARGET_TEMP_RANGE,
-    COMFORT_BAND_EVENT_DEDUP_SECONDS,
     CONF_ADAPTIVE_PREHEAT,
     CONF_ADAPTIVE_SETBACK,
     CONF_AUTOMATION_GRACE_NOTIFY,
@@ -1768,7 +1767,10 @@ class AutomationEngine:
                     )
                 else:
                     _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
-                if self._emit_event_callback:
+                _paused_key = (classification.day_type, classification.hvac_mode)
+                if self._emit_event_callback and not self._recent_duplicate(
+                    "classification_suppressed_paused", _paused_key
+                ):
                     self._emit_event_callback(
                         "classification_suppressed_paused",
                         {"day_type": classification.day_type, "hvac_mode": classification.hvac_mode},
@@ -1824,8 +1826,11 @@ class AutomationEngine:
             )
             _old_mode_cls = _cs.state if _cs else None
             _cls_key = (classification.day_type, classification.hvac_mode)
-            if _cls_key != self._last_classification_applied:
-                self._last_classification_applied = _cls_key
+            # _last_classification_applied is also read directly by coordinator.py/api.py as
+            # a "has a classification ever been applied" marker (independent of event dedup) —
+            # keep it updated to the latest key regardless of what _recent_duplicate() decides.
+            self._last_classification_applied = _cls_key
+            if not self._recent_duplicate("classification_applied", _cls_key):
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "classification_applied",
@@ -2092,39 +2097,22 @@ class AutomationEngine:
             )
             return
 
-        # Issue #444: _set_temperature() above is always called (unconditional thermostat
-        # re-assertion) — only the human-facing ANNOUNCEMENT is deduped here. Overlapping
-        # triggers (startup coalesce + its own follow-on refresh; grace-expiry re-application
-        # colliding with the regular cycle) otherwise each re-announce an identical band as a
-        # fresh comfort_band_applied event within the same minute. Time-windowed, not
-        # permanent: a real re-announcement after COMFORT_BAND_EVENT_DEDUP_SECONDS (well under
-        # the 30-min regular cycle) still fires normally.
+        # Issue #444, revised by Issue #591/#590 Finding D: _set_temperature() above is always
+        # called (unconditional thermostat re-assertion) — only the human-facing ANNOUNCEMENT
+        # is deduped here, via the shared _recent_duplicate() helper. Permanent
+        # (content-keyed, no fixed window) rather than #444's original 10-minute window — a
+        # real 11-minute production gap (an uncancelled revisit timer armed by a
+        # non-apply_classification() _apply_comfort_band() caller) slipped past that window
+        # and re-announced an identical band. Owner-confirmed decision (#590 Finding D): no
+        # periodic re-announcement heartbeat — the visible confirmation is silent after the
+        # first announcement until the band actually changes; the underlying thermostat
+        # command is unaffected and still fires every cycle.
         _signature = (band.active, _cmd_shape, round(_target, 2))
-        _now = dt_util.now()
-        # getattr: some tests construct AutomationEngine via object.__new__() and populate
-        # only the attributes they need, bypassing __init__ — mirrors the existing
-        # _nat_vent_was_active defensive-read pattern in coordinator.py._emit_event().
-        _last_signature = getattr(self, "_last_comfort_band_signature", None)
-        _last_at = getattr(self, "_last_comfort_band_event_at", None)
-        # isinstance guard: some tests mock dt_util as a bare MagicMock (never calling
-        # datetime.now() for real), which would otherwise make the elapsed-time comparison
-        # below operate on MagicMock objects instead of real timedeltas. Treat anything that
-        # isn't a real datetime as "no prior timestamp" — the safe default (never suppress).
-        _is_redundant = (
-            _last_signature == _signature
-            and isinstance(_last_at, datetime)
-            and isinstance(_now, datetime)
-            and (_now - _last_at).total_seconds() < COMFORT_BAND_EVENT_DEDUP_SECONDS
-        )
-        self._last_comfort_band_signature = _signature
-        self._last_comfort_band_event_at = _now
-
-        if _is_redundant:
+        if self._recent_duplicate("comfort_band_applied", _signature):
             _LOGGER.debug(
-                "comfort_band_applied event suppressed — identical band (%s %.1f°F) already announced %.1fs ago",
+                "comfort_band_applied event suppressed — identical band (%s %.1f°F) already announced",
                 _cmd_shape,
                 _target,
-                (_now - _last_at).total_seconds(),
             )
             return
 
@@ -2147,7 +2135,19 @@ class AutomationEngine:
         # enforced here rather than by convention at every one of the ~13 call sites.
         if mode != "off" and self._whf_owns_hvac():
             _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
-            if self._emit_event_callback:
+            # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
+            # tried first and reverted — it silently swallowed the second, semantically
+            # distinct guard firing at wake-up in golden/pending scenario
+            # wakeup_preserves_whf_manual_override, since each occurrence (bedtime, then
+            # wake-up, hours apart) is its own decision point, not noise. But leaving this
+            # site completely unguarded reopens the literal #584 bug shape — an overlapping
+            # trigger pair (e.g. startup coalesce + its own follow-on refresh) firing this
+            # SAME guard seconds apart. A short window catches that accidental near-duplicate
+            # with wide margin below the hours-apart gaps real decision points have.
+            _whf_block_sig = (mode,)
+            if self._emit_event_callback and not self._recent_duplicate(
+                "hvac_write_blocked_whf_active", _whf_block_sig, window_seconds=600
+            ):
                 self._emit_event_callback(
                     "hvac_write_blocked_whf_active",
                     {"attempted_mode": mode, "reason": reason},
@@ -2208,7 +2208,19 @@ class AutomationEngine:
         # enforced here rather than by convention at every call site.
         if mode != "off" and self._whf_owns_hvac():
             _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
-            if self._emit_event_callback:
+            # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
+            # tried first and reverted — it silently swallowed the second, semantically
+            # distinct guard firing at wake-up in golden/pending scenario
+            # wakeup_preserves_whf_manual_override, since each occurrence (bedtime, then
+            # wake-up, hours apart) is its own decision point, not noise. But leaving this
+            # site completely unguarded reopens the literal #584 bug shape — an overlapping
+            # trigger pair (e.g. startup coalesce + its own follow-on refresh) firing this
+            # SAME guard seconds apart. A short window catches that accidental near-duplicate
+            # with wide margin below the hours-apart gaps real decision points have.
+            _whf_block_sig = (mode,)
+            if self._emit_event_callback and not self._recent_duplicate(
+                "hvac_write_blocked_whf_active", _whf_block_sig, window_seconds=600
+            ):
                 self._emit_event_callback(
                     "hvac_write_blocked_whf_active",
                     {"attempted_mode": mode, "reason": reason},
@@ -4275,7 +4287,9 @@ class AutomationEngine:
                 "Occupancy away — door/window open (_paused_by_door=True), "
                 "skipping setback band; occupancy recorded, HVAC remains off"
             )
-            if self._emit_event_callback:
+            if self._emit_event_callback and not self._recent_duplicate(
+                "occupancy_setback_suppressed_paused", ("away",)
+            ):
                 self._emit_event_callback(
                     "occupancy_setback_suppressed_paused",
                     {"occupancy": "away", "reason": "paused_by_door"},
@@ -4301,7 +4315,21 @@ class AutomationEngine:
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
-        if self._emit_event_callback:
+        # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was tried
+        # first and reverted — a repeat occupancy_setback with an identical band is not noise
+        # in general: it's often the visible, intentional re-confirmation Issue #505 added
+        # (e.g. handle_bedtime()'s DEFER_OCCUPANCY branch actively reapplying the away/
+        # vacation setback hours after the initial away transition). Golden scenarios
+        # (away_morning_wakeup_skipped_assertion, morning_wakeup_skipped_away_occupancy,
+        # cancel_override_then_resume — gaps of 4.5h, 8.5h, and 31min respectively) rely on
+        # that reapplication being its own visible decision. But leaving this site completely
+        # unguarded reopens the literal #584 bug shape — the SAME overlapping-trigger
+        # collision the original plan traced here (cancel_override()'s immediate refresh
+        # racing _schedule_reclassify_after_cancel()'s 10s-delayed call) could still double-
+        # emit this within seconds. A short window catches that accidental near-duplicate
+        # while staying far below every legitimate gap above.
+        _away_sig = ("away", round(_away_band.floor, 2), round(_away_band.ceiling, 2))
+        if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _away_sig, window_seconds=600):
             self._emit_event_callback(
                 "occupancy_setback",
                 {
@@ -4374,7 +4402,9 @@ class AutomationEngine:
                 "Occupancy vacation — door/window open (_paused_by_door=True), "
                 "skipping setback band; occupancy recorded, HVAC remains off"
             )
-            if self._emit_event_callback:
+            if self._emit_event_callback and not self._recent_duplicate(
+                "occupancy_setback_suppressed_paused", ("vacation",)
+            ):
                 self._emit_event_callback(
                     "occupancy_setback_suppressed_paused",
                     {"occupancy": "vacation", "reason": "paused_by_door"},
@@ -4399,7 +4429,9 @@ class AutomationEngine:
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
-        if self._emit_event_callback:
+        # Issue #591: windowed dedup — see the matching comment in handle_occupancy_away() above.
+        _vac_sig = ("vacation", round(_vac_band.floor, 2), round(_vac_band.ceiling, 2))
+        if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _vac_sig, window_seconds=600):
             self._emit_event_callback(
                 "occupancy_setback",
                 {
@@ -4453,7 +4485,9 @@ class AutomationEngine:
                 "Bedtime skipped — %s mode (reapplying setback instead of sleep temps)",
                 self._occupancy_mode,
             )
-            if self._emit_event_callback:
+            if self._emit_event_callback and not self._recent_duplicate(
+                "bedtime_setback_skipped", ("occupancy", self._occupancy_mode)
+            ):
                 self._emit_event_callback(
                     "bedtime_setback_skipped",
                     {"reason": "occupancy", "occupancy": self._occupancy_mode},
@@ -4472,7 +4506,8 @@ class AutomationEngine:
                 self._manual_override_mode,
                 self._manual_override_time,
             )
-            if self._emit_event_callback:
+            _skip_dup = self._recent_duplicate("bedtime_setback_skipped", ("manual_override",))
+            if self._emit_event_callback and not _skip_dup:
                 self._emit_event_callback("bedtime_setback_skipped", {"reason": "manual_override"})
             if self._today_record is not None:
                 self._today_record.setback_skipped_reason = "manual_override"
@@ -4480,7 +4515,7 @@ class AutomationEngine:
 
         if _gate == ScheduledBandGate.DEFER_PAUSED:
             _LOGGER.info("Bedtime setback skipped — paused by open door/window")
-            if self._emit_event_callback:
+            if self._emit_event_callback and not self._recent_duplicate("bedtime_setback_skipped", ("paused_by_door",)):
                 self._emit_event_callback("bedtime_setback_skipped", {"reason": "paused_by_door"})
             if self._today_record is not None:
                 self._today_record.setback_skipped_reason = "paused_by_door"
@@ -4550,7 +4585,11 @@ class AutomationEngine:
                     "modifier": c.setback_modifier,
                 },
             )
-        if _gate == ScheduledBandGate.DEFER_NAT_VENT and self._emit_event_callback:
+        if (
+            _gate == ScheduledBandGate.DEFER_NAT_VENT
+            and self._emit_event_callback
+            and not self._recent_duplicate("nat_vent_bedtime_continue", (_fan_device_label(self.config),))
+        ):
             self._emit_event_callback(
                 "nat_vent_bedtime_continue",
                 {"fan_device": _fan_device_label(self.config)},
@@ -4845,7 +4884,16 @@ class AutomationEngine:
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
-        if self._emit_event_callback:
+        # Issue #591 (found via further investigation of wakeup_preserves_whf_manual_override):
+        # handle_morning_wakeup() itself is reachable from multiple overlapping trigger paths,
+        # same as apply_classification()/handle_bedtime() — that scenario has it invoked twice
+        # within the same wake-up. Without a dedup guard here, the second call's unconditional
+        # morning_wakeup marker survived even after hvac_write_blocked_whf_active (below) was
+        # deduped, becoming the new trailing "last observable decision" and masking the correct
+        # outcome. Windowed (not permanent) — this event legitimately fires once per real
+        # wake-up, hours apart.
+        _wakeup_sig = (c.hvac_mode, round(_wakeup_band.floor, 2), round(_wakeup_band.ceiling, 2), _wakeup_band.active)
+        if self._emit_event_callback and not self._recent_duplicate("morning_wakeup", _wakeup_sig, window_seconds=600):
             self._emit_event_callback(
                 "morning_wakeup",
                 {
@@ -5193,7 +5241,8 @@ class AutomationEngine:
                     comfort_heat,
                     comfort_cool,
                 )
-                if self._emit_event_callback:
+                _assist_sig = ("sleep_window", round(comfort_heat, 2), round(comfort_cool, 2))
+                if self._emit_event_callback and not self._recent_duplicate("nat_vent_ac_assist_armed", _assist_sig):
                     self._emit_event_callback(
                         "nat_vent_ac_assist_armed",
                         {
@@ -5221,7 +5270,8 @@ class AutomationEngine:
                 _nat_vent_band,
                 reason="nat-vent AC assist: full band armed (aggressive_savings=off)",
             )
-            if self._emit_event_callback:
+            _assist_sig = ("full_band", round(comfort_heat, 2), round(comfort_cool, 2))
+            if self._emit_event_callback and not self._recent_duplicate("nat_vent_ac_assist_armed", _assist_sig):
                 self._emit_event_callback(
                     "nat_vent_ac_assist_armed",
                     {
@@ -6026,6 +6076,55 @@ class AutomationEngine:
         except (TypeError, ValueError, KeyError, AttributeError):
             pass
         return None
+
+    def _recent_duplicate(
+        self,
+        key: str,
+        signature: tuple[Any, ...],
+        *,
+        window_seconds: float | None = None,
+    ) -> bool:
+        """Shared decision-record dedup check (Issue #591 — generalizes Issue #444's pattern).
+
+        Content-keyed: returns True (and does NOT update the record) only when the exact
+        same ``signature`` was already the last one recorded for ``key`` — and, if
+        ``window_seconds`` is given, only within that many seconds of the prior record. A
+        signature change always updates the record and returns False, regardless of timing.
+        ``window_seconds=None`` (the default) means permanent-until-changed: a repeated
+        identical signature is suppressed no matter how much time has passed, which is the
+        only shape immune to the recurring bug class this helper closes (Issue #96, #444,
+        #584) — a function reachable from multiple independent trigger paths, where a fixed
+        time window can be slipped past by an untraced trigger delay (confirmed in
+        production: an 11-minute gap slipped past #444's original 10-minute window).
+
+        This gates ONLY the caller's event/log emission — callers MUST perform any real
+        HVAC/fan action unconditionally, before consulting this helper. See Issue #591/#590
+        Finding C for the per-call-site audit confirming this holds for every current caller.
+
+        getattr/dict-create-on-first-use: mirrors the pre-existing ``_last_comfort_band_*``
+        defensive-read pattern — some tests construct ``AutomationEngine`` via
+        ``object.__new__()`` and bypass ``__init__``.
+        """
+        now = dt_util.now()
+        sigs: dict[str, tuple[Any, ...]] = getattr(self, "_dedup_signatures", None) or {}
+        ats: dict[str, datetime] = getattr(self, "_dedup_timestamps", None) or {}
+        self._dedup_signatures = sigs
+        self._dedup_timestamps = ats
+
+        last_signature = sigs.get(key)
+        last_at = ats.get(key)
+        if window_seconds is None:
+            _within_window = True
+        else:
+            _within_window = (
+                isinstance(last_at, datetime)
+                and isinstance(now, datetime)
+                and (now - last_at).total_seconds() < window_seconds
+            )
+        is_duplicate = last_signature == signature and _within_window
+        sigs[key] = signature
+        ats[key] = now
+        return is_duplicate
 
     def _get_thermostat_capabilities(self) -> ThermostatCapabilities:
         """Read the configured thermostat's advertised capabilities (Issue #249).

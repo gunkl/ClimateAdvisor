@@ -172,7 +172,6 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
 
     coord._today_record = DailyRecord(date="2026-04-08", day_type="warm", trend_direction="stable")
     coord._hvac_on_since = None
-    coord._last_state_contradiction_time = None
 
     ae = MagicMock()
     ae._fan_active = ca_fan_active
@@ -182,6 +181,17 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     ae._last_action_reason = ""
     ae._fan_override_time = None
     ae._get_fan_runtime_minutes = MagicMock(return_value=0.0)
+    # Issue #591: state_contradiction_warning's dedup now lives on the shared
+    # AutomationEngine._recent_duplicate() helper — bind the real method so these
+    # tests exercise actual dedup logic, not a MagicMock stand-in. `ae` is itself a
+    # MagicMock, so its getattr() auto-vivifies unknown attributes as MagicMocks
+    # instead of raising — pre-seed real dicts so _recent_duplicate()'s
+    # getattr(self, "_dedup_signatures", None) finds them instead of a mock.
+    from custom_components.climate_advisor.automation import AutomationEngine
+
+    ae._dedup_signatures = {}
+    ae._dedup_timestamps = {}
+    ae._recent_duplicate = types.MethodType(AutomationEngine._recent_duplicate, ae)
     coord.automation_engine = ae
 
     coord._emit_event = MagicMock()
@@ -417,10 +427,18 @@ class TestStateContradictionEventReal:
         coord = _make_update_data_coord(hvac_mode="off", hvac_action="fan")
         fixed_now = datetime(2026, 4, 8, 21, 0, 0)
 
-        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt:
+        # Issue #591: the dedup check now lives in automation.py's shared
+        # _recent_duplicate() helper (called via coord.automation_engine), not
+        # coordinator.py directly — patch both modules' dt_util so the elapsed-time
+        # comparison inside _recent_duplicate() sees the same fixed clock.
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt,
+            patch("custom_components.climate_advisor.automation.dt_util") as mock_ae_dt,
+        ):
             mock_dt.now.return_value = fixed_now
+            mock_ae_dt.now.return_value = fixed_now
 
-            # First call: emits event, sets _last_state_contradiction_time = fixed_now
+            # First call: emits event, sets the dedup record via _recent_duplicate()
             asyncio.run(coord._async_update_data())
             first_count = sum(1 for c in coord._emit_event.call_args_list if c[0][0] == "state_contradiction_warning")
             assert first_count == 1

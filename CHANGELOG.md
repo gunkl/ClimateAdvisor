@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.63] — 2026-08-08
+
+- Feat #592: the Activity Record now explains *why* several nat-vent, door/window pause, and grace-recovery decisions happened, not just that they happened — "Classification suppressed" and "Occupancy setback suppressed" rows now name which sensor is open and for how long; nat-vent fan-on/floor-skip/soft-start/ceiling-escalation rows show the actual outdoor/indoor temperatures and thresholds behind the decision instead of only a derived summary number; "Override cleared" (fan-only) and "Override confirmed" rows show the reason/trigger; and a stuck-grace recovery row now names which mode/time was stale. No automation behavior changed — same decisions, more visible reasoning.
+
 ## [0.5.62] — 2026-08-08
 
 - Fix #591: fixed the Activity Record showing the same automation decision (comfort band, classification, occupancy setback skip, nat-vent AC assist, and several others) two or three times in a row after a restart or overlapping trigger — each real decision now appears once.

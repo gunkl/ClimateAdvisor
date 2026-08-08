@@ -1968,8 +1968,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         " override (Issue #321).",
                         _ae._grace_end_time,
                     )
+                    _stale_mode = _ae._manual_override_mode
+                    _stale_since = _ae._manual_override_time
                     _ae.clear_manual_override(reason="stuck_grace_recovery")
-                    self._emit_event("stuck_grace_recovered", {"grace_end_time": _ae._grace_end_time})
+                    self._emit_event(
+                        "stuck_grace_recovered",
+                        {
+                            "grace_end_time": _ae._grace_end_time,
+                            "stale_mode": _stale_mode,
+                            "stale_since": _stale_since,
+                        },
+                    )
 
             self._check_orphaned_grace()
 

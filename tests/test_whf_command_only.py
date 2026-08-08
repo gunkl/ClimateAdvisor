@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import sys
 import types
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
+
+COORDINATOR_LOGGER = "custom_components.climate_advisor.coordinator"
 
 if "homeassistant" not in sys.modules:
     from tools.sim_harness.ha_stubs import install_ha_stubs
@@ -98,6 +101,9 @@ def _make_coord_stub(config: dict | None = None) -> MagicMock:
     coord._last_commanded_fan_state = None
     coord._fan_state_entity_unavailable_warned = False
     coord._is_recent_fan_command = MagicMock(return_value=False)
+    # Issue #589: explicit, not a truthy-by-default MagicMock attr — _async_command_fan_entity
+    # reads this directly to gate the dry-run/automation-disabled check.
+    coord._automation_enabled = True
 
     # Bind the real implementation so guards that call self._fan_state_feedback_enabled()
     # get the actual config value rather than a truthy MagicMock.
@@ -344,6 +350,77 @@ class TestCommandOnlyReconcile:
         asyncio.run(_run())
 
         coord.hass.services.async_call.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# TestCommandOnlyReconcileDryRun (Issue #589)
+# ---------------------------------------------------------------------------
+
+
+class TestCommandOnlyReconcileDryRun:
+    """Issue #589: command-only fan reconciliation must honor automation_enabled/dry_run.
+
+    _async_command_fan_entity() was the one action choke point in the automation
+    engine that did not check dry_run — disabling automation left this specific
+    fan-reconciliation path free to keep issuing real hardware commands every
+    ~30-min cycle. These tests confirm the gate added at that choke point.
+    """
+
+    def test_dry_run_skips_turn_on_and_returns_false(self, caplog):
+        coord = _make_coord_stub()
+        coord._automation_enabled = False
+
+        method = _bind("_async_command_fan_entity", coord)
+        with caplog.at_level(logging.INFO, logger=COORDINATOR_LOGGER):
+            result = asyncio.run(method(on=True))
+
+        assert result is False
+        coord.hass.services.async_call.assert_not_awaited()
+        dry_run_msgs = [r.message for r in caplog.records if "[DRY RUN]" in r.message]
+        assert len(dry_run_msgs) == 1
+        assert "Would command fan entity" in dry_run_msgs[0]
+
+    def test_dry_run_skips_turn_off_and_returns_false(self, caplog):
+        coord = _make_coord_stub()
+        coord._automation_enabled = False
+
+        method = _bind("_async_command_fan_entity", coord)
+        with caplog.at_level(logging.INFO, logger=COORDINATOR_LOGGER):
+            result = asyncio.run(method(on=False))
+
+        assert result is False
+        coord.hass.services.async_call.assert_not_awaited()
+
+    def test_normal_mode_issues_command_and_returns_true(self):
+        coord = _make_coord_stub()
+        coord._automation_enabled = True
+
+        method = _bind("_async_command_fan_entity", coord)
+        result = asyncio.run(method(on=True))
+
+        assert result is True
+        coord.hass.services.async_call.assert_awaited_once()
+
+    def test_reconcile_block_does_not_update_last_commanded_when_dry_run(self):
+        """Reconcile block only updates _last_commanded_fan_state when a command was actually issued —
+        so it re-asserts once automation is re-enabled instead of believing a command it never sent."""
+        coord = _make_coord_stub()
+        coord._automation_enabled = False
+        ae = coord.automation_engine
+        ae._fan_active = True
+        ae._grace_active = False
+        ae._fan_override_active = False
+        coord._last_commanded_fan_state = None
+
+        async def _run():
+            method = _bind("_async_command_fan_entity", coord)
+            if await method(on=True):
+                coord._last_commanded_fan_state = True
+
+        asyncio.run(_run())
+
+        coord.hass.services.async_call.assert_not_awaited()
+        assert coord._last_commanded_fan_state is None
 
 
 # ---------------------------------------------------------------------------

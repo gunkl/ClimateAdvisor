@@ -952,6 +952,38 @@ class TestClassificationHysteresis:
         result = classify_day(make_forecast(THRESHOLD_HOT - M - 1), previous_day_type=DAY_TYPE_HOT)
         assert result.day_type == DAY_TYPE_WARM
 
+
+# ---------------------------------------------------------------------------
+# Issue #593: applied_threshold_f / threshold_margin_f -- the threshold that
+# produced day_type, and today's high's distance from it, surfaced to callers
+# instead of staying trapped in a _LOGGER.debug() line.
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedThresholdAndMargin:
+    def test_hot_day_reports_hot_threshold_and_positive_margin(self):
+        result = classify_day(make_forecast(THRESHOLD_HOT + 4))
+        assert result.applied_threshold_f == THRESHOLD_HOT
+        assert result.threshold_margin_f == 4.0
+
+    def test_warm_day_reports_warm_threshold(self):
+        result = classify_day(make_forecast(THRESHOLD_WARM))
+        assert result.applied_threshold_f == THRESHOLD_WARM
+        assert result.threshold_margin_f == 0.0
+
+    def test_cold_day_reports_cool_threshold_with_negative_margin(self):
+        """COLD has no dedicated threshold — margin is measured against the cool floor."""
+        result = classify_day(make_forecast(THRESHOLD_COOL - 5))
+        assert result.applied_threshold_f == THRESHOLD_COOL
+        assert result.threshold_margin_f == -5.0
+
+    def test_hysteresis_sticky_day_reports_threshold_for_final_day_type(self):
+        """When hysteresis keeps the previous day_type, the threshold must match
+        the day_type actually applied (previous), not the one first computed."""
+        result = classify_day(make_forecast(THRESHOLD_HOT + 1), previous_day_type=DAY_TYPE_WARM)
+        assert result.day_type == DAY_TYPE_WARM
+        assert result.applied_threshold_f == THRESHOLD_WARM
+
     # --- Large jump bypasses dead zone ---
 
     def test_large_jump_warm_to_hot(self):

@@ -1634,6 +1634,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "nat_vent_activated": nat_vent_activated,
                 "hvac_commanded": hvac_commanded,
                 "sensors_open_count": len(open_sensors),
+                "indoor_f": indoor,
+                "outdoor_f": outdoor,
+                "fan_archetype": self.config.get("fan_mode"),
             },
         )
         self._startup_coalesce_active = False
@@ -3135,7 +3138,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 self._emit_event(
                     "thermal_learning_no_observations",
-                    {"hvac_runtime_minutes": round(self._today_record.hvac_runtime_minutes, 1)},
+                    {
+                        "hvac_runtime_minutes": round(self._today_record.hvac_runtime_minutes, 1),
+                        "thermal_session_count": self._today_record.thermal_session_count,
+                    },
                 )
             self.learning.record_day(self._today_record)
             await self.hass.async_add_executor_job(self.learning.save_state)

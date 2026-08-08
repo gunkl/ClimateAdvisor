@@ -4,9 +4,24 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.60"
+VERSION = "0.5.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.61": [
+        "Feat #593: closed out the remaining Activity Record payload-completeness gaps"
+        " from the #584 investigation — classification decisions now show the trend"
+        " magnitude and the exact threshold/margin that produced the day type; setpoint"
+        " retry/nudge events show the reject streak count; startup coalescing shows"
+        " indoor/outdoor temps and fan archetype; the thermal-learning watchdog shows"
+        " today's session count; the fan-stopped and incident-detected cards now use"
+        " data they already had (fan device, incident ID, comfort-band comparison)"
+        " instead of a generic label; morning wake-up now reports an explicit skip"
+        " reason when occupancy is away/vacation, matching its other skip reasons; and"
+        " pre-cool deferring to an already-active nat-vent/WHF session now shows what"
+        " indoor temp and target it's deferring to, instead of a bare notice. Four"
+        " renderer functions with no current emitter are now explicitly marked as"
+        " legacy/historical-log-only rather than looking like live, untested code.",
+    ],
     "0.5.60": [
         "Feat #580: the dashboard's Activity Record report now defaults to the"
         ' "Last 12 hours" time window instead of 24, and lists events newest-first'
@@ -1540,6 +1555,49 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    593: {
+        "version_fixed": "0.5.61",
+        "title": (
+            "Following the #584 investigation's full event-type audit (Block 4 of the"
+            " plan), several remaining Activity Record event types either discarded"
+            " payload data they already had, or omitted locally-computed inputs their"
+            " emit sites could have passed — leaving the reasoning behind those specific"
+            " decisions invisible even though the underlying data existed."
+        ),
+        "scope_covered": (
+            "classifier.py: DayClassification gained applied_threshold_f/"
+            "threshold_margin_f, computed in classify_day() from the final"
+            " (post-hysteresis) day_type against the threshold that produced it."
+            " automation.py: classification_applied payload now includes"
+            " trend_magnitude/today_high/applied_threshold_f/threshold_margin_f;"
+            " setpoint_rejected/setpoint_nudge now include reject_streak;"
+            " handle_morning_wakeup()'s DEFER_OCCUPANCY branch now emits"
+            " morning_wakeup_skipped (previously silent, unlike its DEFER_OVERRIDE/"
+            "DEFER_PAUSED siblings and handle_bedtime()'s equivalent branch);"
+            " pre_cool_suppressed_nat_vent's active_session branch (DEFER_NAT_VENT)"
+            " now includes indoor/target — pre_cool_target is computed once, up front,"
+            " before the gate checks, instead of after the branch that needed it."
+            " coordinator.py: startup_coalesced now includes indoor_f/outdoor_f/"
+            "fan_archetype; thermal_learning_no_observations now includes"
+            " thermal_session_count. ai_skills_context.py: renderers for"
+            " classification_applied, setpoint_rejected/setpoint_nudge,"
+            " startup_coalesced, thermal_learning_no_observations,"
+            " fan_untracked_cleared (now uses fan_device instead of a hardcoded"
+            ' "fan: off"), incident_detected (now uses incident_id and the'
+            " comfort-band comparison it already carried), morning_wakeup_skipped,"
+            " and pre_cool_suppressed_nat_vent were all updated to surface the new/"
+            "existing fields; nat_vent_sleep_ceiling_reached and the three legacy"
+            " warm_day_* renderers (confirmed zero current emitters) are now"
+            " explicitly commented as historical-log-only. Two golden simulations"
+            " (away_morning_wakeup_skipped_assertion, morning_wakeup_skipped_away_"
+            "occupancy) were updated with the user's explicit sign-off to expect the"
+            " new morning_wakeup_skipped event instead of relying on the prior silent"
+            " gap; no HVAC/decision-logic behavior changed in either. A pre-existing,"
+            " unrelated test-harness gap (a pending scenario passing by coincidence"
+            " due to the harness not advancing past a scheduled trigger) was found"
+            " during this work and filed separately as #598 rather than fixed here."
+        ),
+    },
     580: {
         "version_fixed": "0.5.60",
         "title": (

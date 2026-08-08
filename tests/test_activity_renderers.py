@@ -1173,3 +1173,146 @@ class TestNewestFirstOrdering:
 
     def test_newest_first_empty_log_unaffected(self):
         assert _build_table([], newest_first=True) == _build_table([], newest_first=False)
+
+
+class TestPayloadCompletenessFollowUp:
+    """Issue #593: remaining payload-completeness + legacy renderer cleanup.
+
+    Each test calls the registered renderer directly with a representative payload
+    (mirroring how the real emit sites now populate it) and asserts the new field
+    actually reaches the rendered Settings/Event cell -- not just that it's present
+    in the payload dict.
+    """
+
+    def _render(self, event_type: str, payload: dict, unit: str = "fahrenheit") -> tuple[str, str]:
+        return _act_mod.EVENT_RENDERERS[event_type](payload, unit)
+
+    # -- K1: classification_applied trend/threshold -------------------------
+
+    def test_classification_applied_shows_threshold_margin(self):
+        label, settings = self._render(
+            "classification_applied",
+            {
+                "day_type": "hot",
+                "hvac_mode": "cool",
+                "trend": "stable",
+                "trend_magnitude": 1.2,
+                "old_hvac_mode": "off",
+                "today_high": 86.0,
+                "applied_threshold_f": 82.0,
+                "threshold_margin_f": 4.0,
+            },
+        )
+        assert "hot" in label
+        assert "82" in settings and "86" in settings
+        assert "+4.0" in settings or "4.0" in settings
+
+    def test_classification_applied_missing_threshold_data_no_crash(self):
+        label, settings = self._render(
+            "classification_applied", {"day_type": "mild", "hvac_mode": "off", "trend": "stable"}
+        )
+        assert "mild" in label
+        assert settings == ""
+
+    # -- K2: setpoint_rejected / setpoint_nudge retry streak -----------------
+
+    def test_setpoint_rejected_shows_reject_streak(self):
+        _label, settings = self._render("setpoint_rejected", {"commanded": 72.0, "reported": 74.0, "reject_streak": 3})
+        assert "reject streak=3" in settings
+
+    def test_setpoint_nudge_shows_reject_streak(self):
+        _label, settings = self._render(
+            "setpoint_nudge",
+            {"nudge_value": 73.0, "real_target": 72.0, "mode": "cool", "reject_streak": 2},
+        )
+        assert "reject streak=2" in settings
+
+    # -- K3: startup_coalesced indoor/outdoor/archetype -----------------------
+
+    def test_startup_coalesced_shows_indoor_outdoor_archetype(self):
+        _label, settings = self._render(
+            "startup_coalesced",
+            {
+                "nat_vent_activated": False,
+                "hvac_commanded": True,
+                "sensors_open_count": 0,
+                "indoor_f": 74.0,
+                "outdoor_f": 84.0,
+                "fan_archetype": "whole_house_fan",
+            },
+        )
+        assert "74" in settings and "84" in settings
+        assert "whole_house_fan" in settings
+
+    # -- K4: thermal_learning_no_observations session count -------------------
+
+    def test_thermal_learning_no_observations_shows_session_count(self):
+        _label, settings = self._render(
+            "thermal_learning_no_observations",
+            {"hvac_runtime_minutes": 45.0, "thermal_session_count": 0},
+        )
+        assert "sessions today: 0" in settings
+
+    # -- K5: fan_untracked_cleared uses fan_device -----------------------------
+
+    def test_fan_untracked_cleared_shows_fan_device(self):
+        _label, settings = self._render("fan_untracked_cleared", {"fan_device": "whf"})
+        assert "whf" in settings
+
+    def test_fan_untracked_cleared_missing_device_falls_back(self):
+        _label, settings = self._render("fan_untracked_cleared", {})
+        assert settings == "fan: off"
+
+    # -- K6: incident_detected uses incident_id + comfort compare -------------
+
+    def test_incident_detected_shows_id_and_band_comparison(self):
+        label, settings = self._render(
+            "incident_detected",
+            {
+                "incident_class": "comfort_violation",
+                "incident_id": "abc123",
+                "indoor_f": 76.0,
+                "comfort_heat": 68.0,
+                "comfort_cool": 74.0,
+                "occupancy_mode": "home",
+            },
+        )
+        assert "abc123" in label
+        assert "76" in settings and "68" in settings and "74" in settings
+        assert "home" in settings
+
+    # -- K7: morning_wakeup DEFER_OCCUPANCY now emits --------------------------
+
+    def test_morning_wakeup_skipped_occupancy_reason(self):
+        label, _settings = self._render("morning_wakeup_skipped", {"reason": "occupancy", "occupancy": "away"})
+        assert "away mode active" in label
+
+    # -- L: pre_cool_suppressed_nat_vent active_session now shows comparison --
+
+    def test_pre_cool_suppressed_active_session_shows_target(self):
+        label, settings = self._render(
+            "pre_cool_suppressed_nat_vent",
+            {"modifier": -2.0, "reason": "active_session", "target": 70.0, "indoor": 72.0},
+        )
+        assert "session already active" in label
+        assert "70" in settings and "72" in settings
+
+    def test_pre_cool_suppressed_achieved_reason_unchanged(self):
+        label, settings = self._render(
+            "pre_cool_suppressed_nat_vent",
+            {"modifier": -1.0, "reason": "achieved", "target": 70.0, "indoor": 69.0},
+        )
+        assert "already achieved" in label
+        assert "70" in settings and "69" in settings
+
+    # -- M: legacy dead renderers still render without crashing ---------------
+
+    def test_legacy_renderers_still_render_persisted_logs(self):
+        for event_type, payload in (
+            ("nat_vent_sleep_ceiling_reached", {"indoor_temp": 70.0, "sleep_cool": 70.0}),
+            ("warm_day_setback_applied", {"old_setpoint_f": 72.0, "new_setpoint_f": 68.0}),
+            ("warm_day_state_confirmed", {}),
+            ("warm_day_comfort_gap", {}),
+        ):
+            label, _settings = self._render(event_type, payload)
+            assert label

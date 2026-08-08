@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.61] — 2026-08-07
+
+- Feat #593: closed out the remaining Activity Record payload-completeness gaps from the #584 investigation — classification decisions now show the trend magnitude and the exact threshold/margin that produced the day type; setpoint retry/nudge events show the reject streak count; startup coalescing shows indoor/outdoor temps and fan archetype; the thermal-learning watchdog shows today's session count; the fan-stopped and incident-detected cards now use data they already had instead of a generic label; morning wake-up now reports an explicit skip reason when occupancy is away/vacation, matching its other skip reasons; and pre-cool deferring to an already-active nat-vent/WHF session now shows what indoor temp and target it's deferring to. Four renderer functions with no current emitter are now explicitly marked as legacy/historical-log-only.
+
 ## [0.5.60] — 2026-08-05
 
 - Feat #580: the dashboard's Activity Record report now defaults to the "Last 12 hours" time window instead of 24, and lists events newest-first (most recent at the top, oldest at the bottom) instead of oldest-first — so the events you actually care about no longer require scrolling past a full day of history to find. The AI Investigative Analysis report type is unaffected and keeps its own separate time-window defaults.

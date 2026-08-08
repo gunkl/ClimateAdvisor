@@ -51,7 +51,7 @@ from .const import (
     THERMAL_SWING_DEFAULT_F,
 )
 from .fan_status import is_ca_fan_running
-from .temperature import format_temp
+from .temperature import format_temp, format_temp_delta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1599,15 +1599,30 @@ def _render_classification_applied(p: dict, unit: str) -> tuple[str, str]:
     label = f"Classification applied: {day_type}" if day_type else "Classification applied"
     if trend:
         label = f"{label} ({trend})"
-    settings = ""
+    settings_parts = []
     if old_m and hvac and old_m != hvac:
-        settings = f"mode: {old_m}->{hvac}"
+        settings_parts.append(f"mode: {old_m}->{hvac}")
+    today_high = p.get("today_high")
+    threshold = p.get("applied_threshold_f")
+    margin = p.get("threshold_margin_f")
+    if today_high is not None and threshold is not None and margin is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings_parts.append(
+                f"today's high {format_temp(today_high, unit)} vs. {day_type} threshold "
+                f"{format_temp(threshold, unit)} ({margin:+.1f}°F)"
+            )
+    trend_mag = p.get("trend_magnitude")
+    if trend_mag is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings_parts.append(f"trend magnitude {format_temp_delta(trend_mag, unit)}")
+    settings = ", ".join(settings_parts)
     return label, settings
 
 
 def _render_setpoint_rejected(p: dict, unit: str) -> tuple[str, str]:
     commanded = p.get("commanded")
     reported = p.get("reported")
+    streak = p.get("reject_streak")
     label = "Setpoint validation failed -- retry scheduled"
     settings = ""
     if commanded is not None and reported is not None:
@@ -1616,6 +1631,8 @@ def _render_setpoint_rejected(p: dict, unit: str) -> tuple[str, str]:
                 f"commanded {format_temp(float(commanded), unit)}, "
                 f"thermostat reports {format_temp(float(reported), unit)}"
             )
+    if streak is not None:
+        settings = f"{settings}, reject streak={streak}" if settings else f"reject streak={streak}"
     return label, settings
 
 
@@ -1623,6 +1640,7 @@ def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
     nudge_value = p.get("nudge_value")
     real_target = p.get("real_target")
     mode = p.get("mode", "")
+    streak = p.get("reject_streak")
     label = "Reconciling stuck setpoint -- nudging thermostat"
     settings = ""
     if nudge_value is not None and real_target is not None:
@@ -1631,6 +1649,8 @@ def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
                 f"nudge to {format_temp(float(nudge_value), unit)} ({mode}),"
                 f" then {format_temp(float(real_target), unit)} in 30s"
             )
+    if streak is not None:
+        settings = f"{settings}, reject streak={streak}" if settings else f"reject streak={streak}"
     return label, settings
 
 
@@ -1814,7 +1834,9 @@ def _render_fan_running_untracked(p: dict, unit: str) -> tuple[str, str]:
 
 
 def _render_fan_untracked_cleared(p: dict, unit: str) -> tuple[str, str]:
-    return "Fan stopped (untracked fan ended)", "fan: off"
+    fan_device = p.get("fan_device")
+    settings = f"fan: {fan_device} off" if fan_device else "fan: off"
+    return "Fan stopped (untracked fan ended)", settings
 
 
 def _render_fan_cancel(p: dict, unit: str) -> tuple[str, str]:
@@ -1936,6 +1958,8 @@ def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
     return "Nat-vent + AC assist armed (full band)", ""
 
 
+# Legacy event, no current emitter (Issue #593 audit) -- kept only to render
+# historically-persisted event logs from a removed nat-vent code path.
 def _render_nat_vent_sleep_ceiling_reached(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor_temp")
     cool = p.get("sleep_cool")
@@ -2029,20 +2053,28 @@ def _render_bedtime_setback_skipped(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_morning_wakeup_skipped(p: dict, unit: str) -> tuple[str, str]:
     reason = p.get("reason", "")
+    occ = p.get("occupancy", "")
+    if reason == "occupancy" and occ:
+        return f"Morning wake-up skipped -- {occ} mode active", ""
     return (f"Morning wake-up skipped -- {reason}" if reason else "Morning wake-up skipped"), ""
 
 
 def _render_pre_cool_suppressed_nat_vent(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor")
     target = p.get("target")
-    label = "Pre-cool suppressed -- nat-vent already achieved target"
+    reason = p.get("reason")
+    if reason == "active_session":
+        label = "Pre-cool deferred -- nat-vent/WHF session already active"
+    else:
+        label = "Pre-cool suppressed -- nat-vent already achieved target"
+    settings = ""
     if indoor is not None and target is not None:
         with contextlib.suppress(TypeError, ValueError):
-            label = (
-                f"Pre-cool suppressed -- nat-vent: indoor {format_temp(float(indoor), unit)}"
-                f" <= target {format_temp(float(target), unit)}"
+            comparator = "<=" if reason != "active_session" else "chasing"
+            settings = (
+                f"indoor {format_temp(float(indoor), unit)} {comparator} target {format_temp(float(target), unit)}"
             )
-    return label, ""
+    return label, settings
 
 
 def _render_pre_cool_overshoot(p: dict, unit: str) -> tuple[str, str]:
@@ -2091,7 +2123,19 @@ def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
     if sensors:
         notes.append(f"{sensors} sensor(s) open")
     suffix = " -- " + ", ".join(notes) if notes else ""
-    return f"Startup coalescing complete{suffix}", ""
+    settings_parts = []
+    indoor_f = p.get("indoor_f")
+    outdoor_f = p.get("outdoor_f")
+    if indoor_f is not None and outdoor_f is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings_parts.append(
+                f"indoor {format_temp(float(indoor_f), unit)} / outdoor {format_temp(float(outdoor_f), unit)}"
+            )
+    archetype = p.get("fan_archetype")
+    if archetype:
+        settings_parts.append(f"fan: {archetype}")
+    settings = ", ".join(settings_parts)
+    return f"Startup coalescing complete{suffix}", settings
 
 
 def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
@@ -2115,16 +2159,36 @@ def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[str, s
         label = f"Thermal learning: no observations despite {runtime} min HVAC runtime"
     else:
         label = "Thermal learning: no observations recorded"
-    return label, ""
+    session_count = p.get("thermal_session_count")
+    settings = f"sessions today: {session_count}" if session_count is not None else ""
+    return label, settings
 
 
 def _render_incident_detected(p: dict, unit: str) -> tuple[str, str]:
     cls = p.get("incident_class", "")
+    incident_id = p.get("incident_id")
     label = f"Incident detected: {cls}" if cls else "Incident detected"
-    return label, ""
+    if incident_id:
+        label = f"{label} ({incident_id})"
+    settings_parts = []
+    indoor_f = p.get("indoor_f")
+    comfort_heat = p.get("comfort_heat")
+    comfort_cool = p.get("comfort_cool")
+    if indoor_f is not None and comfort_heat is not None and comfort_cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings_parts.append(
+                f"indoor {format_temp(float(indoor_f), unit)} vs. band "
+                f"[{format_temp(float(comfort_heat), unit)}/{format_temp(float(comfort_cool), unit)}]"
+            )
+    occupancy = p.get("occupancy_mode")
+    if occupancy:
+        settings_parts.append(f"occupancy: {occupancy}")
+    settings = ", ".join(settings_parts)
+    return label, settings
 
 
-# Legacy warm_day events (pre-P3, may appear in persisted event logs)
+# Legacy warm_day events (pre-P3, may appear in persisted event logs). Confirmed
+# zero current emitters (Issue #593 audit) -- kept renderer-only for history.
 def _render_warm_day_setback_applied(p: dict, unit: str) -> tuple[str, str]:
     old_t = p.get("old_setpoint_f")
     new_t = p.get("new_setpoint_f")

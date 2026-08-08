@@ -4,9 +4,15 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.60"
+VERSION = "0.5.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.61": [
+        "Fix #591: fixed the Activity Record showing the same automation decision "
+        "(comfort band, classification, occupancy setback skip, nat-vent AC assist, and "
+        "several others) two or three times in a row after a restart or overlapping "
+        "trigger — each real decision now appears once.",
+    ],
     "0.5.60": [
         "Feat #580: the dashboard's Activity Record report now defaults to the"
         ' "Last 12 hours" time window instead of 24, and lists events newest-first'
@@ -1540,6 +1546,61 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    591: {
+        "version_fixed": "0.5.61",
+        "title": (
+            "Activity Record showed the same automation decision (comfort band applied,"
+            " classification applied, occupancy setback skipped while paused, nat-vent AC"
+            " assist armed, bedtime setback skipped, nat-vent bedtime continue, and the"
+            " coordinator's state-contradiction warning) two or three times in a row —"
+            " sometimes visibly duplicated, sometimes silently masked by the Activity"
+            " Record's own consecutive-same-type row collapsing into a misleading 'x2'"
+            " count. Traced to apply_classification()/handle_bedtime() each being"
+            " reachable from multiple independent trigger paths (startup coalesce +"
+            " its own follow-on refresh, cancel-override + its own delayed reclassify,"
+            " and an uncancelled 5-minute revisit timer armed by 6 of 7"
+            " _apply_comfort_band() callers) with no consistent dedup boundary — the same"
+            " defect shape Issue #96 and #444 each independently patched once, at one"
+            " call site apiece."
+        ),
+        "scope_covered": (
+            "automation.py: new AutomationEngine._recent_duplicate(key, signature,"
+            " window_seconds=None) shared decision-record dedup helper, generalizing"
+            " Issue #444's _last_comfort_band_signature pattern (removed in favor of the"
+            " helper; const.py's COMFORT_BAND_EVENT_DEDUP_SECONDS removed — comfort_band_"
+            " applied is now permanent/content-keyed instead of a 10-minute window, an"
+            " explicit owner-approved decision since a real production 11-minute gap had"
+            " already slipped past the old fixed window). Migrated onto the helper:"
+            " comfort_band_applied, classification_applied (kept updating the pre-existing"
+            " _last_classification_applied marker other code reads directly),"
+            " classification_suppressed_paused, occupancy_setback_suppressed_paused (both"
+            " away/vacation sites), nat_vent_ac_assist_armed (both sleep-window and"
+            " full-band branches), bedtime_setback_skipped (all 3 branches),"
+            " nat_vent_bedtime_continue, and coordinator.py's state_contradiction_warning"
+            " (kept its original 30-minute window; _last_state_contradiction_time"
+            " attribute removed). occupancy_setback and hvac_write_blocked_whf_active were"
+            " ALSO tried against the helper but reverted after golden/pending scenario"
+            " failures (wakeup_preserves_whf_manual_override,"
+            " away_morning_wakeup_skipped_assertion,"
+            " morning_wakeup_skipped_away_occupancy, cancel_override_then_resume) proved"
+            " their repeats are distinct, meaningful re-confirmations at new decision"
+            " points (e.g. Issue #505's bedtime-time away-setback reapply), not accidental"
+            " echoes — left unconditional, with a comment explaining why."
+            " coordinator.py: _do_startup_coalesce() now returns whether it already ran"
+            " apply_classification() this cycle, and _async_update_data_impl() skips the"
+            " redundant regular-cycle call when so. tests/conftest.py:"
+            " assert_no_duplicate_events() + LEGITIMATELY_REPEATING_EVENT_TYPES shared"
+            " helper, generalizing the len(x_events)==1 idiom from test_override_dedup.py."
+            " tools/simulate.py: run_scenario_production() now surfaces the full"
+            " timestamped event_log (previously dropped). New"
+            " tests/test_no_duplicate_decisions.py runs the golden-level automatic"
+            " duplicate check via that event_log across every golden scenario. New"
+            " tests/test_multi_site_event_dedup_guard.py: ast-based static guard (mirrors"
+            " test_executor_offload.py) over the 7 Delta-2-audited multi-call-site event"
+            " types. New tests/test_recent_duplicate_helper.py: unit coverage for the"
+            " helper itself (content-keyed and windowed modes, bare-instance safety)."
+        ),
+    },
     580: {
         "version_fixed": "0.5.60",
         "title": (
@@ -5522,15 +5583,10 @@ MAX_CONTINUOUS_RUNTIME_HOURS = 3
 
 # Issue #444: _apply_comfort_band() has no source-of-truth "did the band actually
 # change" check, so overlapping triggers (startup coalesce + its own follow-on
-# refresh; grace-expiry re-application colliding with the regular cycle) each
-# unconditionally re-announce the identical band as a fresh comfort_band_applied
-# event. This window suppresses a redundant *announcement* of an unchanged band
-# within N seconds of the last one — the underlying _set_temperature() call is
-# NEVER suppressed (thermostat control must stay unconditional). Sized to
-# comfortably span the widest observed redundant-call gap in real telemetry
-# (~5-6 minutes) while staying well under the 30-minute regular classification
-# cycle, so a genuine re-announcement after a real cycle is never swallowed.
-COMFORT_BAND_EVENT_DEDUP_SECONDS = 600  # 10 minutes
+# Issue #444's original COMFORT_BAND_EVENT_DEDUP_SECONDS (10-minute time-windowed dedup)
+# was replaced by Issue #591's shared, permanent (content-keyed) AutomationEngine.
+# _recent_duplicate() helper — see automation.py._apply_comfort_band(). A real 11-minute
+# production gap slipped past the old fixed window (Issue #591/#590 Finding D/Delta 1).
 
 # Issue #530: an RF-remote-timer-linked manual grace period's software-tracked expiry and
 # the timer's own hardware-side completion are the same physical event, but don't land at

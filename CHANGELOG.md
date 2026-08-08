@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.61] — 2026-08-07
+
+- Fix #591: fixed the Activity Record showing the same automation decision (comfort band, classification, occupancy setback skip, nat-vent AC assist, and several others) two or three times in a row after a restart or overlapping trigger — each real decision now appears once.
+
 ## [0.5.60] — 2026-08-05
 
 - Feat #580: the dashboard's Activity Record report now defaults to the "Last 12 hours" time window instead of 24, and lists events newest-first (most recent at the top, oldest at the bottom) instead of oldest-first — so the events you actually care about no longer require scrolling past a full day of history to find. The AI Investigative Analysis report type is unaffected and keeps its own separate time-window defaults.

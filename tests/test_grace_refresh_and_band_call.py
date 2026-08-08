@@ -306,8 +306,9 @@ def _band_engine() -> AutomationEngine:
 
 
 class TestApplyComfortBandEventDedup:
-    """Issue #444 — the comfort_band_applied EVENT is deduped within a short window
-    when the band is unchanged; the underlying set_temperature call is never deduped."""
+    """Issue #444, revised by #591/#590 Finding D — the comfort_band_applied EVENT is
+    deduped permanently (content-keyed, no fixed window) while the band is unchanged;
+    the underlying set_temperature call is never deduped."""
 
     def test_identical_band_within_window_emits_event_once(self):
         """Revert-test: without the guard this emits 2 events, not 1."""
@@ -346,8 +347,13 @@ class TestApplyComfortBandEventDedup:
         band_events = [e for e in engine._emitted_events if e[0] == "comfort_band_applied"]
         assert len(band_events) == 2, f"Different bands must both emit, got {len(band_events)}"
 
-    def test_identical_band_after_dedup_window_emits_again(self):
-        """Not a permanent suppression — a real re-announcement after the window fires normally."""
+    def test_identical_band_stays_suppressed_past_old_fixed_window(self):
+        """Issue #591 Delta 1: production traced an 11-minute real-world gap (an uncancelled
+        revisit timer armed by a non-apply_classification() caller) that slipped past #444's
+        original 10-minute window and re-announced an identical band. Owner-confirmed
+        decision (#590 Finding D): dedup is now content-keyed/permanent, not time-windowed —
+        an identical band must stay suppressed regardless of elapsed time. The underlying
+        set_temperature call still fires unconditionally either way."""
         engine = _band_engine()
         band = ComfortBand(floor=68.0, ceiling=76.0, active="ceiling", reason="test")
 
@@ -359,11 +365,36 @@ class TestApplyComfortBandEventDedup:
 
         with patch(
             "custom_components.climate_advisor.automation.dt_util.now",
-            return_value=datetime(2026, 7, 10, 11, 5, 0, tzinfo=UTC),  # 12 min later — past the 10-min window
+            return_value=datetime(2026, 7, 10, 11, 5, 0, tzinfo=UTC),  # 12 min later — past the old 10-min window
         ):
-            asyncio.run(engine._apply_comfort_band(band, reason="30-min cycle, unchanged"))
+            asyncio.run(engine._apply_comfort_band(band, reason="revisit timer, unchanged"))
+
+        band_events = [e for e in engine._emitted_events if e[0] == "comfort_band_applied"]
+        assert len(band_events) == 1, (
+            f"Identical band must stay suppressed regardless of elapsed time, got {len(band_events)}"
+        )
+
+        # The underlying thermostat command is NEVER deduped — both calls must have fired.
+        climate_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "climate"]
+        assert len(climate_calls) == 2, (
+            f"Expected 2 set_temperature calls (thermostat re-assertion is unconditional), got {len(climate_calls)}"
+        )
+
+    def test_band_change_after_suppression_emits_again(self):
+        """A genuinely different band must emit even after a prior identical-band suppression."""
+        engine = _band_engine()
+        band_a = ComfortBand(floor=68.0, ceiling=76.0, active="ceiling", reason="test")
+        band_b = ComfortBand(floor=68.0, ceiling=74.0, active="ceiling", reason="test")  # different ceiling
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 7, 10, 10, 53, 0, tzinfo=UTC),
+        ):
+            asyncio.run(engine._apply_comfort_band(band_a, reason="first"))
+            asyncio.run(engine._apply_comfort_band(band_a, reason="suppressed repeat"))
+            asyncio.run(engine._apply_comfort_band(band_b, reason="genuine change"))
 
         band_events = [e for e in engine._emitted_events if e[0] == "comfort_band_applied"]
         assert len(band_events) == 2, (
-            f"A re-announcement after COMFORT_BAND_EVENT_DEDUP_SECONDS must not be suppressed, got {len(band_events)}"
+            f"Expected first + changed band to emit (repeat suppressed), got {len(band_events)}"
         )

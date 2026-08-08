@@ -2559,6 +2559,81 @@ class TestReconcileFanOnStartupReentrancyGuard:
         assert engine._natural_vent_active is True, "a second, sequential call must still be processed"
 
 
+class TestReconcileFanOnStartupDuplicateAdoptGuard:
+    """Issue #600: reconcile_fan_on_startup() has 4 independent callers (ha_restart,
+    backstop_30min, post_grace_expiry, thermostat_state_change) with no coordination
+    between sequential (non-overlapping) triggers — the Issue #561 mutex only blocks
+    concurrent re-entry, not a second trigger landing minutes later. Without a guard, two
+    triggers landing while nat-vent is already CA-owned each redundantly re-adopt: duplicate
+    "Fan activated" Activity Record entries for one real event, and _fan_on_since silently
+    jumping forward each time.
+    """
+
+    def _engine(self, fan_mode=FAN_MODE_WHOLE_HOUSE):
+        engine = _make_automation_engine({CONF_FAN_MODE: fan_mode})
+        engine._deactivate_fan = AsyncMock()
+        engine._start_fan_thermo_backstop = MagicMock()
+        return engine
+
+    def test_reconfirm_of_already_adopted_session_does_not_reemit(self):
+        """A second adopt-eligible reconcile while nat-vent is already CA-owned must not
+        record another activity-log entry or emit a second fan_activated event."""
+        engine = self._engine()
+        engine._emit_event_callback = MagicMock()
+        engine._record_action = MagicMock()
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+        assert engine._record_action.call_count == 1
+        assert engine._emit_event_callback.call_count == 1
+
+        # Second, sequential trigger — session is already CA-owned (_natural_vent_active
+        # stays True from the first call, matching the real cross-trigger scenario).
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+            )
+        )
+        assert engine._record_action.call_count == 1, "re-confirmation must not record a second entry"
+        assert engine._emit_event_callback.call_count == 1, "re-confirmation must not emit a second event"
+        assert engine._natural_vent_active is True
+        assert engine._fan_active is True
+
+    def test_reconfirm_of_already_adopted_session_preserves_fan_on_since(self):
+        """_fan_on_since must be stamped once, at true first adoption — a redundant
+        re-confirmation must not overwrite it with a later timestamp (Issue #600)."""
+        engine = self._engine()
+        engine._emit_event_callback = MagicMock()
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 8, 7, 20, 12, 0),
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+                )
+            )
+        first_since = engine._fan_on_since
+        assert first_since is not None
+
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 8, 7, 20, 17, 0),
+        ):
+            asyncio.run(
+                engine.reconcile_fan_on_startup(
+                    indoor=75.0, outdoor=65.0, thermostat_fan_running=True, any_sensor_open=True
+                )
+            )
+        assert engine._fan_on_since == first_since, (
+            "a redundant re-confirmation must not jump the displayed session start time forward"
+        )
+
+
 class TestFanThermoBackstopGenerationGuard:
     """Issue #561 defense-in-depth: self._fan_thermo_cancel can only ever hold one live
     cancel handle, so if two backstop timer chains are ever started concurrently, the

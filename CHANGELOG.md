@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.65] — 2026-08-08
+
+- Fix #600: after an HA restart or grace-period expiry with the whole-house fan already running for natural ventilation, the Activity Record no longer shows the same "Fan activated" adoption logged 2-3 times in the same minute — the fan itself only ever turned on once; only the redundant log/event entries are gone. Also fixes the displayed nat-vent session start time silently jumping forward on each redundant re-confirmation.
+
 ## [0.5.64] — 2026-08-08
 
 - Feat #593: closed out the remaining Activity Record payload-completeness gaps from the #584 investigation — classification decisions now show the trend magnitude and the exact threshold/margin that produced the day type; setpoint retry/nudge events show the reject streak count; startup coalescing shows indoor/outdoor temps and fan archetype; the thermal-learning watchdog shows today's session count; the fan-stopped and incident-detected cards now use data they already had instead of a generic label; morning wake-up now reports an explicit skip reason when occupancy is away/vacation, matching its other skip reasons; and pre-cool deferring to an already-active nat-vent/WHF session now shows what indoor temp and target it's deferring to. Four renderer functions with no current emitter are now explicitly marked as legacy/historical-log-only.

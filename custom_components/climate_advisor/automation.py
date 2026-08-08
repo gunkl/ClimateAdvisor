@@ -3888,8 +3888,19 @@ class AutomationEngine:
         if nat_vent_eligible:
             # Adopt the running fan as CA-owned nat-vent
             decision = "adopt-on"
+            # Issue #600: this method has 4 independent callers (ha_restart,
+            # backstop_30min, post_grace_expiry, thermostat_state_change) with no
+            # coordination between sequential (non-overlapping) triggers — the Issue #561
+            # mutex only blocks concurrent re-entry and explicitly lets a second sequential
+            # trigger through ("the caller that lost the race gets another chance on its
+            # own next trigger"). Without this guard, two triggers landing minutes apart
+            # each redundantly re-adopt an already-owned session: duplicate "Fan activated"
+            # Activity Record entries for one real event, and _fan_on_since silently
+            # jumping forward each time, understating the displayed session duration.
+            _already_adopted = self._natural_vent_active
             self._fan_active = True
-            self._fan_on_since = dt_util.now().isoformat()
+            if self._fan_on_since is None:
+                self._fan_on_since = dt_util.now().isoformat()
             self._natural_vent_active = True
             # Start the thermostatic backstop now that CA owns this fan session
             self._start_fan_thermo_backstop()
@@ -3900,6 +3911,13 @@ class AutomationEngine:
                 decision,
                 archetype,
             )
+            if _already_adopted:
+                _LOGGER.debug(
+                    "%s reconcile re-confirmed an already-adopted nat-vent session —"
+                    " skipping duplicate Activity Record entry",
+                    trigger,
+                )
+                return
             # Issue #402 follow-up: this branch previously left zero activity-log trace of
             # the fan being adopted as CA-owned at startup — the fan silently starts being
             # managed with no record of why, unlike the turn-off branch below which does

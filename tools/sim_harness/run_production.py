@@ -847,6 +847,8 @@ def _snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_economizer_phase",
         "_pre_condition_achieved",  # Issue #295
         "_pre_condition_achieved_date",  # Issue #295
+        "_nat_vent_soft_start",  # Issue #606
+        "_nat_vent_outdoor_exit_time",  # Issue #606
     ):
         snap[attr] = getattr(engine, attr, None)
 

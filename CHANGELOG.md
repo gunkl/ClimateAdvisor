@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.0] — 2026-08-08
+
+- Feat #606: internal refactor only, no user-visible behavior change — the natural-ventilation on/off/purge-mode logic now has a single, named, automatically-verified description of its own state (checked against every regression-test scenario), laying groundwork for safer future automation-logic changes in this area.
+
 ## [0.5.67] — 2026-08-08
 
 - Feat #604: internal refactor only, no user-visible behavior change — makes it safe to eventually build a second, non-acting engine instance for testing automation changes without risk to the live system, by giving it its own isolated set of callbacks instead of ones that could reach into the real thermostat.

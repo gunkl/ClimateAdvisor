@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.67"
+VERSION = "0.6.0"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.0": [
+        "Feat #606: internal refactor only, no user-visible behavior change — the"
+        " natural-ventilation on/off/purge-mode logic now has a single, named,"
+        " automatically-verified description of its own state (checked against"
+        " every regression-test scenario), laying groundwork for safer future"
+        " automation-logic changes in this area.",
+    ],
     "0.5.67": [
         "Feat #604: internal refactor only, no user-visible behavior change — makes it"
         " safe to eventually build a second, non-acting engine instance for testing"
@@ -1609,6 +1616,53 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    606: {
+        "version_fixed": "0.6.0",
+        "title": (
+            "Natural ventilation's session state (\"is it active, in soft-start"
+            " purge/comfort mode, inactive, or locked out from immediately"
+            ' reactivating after an outdoor-warm exit") had no single named'
+            " representation anywhere in the codebase — it was always"
+            " reconstructed ad hoc from a combination of 4 separate flags"
+            " (_natural_vent_active, _nat_vent_soft_start, _paused_by_door,"
+            " _nat_vent_outdoor_exit_time). Block 5 (epic #594) Phase 1: the"
+            " first step of a multi-phase arc toward an explicit, verifiable"
+            " state machine for this lifecycle."
+        ),
+        "scope_covered": (
+            "New custom_components/climate_advisor/nat_vent_lifecycle.py:"
+            " NatVentLifecycleState enum (INACTIVE, ACTIVE_FULL_GATE,"
+            " ACTIVE_SOFT_START, PAUSED_REACTIVATION_LOCKOUT),"
+            " NatVentLifecycleInputs dataclass, pure"
+            " derive_nat_vent_lifecycle_state(). Read-only"
+            " AutomationEngine.nat_vent_lifecycle_state property — additive"
+            " only, not called from any production decision path (verified by"
+            " grep). tools/sim_harness/run_production.py's"
+            " _snapshot_engine_state() extended with 2 new fields"
+            " (_nat_vent_soft_start, _nat_vent_outdoor_exit_time) to support"
+            " replay-based verification. New tests/test_nat_vent_lifecycle_state.py"
+            " (90 tests): direct unit coverage of the pure function including"
+            " the reactivation-lockout boundary; a broad consistency check"
+            " across the real final engine flags from every golden (74) +"
+            " pending (4) scenario after a full production replay; and 3"
+            " independently hand-reasoned ground-truth scenarios"
+            " (mild_all_day_nat_vent_only -> ACTIVE_FULL_GATE,"
+            " nat-vent-comfort-floor-exit-restores-heat -> INACTIVE,"
+            " nat-vent-outdoor-rises-above-indoor-exit ->"
+            " PAUSED_REACTIVATION_LOCKOUT). New Tier 3 doc"
+            " docs/nat-vent-lifecycle-spec.md, with small additive"
+            " cross-reference edits to docs/grace-periods-spec.md and"
+            " docs/07-AUTOMATION-FLOWCHART.md at the one real handoff seam"
+            " (_exit_nat_vent() forking into the pause or grace lifecycle)."
+            " Corrected an inaccurate assumption from this session's earlier"
+            " research: the comfort-floor exit inside"
+            " check_natural_vent_conditions() does NOT route through"
+            " _exit_nat_vent() — confirmed by direct code reading and by a"
+            " golden scenario's own verdict text. Zero production decision"
+            " logic changed; full suite (3954 tests) + golden (74/74) +"
+            " pending (4/4) all pass with zero regressions."
+        ),
+    },
     604: {
         "version_fixed": "0.5.67",
         "title": (

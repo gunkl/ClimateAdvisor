@@ -497,6 +497,8 @@ flowchart TD
 
 This check runs on every coordinator update while nat vent is active or paused. Exit conditions are evaluated in priority order; the first match wins.
 
+**See also:** [nat-vent-lifecycle-spec.md](nat-vent-lifecycle-spec.md) (Issue #606) — the session-state view of this same lifecycle (4 named states derived from flags, differentially validated against every golden/pending scenario), plus a note on which exits above route through `_exit_nat_vent()` versus mutating flags directly.
+
 ```mermaid
 flowchart TD
     A{State?} -->|Neither active nor paused| A2{Idle re-eval:\ncontact sensor open\nAND HVAC not actively\ncalling for heat/cool\nAND debounce NOT pending\nfor that sensor?}

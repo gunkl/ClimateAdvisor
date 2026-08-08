@@ -113,6 +113,11 @@ from .nat_vent_gate import (
     decide_nat_vent_gate,
     decide_nat_vent_soft_start_gate,
 )
+from .nat_vent_lifecycle import (
+    NatVentLifecycleInputs,
+    NatVentLifecycleState,
+    derive_nat_vent_lifecycle_state,
+)
 from .nat_vent_reactivation_lockout import is_reactivation_locked_out
 from .setpoint_verify_decision import SetpointVerifyOutcome, decide_setpoint_verify
 from .temperature import (
@@ -5155,6 +5160,27 @@ class AutomationEngine:
         if _in_sleep_window(dt_util.now(), self.config):
             return float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
         return comfort_heat
+
+    @property
+    def nat_vent_lifecycle_state(self) -> NatVentLifecycleState:
+        """Current nat-vent session state, derived from existing flags (Issue #606).
+
+        Read-only observability — not called from any production decision path.
+        Purely a computed view of ``_natural_vent_active``/``_nat_vent_soft_start``/
+        ``_paused_by_door``/``_nat_vent_outdoor_exit_time``, so it cannot desync from
+        the flags it reads. See ``nat_vent_lifecycle.py`` for the pure derivation.
+        """
+        lockout_s = float(self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S))
+        return derive_nat_vent_lifecycle_state(
+            NatVentLifecycleInputs(
+                natural_vent_active=self._natural_vent_active,
+                nat_vent_soft_start=self._nat_vent_soft_start,
+                paused_by_door=self._paused_by_door,
+                outdoor_exit_time=self._nat_vent_outdoor_exit_time,
+                now=dt_util.now(),
+                lockout_seconds=lockout_s,
+            )
+        )
 
     def _nat_vent_may_reactivate(
         self,

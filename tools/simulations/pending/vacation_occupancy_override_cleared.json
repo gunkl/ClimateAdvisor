@@ -3,7 +3,6 @@
   "description": "Vacation-mode mirror of cancel_override_then_resume: a manual override set during vacation (e.g. cleaners visiting) must have the deep vacation setback restored the moment it's cancelled, not left at the override's setpoint until the next unrelated event (Issue #505)",
   "source": "synthetic",
   "issue": 505,
-  "pending_issue": 598,
   "config": {
     "comfort_heat": 68,
     "comfort_cool": 74,
@@ -11,7 +10,7 @@
     "setback_cool": 79,
     "natural_vent_delta": 3.0,
     "override_confirm_seconds": 5,
-    "manual_grace_seconds": 3600,
+    "manual_grace_seconds": 7200,
     "wake_time": "04:00",
     "briefing_time": "04:15"
   },
@@ -34,6 +33,13 @@
       "indoor_f": 75.0,
       "outdoor_f": 82.0,
       "note": "Indoor still cooling toward the setback, outdoor hot."
+    },
+    {
+      "time": "2026-07-16T00:30:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "note": "Issue #602: models the real production regular 30-min classification cycle re-confirming the (unchanged) classification after the midnight day rollover — this is what recreates coordinator._today_record for the new day (via _ensure_today_record()), the same way a real install's weather-retrying refresh cycle does. Without an event here, the harness (which doesn't auto-tick a periodic cycle the way production does) never recreates the day-2 record before the override below fires."
     },
     {
       "time": "2026-07-16T12:43:00",
@@ -85,9 +91,8 @@
   },
   "notes": [
     "Direct vacation-mode mirror of tools/simulations/golden/cancel_override_then_resume.json (the AWAY-mode version of this exact sequence, which already passes). There was no vacation equivalent prior to Issue #505 — the coverage gap tracked the code gap exactly.",
-    "Revert test: with the automation.py:1513 DEFER_OCCUPANCY-VACATION branch reverted to its pre-fix log-and-return form, the 07:43:10 assertion fails (no setback_applied event fires — event_log ends at override cleared/grace expired). Confirms this assertion genuinely depends on the fix, not a coincidental re-apply.",
-    "override_confirm_seconds/manual_grace_seconds mirror cancel_override_then_resume.json's values for the same reason (short wall-clock span; grace long enough that the explicit cancel_override event — not an auto-expiry — is what's under test).",
-    "Issue #598 (found during #593): the 13:54:10 assertion was passing by coincidence, not because the claimed cancel_override reapply was actually exercised. Direct inspection of run_production_scenario()'s real event_log/action_log shows the harness stops advancing after the scheduled 04:00 wake_time trigger — none of the later explicit events (thermostat_state_changed, cancel_override, the final temp_update) are ever dispatched. Before #593's unrelated morning_wakeup_skipped fix, the 22:30 bedtime-reapply decision (also 82F) was the last one in the truncated log and happened to match the expected value. Marked pending_issue until the harness truncation is diagnosed and fixed."
+    "Revert test: with the automation.py:1513 DEFER_OCCUPANCY-VACATION branch reverted to its pre-fix log-and-return form, the 13:54:10 assertion fails (no setback_applied event fires from the cancel-override path). Confirms this assertion genuinely depends on the fix, not a coincidental re-apply.",
+    "Issue #598/#602 (found during #593, root-caused and fixed together): the 13:54:10 assertion was passing by coincidence, not because the claimed cancel_override reapply was actually exercised. Root cause (NOT the originally-suspected clock-advance loop, which was disproven by direct instrumentation): coordinator.py's setpoint-only override-detection block requires self._today_record to be non-None, which was ONLY ever created by the once-daily _async_send_briefing() trigger — never reached by this weather-free scenario, and in production silently blocked by any weather outage overlapping that one fixed daily moment. Fixed at the root by Issue #602 (_ensure_today_record() now also runs on the resilient, already-self-healing regular classification cycle). Two consequences for this scenario once real override detection started working: (1) it needed an explicit reconfirmation classification event after the midnight day-rollover, since the harness (unlike production) does not auto-tick a periodic cycle — added at 2026-07-16T00:30:00; (2) manual_grace_seconds=3600 (copied from cancel_override_then_resume.json, whose override-to-cancel gap is only 1 minute) was too short for THIS scenario's 71-minute gap (12:43 confirm to 13:54 cancel) — grace was auto-expiring 11 minutes before the explicit cancel_override event, so the assertion was passing via grace-expiry, not the cancel-override path this scenario exists to test. Bumped to 7200s so the explicit cancel_override event is genuinely what's under test, matching the golden analog's actual intent."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true

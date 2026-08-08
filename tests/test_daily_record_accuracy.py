@@ -584,3 +584,91 @@ class TestDailyRecordBriefingPreservation:
         # Yesterday's counters must NOT carry over — fresh day
         assert coord._today_record.hvac_runtime_minutes == 0.0
         assert coord._today_record.manual_overrides == 0
+
+
+# ---------------------------------------------------------------------------
+# TestEnsureTodayRecord — Issue #602
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureTodayRecord:
+    """_ensure_today_record() must be idempotent within a day and roll over correctly
+    across a date change — it's now called every ~30-min regular classification cycle,
+    not just once daily from _async_send_briefing(), so repeated same-day calls must
+    never reset accumulated counters.
+    """
+
+    def _make_coord(self, *, today_record=None):
+        ClimateAdvisorCoordinator = _get_coordinator_class()
+        coord = object.__new__(ClimateAdvisorCoordinator)
+        coord._today_record = today_record
+        coord.config = {"learning_enabled": False}
+        coord._ensure_today_record = types.MethodType(ClimateAdvisorCoordinator._ensure_today_record, coord)
+        return coord
+
+    def test_creates_record_when_none(self):
+        coord = self._make_coord(today_record=None)
+        cls = _make_classification(day_type="hot", hvac_mode="cool")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 0, 30, 0)
+            coord._ensure_today_record(cls)
+        assert coord._today_record is not None
+        assert coord._today_record.date == "2026-04-05"
+        assert coord._today_record.day_type == "hot"
+
+    def test_repeated_same_day_calls_do_not_reset_counters(self):
+        """Simulates two 30-min regular cycles on the same day — accumulated
+        counters between calls must survive, matching Issue #176's existing
+        briefing-preservation guarantee."""
+        coord = self._make_coord(
+            today_record=_make_today_record(
+                date="2026-04-05",
+                hvac_runtime_minutes=19.8,
+                manual_overrides=3,
+                comfort_violations_minutes=12.0,
+                windows_opened=True,
+            )
+        )
+        cls = _make_classification(day_type="warm", hvac_mode="cool")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 10, 0, 0)
+            coord._ensure_today_record(cls)
+        # Same-day call must be a true no-op — same object, nothing rebuilt.
+        assert coord._today_record.hvac_runtime_minutes == 19.8
+        assert coord._today_record.manual_overrides == 3
+        assert coord._today_record.comfort_violations_minutes == 12.0
+        assert coord._today_record.windows_opened is True
+
+    def test_rolls_over_on_new_day_preserving_no_counters(self):
+        coord = self._make_coord(
+            today_record=_make_today_record(
+                date="2026-04-04",  # yesterday
+                hvac_runtime_minutes=95.0,
+                manual_overrides=5,
+            )
+        )
+        cls = _make_classification(day_type="mild", hvac_mode="off")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 0, 30, 0)
+            coord._ensure_today_record(cls)
+        assert coord._today_record.date == "2026-04-05"
+        assert coord._today_record.day_type == "mild"
+        assert coord._today_record.hvac_runtime_minutes == 0.0
+        assert coord._today_record.manual_overrides == 0
+
+    def test_idempotent_across_many_calls_same_day(self):
+        """Regression guard: calling _ensure_today_record() many times in one day
+        (mirroring ~48 real 30-min cycles) must never reset counters — this is the
+        exact failure mode that would silently reintroduce Issue #176 at 30-min
+        cadence instead of once-daily."""
+        coord = self._make_coord(today_record=None)
+        cls = _make_classification(day_type="hot", hvac_mode="cool")
+        with patch("custom_components.climate_advisor.coordinator.dt_util") as mock_dt_util:
+            mock_dt_util.now.return_value = datetime(2026, 4, 5, 0, 30, 0)
+            coord._ensure_today_record(cls)
+            coord._today_record.manual_overrides = 2
+            coord._today_record.hvac_runtime_minutes = 45.0
+            for _ in range(10):
+                coord._ensure_today_record(cls)
+        assert coord._today_record.manual_overrides == 2
+        assert coord._today_record.hvac_runtime_minutes == 45.0

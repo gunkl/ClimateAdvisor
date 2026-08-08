@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.66"
+VERSION = "0.5.67"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.67": [
+        "Feat #604: internal refactor only, no user-visible behavior change — makes it"
+        " safe to eventually build a second, non-acting engine instance for testing"
+        " automation changes without risk to the live system, by giving it its own"
+        " isolated set of callbacks instead of ones that could reach into the real"
+        " thermostat.",
+    ],
     "0.5.66": [
         "Fix #602: the daily learning record (which gates manual-override detection for"
         " setpoint-only changes, HVAC runtime tracking, comfort-violation minutes,"
@@ -1602,6 +1609,39 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    604: {
+        "version_fixed": "0.5.67",
+        "title": (
+            "AutomationEngine's 9 coordinator-wired callback attributes (revisit,"
+            " sensor_check, sensor_debounce_pending, emit_event, request_refresh,"
+            " post_grace_fan_check, get_fan_physical_state, is_recent_fan_command,"
+            " reclassify) were always closures/bound methods over the single production"
+            " coordinator instance, not parameterized by which engine instance invoked"
+            " them. At least 4 (post_grace_fan_check, emit_event, request_refresh, and"
+            " the request_refresh lambda) reach into real production state or trigger"
+            " real side effects regardless of which engine fired them — unsafe for any"
+            " future second (shadow) AutomationEngine instance (Block 5 / epic #594)."
+            " AutomationEngine itself has no hidden shared state and was already safe to"
+            " instantiate twice; only the coordinator's callback wiring was the hazard."
+        ),
+        "scope_covered": (
+            "automation.py: new AutomationEngineCallbacks dataclass (9 named fields) and"
+            " optional keyword-only callbacks/role constructor params on AutomationEngine"
+            " — omitted (default) leaves all 9 attributes None exactly as before this"
+            " change. coordinator.py: extracted the 9 existing post-construction"
+            " assignments into _build_production_automation_callbacks(), passed at"
+            " construction time; added a shadow_automation_engine=None placeholder"
+            " attribute (stays None until Block 5 subtask Q builds a real second engine)."
+            " docs/02-ARCHITECTURE-REFERENCE.md: new 'Engine Callback Isolation'"
+            " subsection documenting the contract and naming the unsafe callables so a"
+            " future shadow-engine implementer can't miss them. Pure construction-time"
+            " refactor — zero behavior change for the existing single (production)"
+            " engine, verified via full test suite (3864 tests) + golden (74/74) +"
+            " pending (4/4) suites, all passing with zero regressions. Does not build"
+            " the shadow engine itself, any state machine, or any comparator — those are"
+            " separately scoped Block 5 subtasks P/O/Q/R."
+        ),
+    },
     602: {
         "version_fixed": "0.5.66",
         "title": (

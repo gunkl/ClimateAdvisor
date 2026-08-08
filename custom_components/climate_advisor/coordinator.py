@@ -38,6 +38,7 @@ from homeassistant.util import dt as dt_util
 
 from .automation import (
     AutomationEngine,
+    AutomationEngineCallbacks,
     _in_sleep_window,
     compute_bedtime_setback,
     compute_pre_cool_target,
@@ -362,28 +363,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             notify_service=config["notify_service"],
             config=config,
             sensor_polarity_inverted=config.get(CONF_SENSOR_POLARITY_INVERTED, False),
+            callbacks=self._build_production_automation_callbacks(),
+            role="production",
         )
-        self.automation_engine._revisit_callback = self.async_request_refresh
-        self.automation_engine._sensor_check_callback = self._any_sensor_open
-        # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell whether
-        # any currently-open monitored sensor is still within its CONF_SENSOR_DEBOUNCE
-        # settle window (i.e. still tracked in _door_open_timers) — reused as-is rather than
-        # introducing a second debounce/lockout concept.
-        self.automation_engine._sensor_debounce_pending_callback = lambda: bool(self._door_open_timers)
-        self.automation_engine._emit_event_callback = self._emit_event
-        self.automation_engine._request_refresh_callback = lambda: self.hass.async_create_task(
-            self.async_request_refresh()
-        )
-        # Issue #359: post-grace fan check callback — called by engine when any grace period expires
-        self.automation_engine._post_grace_fan_check_callback = self._on_post_grace_fan_check
-        # Issue #423: physical fan ground-truth callbacks for _reconcile_fan_physical_drift()
-        self.automation_engine._get_fan_physical_state_callback = self._get_fan_physical_state
-        self.automation_engine._is_recent_fan_command_callback = self._is_recent_fan_command
-        # Issue #495: reclassify callback — called by _release_whf_and_reclassify() when a
-        # manual/remote WHF session ends, reusing the existing fan-off reassert path (Issue
-        # #359 Fix A) so the thermostat converges on CA's current classification rather than
-        # a blindly-restored, potentially hours-stale captured mode.
-        self.automation_engine._reclassify_callback = self._on_whf_release_reclassify
+        # Issue #604 (Block 5, subtask N2): placeholder for a future second, non-acting
+        # AutomationEngine instance (Block 5 subtask Q). Always None until Q — kept here
+        # so any status/diagnostics schema field exists from N2 onward rather than being
+        # bundled into Q later. A shadow engine must be constructed with its own
+        # AutomationEngineCallbacks bundle — never the production callbacks below — see
+        # docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
+        self.shadow_automation_engine: AutomationEngine | None = None
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -529,6 +518,44 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.last_update_error: str | None = None
         self.last_update_error_time: str | None = None
         self.consecutive_failure_count: int = 0
+
+    def _build_production_automation_callbacks(self) -> AutomationEngineCallbacks:
+        """Build the callback bundle wired onto the real, acting AutomationEngine.
+
+        Issue #604 (Block 5, subtask N2): extracted verbatim from the 9 post-hoc
+        ``self.automation_engine._x_callback = ...`` assignments this coordinator used
+        to make right after construction — same callables, same behavior, just built
+        as a named bundle so construction is one step instead of nine. A future shadow
+        engine (Block 5 subtask Q) MUST NOT be given this bundle — several of these
+        callables reach into real production state or trigger real side effects
+        regardless of which engine instance invoked them (see
+        docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation").
+        """
+        return AutomationEngineCallbacks(
+            revisit=self.async_request_refresh,
+            sensor_check=self._any_sensor_open,
+            # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell
+            # whether any currently-open monitored sensor is still within its
+            # CONF_SENSOR_DEBOUNCE settle window (i.e. still tracked in
+            # _door_open_timers) — reused as-is rather than introducing a second
+            # debounce/lockout concept.
+            sensor_debounce_pending=lambda: bool(self._door_open_timers),
+            emit_event=self._emit_event,
+            request_refresh=lambda: self.hass.async_create_task(self.async_request_refresh()),
+            # Issue #359: post-grace fan check callback — called by engine when any
+            # grace period expires.
+            post_grace_fan_check=self._on_post_grace_fan_check,
+            # Issue #423: physical fan ground-truth callbacks for
+            # _reconcile_fan_physical_drift().
+            get_fan_physical_state=self._get_fan_physical_state,
+            is_recent_fan_command=self._is_recent_fan_command,
+            # Issue #495: reclassify callback — called by _release_whf_and_reclassify()
+            # when a manual/remote WHF session ends, reusing the existing fan-off
+            # reassert path (Issue #359 Fix A) so the thermostat converges on CA's
+            # current classification rather than a blindly-restored, potentially
+            # hours-stale captured mode.
+            reclassify=self._on_whf_release_reclassify,
+        )
 
     @property
     def automation_enabled(self) -> bool:

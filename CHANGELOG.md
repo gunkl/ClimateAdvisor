@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.67] — 2026-08-08
+
+- Feat #604: internal refactor only, no user-visible behavior change — makes it safe to eventually build a second, non-acting engine instance for testing automation changes without risk to the live system, by giving it its own isolated set of callbacks instead of ones that could reach into the real thermostat.
+
 ## [0.5.66] — 2026-08-08
 
 - Fix #602: the daily learning record (which gates manual-override detection for setpoint-only changes, HVAC runtime tracking, comfort-violation minutes, occupancy-away minutes, door/window pause counts, and the thermal-learning watchdog) was only ever created once a day by the morning briefing — if the weather integration happened to be unavailable at that one fixed moment, all of that silently stopped working for the rest of the day, with no warning. It now also gets created by the regular classification cycle, which already retries weather forever — the gap shrinks from up to 24 hours to about 30 minutes. Fix #598: a test scenario covering Issue #505's vacation-override-cleared fix was passing by coincidence rather than exercising the real behavior — this fix gives it real coverage.

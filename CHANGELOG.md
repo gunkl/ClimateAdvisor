@@ -3,9 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
-## [0.5.61] — 2026-08-07
+## [0.5.62] — 2026-08-08
 
 - Fix #591: fixed the Activity Record showing the same automation decision (comfort band, classification, occupancy setback skip, nat-vent AC assist, and several others) two or three times in a row after a restart or overlapping trigger — each real decision now appears once.
+
+## [0.5.61] — 2026-08-07
+
+- Fix #589: disabling automation (the "Automation Enabled" switch / observe-only mode) now also stops the whole-house-fan command-only reconciliation path. Previously, on installs where the fan entity only echoes commands (fan_state_feedback=False), this path kept issuing real fan on/off commands every ~30 minutes even with automation disabled — the only automated action that didn't respect the switch. It now honors dry_run like every other automated action.
 
 ## [0.5.60] — 2026-08-05
 

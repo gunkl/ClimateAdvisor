@@ -146,10 +146,10 @@ def _make_update_data_coord(
 
     coord._today_record = DailyRecord(date="2026-04-09", day_type="warm", trend_direction="stable")
     coord._hvac_on_since = None
-    coord._last_state_contradiction_time = None
 
     ae = MagicMock()
     ae._fan_active = False
+    ae._natural_vent_active = False
     ae._last_action_time = None
     ae._last_action_reason = ""
     ae._fan_override_time = None
@@ -159,6 +159,16 @@ def _make_update_data_coord(
     ae.check_window_cooling_opportunity = AsyncMock()
     ae.check_natural_vent_conditions = AsyncMock()
     ae.update_outdoor_temp = MagicMock()
+    # Issue #591: bind the real dedup helper — some hvac_action combinations here
+    # can reach the state_contradiction_warning check, which now uses it. `ae` is a
+    # MagicMock, so pre-seed real dicts (its getattr() auto-vivifies unknowns as
+    # MagicMocks instead of raising, which would otherwise defeat the getattr-based
+    # first-use check inside _recent_duplicate()).
+    from custom_components.climate_advisor.automation import AutomationEngine
+
+    ae._dedup_signatures = {}
+    ae._dedup_timestamps = {}
+    ae._recent_duplicate = types.MethodType(AutomationEngine._recent_duplicate, ae)
     coord.automation_engine = ae
 
     coord._emit_event = MagicMock()

@@ -952,7 +952,12 @@ class TestOccupancyAwayWhilePaused:
 
         suppressed = [e for e in events if e[0] == "occupancy_setback_suppressed_paused"]
         assert len(suppressed) == 1
-        assert suppressed[0][1] == {"occupancy": "away", "reason": "paused_by_door"}
+        assert suppressed[0][1] == {
+            "occupancy": "away",
+            "reason": "paused_by_door",
+            "paused_entity": None,
+            "paused_minutes": None,
+        }
 
 
 class TestOccupancyVacationWhilePaused:
@@ -988,7 +993,12 @@ class TestOccupancyVacationWhilePaused:
 
         suppressed = [e for e in events if e[0] == "occupancy_setback_suppressed_paused"]
         assert len(suppressed) == 1
-        assert suppressed[0][1] == {"occupancy": "vacation", "reason": "paused_by_door"}
+        assert suppressed[0][1] == {
+            "occupancy": "vacation",
+            "reason": "paused_by_door",
+            "paused_entity": None,
+            "paused_minutes": None,
+        }
 
 
 class TestAutomationStatusPausedWithOccupancy:
@@ -1141,7 +1151,7 @@ class TestApplyClassificationPausedGuard:
         # Must have emitted classification_suppressed_paused
         engine._emit_event_callback.assert_called_once_with(
             "classification_suppressed_paused",
-            {"day_type": "hot", "hvac_mode": "cool"},
+            {"day_type": "hot", "hvac_mode": "cool", "paused_entity": None, "paused_minutes": None},
         )
 
         # Must NOT have called _apply_comfort_band
@@ -1160,7 +1170,7 @@ class TestApplyClassificationPausedGuard:
         # Must still emit classification_suppressed_paused
         engine._emit_event_callback.assert_called_once_with(
             "classification_suppressed_paused",
-            {"day_type": "hot", "hvac_mode": "cool"},
+            {"day_type": "hot", "hvac_mode": "cool", "paused_entity": None, "paused_minutes": None},
         )
 
         # Must NOT have called _apply_comfort_band
@@ -1212,7 +1222,7 @@ class TestApplyClassificationPausedGuard:
 
         engine._emit_event_callback.assert_called_once_with(
             "classification_suppressed_paused",
-            {"day_type": "cold", "hvac_mode": "heat"},
+            {"day_type": "cold", "hvac_mode": "heat", "paused_entity": None, "paused_minutes": None},
         )
 
         engine._apply_comfort_band.assert_not_called()

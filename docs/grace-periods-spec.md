@@ -62,7 +62,7 @@
 treat them as a navigation aid, not a contract; if a line doesn't match, search for the function name.
 
 **Out of scope for this spec:**
-- Natural ventilation internal logic (see `check_natural_vent_conditions()`, `_re_evaluate_nat_vent()`)
+- Natural ventilation internal logic — see [nat-vent-lifecycle-spec.md](nat-vent-lifecycle-spec.md) (Issue #606), which also documents the `_exit_nat_vent()` handoff into this spec's `PAUSED`/`GRACE` states
 - Fan min-runtime cycles (separate lifecycle from grace)
 - Occupancy setback calculations
 
@@ -158,6 +158,8 @@ The grace period state machine is embedded within the broader pause/resume lifec
 | GRACE | Grace timer fires; all sensors closed | NORMAL (`paused=F, grace=F`) | Clear grace flags; call `clear_manual_override()`; emit `grace_expired` event with `re_paused=False`; send notification if enabled |
 | GRACE | `_cancel_grace_timers()` called (e.g., new grace replaces old) | NORMAL (`paused=F, grace=F`) | Cancel active timer; clear `_grace_active`, `_last_resume_source` |
 | NORMAL | Fan manual override detected | GRACE (`paused=F, grace=T`) | Start manual grace (fan override path — HVAC pause not involved) |
+
+**Cross-reference (Issue #606):** the PAUSED state entered via `_exit_nat_vent()`'s sensor-still-open branch corresponds exactly to nat-vent's own `PAUSED_REACTIVATION_LOCKOUT` state when the exit reason was the outdoor-warm-rise exit (the only exit that arms the reactivation lockout) — see [nat-vent-lifecycle-spec.md § Handoff to Pause/Grace](nat-vent-lifecycle-spec.md#handoff-to-pausegrace). The GRACE row above ("New door/window open (outdoor cool enough for nat-vent) → NAT_VENT") is the reverse edge of that same handoff.
 
 **Note on concurrent manual and automation timers:** `_start_grace_period()` always calls `_cancel_grace_timers()` first (L1469). This means starting a new grace (of either type) unconditionally cancels any running timer. The engine cannot have both `_manual_grace_cancel` and `_automation_grace_cancel` active simultaneously — the second call to `_start_grace_period()` replaces the first. `_grace_active` therefore reflects the most recently started grace only.
 

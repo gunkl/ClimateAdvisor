@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.60"
+VERSION = "0.5.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.61": [
+        "Feat #592: the Activity Record now explains *why* several nat-vent, door/window"
+        " pause, and grace-recovery decisions happened, not just that they happened —"
+        ' "Classification suppressed" and "Occupancy setback suppressed" rows now name'
+        " which sensor is open and for how long; nat-vent fan-on/floor-skip/soft-start/"
+        " ceiling-escalation rows show the actual outdoor/indoor temperatures and"
+        " thresholds behind the decision instead of only a derived summary number;"
+        ' "Override cleared" (fan-only) and "Override confirmed" rows show the reason/'
+        " trigger; and a stuck-grace recovery row now names which mode/time was stale."
+        " No automation behavior changed — same decisions, more visible reasoning.",
+    ],
     "0.5.60": [
         "Feat #580: the dashboard's Activity Record report now defaults to the"
         ' "Last 12 hours" time window instead of 24, and lists events newest-first'
@@ -1540,6 +1551,40 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    592: {
+        "version_fixed": "0.5.61",
+        "title": (
+            "Activity Record payload-completeness sweep for the four lifecycle-scoped"
+            " decision families (nat-vent, door/window pause, override, grace) — many"
+            " emit sites discarded locally-computed inputs (outdoor/indoor temps,"
+            " thresholds, k_passive, pause duration/entity, override reason/trigger) that"
+            " were never threaded into the event payload, so the renderer could only show"
+            " a bare verdict with no visible reasoning behind it."
+        ),
+        "scope_covered": (
+            "automation.py: classification_suppressed_paused and"
+            " occupancy_setback_suppressed_paused now carry paused_entity/paused_minutes"
+            " (new self._paused_entity/self._paused_since state, set in"
+            " _pause_for_door_window() and cleared at every resume site); nat_vent_fan_on"
+            " gained outdoor_temp; nat_vent_predicted_floor_exit/"
+            " nat_vent_floor_imminent_skip gained indoor_temp/comfort_heat/k_passive;"
+            " nat_vent_soft_start_entered gained comfort_heat/decline_margin_f (both call"
+            " sites); nat_vent_ceiling_escalation gained hours_to_breach/lead_min/"
+            " k_active_cool; nat_vent_bedtime_continue gained outdoor_temp/sleep_cool;"
+            " sensor_opened at the _re_pause_for_open_sensor() re-check site gained"
+            " outdoor_temp/indoor_temp/threshold; override_cleared's fan-only variant"
+            " gained reason; override_confirmed gained cls_mode/source;"
+            " nat_vent_comfort_floor_exit's temp_check call site now matches its sibling's"
+            " fan_mode_change/hvac_mode_restored shape. coordinator.py:"
+            " stuck_grace_recovered at the Issue #321 watchdog site gained"
+            " stale_mode/stale_since (captured before clear_manual_override() resets"
+            " them). ai_skills_context.py: renderers for all of the above updated to"
+            " surface the new fields in the Event/Settings cells; added a shared"
+            " _render_paused_entity_settings() helper for the two pause-suppression"
+            " renderers. No decision logic changed — golden suite (74/74) and pending"
+            " suite (4/4) show zero behavior change."
+        ),
+    },
     580: {
         "version_fixed": "0.5.60",
         "title": (

@@ -523,6 +523,11 @@ class AutomationEngine:
         # #504) must keep running every cycle in the former case, since nothing else will
         # ever re-trigger it otherwise. Only _pause_for_door_window() sets this True.
         self._paused_with_hvac_already_off = False
+        # Issue #592: which entity triggered the current door/window pause, and when it
+        # started — threaded into classification_suppressed_paused so the Activity Record
+        # can say *which* sensor and *how long*, not just that a pause is in effect.
+        self._paused_entity: str | None = None
+        self._paused_since: datetime | None = None
 
         # Issue #392 Fix 3: serialize the six automation decision-pass entry points
         # (apply_classification, handle_door_window_open, handle_all_doors_windows_closed,
@@ -926,7 +931,7 @@ class AutomationEngine:
         # was active (guarded on _manual_override_active); a fan-only override cleared here would
         # otherwise leave zero trace in the Activity Report.
         if had_fan and not had_manual and self._emit_event_callback:
-            self._emit_event_callback("override_cleared", {"was_mode": None, "old_setpoint_f": None})
+            self._emit_event_callback("override_cleared", {"was_mode": None, "old_setpoint_f": None, "reason": reason})
 
         # Force the same reconciliation a natural grace expiry always performs, instead of
         # relying on the next incidental event or the next 30-min classification cycle.
@@ -1498,7 +1503,12 @@ class AutomationEngine:
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_confirmed",
-                        {"mode": current_mode, "confirm_delay_seconds": confirm_seconds},
+                        {
+                            "mode": current_mode,
+                            "confirm_delay_seconds": confirm_seconds,
+                            "cls_mode": cls_mode,
+                            "source": source,
+                        },
                     )
             else:
                 # PATH B: State resolved — transient event, no override
@@ -1769,9 +1779,19 @@ class AutomationEngine:
                 else:
                     _LOGGER.info("apply_classification: thermostat already off — no mode change needed (windows open)")
                 if self._emit_event_callback:
+                    _pause_minutes = (
+                        (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                        if self._paused_since is not None
+                        else None
+                    )
                     self._emit_event_callback(
                         "classification_suppressed_paused",
-                        {"day_type": classification.day_type, "hvac_mode": classification.hvac_mode},
+                        {
+                            "day_type": classification.day_type,
+                            "hvac_mode": classification.hvac_mode,
+                            "paused_entity": self._paused_entity,
+                            "paused_minutes": round(_pause_minutes) if _pause_minutes is not None else None,
+                        },
                     )
                 return
 
@@ -2006,6 +2026,9 @@ class AutomationEngine:
                                             "indoor": _indoor_cg,
                                             "outdoor": _outdoor,
                                             "comfort_cool": _comfort_cool_cg,
+                                            "hours_to_breach": round(_hours_to_breach, 2),
+                                            "lead_min": round(_lead_min),
+                                            "k_active_cool": _k_active_cool,
                                         },
                                     )
                             _cs_cg = self.hass.states.get(self.climate_entity)
@@ -2583,6 +2606,8 @@ class AutomationEngine:
             self._pre_pause_mode = mode
             self._paused_by_door = True
             self._paused_with_hvac_already_off = False
+            self._paused_entity = entity_label
+            self._paused_since = dt_util.now()
             await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
             await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
@@ -2594,6 +2619,8 @@ class AutomationEngine:
         if mode == "off":
             self._paused_by_door = True
             self._paused_with_hvac_already_off = True
+            self._paused_entity = entity_label
+            self._paused_since = dt_util.now()
             _LOGGER.info(
                 "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
                 entity_label,
@@ -2725,6 +2752,9 @@ class AutomationEngine:
                                             "nat_vent_floor_imminent_skip",
                                             {
                                                 "time_to_floor_hr": round(time_to_floor, 2),
+                                                "indoor_temp": round(indoor, 1),
+                                                "comfort_heat": round(comfort_heat, 1),
+                                                "k_passive": round(k_passive, 4),
                                                 "fan_device": _fan_device_label(self.config),
                                             },
                                         )
@@ -2836,6 +2866,8 @@ class AutomationEngine:
 
             self._paused_by_door = False
             self._paused_with_hvac_already_off = False
+            self._paused_entity = None
+            self._paused_since = None
             if self._pre_pause_mode:
                 await self._set_hvac_mode(
                     self._pre_pause_mode,
@@ -2999,6 +3031,8 @@ class AutomationEngine:
                                 "outdoor": outdoor,
                                 "indoor": _indoor,
                                 "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "comfort_heat": _comfort_heat,
+                                "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
                         )
                 return
@@ -3169,6 +3203,9 @@ class AutomationEngine:
                                         "nat_vent_predicted_floor_exit",
                                         {
                                             "time_to_floor_hr": round(time_to_floor, 2),
+                                            "indoor_temp": round(_indoor_now, 1),
+                                            "comfort_heat": round(comfort_heat_now, 1),
+                                            "k_passive": round(k_passive, 4),
                                             "fan_mode_change": "on→auto",
                                             "fan_device": _fan_device_label(self.config),
                                             "hvac_mode_restored": (
@@ -3275,6 +3312,8 @@ class AutomationEngine:
                     self._natural_vent_active = True
                     self._paused_by_door = False
                     self._paused_with_hvac_already_off = False
+                    self._paused_entity = None
+                    self._paused_since = None
                     _LOGGER.info(
                         "Natural vent activated: outdoor %.1f°F < indoor %.1f°F − %.1f°F hysteresis,"
                         " outdoor ≤ threshold %.1f°F while paused",
@@ -3305,6 +3344,8 @@ class AutomationEngine:
                     self._nat_vent_soft_start = True
                     self._paused_by_door = False
                     self._paused_with_hvac_already_off = False
+                    self._paused_entity = None
+                    self._paused_since = None
                     _LOGGER.info(
                         "Nat-vent soft-start activated while paused: outdoor %.1f°F <= indoor %.1f°F,"
                         " past today's peak %.1f°F by >= %.1f°F",
@@ -3320,6 +3361,8 @@ class AutomationEngine:
                                 "outdoor": outdoor,
                                 "indoor": indoor,
                                 "outdoor_today_peak": self._outdoor_temp_today_peak,
+                                "comfort_heat": comfort_heat,
+                                "decline_margin_f": PEAK_DECLINE_MARGIN_F,
                             },
                         )
                     await self._apply_nat_vent_hvac_state()
@@ -3426,6 +3469,10 @@ class AutomationEngine:
                             "comfort_heat": _hard_floor,
                             "source": "temp_check",
                             "fan_device": _fan_device_label(self.config),
+                            "fan_mode_change": "on→auto",
+                            "hvac_mode_restored": (
+                                self._current_classification.hvac_mode if self._current_classification else "unknown"
+                            ),
                         },
                     )
                 await self._exit_nat_vent(
@@ -3506,6 +3553,7 @@ class AutomationEngine:
                         "nat_vent_fan_on",
                         {
                             "indoor_temp": current_temp,
+                            "outdoor_temp": outdoor,
                             "on_threshold": on_threshold,
                             "target": nat_vent_target,
                             "fan_device": _fan_device_label(self.config),
@@ -3921,6 +3969,8 @@ class AutomationEngine:
         _LOGGER.info("Manual HVAC override detected during door/window pause")
         self._paused_by_door = False
         self._paused_with_hvac_already_off = False
+        self._paused_entity = None
+        self._paused_since = None
         self._pre_pause_mode = None
         # Start confirmation period — wait before formally accepting the override
         self.start_override_confirmation(
@@ -3945,6 +3995,8 @@ class AutomationEngine:
         _LOGGER.info("User resumed HVAC from door/window pause via dashboard")
         self._paused_by_door = False
         self._paused_with_hvac_already_off = False
+        self._paused_entity = None
+        self._paused_since = None
         self._pre_pause_mode = None
         self._resumed_from_pause = True
 
@@ -4231,7 +4283,16 @@ class AutomationEngine:
                     nat_vent_threshold,
                 )
                 if self._emit_event_callback:
-                    self._emit_event_callback("sensor_opened", {"entity": "re-check", "result": "natural_ventilation"})
+                    self._emit_event_callback(
+                        "sensor_opened",
+                        {
+                            "entity": "re-check",
+                            "result": "natural_ventilation",
+                            "outdoor_temp": outdoor,
+                            "indoor_temp": indoor,
+                            "threshold": nat_vent_threshold,
+                        },
+                    )
                 return
             await self._pause_for_door_window(
                 entity_label="re-check",
@@ -4276,9 +4337,19 @@ class AutomationEngine:
                 "skipping setback band; occupancy recorded, HVAC remains off"
             )
             if self._emit_event_callback:
+                _away_pause_minutes = (
+                    (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                    if self._paused_since is not None
+                    else None
+                )
                 self._emit_event_callback(
                     "occupancy_setback_suppressed_paused",
-                    {"occupancy": "away", "reason": "paused_by_door"},
+                    {
+                        "occupancy": "away",
+                        "reason": "paused_by_door",
+                        "paused_entity": self._paused_entity,
+                        "paused_minutes": round(_away_pause_minutes) if _away_pause_minutes is not None else None,
+                    },
                 )
             return
         if self._manual_override_active:
@@ -4375,9 +4446,19 @@ class AutomationEngine:
                 "skipping setback band; occupancy recorded, HVAC remains off"
             )
             if self._emit_event_callback:
+                _vac_pause_minutes = (
+                    (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                    if self._paused_since is not None
+                    else None
+                )
                 self._emit_event_callback(
                     "occupancy_setback_suppressed_paused",
-                    {"occupancy": "vacation", "reason": "paused_by_door"},
+                    {
+                        "occupancy": "vacation",
+                        "reason": "paused_by_door",
+                        "paused_entity": self._paused_entity,
+                        "paused_minutes": round(_vac_pause_minutes) if _vac_pause_minutes is not None else None,
+                    },
                 )
             return
         if self._manual_override_active:
@@ -4553,7 +4634,11 @@ class AutomationEngine:
         if _gate == ScheduledBandGate.DEFER_NAT_VENT and self._emit_event_callback:
             self._emit_event_callback(
                 "nat_vent_bedtime_continue",
-                {"fan_device": _fan_device_label(self.config)},
+                {
+                    "fan_device": _fan_device_label(self.config),
+                    "outdoor_temp": self._last_outdoor_temp,
+                    "sleep_cool": _sleep_band.ceiling,
+                },
             )
         if self._today_record is not None:
             # Issue #402: key off _sleep_band.active (the edge _apply_comfort_band() actually

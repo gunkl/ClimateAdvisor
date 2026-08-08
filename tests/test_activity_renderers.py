@@ -1173,3 +1173,168 @@ class TestNewestFirstOrdering:
 
     def test_newest_first_empty_log_unaffected(self):
         assert _build_table([], newest_first=True) == _build_table([], newest_first=False)
+
+
+# ---------------------------------------------------------------------------
+# TestLifecycleScopedNarration (Issue #592 — nat-vent/pause/override/grace payload
+# completeness). Confirms the newly-threaded fields actually reach the rendered
+# Event/Settings cells, not just the emit-site payload.
+# ---------------------------------------------------------------------------
+
+
+class TestLifecycleScopedNarration:
+    def test_classification_suppressed_paused_shows_day_hvac_and_pause_info(self):
+        ev, st = _act_mod.EVENT_RENDERERS["classification_suppressed_paused"](
+            {
+                "day_type": "hot",
+                "hvac_mode": "cool",
+                "paused_entity": "binary_sensor.back_door",
+                "paused_minutes": 42,
+            },
+            "fahrenheit",
+        )
+        assert "day=hot" in ev
+        assert "mode=cool" in ev
+        assert "binary_sensor.back_door" in st
+        assert "42" in st
+
+    def test_classification_suppressed_paused_no_pause_info_yields_empty_settings(self):
+        ev, st = _act_mod.EVENT_RENDERERS["classification_suppressed_paused"](
+            {"day_type": "hot", "hvac_mode": "cool", "paused_entity": None, "paused_minutes": None},
+            "fahrenheit",
+        )
+        assert st == ""
+
+    def test_occupancy_setback_suppressed_paused_shows_pause_info(self):
+        ev, st = _act_mod.EVENT_RENDERERS["occupancy_setback_suppressed_paused"](
+            {
+                "occupancy": "away",
+                "reason": "paused_by_door",
+                "paused_entity": "binary_sensor.window",
+                "paused_minutes": 5,
+            },
+            "fahrenheit",
+        )
+        assert "away" in ev
+        assert "binary_sensor.window" in st
+        assert "5" in st
+
+    def test_nat_vent_fan_on_shows_outdoor_temp(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_fan_on"](
+            {"indoor_temp": 76.0, "outdoor_temp": 68.0, "on_threshold": 75.0, "fan_device": "whf"},
+            "fahrenheit",
+        )
+        assert "outdoor" in st
+        assert "68" in st
+
+    def test_nat_vent_predicted_floor_exit_shows_raw_inputs(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_predicted_floor_exit"](
+            {
+                "time_to_floor_hr": 0.5,
+                "indoor_temp": 68.0,
+                "comfort_heat": 66.0,
+                "k_passive": -0.15,
+                "fan_mode_change": "on->auto",
+                "hvac_mode_restored": "heat",
+            },
+            "fahrenheit",
+        )
+        assert "68" in st
+        assert "66" in st
+        assert "k_passive=-0.1500" in st
+
+    def test_nat_vent_floor_imminent_skip_shows_raw_inputs(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_floor_imminent_skip"](
+            {"time_to_floor_hr": 0.3, "indoor_temp": 67.0, "comfort_heat": 66.0, "k_passive": -0.2},
+            "fahrenheit",
+        )
+        assert "67" in st
+        assert "66" in st
+        assert "k_passive=-0.2000" in st
+
+    def test_nat_vent_soft_start_entered_shows_floor_and_margin(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_soft_start_entered"](
+            {
+                "outdoor": 75.0,
+                "indoor": 75.0,
+                "outdoor_today_peak": 82.0,
+                "comfort_heat": 68.0,
+                "decline_margin_f": 2.0,
+            },
+            "fahrenheit",
+        )
+        assert "floor" in st
+        assert "68" in st
+        assert "decline margin" in st
+
+    def test_nat_vent_ceiling_escalation_shows_breach_lead_and_k(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_ceiling_escalation"](
+            {"indoor": 78.0, "comfort_cool": 76.0, "hours_to_breach": 0.4, "lead_min": 15, "k_active_cool": -0.55},
+            "fahrenheit",
+        )
+        assert "breach in 0.4h" in st
+        assert "lead=15min" in st
+        assert "k_cool=-0.550" in st
+
+    def test_nat_vent_bedtime_continue_shows_outdoor_and_sleep_cool(self):
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_bedtime_continue"](
+            {"fan_device": "whf", "outdoor_temp": 70.0, "sleep_cool": 74.0},
+            "fahrenheit",
+        )
+        assert "70" in ev
+        assert "74" in ev
+
+    def test_sensor_opened_re_check_shows_outdoor_indoor_threshold(self):
+        ev, st = _act_mod.EVENT_RENDERERS["sensor_opened"](
+            {
+                "entity": "re-check",
+                "result": "natural_ventilation",
+                "outdoor_temp": 68.0,
+                "indoor_temp": 74.0,
+                "threshold": 77.0,
+            },
+            "fahrenheit",
+        )
+        assert "68" in st
+        assert "74" in st
+        assert "77" in st
+
+    def test_override_cleared_fan_only_shows_reason(self):
+        ev, st = _act_mod.EVENT_RENDERERS["override_cleared"](
+            {"was_mode": None, "old_setpoint_f": None, "reason": "user_cancel"},
+            "fahrenheit",
+        )
+        assert "user_cancel" in st
+
+    def test_override_confirmed_shows_cls_mode_and_source(self):
+        ev, st = _act_mod.EVENT_RENDERERS["override_confirmed"](
+            {"mode": "cool", "confirm_delay_seconds": 300, "cls_mode": "heat", "source": "setpoint"},
+            "fahrenheit",
+        )
+        assert "cool" in ev
+        assert "heat" in ev
+        assert "setpoint" in st
+
+    def test_stuck_grace_recovered_shows_stale_mode_and_time(self):
+        ev, st = _act_mod.EVENT_RENDERERS["stuck_grace_recovered"](
+            {"grace_end_time": "2026-06-17T10:00:00", "stale_mode": "cool", "stale_since": "2026-06-17T08:00:00"},
+            "fahrenheit",
+        )
+        assert "cool" in st
+        assert "2026-06-17T08:00:00" in st
+
+    def test_nat_vent_comfort_floor_exit_temp_check_site_has_full_shape(self):
+        """Both call sites now emit fan_mode_change/hvac_mode_restored (Issue #592)."""
+        ev, st = _act_mod.EVENT_RENDERERS["nat_vent_comfort_floor_exit"](
+            {
+                "indoor_temp": 65.0,
+                "comfort_heat": 66.0,
+                "source": "temp_check",
+                "fan_device": "whf",
+                "fan_mode_change": "on->auto",
+                "hvac_mode_restored": "heat",
+            },
+            "fahrenheit",
+        )
+        assert "mode: off->heat" in st
+        assert "fan: on->auto" in st

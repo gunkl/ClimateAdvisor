@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.61] — 2026-08-07
+
+- Feat #592: the Activity Record now explains *why* several nat-vent, door/window pause, and grace-recovery decisions happened, not just that they happened — "Classification suppressed" and "Occupancy setback suppressed" rows now name which sensor is open and for how long; nat-vent fan-on/floor-skip/soft-start/ceiling-escalation rows show the actual outdoor/indoor temperatures and thresholds behind the decision instead of only a derived summary number; "Override cleared" (fan-only) and "Override confirmed" rows show the reason/trigger; and a stuck-grace recovery row now names which mode/time was stale. No automation behavior changed — same decisions, more visible reasoning.
+
 ## [0.5.60] — 2026-08-05
 
 - Feat #580: the dashboard's Activity Record report now defaults to the "Last 12 hours" time window instead of 24, and lists events newest-first (most recent at the top, oldest at the bottom) instead of oldest-first — so the events you actually care about no longer require scrolling past a full day of history to find. The AI Investigative Analysis report type is unaffected and keeps its own separate time-window defaults.

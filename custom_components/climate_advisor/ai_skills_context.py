@@ -1637,18 +1637,25 @@ def _render_setpoint_nudge(p: dict, unit: str) -> tuple[str, str]:
 def _render_override_cleared(p: dict, unit: str) -> tuple[str, str]:
     was_mode = p.get("was_mode", "")
     old_t = p.get("old_setpoint_f")
+    reason = p.get("reason", "")
     label = f"Override cleared (was {was_mode})" if was_mode else "Override cleared"
     settings = ""
     if old_t is not None:
         with contextlib.suppress(TypeError, ValueError):
             settings = f"was {format_temp(float(old_t), unit)} (manual setpoint)"
+    elif reason:
+        settings = f"fan override — {reason}"
     return label, settings
 
 
 def _render_override_confirmed(p: dict, unit: str) -> tuple[str, str]:
     mode = p.get("mode", "")
+    cls_mode = p.get("cls_mode", "")
+    source = p.get("source", "")
     label = f"Override confirmed ({mode} mode)" if mode else "Override confirmed"
-    return label, ""
+    if cls_mode and mode and cls_mode != mode:
+        label = f"{label} -- classification wanted {cls_mode}"
+    return label, f"trigger: {source}" if source else ""
 
 
 def _render_override_self_resolved(p: dict, unit: str) -> tuple[str, str]:
@@ -1702,6 +1709,7 @@ def _render_grace_expired(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor_temp")
+    outdoor = p.get("outdoor_temp")
     on_thr = p.get("on_threshold")
     fan_device = p.get("fan_device", "fan")
     label = "Nat-vent fan on (cycling)"
@@ -1710,7 +1718,11 @@ def _render_nat_vent_fan_on(p: dict, unit: str) -> tuple[str, str]:
             label = (
                 f"Nat-vent fan on -- indoor {format_temp(float(indoor), unit)} >= {format_temp(float(on_thr), unit)}"
             )
-    return label, f"{fan_device}: auto->on"
+    settings = f"{fan_device}: auto->on"
+    if outdoor is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = f"{settings}, outdoor {format_temp(float(outdoor), unit)}"
+    return label, settings
 
 
 def _render_nat_vent_fan_off(p: dict, unit: str) -> tuple[str, str]:
@@ -1895,6 +1907,15 @@ def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]
         with contextlib.suppress(TypeError, ValueError):
             label = f"Nat-vent proactive exit -- floor in {float(ttf):.2f} hr"
     parts = []
+    indoor = p.get("indoor_temp")
+    heat = p.get("comfort_heat")
+    if indoor is not None and heat is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"{format_temp(float(indoor), unit)} -> floor {format_temp(float(heat), unit)}")
+    k_passive = p.get("k_passive")
+    if k_passive is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"k_passive={float(k_passive):.4f}")
     hvac_restored = p.get("hvac_mode_restored", "")
     fan_change = p.get("fan_mode_change", "")
     if hvac_restored and hvac_restored not in ("unknown", ""):
@@ -1914,9 +1935,20 @@ def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[str, str]:
                 f"Nat-vent soft-start -- outdoor {format_temp(float(outdoor), unit)}"
                 f" <= indoor {format_temp(float(indoor), unit)}, past today's peak"
             )
+    parts = []
     peak = p.get("outdoor_today_peak")
-    detail = f"today's peak: {format_temp(float(peak), unit)}" if peak is not None else ""
-    return label, detail
+    if peak is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"today's peak: {format_temp(float(peak), unit)}")
+    heat = p.get("comfort_heat")
+    margin = p.get("decline_margin_f")
+    if heat is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"floor: {format_temp(float(heat), unit)}")
+    if margin is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"decline margin: {float(margin):.1f}°")
+    return label, ", ".join(parts)
 
 
 def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
@@ -1929,7 +1961,20 @@ def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
                 f"Nat-vent escalated to AC -- indoor {format_temp(float(indoor), unit)}"
                 f" > ceiling {format_temp(float(cool), unit)}"
             )
-    return label, "mode: off->cool"
+    parts = ["mode: off->cool"]
+    hours = p.get("hours_to_breach")
+    lead = p.get("lead_min")
+    k_cool = p.get("k_active_cool")
+    if hours is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"breach in {float(hours):.1f}h")
+    if lead is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"lead={int(lead)}min")
+    if k_cool is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"k_cool={float(k_cool):.3f}")
+    return label, ", ".join(parts)
 
 
 def _render_nat_vent_ac_assist_armed(p: dict, unit: str) -> tuple[str, str]:
@@ -1978,6 +2023,15 @@ def _render_sensor_opened(p: dict, unit: str) -> tuple[str, str]:
         parts.append(f"mode: {hvac_change}")
     if fan_change:
         parts.append(f"fan: {fan_change}")
+    outdoor = p.get("outdoor_temp")
+    indoor = p.get("indoor_temp")
+    threshold = p.get("threshold")
+    if outdoor is not None and indoor is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"outdoor {format_temp(float(outdoor), unit)} < indoor {format_temp(float(indoor), unit)}")
+    if threshold is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"threshold {format_temp(float(threshold), unit)}")
     return label, ", ".join(parts)
 
 
@@ -2014,7 +2068,17 @@ def _render_nat_vent_floor_imminent_skip(p: dict, unit: str) -> tuple[str, str]:
     if ttf is not None:
         with contextlib.suppress(TypeError, ValueError):
             label = f"Nat-vent skipped -- floor in {float(ttf):.2f} hr (thermal model)"
-    return label, ""
+    parts = []
+    indoor = p.get("indoor_temp")
+    heat = p.get("comfort_heat")
+    if indoor is not None and heat is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"{format_temp(float(indoor), unit)} -> floor {format_temp(float(heat), unit)}")
+    k_passive = p.get("k_passive")
+    if k_passive is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            parts.append(f"k_passive={float(k_passive):.4f}")
+    return label, ", ".join(parts)
 
 
 def _render_bedtime_setback_skipped(p: dict, unit: str) -> tuple[str, str]:
@@ -2096,11 +2160,14 @@ def _render_startup_coalesced(p: dict, unit: str) -> tuple[str, str]:
 
 def _render_stuck_grace_recovered(p: dict, unit: str) -> tuple[str, str]:
     grace_end = p.get("grace_end_time", "")
+    stale_mode = p.get("stale_mode", "")
+    stale_since = p.get("stale_since", "")
+    settings = f"was {stale_mode} since {stale_since}" if stale_mode else ""
     if p.get("reason") == "grace_without_override":
         # Issue #508's watchdog mirror: grace_end_time is typically still in the future here
         # (the timer would have fired correctly on its own) — "expired" would be misleading.
-        return "Stuck grace recovered (no override was active to protect it)", ""
-    return f"Stuck grace recovered (expired {grace_end})", ""
+        return "Stuck grace recovered (no override was active to protect it)", settings
+    return f"Stuck grace recovered (expired {grace_end})", settings
 
 
 def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[str, str]:
@@ -2144,13 +2211,35 @@ def _render_warm_day_comfort_gap(p: dict, unit: str) -> tuple[str, str]:
     return "Warm-day comfort gap -- heating before shutoff", ""
 
 
+def _render_paused_entity_settings(p: dict) -> str:
+    """Shared settings-cell rendering for the door/window pause lifecycle (Issue #592).
+
+    ``paused_entity``/``paused_minutes`` are threaded from the same ``_paused_entity``/
+    ``_paused_since`` state on the engine at every pause-suppression emit site, so the
+    Settings cell shows which sensor and for how long consistently across all of them.
+    """
+    entity = p.get("paused_entity")
+    minutes = p.get("paused_minutes")
+    if not entity:
+        return ""
+    settings = entity
+    if isinstance(minutes, (int, float)):
+        settings = f"{settings} (open {int(minutes)} min)"
+    return settings
+
+
 def _render_classification_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
-    return "Classification suppressed (windows open)", ""
+    day_type = p.get("day_type", "")
+    hvac_mode = p.get("hvac_mode", "")
+    label = "Classification suppressed — windows open"
+    if day_type or hvac_mode:
+        label = f"{label} (day={day_type}, mode={hvac_mode})"
+    return label, _render_paused_entity_settings(p)
 
 
 def _render_occupancy_setback_suppressed_paused(p: dict, unit: str) -> tuple[str, str]:
     occupancy = p.get("occupancy", "away")
-    return f"Occupancy setback suppressed (windows open, {occupancy})", ""
+    return f"Occupancy setback suppressed (windows open, {occupancy})", _render_paused_entity_settings(p)
 
 
 # Registry: event_type -> renderer

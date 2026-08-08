@@ -2135,15 +2135,19 @@ class AutomationEngine:
         # enforced here rather than by convention at every one of the ~13 call sites.
         if mode != "off" and self._whf_owns_hvac():
             _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
-            # Issue #591: deliberately NOT deduped. A repeat hvac_write_blocked_whf_active is
-            # not noise — each occurrence is a distinct decision point (e.g. bedtime, then
-            # wake-up, each independently attempting and being blocked) that downstream
-            # scenarios assert on individually. Golden/pending scenario
-            # wakeup_preserves_whf_manual_override relies on this event firing again at
-            # wake-up even though an identical one already fired earlier in the same run —
-            # content-keyed dedup silently swallowed the second, semantically distinct guard
-            # firing when tried here (same class of issue found for occupancy_setback above).
-            if self._emit_event_callback:
+            # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
+            # tried first and reverted — it silently swallowed the second, semantically
+            # distinct guard firing at wake-up in golden/pending scenario
+            # wakeup_preserves_whf_manual_override, since each occurrence (bedtime, then
+            # wake-up, hours apart) is its own decision point, not noise. But leaving this
+            # site completely unguarded reopens the literal #584 bug shape — an overlapping
+            # trigger pair (e.g. startup coalesce + its own follow-on refresh) firing this
+            # SAME guard seconds apart. A short window catches that accidental near-duplicate
+            # with wide margin below the hours-apart gaps real decision points have.
+            _whf_block_sig = (mode,)
+            if self._emit_event_callback and not self._recent_duplicate(
+                "hvac_write_blocked_whf_active", _whf_block_sig, window_seconds=600
+            ):
                 self._emit_event_callback(
                     "hvac_write_blocked_whf_active",
                     {"attempted_mode": mode, "reason": reason},
@@ -2204,15 +2208,19 @@ class AutomationEngine:
         # enforced here rather than by convention at every call site.
         if mode != "off" and self._whf_owns_hvac():
             _LOGGER.warning("HVAC write blocked — whole-house fan owns thermostat (%s)", reason)
-            # Issue #591: deliberately NOT deduped. A repeat hvac_write_blocked_whf_active is
-            # not noise — each occurrence is a distinct decision point (e.g. bedtime, then
-            # wake-up, each independently attempting and being blocked) that downstream
-            # scenarios assert on individually. Golden/pending scenario
-            # wakeup_preserves_whf_manual_override relies on this event firing again at
-            # wake-up even though an identical one already fired earlier in the same run —
-            # content-keyed dedup silently swallowed the second, semantically distinct guard
-            # firing when tried here (same class of issue found for occupancy_setback above).
-            if self._emit_event_callback:
+            # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was
+            # tried first and reverted — it silently swallowed the second, semantically
+            # distinct guard firing at wake-up in golden/pending scenario
+            # wakeup_preserves_whf_manual_override, since each occurrence (bedtime, then
+            # wake-up, hours apart) is its own decision point, not noise. But leaving this
+            # site completely unguarded reopens the literal #584 bug shape — an overlapping
+            # trigger pair (e.g. startup coalesce + its own follow-on refresh) firing this
+            # SAME guard seconds apart. A short window catches that accidental near-duplicate
+            # with wide margin below the hours-apart gaps real decision points have.
+            _whf_block_sig = (mode,)
+            if self._emit_event_callback and not self._recent_duplicate(
+                "hvac_write_blocked_whf_active", _whf_block_sig, window_seconds=600
+            ):
                 self._emit_event_callback(
                     "hvac_write_blocked_whf_active",
                     {"attempted_mode": mode, "reason": reason},
@@ -4307,14 +4315,21 @@ class AutomationEngine:
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
-        # Issue #591: deliberately NOT deduped, unlike the other 9 migrated sites. A repeat
-        # occupancy_setback with an identical band is not noise here — it's the visible,
-        # intentional re-confirmation Issue #505 added (e.g. handle_bedtime()'s DEFER_OCCUPANCY
-        # branch actively reapplying the away/vacation setback). Golden scenarios
+        # Issue #591: WINDOWED (not permanent) dedup. Permanent content-keyed dedup was tried
+        # first and reverted — a repeat occupancy_setback with an identical band is not noise
+        # in general: it's often the visible, intentional re-confirmation Issue #505 added
+        # (e.g. handle_bedtime()'s DEFER_OCCUPANCY branch actively reapplying the away/
+        # vacation setback hours after the initial away transition). Golden scenarios
         # (away_morning_wakeup_skipped_assertion, morning_wakeup_skipped_away_occupancy,
-        # cancel_override_then_resume) rely on that reapplication being its own visible
-        # decision — content-keyed dedup silently broke Issue #505's fix when tried here.
-        if self._emit_event_callback:
+        # cancel_override_then_resume — gaps of 4.5h, 8.5h, and 31min respectively) rely on
+        # that reapplication being its own visible decision. But leaving this site completely
+        # unguarded reopens the literal #584 bug shape — the SAME overlapping-trigger
+        # collision the original plan traced here (cancel_override()'s immediate refresh
+        # racing _schedule_reclassify_after_cancel()'s 10s-delayed call) could still double-
+        # emit this within seconds. A short window catches that accidental near-duplicate
+        # while staying far below every legitimate gap above.
+        _away_sig = ("away", round(_away_band.floor, 2), round(_away_band.ceiling, 2))
+        if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _away_sig, window_seconds=600):
             self._emit_event_callback(
                 "occupancy_setback",
                 {
@@ -4414,9 +4429,9 @@ class AutomationEngine:
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
-        # Issue #591: deliberately NOT deduped — see the matching comment in
-        # handle_occupancy_away() above.
-        if self._emit_event_callback:
+        # Issue #591: windowed dedup — see the matching comment in handle_occupancy_away() above.
+        _vac_sig = ("vacation", round(_vac_band.floor, 2), round(_vac_band.ceiling, 2))
+        if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _vac_sig, window_seconds=600):
             self._emit_event_callback(
                 "occupancy_setback",
                 {
@@ -4869,7 +4884,16 @@ class AutomationEngine:
             in_sleep_window=False,
             aggressive_savings=bool(self.config.get("aggressive_savings", False)),
         )
-        if self._emit_event_callback:
+        # Issue #591 (found via further investigation of wakeup_preserves_whf_manual_override):
+        # handle_morning_wakeup() itself is reachable from multiple overlapping trigger paths,
+        # same as apply_classification()/handle_bedtime() — that scenario has it invoked twice
+        # within the same wake-up. Without a dedup guard here, the second call's unconditional
+        # morning_wakeup marker survived even after hvac_write_blocked_whf_active (below) was
+        # deduped, becoming the new trailing "last observable decision" and masking the correct
+        # outcome. Windowed (not permanent) — this event legitimately fires once per real
+        # wake-up, hours apart.
+        _wakeup_sig = (c.hvac_mode, round(_wakeup_band.floor, 2), round(_wakeup_band.ceiling, 2), _wakeup_band.active)
+        if self._emit_event_callback and not self._recent_duplicate("morning_wakeup", _wakeup_sig, window_seconds=600):
             self._emit_event_callback(
                 "morning_wakeup",
                 {

@@ -33,16 +33,18 @@ from pathlib import Path
 AUTOMATION_PY = Path(__file__).parent.parent / "custom_components" / "climate_advisor" / "automation.py"
 
 # Issue #591: Delta 2's audit found occupancy_setback and hvac_write_blocked_whf_active
-# emitted from 2 call sites each. Both were tried against _recent_duplicate() and reverted
-# after golden/pending scenarios (wakeup_preserves_whf_manual_override,
-# away_morning_wakeup_skipped_assertion, morning_wakeup_skipped_away_occupancy,
-# cancel_override_then_resume, vacation_occupancy_override_cleared) proved each repeat is a
-# distinct, meaningful re-confirmation at a new decision point, not an accidental echo of the
-# same decision — see the comments at their call sites in automation.py.
-MULTI_SITE_EVENT_ALLOWLIST = {
-    "occupancy_setback",
-    "hvac_write_blocked_whf_active",
-}
+# emitted from 2 call sites each. Both were first tried against PERMANENT (content-keyed,
+# no window) dedup and reverted after golden/pending scenario failures
+# (wakeup_preserves_whf_manual_override, away_morning_wakeup_skipped_assertion,
+# morning_wakeup_skipped_away_occupancy, cancel_override_then_resume) proved each repeat is
+# often a distinct, meaningful re-confirmation hours later (e.g. #505's bedtime-time
+# away-setback reapply), not an accidental echo. They now use WINDOWED dedup instead
+# (window_seconds=600, same helper) — short enough to still catch a genuine same-cycle
+# duplicate (the literal #584 shape), long enough to never touch the hours-apart legitimate
+# repeats. Nothing needs to sit in this allowlist currently — both sites are guarded, just
+# with a window instead of permanent dedup. Kept as an empty set (rather than deleted) so a
+# future site that's found to need blanket exemption has an obvious place to add it.
+MULTI_SITE_EVENT_ALLOWLIST: set[str] = set()
 
 # Issue #591/#590 Delta 2's full audited list — the only event types this test checks.
 # classification_applied and comfort_band_applied are single-named-mechanism sites (the

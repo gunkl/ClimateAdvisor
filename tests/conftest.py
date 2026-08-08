@@ -41,15 +41,23 @@ def basic_forecast() -> ForecastSnapshot:
 # (originally test_override_dedup.py for Issue #96). Event types that legitimately
 # repeat with identical content across genuinely distinct decision points — NOT
 # accidental multi-trigger echoes of the same decision — must be listed here rather
-# than silently passing. Issue #591 found two such cases the hard way: occupancy_setback
-# and hvac_write_blocked_whf_active each represent a fresh, meaningful re-confirmation
-# at a new decision point (e.g. bedtime reapplying an away setback, then wake-up
-# attempting and being blocked again) and must NOT be deduped — see the matching
-# comments at their emit sites in automation.py.
+# than silently passing.
+#
+# Note: this check has no concept of elapsed time — it only looks at whether two
+# CONSECUTIVE entries in an event list have identical (type, payload). occupancy_setback,
+# hvac_write_blocked_whf_active, and morning_wakeup are all guarded in production code by
+# a WINDOWED (window_seconds=600) _recent_duplicate() check, not a blanket exemption — a
+# real same-cycle duplicate is already suppressed before it ever reaches the event log. But
+# a genuine hours-apart re-confirmation (e.g. bedtime reapplying an away setback, or two
+# separate real wake-ups) still appears as two real, separate entries here, and in a sparse
+# scenario timeline can easily be adjacent with identical payload — so they still need to be
+# listed here even though the underlying code IS protected. See the matching comments at
+# their emit sites in automation.py for the code-level guard.
 LEGITIMATELY_REPEATING_EVENT_TYPES = frozenset(
     {
         "occupancy_setback",
         "hvac_write_blocked_whf_active",
+        "morning_wakeup",
         "occupancy_comfort_restored",
         "fan_activated",
         "fan_deactivated",

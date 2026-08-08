@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.60"
+VERSION = "0.5.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.61": [
+        "Fix #600: after an HA restart or grace-period expiry with the whole-house fan"
+        " already running for natural ventilation, the Activity Record no longer shows"
+        ' the same "Fan activated" adoption logged 2-3 times in the same minute — the'
+        " fan itself only ever turned on once; only the redundant log/event entries are"
+        " gone. Also fixes the displayed nat-vent session start time silently jumping"
+        " forward on each redundant re-confirmation.",
+    ],
     "0.5.60": [
         "Feat #580: the dashboard's Activity Record report now defaults to the"
         ' "Last 12 hours" time window instead of 24, and lists events newest-first'
@@ -1540,6 +1548,28 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    600: {
+        "version_fixed": "0.5.61",
+        "title": (
+            "reconcile_fan_on_startup()'s adopt-on branch had no guard against being"
+            " re-entered by a second sequential trigger (of its 4 independent callers)"
+            " while nat-vent was already CA-owned, producing 2-3 duplicate 'Fan"
+            " activated' Activity Record entries for one real fan-on event, and"
+            " silently resetting the displayed session start time on each redundant"
+            " re-confirmation."
+        ),
+        "scope_covered": (
+            "automation.py: _reconcile_fan_on_startup_locked()'s adopt-on branch"
+            " (~line 3822) now checks self._natural_vent_active before mutating"
+            " flags/recording/emitting — a redundant re-confirmation still refreshes"
+            " _fan_active/_natural_vent_active/the thermo backstop timer, but returns"
+            " before _record_action()/_emit_event_callback('fan_activated', ...)."
+            " _fan_on_since is now only stamped on true first adoption"
+            " (`if self._fan_on_since is None`), not on every re-entry. The sibling"
+            " 'turn-off' branch already had its own cooldown (Issue #446) and was"
+            " not touched."
+        ),
+    },
     580: {
         "version_fixed": "0.5.60",
         "title": (

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.61] — 2026-08-07
+
+- Fix #600: after an HA restart or grace-period expiry with the whole-house fan already running for natural ventilation, the Activity Record no longer shows the same "Fan activated" adoption logged 2-3 times in the same minute — the fan itself only ever turned on once; only the redundant log/event entries are gone. Also fixes the displayed nat-vent session start time silently jumping forward on each redundant re-confirmation.
+
 ## [0.5.60] — 2026-08-05
 
 - Feat #580: the dashboard's Activity Record report now defaults to the "Last 12 hours" time window instead of 24, and lists events newest-first (most recent at the top, oldest at the bottom) instead of oldest-first — so the events you actually care about no longer require scrolling past a full day of history to find. The AI Investigative Analysis report type is unaffected and keeps its own separate time-window defaults.

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.2": [
+        "Feat #611: internal refactor only, no user-visible behavior change —"
+        " added an offline test harness that proves a second, inert 'shadow'"
+        " copy of the automation engine can run alongside the real one without"
+        " ever issuing a real command or changing what the real engine does."
+        " This is groundwork for a future safe-rollout mechanism (test new"
+        " automation logic silently before it's ever allowed to control the"
+        " thermostat) and does not change today's behavior.",
+    ],
     "0.6.1": [
         "Feat #608: internal refactor only, no user-visible behavior change — the"
         " natural-ventilation exit logic (why a free-cooling session ends: comfort"
@@ -1628,6 +1637,49 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    611: {
+        "version_fixed": "0.6.2",
+        "title": (
+            "Block 5 (epic #594) sequencing item O ('offline validation, zero"
+            " live risk — generalize the existing shadow-mode comparator from"
+            " single-function to whole-engine comparison') had no implementation."
+            " Item N2 (#604/#605) built the callback-isolation prerequisite"
+            " (AutomationEngineCallbacks + role kwarg) after the epic flagged a"
+            " HIGH-risk finding: a shadow engine's own construction-time callback"
+            " wiring, done the old way, could reach back into the production"
+            " engine and issue a real service call. This issue proves offline,"
+            " before any live coordinator wiring, that N2's isolation actually"
+            " holds."
+        ),
+        "scope_covered": (
+            "New tools/sim_harness/shadow_engine_pair.py: run_shadow_pair_scenario()"
+            " replays one scenario through three fully independent"
+            " (engine, fake_hass, scheduler) stacks — a solo baseline, a paired"
+            " production (role='production', dry_run=False), and a shadow"
+            " (role='shadow', dry_run=True) — and checks (a) production's"
+            " action_log matches baseline's exactly, (b) shadow's action_log is"
+            " empty, (c) derive_nat_vent_lifecycle_state() agrees between"
+            " production and shadow at scenario end. build_headless_engine()"
+            " and run_production_scenario() extended with role/dry_run"
+            " passthrough (engine-only mode only — backward-compatible, no"
+            " existing caller's behavior changes). New"
+            " tests/test_shadow_engine_pair.py: 60 offline-eligible golden +"
+            " pending scenarios (18 use_coordinator scenarios are out of this"
+            " offline harness's scope — coordinator-level shadow wiring is"
+            " subtask Q's job) plus 3 positive controls proving each of the"
+            " three checks actually catches what it claims to (forced dry_run"
+            " bypass, forced lifecycle disagreement, forced production"
+            " contamination). Found and fixed a real canonicalization gap along"
+            " the way: differential.py's existing action-log diff falls back to"
+            " repr() for a service call's context field (a real HA Context,"
+            " carrying a random per-call UUID by design), producing 7/78"
+            " false-positive divergences between two identical-code runs;"
+            " shadow_engine_pair.py excludes that field from its own comparison."
+            " Full suite (4042 tests) + golden (74/74) + pending (4/4), zero"
+            " regressions. No coordinator or production automation.py behavior"
+            " changed — purely additive test tooling."
+        ),
+    },
     608: {
         "version_fixed": "0.6.1",
         "title": (

@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.1": [
+        "Feat #608: internal refactor only, no user-visible behavior change — the"
+        " natural-ventilation exit logic (why a free-cooling session ends: comfort"
+        " reached, ceiling reached, prediction, outdoor warming) is now a single,"
+        " tested, verified-behavior-preserving decision instead of inline logic,"
+        " continuing the groundwork from the previous release. Along the way, this"
+        " also surfaced (documented, not yet consolidated) that natural"
+        " ventilation currently evaluates some of these same exit conditions in"
+        " up to three separate places — a known duplication pattern in this area"
+        " that occasionally causes drift between them; consolidating them is"
+        " flagged as follow-up work.",
+    ],
     "0.6.0": [
         "Feat #606: internal refactor only, no user-visible behavior change — the"
         " natural-ventilation on/off/purge-mode logic now has a single, named,"
@@ -1616,6 +1628,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    608: {
+        "version_fixed": "0.6.1",
+        "title": (
+            "check_natural_vent_conditions()'s 5-check priority-ordered exit chain"
+            " (comfort-floor, away-ceiling, proactive/ODE floor, outdoor-rise,"
+            " ceiling-threshold) was inline conditional logic with no unit-level"
+            " coverage of its own, unlike the already-extracted entry gate"
+            " (nat_vent_gate.py, Issue #411/#441). Block 5 (epic #594) Phase 2:"
+            " extracted following the same proven methodology as #441."
+        ),
+        "scope_covered": (
+            "New custom_components/climate_advisor/nat_vent_exit.py:"
+            " NatVentExitReason enum, NatVentExitInputs/NatVentExitDecision"
+            " dataclasses, pure decide_nat_vent_exit() — reuses the already-pure"
+            " resolve_hard_exit_floor() from fan_thermostat_decision.py rather"
+            " than re-deriving it. Swapped into"
+            " check_natural_vent_conditions(): side effects (fan/HVAC calls,"
+            " event emission, logging) unchanged, only the branching condition"
+            " moved. New tests/test_nat_vent_exit.py (22 tests): all 5 exit"
+            " reasons, priority order, boundary conditions, plus a revert-test"
+            " (temporarily invert a condition, confirm matching tests fail,"
+            " restore) proving the extraction is load-bearing. The swap-in"
+            " itself surfaced and fixed one real latent bug: an"
+            " UnboundLocalError on 'indoor' when the exit-chain block was"
+            " reached with _natural_vent_active already False (the paused-"
+            "reactivation-lockout code path a few lines later also reads"
+            " 'indoor', previously computed unconditionally, now restored to"
+            " being computed unconditionally). Full suite (3976 tests) + golden"
+            " (74/74) + pending (4/4), zero regressions post-swap."
+            " Also documented (docs/nat-vent-lifecycle-spec.md, 'Known"
+            " Duplicate-Logic Race' section), NOT fixed in this issue: a"
+            " golden-scenario-level positive control for this swap was"
+            " attempted and found unreliable, because nat_vent_temperature_check()"
+            " and fan_thermostat_check() (both dispatched before"
+            " check_natural_vent_conditions() on the same trigger) independently"
+            " implement equivalent comfort-floor and outdoor-rise stops and win"
+            " the race for every golden scenario tried — the same duplicate-"
+            "threshold-logic pattern already tracked for the entry gate"
+            " (#400/#402), now confirmed on the exit side across three functions."
+            " Consolidating them is flagged as follow-up work, not undertaken here."
+        ),
+    },
     606: {
         "version_fixed": "0.6.0",
         "title": (

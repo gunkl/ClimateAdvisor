@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.60"
+VERSION = "0.5.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.5.61": [
+        "Fix #589: disabling automation (the 'Automation Enabled' switch / observe-only"
+        " mode) now also stops the whole-house-fan command-only reconciliation path."
+        " Previously, on installs where the fan entity only echoes commands"
+        " (fan_state_feedback=False), this path kept issuing real fan on/off commands"
+        " every ~30 minutes even with automation disabled — the only automated action"
+        " that didn't respect the switch. It now honors dry_run like every other"
+        " automated action.",
+    ],
     "0.5.60": [
         "Feat #580: the dashboard's Activity Record report now defaults to the"
         ' "Last 12 hours" time window instead of 24, and lists events newest-first'
@@ -1540,6 +1549,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    589: {
+        "version_fixed": "0.5.61",
+        "title": (
+            "_async_command_fan_entity() (the whole-house-fan command-only"
+            " reconciliation choke point, coordinator.py) had no dry_run/"
+            "automation_enabled check — the one automated action path that ignored"
+            " the 'Automation Enabled' switch, on installs with"
+            " fan_state_feedback=False."
+        ),
+        "scope_covered": (
+            "coordinator.py: _async_command_fan_entity() now checks"
+            " self._automation_enabled before issuing the turn_on/turn_off service"
+            " call, logging '[DRY RUN] Would command fan entity ...' and returning"
+            " False instead when automation is disabled — matching the convention"
+            " already used by automation.py's other choke points (_set_hvac_mode,"
+            " _set_temperature, _activate_fan/_deactivate_fan, _notify). Changed to"
+            " return bool (True if a real service call was issued); both call sites"
+            " in the command-only reconciliation block (coordinator.py ~2248-2280)"
+            " now only update _last_commanded_fan_state when a command actually"
+            " fired, so the desired state re-asserts correctly once automation is"
+            " re-enabled instead of the bookkeeping believing a command it never"
+            " sent."
+        ),
+    },
     580: {
         "version_fixed": "0.5.60",
         "title": (

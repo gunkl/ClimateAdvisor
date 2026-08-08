@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.5.61] — 2026-08-07
+
+- Fix #589: disabling automation (the "Automation Enabled" switch / observe-only mode) now also stops the whole-house-fan command-only reconciliation path. Previously, on installs where the fan entity only echoes commands (fan_state_feedback=False), this path kept issuing real fan on/off commands every ~30 minutes even with automation disabled — the only automated action that didn't respect the switch. It now honors dry_run like every other automated action.
+
 ## [0.5.60] — 2026-08-05
 
 - Feat #580: the dashboard's Activity Record report now defaults to the "Last 12 hours" time window instead of 24, and lists events newest-first (most recent at the top, oldest at the bottom) instead of oldest-first — so the events you actually care about no longer require scrolling past a full day of history to find. The AI Investigative Analysis report type is unaffected and keeps its own separate time-window defaults.

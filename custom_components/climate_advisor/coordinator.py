@@ -2262,16 +2262,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         _last_cmd,
                         self.config.get(CONF_FAN_ENTITY, ""),
                     )
-                    await self._async_command_fan_entity(on=True)
-                    self._last_commanded_fan_state = True
+                    if await self._async_command_fan_entity(on=True):
+                        self._last_commanded_fan_state = True
                 elif not _desired_on and _last_cmd is not False and not _grace_on and not _override_on:
                     _LOGGER.info(
                         "Fan command-only assert: desired=off last_commanded=%s → issuing off command (fan_entity=%s)",
                         _last_cmd,
                         self.config.get(CONF_FAN_ENTITY, ""),
                     )
-                    await self._async_command_fan_entity(on=False)
-                    self._last_commanded_fan_state = False
+                    if await self._async_command_fan_entity(on=False):
+                        self._last_commanded_fan_state = False
                 else:
                     _LOGGER.debug(
                         "Fan command-only assert: desired=%s last_commanded=%s — no command needed",
@@ -3844,18 +3844,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
                 )
 
-    async def _async_command_fan_entity(self, *, on: bool) -> None:
+    async def _async_command_fan_entity(self, *, on: bool) -> bool:
         """Issue a turn_on or turn_off service call to the configured WHF fan entity (Issue #361).
 
         Used by command-only reconciliation; reuses the same domain-split pattern as
         automation.py ``_activate_fan()`` / ``_deactivate_fan()``.
+
+        Issue #589: this is the automation's only action choke point that did not honor
+        ``_automation_enabled``/``dry_run`` — disabling automation left this specific
+        fan-reconciliation path free to keep issuing real hardware commands. Gated here,
+        matching the "[DRY RUN] Would ..." convention used by automation.py's other
+        choke points (``_activate_fan``/``_deactivate_fan``/``_set_hvac_mode``/etc.).
+
+        Returns True if a real service call was issued, False if skipped (no fan entity
+        configured, or automation disabled).
         """
         fan_entity_id = self.config.get(CONF_FAN_ENTITY)
         if not fan_entity_id:
             _LOGGER.debug("_async_command_fan_entity: no fan_entity configured — skipping")
-            return
+            return False
         domain = fan_entity_id.split(".")[0]  # "fan" or "switch"
         service = "turn_on" if on else "turn_off"
+        if not self._automation_enabled:
+            _LOGGER.info(
+                "[DRY RUN] Would command fan entity %s.%s entity_id=%s (automation disabled)",
+                domain,
+                service,
+                fan_entity_id,
+            )
+            return False
         _LOGGER.debug(
             "_async_command_fan_entity: %s.%s entity_id=%s",
             domain,
@@ -3863,6 +3880,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             fan_entity_id,
         )
         await self.hass.services.async_call(domain, service, {"entity_id": fan_entity_id})
+        return True
 
     async def _async_fan_entity_changed(self, event: Event) -> None:
         """Detect manual fan entity state changes (Issue #37)."""

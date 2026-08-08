@@ -84,6 +84,8 @@ def build_headless_engine(
     climate_attributes: dict[str, Any] | None = None,
     start_time: datetime | None = None,
     sensor_polarity_inverted: bool = False,
+    role: str = "production",
+    dry_run: bool = False,
 ) -> tuple[Any, FakeHass, FakeScheduler, list[tuple[str, dict, datetime | None]]]:
     """Build and return a headless AutomationEngine.
 
@@ -96,6 +98,23 @@ def build_headless_engine(
         climate_attributes: Initial thermostat attributes dict.
         start_time: Virtual clock start time.  Defaults to 2024-01-15 08:00 UTC.
         sensor_polarity_inverted: Passed to AutomationEngine constructor.
+        role: Issue #611 (Block 5, subtask O) — passed through to
+              ``AutomationEngine(role=...)``. Label only, never branched on inside
+              the engine (Issue #604) — exists so a harness caller can build a
+              "shadow" instance distinguishable in logs/snapshots from the default
+              "production" one. Does not, by itself, isolate callbacks — see
+              ``dry_run`` and callers wiring their own ``engine._*_callback``
+              closures per instance (this function still wires its own local
+              no-op closures below, one set per call — every ``build_headless_engine``
+              call already gets independent callbacks, which is the N2 isolation
+              property a shadow pair needs).
+        dry_run: Issue #611 — sets ``engine.dry_run`` immediately after construction.
+                 When True, every service-call choke point
+                 (``_set_hvac_mode``/``_set_temperature``/``_activate_fan``/
+                 ``_deactivate_fan``/``_notify``) short-circuits without touching
+                 ``fake_hass`` — the production dry-run behavior already used by
+                 ``switch.py``, reused here so a shadow engine can never write a
+                 real action_log entry.
 
     Returns:
         ``(engine, fake_hass, scheduler, event_log)``
@@ -170,7 +189,9 @@ def build_headless_engine(
         notify_service=merged_config.get("notify_service", "notify.test"),
         config=merged_config,
         sensor_polarity_inverted=sensor_polarity_inverted,
+        role=role,
     )
+    engine.dry_run = dry_run
 
     # 8. Wire coordinator-facing callbacks
     engine._emit_event_callback = _emit_event

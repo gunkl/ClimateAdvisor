@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.2] — 2026-08-08
+
+- Feat #611: internal refactor only, no user-visible behavior change — added an offline test harness that proves a second, inert "shadow" copy of the automation engine can run alongside the real one without ever issuing a real command or changing what the real engine does. This is groundwork for a future safe-rollout mechanism (test new automation logic silently before it's ever allowed to control the thermostat) and does not change today's behavior.
+
 ## [0.6.1] — 2026-08-08
 
 - Feat #608: internal refactor only, no user-visible behavior change — the natural-ventilation exit logic (why a free-cooling session ends: comfort reached, ceiling reached, prediction, outdoor warming) is now a single, tested, verified-behavior-preserving decision instead of inline logic. Along the way, this also surfaced (documented, not yet consolidated) that natural ventilation currently evaluates some of these same exit conditions in up to three separate places — a known duplication pattern in this area; consolidating them is flagged as follow-up work.

@@ -294,7 +294,13 @@ def _parse_event_time(time_str: str, default: datetime) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def run_production_scenario(scenario: dict, *, use_coordinator: bool = False) -> ProductionRunResult:
+def run_production_scenario(
+    scenario: dict,
+    *,
+    use_coordinator: bool = False,
+    role: str = "production",
+    dry_run: bool = False,
+) -> ProductionRunResult:
     """Run a scenario dict through the REAL AutomationEngine and return results.
 
     Args:
@@ -309,6 +315,13 @@ def run_production_scenario(scenario: dict, *, use_coordinator: bool = False) ->
             of the old hand-approximated mirror. Required for any scenario
             previously tagged ``track: "integration"`` /
             ``simulator_support: false``.
+        role: Issue #611 (Block 5, subtask O) — forwarded to
+            ``build_headless_engine(role=...)``. Only meaningful with
+            ``use_coordinator=False``; ``build_headless_coordinator()`` always
+            builds its engine as the production role (a coordinator-driven
+            shadow engine is Phase 4/Q's scope, not this offline harness's).
+        dry_run: Issue #611 — forwarded to ``build_headless_engine(dry_run=...)``.
+            Same coordinator-mode restriction as ``role`` above.
 
     Returns:
         ProductionRunResult with event_log, action_log, engine_state, callback_errors.
@@ -358,6 +371,8 @@ def run_production_scenario(scenario: dict, *, use_coordinator: bool = False) ->
             climate_entity=climate_entity,
             climate_state=initial_thermostat_mode,
             start_time=start_dt,
+            role=role,
+            dry_run=dry_run,
         )
 
     # --- Sensor tracker — drives engine._sensor_check_callback (engine-only mode) ---

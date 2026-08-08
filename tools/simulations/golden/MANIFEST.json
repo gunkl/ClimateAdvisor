@@ -159,13 +159,13 @@
     "issue": 229
   },
   "away_morning_wakeup_skipped_assertion": {
-    "sha256": "5c5aa27b6de12700ee7f3219faee80b113d3d0a7d5d118d8c88f167d53c7356c",
-    "signed": "2026-07-20",
+    "sha256": "3f82436d23c2219e110a3730714ed5551891fca7a8219431312657f52c98aa81",
+    "signed": "2026-08-07",
     "issue": 229
   },
   "morning_wakeup_skipped_away_occupancy": {
-    "sha256": "e013ef1001712ceae649c71fbccb8d72d8a71751c12b12f26f43cd6c28f1a934",
-    "signed": "2026-07-20",
+    "sha256": "a57f603d79ce5bd914dcdb5502ab5c8565194da5e0c06fa690fc2afe5c83eaff",
+    "signed": "2026-08-07",
     "issue": 229
   },
   "away_natvent_activates_free_cooling": {

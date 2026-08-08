@@ -521,6 +521,21 @@ class TestStartupCoalesceDoCoalesce:
         assert "hvac_commanded" in event_data
         assert "sensors_open_count" in event_data
 
+    def test_startup_coalesced_event_carries_indoor_outdoor_archetype(self):
+        """Issue #593: startup_coalesced previously only carried summary booleans —
+        indoor/outdoor temp and fan archetype were available locally but never
+        threaded into the payload."""
+        coord = _make_coalesce_coord_stub()
+        coord.config["fan_mode"] = "whole_house_fan"
+
+        asyncio.run(coord._do_startup_coalesce())
+
+        event_name, event_data = coord._emit_event.call_args[0]
+        assert event_name == "startup_coalesced"
+        assert event_data["indoor_f"] == 72.0
+        assert event_data["outdoor_f"] == 65.0
+        assert event_data["fan_archetype"] == "whole_house_fan"
+
     def test_startup_coalesce_active_cleared_after(self):
         """_startup_coalesce_active is False after _do_startup_coalesce runs."""
         coord = _make_coalesce_coord_stub()

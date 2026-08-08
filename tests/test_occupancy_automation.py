@@ -240,6 +240,24 @@ class TestMorningWakeupOccupancy:
 
         engine.hass.services.async_call.assert_not_called()
 
+    def test_wakeup_skipped_when_away_emits_morning_wakeup_skipped(self):
+        """Issue #593: DEFER_OCCUPANCY previously returned silently — unlike its
+        DEFER_OVERRIDE/DEFER_PAUSED siblings and unlike handle_bedtime's equivalent
+        branch, it never called _emit_event_callback, leaving this skip reason
+        entirely invisible in the Activity Record."""
+        engine = _make_engine()
+        emitted = []
+        engine._emit_event_callback = lambda event_type, payload: emitted.append((event_type, payload))
+        c = _make_classification(hvac_mode="heat", day_type="cold")
+        engine._current_classification = c
+        engine.set_occupancy_mode("away")
+
+        asyncio.run(engine.handle_morning_wakeup())
+
+        matches = [e for e in emitted if e[0] == "morning_wakeup_skipped"]
+        assert len(matches) == 1
+        assert matches[0][1] == {"reason": "occupancy", "occupancy": "away"}
+
     def test_wakeup_skipped_when_vacation(self):
         """Morning wakeup should not restore comfort during vacation."""
         engine = _make_engine()

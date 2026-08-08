@@ -1858,8 +1858,12 @@ class AutomationEngine:
                             "day_type": classification.day_type,
                             "hvac_mode": classification.hvac_mode,
                             "trend": classification.trend_direction,
+                            "trend_magnitude": classification.trend_magnitude,
                             "old_hvac_mode": _old_mode_cls,
                             "indoor_f": indoor_temp,
+                            "today_high": classification.today_high,
+                            "applied_threshold_f": classification.applied_threshold_f,
+                            "threshold_margin_f": classification.threshold_margin_f,
                         },
                     )
             else:
@@ -2368,6 +2372,7 @@ class AutomationEngine:
                         {
                             "commanded": self._pending_setpoint_single,
                             "reported": reported,
+                            "reject_streak": self._setpoint_reject_streak,
                         },
                     )
                 # Retry after 15 minutes if no newer command has superseded this one.
@@ -2417,6 +2422,7 @@ class AutomationEngine:
                                     "nudge_value": _nudge_temp,
                                     "real_target": _retry_temp,
                                     "mode": _retry_mode,
+                                    "reject_streak": self._setpoint_reject_streak,
                                 },
                             )
                         await self.hass.services.async_call(
@@ -4720,6 +4726,11 @@ class AutomationEngine:
             )
             return "skipped: not eligible"
 
+        # Issue #593: computed up front (pure config + modifier, no gate/indoor dependency)
+        # so the DEFER_NAT_VENT "active_session" branch below can show the target it's
+        # deferring to, not just a generic "already achieved" label that never applied here.
+        pre_cool_target = compute_pre_cool_target(self.config, _modifier)
+
         # Issue #498: occupancy/override/paused/nat-vent checks below now route through the
         # single shared gate (desired_state.decide_scheduled_band_gate()) also used by
         # apply_classification()/handle_bedtime()/handle_morning_wakeup() — see that
@@ -4775,7 +4786,12 @@ class AutomationEngine:
             if self._emit_event_callback:
                 self._emit_event_callback(
                     "pre_cool_suppressed_nat_vent",
-                    {"modifier": _modifier, "reason": "active_session"},
+                    {
+                        "modifier": _modifier,
+                        "reason": "active_session",
+                        "target": pre_cool_target,
+                        "indoor": indoor_temp,
+                    },
                 )
             if _fan_cfg_pc in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
                 return "suppressed: nat-vent/WHF session active"
@@ -4786,7 +4802,6 @@ class AutomationEngine:
         hysteresis = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         raw_target = sleep_cool + _modifier  # negative modifier lowers the ceiling below sleep_cool
         floor = sleep_heat_floor + hysteresis
-        pre_cool_target = compute_pre_cool_target(self.config, _modifier)
 
         _LOGGER.info(
             "Pre-cool trigger fired: indoor=%s°F, target=%.1f°F, modifier=%.1f (sleep_cool=%.1f, floor=%.1f)",
@@ -4891,6 +4906,11 @@ class AutomationEngine:
                 "Morning wakeup skipped — occupancy mode is '%s'",
                 self._occupancy_mode,
             )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "morning_wakeup_skipped",
+                    {"reason": "occupancy", "occupancy": self._occupancy_mode},
+                )
             return
 
         if _gate == ScheduledBandGate.DEFER_OVERRIDE:

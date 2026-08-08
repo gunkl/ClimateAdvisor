@@ -365,6 +365,27 @@ class TestHandlePreCoolNatVentBypass:
         assert payload["indoor"] == pytest.approx(74.5)
         assert payload["target"] == pytest.approx(75.0)
 
+    def test_active_session_deferral_event_carries_indoor_and_target(self):
+        """Issue #593: the DEFER_NAT_VENT 'active_session' branch fires before
+        pre_cool_target used to be computed, so its emit carried no comparison
+        data at all — reordered so it now shows what it's deferring to, same
+        as the 'achieved' bypass branch above."""
+        engine = _make_engine({"sleep_cool": 78.0, "comfort_heat": 70.0})
+        emitted: list[tuple] = []
+        engine._emit_event_callback = lambda e, d: emitted.append((e, d))
+        engine.set_occupancy_mode(OCCUPANCY_HOME)
+        engine._current_classification = _make_classification(setback_modifier=-3.0)
+        engine._natural_vent_active = True
+
+        asyncio.run(engine.handle_pre_cool(indoor_temp=73.0, nat_vent_just_closed=False))
+
+        suppressed = [(e, d) for e, d in emitted if e == "pre_cool_suppressed_nat_vent"]
+        assert len(suppressed) == 1
+        _, payload = suppressed[0]
+        assert payload["reason"] == "active_session"
+        assert payload["target"] == pytest.approx(75.0)
+        assert payload["indoor"] == pytest.approx(73.0)
+
 
 # ---------------------------------------------------------------------------
 # Tests: handle_pre_cool() — skip conditions

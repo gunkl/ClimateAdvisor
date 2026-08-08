@@ -476,7 +476,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._rejection_log: dict[str, list[dict]] = {}  # keyed by obs_type; capped at _REJECTION_LOG_CAP
         self._pre_heat_sample_buffer: list[dict] = []  # rolling pre-heat window, max 15
         self._startup_hvac_initialized: bool = False  # Issue #96: prevents repeated late-start init
-        self._last_state_contradiction_time: datetime | None = None  # dedup for state_contradiction_warning events
         self._untracked_fan_active: bool = False  # Issue #331 follow-up: entry/exit dedup for fan_running_untracked
         self._fan_state_entity_unavailable_warned: bool = False  # Issue #359: WHF Type 2 fallback warning dedup
         self._last_commanded_fan_state: bool | None = None  # Issue #361: command-only mode — last on/off commanded
@@ -1538,8 +1537,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 value,
             )
 
-    async def _do_startup_coalesce(self) -> None:
-        """Proactively coalesce HVAC and nat-vent state 5 minutes after restart (Issue #321)."""
+    async def _do_startup_coalesce(self) -> bool:
+        """Proactively coalesce HVAC and nat-vent state 5 minutes after restart (Issue #321).
+
+        Returns whether this call already invoked ``apply_classification()`` — Issue #591:
+        the caller uses this to skip the redundant same-cycle regular-cycle
+        ``apply_classification()`` call that otherwise always follows immediately after.
+        """
         open_sensors = [s for s in self._resolved_sensors if self._is_sensor_open(s)]
         indoor = self._get_indoor_temp()
         outdoor = self._last_outdoor_temp
@@ -1634,11 +1638,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "nat_vent_activated": nat_vent_activated,
                 "hvac_commanded": hvac_commanded,
                 "sensors_open_count": len(open_sensors),
+                "indoor_f": indoor,
+                "outdoor_f": outdoor,
+                "fan_archetype": self.config.get("fan_mode"),
             },
         )
         self._startup_coalesce_active = False
         _LOGGER.info("Startup coalescing complete — startup grace period ended")
         self.hass.async_create_task(self.async_request_refresh())
+        return hvac_commanded
 
     def _check_orphaned_grace(self) -> None:
         """Self-heal a grace period left active with no override to protect (Issue #508).
@@ -1879,9 +1887,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self._startup_coalesce_active,
                 self._current_classification is not None,
             )
+            # Issue #591: track whether _do_startup_coalesce() already ran apply_classification()
+            # this cycle, so the unconditional regular-cycle call below can skip it — closing the
+            # most direct duplicate-call path (coalesce path + regular-cycle path, same invocation).
+            _coalesce_already_classified = False
             if self._startup_timer_fired and self._startup_coalesce_active and self._current_classification:
                 _LOGGER.debug("[coalesce-diag] before _do_startup_coalesce()")
-                await self._do_startup_coalesce()
+                _coalesce_already_classified = await self._do_startup_coalesce()
                 _LOGGER.debug("[coalesce-diag] after _do_startup_coalesce()")
 
             # Periodic daily solar phase re-fit (Issue #310): run once per calendar day
@@ -1959,18 +1971,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         " override (Issue #321).",
                         _ae._grace_end_time,
                     )
+                    _stale_mode = _ae._manual_override_mode
+                    _stale_since = _ae._manual_override_time
                     _ae.clear_manual_override(reason="stuck_grace_recovery")
-                    self._emit_event("stuck_grace_recovered", {"grace_end_time": _ae._grace_end_time})
+                    self._emit_event(
+                        "stuck_grace_recovered",
+                        {
+                            "grace_end_time": _ae._grace_end_time,
+                            "stale_mode": _stale_mode,
+                            "stale_since": _stale_since,
+                        },
+                    )
 
             self._check_orphaned_grace()
 
-            _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
-            await self.automation_engine.apply_classification(
-                self._current_classification,
-                predicted_indoor=self._last_predicted_indoor,
-                indoor_temp=self._get_indoor_temp(),
-            )
-            _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
+            if _coalesce_already_classified:
+                _LOGGER.debug(
+                    "[coalesce-diag] skipping apply_classification() [regular cycle path] —"
+                    " _do_startup_coalesce() already applied classification this cycle (Issue #591)"
+                )
+            else:
+                _LOGGER.debug("[coalesce-diag] before apply_classification() [regular cycle path]")
+                await self.automation_engine.apply_classification(
+                    self._current_classification,
+                    predicted_indoor=self._last_predicted_indoor,
+                    indoor_temp=self._get_indoor_temp(),
+                )
+                _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
             # If the day type changed since the briefing was generated,
             # regenerate the briefing text without re-sending notifications (Issue #78).
@@ -2127,18 +2154,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # disagreed on this case.
             _ca_fan_running = self.automation_engine._natural_vent_active or is_ca_fan_running(_fan_status_uc)
             _is_expected_fan = str(hvac_action).lower() == "fan" and _ca_fan_running
-            if not _is_expected_fan:
-                _now = dt_util.now()
-                _dedup_window = timedelta(minutes=30)
-                if (
-                    self._last_state_contradiction_time is None
-                    or (_now - self._last_state_contradiction_time) > _dedup_window
-                ):
-                    self._emit_event(
-                        "state_contradiction_warning",
-                        {"hvac_mode": hvac_mode, "hvac_action": hvac_action},
-                    )
-                    self._last_state_contradiction_time = _now
+            # Issue #591: migrated onto the shared AutomationEngine._recent_duplicate() helper,
+            # keeping the original 30-minute window (event-only, no side-effecting action here —
+            # Issue #591/#590 Finding C). Short-circuits before _recent_duplicate() when
+            # _is_expected_fan is True so the expected-fan case never records a signature —
+            # otherwise a real contradiction right after an expected-fan window ends could be
+            # wrongly suppressed as "already recorded."
+            _contradiction_sig = (hvac_mode, str(hvac_action).lower())
+            if not _is_expected_fan and not self.automation_engine._recent_duplicate(
+                "state_contradiction_warning", _contradiction_sig, window_seconds=1800
+            ):
+                self._emit_event(
+                    "state_contradiction_warning",
+                    {"hvac_mode": hvac_mode, "hvac_action": hvac_action},
+                )
 
         # Issue #331 follow-up: surface an UNTRACKED fan (the thermostat running its own
         # blower/fan that CA did not command) in the event log so it is not invisible.
@@ -2262,16 +2291,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         _last_cmd,
                         self.config.get(CONF_FAN_ENTITY, ""),
                     )
-                    await self._async_command_fan_entity(on=True)
-                    self._last_commanded_fan_state = True
+                    if await self._async_command_fan_entity(on=True):
+                        self._last_commanded_fan_state = True
                 elif not _desired_on and _last_cmd is not False and not _grace_on and not _override_on:
                     _LOGGER.info(
                         "Fan command-only assert: desired=off last_commanded=%s → issuing off command (fan_entity=%s)",
                         _last_cmd,
                         self.config.get(CONF_FAN_ENTITY, ""),
                     )
-                    await self._async_command_fan_entity(on=False)
-                    self._last_commanded_fan_state = False
+                    if await self._async_command_fan_entity(on=False):
+                        self._last_commanded_fan_state = False
                 else:
                     _LOGGER.debug(
                         "Fan command-only assert: desired=%s last_commanded=%s — no command needed",
@@ -3135,7 +3164,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
                 self._emit_event(
                     "thermal_learning_no_observations",
-                    {"hvac_runtime_minutes": round(self._today_record.hvac_runtime_minutes, 1)},
+                    {
+                        "hvac_runtime_minutes": round(self._today_record.hvac_runtime_minutes, 1),
+                        "thermal_session_count": self._today_record.thermal_session_count,
+                    },
                 )
             self.learning.record_day(self._today_record)
             await self.hass.async_add_executor_job(self.learning.save_state)
@@ -3844,18 +3876,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
                 )
 
-    async def _async_command_fan_entity(self, *, on: bool) -> None:
+    async def _async_command_fan_entity(self, *, on: bool) -> bool:
         """Issue a turn_on or turn_off service call to the configured WHF fan entity (Issue #361).
 
         Used by command-only reconciliation; reuses the same domain-split pattern as
         automation.py ``_activate_fan()`` / ``_deactivate_fan()``.
+
+        Issue #589: this is the automation's only action choke point that did not honor
+        ``_automation_enabled``/``dry_run`` — disabling automation left this specific
+        fan-reconciliation path free to keep issuing real hardware commands. Gated here,
+        matching the "[DRY RUN] Would ..." convention used by automation.py's other
+        choke points (``_activate_fan``/``_deactivate_fan``/``_set_hvac_mode``/etc.).
+
+        Returns True if a real service call was issued, False if skipped (no fan entity
+        configured, or automation disabled).
         """
         fan_entity_id = self.config.get(CONF_FAN_ENTITY)
         if not fan_entity_id:
             _LOGGER.debug("_async_command_fan_entity: no fan_entity configured — skipping")
-            return
+            return False
         domain = fan_entity_id.split(".")[0]  # "fan" or "switch"
         service = "turn_on" if on else "turn_off"
+        if not self._automation_enabled:
+            _LOGGER.info(
+                "[DRY RUN] Would command fan entity %s.%s entity_id=%s (automation disabled)",
+                domain,
+                service,
+                fan_entity_id,
+            )
+            return False
         _LOGGER.debug(
             "_async_command_fan_entity: %s.%s entity_id=%s",
             domain,
@@ -3863,6 +3912,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             fan_entity_id,
         )
         await self.hass.services.async_call(domain, service, {"entity_id": fan_entity_id})
+        return True
 
     async def _async_fan_entity_changed(self, event: Event) -> None:
         """Detect manual fan entity state changes (Issue #37)."""

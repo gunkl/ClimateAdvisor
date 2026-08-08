@@ -173,6 +173,18 @@ def run_scenario_production(scenario_file: Path, state: str | None = None) -> di
             {"time": d.time, "outcome": d.outcome, "reason": d.event_type, "target_temp": d.target_temp}
             for d in decisions
         ],
+        # Issue #591: full timestamped raw event log (previously dropped in favor of the
+        # lossy "decisions" summary above), so a golden-scenario-level automatic
+        # duplicate-decision check is possible — see
+        # tests/test_no_duplicate_decisions.py.
+        "event_log": [
+            {
+                "time": ts.isoformat() if ts is not None else None,
+                "event_type": event_type,
+                "payload": payload,
+            }
+            for event_type, payload, ts in result.event_log
+        ],
         "assertions": assertion_results,
         "passed": passed,
         "callback_errors": callback_errors,

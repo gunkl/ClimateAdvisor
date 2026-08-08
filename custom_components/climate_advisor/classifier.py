@@ -59,6 +59,8 @@ class DayClassification:
     today_low: float
     tomorrow_high: float
     tomorrow_low: float
+    applied_threshold_f: float | None = None  # Threshold that produced day_type
+    threshold_margin_f: float | None = None  # today_high - applied_threshold_f
 
     # Computed recommendations
     hvac_mode: str = ""  # "heat", "cool", "off", "auto"
@@ -258,6 +260,19 @@ def classify_day(
 
     _LOGGER.debug("Day type — today_high=%.0f°F, classified=%s", today_high, day_type)
 
+    # Threshold that produced the final day_type (post-hysteresis), and how far
+    # today's high sits from it — surfaced to callers/Activity Record so the
+    # "why" behind classification_applied isn't only in a debug log (Issue #593).
+    _threshold_for_type = {
+        DAY_TYPE_HOT: threshold_hot,
+        DAY_TYPE_WARM: threshold_warm,
+        DAY_TYPE_MILD: threshold_mild,
+        DAY_TYPE_COOL: threshold_cool,
+        DAY_TYPE_COLD: threshold_cool,
+    }
+    applied_threshold = _threshold_for_type[day_type]
+    threshold_margin = today_high - applied_threshold
+
     # Determine trend by comparing tomorrow to today
     high_delta = tomorrow_high - today_high
     low_delta = forecast.tomorrow_low - forecast.today_low
@@ -289,4 +304,6 @@ def classify_day(
         today_low=forecast.today_low,
         tomorrow_high=tomorrow_high,
         tomorrow_low=forecast.tomorrow_low,
+        applied_threshold_f=applied_threshold,
+        threshold_margin_f=round(threshold_margin, 1),
     )

@@ -4,16 +4,57 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.5.61"
+VERSION = "0.5.65"
 
 RELEASE_NOTES: dict[str, list[str]] = {
-    "0.5.61": [
+    "0.5.65": [
         "Fix #600: after an HA restart or grace-period expiry with the whole-house fan"
         " already running for natural ventilation, the Activity Record no longer shows"
         ' the same "Fan activated" adoption logged 2-3 times in the same minute — the'
         " fan itself only ever turned on once; only the redundant log/event entries are"
         " gone. Also fixes the displayed nat-vent session start time silently jumping"
         " forward on each redundant re-confirmation.",
+    ],
+    "0.5.64": [
+        "Feat #593: closed out the remaining Activity Record payload-completeness gaps"
+        " from the #584 investigation — classification decisions now show the trend"
+        " magnitude and the exact threshold/margin that produced the day type; setpoint"
+        " retry/nudge events show the reject streak count; startup coalescing shows"
+        " indoor/outdoor temps and fan archetype; the thermal-learning watchdog shows"
+        " today's session count; the fan-stopped and incident-detected cards now use"
+        " data they already had (fan device, incident ID, comfort-band comparison)"
+        " instead of a generic label; morning wake-up now reports an explicit skip"
+        " reason when occupancy is away/vacation, matching its other skip reasons; and"
+        " pre-cool deferring to an already-active nat-vent/WHF session now shows what"
+        " indoor temp and target it's deferring to, instead of a bare notice. Four"
+        " renderer functions with no current emitter are now explicitly marked as"
+        " legacy/historical-log-only rather than looking like live, untested code.",
+    ],
+    "0.5.63": [
+        "Feat #592: the Activity Record now explains *why* several nat-vent, door/window"
+        " pause, and grace-recovery decisions happened, not just that they happened —"
+        ' "Classification suppressed" and "Occupancy setback suppressed" rows now name'
+        " which sensor is open and for how long; nat-vent fan-on/floor-skip/soft-start/"
+        " ceiling-escalation rows show the actual outdoor/indoor temperatures and"
+        " thresholds behind the decision instead of only a derived summary number;"
+        ' "Override cleared" (fan-only) and "Override confirmed" rows show the reason/'
+        " trigger; and a stuck-grace recovery row now names which mode/time was stale."
+        " No automation behavior changed — same decisions, more visible reasoning.",
+    ],
+    "0.5.62": [
+        "Fix #591: fixed the Activity Record showing the same automation decision "
+        "(comfort band, classification, occupancy setback skip, nat-vent AC assist, and "
+        "several others) two or three times in a row after a restart or overlapping "
+        "trigger — each real decision now appears once.",
+    ],
+    "0.5.61": [
+        "Fix #589: disabling automation (the 'Automation Enabled' switch / observe-only"
+        " mode) now also stops the whole-house-fan command-only reconciliation path."
+        " Previously, on installs where the fan entity only echoes commands"
+        " (fan_state_feedback=False), this path kept issuing real fan on/off commands"
+        " every ~30 minutes even with automation disabled — the only automated action"
+        " that didn't respect the switch. It now honors dry_run like every other"
+        " automated action.",
     ],
     "0.5.60": [
         "Feat #580: the dashboard's Activity Record report now defaults to the"
@@ -1549,7 +1590,7 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     600: {
-        "version_fixed": "0.5.61",
+        "version_fixed": "0.5.65",
         "title": (
             "reconcile_fan_on_startup()'s adopt-on branch had no guard against being"
             " re-entered by a second sequential trigger (of its 4 independent callers)"
@@ -1568,6 +1609,170 @@ KNOWN_FIXES: dict[int, dict] = {
             " (`if self._fan_on_since is None`), not on every re-entry. The sibling"
             " 'turn-off' branch already had its own cooldown (Issue #446) and was"
             " not touched."
+        ),
+    },
+    593: {
+        "version_fixed": "0.5.64",
+        "title": (
+            "Following the #584 investigation's full event-type audit (Block 4 of the"
+            " plan), several remaining Activity Record event types either discarded"
+            " payload data they already had, or omitted locally-computed inputs their"
+            " emit sites could have passed — leaving the reasoning behind those specific"
+            " decisions invisible even though the underlying data existed."
+        ),
+        "scope_covered": (
+            "classifier.py: DayClassification gained applied_threshold_f/"
+            "threshold_margin_f, computed in classify_day() from the final"
+            " (post-hysteresis) day_type against the threshold that produced it."
+            " automation.py: classification_applied payload now includes"
+            " trend_magnitude/today_high/applied_threshold_f/threshold_margin_f;"
+            " setpoint_rejected/setpoint_nudge now include reject_streak;"
+            " handle_morning_wakeup()'s DEFER_OCCUPANCY branch now emits"
+            " morning_wakeup_skipped (previously silent, unlike its DEFER_OVERRIDE/"
+            "DEFER_PAUSED siblings and handle_bedtime()'s equivalent branch);"
+            " pre_cool_suppressed_nat_vent's active_session branch (DEFER_NAT_VENT)"
+            " now includes indoor/target — pre_cool_target is computed once, up front,"
+            " before the gate checks, instead of after the branch that needed it."
+            " coordinator.py: startup_coalesced now includes indoor_f/outdoor_f/"
+            "fan_archetype; thermal_learning_no_observations now includes"
+            " thermal_session_count. ai_skills_context.py: renderers for"
+            " classification_applied, setpoint_rejected/setpoint_nudge,"
+            " startup_coalesced, thermal_learning_no_observations,"
+            " fan_untracked_cleared (now uses fan_device instead of a hardcoded"
+            ' "fan: off"), incident_detected (now uses incident_id and the'
+            " comfort-band comparison it already carried), morning_wakeup_skipped,"
+            " and pre_cool_suppressed_nat_vent were all updated to surface the new/"
+            "existing fields; nat_vent_sleep_ceiling_reached and the three legacy"
+            " warm_day_* renderers (confirmed zero current emitters) are now"
+            " explicitly commented as historical-log-only. Two golden simulations"
+            " (away_morning_wakeup_skipped_assertion, morning_wakeup_skipped_away_"
+            "occupancy) were updated with the user's explicit sign-off to expect the"
+            " new morning_wakeup_skipped event instead of relying on the prior silent"
+            " gap; no HVAC/decision-logic behavior changed in either. A pre-existing,"
+            " unrelated test-harness gap (a pending scenario passing by coincidence"
+            " due to the harness not advancing past a scheduled trigger) was found"
+            " during this work and filed separately as #598 rather than fixed here."
+        ),
+    },
+    592: {
+        "version_fixed": "0.5.63",
+        "title": (
+            "Activity Record payload-completeness sweep for the four lifecycle-scoped"
+            " decision families (nat-vent, door/window pause, override, grace) — many"
+            " emit sites discarded locally-computed inputs (outdoor/indoor temps,"
+            " thresholds, k_passive, pause duration/entity, override reason/trigger) that"
+            " were never threaded into the event payload, so the renderer could only show"
+            " a bare verdict with no visible reasoning behind it."
+        ),
+        "scope_covered": (
+            "automation.py: classification_suppressed_paused and"
+            " occupancy_setback_suppressed_paused now carry paused_entity/paused_minutes"
+            " (new self._paused_entity/self._paused_since state, set in"
+            " _pause_for_door_window() and cleared at every resume site); nat_vent_fan_on"
+            " gained outdoor_temp; nat_vent_predicted_floor_exit/"
+            " nat_vent_floor_imminent_skip gained indoor_temp/comfort_heat/k_passive;"
+            " nat_vent_soft_start_entered gained comfort_heat/decline_margin_f (both call"
+            " sites); nat_vent_ceiling_escalation gained hours_to_breach/lead_min/"
+            " k_active_cool; nat_vent_bedtime_continue gained outdoor_temp/sleep_cool;"
+            " sensor_opened at the _re_pause_for_open_sensor() re-check site gained"
+            " outdoor_temp/indoor_temp/threshold; override_cleared's fan-only variant"
+            " gained reason; override_confirmed gained cls_mode/source;"
+            " nat_vent_comfort_floor_exit's temp_check call site now matches its sibling's"
+            " fan_mode_change/hvac_mode_restored shape. coordinator.py:"
+            " stuck_grace_recovered at the Issue #321 watchdog site gained"
+            " stale_mode/stale_since (captured before clear_manual_override() resets"
+            " them). ai_skills_context.py: renderers for all of the above updated to"
+            " surface the new fields in the Event/Settings cells; added a shared"
+            " _render_paused_entity_settings() helper for the two pause-suppression"
+            " renderers. No decision logic changed — golden suite (74/74) and pending"
+            " suite (4/4) show zero behavior change."
+        ),
+    },
+    591: {
+        "version_fixed": "0.5.62",
+        "title": (
+            "Activity Record showed the same automation decision (comfort band applied,"
+            " classification applied, occupancy setback skipped while paused, nat-vent AC"
+            " assist armed, bedtime setback skipped, nat-vent bedtime continue, and the"
+            " coordinator's state-contradiction warning) two or three times in a row —"
+            " sometimes visibly duplicated, sometimes silently masked by the Activity"
+            " Record's own consecutive-same-type row collapsing into a misleading 'x2'"
+            " count. Traced to apply_classification()/handle_bedtime() each being"
+            " reachable from multiple independent trigger paths (startup coalesce +"
+            " its own follow-on refresh, cancel-override + its own delayed reclassify,"
+            " and an uncancelled 5-minute revisit timer armed by 6 of 7"
+            " _apply_comfort_band() callers) with no consistent dedup boundary — the same"
+            " defect shape Issue #96 and #444 each independently patched once, at one"
+            " call site apiece."
+        ),
+        "scope_covered": (
+            "automation.py: new AutomationEngine._recent_duplicate(key, signature,"
+            " window_seconds=None) shared decision-record dedup helper, generalizing"
+            " Issue #444's _last_comfort_band_signature pattern (removed in favor of the"
+            " helper; const.py's COMFORT_BAND_EVENT_DEDUP_SECONDS removed — comfort_band_"
+            " applied is now permanent/content-keyed instead of a 10-minute window, an"
+            " explicit owner-approved decision since a real production 11-minute gap had"
+            " already slipped past the old fixed window). Migrated onto the helper:"
+            " comfort_band_applied, classification_applied (kept updating the pre-existing"
+            " _last_classification_applied marker other code reads directly),"
+            " classification_suppressed_paused, occupancy_setback_suppressed_paused (both"
+            " away/vacation sites), nat_vent_ac_assist_armed (both sleep-window and"
+            " full-band branches), bedtime_setback_skipped (all 3 branches),"
+            " nat_vent_bedtime_continue, and coordinator.py's state_contradiction_warning"
+            " (kept its original 30-minute window; _last_state_contradiction_time"
+            " attribute removed). occupancy_setback and hvac_write_blocked_whf_active were"
+            " first tried with PERMANENT (content-keyed) dedup like the others, which broke"
+            " 5 golden/pending scenarios (wakeup_preserves_whf_manual_override,"
+            " away_morning_wakeup_skipped_assertion, morning_wakeup_skipped_away_occupancy,"
+            " cancel_override_then_resume, vacation_occupancy_override_cleared) — their"
+            " repeats are often distinct, meaningful re-confirmations hours later (e.g."
+            " Issue #505's bedtime-time away-setback reapply), not accidental echoes."
+            " Switched to WINDOWED dedup (window_seconds=600) instead: short enough to still"
+            " catch a genuine same-cycle duplicate (the literal #584 shape), long enough to"
+            " never suppress the hours-apart legitimate repeats every failing scenario"
+            " actually needed. Investigating the last failure (wakeup_preserves_"
+            " whf_manual_override) further found a third, previously-unaudited site with the"
+            " same defect: handle_morning_wakeup()'s own unconditional 'morning_wakeup'"
+            " marker event is reachable from the same overlapping-trigger paths (the"
+            " scenario invokes handle_morning_wakeup() twice) and was masking the correct"
+            " outcome once hvac_write_blocked_whf_active got its own guard — also windowed"
+            " (600s) now. coordinator.py: _do_startup_coalesce() now returns whether it already ran"
+            " apply_classification() this cycle, and _async_update_data_impl() skips the"
+            " redundant regular-cycle call when so. tests/conftest.py:"
+            " assert_no_duplicate_events() + LEGITIMATELY_REPEATING_EVENT_TYPES shared"
+            " helper, generalizing the len(x_events)==1 idiom from test_override_dedup.py."
+            " tools/simulate.py: run_scenario_production() now surfaces the full"
+            " timestamped event_log (previously dropped). New"
+            " tests/test_no_duplicate_decisions.py runs the golden-level automatic"
+            " duplicate check via that event_log across every golden scenario. New"
+            " tests/test_multi_site_event_dedup_guard.py: ast-based static guard (mirrors"
+            " test_executor_offload.py) over the 7 Delta-2-audited multi-call-site event"
+            " types. New tests/test_recent_duplicate_helper.py: unit coverage for the"
+            " helper itself (content-keyed and windowed modes, bare-instance safety)."
+        ),
+    },
+    589: {
+        "version_fixed": "0.5.61",
+        "title": (
+            "_async_command_fan_entity() (the whole-house-fan command-only"
+            " reconciliation choke point, coordinator.py) had no dry_run/"
+            "automation_enabled check — the one automated action path that ignored"
+            " the 'Automation Enabled' switch, on installs with"
+            " fan_state_feedback=False."
+        ),
+        "scope_covered": (
+            "coordinator.py: _async_command_fan_entity() now checks"
+            " self._automation_enabled before issuing the turn_on/turn_off service"
+            " call, logging '[DRY RUN] Would command fan entity ...' and returning"
+            " False instead when automation is disabled — matching the convention"
+            " already used by automation.py's other choke points (_set_hvac_mode,"
+            " _set_temperature, _activate_fan/_deactivate_fan, _notify). Changed to"
+            " return bool (True if a real service call was issued); both call sites"
+            " in the command-only reconciliation block (coordinator.py ~2248-2280)"
+            " now only update _last_commanded_fan_state when a command actually"
+            " fired, so the desired state re-asserts correctly once automation is"
+            " re-enabled instead of the bookkeeping believing a command it never"
+            " sent."
         ),
     },
     580: {
@@ -5552,15 +5757,10 @@ MAX_CONTINUOUS_RUNTIME_HOURS = 3
 
 # Issue #444: _apply_comfort_band() has no source-of-truth "did the band actually
 # change" check, so overlapping triggers (startup coalesce + its own follow-on
-# refresh; grace-expiry re-application colliding with the regular cycle) each
-# unconditionally re-announce the identical band as a fresh comfort_band_applied
-# event. This window suppresses a redundant *announcement* of an unchanged band
-# within N seconds of the last one — the underlying _set_temperature() call is
-# NEVER suppressed (thermostat control must stay unconditional). Sized to
-# comfortably span the widest observed redundant-call gap in real telemetry
-# (~5-6 minutes) while staying well under the 30-minute regular classification
-# cycle, so a genuine re-announcement after a real cycle is never swallowed.
-COMFORT_BAND_EVENT_DEDUP_SECONDS = 600  # 10 minutes
+# Issue #444's original COMFORT_BAND_EVENT_DEDUP_SECONDS (10-minute time-windowed dedup)
+# was replaced by Issue #591's shared, permanent (content-keyed) AutomationEngine.
+# _recent_duplicate() helper — see automation.py._apply_comfort_band(). A real 11-minute
+# production gap slipped past the old fixed window (Issue #591/#590 Finding D/Delta 1).
 
 # Issue #530: an RF-remote-timer-linked manual grace period's software-tracked expiry and
 # the timer's own hardware-side completion are the same physical event, but don't land at

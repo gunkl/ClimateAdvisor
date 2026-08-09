@@ -745,3 +745,40 @@ class TestCancelViewsGraceCancellation:
         with patch("homeassistant.helpers.event.async_call_later") as mock_call_later:
             self._post(ClimateAdvisorCancelFanOverrideView, coordinator)
             mock_call_later.assert_called_once()
+
+
+class TestResumeFromPauseViewShadowMirror:
+    """Issue #615: ClimateAdvisorResumeFromPauseView.post() must mirror
+    resume_from_pause() onto the shadow engine too — the only decision method
+    triggered from api.py rather than coordinator.py."""
+
+    def _post(self, coordinator):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from custom_components.climate_advisor.api import ClimateAdvisorResumeFromPauseView
+
+        view = ClimateAdvisorResumeFromPauseView()
+        request = _make_view_request(coordinator)
+        coordinator._mirror_to_shadow = AsyncMock()
+        resp = asyncio.run(view.post(request))
+        return resp.json_data
+
+    def test_mirrors_resume_from_pause_when_paused(self):
+        from unittest.mock import AsyncMock
+
+        coordinator = MagicMock()
+        coordinator.automation_engine.is_paused_by_door = True
+        coordinator.automation_engine.resume_from_pause = AsyncMock(return_value="cool")
+
+        self._post(coordinator)
+
+        coordinator._mirror_to_shadow.assert_awaited_once_with("resume_from_pause")
+
+    def test_does_not_mirror_when_not_paused(self):
+        coordinator = MagicMock()
+        coordinator.automation_engine.is_paused_by_door = False
+
+        self._post(coordinator)
+
+        coordinator._mirror_to_shadow.assert_not_awaited()

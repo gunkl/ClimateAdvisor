@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import functools
 import hashlib
+import inspect
 import logging
 import math
 from collections.abc import Callable
@@ -630,17 +631,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if len(self._shadow_event_log) > EVENT_LOG_CAP:
             self._shadow_event_log.pop(0)
 
+    def _sync_shadow_inputs(self) -> None:
+        """Copy live input-data attributes onto the shadow engine (Issue #615).
+
+        Several nat-vent decision methods (``handle_door_window_open()`` chief among
+        them) read ``self._last_outdoor_temp``/``self._hourly_forecast_temps``/
+        ``self._thermal_model``/``self._occupancy_mode`` as engine-instance state, not
+        as method arguments — the coordinator sets these directly on
+        ``self.automation_engine`` at several scattered call sites (``update_outdoor_temp()``,
+        daily-reset, restore) that ``_mirror_to_shadow()``'s per-decision replay never
+        touched. #613 shipped with the shadow engine's ``_last_outdoor_temp`` permanently
+        ``None`` as a result — its nat-vent gate could never fire, producing a
+        structural, permanent false "disagree" (confirmed live: agreed briefly right
+        after restart, then stuck disagreeing for hours). Called unconditionally at the
+        top of every ``_mirror_to_shadow()`` invocation — single call site, always fresh,
+        instead of re-deriving "which of the many production input-setting call sites
+        needs a matching shadow line" (the pattern that caused the bug in the first
+        place). Copies straight from ``self.automation_engine``'s current values, never
+        from local cycle variables, so it can't drift from whatever production most
+        recently observed.
+        """
+        se = self.shadow_automation_engine
+        ae = self.automation_engine
+        se.update_outdoor_temp(ae._last_outdoor_temp)
+        se._hourly_forecast_temps = ae._hourly_forecast_temps
+        se._thermal_model = ae._thermal_model
+        se._outdoor_temp_today_peak = ae._outdoor_temp_today_peak
+        se._outdoor_temp_today_sample_count = ae._outdoor_temp_today_sample_count
+        se.set_occupancy_mode(ae._occupancy_mode)
+
     async def _mirror_to_shadow(self, method_name: str, *args: Any, **kwargs: Any) -> None:
         """Replay a production nat-vent decision call on the shadow engine (Issue #613).
 
         Isolated by construction (see ``_build_shadow_automation_callbacks``) and, on
         top of that, isolated here: any exception raised by the shadow call is logged
         and swallowed, never re-raised — a bug in the shadow engine's decision code
-        must never be able to affect production's own control flow.
+        must never be able to affect production's own control flow. Supports both sync
+        (``on_fan_turned_off()``) and async decision methods — awaits the result only
+        if it's actually awaitable, since a handful of the mirrored methods are
+        synchronous (Issue #615).
         """
         try:
+            self._sync_shadow_inputs()
             method = getattr(self.shadow_automation_engine, method_name)
-            await method(*args, **kwargs)
+            result = method(*args, **kwargs)
+            if inspect.isawaitable(result):
+                await result
         except Exception as exc:  # noqa: BLE001 — shadow errors must never affect production
             _LOGGER.warning(
                 "Shadow engine mirror of %s() failed (isolated, no production impact): %s",
@@ -1117,6 +1153,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         auto_state = state.get("automation_state", {})
         if auto_state:
             self.automation_engine.restore_state(auto_state)
+            # Issue #615: restore the same fan-activity hints onto the shadow engine —
+            # now load-bearing since reconcile_fan_on_startup() (which reads them) is
+            # mirrored too. Still does not restore _natural_vent_active or
+            # _current_classification on either engine (restore_state()'s own
+            # documented clean-slate design).
+            await self._mirror_to_shadow("restore_state", auto_state)
 
         # Grace state is cleared by restore_state() (clean-slate design, Issue #282).
         # The coordinator does not reschedule grace timers on restart.
@@ -1805,6 +1847,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             any_sensor_open=self._any_sensor_open(),
             trigger="ha_restart",
         )
+        # Issue #615: this exact call site is what tonight's bug reproduces — the
+        # startup-time fan reconciliation that can set _natural_vent_active=True from
+        # physical fan state, never previously mirrored.
+        await self._mirror_to_shadow(
+            "reconcile_fan_on_startup",
+            indoor=indoor,
+            outdoor=outdoor,
+            thermostat_fan_running=_thermostat_fan_running,
+            any_sensor_open=self._any_sensor_open(),
+            trigger="ha_restart",
+        )
         _LOGGER.debug("[coalesce-diag] after reconcile_fan_on_startup()")
 
         self._emit_event(
@@ -2449,6 +2502,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     outdoor=self._last_outdoor_temp,
                     # Issue #423: archetype-aware — WHF mode checks the real fan entity's
                     # physical state instead of always trusting the thermostat's attributes.
+                    thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
+                        fan_mode_attr=_bst_fan_mode,
+                        hvac_action_attr=_bst_hvac_action,
+                    ),
+                    any_sensor_open=self._any_sensor_open(),
+                    trigger="backstop_30min",
+                )
+                await self._mirror_to_shadow(
+                    "reconcile_fan_on_startup",
+                    indoor=self._get_indoor_temp(),
+                    outdoor=self._last_outdoor_temp,
                     thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
                         fan_mode_attr=_bst_fan_mode,
                         hvac_action_attr=_bst_hvac_action,
@@ -3142,6 +3206,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             predicted_indoor=self._last_predicted_indoor,
             indoor_temp=self._get_indoor_temp(),
         )
+        await self._mirror_to_shadow(
+            "apply_classification",
+            classification,
+            predicted_indoor=self._last_predicted_indoor,
+            indoor_temp=self._get_indoor_temp(),
+        )
 
         # Initialize today's learning record, preserving any counters already accumulated
         # today (e.g. after an HA restart mid-day that fires briefing again). Issue #602:
@@ -3194,6 +3264,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
         await self.automation_engine.handle_bedtime()
+        await self._mirror_to_shadow("handle_bedtime")
 
     def _compute_pre_cool_trigger_time(self) -> datetime | None:
         """Compute the pre-cool trigger time for tonight.
@@ -3576,6 +3647,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 outdoor=self._last_outdoor_temp,
                 trigger="tick",
             )
+        # Issue #615: mirrored unconditionally, same rationale as nat_vent_temperature_check
+        # above — fan_thermostat_check() is documented as idempotent/no-op-safe when no CA
+        # fan is active, and per Issue #608's own finding this is usually the function that
+        # actually EXITS a nat-vent session on this dispatch path (wins the race before
+        # check_natural_vent_conditions()'s chain ever runs) — a gap in #613's original scope.
+        if _new_temp_attr is not None and _new_temp_attr != _old_temp_attr:
+            await self._mirror_to_shadow(
+                "fan_thermostat_check",
+                indoor=self._get_indoor_temp(),
+                outdoor=self._last_outdoor_temp,
+                trigger="tick",
+            )
 
         # Expected-state confirmation suppression: if thermostat is confirming an automation
         # command (same mode, within 2 minutes), this is not a user override.
@@ -3623,6 +3706,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     new_state.state,
                 )
                 await self.automation_engine.handle_manual_override_during_pause(
+                    old_mode=old_state.state,
+                    new_mode=new_state.state,
+                    classification_mode=(
+                        self._current_classification.hvac_mode if self._current_classification else None
+                    ),
+                )
+                await self._mirror_to_shadow(
+                    "handle_manual_override_during_pause",
                     old_mode=old_state.state,
                     new_mode=new_state.state,
                     classification_mode=(
@@ -4084,6 +4175,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # (which sets the "user turned fan ON" override flag).
             if _fan_cancel_in_this_event:
                 self.automation_engine.on_fan_turned_off(fan_before=str(old_fan_mode), fan_after=str(new_fan_mode))
+                await self._mirror_to_shadow(
+                    "on_fan_turned_off", fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
+                )
             else:
                 self.automation_engine.handle_fan_manual_override(
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
@@ -4265,6 +4359,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self.automation_engine.on_fan_turned_off(
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+            )
+            await self._mirror_to_shadow(
+                "on_fan_turned_off",
+                fan_before=str(old_state.state),
+                fan_after=str(new_state.state),
+                event_context_id=event_context_id,
             )
 
     async def _async_fan_remote_changed(self, event: Event) -> None:
@@ -4515,6 +4615,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("Setpoint re-assertion after fan-off: no current classification — skipping")
                 return
             await self.automation_engine.apply_classification(
+                classification,
+                predicted_indoor=self._last_predicted_indoor,
+                indoor_temp=self._get_indoor_temp(),
+            )
+            await self._mirror_to_shadow(
+                "apply_classification",
                 classification,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=self._get_indoor_temp(),

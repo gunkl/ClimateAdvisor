@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.4] — 2026-08-09
+
+- Fix #615: internal fix only, no user-visible behavior change — the diagnostic shadow engine added in 0.6.3 was missing several real-world inputs (outdoor temperature, forecast, and 8 of 13 decision triggers), so it could never correctly agree with the real engine even when both were doing the right thing. Fixed with full coverage plus an automated check that keeps future changes from silently reintroducing the gap. The real engine's behavior is completely unchanged; only the diagnostic sensor's accuracy is affected.
+
 ## [0.6.3] — 2026-08-08
 
 - Feat #613: internal refactor only, no user-visible behavior change — a second, permanently inert copy of the automation engine now runs live alongside the real one, fed the same nat-vent sensor/classification inputs, and can never issue a real command. A new diagnostic sensor shows whether it agrees with the real engine's conclusions. This is groundwork for a future safe-rollout mechanism and does not change today's HVAC behavior.

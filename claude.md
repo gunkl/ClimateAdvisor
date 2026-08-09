@@ -727,6 +727,14 @@ After merge: `gh release edit vX.Y.Z --draft=false`
 - Include summary, requirements, implementation checklist
 - Update issue status when work is complete — provide user with brief commit summary including GitHub issue reference
 - Reference related issues when applicable
+- **If the tracking issue is a sub-issue of a multi-phase epic, closing it is not enough.**
+  Post a status comment on the epic itself — sub-issue #, PR #, version, one-line outcome
+  — every time a phase ships. Discovered 2026-08-09 (Climate Advisor Block 5 epic #594):
+  5 sub-phases shipped and closed their own issues over several sessions, but the epic
+  itself had exactly one comment — its own creation note — so it read as entirely
+  unstarted to anyone (including a future session) checking it. A sub-issue's own
+  auto-close comment does not propagate to the epic thread; the epic update is a
+  separate, explicit step.
 
 ### Example Workflow
 ```

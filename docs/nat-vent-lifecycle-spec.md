@@ -14,6 +14,7 @@
 | How was this spec's accuracy verified? | Differential replay: `derive_nat_vent_lifecycle_state()` run against the real final engine flags from all 74 golden + 4 pending scenarios (Issue #606), plus 3 hand-reasoned ground-truth scenarios. | [Verification](#verification) |
 | Does `check_natural_vent_conditions()`'s exit chain always decide WHY a session ends? | No — confirmed by direct experiment (Issue #608): `nat_vent_temperature_check()` and `fan_thermostat_check()` (both dispatched from the same `temp_update`/thermostat-attribute-change trigger, both already pure-extracted by Issue #441) run FIRST and independently implement equivalent comfort-floor and outdoor-rise-style stops — they win the race and exit the session before `check_natural_vent_conditions()`'s chain ever evaluates, for every golden scenario tested. | [Known Duplicate-Logic Race](#known-duplicate-logic-race-issue-608-finding) |
 | Has a shadow engine instance been proven safe to construct alongside production, offline? | Yes — `tools/sim_harness/shadow_engine_pair.py` (Issue #611) proves, across 60 offline-eligible golden+pending scenarios, that a dry_run=True shadow instance never issues a real action AND never changes what production itself does. | [Offline Whole-Engine Shadow-Pair Validation](#offline-whole-engine-shadow-pair-validation-issue-611-subtask-o) |
+| Is there a real, live shadow engine running inside the coordinator today? | Yes — `coordinator.shadow_automation_engine` (Issue #613), permanently `dry_run=True`, fed the same nat-vent lifecycle inputs as production via `coordinator._mirror_to_shadow()`. Zero occupant/HVAC impact; surfaced via a diagnostic sensor, not any Status-tab card. | [Live Shadow Engine](#live-shadow-engine-issue-613-subtask-q) |
 
 ## Scope
 
@@ -113,6 +114,32 @@ This is a real, if narrow, test of the epic's own flagged HIGH-risk finding ("a 
 
 **A real canonicalization gap was found and fixed during this validation**, not merely a testing artifact: `differential.py`'s existing `_canon_action_log()` falls back to `repr(obj)` for a service call's `context` field (a real HA `Context`, carrying a random per-call UUID by design). Reusing it produced 7/78 false-positive "divergences" — two independent runs of *identical* code, differing only because their Context objects had different random ids/memory addresses, not because production actually behaved differently. `shadow_engine_pair.py` uses its own `_canon_action_log_ignoring_context()` instead, excluding that field from the comparison it needs (domain/service/entity_id/data/timestamp).
 
+## Live Shadow Engine (Issue #613, subtask Q)
+
+Epic #594's sequencing item **Q** ("live shadow mode — a genuine second engine instance computing decisions from the same live inputs, fully inert per N2's redesign, with agreement/disagreement surfaced via a new diagnostic sensor") is now live for the nat-vent lifecycle. `coordinator.shadow_automation_engine` (superseding N2's `None` placeholder) is a real `AutomationEngine`, constructed alongside production at coordinator `__init__`, `role="shadow"`, `dry_run=True` set immediately and never toggled — there is no owner-facing switch for it this phase (that's Phase 5 / subtask R).
+
+**Callback isolation** (`coordinator._build_shadow_automation_callbacks()`): the four callables N2's investigation traced as capable of reaching production are structurally cut off, not dry_run-gated —
+
+- `sensor_check`, `sensor_debounce_pending`, `get_fan_physical_state`, `is_recent_fan_command` — pure reads, safely SHARED with production's own bundle (they observe ground truth, they don't act).
+- `emit_event` — shadow-local (`coordinator._on_shadow_emit_event`), a capped list, never the production `_event_log` ring buffer or its pre-cool-reschedule side effect.
+- `request_refresh`, `post_grace_fan_check`, `reclassify` — no-op lambdas. Each is invoked as a plain synchronous call in `automation.py` (never wrapped in `hass.async_create_task`), so a lambda returning `None` is a genuine no-op.
+- `revisit` — left unset (`None`), not a no-op lambda: `_schedule_revisit()` invokes it as `hass.async_create_task(revisit_cb())`, which would crash on a lambda returning `None` (not awaitable). `None` makes `has_revisit_callback` False, so the follow-up timer is never scheduled — correct for an engine whose actions are always dry-run anyway.
+
+**Mirrored call sites** — the nat-vent lifecycle's real entry points, each production call immediately followed by `await coordinator._mirror_to_shadow(method_name, *same_args)`:
+
+- `apply_classification()` — both the regular per-cycle path and the startup-coalesce path.
+- `handle_door_window_open()` / `handle_all_doors_windows_closed()` — the real `_async_door_window_changed` listener, both the debounced-open branch and the all-closed branch.
+- `check_natural_vent_conditions()` — the "any sensor still open" re-evaluation inside the regular cycle.
+- `nat_vent_temperature_check()` — mirrored **unconditionally** on every thermostat temperature tick (not gated on production's own `_natural_vent_active`, unlike the production call site): the method internally no-ops on `self._natural_vent_active` — the SHADOW's own flag when bound to the shadow instance — which is exactly the "does the shadow reach the same conclusion independently" property this diagnostic exists to check.
+
+Two secondary `apply_classification()` call sites (the once-daily briefing-generation path, and the rare post-WHF-release setpoint reassertion path) are deliberately **not** mirrored — both are low-frequency and the shadow re-syncs on the next regular cycle either way; mirroring every call site in the file was judged unnecessary complexity for this slice.
+
+**Isolation of the mirror itself** (`coordinator._mirror_to_shadow()`): any exception from the shadow call, and separately any exception from the diagnostic recompute that follows it, is caught, logged at WARNING, and swallowed — never re-raised. A bug in the shadow engine's decision code, or a `None`/mock-shaped `shadow_automation_engine` (several older tests partially instantiate the coordinator via `object.__new__()` without a full `__init__`), must never be able to affect `_async_update_data()`'s own control flow.
+
+**Diagnostic** (`coordinator._update_shadow_engine_diagnostic()`, `coordinator.shadow_engine_diagnostic`): reuses `derive_nat_vent_lifecycle_state()` (Issue #606) — the same pure function both engines' state already agreed on in Phase 3's offline sweep — computed for both `automation_engine` and `shadow_automation_engine` against the real live clock, recomputed after every mirrored call. Surfaced via `ClimateAdvisorShadowEngineStatusSensor` (`sensor.py`), a `diagnostic`-category entity: state is `"agree"` / `"disagree"` / `"inactive"` (before the first mirrored decision), attributes carry both derived states and the check timestamp. Deliberately **not** wired into any of the four occupant-facing Status-tab cards (`docs/07-...`/CLAUDE.md's Status Card Ontology, Issue #527) — the shadow engine has zero HVAC impact; this is an internal architecture-validation signal, not an automation-behavior explanation.
+
+**Cleanup**: `coordinator.async_shutdown()` calls `shadow_automation_engine.cleanup()` alongside production's — the shadow engine schedules its own real `async_call_later` timers (grace, fan min-cycle, thermo backstop) directly on the real HA event loop regardless of `dry_run` (which only guards the service-call choke points), so it needs the same timer cancellation at shutdown.
+
 ## Code Reference
 
 - [`derive_nat_vent_lifecycle_state`](../custom_components/climate_advisor/nat_vent_lifecycle.py) — pure derivation
@@ -122,3 +149,5 @@ This is a real, if narrow, test of the epic's own flagged HIGH-risk finding ("a 
 - [`decide_nat_vent_gate`, `decide_nat_vent_soft_start_gate`](../custom_components/climate_advisor/nat_vent_gate.py) — entry gates
 - [`is_reactivation_locked_out`](../custom_components/climate_advisor/nat_vent_reactivation_lockout.py) — lockout predicate
 - [`run_shadow_pair_scenario`](../tools/sim_harness/shadow_engine_pair.py) — offline whole-engine shadow-pair comparator (Issue #611)
+- [`ClimateAdvisorCoordinator._mirror_to_shadow`, `_build_shadow_automation_callbacks`, `_update_shadow_engine_diagnostic`](../custom_components/climate_advisor/coordinator.py) — live shadow engine wiring (Issue #613)
+- [`ClimateAdvisorShadowEngineStatusSensor`](../custom_components/climate_advisor/sensor.py) — diagnostic sensor (Issue #613)

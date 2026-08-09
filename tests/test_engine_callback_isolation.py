@@ -155,9 +155,20 @@ class TestCoordinatorRefactorIsBehaviorPreserving:
         assert ae._reclassify_callback == coordinator._on_whf_release_reclassify
         assert ae._sensor_debounce_pending_callback() == bool(coordinator._door_open_timers)
 
-    def test_shadow_automation_engine_placeholder_is_none(self) -> None:
+    def test_shadow_automation_engine_is_constructed_with_its_own_isolated_bundle(self) -> None:
+        """Superseded by Issue #613 (Block 5 subtask Q): the coordinator now builds a
+        real shadow engine at construction time, not the ``None`` placeholder N2 left
+        here. See ``tests/test_shadow_engine_live.py`` for full Q-phase coverage —
+        this test just confirms N2's own bundle-isolation building blocks are what Q
+        actually used, not a hand-rolled reimplementation.
+        """
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        assert coordinator.shadow_automation_engine is None
+        shadow = coordinator.shadow_automation_engine
+        assert shadow is not None
+        assert shadow.role == "shadow"
+        assert shadow is not coordinator.automation_engine
+        assert shadow._revisit_callback is None
+        assert shadow._request_refresh_callback is not coordinator.automation_engine._request_refresh_callback
 
 
 class TestHazardCharacterization:

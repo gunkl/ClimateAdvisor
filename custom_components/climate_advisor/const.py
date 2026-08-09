@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.3": [
+        "Feat #613: internal refactor only, no user-visible behavior change — a second,"
+        " permanently inert copy of the automation engine now runs live alongside the"
+        " real one, fed the same nat-vent sensor/classification inputs, and can never"
+        " issue a real command. A new diagnostic sensor shows whether it agrees with the"
+        " real engine's conclusions. This is groundwork for a future safe-rollout"
+        " mechanism and does not change today's HVAC behavior.",
+    ],
     "0.6.2": [
         "Feat #611: internal refactor only, no user-visible behavior change —"
         " added an offline test harness that proves a second, inert 'shadow'"
@@ -1637,6 +1645,66 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    613: {
+        "version_fixed": "0.6.3",
+        "title": (
+            "Block 5 (epic #594) sequencing item Q ('live shadow mode — a genuine"
+            " second engine instance computing decisions from the same live"
+            " inputs, fully inert per N2's redesign, with agreement/disagreement"
+            " surfaced via a new diagnostic sensor') had no implementation."
+            " Item O (#611/#612) proved N2's isolation held offline against 60"
+            " golden/pending scenarios; this issue builds the real, live second"
+            " engine instance inside the running coordinator."
+        ),
+        "scope_covered": (
+            "coordinator.shadow_automation_engine (superseding N2's None"
+            " placeholder): a real AutomationEngine, role='shadow',"
+            " dry_run=True set immediately after construction and never"
+            " toggled (no owner switch this phase — that's subtask R)."
+            " New coordinator._build_shadow_automation_callbacks(): the 4"
+            " callables N2 traced as reaching production (revisit,"
+            " request_refresh, post_grace_fan_check, reclassify) are cut off"
+            " structurally — revisit left None (a no-op lambda would crash,"
+            " since _schedule_revisit() awaits it via async_create_task), the"
+            " other 3 are no-op lambdas (safe: automation.py calls them"
+            " synchronously, never via async_create_task); read-only callbacks"
+            " (sensor_check, sensor_debounce_pending, get_fan_physical_state,"
+            " is_recent_fan_command) are shared with production; emit_event is"
+            " shadow-local (_on_shadow_emit_event, capped list, never the"
+            " production event log). New coordinator._mirror_to_shadow():"
+            " replays apply_classification/handle_door_window_open/"
+            " handle_all_doors_windows_closed/check_natural_vent_conditions/"
+            " nat_vent_temperature_check on the shadow engine immediately after"
+            " each production call, with the same args; any shadow-side"
+            " exception (including from the diagnostic recompute that follows"
+            " it) is caught, logged at WARNING, and swallowed — never"
+            " propagated. New coordinator._update_shadow_engine_diagnostic():"
+            " compares derive_nat_vent_lifecycle_state() (Issue #606) between"
+            " both engines against the real live clock. New"
+            " ClimateAdvisorShadowEngineStatusSensor (sensor.py): a"
+            " diagnostic-category entity (state agree/disagree/inactive,"
+            " attributes carry both derived states + timestamp) — deliberately"
+            " not wired into any occupant-facing Status-tab card (Issue #527"
+            " ontology), zero HVAC impact. shadow_automation_engine.cleanup()"
+            " added to coordinator.async_shutdown() (the shadow schedules real"
+            " async_call_later timers directly, independent of dry_run)."
+            " New tests/test_shadow_engine_live.py (18 tests) +"
+            " tests/test_shadow_engine_sensor.py (6 tests): construction,"
+            " callback isolation with a positive control reproducing the N2"
+            " hazard, mirror exception/diagnostic isolation with positive"
+            " controls, agreement/disagreement diagnostic with a positive"
+            " control, shutdown cleanup, sensor state/attributes. Also added"
+            " homeassistant.helpers.entity/EntityCategory to the test harness's"
+            " HA stub layer (ha_stubs.py) — the first diagnostic-category"
+            " entity in this codebase. Full suite (4066 tests) + golden"
+            " (74/74) + pending (4/4), zero regressions. No production"
+            " automation.py behavior changed for the real engine; two"
+            " secondary apply_classification() call sites (once-daily"
+            " briefing generation, post-WHF-release reassertion) are"
+            " deliberately not mirrored — low-frequency, shadow re-syncs on"
+            " the next regular cycle."
+        ),
+    },
     611: {
         "version_fixed": "0.6.2",
         "title": (

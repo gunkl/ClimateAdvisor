@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.3] — 2026-08-08
+
+- Feat #613: internal refactor only, no user-visible behavior change — a second, permanently inert copy of the automation engine now runs live alongside the real one, fed the same nat-vent sensor/classification inputs, and can never issue a real command. A new diagnostic sensor shows whether it agrees with the real engine's conclusions. This is groundwork for a future safe-rollout mechanism and does not change today's HVAC behavior.
+
 ## [0.6.2] — 2026-08-08
 
 - Feat #611: internal refactor only, no user-visible behavior change — added an offline test harness that proves a second, inert "shadow" copy of the automation engine can run alongside the real one without ever issuing a real command or changing what the real engine does. This is groundwork for a future safe-rollout mechanism (test new automation logic silently before it's ever allowed to control the thermostat) and does not change today's behavior.

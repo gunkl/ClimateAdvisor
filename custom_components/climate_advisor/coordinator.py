@@ -366,13 +366,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_production_automation_callbacks(),
             role="production",
         )
-        # Issue #604 (Block 5, subtask N2): placeholder for a future second, non-acting
-        # AutomationEngine instance (Block 5 subtask Q). Always None until Q — kept here
-        # so any status/diagnostics schema field exists from N2 onward rather than being
-        # bundled into Q later. A shadow engine must be constructed with its own
-        # AutomationEngineCallbacks bundle — never the production callbacks below — see
-        # docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
-        self.shadow_automation_engine: AutomationEngine | None = None
+        # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
+        # computing decisions from the same inputs as production, permanently inert.
+        # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
+        # unlike production's dry_run (tied to automation_enabled), the shadow engine has
+        # no owner-facing switch this phase; that's Phase 5/subtask R. Built with its own
+        # isolated callback bundle (_build_shadow_automation_callbacks) — never the
+        # production callbacks above — per N2's confirmed HIGH-risk finding: a shadow
+        # engine given production's callbacks could reach real production state/side
+        # effects (e.g. reconcile_fan_on_startup) regardless of the shadow's own dry_run.
+        # See docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
+        self._shadow_event_log: list[dict[str, Any]] = []
+        self._shadow_engine_diagnostic: dict[str, Any] | None = None
+        self.shadow_automation_engine: AutomationEngine = AutomationEngine(
+            hass=hass,
+            climate_entity=config["climate_entity"],
+            weather_entity=config["weather_entity"],
+            door_window_sensors=config.get("door_window_sensors", []),
+            notify_service=config["notify_service"],
+            config=config,
+            sensor_polarity_inverted=config.get(CONF_SENSOR_POLARITY_INVERTED, False),
+            callbacks=self._build_shadow_automation_callbacks(),
+            role="shadow",
+        )
+        self.shadow_automation_engine.dry_run = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -556,6 +573,133 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # hours-stale captured mode.
             reclassify=self._on_whf_release_reclassify,
         )
+
+    def _build_shadow_automation_callbacks(self) -> AutomationEngineCallbacks:
+        """Build the callback bundle wired onto the inert shadow AutomationEngine.
+
+        Issue #613 (Block 5, subtask Q). Every callback here is either a pure read
+        (safe to share with production — it observes ground truth, it doesn't act)
+        or a no-op (the ones N2 confirmed can reach real production side effects):
+
+          - ``sensor_check``/``sensor_debounce_pending``/``get_fan_physical_state``/
+            ``is_recent_fan_command`` are read-only observations of live HA/production
+            state — reused as-is, same callables the production bundle uses.
+          - ``emit_event`` is shadow-local (``_on_shadow_emit_event``) — appends to its
+            own capped log, never touches ``_event_log`` or the pre-cool rescheduling
+            side effect ``_emit_event`` triggers on a nat-vent exit transition.
+          - ``request_refresh``, ``post_grace_fan_check``, and ``reclassify`` are
+            no-op lambdas — each is invoked as a plain synchronous call (never
+            ``async_create_task(callback())``), so a lambda returning ``None`` is a
+            safe true no-op. These are exactly three of the four callables N2's
+            investigation traced as capable of reaching production: request_refresh
+            schedules a real coordinator refresh, post_grace_fan_check can reach
+            ``automation_engine.reconcile_fan_on_startup()`` (real fan commands gated
+            only by production's own live dry_run), and reclassify triggers a real
+            setpoint reassert task. The shadow engine's own dry_run only guards its
+            own service-call choke points — it has no bearing on what these callbacks
+            do once invoked, so isolation must be structural (no-op), not dry_run-based.
+          - ``revisit`` is left unset (``None``), not a no-op lambda: unlike the three
+            above, ``_schedule_revisit()`` invokes it as ``hass.async_create_task(
+            revisit_cb())`` — a lambda returning ``None`` would crash there (``None``
+            is not awaitable). Passing ``None`` makes ``AutomationEngine`` see
+            ``has_revisit_callback=False`` and skip scheduling the follow-up timer
+            entirely, which is the correct no-op for an engine whose actions are
+            always dry-run anyway.
+        """
+        return AutomationEngineCallbacks(
+            revisit=None,
+            sensor_check=self._any_sensor_open,
+            sensor_debounce_pending=lambda: bool(self._door_open_timers),
+            emit_event=self._on_shadow_emit_event,
+            request_refresh=lambda: None,
+            post_grace_fan_check=lambda: None,
+            get_fan_physical_state=self._get_fan_physical_state,
+            is_recent_fan_command=self._is_recent_fan_command,
+            reclassify=lambda: None,
+        )
+
+    def _on_shadow_emit_event(self, event_type: str, data: dict) -> None:
+        """Shadow-engine event sink (Issue #613) — a capped local log only.
+
+        Deliberately NOT ``_emit_event``: that method also mutates ``_nat_vent_was_active``
+        and can trigger ``_maybe_reschedule_pre_cool_on_nat_vent_exit()``, a real production
+        side effect keyed off the production engine's nat-vent transition, not the shadow's.
+        """
+        entry: dict[str, Any] = {"time": dt_util.now().isoformat(), "type": event_type, **data}
+        self._shadow_event_log.append(entry)
+        if len(self._shadow_event_log) > EVENT_LOG_CAP:
+            self._shadow_event_log.pop(0)
+
+    async def _mirror_to_shadow(self, method_name: str, *args: Any, **kwargs: Any) -> None:
+        """Replay a production nat-vent decision call on the shadow engine (Issue #613).
+
+        Isolated by construction (see ``_build_shadow_automation_callbacks``) and, on
+        top of that, isolated here: any exception raised by the shadow call is logged
+        and swallowed, never re-raised — a bug in the shadow engine's decision code
+        must never be able to affect production's own control flow.
+        """
+        try:
+            method = getattr(self.shadow_automation_engine, method_name)
+            await method(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — shadow errors must never affect production
+            _LOGGER.warning(
+                "Shadow engine mirror of %s() failed (isolated, no production impact): %s",
+                method_name,
+                exc,
+            )
+        finally:
+            try:
+                self._update_shadow_engine_diagnostic()
+            except Exception as diag_exc:  # noqa: BLE001 — diagnostic is best-effort observability
+                _LOGGER.warning(
+                    "Shadow engine diagnostic update failed (isolated, no production impact): %s",
+                    diag_exc,
+                )
+
+    def _update_shadow_engine_diagnostic(self) -> None:
+        """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613).
+
+        Reuses ``derive_nat_vent_lifecycle_state()`` (Issue #606) directly — the same
+        pure function both engines' state already agreed on in Phase 3's offline sweep
+        of 60 golden/pending scenarios. Live ``now`` is real wall-clock time here (not
+        a scenario timestamp), since this runs against the live coordinator.
+        """
+        from .nat_vent_lifecycle import NatVentLifecycleInputs, derive_nat_vent_lifecycle_state
+
+        now = dt_util.now()
+
+        def _state_for(ae: AutomationEngine) -> str:
+            inputs = NatVentLifecycleInputs(
+                natural_vent_active=bool(ae._natural_vent_active),
+                nat_vent_soft_start=bool(ae._nat_vent_soft_start),
+                paused_by_door=bool(ae._paused_by_door),
+                outdoor_exit_time=ae._nat_vent_outdoor_exit_time,
+                now=now,
+                lockout_seconds=300,
+            )
+            return derive_nat_vent_lifecycle_state(inputs).value
+
+        production_state = _state_for(self.automation_engine)
+        shadow_state = _state_for(self.shadow_automation_engine)
+        agrees = production_state == shadow_state
+        self._shadow_engine_diagnostic = {
+            "production_state": production_state,
+            "shadow_state": shadow_state,
+            "agrees": agrees,
+            "checked_at": now.isoformat(),
+        }
+        if not agrees:
+            _LOGGER.warning(
+                "Shadow engine disagreement (Issue #613): production=%s shadow=%s",
+                production_state,
+                shadow_state,
+            )
+
+    @property
+    def shadow_engine_diagnostic(self) -> dict[str, Any] | None:
+        """Latest production/shadow nat-vent lifecycle agreement snapshot, or None
+        before the first mirrored decision has run."""
+        return self._shadow_engine_diagnostic
 
     @property
     def automation_enabled(self) -> bool:
@@ -1602,6 +1746,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             first_sensor = open_sensors[0]
             _LOGGER.debug("[coalesce-diag] before handle_door_window_open(%s)", first_sensor)
             await self.automation_engine.handle_door_window_open(first_sensor)
+            await self._mirror_to_shadow("handle_door_window_open", first_sensor)
             _LOGGER.debug("[coalesce-diag] after handle_door_window_open(%s)", first_sensor)
             nat_vent_activated = self.automation_engine._natural_vent_active
             _LOGGER.info(
@@ -1625,6 +1770,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 c,
                 predicted_indoor=self._last_predicted_indoor,
                 indoor_temp=indoor_temp,
+            )
+            await self._mirror_to_shadow(
+                "apply_classification", c, predicted_indoor=self._last_predicted_indoor, indoor_temp=indoor_temp
             )
             _LOGGER.debug("[coalesce-diag] after apply_classification() [coalesce path]")
             hvac_commanded = True
@@ -2030,6 +2178,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     predicted_indoor=self._last_predicted_indoor,
                     indoor_temp=self._get_indoor_temp(),
                 )
+                await self._mirror_to_shadow(
+                    "apply_classification",
+                    self._current_classification,
+                    predicted_indoor=self._last_predicted_indoor,
+                    indoor_temp=self._get_indoor_temp(),
+                )
                 _LOGGER.debug("[coalesce-diag] after apply_classification() [regular cycle path]")
 
             # If the day type changed since the briefing was generated,
@@ -2096,6 +2250,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self._any_sensor_open():
                 _LOGGER.debug("[coalesce-diag] before check_natural_vent_conditions()")
                 await self.automation_engine.check_natural_vent_conditions()
+                await self._mirror_to_shadow("check_natural_vent_conditions")
                 _LOGGER.debug("[coalesce-diag] after check_natural_vent_conditions()")
 
             # Save state after classification update
@@ -3297,6 +3452,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             c.windows_recommended if c else False,
                         )
                         await self.automation_engine.handle_door_window_open(eid)
+                        await self._mirror_to_shadow("handle_door_window_open", eid)
                         # Trigger coordinator refresh so sensor entities reflect post-evaluation state
                         self.hass.async_create_task(self.async_request_refresh())
                         if self._today_record:
@@ -3349,6 +3505,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 ):
                     self._today_record.window_physical_close_time = dt_util.now().isoformat()
                 await self.automation_engine.handle_all_doors_windows_closed()
+                await self._mirror_to_shadow("handle_all_doors_windows_closed")
                 # Issue #489: post-decision refresh, mirroring the open path's
                 # post-handle_door_window_open refresh above — covers the real-pause-
                 # resume case (HVAC mode/temp restored, grace started), not just the
@@ -3393,6 +3550,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ):
             await self.automation_engine.nat_vent_temperature_check(
                 float(_new_temp_attr), outdoor=self._last_outdoor_temp
+            )
+        # Issue #613: mirrored unconditionally (not gated on production's own
+        # _natural_vent_active) — nat_vent_temperature_check() internally no-ops on
+        # `self._natural_vent_active` (the SHADOW's own flag when bound to the shadow
+        # instance), which is exactly the independent-conclusion check this diagnostic
+        # needs: does the shadow's own state agree production should even be running
+        # this check right now.
+        if _new_temp_attr is not None and _new_temp_attr != _old_temp_attr:
+            await self._mirror_to_shadow(
+                "nat_vent_temperature_check", float(_new_temp_attr), outdoor=self._last_outdoor_temp
             )
 
         # Issue #327: Thermostatic fan re-evaluation on every indoor temp tick.
@@ -7809,6 +7976,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._unsub_listeners.clear()
         self._unsubscribe_door_window_listeners()
         self.automation_engine.cleanup()
+        # Issue #613: the shadow engine schedules its own real async_call_later timers
+        # (grace, fan min-cycle, thermo backstop, etc.) via the real HA event loop even
+        # though its dry_run=True guards only the service-call choke points — cleanup()
+        # cancels those the same way it does for production.
+        self.shadow_automation_engine.cleanup()
 
 
 def _decide_pre_cool_reschedule(

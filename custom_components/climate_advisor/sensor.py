@@ -14,6 +14,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -83,6 +84,7 @@ async def async_setup_entry(
         ClimateAdvisorOutdoorTempSensor(coordinator, entry),
         ClimateAdvisorForecastHighSensor(coordinator, entry),
         ClimateAdvisorForecastLowSensor(coordinator, entry),
+        ClimateAdvisorShadowEngineStatusSensor(coordinator, entry),
     ]
 
     async_add_entities(entities)
@@ -459,3 +461,42 @@ class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
     def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
         """Initialize the forecast low temperature sensor."""
         super().__init__(coordinator, entry, ATTR_FORECAST_LOW, "Forecast Low", "mdi:thermometer-chevron-down")
+
+
+class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
+    """Diagnostic sensor: agreement between the live production and shadow automation
+    engines' nat-vent lifecycle state (Issue #613, Block 5 / epic #594, subtask Q).
+
+    The shadow engine is permanently dry_run=True and never issues a real command —
+    this sensor has zero occupant HVAC impact. It exists to validate the Block 5
+    architecture migration, not to inform HVAC behavior, so it is deliberately NOT
+    wired into any of the four occupant-facing Status-tab cards (see CLAUDE.md's
+    Status Card Ontology, Issue #527) — those each answer an occupant-facing
+    question this sensor doesn't.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: ClimateAdvisorCoordinator, entry: ConfigEntry) -> None:
+        """Initialize the shadow engine status sensor."""
+        super().__init__(coordinator, entry, "shadow_engine_status", "Shadow Engine Status", "mdi:compare")
+
+    @property
+    def native_value(self) -> str:
+        """Return "agree", "disagree", or "inactive" (before the first mirrored decision)."""
+        diag = self.coordinator.shadow_engine_diagnostic
+        if diag is None:
+            return "inactive"
+        return "agree" if diag["agrees"] else "disagree"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Both engines' derived lifecycle state and when the comparison last ran."""
+        diag = self.coordinator.shadow_engine_diagnostic
+        if diag is None:
+            return {}
+        return {
+            "production_state": diag["production_state"],
+            "shadow_state": diag["shadow_state"],
+            "checked_at": diag["checked_at"],
+        }

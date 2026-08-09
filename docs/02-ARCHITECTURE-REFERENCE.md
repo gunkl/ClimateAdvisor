@@ -20,7 +20,7 @@
 | Where is the Tier 3 spec for the Activity Report per-event table — event vocabulary, setpoint convention, renderer runbook? | The Territory spec covers 34 event types in 6 groups, `_format_band_setpoint` single-setpoint convention, `EVENT_RENDERERS` registry, `_default_renderer` contract, dedup mechanics, and the four-step runbook for adding a new renderer. | [Activity Report Table Spec](activity-report-table.md) |
 | What replaced the ClimateSimulator and how does the production harness work? | Issue #236 eliminated the standalone simulator engine. `tools/sim_harness/` drives the real `AutomationEngine` headless via FakeHass + FakeScheduler. `tools/simulate.py` is now a CLI/MANIFEST shell only. | [Sim Harness Brief](sim-harness-brief.md) |
 | What are the full contracts for FakeHass, FakeScheduler, run_production, and outcomes? | FakeHass service-bus interception + state-feedback loop; FakeScheduler virtual clock patching contract; run_production event dispatch table including predicted_indoor ODE re-classification; outcomes custom assertion types. | [Sim Harness Spec](sim-harness-spec.md) |
-| Is it safe to construct a second `AutomationEngine` instance, and what must a future shadow engine never share with production? | `AutomationEngine` has no hidden shared state — safe to instantiate twice. The coordinator's 9 callback attributes are not: 4 reach into real production state/side effects regardless of which engine fired them. `AutomationEngineCallbacks` (Issue #604) makes isolation structural, not a runtime check. | [§Engine Callback Isolation](02-ARCHITECTURE-REFERENCE.md#engine-callback-isolation-issue-604-block-5-subtask-n2) |
+| Is there a live second `AutomationEngine` instance, and what does it never share with production? | Yes — `coordinator.shadow_automation_engine` (Issue #613), permanently `dry_run=True`, `role="shadow"`. The coordinator's 9 callback attributes are not automatically safe to reuse: 4 reach into real production state/side effects regardless of which engine fired them, so the shadow gets its own bundle (`_build_shadow_automation_callbacks()`). `AutomationEngineCallbacks` (Issue #604) makes isolation structural, not a runtime check. | [§Engine Callback Isolation](02-ARCHITECTURE-REFERENCE.md#engine-callback-isolation-issue-604-block-5-subtask-n2) |
 
 ## File Structure
 
@@ -346,18 +346,44 @@ The coordinator's own wiring is built by `_build_production_automation_callbacks
 behavior-preserving extraction of what used to be 9 individual post-construction
 assignments, now one bundle passed at construction time
 (`AutomationEngine(..., callbacks=self._build_production_automation_callbacks(),
-role="production")`). `coordinator.shadow_automation_engine` exists as a placeholder
-(`None` until Block 5 subtask Q) so the schema field is stable from N2 onward.
+role="production")`).
 
-**Rule for any future second `AutomationEngine` instance (Block 5 subtask Q and beyond)**:
-build a dedicated `AutomationEngineCallbacks` bundle for it. It must **never** reuse
-`coordinator._on_post_grace_fan_check`, `coordinator._emit_event`,
-`coordinator.async_request_refresh`, or the `_request_refresh_callback` lambda that wraps
-it — reusing any of those lets the second engine's events/decisions mutate real production
-state and event history regardless of the second engine's own `dry_run`/`role`.
-`tests/test_engine_callback_isolation.py::TestHazardCharacterization` reproduces this exact
-hazard today (a second engine built with the production bundle leaks an event into the
-production event log) as a concrete negative example for review.
+**Block 5 subtask Q (Issue #613) built the second instance** N2 scaffolded a placeholder
+for: `coordinator.shadow_automation_engine` is now a real, live `AutomationEngine`,
+`role="shadow"`, `dry_run=True` set immediately after construction and never toggled
+(no owner-facing switch this phase — that's Phase 5/subtask R). It is built with its own
+`_build_shadow_automation_callbacks()` bundle:
+
+- The 4 hazardous callables above are cut off structurally, not dry_run-gated: `revisit`
+  is left `None` (not a no-op lambda — `_schedule_revisit()` calls it via
+  `hass.async_create_task(revisit_cb())`, which would crash on a lambda returning `None`);
+  `request_refresh`, `post_grace_fan_check`, and `reclassify` are no-op lambdas (safe here
+  because `automation.py` invokes all three as plain synchronous calls, never wrapped in
+  `async_create_task`).
+- `sensor_check`, `sensor_debounce_pending`, `get_fan_physical_state`,
+  `is_recent_fan_command` are pure reads — safely shared with production's own bundle.
+- `emit_event` is shadow-local (`coordinator._on_shadow_emit_event`, a capped list),
+  never `coordinator._emit_event`.
+
+Production's nat-vent decision calls (`apply_classification`, `handle_door_window_open`,
+`handle_all_doors_windows_closed`, `check_natural_vent_conditions`,
+`nat_vent_temperature_check`) are each replayed on the shadow engine via
+`coordinator._mirror_to_shadow()` immediately after the production call, with the same
+arguments — isolated by a try/except that swallows (and logs at WARNING) any shadow-side
+exception, including one from the agreement-diagnostic recompute that follows it, so a
+shadow-engine bug can never affect production's own control flow. Full detail —
+mirrored call sites, the diagnostic sensor, shutdown/cleanup — is in
+`docs/nat-vent-lifecycle-spec.md`'s "Live Shadow Engine" section, not duplicated here.
+
+**Rule for any future second `AutomationEngine` instance**: build a dedicated
+`AutomationEngineCallbacks` bundle for it, following `_build_shadow_automation_callbacks()`'s
+pattern. It must **never** reuse `coordinator._on_post_grace_fan_check`,
+`coordinator._emit_event`, `coordinator.async_request_refresh`, or the
+`_request_refresh_callback` lambda that wraps it — reusing any of those lets the second
+engine's events/decisions mutate real production state and event history regardless of the
+second engine's own `dry_run`/`role`. `tests/test_engine_callback_isolation.py::TestHazardCharacterization`
+reproduces this exact hazard today (a second engine built with the production bundle leaks
+an event into the production event log) as a concrete negative example for review.
 
 ## Automation Engine — Occupancy Methods
 

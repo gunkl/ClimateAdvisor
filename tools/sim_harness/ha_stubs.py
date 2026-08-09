@@ -35,6 +35,7 @@ _HA_MODULES = [
     "homeassistant.const",
     "homeassistant.core",
     "homeassistant.helpers",
+    "homeassistant.helpers.entity",
     "homeassistant.helpers.update_coordinator",
     "homeassistant.helpers.entity_platform",
     "homeassistant.helpers.event",
@@ -248,6 +249,14 @@ class _UnitOfTemperature(_enum.StrEnum):
     KELVIN = "K"
 
 
+class _EntityCategory(_enum.StrEnum):
+    """Issue #613: first diagnostic-category entity in this codebase
+    (ClimateAdvisorShadowEngineStatusSensor)."""
+
+    CONFIG = "config"
+    DIAGNOSTIC = "diagnostic"
+
+
 def install_ha_stubs() -> None:
     """Install homeassistant.* mock modules into sys.modules (idempotent).
 
@@ -286,6 +295,10 @@ def install_ha_stubs() -> None:
     helpers = sys.modules["homeassistant.helpers"]
     helpers.entity_registry = sys.modules["homeassistant.helpers.entity_registry"]
     helpers.device_registry = sys.modules["homeassistant.helpers.device_registry"]
+    helpers.entity = sys.modules["homeassistant.helpers.entity"]
+
+    entity_mod = sys.modules["homeassistant.helpers.entity"]
+    entity_mod.EntityCategory = _EntityCategory
 
     core = sys.modules["homeassistant.core"]
     core.Context = _MockContext

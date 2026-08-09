@@ -626,6 +626,10 @@ class ClimateAdvisorResumeFromPauseView(HomeAssistantView):
             return self.json({"status": "ok", "message": "Not currently paused"})
 
         restored_mode = await ae.resume_from_pause()
+        # Issue #615: mirror onto the shadow engine too — resume_from_pause() internally
+        # no-ops if the shadow doesn't believe it's paused, same unconditional-mirror
+        # pattern used for the coordinator-driven decision methods.
+        await coordinator._mirror_to_shadow("resume_from_pause")
         return self.json(
             {
                 "status": "ok",

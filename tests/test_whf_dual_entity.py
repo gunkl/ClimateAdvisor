@@ -80,6 +80,8 @@ def _make_coord_stub(config: dict) -> MagicMock:
     # _suppress_during_startup_coalescing() guard; coord being a bare MagicMock would
     # otherwise return a truthy MagicMock and silently suppress dispatch tests below.
     coord._suppress_during_startup_coalescing = MagicMock(return_value=False)
+    # Issue #615: on_fan_turned_off() is now mirrored onto the shadow engine too.
+    coord._mirror_to_shadow = AsyncMock()
 
     return coord
 

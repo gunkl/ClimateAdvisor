@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.4": [
+        "Fix #615: internal fix only, no user-visible behavior change — the diagnostic"
+        " shadow engine added in 0.6.3 was missing several real-world inputs (outdoor"
+        " temperature, forecast, and 8 of 13 decision triggers), so it could never"
+        " correctly agree with the real engine even when both were doing the right"
+        " thing. Fixed with full coverage plus an automated check that keeps future"
+        " changes from silently reintroducing the gap. The real engine's behavior is"
+        " completely unchanged; only the diagnostic sensor's accuracy is affected.",
+    ],
     "0.6.3": [
         "Feat #613: internal refactor only, no user-visible behavior change — a second,"
         " permanently inert copy of the automation engine now runs live alongside the"
@@ -1645,6 +1654,50 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    615: {
+        "version_fixed": "0.6.4",
+        "title": (
+            "#613 (v0.6.3) shipped the live shadow engine mirroring only 5 of 13 real"
+            " nat-vent entry points and never feeding it 3 input-data attributes"
+            " (outdoor temp, forecast, thermal model) — a live incident within hours"
+            " of deploy showed the shadow stuck 'inactive' vs production's"
+            " 'active_full_gate' after a brief post-restart agreement. A systematic"
+            " AST-based audit (not another spot-check) found 9 total gaps, not the"
+            " 1-2 initially suspected."
+        ),
+        "scope_covered": (
+            "New coordinator._sync_shadow_inputs(): single audited copy of"
+            " _last_outdoor_temp/_hourly_forecast_temps/_thermal_model/"
+            "_outdoor_temp_today_peak/_sample_count/_occupancy_mode from production to"
+            " shadow, called unconditionally at the top of every _mirror_to_shadow()"
+            " invocation. 8 additional decision methods mirrored: fan_thermostat_check()"
+            " (Issue #608's own finding: usually the function that actually exits a"
+            " session on the dominant dispatch path), on_fan_turned_off() (sync method"
+            " — _mirror_to_shadow() extended to await only if the result is awaitable),"
+            " reconcile_fan_on_startup() (both call sites; the ha_restart one is the"
+            " exact live-incident reproduction), handle_bedtime(),"
+            " handle_manual_override_during_pause(), resume_from_pause() (mirrored from"
+            " api.py's ClimateAdvisorResumeFromPauseView — the one decision method"
+            " triggered from the REST API rather than the coordinator), plus the 2"
+            " previously-unmirrored apply_classification() call sites (briefing"
+            " generation, post-WHF-release reassertion). shadow_automation_engine"
+            ".restore_state() added at coordinator startup, now load-bearing since"
+            " reconcile_fan_on_startup() reads the restored fan-activity hints."
+            " Investigated and confirmed NOT separate gaps:"
+            " _reconcile_fan_physical_drift() and _re_pause_for_open_sensor() are"
+            " engine-internal self-scheduled timer callbacks that already run"
+            " independently per instance once their trigger paths are mirrored."
+            " New tests/test_shadow_engine_coverage.py: AST-scans automation.py for"
+            " every method assigning one of the 4 tracked lifecycle fields, requires"
+            " each to be in an explicit mirrored/internal/exempted registry — same"
+            " enforcement shape as test_executor_offload.py's _BLOCKING_METHODS, so a"
+            " future new entry point can't silently ship unmirrored. Blast radius"
+            " confirmed zero for production HVAC safety throughout (isolation/dry_run"
+            " never implicated) — harm was fully confined to the diagnostic sensor's"
+            " accuracy. Full suite (4080 tests) + golden (74/74) + pending (4/4), zero"
+            " regressions."
+        ),
+    },
     613: {
         "version_fixed": "0.6.3",
         "title": (

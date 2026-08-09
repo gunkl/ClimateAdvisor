@@ -13,6 +13,13 @@ Covers:
   - ``_update_shadow_engine_diagnostic``: agreement/disagreement detection,
     including a positive control that forces disagreement.
   - Shutdown: shadow engine timers get cancelled alongside production's.
+
+Issue #615 (coverage-gap follow-up) adds:
+  - ``_sync_shadow_inputs()``: outdoor temp/forecast/thermal-model/occupancy parity,
+    with a positive control (the exact bug: input never mirrored → gate can't fire).
+  - Representative newly-mirrored decision methods: ``reconcile_fan_on_startup()``
+    (the exact live-incident reproduction), ``fan_thermostat_check()`` (Issue #608's
+    dominant-exit-path finding), and sync-method mirroring (``on_fan_turned_off()``).
 """
 
 from __future__ import annotations
@@ -212,6 +219,114 @@ class TestShadowEngineShutdown:
         coordinator.shadow_automation_engine.cleanup = lambda: cleaned.append(1)  # type: ignore[assignment]
         _run(coordinator.async_shutdown())
         assert cleaned == [1]
+
+
+class TestSyncShadowInputs:
+    """Issue #615: the confirmed live bug — shadow's _last_outdoor_temp stayed None
+    forever because nothing ever called update_outdoor_temp() on it."""
+
+    def test_outdoor_temp_parity_after_mirror_call(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine.update_outdoor_temp(72.5)
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._last_outdoor_temp == 72.5
+
+    def test_forecast_and_thermal_model_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._hourly_forecast_temps = [{"temperature": 80}]
+        coordinator.automation_engine._thermal_model = {"confidence": "high"}
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._hourly_forecast_temps == [{"temperature": 80}]
+        assert coordinator.shadow_automation_engine._thermal_model == {"confidence": "high"}
+
+    def test_occupancy_mode_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine.set_occupancy_mode("away")
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._occupancy_mode == "away"
+
+    def test_positive_control_missing_sync_reproduces_the_live_bug(self) -> None:
+        """Without _sync_shadow_inputs(), outdoor temp stays None on the shadow even
+        after production has a real reading — proves this test would have caught
+        tonight's incident before it shipped."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine.update_outdoor_temp(72.5)
+        coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._last_outdoor_temp is None
+
+
+class TestNewlyMirroredDecisionMethods:
+    """Representative coverage for Issue #615's 8 newly-mirrored entry points — not
+    exhaustive per-method duplication, but the ones with the most real-world weight."""
+
+    def test_reconcile_fan_on_startup_is_mirrored(self) -> None:
+        """The exact live-incident reproduction: startup-time fan reconciliation."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        captured: list[tuple] = []
+
+        async def _fake(**kwargs):
+            captured.append(kwargs)
+
+        coordinator.shadow_automation_engine.reconcile_fan_on_startup = _fake
+        _run(
+            coordinator._mirror_to_shadow(
+                "reconcile_fan_on_startup",
+                indoor=70.0,
+                outdoor=65.0,
+                thermostat_fan_running=True,
+                any_sensor_open=False,
+                trigger="ha_restart",
+            )
+        )
+        assert captured == [
+            {
+                "indoor": 70.0,
+                "outdoor": 65.0,
+                "thermostat_fan_running": True,
+                "any_sensor_open": False,
+                "trigger": "ha_restart",
+            }
+        ]
+
+    def test_fan_thermostat_check_is_mirrored(self) -> None:
+        """Issue #608's own finding: this is usually the function that actually exits
+        a nat-vent session on the dominant dispatch path — #613 mirrored its sibling
+        (nat_vent_temperature_check) but not this one."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        captured: list[tuple] = []
+
+        async def _fake(**kwargs):
+            captured.append(kwargs)
+
+        coordinator.shadow_automation_engine.fan_thermostat_check = _fake
+        _run(coordinator._mirror_to_shadow("fan_thermostat_check", indoor=70.0, outdoor=65.0, trigger="tick"))
+        assert captured == [{"indoor": 70.0, "outdoor": 65.0, "trigger": "tick"}]
+
+    def test_sync_method_on_fan_turned_off_is_mirrored_without_awaiting_none(self) -> None:
+        """on_fan_turned_off() is a plain sync method (returns None, not a coroutine) —
+        _mirror_to_shadow() must call it without awaiting the result."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        captured: list[tuple] = []
+
+        def _fake(**kwargs):
+            captured.append(kwargs)
+            return None
+
+        coordinator.shadow_automation_engine.on_fan_turned_off = _fake
+        _run(coordinator._mirror_to_shadow("on_fan_turned_off", fan_before="on", fan_after="off"))
+        assert captured == [{"fan_before": "on", "fan_after": "off"}]
+
+    def test_handle_bedtime_is_mirrored(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        called: list[bool] = []
+
+        async def _fake():
+            called.append(True)
+
+        coordinator.shadow_automation_engine.handle_bedtime = _fake
+        _run(coordinator._mirror_to_shadow("handle_bedtime"))
+        assert called == [True]
 
 
 def _run(coro):

@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.5"
+VERSION = "0.6.6"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.6": [
+        "Fix #620: if you turned the whole-house fan off manually while a window was open"
+        " and the outdoor air was still favorable, the automation could turn it back on"
+        " within seconds, undoing your action. Separately, once a fan session ended (for"
+        " any reason) with a window still open, the AC or heat could get set active with"
+        " that window open — even if the window had been open for a while and nothing"
+        " had ever noticed. All three now correctly pause instead. Also: the Status card"
+        " now shows how much longer an active grace period will last and why it started,"
+        " information that was previously only visible on the Debug tab.",
+    ],
     "0.6.5": [
         "Fix #618: on a hot or cold day, if a whole-house-fan/natural-ventilation session"
         " ended while a window was still open, HVAC could stay silently un-managed for"
@@ -1664,6 +1674,56 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    620: {
+        "version_fixed": "0.6.6",
+        "title": (
+            "Three independent gaps, all confirmed in a live 2026-08-11 incident where"
+            " HVAC was set to cool with a monitored window open. (1)"
+            " check_natural_vent_conditions()'s _idle_open widening (Issue #244/#402/#504)"
+            " never checked _grace_active, unlike the Issue #134 comfort-ceiling exception"
+            " beside it — a user manually turning the WHF off could see it reactivated"
+            " within 5 seconds if outdoor stayed favorable, directly violating"
+            " docs/grace-periods-spec.md's documented fan-off-grace guarantee. (2)"
+            " fan_thermostat_check()'s STOP_DEACTIVATE and STOP_COOLED_TO_FLOOR outcomes"
+            " were never migrated to _exit_nat_vent() when Issue #418 fixed their sibling"
+            " STOP_VIA_NAT_VENT_EXIT for the identical bug (restore_hvac=True default with"
+            " no live sensor check) — a comfort-floor exit could silently restore an"
+            " active mode into an open window. (3, the deepest gap) decide_scheduled_band_gate()'s"
+            " paused_by_door input (Issue #498) reflected only event history"
+            " (handle_door_window_open()/_exit_nat_vent()), never live sensor state — a"
+            " sensor open since before either of those paths ever ran left the flag False"
+            " forever, so the routine apply_classification()/handle_bedtime()/"
+            "handle_morning_wakeup()/handle_pre_cool() comfort-restore write had zero live"
+            " check at all."
+        ),
+        "scope_covered": (
+            "automation.py: _idle_open gained 'and not self._grace_active'. "
+            "fan_thermostat_check()'s two unmigrated stop outcomes now route through"
+            " _exit_nat_vent(), with event emission made conditional on whether a genuine"
+            " nat-vent session was active (both outcomes can also fire for a non-nat-vent"
+            " CA fan, e.g. min-runtime cycling) to avoid mislabeling that case's Activity"
+            " Record entry. New _sensor_debounce_pending property (extracted from"
+            " _idle_open's own inline pattern — second consumer of the existing"
+            " _sensor_debounce_pending_callback, not a new debounce mechanism) and new"
+            " _sync_paused_by_door_with_live_sensors() helper, called at the top of all 4"
+            " decide_scheduled_band_gate() callers, reusing the existing"
+            " _pause_for_door_window() (Issue #523). coordinator.py:"
+            " _compute_automation_status()'s grace branch now appends"
+            " _format_grace_remaining() (Issue #498, previously wired only into the"
+            " Next-Action cards and orphaned there by Issue #527's Status Card Ontology"
+            " cleanup) and _last_action_reason — both already correctly shown on the"
+            " Debug tab, now also on the Status card. tools/sim_harness/outcomes.py:"
+            " two new assertion types (fan_not_active, paused_by_door), same pattern as"
+            " the existing nat_vent_still_active/nat_vent_not_active. 2 new pending"
+            " scenarios (both revert-tested to confirm they fail without their fix); a"
+            " 3rd was attempted for fan_thermostat_check()'s tick-level path specifically"
+            " but moved to unsupported/ after the harness proved unable to isolate it from"
+            " a parallel, already-correct comfort-floor implementation"
+            " (nat_vent_temperature_check()) — that fix's correctness rests on"
+            " tests/test_fan_control.py's existing unit coverage instead, which caught a"
+            " real event-mislabeling regression during this fix's own implementation."
+        ),
+    },
     618: {
         "version_fixed": "0.6.5",
         "title": (

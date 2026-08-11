@@ -1793,6 +1793,9 @@ class AutomationEngine:
             # shared gate (desired_state.decide_scheduled_band_gate()) also used by
             # handle_bedtime()/handle_morning_wakeup()/handle_pre_cool() — pure extraction of
             # this exact check order, no behavior change for this call site.
+            # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor
+            # open since before any event-driven pause path ran would otherwise never be seen.
+            await self._sync_paused_by_door_with_live_sensors()
             _gate = decide_scheduled_band_gate(
                 occupancy_mode=self._occupancy_mode,
                 manual_override_active=self._manual_override_active,
@@ -2668,6 +2671,44 @@ class AutomationEngine:
                 "duration_hours": 2,
             }
 
+    @property
+    def _sensor_debounce_pending(self) -> bool:
+        """True if any monitored sensor is still inside its open/close debounce settle window.
+
+        Single source of truth for "momentary/transient vs. genuinely settled" sensor state —
+        reused by ``_idle_open`` (the reactivation-gate widening from Issue #244/#402/#504) and
+        ``_sync_paused_by_door_with_live_sensors()`` (Issue #620) so the two callers can never
+        define "settled" differently.
+        """
+        return bool(self._sensor_debounce_pending_callback and self._sensor_debounce_pending_callback())
+
+    async def _sync_paused_by_door_with_live_sensors(self) -> None:
+        """Reconcile ``_paused_by_door`` with live, debounce-settled sensor state (Issue #620).
+
+        ``_paused_by_door`` is normally only set by event-driven paths
+        (``handle_door_window_open()`` on a fresh open, ``_exit_nat_vent()``'s sensor-open
+        branch). A sensor that was already open *before* either of those ever ran leaves it
+        ``False`` forever — so ``decide_scheduled_band_gate()``'s four callers
+        (``apply_classification``/``handle_bedtime``/``handle_morning_wakeup``/``handle_pre_cool``)
+        could write an active HVAC mode into an open window with no live check at all. Confirmed
+        live: 2026-08-11 incident, a sensor open since bedtime with no fresh open event ever
+        firing. Call this at the top of each of those four, before they build the gate's inputs.
+        """
+        if self._paused_by_door or self._natural_vent_active or self._whf_owns_hvac():
+            return  # already paused, or nat-vent/WHF already legitimately owns this
+        if self._is_within_planned_window_period():
+            return  # windows intentionally open — same exception handle_door_window_open() honors
+        if self._sensor_debounce_pending or not self._any_monitored_sensor_open():
+            return  # not open, or only momentarily/transiently open — do not pause on a blip
+        await self._pause_for_door_window(
+            entity_label="monitored door/window",
+            reason="door/window still open at comfort-restore time",
+            notify_message=(
+                "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
+            ),
+            notify_type="door_window_pause",
+        )
+
     async def _pause_for_door_window(
         self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
     ) -> bool:
@@ -3015,10 +3056,17 @@ class AutomationEngine:
                 # enough for #244's scenario to matter has long since cleared its debounce timer,
                 # so this is a no-op for #244 — it only blocks reacting to a sensor still
                 # bouncing/settling (was previously indistinguishable from a real, stable open).
-                _debounce_pending = bool(
-                    self._sensor_debounce_pending_callback and self._sensor_debounce_pending_callback()
+                # Issue #620: _idle_open must not bypass an active grace period — grace exists
+                # specifically to gate nat-vent re-activation (docs/grace-periods-spec.md:79,95),
+                # and this widening (Issue #244/#402/#504) was the one path that never checked
+                # it. The comfort-ceiling exception beside it (Issue #134) is untouched — genuine
+                # overheating during grace still re-engages nat-vent.
+                _idle_open = (
+                    self._any_monitored_sensor_open()
+                    and _hvac_off_244
+                    and not self._sensor_debounce_pending
+                    and not self._grace_active
                 )
-                _idle_open = self._any_monitored_sensor_open() and _hvac_off_244 and not _debounce_pending
                 if not ((self._grace_active and _indoor is not None and _indoor > _cool) or _idle_open):
                     return
 
@@ -3189,15 +3237,26 @@ class AutomationEngine:
                 )
 
                 if exit_decision.reason == NatVentExitReason.COMFORT_FLOOR:
+                    # Note (Issue #620 investigation): like fan_thermostat_check()'s
+                    # STOP_COOLED_TO_FLOOR (now fixed via _exit_nat_vent()), this branch calls
+                    # _deactivate_fan() with default restore_hvac=True and no live sensor check
+                    # — the same bug class. NOT migrated to _exit_nat_vent() here: unlike the
+                    # fast-path branches, this one explicitly restores to
+                    # _current_classification.hvac_mode (live intent) via the _set_hvac_mode()/
+                    # _set_temperature_for_mode() calls below, not _exit_nat_vent()'s
+                    # _pre_fan_hvac_mode snapshot — those are different restore-target semantics
+                    # that need their own decision, not a mechanical swap. Flagged as a known
+                    # follow-up, out of scope for #620.
                     _vent_floor = exit_decision.vent_floor
                     self._natural_vent_active = False
                     await self._deactivate_fan(
                         reason=(f"natural vent exit: indoor {indoor:.1f}°F ≤ comfort floor {_vent_floor:.1f}°F")
                     )
                     _LOGGER.info(
-                        "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring heat",
+                        "Natural vent exit (comfort floor): indoor %.1f°F ≤ floor %.1f°F — restoring %s",
                         indoor,
                         _vent_floor,
+                        self._current_classification.hvac_mode if self._current_classification else "unknown",
                     )
                     if self._emit_event_callback:
                         self._emit_event_callback(
@@ -3753,7 +3812,32 @@ class AutomationEngine:
                 True,
                 f"stop:{stop_reason}",
             )
-            await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
+            # Issue #620: previously a bare _deactivate_fan() call — restore_hvac defaulted to
+            # True with no check of live sensor state, the exact pre-#418 pattern documented
+            # above at STOP_VIA_NAT_VENT_EXIT. Route through the same single choke point so a
+            # monitored sensor still open at this stop is paused, not silently restored into.
+            # This branch fires for ANY CA-owned fan (nat-vent session or not, e.g. a
+            # min-runtime-cycle fan) — unlike STOP_VIA_NAT_VENT_EXIT, which only fires when a
+            # nat-vent session is active. Only label the event nat-vent-specific when one
+            # genuinely was; otherwise emit the same generic event _deactivate_fan() itself
+            # would have (test_stops_non_natvent_fan_without_natvent_event).
+            _was_nat_vent = self._natural_vent_active
+            if self._emit_event_callback:
+                if _was_nat_vent:
+                    self._emit_event_callback(
+                        "nat_vent_outdoor_rise_exit",
+                        {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
+                    )
+                else:
+                    self._emit_event_callback(
+                        "fan_deactivated",
+                        {
+                            "reason": f"fan thermostat check — {stop_reason}",
+                            "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+                            "fan_device": _fan_device_label(self.config),
+                        },
+                    )
+            await self._exit_nat_vent(reason=f"fan thermostat check — {stop_reason}")
             return
 
         # outcome is STOP_COOLED_TO_FLOOR
@@ -3781,10 +3865,40 @@ class AutomationEngine:
             True,
             f"stop:{stop_reason}",
         )
-        if self._natural_vent_active:
-            self._natural_vent_active = False
-            self._nat_vent_soft_start = False
-        await self._deactivate_fan(reason=f"fan thermostat check — {stop_reason}")
+        # Issue #620: previously a bare _deactivate_fan() call after manually clearing
+        # _natural_vent_active — restore_hvac defaulted to True with no check of live sensor
+        # state (the exact incident this issue is about: WHF stops here, and the pre-suppression
+        # HVAC mode gets restored into a window that's still open). _exit_nat_vent() already
+        # clears _natural_vent_active/_nat_vent_soft_start itself and checks the sensor before
+        # deciding whether to restore or pause — same single choke point as the two branches
+        # above. This branch fires for ANY CA-owned fan (nat-vent or not, e.g. min-runtime
+        # cycling) — only label the event nat-vent-specific when one genuinely was active,
+        # mirroring the same distinction made for STOP_DEACTIVATE above.
+        _was_nat_vent_floor = self._natural_vent_active
+        if self._emit_event_callback:
+            if _was_nat_vent_floor:
+                self._emit_event_callback(
+                    "nat_vent_comfort_floor_exit",
+                    {
+                        "indoor_temp": indoor,
+                        "comfort_heat": vent_floor_ftc,
+                        "fan_mode_change": "on→auto",
+                        "fan_device": _fan_device_label(self.config),
+                        "hvac_mode_restored": (
+                            self._current_classification.hvac_mode if self._current_classification else "unknown"
+                        ),
+                    },
+                )
+            else:
+                self._emit_event_callback(
+                    "fan_deactivated",
+                    {
+                        "reason": f"fan thermostat check — {stop_reason}",
+                        "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
+        await self._exit_nat_vent(reason=f"fan thermostat check — {stop_reason}")
 
     async def reconcile_fan_on_startup(
         self,
@@ -4640,6 +4754,9 @@ class AutomationEngine:
         # reversal exit, sleep-aware cycling target), so bedtime just defers entirely while
         # nat-vent/WHF is active. (2) bedtime now also defers when paused by an open door/
         # window, which it never checked before (finding #11).
+        # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
+        # since before any event-driven pause path ran would otherwise never be seen.
+        await self._sync_paused_by_door_with_live_sensors()
         _gate = decide_scheduled_band_gate(
             occupancy_mode=self._occupancy_mode,
             manual_override_active=self._manual_override_active,
@@ -4829,6 +4946,9 @@ class AutomationEngine:
         # nat_vent_temperature_check() already cycles the fan around during the sleep window —
         # free cooling is already doing at least as much work as pre-cool's own AC ceiling
         # would (Issue #498 finding #8a).
+        # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
+        # since before any event-driven pause path ran would otherwise never be seen.
+        await self._sync_paused_by_door_with_live_sensors()
         _gate = decide_scheduled_band_gate(
             occupancy_mode=self._occupancy_mode,
             manual_override_active=self._manual_override_active,
@@ -4978,6 +5098,9 @@ class AutomationEngine:
         # skips whenever the user is overriding the fan (previously missing that check
         # entirely, unlike handle_bedtime()). It also now defers when paused by an open door/
         # window, which it never checked before (finding #11).
+        # Issue #620: reconcile _paused_by_door with live sensor state first — a sensor open
+        # since before any event-driven pause path ran would otherwise never be seen.
+        await self._sync_paused_by_door_with_live_sensors()
         _gate = decide_scheduled_band_gate(
             occupancy_mode=self._occupancy_mode,
             manual_override_active=self._manual_override_active,

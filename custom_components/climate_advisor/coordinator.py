@@ -7047,7 +7047,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self.automation_engine._resumed_from_pause:
                 return "resumed — door/window override"
             source = self.automation_engine._last_resume_source or "automation"
-            return f"grace period ({source})"
+            # Issue #620: the countdown (_format_grace_remaining()) and reason
+            # (_last_action_reason) are already correctly shown on the Debug tab — this brings
+            # the same already-existing, already-maintained data onto the Status card, which per
+            # the Status Card Ontology is the only card where mechanism state belongs.
+            _ae_reason = self.automation_engine._last_action_reason
+            _reason_suffix = f" — {_ae_reason}" if _ae_reason else ""
+            return f"grace period ({source}){_reason_suffix}{self._format_grace_remaining(self.automation_engine)}"
         if self._occupancy_mode == OCCUPANCY_VACATION:
             return "active (vacation)"
         if self._occupancy_mode == OCCUPANCY_AWAY:

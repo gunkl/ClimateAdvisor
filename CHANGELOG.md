@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.6] — 2026-08-11
+
+- Fix #620: if you turned the whole-house fan off manually while a window was open and the outdoor air was still favorable, the automation could turn it back on within seconds, undoing your action. Separately, once a fan session ended (for any reason) with a window still open, the AC or heat could get set active with that window open — even if the window had been open for a while and nothing had ever noticed. All three now correctly pause instead. Also: the Status card now shows how much longer an active grace period will last and why it started, information that was previously only visible on the Debug tab.
+
 ## [0.6.5] — 2026-08-10
 
 - Fix #618: on a hot or cold day, if a whole-house-fan/natural-ventilation session ended while a window was still open, HVAC could stay silently un-managed for hours after the window closed — classification wanted the AC or heat on, but the mode never got applied and nothing indicated a problem. A related bug could also cancel AC that had just started cooling, moments after it began, if the thermostat reported a normal post-cycle fan phase. Both are fixed. Also: a specific corrective HVAC-mode restore now shows up in the Activity Record instead of being invisible.

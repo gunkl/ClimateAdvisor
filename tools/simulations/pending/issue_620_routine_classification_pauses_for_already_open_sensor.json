@@ -1,0 +1,102 @@
+{
+  "name": "issue_620_routine_classification_pauses_for_already_open_sensor",
+  "description": "apply_classification()'s routine comfort-restore write must pause instead of setting an active HVAC mode when a monitored sensor has been open since before any event-driven pause path ever ran (Issue #620, Fix A)",
+  "source": "issue-report",
+  "issue": 620,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant impact: on 2026-08-11, a door/window sensor had been open since bedtime (~05:25)",
+    "with no fresh 'sensor opened' event ever firing (handle_door_window_open() was never",
+    "invoked for it) -- so _paused_by_door stayed False. When the fan session that had been",
+    "suppressing HVAC ended, apply_classification()'s routine comfort-restore write went ahead",
+    "and set HVAC to cool@74F with the window open, because that write path only ever checked",
+    "the _paused_by_door FLAG (event history), never live sensor state.",
+    "",
+    "Scenario design: outdoor is deliberately kept far above indoor throughout (85F vs 70F) so",
+    "nat-vent/WHF is never eligible or involved -- this isolates the routine",
+    "apply_classification() choke point (Fix A) from the nat-vent-specific fixes (B, C). The",
+    "sensor is seeded already-open (no dispatch), matching the real incident's shape of a",
+    "sensor that had been open for a while, not one that just opened. A second classification",
+    "event re-triggers apply_classification()'s routine write with the sensor already open --",
+    "this models any of the four real call sites (apply_classification/handle_bedtime/",
+    "handle_morning_wakeup/handle_pre_cool) re-evaluating on their next cycle.",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: removing the",
+    "    'await self._sync_paused_by_door_with_live_sensors()' call from",
+    "    apply_classification() (Fix A) would make this scenario fail -- the second",
+    "    classification event would proceed straight to PROCEED (whf_owns_hvac=False,",
+    "    paused_by_door=False) and write cool@74F with the window open. Verified via",
+    "    revert-test before promoting this scenario.",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md's",
+    "    decide_scheduled_band_gate() / Issue #498 section is updated (Issue #620 doc pass) to",
+    "    document _sync_paused_by_door_with_live_sensors() as the mechanism that keeps its",
+    "    paused_by_door input truthful.",
+    "(c) User outcome: the home stays paused (HVAC off) instead of silently starting to cool",
+    "    with a window open that automation never noticed was open."
+  ],
+  "config": {
+    "comfort_heat": 64,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.bedroom_window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-08-11T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 85.0,
+      "note": "Afternoon: indoor 70F, outdoor 85F -- outdoor well above indoor, nat-vent never eligible. Isolates the routine classification choke point from the nat-vent fixes."
+    },
+    {
+      "time": "2026-08-11T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "First classification application: HVAC set to cool@74F normally (no sensor open yet)."
+    },
+    {
+      "time": "2026-08-11T14:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "seed": true,
+      "note": "Window already open, seeded silently (no dispatch) -- models a sensor that's been open for a while with no fresh open event, matching the real incident. handle_door_window_open() never runs for it."
+    },
+    {
+      "time": "2026-08-11T14:31:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Next classification cycle (models the 30-min re-evaluation) re-runs apply_classification() with the sensor now open. Must pause instead of re-affirming cool@74F."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-11T14:01:00",
+      "expect": "classification_applied",
+      "reason": "First classification applies normally -- no sensor open, nothing to pause for."
+    },
+    {
+      "at": "2026-08-11T14:31:00",
+      "expect": "paused_by_door",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Issue #620 Fix A: apply_classification() must call _sync_paused_by_door_with_live_sensors() before building decide_scheduled_band_gate()'s inputs. With the sensor settled-open (seeded, past any debounce window) and no other guard (nat-vent/WHF/planned-window) claiming it, this must set _paused_by_door=True and defer the band -- not silently write cool@74F into the open window."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Routine classification re-application pauses instead of writing an active mode when a sensor has been open since before any event-driven pause ever ran (Issue #620, Fix A)",
+    "observed_behavior": "classification_applied (cool@74F, sensor closed) -> sensor opens (seeded, no dispatch) -> next classification cycle -> paused_by_door=True, HVAC deferred instead of re-affirmed",
+    "expected_behavior": "A sensor open since before any pause-triggering event still blocks the routine comfort-restore write, exactly as if it had just been freshly detected open"
+  }
+}

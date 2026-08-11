@@ -286,6 +286,65 @@ class TestDeactivateFan:
 
 
 # ---------------------------------------------------------------------------
+# release_suppression (Issue #618)
+# ---------------------------------------------------------------------------
+
+
+class TestReleaseSuppression:
+    """Issue #618: _pre_fan_hvac_mode must not stay stranded when a genuine session
+    ends but the caller doesn't want a mode written right now (e.g. a window is still
+    open). Before this fix, restore_hvac=False always skipped clearing the snapshot too,
+    which left _whf_owns_hvac() reporting True for hours after the session actually
+    ended (the 2026-08-10 incident: apply_classification()'s DEFER_NAT_VENT gate kept
+    deferring the HVAC-mode restore long after windows closed).
+    """
+
+    def test_already_inactive_release_suppression_clears_snapshot_without_writing_mode(self):
+        """Fan already physically inactive, restore_hvac=False, release_suppression=True
+        → _pre_fan_hvac_mode is cleared, but no set_hvac_mode service call is made."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._fan_active = False
+        engine._pre_fan_hvac_mode = "cool"
+
+        asyncio.run(engine._deactivate_fan(reason="test session end", restore_hvac=False, release_suppression=True))
+
+        assert engine._pre_fan_hvac_mode is None
+        assert engine._whf_owns_hvac() is False
+        mode_calls = _get_service_calls(engine, "climate", "set_hvac_mode")
+        assert len(mode_calls) == 0
+
+    def test_already_inactive_default_release_suppression_still_strands_on_restore_hvac_false(self):
+        """Without an explicit release_suppression (mid-session cycling-off, the
+        legitimate case), the old stranding behavior is preserved by design — the
+        session is expected to resume, so the snapshot must survive the cycle."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._fan_active = False
+        engine._pre_fan_hvac_mode = "cool"
+
+        asyncio.run(engine._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False))
+
+        assert engine._pre_fan_hvac_mode == "cool"
+        assert engine._whf_owns_hvac() is True
+
+    def test_active_fan_release_suppression_clears_snapshot_without_writing_mode(self):
+        """Fan physically active, restore_hvac=False, release_suppression=True (the
+        reconcile no-fan branch's paused-by-door shape) → snapshot cleared, physical fan
+        turned off, but no HVAC mode write."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "heat"
+
+        asyncio.run(engine._deactivate_fan(reason="paused by open door", restore_hvac=False, release_suppression=True))
+
+        assert engine._pre_fan_hvac_mode is None
+        assert engine._whf_owns_hvac() is False
+        mode_calls = _get_service_calls(engine, "climate", "set_hvac_mode")
+        assert len(mode_calls) == 0
+        fan_off_calls = _get_service_calls(engine, "fan", "turn_off")
+        assert len(fan_off_calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # Switch domain detection
 # ---------------------------------------------------------------------------
 
@@ -2271,6 +2330,59 @@ class TestReconcileFanOnStartup:
 
         engine._set_hvac_mode.assert_not_awaited()
 
+    def test_stranded_hvac_suppression_still_released_while_paused_by_door(self):
+        """Issue #618: #523's pause guard correctly blocks the WRITE, but must not also
+        re-strand the snapshot — before this fix, _paused_by_door=True meant
+        restore_hvac=False, and the old code never cleared _pre_fan_hvac_mode in that
+        case either, silently reproducing the exact #405 stranding bug this branch was
+        written to fix (just gated behind a door-pause instead of a restart). Once the
+        door later closes, _whf_owns_hvac() must not still report True from this call."""
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._set_hvac_mode = AsyncMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._pre_fan_hvac_mode = "cool"
+        engine._paused_by_door = True
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=71.0, outdoor=76.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._set_hvac_mode.assert_not_awaited()
+        assert engine._pre_fan_hvac_mode is None
+        assert engine._whf_owns_hvac() is False
+
+    def test_recent_hvac_session_ended_blocks_restore(self):
+        """Issue #618: the 2026-08-10 incident — hvac_action transitions cooling->fan
+        (a normal post-compressor blower phase) triggers this reconcile with
+        recent_hvac_session_ended=True. Must never force HVAC off because of it, even
+        though nothing is paused and a stranded snapshot exists — the suppression is
+        still released (no future stranding), just not restored via THIS call."""
+        engine = self._engine()
+        engine._deactivate_fan = AutomationEngine._deactivate_fan.__get__(engine)  # real method
+        engine._set_hvac_mode = AsyncMock()
+        engine._fan_active = False
+        engine._natural_vent_active = False
+        engine._pre_fan_hvac_mode = "off"  # stranded from an earlier WHF session
+        engine._paused_by_door = False
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=75.0,
+                outdoor=95.0,
+                thermostat_fan_running=False,
+                any_sensor_open=False,
+                recent_hvac_session_ended=True,
+            )
+        )
+
+        engine._set_hvac_mode.assert_not_awaited()
+        assert engine._pre_fan_hvac_mode is None
+        assert engine._whf_owns_hvac() is False
+
     def test_no_fan_and_nothing_stranded_is_a_true_noop(self):
         """Companion to the #405 regression test: when nothing is stranded, releasing
         the (nonexistent) suppression must not issue a spurious HVAC write or Activity
@@ -2901,6 +3013,25 @@ class TestDeactivateFanRestoresStrandedHvacSuppression:
         asyncio.run(engine._deactivate_fan(reason="redundant call", restore_hvac=True))
 
         engine._set_hvac_mode.assert_not_awaited()
+
+    def test_restore_hvac_true_while_fan_already_inactive_emits_activity_record_event(self):
+        """Issue #618: this exact restore was previously invisible in the dashboard
+        Activity Record (only a DEBUG log line) — the 2026-08-10 incident's harmful
+        14:46 action left no trace anywhere a user could review. Must now emit a
+        stranded_hvac_suppression_restored event."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.whole_house"})
+        engine._fan_active = False
+        engine._pre_fan_hvac_mode = "cool"
+        engine._emit_event_callback = MagicMock()
+
+        import asyncio
+
+        asyncio.run(engine._deactivate_fan(reason="door/window closed", restore_hvac=True))
+
+        engine._emit_event_callback.assert_called_once()
+        event_name, payload = engine._emit_event_callback.call_args.args
+        assert event_name == "stranded_hvac_suppression_restored"
+        assert payload["restore_mode"] == "cool"
 
 
 # ---------------------------------------------------------------------------

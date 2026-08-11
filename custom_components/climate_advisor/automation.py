@@ -1869,10 +1869,18 @@ class AutomationEngine:
             # dropped (Issue #392 Fix 1b's own rationale).
             if _gate == ScheduledBandGate.DEFER_NAT_VENT:
                 _aggressive = bool(self.config.get("aggressive_savings", False))
+                # Issue #618: DEFER_NAT_VENT is natural_vent_active OR whf_owns_hvac() (see the
+                # comment above this block) — printing both disjuncts separately makes it
+                # possible to tell "genuine nat-vent session" apart from "stranded WHF
+                # ownership" directly from logs, without reading code, next time this fires for
+                # much longer than expected.
                 _LOGGER.info(
-                    "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s day_type=%s",
+                    "apply_classification: nat-vent active — enforcing nat-vent band ac_assist=%s"
+                    " day_type=%s natural_vent_active=%s whf_owns_hvac=%s",
                     not _aggressive,
                     classification.day_type,
+                    self._natural_vent_active,
+                    self._whf_owns_hvac(),
                 )
                 await self._apply_nat_vent_hvac_state()
                 if _aggressive:
@@ -3786,6 +3794,7 @@ class AutomationEngine:
         thermostat_fan_running: bool,
         any_sensor_open: bool,
         trigger: str = "startup",
+        recent_hvac_session_ended: bool = False,
     ) -> None:
         """Reconcile fan state on HA startup / coalesce window (Issue #327).
 
@@ -3825,6 +3834,15 @@ class AutomationEngine:
                                     four, which read as a phantom HA restart when none of the other
                                     three triggers fired. Defaults to ``"startup"`` for any caller
                                     that doesn't pass one explicitly.
+            recent_hvac_session_ended: True when this reconcile was triggered by a thermostat
+                                    ``hvac_action`` transition directly out of ``cooling``/
+                                    ``heating`` into ``fan`` — the normal internal post-compressor
+                                    blower phase, not an out-of-band fan appearance. When True,
+                                    the "no-fan" branch below releases any stranded WHF
+                                    suppression but never force-writes an HVAC mode change,
+                                    since a legitimate active/just-finished cooling or heating
+                                    session must never be interrupted by this reconcile
+                                    (Issue #618).
         """
         # Issue #561: reentrancy guard — this method is called from 4 independent sites
         # with no coordination between them. Two overlapping calls previously each
@@ -3845,6 +3863,7 @@ class AutomationEngine:
                 thermostat_fan_running=thermostat_fan_running,
                 any_sensor_open=any_sensor_open,
                 trigger=trigger,
+                recent_hvac_session_ended=recent_hvac_session_ended,
             )
         finally:
             self._reconcile_fan_in_progress = False
@@ -3857,6 +3876,7 @@ class AutomationEngine:
         thermostat_fan_running: bool,
         any_sensor_open: bool,
         trigger: str,
+        recent_hvac_session_ended: bool = False,
     ) -> None:
         """Body of reconcile_fan_on_startup(), run under its reentrancy guard (Issue #561)."""
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
@@ -3889,9 +3909,25 @@ class AutomationEngine:
             # this guard, a WHF session left _pre_fan_hvac_mode stranded from before a
             # restart could silently re-command HVAC on right after the classification block
             # above correctly paused it for an open window.
+            #
+            # Issue #618: this branch is exactly where #405's fix and #523's pause guard could
+            # combine to re-strand the snapshot — when _paused_by_door is True at the moment
+            # this fires, restore_hvac=False, and without release_suppression=True the old code
+            # left _pre_fan_hvac_mode stranded non-None again, indistinguishable from the #405
+            # case this branch was written to fix. release_suppression=True always releases
+            # ownership here (this IS a genuine session end — thermostat_fan_running is False),
+            # while restore_hvac still correctly gates whether a mode gets written right now.
+            #
+            # Issue #618 (part 2): recent_hvac_session_ended additionally blocks the write when
+            # this reconcile was triggered by a normal cooling/heating -> fan hvac_action
+            # transition (the thermostat's own post-compressor blower phase) — never force HVAC
+            # off because of that transition. The 2026-08-10 incident: this exact branch force-
+            # set HVAC to "off" 5 minutes after the AC had legitimately started cooling, because
+            # it misread the blower phase as "the WHF stopped."
             await self._deactivate_fan(
                 reason=f"{trigger} reconcile — fan confirmed off, releasing any stranded HVAC suppression",
-                restore_hvac=not self._paused_by_door,
+                restore_hvac=not self._paused_by_door and not recent_hvac_session_ended,
+                release_suppression=True,
             )
             return
 
@@ -5109,7 +5145,17 @@ class AutomationEngine:
             # Don't restore active HVAC into an open window — pause instead. The
             # existing pause/grace machinery (_re_pause_for_open_sensor) re-evaluates
             # nat-vent reactivation on the next grace-expiry cycle.
-            await self._deactivate_fan(reason=reason, restore_hvac=False, emit_event=False)
+            #
+            # Issue #618: release_suppression=True — this IS the session ending (we already
+            # cleared _natural_vent_active above), even though we're not writing a restored
+            # mode right now. Without this, _pre_fan_hvac_mode stays stranded non-None for as
+            # long as the window stays open, and _whf_owns_hvac() keeps reporting the WHF as
+            # still owning the thermostat long after the session actually ended — which is
+            # exactly what happened in the 2026-08-10 incident: the window later closed and
+            # handle_all_doors_windows_closed() ran, but apply_classification()'s DEFER_NAT_VENT
+            # gate kept deferring the HVAC-mode restore for hours because this flag was never
+            # released.
+            await self._deactivate_fan(reason=reason, restore_hvac=False, release_suppression=True, emit_event=False)
             self._paused_by_door = True
             state = self.hass.states.get(self.climate_entity)
             self._pre_pause_mode = state.state if state and state.state != "off" else None
@@ -5927,7 +5973,14 @@ class AutomationEngine:
 
         self.hass.async_create_task(_do_drift_reconciliation_off_command())
 
-    async def _deactivate_fan(self, *, reason: str, restore_hvac: bool = True, emit_event: bool = True) -> None:
+    async def _deactivate_fan(
+        self,
+        *,
+        reason: str,
+        restore_hvac: bool = True,
+        release_suppression: bool | None = None,
+        emit_event: bool = True,
+    ) -> None:
         """Deactivate fan based on configured fan_mode.
 
         Args:
@@ -5936,11 +5989,23 @@ class AutomationEngine:
                 when the whole-house fan activated. Pass False during nat-vent cycling
                 (Bug 3 / Issue #321) so the session can continue without re-engaging HVAC
                 between cycles — the fan turns off temporarily, but HVAC stays suppressed.
+            release_suppression: Whether this call ends WHF ownership of the thermostat
+                (clears ``_pre_fan_hvac_mode``) independent of whether it also *writes* a
+                restored mode right now. Defaults to ``restore_hvac`` when not given, matching
+                historical behavior for existing callers. Genuine session-end callers
+                (``_exit_nat_vent()``'s sensor-open branch, the reconcile "no-fan" branch) pass
+                ``True`` explicitly even when ``restore_hvac=False`` (don't write into an open
+                window, but don't strand the snapshot either) — see Issue #618. Mid-session
+                cycling-off (``nat_vent_temperature_check()``) leaves this at its
+                ``restore_hvac``-tracking default (``False``) since that stranding is
+                intentional — the session is still ongoing and expected to resume.
             emit_event: When True (default), emit a ``fan_deactivated`` event so the Activity
                 Report shows every CA fan-off with its source. Callers that already emit a
                 more specific event for the same transition (nat-vent cycler / exit paths)
                 pass False to avoid a duplicate row (Issue #331 follow-up).
         """
+        if release_suppression is None:
+            release_suppression = restore_hvac
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
             return
@@ -5971,17 +6036,47 @@ class AutomationEngine:
         # permanently stranding _pre_fan_hvac_mode set and blocking all future HVAC writes
         # via _whf_owns_hvac(). Only skip the physical "turn fan off" step; still honor a
         # pending HVAC restore.
+        #
+        # Issue #618: a genuine session-end (release_suppression=True) must clear
+        # _pre_fan_hvac_mode even when restore_hvac=False (don't write HVAC into an open
+        # window, but don't strand the snapshot either — a stranded snapshot kept
+        # _whf_owns_hvac() reporting True for hours after the session actually ended,
+        # blocking apply_classification()'s DEFER_NAT_VENT gate from ever clearing).
         if not self._fan_active:
-            if restore_hvac and self._pre_fan_hvac_mode is not None:
+            if release_suppression and self._pre_fan_hvac_mode is not None:
                 _restore_mode = self._pre_fan_hvac_mode
                 self._pre_fan_hvac_mode = None
-                _LOGGER.debug(
-                    "_deactivate_fan: fan already inactive but restoring stranded HVAC suppression (%s)", reason
-                )
-                await self._set_hvac_mode(
-                    _restore_mode,
-                    reason=f"whole-house fan already stopped — restoring HVAC mode ({_restore_mode})",
-                )
+                if restore_hvac:
+                    _LOGGER.debug(
+                        "_deactivate_fan: fan already inactive but restoring stranded HVAC suppression (%s)", reason
+                    )
+                    await self._set_hvac_mode(
+                        _restore_mode,
+                        reason=f"whole-house fan already stopped — restoring HVAC mode ({_restore_mode})",
+                    )
+                    # Issue #618: this is the "physical fan was already off, but a snapshot
+                    # from an earlier session was still stranded" path — the exact case that
+                    # was completely invisible in the dashboard Activity Record in the
+                    # 2026-08-10 incident (only a DEBUG log line, no event, no record). The
+                    # normal "fan was actively running and gets deactivated now" path a few
+                    # lines below already emits fan_deactivated when emit_event=True; this is
+                    # the one sibling branch that historically emitted nothing at all, so it's
+                    # the only new event added anywhere in this function.
+                    self._record_action(
+                        "Restored HVAC mode from stranded fan suppression", f"{reason} (restored={_restore_mode})"
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "stranded_hvac_suppression_restored",
+                            {"reason": reason, "restore_mode": _restore_mode},
+                        )
+                else:
+                    _LOGGER.debug(
+                        "_deactivate_fan: fan already inactive — releasing stranded HVAC suppression"
+                        " without restoring mode (%s, prior_mode=%s)",
+                        reason,
+                        _restore_mode,
+                    )
             else:
                 _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
             return
@@ -6005,7 +6100,13 @@ class AutomationEngine:
                 # (Issue #277 Fix C). Only restore if we have a stored mode to go back to.
                 # Skipped during nat-vent cycling (restore_hvac=False) so HVAC stays
                 # suppressed between fan-on and fan-off cycles within the same session.
-                if restore_hvac and self._pre_fan_hvac_mode is not None:
+                #
+                # Issue #618: release_suppression (independent of restore_hvac) still clears
+                # _pre_fan_hvac_mode at a genuine session end even when the caller doesn't want
+                # a mode written right now (e.g. a window is still open) — otherwise the stale
+                # snapshot strands _whf_owns_hvac()==True indefinitely, the same bug fixed in
+                # the already-inactive branch above.
+                if release_suppression and self._pre_fan_hvac_mode is not None:
                     _restore_mode = self._pre_fan_hvac_mode
                     # Issue #392: clear _pre_fan_hvac_mode BEFORE issuing the restore write, not
                     # after. _whf_owns_hvac() (the Fix 1b choke-point guard in _set_hvac_mode())
@@ -6014,10 +6115,18 @@ class AutomationEngine:
                     # released before the write, or the guard self-blocks the very call that is
                     # supposed to un-suppress HVAC.
                     self._pre_fan_hvac_mode = None
-                    await self._set_hvac_mode(
-                        _restore_mode,
-                        reason=f"whole-house fan stopped — restoring HVAC mode ({_restore_mode})",
-                    )
+                    if restore_hvac:
+                        await self._set_hvac_mode(
+                            _restore_mode,
+                            reason=f"whole-house fan stopped — restoring HVAC mode ({_restore_mode})",
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "_deactivate_fan: releasing stranded HVAC suppression without"
+                            " restoring mode (%s, prior_mode=%s)",
+                            reason,
+                            _restore_mode,
+                        )
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                 await self.hass.services.async_call(

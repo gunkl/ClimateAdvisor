@@ -3767,6 +3767,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._is_recent_hvac_command()
             and not _is_expected_confirmation
             and self._current_classification
+            # Issue #618 investigation note: an earlier version of this fix flipped this
+            # comparison to check classification.hvac_mode first. Reverted — the full test
+            # suite caught test_heat_cool_override.py::test_heat_cool_to_cool_fires_override_
+            # when_ca_commanded_heat_cool failing, which documents that comparing against
+            # _last_commanded_hvac_mode (not classification.hvac_mode) was itself a deliberate
+            # prior fix ("Bug C"): when CA is running heat_cool banding, its actual commanded
+            # mode ("heat_cool") legitimately differs from classification's simplified
+            # heat/cool/off recommendation, and a user switching away from heat_cool must still
+            # be detected as a real override even though the new mode happens to match
+            # classification. Flipping priority here silently reintroduced Bug C. The
+            # 2026-08-10 incident's 14:20 "Manual override detected" was, on reflection,
+            # correct: CA's last real command was genuinely "off" (from the WHF-suppression
+            # bug fixed elsewhere in this issue), so a change away from that CA-issued state IS
+            # a real, undirected deviation — PATH B's existing self-resolution (10-minute
+            # confirm window, no grace started, "transient" notification) is the correct,
+            # already-working handling for "turned out to match what CA wants anyway." See the
+            # PR discussion for this issue for the full analysis.
             and new_state.state
             != (
                 self.automation_engine._last_commanded_hvac_mode
@@ -3916,6 +3933,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "trigger=post_startup_reconcile old_action=%s",
                 old_action,
             )
+            # Issue #618: old_action in ("cooling", "heating") -> "fan" is the thermostat's own
+            # normal post-compressor blower phase, not an out-of-band fan appearance — never let
+            # the reconcile below force HVAC off because of it (2026-08-10 incident: this exact
+            # transition force-cancelled AC that had started cooling 5 minutes earlier).
+            _recent_hvac_session_ended_618 = old_action in ("cooling", "heating")
+            _thermostat_fan_running_347 = self._derive_thermostat_fan_running_for_reconcile(
+                fan_mode_attr=_new_fan_mode_347,
+                hvac_action_attr=new_action,
+            )
             await _ae_347.reconcile_fan_on_startup(
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
@@ -3923,12 +3949,22 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 # hvac_action transitioning to "fan" is a thermostat-internal event unrelated
                 # to a physically separate whole-house fan. Archetype-aware derivation checks
                 # the real fan entity's state instead of assuming this transition means it.
-                thermostat_fan_running=self._derive_thermostat_fan_running_for_reconcile(
-                    fan_mode_attr=_new_fan_mode_347,
-                    hvac_action_attr=new_action,
-                ),
+                thermostat_fan_running=_thermostat_fan_running_347,
                 any_sensor_open=self._any_sensor_open(),
                 trigger="thermostat_state_change",
+                recent_hvac_session_ended=_recent_hvac_session_ended_618,
+            )
+            # Issue #618: this call site had no matching _mirror_to_shadow — a pre-existing gap
+            # discovered while fixing the recent_hvac_session_ended stomp above, on top of #615's
+            # coverage fix (which mirrored the other 3 of 4 reconcile_fan_on_startup call sites).
+            await self._mirror_to_shadow(
+                "reconcile_fan_on_startup",
+                indoor=self._get_indoor_temp(),
+                outdoor=self._last_outdoor_temp,
+                thermostat_fan_running=_thermostat_fan_running_347,
+                any_sensor_open=self._any_sensor_open(),
+                trigger="thermostat_state_change",
+                recent_hvac_session_ended=_recent_hvac_session_ended_618,
             )
 
         # If thermostat is now fully off, clear any stale HVAC-based fan active flag.
@@ -4704,6 +4740,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         if archetype_fan_running and hvac_action not in ("heating", "cooling"):
             await ae.reconcile_fan_on_startup(
+                indoor=self._get_indoor_temp(),
+                outdoor=self._last_outdoor_temp,
+                thermostat_fan_running=archetype_fan_running,
+                any_sensor_open=self._any_sensor_open(),
+                trigger="post_grace_expiry",
+            )
+            # Issue #618: this call site (the 4th of the "4 different sites" documented on
+            # reconcile_fan_on_startup) had no matching _mirror_to_shadow — a second
+            # pre-existing gap found while auditing all 4 call sites for the same issue
+            # already confirmed at the thermostat_state_change site above.
+            await self._mirror_to_shadow(
+                "reconcile_fan_on_startup",
                 indoor=self._get_indoor_temp(),
                 outdoor=self._last_outdoor_temp,
                 thermostat_fan_running=archetype_fan_running,

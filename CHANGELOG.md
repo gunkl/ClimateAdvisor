@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.5] — 2026-08-10
+
+- Fix #618: on a hot or cold day, if a whole-house-fan/natural-ventilation session ended while a window was still open, HVAC could stay silently un-managed for hours after the window closed — classification wanted the AC or heat on, but the mode never got applied and nothing indicated a problem. A related bug could also cancel AC that had just started cooling, moments after it began, if the thermostat reported a normal post-cycle fan phase. Both are fixed. Also: a specific corrective HVAC-mode restore now shows up in the Activity Record instead of being invisible.
+
 ## [0.6.4] — 2026-08-09
 
 - Fix #615: internal fix only, no user-visible behavior change — the diagnostic shadow engine added in 0.6.3 was missing several real-world inputs (outdoor temperature, forecast, and 8 of 13 decision triggers), so it could never correctly agree with the real engine even when both were doing the right thing. Fixed with full coverage plus an automated check that keeps future changes from silently reintroducing the gap. The real engine's behavior is completely unchanged; only the diagnostic sensor's accuracy is affected.

@@ -372,5 +372,15 @@
     "sha256": "9420399d1886bc767d6388597eac9d027b0b8c68ee67daa799945f5a283a7630",
     "signed": "2026-08-02",
     "issue": 558
+  },
+  "issue_620_fan_off_grace_blocks_idle_reactivation": {
+    "sha256": "3132b2e226a2a21f81b83815741d2499d99223450c6c200765716ea1c449a760",
+    "signed": "2026-08-11",
+    "issue": 620
+  },
+  "issue_620_routine_classification_pauses_for_already_open_sensor": {
+    "sha256": "23352ec7f27eee089c706a52ea67372464645a25a4b806a4f650148e565d16cf",
+    "signed": "2026-08-11",
+    "issue": 620
   }
 }

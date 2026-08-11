@@ -1,0 +1,112 @@
+{
+  "name": "issue_620_fan_off_grace_blocks_idle_reactivation",
+  "description": "A user turning the WHF off manually must not have it re-activated by the idle-open reactivation widening (Issue #244/#402/#504) while the fan-off grace is still active (Issue #620, Fix B)",
+  "source": "issue-report",
+  "issue": 620,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant impact: on 2026-08-11 the user manually turned off the whole-house fan at 06:10:59.",
+    "Automation re-activated it 5 seconds later (06:11:04) via check_natural_vent_conditions()'s",
+    "_idle_open widening, directly undoing the user's action and contradicting",
+    "docs/grace-periods-spec.md's documented guarantee that a fan-off grace gates nat-vent",
+    "re-activation unconditionally. Root cause: _idle_open (automation.py) never checked",
+    "_grace_active at all, unlike the comfort-ceiling exception (Issue #134) sitting right",
+    "beside it. Fix B adds 'and not self._grace_active' to _idle_open's definition.",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: reverting Fix B's one-line change (removing 'and not",
+    "    self._grace_active' from _idle_open) would make this scenario fail -- the 06:16",
+    "    temp_update would re-fire 'natural_ventilation' during the still-active grace window,",
+    "    which the final assertion explicitly forbids.",
+    "(b) Docs-production alignment: docs/grace-periods-spec.md's Fan-Off Grace section is",
+    "    updated (Issue #620 doc pass) to state this path is now correctly gated, matching",
+    "    the Issue #134 comfort-ceiling exception's own documented precedent.",
+    "(c) User outcome: the fan a user just turned off stays off for the documented grace",
+    "    duration, instead of the automation immediately overriding their action."
+  ],
+  "config": {
+    "comfort_heat": 64,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 10800,
+    "door_window_sensors": ["binary_sensor.bedroom_window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-08-11T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 63.0,
+      "note": "Early morning: indoor 66F, outdoor 63F -- favorable for free cooling."
+    },
+    {
+      "time": "2026-08-11T06:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day forecast, cool mode wanted -- but nat-vent is currently favorable."
+    },
+    {
+      "time": "2026-08-11T06:05:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens. outdoor 63F < indoor 66F, indoor > comfort_heat 64F -- nat-vent activates, WHF turns on."
+    },
+    {
+      "time": "2026-08-11T06:10:59",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "User manually turns the WHF off at the remote -- no CA context, on_fan_turned_off() fires, fan-off grace (manual, 10800s) starts."
+    },
+    {
+      "time": "2026-08-11T06:11:04",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 63.0,
+      "note": "Same favorable conditions as before, window still open, 5 seconds into the fan-off grace -- this is the exact timing that reactivated the fan in the real incident. Must NOT reactivate now."
+    },
+    {
+      "time": "2026-08-11T06:16:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 63.0,
+      "note": "Five minutes into the grace, still favorable, window still open -- still must not reactivate."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-11T06:05:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opens with favorable conditions -- nat-vent activates normally."
+    },
+    {
+      "at": "2026-08-11T06:10:59",
+      "expect": "fan_external_change_classified",
+      "expect_event": "fan_cancel",
+      "track": "integration",
+      "simulator_support": false,
+      "reason": "The externally-driven fan-off must be classified as manual (on_fan_turned_off -> fan_cancel, trigger=fan_off), starting the fan-off grace."
+    },
+    {
+      "at": "2026-08-11T06:16:00",
+      "expect": "fan_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Issue #620 Fix B: _idle_open must not bypass an active fan-off grace. A decision-string assertion can't distinguish 'correctly stayed active' from 'incorrectly reactivated' since both produce the same natural_ventilation string -- this reads the final _fan_active flag directly, which must be False: the fan the user turned off at 06:10:59 must still be off 5+ minutes into the grace, even though conditions remain favorable for free cooling."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "Fan-off grace correctly blocks the idle-open nat-vent reactivation widening (Issue #620, Fix B)",
+    "observed_behavior": "sensor_open -> natural_ventilation -> user turns fan off (fan_cancel, grace starts) -> repeated favorable temp_updates during grace produce no reactivation",
+    "expected_behavior": "A fan the user just turned off stays off for the documented fan-off grace duration, even when conditions remain favorable for free cooling"
+  }
+}

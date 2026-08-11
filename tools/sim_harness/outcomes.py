@@ -567,6 +567,31 @@ def check_assertion(
             return "nat_vent_not_active"
         return False
 
+    # --- fan_not_active (Issue #620) ---
+    # Purely additive, same pattern as nat_vent_not_active immediately above — reads the
+    # production engine's final _fan_active flag. Needed because a fan-off-grace
+    # reactivation bug (Issue #620, Fix B) and a legitimate reactivation both emit the same
+    # "sensor_opened"/natural_ventilation decision string, so a decision-list assertion
+    # cannot distinguish "correctly stayed active" from "incorrectly reactivated" — only the
+    # final physical fan state can. Scenario authors should place this assertion at the
+    # timestamp of the LAST event in the scenario (like nat_vent_not_active, this reads
+    # final engine_state, not history at an intermediate "at" time).
+    if expect == "fan_not_active":
+        if engine_state.get("_fan_active") is False:
+            return "fan_not_active"
+        return False
+
+    # --- paused_by_door (Issue #620) ---
+    # Purely additive, same pattern as nat_vent_still_active/fan_not_active — reads the
+    # production engine's final _paused_by_door flag directly. Needed to distinguish a
+    # correct pause from a bug where a nat-vent/fan exit silently restored an active HVAC
+    # mode into a still-open window instead — both leave _natural_vent_active False, so
+    # only _paused_by_door tells them apart.
+    if expect == "paused_by_door":
+        if engine_state.get("_paused_by_door") is True:
+            return "paused_by_door"
+        return False
+
     # --- ODE ceiling guard (Issue #236 D) ---
     # Production emits "ceiling_guard_fired" when it pre-cools.  The legacy scenarios use
     # bespoke labels; map them to the production decision at the asserted time.  "fires"/

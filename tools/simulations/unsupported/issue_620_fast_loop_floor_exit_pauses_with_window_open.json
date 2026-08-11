@@ -1,0 +1,112 @@
+{
+  "name": "issue_620_fast_loop_floor_exit_pauses_with_window_open",
+  "description": "When the fast-loop fan_thermostat_check() stops a non-nat-vent WHF (e.g. min-runtime cycling) because indoor cooled to the comfort floor, a monitored sensor already open must result in a pause, not a silently restored active HVAC mode (Issue #620, Fix C)",
+  "source": "issue-report",
+  "issue": 620,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "UNSUPPORTED (Issue #620): this scenario documents a deliberate scope decision, not a bug",
+    "to fix later. It attempts to isolate fan_thermostat_check()'s STOP_COOLED_TO_FLOOR outcome",
+    "(the fast, tick-level thermostatic-backstop path fixed by Issue #620 Fix C) in the",
+    "simulation harness, and could not be made to reliably exercise that exact path across",
+    "several redesigns:",
+    "  1. use_coordinator=false + a genuine nat-vent session: nat_vent_temperature_check()",
+    "     (a separate, already-correct comfort-floor implementation, called directly by",
+    "     _handle_temp_update() before fan_thermostat_check() gets a turn) always intercepts",
+    "     and exits the session first.",
+    "  2. use_coordinator=false + a non-nat-vent min-runtime fan (activate_fan_min_runtime),",
+    "     sensor_open with seed:true: the seed flag is silently ignored in engine-only mode",
+    "     (see run_production.py's sensor_open handler -- seed only applies when",
+    "     coordinator is not None), so handle_door_window_open()'s full reactivation logic",
+    "     runs anyway and converts the fan into a nat-vent session, defeating the setup.",
+    "  3. use_coordinator=true + seed:true, timed near the real incident's 06:30 timestamp:",
+    "     the real coordinator's scheduled morning-wakeup trigger fires at that exact time",
+    "     and, thanks to Fix A (the new _sync_paused_by_door_with_live_sensors() choke-point",
+    "     check), correctly pauses the sensor BEFORE fan_thermostat_check() ever runs --",
+    "     masking whether Fix C specifically is doing anything.",
+    "  4. use_coordinator=true + seed:true, shifted to a neutral afternoon time (no scheduled",
+    "     trigger nearby): activate_fan_min_runtime produced no observable effect at all in",
+    "     this harness configuration -- investigation did not converge before time was",
+    "     allocated to the remaining #620 fixes.",
+    "The harness has no direct 'fire the periodic 5-min thermostatic backstop timer with",
+    "trigger=timer' event type, which is what actually fires in production (confirmed via the",
+    "real incident's own log line: 'Fan thermostat check: trigger=timer'), and building one",
+    "was out of scope for this issue's blast radius.",
+    "",
+    "Fix C's correctness instead rests on tests/test_fan_control.py's existing unit-test",
+    "coverage for fan_thermostat_check(), which already regression-caught a real defect",
+    "during this fix's implementation (an event-type mislabeling for the non-nat-vent case,",
+    "test_stops_non_natvent_fan_without_natvent_event) -- direct evidence that suite is",
+    "sensitive to exactly this class of change, even without an end-to-end scenario here."
+  ],
+  "config": {
+    "comfort_heat": 64,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.bedroom_window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-08-11T14:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 63.0,
+      "note": "Afternoon (deliberately away from 06:30 morning-wakeup/bedtime/pre-cool scheduled triggers, which would otherwise pause the sensor via Fix A first and mask Fix C): indoor 70F, outdoor 63F."
+    },
+    {
+      "time": "2026-08-11T14:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot day forecast, cool mode wanted -- CA would restore to this mode if the bug were present."
+    },
+    {
+      "time": "2026-08-11T14:02:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "seed": true,
+      "note": "Window already open, seeded silently (no dispatch) -- models a sensor that's been open for a while, matching the real incident. Does not trigger handle_door_window_open()'s reactivation logic."
+    },
+    {
+      "time": "2026-08-11T14:03:00",
+      "type": "activate_fan_min_runtime",
+      "note": "WHF starts via a min-runtime cycle -- _fan_active=True, _natural_vent_active stays False (not a nat-vent session)."
+    },
+    {
+      "time": "2026-08-11T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 63.5,
+      "outdoor_f": 63.0,
+      "note": "Indoor has cooled to 63.5F -- below the 64F comfort floor, outdoor still below indoor (Check 1's free-cooling-gone condition not met). This temp_update dispatches through the real coordinator listener chain, reaching fan_thermostat_check() (_fan_active=True); its STOP_COOLED_TO_FLOOR outcome must fire here with the window still open."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-11T14:30:00",
+      "expect": "fan_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The fan stops once indoor reaches the comfort floor either way (pause or restore) -- this just confirms the session actually ended."
+    },
+    {
+      "at": "2026-08-11T14:30:00",
+      "expect": "paused_by_door",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Issue #620 Fix C: the comfort-floor exit must route through _exit_nat_vent(), which checks the still-open sensor and pauses (_paused_by_door=True) instead of restoring the classification's cool mode into the open window. Before the fix, _deactivate_fan()'s default restore_hvac=True would have set HVAC to cool@74F here with no sensor check at all."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A comfort-floor exit with a monitored sensor still open pauses HVAC instead of restoring an active mode (Issue #620, Fix C)",
+    "observed_behavior": "min-runtime fan running -> indoor cools to floor with window still open -> paused_by_door=True, HVAC stays off",
+    "expected_behavior": "The fast-loop comfort-floor exit checks live sensor state before restoring HVAC, matching the treatment Issue #418 already gave the sibling outdoor-rise exit"
+  }
+}

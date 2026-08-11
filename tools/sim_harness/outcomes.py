@@ -441,6 +441,20 @@ def _map_event_to_outcome(
     if event_type == "whf_hvac_released":
         return ProductionDecision(ts_str, event_type, "whf_hvac_released")
 
+    # --- Stranded WHF suppression restore (Issue #618) ---
+    # New event, no legacy equivalent — purely additive, same pattern as
+    # whf_hvac_suppressed/whf_hvac_released above. Semantically this event IS a resume:
+    # it fires when _deactivate_fan() restores an HVAC mode that was suppressed by a fan
+    # session which had already ended (physically off) without a matching restore call —
+    # exactly what "resumed" already means for the sensor_all_closed/grace_expired cases
+    # above. Without this mapping it fell through to the generic "unknown:<type>"
+    # catch-all and, since it can land at the same timestamp as (and after) the
+    # sensor_all_closed "resumed" decision that triggered it, silently overrode the
+    # correct outcome under this file's last-decision-wins tie-break semantics
+    # (tools/simulations/golden/whole_house_fan_hvac_suppression.json@12:00 caught this).
+    if event_type == "stranded_hvac_suppression_restored":
+        return ProductionDecision(ts_str, event_type, "resumed")
+
     # Issue #498: 1:1 mapping so a scheduled handler's blocked write is directly
     # assertable at-time, same pattern as whf_hvac_suppressed/whf_hvac_released above.
     if event_type == "hvac_write_blocked_whf_active":

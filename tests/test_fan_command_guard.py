@@ -348,6 +348,7 @@ class TestPostStartupUntrackedFanReconcile:
             thermostat_fan_running=True,
             any_sensor_open=False,
             trigger="thermostat_state_change",
+            recent_hvac_session_ended=False,
         )
 
     def test_fan_action_start_ca_owned_skips_reconcile(self):
@@ -535,6 +536,7 @@ class TestReconcileSite3ArchetypeAware:
             thermostat_fan_running=False,
             any_sensor_open=False,
             trigger="thermostat_state_change",
+            recent_hvac_session_ended=False,
         )
 
     def test_whf_thermostat_blip_with_whf_physically_on_does_adopt(self):
@@ -554,4 +556,5 @@ class TestReconcileSite3ArchetypeAware:
             thermostat_fan_running=True,
             any_sensor_open=False,
             trigger="thermostat_state_change",
+            recent_hvac_session_ended=False,
         )

@@ -1806,6 +1806,24 @@ def _render_whf_hvac_released(p: dict, unit: str) -> tuple[str, str]:
     return label, "hvac: reclassifying"
 
 
+def _render_stranded_hvac_suppression_restored(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #618: the fan was already physically off, but a whole-house-fan suppression
+    snapshot from an earlier session was still stranded — this restores the HVAC mode that
+    snapshot captured. Previously invisible in the Activity Record (only a DEBUG log line);
+    this is the specific corrective action that could silently cancel active/just-started
+    cooling or heating (the 2026-08-10 incident), so it gets its own labeled entry.
+    """
+    reason = str(p.get("reason", "")).strip()
+    restore_mode = str(p.get("restore_mode", "")).strip()
+    label = (
+        f"Restored HVAC mode from stranded fan suppression -- {reason}"
+        if reason
+        else ("Restored HVAC mode from stranded fan suppression")
+    )
+    settings = f"hvac: ->{restore_mode}" if restore_mode else "hvac: restored"
+    return label, settings
+
+
 def _render_fan_manual_override(p: dict, unit: str) -> tuple[str, str]:
     """Issue #524: append remote speed/timer context when the override was armed by an RF
     remote press (`automation.py::handle_fan_manual_override`'s `remote_speed`/
@@ -2336,6 +2354,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "hvac_write_blocked_whf_active": _render_hvac_write_blocked_whf_active,
     "whf_hvac_suppressed": _render_whf_hvac_suppressed,
     "whf_hvac_released": _render_whf_hvac_released,
+    "stranded_hvac_suppression_restored": _render_stranded_hvac_suppression_restored,
     "fan_running_untracked": _render_fan_running_untracked,
     "fan_untracked_cleared": _render_fan_untracked_cleared,
     "fan_cancel": _render_fan_cancel,

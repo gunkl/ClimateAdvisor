@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.5": [
+        "Fix #618: on a hot or cold day, if a whole-house-fan/natural-ventilation session"
+        " ended while a window was still open, HVAC could stay silently un-managed for"
+        " hours after the window closed — classification wanted the AC or heat on, but"
+        " the mode never got applied and nothing indicated a problem. A related bug"
+        " could also cancel AC that had just started cooling, moments after it began,"
+        " if the thermostat reported a normal post-cycle fan phase. Both are fixed."
+        " Also: a specific corrective HVAC-mode restore now shows up in the Activity"
+        " Record instead of being invisible.",
+    ],
     "0.6.4": [
         "Fix #615: internal fix only, no user-visible behavior change — the diagnostic"
         " shadow engine added in 0.6.3 was missing several real-world inputs (outdoor"
@@ -1654,6 +1664,50 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    618: {
+        "version_fixed": "0.6.5",
+        "title": (
+            "A whole-house-fan/nat-vent session that ended while a monitored sensor was"
+            " still open never cleared its _pre_fan_hvac_mode suppression snapshot"
+            " (restore_hvac=False also skipped the release, by the pre-fix design)."
+            " _whf_owns_hvac() kept reporting the WHF as still owning the thermostat for"
+            " as long as the pause lasted, silently deferring apply_classification()'s"
+            " HVAC-mode restore even after the window closed — confirmed in a live"
+            " incident to leave HVAC un-managed for ~4.5 hours on a 95F day. Separately,"
+            " reconcile_fan_on_startup()'s 'no-fan' branch could not distinguish a"
+            " normal post-compressor cooling->fan hvac_action transition from a real"
+            " unowned fan appearance, so it blindly replayed the same stale snapshot and"
+            " force-cancelled AC that had just started legitimately cooling 5 minutes"
+            " earlier. A third, related symptom (a mode change already matching live"
+            " classification being logged/notified as 'Manual override detected') was"
+            " investigated and found to be correct existing behavior (Issue #269 Bug C:"
+            " comparing against _last_commanded_hvac_mode, not classification.hvac_mode,"
+            " is required for dual-setpoint heat_cool detection) — not changed."
+        ),
+        "scope_covered": (
+            "_deactivate_fan() gained a release_suppression parameter, decoupled from"
+            " restore_hvac: genuine session-end callers (_exit_nat_vent()'s sensor-open"
+            " branch, reconcile's no-fan branch) now always release _pre_fan_hvac_mode"
+            " even when they can't write a mode into an open window; mid-session"
+            " cycling-off (nat_vent_temperature_check()) keeps the prior"
+            " restore_hvac-tracking default, since that stranding is intentional."
+            " reconcile_fan_on_startup()/_reconcile_fan_on_startup_locked() gained a"
+            " recent_hvac_session_ended parameter, set True at the hvac_action=='fan'"
+            " coordinator listener when the transition came directly from"
+            " cooling/heating — blocks the restore-mode write without blocking the"
+            " suppression release. Two pre-existing shadow-engine mirroring gaps found"
+            " and closed while auditing all 4 reconcile_fan_on_startup() call sites"
+            " (thermostat_state_change and post_grace_expiry sites had no"
+            " _mirror_to_shadow call). New stranded_hvac_suppression_restored event"
+            " (automation.py) + EVENT_RENDERERS entry (ai_skills_context.py) makes the"
+            " previously-invisible stranded-restore action visible in the Activity"
+            " Record. tools/sim_harness/outcomes.py mapped the new event type to the"
+            " existing 'resumed' outcome (purely additive, same pattern as"
+            " whf_hvac_suppressed/whf_hvac_released). 6 new regression tests in"
+            " tests/test_fan_control.py covering release-without-restore, the"
+            " compressor-stomp guard, and the new event emission."
+        ),
+    },
     615: {
         "version_fixed": "0.6.4",
         "title": (

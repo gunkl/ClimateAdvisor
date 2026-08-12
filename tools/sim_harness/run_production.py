@@ -63,6 +63,16 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                           → inject indoor/outdoor + run_coro(engine.reconcile_fan_on_startup(
                             thermostat_fan_running=, any_sensor_open=)) — mirrors the
                             coordinator's startup-coalesce call
+  fan_backstop_tick      → (use_coordinator=True) real coordinator._compute_fan_status() +
+                            coordinator._should_run_untracked_fan_backstop() +, if that
+                            gate passes, run_coro(automation_engine.reconcile_fan_on_startup(
+                            trigger="backstop_30min")) — the real periodic untracked-fan
+                            backstop call site (Issue #627), previously not dispatchable at all
+  simulate_restart        → (use_coordinator=True) engine.restore_state(engine.
+                            get_serializable_state()) + coordinator._startup_coalesce_active
+                            = True — the real continuity boundary an HA restart crosses
+                            (Issue #263/#327 clean-slate + fresh coalescing window), not a
+                            mirror of what restart does to engine state
 
 No clean production entry points (FINDINGS):
   fan_cycle_on   — _fan_cycle_on() is private; production triggers it via
@@ -655,6 +665,40 @@ def _dispatch_event(
         if coordinator is not None:
             run_coro(coordinator._do_startup_coalesce())
 
+    elif etype == "fan_backstop_tick":
+        # Issue #627: direct call to the real coordinator's periodic backstop_30min
+        # untracked-fan reconcile — the same legitimate "real entry point, externally-
+        # supplied trigger" pattern as reconcile_fan_on_startup/startup_coalesce above,
+        # not a mirror of the decision logic. Before Issue #627 there was no dispatchable
+        # event for this call site at all — it runs inline inside
+        # _async_update_data_impl(), and driving that whole method through the fake
+        # scheduler just to reach it is unnecessary indirection. This calls the same two
+        # real methods coordinator.py itself calls, in the same order:
+        # _compute_fan_status() (real ground-truth derivation) to get _is_untracked, then
+        # _should_run_untracked_fan_backstop() (the exact gate Issue #627 fixed) to decide
+        # whether to fire reconcile_fan_on_startup(trigger="backstop_30min") — the same
+        # method reconcile_fan_on_startup calls with the same trigger label production
+        # uses for this call site.
+        if coordinator is not None:
+            _is_untracked_tick = coordinator._compute_fan_status() == "running (untracked)"
+            if coordinator._should_run_untracked_fan_backstop(_is_untracked_tick):
+                _cs_tick = fake_hass.states.get(climate_entity)
+                _tick_fan_mode = str(_cs_tick.attributes.get("fan_mode", "")) if _cs_tick else ""
+                _tick_hvac_action = str(_cs_tick.attributes.get("hvac_action", "")).lower() if _cs_tick else ""
+                if _tick_hvac_action not in ("heating", "cooling"):
+                    run_coro(
+                        coordinator.automation_engine.reconcile_fan_on_startup(
+                            indoor=coordinator._get_indoor_temp(),
+                            outdoor=coordinator._last_outdoor_temp,
+                            thermostat_fan_running=coordinator._derive_thermostat_fan_running_for_reconcile(
+                                fan_mode_attr=_tick_fan_mode,
+                                hvac_action_attr=_tick_hvac_action,
+                            ),
+                            any_sensor_open=coordinator._any_sensor_open(),
+                            trigger="backstop_30min",
+                        )
+                    )
+
     elif etype == "thermostat_state_changed":
         # Issue #474: when a real coordinator is present, dispatch via
         # states.async_set() — this fires the coordinator's actual
@@ -774,6 +818,20 @@ def _dispatch_event(
         # evaluated against a later-injected indoor temp) must dispatch it explicitly.
         # Purely additive — no existing event type's semantics changed.
         run_coro(coordinator.async_request_refresh())
+
+    elif etype == "simulate_restart" and coordinator is not None:
+        # Issue #627: models an HA restart mid-scenario using the REAL production
+        # continuity boundary — engine.get_serializable_state() (the real save-path
+        # method) followed by engine.restore_state() (the real load-path method,
+        # including its Issue #263/#327 clean-slate wipe of _fan_override_active/
+        # _fan_remote_timer_hours while preserving _pre_fan_hvac_mode/_fan_active) — not
+        # a hand-rolled mirror of what restart does. Also resets
+        # coordinator._startup_coalesce_active to True, its real __init__ default,
+        # since a fresh coordinator/process is exactly what a restart produces. This is
+        # the only way to reach the exact post-restart state (Issue #627's premature
+        # backstop_30min misfire) without spinning up a second full coordinator.
+        engine.restore_state(engine.get_serializable_state())
+        coordinator._startup_coalesce_active = True
 
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 

@@ -2529,11 +2529,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # job. The ~30-min cadence here (vs. the primary direction's ~10-min 2-tick confirm)
         # is acceptable for this direction: it's an automation-ownership bookkeeping concern,
         # not a display concern (0.1a/0.1b already fix display immediately and independently).
-        if (
-            _is_untracked
-            and not self.automation_engine._fan_override_active
-            and not self.automation_engine._grace_active
-        ):
+        # Issue #627: gate this backstop behind the startup-coalescing window, the same
+        # idiom every sibling override-detection check in this file already uses (see the
+        # "Startup coalescing active — suppressing X detection" log lines below). Without
+        # this gate, this backstop fires on the very first _async_update_data() cycle after
+        # restart — before restore_state()'s Issue #263/#327 clean-slate settle window has
+        # had any chance to elapse — and its only gate (_fan_override_active) is exactly the
+        # flag that clean-slate just wiped to False. That let it misread a whole-house fan
+        # still legitimately running under a pre-restart RF-remote timer as "unwarranted,"
+        # turn it off, and release _pre_fan_hvac_mode (the flag _whf_owns_hvac() depends on)
+        # — which then let apply_classification() commit the thermostat to Cool mode moments
+        # later with nothing left to stop it (a real AC/whole-house-fan mutex violation). The
+        # premature correction also armed the 5-minute correction cooldown, silently
+        # suppressing the properly-designed _do_startup_coalesce() -> reconcile_fan_on_startup
+        # (trigger="ha_restart") call at the real 300s coalescing boundary from ever
+        # re-evaluating. Delaying this backstop until the window closes costs nothing in
+        # steady-state operation (_startup_coalesce_active is False the rest of the time) and
+        # lets the intended ha_restart-triggered reconcile make the first real decision.
+        if self._should_run_untracked_fan_backstop(_is_untracked):
             _LOGGER.info("Fan running untracked with no active override/grace — triggering periodic reconciliation")
             _cs_bst = self.hass.states.get(self.config.get("climate_entity", ""))
             _bst_fan_mode = str(_cs_bst.attributes.get("fan_mode", "")) if _cs_bst else ""
@@ -2567,6 +2580,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "Periodic reconciliation skipped: HVAC actively %s — fan is thermostat blower",
                     _bst_hvac_action,
                 )
+        elif _is_untracked and self._startup_coalesce_active:
+            _LOGGER.debug("Startup coalescing active — suppressing untracked-fan backstop reconciliation")
 
         # Issue #361: command-only fan reconciliation (fan_state_feedback=False).
         # When the fan entity only echoes the last command, we cannot detect physical overrides
@@ -4842,6 +4857,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if fan_state is not None:
                 return fan_state.state.lower() in ("on", "true")
         return False
+
+    def _should_run_untracked_fan_backstop(self, is_untracked: bool) -> bool:
+        """Whether the periodic ``backstop_30min`` untracked-fan reconcile should fire now.
+
+        Issue #627: previously this was an inline condition that checked only
+        ``_fan_override_active``/``_grace_active`` — not ``_startup_coalesce_active``, unlike
+        every sibling override-detection check in this file. That let the backstop fire on
+        the very first ``_async_update_data()`` cycle after a restart, before
+        ``restore_state()``'s Issue #263/#327 clean-slate settle window (300s) had elapsed,
+        using a flag (``_fan_override_active``) that clean-slate had just wiped. It
+        misclassified a whole-house fan still legitimately running under a pre-restart
+        RF-remote timer as "unwarranted," turned it off, and released ``_pre_fan_hvac_mode``
+        (the flag ``_whf_owns_hvac()`` depends on) — letting ``apply_classification()``
+        commit the thermostat to Cool mode moments later with nothing left to stop it (a
+        real AC/whole-house-fan mutex violation). Extracted to its own method so this exact
+        predicate can be unit tested directly.
+        """
+        return (
+            is_untracked
+            and not self._startup_coalesce_active
+            and not self.automation_engine._fan_override_active
+            and not self.automation_engine._grace_active
+        )
 
     def _derive_thermostat_fan_running_for_reconcile(self, *, fan_mode_attr: str, hvac_action_attr: str) -> bool:
         """Archetype-aware 'is a fan running' signal for reconcile_fan_on_startup() (Issue #423).

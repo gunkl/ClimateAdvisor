@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.9] — 2026-08-11
+
+- Fix #627: after a restart during an active whole-house-fan session (e.g. one started via RF remote), Climate Advisor could silently turn the fan off within the first second and then switch the air conditioner into Cool mode roughly 30 seconds later — running the AC and whole-house fan at the same time, which the automation is specifically designed to prevent. A periodic safety check meant to catch a truly stray fan was firing before the system had finished settling back in after the restart. It now waits for that settling window to close before acting, the same way every other restart-related check already does.
+
 ## [0.6.8] — 2026-08-11
 
 - Fix #625: the Status card's grace-period text (added in 0.6.6, #620) had grown into a long, duplicated sentence — for a whole-house-fan override it repeated what the Fan (WHF) card already said, in different words. It now shows a short cause (e.g. "WHF override", "thermostat override") plus how long the grace period was set for and when it ends — the same compact style the Fan (WHF) card already uses for its remote timer. It also now shows a cause at all when you manually change the thermostat directly (mode or temperature) — previously that case showed no cause, or occasionally an unrelated leftover from an earlier event.

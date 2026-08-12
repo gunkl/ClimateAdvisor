@@ -217,6 +217,7 @@ def _make_update_data_coord(*, hvac_mode: str, hvac_action: str, ca_fan_active: 
     coord._first_run = False
     coord._occupancy_mode = "home"
     coord._last_violation_check = None
+    coord._startup_coalesce_active = False  # Issue #627: gates the untracked-fan backstop
 
     # Unused stubs kept for completeness (no-ops due to forecast=None path)
     coord._update_forecast = MagicMock()
@@ -400,26 +401,38 @@ class TestStateContradictionEventReal:
 
     def test_event_emitted_when_mode_off_action_fan(self):
         coord = _make_update_data_coord(hvac_mode="off", hvac_action="fan")
-        asyncio.run(coord._async_update_data())
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now", return_value=datetime(2026, 4, 8, 21, 0, 0)
+        ):
+            asyncio.run(coord._async_update_data())
         calls = [c[0][0] for c in coord._emit_event.call_args_list]
         assert "state_contradiction_warning" in calls, f"Expected state_contradiction_warning event; got: {calls}"
 
     def test_event_emitted_when_mode_off_action_heating(self):
         coord = _make_update_data_coord(hvac_mode="off", hvac_action="heating")
-        asyncio.run(coord._async_update_data())
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now", return_value=datetime(2026, 4, 8, 21, 0, 0)
+        ):
+            asyncio.run(coord._async_update_data())
         calls = [c[0][0] for c in coord._emit_event.call_args_list]
         assert "state_contradiction_warning" in calls
 
     def test_no_event_when_mode_matches_action(self):
         coord = _make_update_data_coord(hvac_mode="heat", hvac_action="heating")
-        asyncio.run(coord._async_update_data())
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now", return_value=datetime(2026, 4, 8, 21, 0, 0)
+        ):
+            asyncio.run(coord._async_update_data())
         calls = [c[0][0] for c in coord._emit_event.call_args_list]
         assert "state_contradiction_warning" not in calls
 
     def test_no_event_when_ca_fan_is_active(self):
         """hvac_mode=off + hvac_action=fan, but CA itself activated the fan — suppress."""
         coord = _make_update_data_coord(hvac_mode="off", hvac_action="fan", ca_fan_active=True)
-        asyncio.run(coord._async_update_data())
+        with patch(
+            "custom_components.climate_advisor.coordinator.dt_util.now", return_value=datetime(2026, 4, 8, 21, 0, 0)
+        ):
+            asyncio.run(coord._async_update_data())
         calls = [c[0][0] for c in coord._emit_event.call_args_list]
         assert "state_contradiction_warning" not in calls
 
@@ -652,21 +665,23 @@ class TestUntrackedFanEvent:
         # _compute_fan_status itself is covered by TestFanPhysicallyRunning in test_coordinator_chart.
         coord._compute_fan_status = MagicMock(return_value="running (untracked)")
 
-        # Entry: untracked fan → exactly one fan_running_untracked event
-        asyncio.run(coord._async_update_data())
-        types = [c.args[0] for c in coord._emit_event.call_args_list]
-        assert "fan_running_untracked" in types
-        assert coord._untracked_fan_active is True
+        fixed_now = datetime(2026, 4, 8, 21, 0, 0)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=fixed_now):
+            # Entry: untracked fan → exactly one fan_running_untracked event
+            asyncio.run(coord._async_update_data())
+            types = [c.args[0] for c in coord._emit_event.call_args_list]
+            assert "fan_running_untracked" in types
+            assert coord._untracked_fan_active is True
 
-        # Dedup: still untracked next cycle → no re-emit
-        coord._emit_event.reset_mock()
-        asyncio.run(coord._async_update_data())
-        assert "fan_running_untracked" not in [c.args[0] for c in coord._emit_event.call_args_list]
+            # Dedup: still untracked next cycle → no re-emit
+            coord._emit_event.reset_mock()
+            asyncio.run(coord._async_update_data())
+            assert "fan_running_untracked" not in [c.args[0] for c in coord._emit_event.call_args_list]
 
-        # Exit: fan stops → fan_untracked_cleared, flag reset
-        coord._compute_fan_status = MagicMock(return_value="inactive")
-        coord._emit_event.reset_mock()
-        asyncio.run(coord._async_update_data())
-        types3 = [c.args[0] for c in coord._emit_event.call_args_list]
-        assert "fan_untracked_cleared" in types3
-        assert coord._untracked_fan_active is False
+            # Exit: fan stops → fan_untracked_cleared, flag reset
+            coord._compute_fan_status = MagicMock(return_value="inactive")
+            coord._emit_event.reset_mock()
+            asyncio.run(coord._async_update_data())
+            types3 = [c.args[0] for c in coord._emit_event.call_args_list]
+            assert "fan_untracked_cleared" in types3
+            assert coord._untracked_fan_active is False

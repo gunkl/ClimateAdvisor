@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import sys
+import types
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3790,3 +3792,61 @@ class TestCallFanServiceWithContext:
             )
 
             assert not engine.fan_command_context_matches("ctx-old", None)
+
+
+class TestShouldRunUntrackedFanBackstop:
+    """Issue #627: coordinator._should_run_untracked_fan_backstop() gates the
+    backstop_30min "untracked fan" reconcile behind the startup-coalescing window, the
+    same idiom every sibling override-detection check in coordinator.py already uses.
+
+    Before this fix, the backstop's only gate was `_fan_override_active` — the exact flag
+    restore_state()'s Issue #263/#327 clean-slate policy wipes to False on every restart.
+    That let the backstop fire on the very first post-restart update cycle (before the
+    300s coalescing window had any chance to settle), misclassify a whole-house fan still
+    legitimately running under a pre-restart RF-remote timer as "unwarranted," turn it
+    off, and release `_pre_fan_hvac_mode` — which then let `apply_classification()` commit
+    the thermostat to Cool mode moments later with nothing left to stop it (a real
+    AC/whole-house-fan mutex violation, live incident 2026-08-11).
+    """
+
+    def _make_coord(self, *, startup_coalesce_active: bool, fan_override_active: bool, grace_active: bool):
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = MagicMock()
+        coord._should_run_untracked_fan_backstop = types.MethodType(
+            mod.ClimateAdvisorCoordinator._should_run_untracked_fan_backstop, coord
+        )
+        coord._startup_coalesce_active = startup_coalesce_active
+        coord.automation_engine = MagicMock()
+        coord.automation_engine._fan_override_active = fan_override_active
+        coord.automation_engine._grace_active = grace_active
+        return coord
+
+    def test_suppressed_during_startup_coalescing_window(self):
+        """REGRESSION GUARD: an untracked fan detected while _startup_coalesce_active is
+        True (the exact post-restart state that misfired in the live incident — clean-slate
+        already wiped _fan_override_active to False) must NOT trigger the backstop."""
+        coord = self._make_coord(startup_coalesce_active=True, fan_override_active=False, grace_active=False)
+        assert coord._should_run_untracked_fan_backstop(True) is False
+
+    def test_fires_once_coalescing_window_closes(self):
+        """The exact same untracked-fan/no-override/no-grace state must fire normally once
+        _startup_coalesce_active flips False — the fix delays the decision, it doesn't
+        remove it."""
+        coord = self._make_coord(startup_coalesce_active=False, fan_override_active=False, grace_active=False)
+        assert coord._should_run_untracked_fan_backstop(True) is True
+
+    def test_not_untracked_never_fires_regardless_of_window(self):
+        coord = self._make_coord(startup_coalesce_active=False, fan_override_active=False, grace_active=False)
+        assert coord._should_run_untracked_fan_backstop(False) is False
+
+    def test_active_fan_override_still_suppresses_outside_the_window(self):
+        """Pre-existing behavior (unchanged by this fix): a live manual fan override still
+        blocks the backstop even once the coalescing window has closed."""
+        coord = self._make_coord(startup_coalesce_active=False, fan_override_active=True, grace_active=False)
+        assert coord._should_run_untracked_fan_backstop(True) is False
+
+    def test_active_grace_still_suppresses_outside_the_window(self):
+        """Pre-existing behavior (unchanged by this fix): an active grace period still
+        blocks the backstop even once the coalescing window has closed."""
+        coord = self._make_coord(startup_coalesce_active=False, fan_override_active=False, grace_active=True)
+        assert coord._should_run_untracked_fan_backstop(True) is False

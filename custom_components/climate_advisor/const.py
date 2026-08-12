@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.8"
+VERSION = "0.6.9"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.9": [
+        "Fix #627: after a restart during an active whole-house-fan session (e.g. one"
+        " started via RF remote), Climate Advisor could silently turn the fan off within"
+        " the first second and then switch the air conditioner into Cool mode roughly 30"
+        " seconds later — running the AC and whole-house fan at the same time, which the"
+        " automation is specifically designed to prevent. A periodic safety check meant to"
+        " catch a truly stray fan was firing before the system had finished settling back"
+        " in after the restart. It now waits for that settling window to close before"
+        " acting, the same way every other restart-related check already does.",
+    ],
     "0.6.8": [
         "Fix #625: the Status card's grace-period text (added in 0.6.6, #620) had grown"
         " into a long, duplicated sentence — for a whole-house-fan override it repeated"
@@ -1692,6 +1702,37 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    627: {
+        "version_fixed": "0.6.9",
+        "title": (
+            "Live incident 2026-08-11: restore_state()'s Issue #263/#327 restart clean-slate"
+            " wipes AutomationEngine._fan_override_active but correctly preserves"
+            " _pre_fan_hvac_mode (the flag _whf_owns_hvac() depends on). The coordinator's"
+            " periodic backstop_30min 'untracked fan' reconcile used only"
+            " _fan_override_active as its gate — not _startup_coalesce_active, unlike every"
+            " sibling override-detection check in coordinator.py — so it fired on the very"
+            " first post-restart update cycle, before the 300s startup-coalescing window had"
+            " any chance to settle. It misread a whole-house fan still legitimately running"
+            " under a pre-restart RF-remote timer as unwarranted, turned it off, and released"
+            " _pre_fan_hvac_mode via _deactivate_fan() — which let the next apply_classification()"
+            " cycle commit the thermostat to Cool mode ~34 seconds later with nothing left to"
+            " stop it. The premature correction also armed the 5-minute correction cooldown,"
+            " silently suppressing the properly-designed _do_startup_coalesce() ->"
+            " reconcile_fan_on_startup(trigger='ha_restart') call at the real 300s coalescing"
+            " boundary from ever re-evaluating."
+        ),
+        "scope_covered": (
+            "coordinator.py: new _should_run_untracked_fan_backstop() predicate method"
+            " (extracted from the inline backstop_30min condition so it can be unit tested"
+            " directly) adds `not self._startup_coalesce_active` to the existing"
+            " _fan_override_active/_grace_active gate — the same idiom already used by every"
+            " other override-detection check in this file. tools/sim_harness/run_production.py:"
+            " new `simulate_restart` (drives the real engine.restore_state(engine."
+            " get_serializable_state()) continuity boundary) and `fan_backstop_tick` (drives the"
+            " real backstop_30min call site) scenario event types — neither existed before,"
+            " closing a real harness coverage gap for this call site."
+        ),
+    },
     625: {
         "version_fixed": "0.6.8",
         "title": (

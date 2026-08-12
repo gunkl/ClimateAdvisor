@@ -1,0 +1,93 @@
+{
+  "name": "restart_whf_ac_mutex_backstop_race",
+  "description": "Issue #627: an HA restart mid-WHF-session let the periodic backstop_30min untracked-fan reconcile fire before the startup-coalescing window settled, releasing the WHF/HVAC mutex and letting the AC be commanded into Cool mode while the whole-house fan may still have been physically running.",
+  "source": "live-incident",
+  "issue": 627,
+  "notes": [
+    "Occupant impact: the user started the whole-house fan via RF remote to cool the house for free. A routine software restart silently turned that fan off 90 minutes into its session, then ~34 seconds later the thermostat switched to Cool mode -- the exact AC/whole-house-fan-fighting condition the mutual-exclusion rule exists to prevent.",
+    "Root cause (five whys, full trace in PR #627): restore_state()'s Issue #263/#327 clean-slate wipes _fan_override_active on restart but correctly preserves _pre_fan_hvac_mode (the flag _whf_owns_hvac() actually depends on). The coordinator's periodic backstop_30min untracked-fan reconcile used ONLY _fan_override_active as its gate -- not _startup_coalesce_active, unlike every sibling override-detection check in coordinator.py -- so it fired on the very first post-restart cycle, misread the still-legitimately-running fan as unwarranted, and cleared _pre_fan_hvac_mode via _deactivate_fan(). With that flag gone, the next classification cycle had nothing left to stop it from committing Cool mode.",
+    "Fix: coordinator._should_run_untracked_fan_backstop() now also requires `not self._startup_coalesce_active`, the same idiom already used by every other override-detection check in this file. This scenario models the real restart boundary via engine.restore_state(engine.get_serializable_state()) (Issue #627's new `simulate_restart` harness event) and the real periodic backstop call site (Issue #627's new `fan_backstop_tick` harness event) -- not a mirror of the decision logic, the actual production methods.",
+    "(a) Scenario effectiveness: if the Issue #627 gate were removed (reverting to the pre-fix condition), _should_run_untracked_fan_backstop would return True at the fan_backstop_tick event (fan is untracked, _startup_coalesce_active=True but no longer checked, no override, no grace) -- reconcile_fan_on_startup(trigger=\"backstop_30min\") would fire, nat-vent would not be eligible (outdoor 74F >= indoor 72F), the turn-off branch would deactivate the fan and clear _pre_fan_hvac_mode, and the following classification event would then be free to command Cool mode -- exactly reproducing the incident and failing hvac_mode_never_commanded/fan_not_active below. The scenario would fail without the fix.",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md's startup-coalescing/fan-reconcile section and docs/grace-periods-spec.md are updated in this same PR to describe the new _startup_coalesce_active gate -- reviewed against current code before this scenario was authored, not after.",
+    "(c) User outcome if this scenario's assertions fail in the future: the AC and whole-house fan could run simultaneously again after any restart during an active RF-remote WHF session -- wasted energy at minimum, and the exact fan-fighting condition the mutual-exclusion rule exists to prevent at worst."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-08-11T18:58:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a real prior state for fan.whf -- _async_fan_entity_changed requires both old_state and new_state to be non-None to evaluate a transition (mirrors the sensor_open 'seed' pattern elsewhere in this harness), and fan_state_feedback=true is required for the listener's override-detection body to run at all (Issue #361: command-only mode treats entity state changes as command echoes, not physical signals)."
+    },
+    {
+      "time": "2026-08-11T18:59:00",
+      "type": "temp_update",
+      "indoor_f": 72.0,
+      "outdoor_f": 74.0,
+      "note": "Evening: indoor 72F, outdoor 74F -- outdoor at/above indoor, matches the incident (nat-vent direction gate will fail once evaluated)."
+    },
+    {
+      "time": "2026-08-11T18:59:30",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Matches the incident's real classification: hot day, mode=cool. Thermostat is commanded to cool/74F here so the WHF override below has a real prior mode to capture and restore protection for."
+    },
+    {
+      "time": "2026-08-11T18:59:41",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "User turns the whole-house fan on via RF remote (12h timer in the real incident). Real _async_fan_entity_changed listener detects this as a manual override, sets _fan_override_active=True, and suppresses HVAC (_pre_fan_hvac_mode captures the prior 'cool' mode, HVAC set off)."
+    },
+    {
+      "time": "2026-08-11T19:05:00",
+      "type": "simulate_restart",
+      "note": "Models the HA restart for the 0.6.8 deploy (compressed to ~5 min after the override in this scenario, well inside the 15-min DEFAULT manual grace window this harness's external_fan_state_change dispatch uses -- the real incident's RF-remote timer was 12h, but restore_state() unconditionally clears _grace_active on restart regardless of how much grace time was nominally left, so this compressed timing exercises the identical restart-boundary mechanics as the live incident without needing an RF-remote-timer-duration event type. Placed BEFORE the grace period's own natural 19:14:41 expiry so this scenario isolates the Issue #627 backstop_30min bug from the unrelated post_grace_expiry reconcile call site, which would otherwise resolve the fan first and mask this scenario's assertions.) restore_state(get_serializable_state()) wipes _fan_override_active/_fan_remote_timer_hours (Issue #263/#327 clean-slate) but preserves _pre_fan_hvac_mode/_fan_active. coordinator._startup_coalesce_active is reset to True, its real post-restart default."
+    },
+    {
+      "time": "2026-08-11T19:05:00",
+      "type": "fan_backstop_tick",
+      "note": "Models the exact real call site that misfired in production: the periodic backstop_30min untracked-fan reconcile, evaluated within the same second as the restart -- before the coalescing window has had any chance to settle. With the Issue #627 fix, _should_run_untracked_fan_backstop() must return False here (a still-physically-running, still-_pre_fan_hvac_mode-protected fan must not be touched during this window)."
+    },
+    {
+      "time": "2026-08-11T19:05:30",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Models the next classification re-evaluation the incident's door/window-open event triggered. If the fix holds, _pre_fan_hvac_mode is still set from before the restart, so _whf_owns_hvac() is still True and this must NOT command Cool mode -- reproducing the exact moment the live incident's AC turned on."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-11T19:05:30",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["cool", "heat"],
+      "reason": "The AC must never be commanded into Cool/Heat mode anywhere in this scenario -- the whole-house fan's HVAC suppression (_pre_fan_hvac_mode / _whf_owns_hvac()) must hold across the restart and the full startup-coalescing window, exactly the guarantee the live incident violated."
+    },
+    {
+      "at": "2026-08-11T19:05:30",
+      "expect": "fan_not_active",
+      "reason": "INVERTED on purpose: engine._fan_active is False throughout this scenario (a manually/remotely-detected WHF override never sets _fan_active=True -- only _fan_override_active and _pre_fan_hvac_mode track it, see handle_fan_manual_override()), so this assertion documents that expectation explicitly rather than leaving it unverified. If a future change starts setting _fan_active=True for manual overrides, this assertion existing here (rather than being silently absent) forces a deliberate review of whether reconcile_fan_on_startup's turn-off branch would then have fired and misbehaved."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After the Issue #627 fix, a whole-house fan running under a manual override survives an HA restart's clean-slate wipe without the AC ever being commanded on -- the periodic untracked-fan backstop correctly waits for the startup-coalescing window to close instead of racing ahead of it.",
+    "observed_behavior": "hvac_mode_never_commanded holds across the restart, the premature backstop tick (correctly suppressed), and the following classification cycle -- no climate.set_hvac_mode call with mode cool/heat appears in the action log.",
+    "expected_behavior": "The AC and whole-house fan must never run simultaneously as a result of a restart -- this scenario proves the fix closes that window without weakening the backstop's ability to eventually resolve a genuinely stray fan (see docs/08-COMPUTATION-REFERENCE.md for the post-coalescing-window resolution path, unaffected by this fix)."
+  }
+}

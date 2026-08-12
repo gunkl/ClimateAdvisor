@@ -842,6 +842,29 @@ def check_assertion(
                 return False
         return expect
 
+    # --- hvac_mode_never_commanded (Issue #627) ---
+    # Negative GUARANTEE assertion, same shape as override_not_detected/
+    # no_comfort_undertemp_incident above: proves the real climate.set_hvac_mode service
+    # was never called with a forbidden mode across the WHOLE scenario (not gated by
+    # assertion["at"] — the guarantee is "never happened", not "hasn't happened yet by
+    # time T"), scanning result.action_log directly rather than the decisions list. Added
+    # because no prior assertion type could express "HVAC must never be commanded into
+    # cool/heat during this window" — exactly the guarantee the live 2026-08-11 incident
+    # (AC activated while the whole-house fan may still have been physically running,
+    # because a premature backstop reconcile released the WHF/HVAC mutex mid-restart)
+    # needed and had no way to assert before this fix. Payload:
+    # {"forbidden_modes": ["cool", "heat"]} (defaults to ["cool", "heat"] — "off"/"fan_only"
+    # are always allowed since neither engages the compressor).
+    if expect == "hvac_mode_never_commanded":
+        forbidden = {str(m).lower() for m in assertion.get("forbidden_modes", ["cool", "heat"])}
+        for entry in result.action_log:
+            if entry.get("domain") != "climate" or entry.get("service") != "set_hvac_mode":
+                continue
+            commanded = str(entry.get("data", {}).get("hvac_mode", "")).lower()
+            if commanded in forbidden:
+                return False
+        return expect
+
     return False
 
 

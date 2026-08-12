@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.7] — 2026-08-12
+
+- Fix #623: briefly opening a monitored door (e.g. walking outside) could trigger an instant "HVAC paused" notification, bypassing the debounce window you configured to ignore momentary opens. A timing race in the previous release's fix (0.6.6, #620) let this happen; the debounce check is now immune to that race, so a quick in-and-out through a door is correctly ignored.
+
 ## [0.6.6] — 2026-08-11
 
 - Fix #620: if you turned the whole-house fan off manually while a window was open and the outdoor air was still favorable, the automation could turn it back on within seconds, undoing your action. Separately, once a fan session ended (for any reason) with a window still open, the AC or heat could get set active with that window open — even if the window had been open for a while and nothing had ever noticed. All three now correctly pause instead. Also: the Status card now shows how much longer an active grace period will last and why it started, information that was previously only visible on the Debug tab.

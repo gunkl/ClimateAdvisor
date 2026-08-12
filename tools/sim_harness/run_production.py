@@ -483,7 +483,20 @@ def _dispatch_event(
     elif etype == "sensor_open":
         entity_id = event.get("entity", "binary_sensor.window")
         if coordinator is not None:
-            if event.get("seed"):
+            if event.get("seed_fresh"):
+                # Issue #623: models the exact race that caused the transient-open
+                # regression — a sensor's raw HA state already reads "open" (as
+                # apply_classification()'s _any_monitored_sensor_open() would see
+                # it), but the debounce-timer registration that
+                # _async_door_window_changed() would normally have performed
+                # hasn't run yet (in production: an unrelated coordinator refresh
+                # cycle won the race against the event-loop scheduling that
+                # listener). Silent set_simple() (no listener dispatch, so
+                # _door_open_timers stays empty — same as the real race) but
+                # stamped with a fresh last_changed so _sensor_debounce_pending()
+                # must still recognize it as pending via the timestamp check.
+                fake_hass.states.set_simple(entity_id, "on", {}, last_changed=scheduler.now())
+            elif event.get("seed"):
                 # Issue #523: models a window that was ALREADY open before HA
                 # restarted — no fresh on/off transition ever occurs (HA's
                 # _async_door_window_changed listener only fires on a state
@@ -491,7 +504,9 @@ def _dispatch_event(
                 # subscribes), so the debounce-driven pause path never engages.
                 # Only _do_startup_coalesce()'s own raw _is_sensor_open() read
                 # sees this sensor open. Uses the silent states.set() (no
-                # listener dispatch) instead of async_set().
+                # listener dispatch) instead of async_set(). last_changed stays
+                # None ("not tracked") — this sensor is genuinely long-settled,
+                # unlike the seed_fresh variant above (Issue #623).
                 fake_hass.states.set_simple(entity_id, "on", {})
             else:
                 # Issue #476: real state-change dispatch through the coordinator's

@@ -25,6 +25,15 @@ class FakeState:
 
     state: str = "unknown"
     attributes: dict[str, Any] = field(default_factory=dict)
+    # Mirrors real HA's State.last_changed (Issue #623): set only by
+    # _FakeStates.async_set() on an actual value transition, using the sim
+    # clock. None means "not tracked" — states constructed directly (e.g. the
+    # thermostat's FakeState in run_production.py) or seeded silently via
+    # set()/set_simple() (modeling a sensor already open before HA started,
+    # where no real transition was ever observed) intentionally leave this
+    # unset. Consumers must treat None as "assume already settled", not as a
+    # fresh transition — see coordinator.py's _sensor_debounce_pending().
+    last_changed: datetime | None = None
 
 
 @dataclass
@@ -164,9 +173,10 @@ class _FakeStates:
     ``async_set()``.
     """
 
-    def __init__(self, dispatch_fn: Any | None = None) -> None:
+    def __init__(self, dispatch_fn: Any | None = None, clock_fn: Any | None = None) -> None:
         self._states: dict[str, FakeState] = {}
         self._dispatch_fn = dispatch_fn
+        self._clock_fn = clock_fn  # callable → current sim datetime, for last_changed
 
     def get(self, entity_id: str) -> FakeState | None:
         return self._states.get(entity_id)
@@ -174,8 +184,22 @@ class _FakeStates:
     def set(self, entity_id: str, state: FakeState) -> None:
         self._states[entity_id] = state
 
-    def set_simple(self, entity_id: str, state_str: str, attributes: dict | None = None) -> None:
-        self._states[entity_id] = FakeState(state=state_str, attributes=attributes or {})
+    def set_simple(
+        self,
+        entity_id: str,
+        state_str: str,
+        attributes: dict | None = None,
+        last_changed: datetime | None = None,
+    ) -> None:
+        """Silently set a state — no listener dispatch, no debounce-timer registration.
+
+        ``last_changed`` (Issue #623) defaults to ``None`` ("not tracked" — models a
+        sensor already open before HA started, i.e. genuinely settled). Pass an
+        explicit timestamp only to model the opposite: a sensor whose raw state
+        already reflects a fresh open but whose debounce-timer registration hasn't
+        run yet (the exact race _sensor_debounce_pending() must not misread).
+        """
+        self._states[entity_id] = FakeState(state=state_str, attributes=attributes or {}, last_changed=last_changed)
 
     def async_set(self, entity_id: str, state_str: str, attributes: dict | None = None, context: Any = None) -> None:
         """Set a new state and dispatch a state-changed event to real listeners.
@@ -184,9 +208,18 @@ class _FakeStates:
         listeners can exercise context-based provenance. Callers that model an
         external/manual state change (not a CA-issued service call) should
         omit it — ``None`` correctly represents "no CA attribution available."
+
+        ``last_changed`` (Issue #623): stamped with the sim clock only when the
+        state value actually transitions, mirroring real HA — an attribute-only
+        rewrite of the same state string must not look like a fresh open to
+        _sensor_debounce_pending()'s debounce-window check.
         """
         old_state = self._states.get(entity_id)
-        new_state = FakeState(state=state_str, attributes=attributes or {})
+        if old_state is not None and old_state.state == state_str:
+            last_changed = old_state.last_changed
+        else:
+            last_changed = self._clock_fn() if self._clock_fn is not None else None
+        new_state = FakeState(state=state_str, attributes=attributes or {}, last_changed=last_changed)
         self._states[entity_id] = new_state
         if self._dispatch_fn is not None:
             self._dispatch_fn(entity_id, old_state, new_state, context=context)
@@ -257,7 +290,7 @@ class FakeHass:
         self._clock_fn = clock_fn or datetime.now
         self.action_log: list[dict] = []
         self._state_listeners: dict[str, list[Any]] = {}
-        self.states = _FakeStates(dispatch_fn=self._dispatch_state_change)
+        self.states = _FakeStates(dispatch_fn=self._dispatch_state_change, clock_fn=self._clock_fn)
         self.services = _FakeServices(self.action_log, self._clock_fn, self.states)
         self.bus = _FakeBus(task_runner=self.async_create_task)
         self._scheduler: Any | None = None  # set via set_scheduler()

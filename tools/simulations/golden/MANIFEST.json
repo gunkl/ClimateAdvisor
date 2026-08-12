@@ -382,5 +382,10 @@
     "sha256": "23352ec7f27eee089c706a52ea67372464645a25a4b806a4f650148e565d16cf",
     "signed": "2026-08-11",
     "issue": 620
+  },
+  "issue_623_debounce_race_transient_open_not_paused": {
+    "sha256": "cc23310cae55007002d180d55d2cc9ba862226cdb480b875f1da39e56a417405",
+    "signed": "2026-08-11",
+    "issue": 623
   }
 }

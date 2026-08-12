@@ -24,6 +24,7 @@
 | Do bedtime/wakeup/pre-cool implement their own copies of the occupancy/override/paused/nat-vent gate checks? | No (Issue #498). All four scheduled/cyclical call sites — `apply_classification()`, `handle_bedtime()`, `handle_morning_wakeup()`, `handle_pre_cool()` — call one shared pure function, `desired_state.decide_scheduled_band_gate()`, instead of hand-copying the checks. This fixed a real bug: `handle_morning_wakeup()`'s copy was missing the fan-override guard entirely, and none of the three scheduled handlers checked paused-by-door at all. | [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
 | Does a fan-off grace actually stop nat-vent from immediately re-engaging, in every code path? | As of Issue #620, yes. `check_natural_vent_conditions()`'s `_idle_open` widening (Issue #244/#402/#504) never checked `_grace_active` — a user turning the WHF off could see it reactivated within seconds if outdoor stayed favorable. Fixed by adding `and not self._grace_active` to `_idle_open`; the Issue #134 comfort-ceiling exception beside it is untouched. | [§ Fan-Off Grace](#fan-off-grace-issue-359) |
 | Can a monitored sensor block a routine comfort-restore write even if it was never freshly detected as opening? | As of Issue #620, yes. `decide_scheduled_band_gate()`'s `paused_by_door` input previously reflected only event history (`_paused_by_door`, set by `handle_door_window_open()`/`_exit_nat_vent()`). A sensor open since before either ever ran left it `False` forever. `_sync_paused_by_door_with_live_sensors()` — called at the top of all four `decide_scheduled_band_gate()` callers — now reconciles the flag against live, debounce-settled sensor state first. | [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
+| Does briefly opening a monitored door (e.g. walking outside) instantly pause HVAC, bypassing the configured debounce window? | It could (Issue #623 regression from #620's `_sync_paused_by_door_with_live_sensors()`). `_sensor_debounce_pending()`'s old `_door_open_timers`-only check raced against the event listener that populates that dict — a concurrent coordinator refresh could read "open, not yet registered" and misfire a pause before the debounce window even started. Fixed by also checking each open sensor's HA-authoritative `last_changed` timestamp, immune to listener scheduling order. | [§ Debounce-Timer Registration Race (Issue #623)](#debounce-timer-registration-race-issue-623) |
 
 ---
 
@@ -457,6 +458,34 @@ The 5-minute `_first_run` settling window prevents the system from taking any HV
 ### HA Restart During PAUSED State
 
 **Corrected — Issue #523.** Pause state is NOT persisted or restored — `restore_state()` leaves `_paused_by_door`/`_pre_pause_mode` at their clean `__init__` defaults on every restart, same as grace/override state above. If a monitored sensor is still open, `_do_startup_coalesce()` re-derives the pause 5 minutes after boot by delegating to `handle_door_window_open()`, which reads the sensor's live HA state directly (no transition event needed — the sensor was already "on" before CA's listener ever subscribed). Before this fix, `_do_startup_coalesce()` hand-rolled its own incomplete nat-vent pre-check and only called `handle_door_window_open()` when that pre-check favored nat-vent — when it didn't (e.g. outdoor warmer than indoor), the pause was never re-derived at all, and `apply_classification()` could arm a fresh comfort band against the still-open window. See `08-COMPUTATION-REFERENCE.md` for the full incident writeup.
+
+### Debounce-Timer Registration Race (Issue #623)
+
+`_sensor_debounce_pending()` (coordinator.py, consumed by both `_idle_open` and
+`_sync_paused_by_door_with_live_sensors()` — see Issue #620 above) used to mean solely
+"is a timer currently registered in `_door_open_timers`". That timer is populated only
+inside `_async_door_window_changed()`, the `state_changed` **event listener**. But
+`_any_monitored_sensor_open()` reads `hass.states.get(entity_id).state` directly, which
+reflects a fresh open transition immediately — independent of when the event-loop
+schedules our listener coroutine. An unrelated, concurrently-running coordinator refresh
+cycle can reach a comfort-restore check before the listener has had its turn, observing
+"open, but no timer registered" and misreading a **just-opened, still-transient** sensor
+as **settled-open**, bypassing the debounce window entirely. Confirmed live, 2026-08-11 —
+the false pause fired 5ms before "debounce started" was logged for the same transition.
+
+Fixed by also checking each open sensor's own HA-authoritative `state.last_changed`
+timestamp — set by HA's state machine at the physical transition instant, unaffected by
+listener scheduling order — against `CONF_SENSOR_DEBOUNCE`. `_sensor_debounce_pending()`
+now returns `True` if *either* a timer is registered *or* an open sensor's `last_changed`
+is within the debounce window. This only ever widens when the guard returns "pending"
+(never narrows it), so it cannot reintroduce a stale/missed pause.
+
+**Lesson (Five Whys root cause):** `_door_open_timers` membership was validated only for
+its original caller (`_idle_open`, Issue #504), where "registration precedes evaluation"
+held in practice. Issue #620's Fix A reused the same signal in a new caller context —
+evaluating immediately at classification time — without re-verifying that ordering
+invariant still held there. When reusing a shared timing-dependent signal in a new caller,
+re-derive its invariants for that caller; don't assume they transfer.
 
 ### Concurrent Door/Window Events (Multiple Sensors)
 

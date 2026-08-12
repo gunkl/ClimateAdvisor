@@ -1,0 +1,114 @@
+{
+  "name": "issue_623_debounce_race_transient_open_not_paused",
+  "description": "A monitored sensor whose raw HA state already reads open, but whose debounce-timer registration hasn't run yet (the exact scheduling race between an unrelated coordinator refresh and the state-changed event listener), must NOT be treated as settled-open — the routine comfort-restore path must wait for the debounce window, not pause instantly (Issue #623)",
+  "source": "issue-report",
+  "issue": 623,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant impact: on 2026-08-11 the user exited through a door at 15:29 and got an instant",
+    "'HVAC paused' notification, even though the project's sensor-debounce mechanism exists",
+    "specifically to ignore momentary/transient opens (e.g. walking in or out). This bypassed",
+    "the entire 10-minute debounce window the user configured, and cascaded into a grace-period",
+    "start/expire/re-pause sequence and a second comfort-violation incident less than an hour",
+    "later -- all downstream of the false-positive pause.",
+    "",
+    "Root cause (Issue #620 regression, PR #621/commit b6843ca): Fix A",
+    "(_sync_paused_by_door_with_live_sensors()) reads live raw sensor state via",
+    "_any_monitored_sensor_open() and only defers via _sensor_debounce_pending, which used to",
+    "mean 'is a timer currently registered in _door_open_timers'. That timer is only populated",
+    "inside _async_door_window_changed(), the state-changed EVENT LISTENER. Because HA state",
+    "reads (hass.states.get()) reflect a fresh transition immediately, but our own listener is",
+    "scheduled as a separate coroutine, an unrelated periodic coordinator refresh cycle can win",
+    "the race and read 'open, not debounce-pending' before the listener has registered the",
+    "timer for that exact transition -- exactly matching the incident's log: the pause fired at",
+    "15:29:46.907/.910, 5ms BEFORE 'Contact sensor opened ... debounce started' logged at .912",
+    "for the same sensor.",
+    "",
+    "Fix: _sensor_debounce_pending (coordinator.py) now also checks each open sensor's own",
+    "HA-authoritative last_changed timestamp -- set by HA's state machine at the physical",
+    "transition instant, independent of when our listener coroutine gets scheduled -- in",
+    "addition to the existing _door_open_timers registry check.",
+    "",
+    "Scenario design: the sensor_open event uses seed_fresh (not seed) -- silently sets the",
+    "sensor 'on' via the harness's set_simple() (no listener dispatch, so _door_open_timers",
+    "stays empty, faithfully modeling the race where the listener hasn't run) but stamps a",
+    "fresh last_changed via the sim clock, faithfully modeling 'raw state already reflects the",
+    "open, timestamp says it JUST happened'. A classification cycle immediately after must NOT",
+    "pause -- the sensor is well within the configured 10-minute debounce window.",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: reverting _sensor_debounce_pending() to the old",
+    "    'lambda: bool(self._door_open_timers)' makes this scenario fail -- the classification",
+    "    cycle immediately after seed_fresh would see debounce_pending=False (no timer",
+    "    registered) and pause instantly. Verified via revert-test before promoting.",
+    "(b) Docs-production alignment: docs/grace-periods-spec.md's _sensor_debounce_pending note",
+    "    (added for #620) is updated to describe the last_changed-based check and why",
+    "    (Issue #623 doc pass).",
+    "(c) User outcome: briefly opening/exiting through a monitored door no longer produces an",
+    "    instant pause notification and grace-period cascade -- the debounce window the user",
+    "    configured is actually honored."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "sensor_debounce_seconds": 600,
+    "door_window_sensors": ["binary_sensor.bedroom_window"],
+    "fan_mode": "disabled"
+  },
+  "events": [
+    {
+      "time": "2026-08-11T15:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 92.0,
+      "note": "Hot afternoon: indoor at the comfort ceiling, outdoor far above -- no free-cooling eligibility, isolates the debounce-race check from nat-vent logic entirely (fan_mode=disabled)."
+    },
+    {
+      "time": "2026-08-11T15:01:00",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Normal classification applies cool@74F -- sensor closed, nothing to pause for."
+    },
+    {
+      "time": "2026-08-11T15:29:46",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "seed_fresh": true,
+      "note": "Models the exact race: raw state now reads open, but no debounce timer registered yet -- matching the real incident's 5ms window before 'debounce started' was logged."
+    },
+    {
+      "time": "2026-08-11T15:29:47",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "A routine classification cycle fires 1 second later -- exactly the unrelated periodic refresh that won the race in production. Must NOT pause: the sensor is 1 second into a 600-second debounce window."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-11T15:01:00",
+      "expect": "classification_applied",
+      "reason": "First classification applies normally -- no sensor open yet."
+    },
+    {
+      "at": "2026-08-11T15:29:47",
+      "expect": "classification_applied",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Issue #623: even though the sensor's raw state already reads open and _door_open_timers is empty (listener hasn't run), _sensor_debounce_pending() must recognize the sensor is only 1 second into its 600-second debounce window via last_changed, and apply_classification() must proceed normally -- not pause. The debounce mechanism exists precisely to ignore a transient/fresh open like this."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A sensor whose raw state just changed but whose debounce timer hasn't registered yet is still correctly treated as pending, not settled -- classification proceeds normally instead of pausing instantly (Issue #623)",
+    "observed_behavior": "classification_applied (cool@74F) -> sensor opens with a fresh timestamp but no registered timer -> next classification cycle -> classification_applied again, HVAC unaffected",
+    "expected_behavior": "The debounce window is honored even when the internal timer-registry hasn't caught up with a fresh raw-state transition"
+  }
+}

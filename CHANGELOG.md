@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.8] — 2026-08-11
+
+- Fix #625: the Status card's grace-period text (added in 0.6.6, #620) had grown into a long, duplicated sentence — for a whole-house-fan override it repeated what the Fan (WHF) card already said, in different words. It now shows a short cause (e.g. "WHF override", "thermostat override") plus how long the grace period was set for and when it ends — the same compact style the Fan (WHF) card already uses for its remote timer. It also now shows a cause at all when you manually change the thermostat directly (mode or temperature) — previously that case showed no cause, or occasionally an unrelated leftover from an earlier event.
+
 ## [0.6.7] — 2026-08-12
 
 - Fix #623: briefly opening a monitored door (e.g. walking outside) could trigger an instant "HVAC paused" notification, bypassing the debounce window you configured to ignore momentary opens. A timing race in the previous release's fix (0.6.6, #620) let this happen; the debounce check is now immune to that race, so a quick in-and-out through a door is correctly ignored.

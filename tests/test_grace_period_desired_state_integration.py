@@ -30,3 +30,23 @@ def test_forcing_grace_disabled_prevents_a_real_grace_start():
         "starting even with a real nonzero duration configured — the wiring is load-bearing"
     )
     mock_call_later.assert_not_called()
+
+
+def test_start_grace_period_stores_trigger_for_status_card():
+    """_start_grace_period() must store `trigger` on _last_grace_trigger (Issue #625) so
+    the Status card can show a short cause label instead of the old free-text
+    _last_action_reason sentence."""
+    engine = _make_automation_engine({CONF_AUTOMATION_GRACE_PERIOD: 300})
+
+    with (
+        patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later,
+        patch("custom_components.climate_advisor.automation.callback", side_effect=lambda f: f),
+    ):
+        mock_call_later.return_value = MagicMock()
+        engine._start_grace_period(source="automation", trigger="sensor_closed_resume")
+
+    assert engine._grace_active is True
+    assert engine._last_grace_trigger == "sensor_closed_resume"
+
+    engine._cancel_grace_timers()
+    assert engine._last_grace_trigger is None, "_cancel_grace_timers() must clear the stored trigger too"

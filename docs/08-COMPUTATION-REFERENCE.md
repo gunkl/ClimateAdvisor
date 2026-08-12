@@ -1889,15 +1889,43 @@ unreachable dead code (identical shape to the `nat_vent_active` gap fixed in the
 detail belonging on the Status card and nowhere else — had one more instance: `_format_grace_remaining()`
 (added by #498, orphaned by #527's cleanup above since it was never re-homed) and
 `_last_action_reason` were both already correctly shown on the **Debug tab**, but not on the
-Status card itself. `_compute_automation_status()`'s grace-active branch now appends both, e.g.
-`"grace period (manual) — Fan cancel (user turned off) — ends 7:14 AM (18 min left)"` — no new
-fields or methods, purely wiring two already-existing, already-maintained values into the one
-card whose job is mechanism state.
+Status card itself. `_compute_automation_status()`'s grace-active branch appended both, e.g.
+`"grace period (manual) — Fan cancel (user turned off) — ends 7:14 AM (18 min left)"`.
+
+**Issue #625 follow-up (superseding the #620 wiring above):** appending the raw
+`_last_action_reason` sentence turned out to be the wrong home for two reasons. First, for
+fan-triggered grace periods (WHF manually turned on/off, CA-initiated WHF suppression) the
+reason string duplicated what the Fan (WHF) card already says via `_compute_whf_status()`
+(e.g. Status: `"whole-house fan manually turned on — suppressing HVAC to prevent AC/fan
+fighting"` vs. the Fan card's own `"running (manual override)"` + `"remote timer: 12h (ends
+10:09 PM)"`), producing a long duplicated sentence. Second, for a manual thermostat override
+(`_confirm_override()`, the "user turns off cooling at the wall unit" case) `_last_action_reason`
+was never populated at all — `_confirm_override()` doesn't call `_record_action()` — so the
+Status card showed a blank or, worse, a stale reason left over from some unrelated earlier
+action.
+
+The fix: `_start_grace_period(source, trigger=...)`'s existing `trigger` string (previously used
+only for logging/event-payload correlation) is now retained as `AutomationEngine._last_grace_trigger`,
+cleared alongside `_last_resume_source` in `_cancel_grace_timers()` and the restart/reset path.
+`_compute_automation_status()`'s grace branch looks it up in a module-level `_GRACE_TRIGGER_LABELS`
+dict (`coordinator.py`) to get a short (2-3 word) cause label — unmapped/unknown triggers fall
+back to no cause segment rather than leaking a raw internal string onto the UI. `_format_grace_remaining()`
+was also reworked: instead of a "N min left" countdown, it now shows the **applied** duration
+(from `_grace_duration_seconds`) alongside the end time — the same structural shape as the Fan
+(WHF) card's own `"remote timer: 12h (ends 10:09 PM)"` line. Result:
+`"grace period (manual) — WHF override — 12h (ends 10:09 PM)"` for the WHF case, and
+`"grace period (manual) — thermostat override — 30 min (ends 7:14 AM)"` for the manual-override
+case that previously showed nothing. The full free-text reason remains available on the Debug tab
+(`_last_action_reason`), unaffected.
 
 **Test coverage:** `tests/test_coordinator.py::TestComputeNextAction` (paused/grace/override tests
 renamed `test_next_action_*_does_not_preempt_schedule`, asserting the real guidance now surfaces
 and the mechanism word does NOT appear), `tests/test_status_sensors.py::TestComputeNextAutomationAction`
-(`test_paused_by_door_still_shows_real_next_step`, `test_grace_period_active_still_shows_real_next_step`).
+(`test_paused_by_door_still_shows_real_next_step`, `test_grace_period_active_still_shows_real_next_step`),
+`tests/test_status_sensors.py::TestGraceStatusNoLongerLeaksLastActionReason` and
+`::TestFormatGraceRemaining` (Issue #625 — cause-label lookup, duration+end-time formatting,
+confirms `_last_action_reason` never leaks onto Status),
+`tests/test_grace_period_desired_state_integration.py::test_start_grace_period_stores_trigger_for_status_card`.
 
 ### 9f. Timestamp-Correct Forecast-Curve Crossing Scan, and Predictive Next Automation Candidates (Issue #528)
 

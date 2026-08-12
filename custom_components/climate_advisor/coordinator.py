@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
@@ -252,6 +252,21 @@ _WINDOWS_EXTREME_COLD_MARGIN = 15.0
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
 # Matches the per-obs-type cap enforced by LearningState.rejection_log on load.
 _REJECTION_LOG_CAP: int = 100
+
+# Issue #625: short, Fan(WHF)-card-style cause labels for AutomationEngine._last_grace_trigger,
+# shown on the Status card's grace branch instead of a free-text _last_action_reason sentence
+# (which duplicated the Fan (WHF) card for fan-triggered grace periods, and was blank/stale
+# for manual thermostat overrides, which never populate _last_action_reason at all). An
+# unmapped/unknown trigger falls back to no cause segment rather than leaking a raw internal
+# string like "sensor_closed_resume" onto the UI.
+_GRACE_TRIGGER_LABELS: Final[dict[str, str]] = {
+    "fan_manual_override": "WHF override",
+    "fan_off": "WHF turned off",
+    "physical_drift_correction": "fan drift correction",
+    "override_confirmed": "thermostat override",
+    "sensor_closed_resume": "door/window closed",
+    "nat_vent_exit_resume": "nat-vent exit",
+}
 
 # Plausible indoor temperature range in Fahrenheit.  Values outside this band indicate
 # a sensor glitch (e.g. a thermostat echoing its new setpoint into current_temperature
@@ -7074,13 +7089,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if self.automation_engine._resumed_from_pause:
                 return "resumed — door/window override"
             source = self.automation_engine._last_resume_source or "automation"
-            # Issue #620: the countdown (_format_grace_remaining()) and reason
-            # (_last_action_reason) are already correctly shown on the Debug tab — this brings
-            # the same already-existing, already-maintained data onto the Status card, which per
-            # the Status Card Ontology is the only card where mechanism state belongs.
-            _ae_reason = self.automation_engine._last_action_reason
-            _reason_suffix = f" — {_ae_reason}" if _ae_reason else ""
-            return f"grace period ({source}){_reason_suffix}{self._format_grace_remaining(self.automation_engine)}"
+            # Issue #625: previously appended the full _last_action_reason sentence here
+            # (Issue #620) — for fan-triggered grace periods that duplicated what the Fan
+            # (WHF) card already says, and for manual thermostat overrides
+            # (_confirm_override() never calls _record_action()) it was blank or a stale
+            # leftover from an unrelated earlier action. Use the short _GRACE_TRIGGER_LABELS
+            # lookup instead — same compact "cause — duration (ends HH:MM)" shape the Fan
+            # (WHF) card already uses. Full detail remains on the Debug tab
+            # (_last_action_reason), unaffected by this change.
+            _trigger_label = _GRACE_TRIGGER_LABELS.get(self.automation_engine._last_grace_trigger or "", "")
+            _cause_suffix = f" — {_trigger_label}" if _trigger_label else ""
+            return f"grace period ({source}){_cause_suffix}{self._format_grace_remaining(self.automation_engine)}"
         if self._occupancy_mode == OCCUPANCY_VACATION:
             return "active (vacation)"
         if self._occupancy_mode == OCCUPANCY_AWAY:
@@ -7356,19 +7375,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return details
 
     def _format_grace_remaining(self, ae: AutomationEngine) -> str:
-        """Format ``ae._grace_end_time`` as an ' — ends H:MM AM (N min left)' suffix.
+        """Format grace duration + end time as ' — 30 min (ends H:MM AM)', matching the
+        Fan (WHF) card's 'remote timer: Xh (ends HH:MM)' style (Issue #625).
 
-        Returns "" if the timestamp is missing, unparseable, or already in the past —
-        never raises (Issue #498: dashboard showed grace was active but never said when
-        it would end, the single most useful piece of information during an override).
+        Returns "" if the timestamp/duration is missing, unparseable, or already in the
+        past — never raises (Issue #498: dashboard showed grace was active but never said
+        when it would end, the single most useful piece of information during an override).
         """
         end_iso = getattr(ae, "_grace_end_time", None)
-        # isinstance guard: tests frequently stub the automation engine as a bare
-        # MagicMock() without setting _grace_end_time — an unset MagicMock attribute is
+        duration_s = getattr(ae, "_grace_duration_seconds", None)
+        # isinstance guards: tests frequently stub the automation engine as a bare
+        # MagicMock() without setting these attributes — an unset MagicMock attribute is
         # truthy, so `if not end_iso` alone wouldn't catch it. Treat anything that isn't a
-        # real string as "no timestamp", matching the existing defensive pattern used for
+        # real string/number as "no data", matching the existing defensive pattern used for
         # mocked dt_util elsewhere in this codebase (never raise on test doubles).
         if not isinstance(end_iso, str) or not end_iso:
+            return ""
+        if not isinstance(duration_s, (int, float)) or isinstance(duration_s, bool):
             return ""
         end_dt = dt_util.parse_datetime(end_iso)
         if not isinstance(end_dt, datetime):
@@ -7380,8 +7403,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if remaining_s <= 0:
             return ""
         end_str = dt_util.as_local(end_dt).strftime("%I:%M %p").lstrip("0")
-        remaining_min = max(1, round(remaining_s / 60))
-        return f" — ends {end_str} ({remaining_min} min left)"
+        minutes = max(1, round(duration_s / 60))
+        if minutes >= 60 and minutes % 60 == 0:
+            dur_str = f"{minutes // 60}h"
+        elif minutes >= 60:
+            dur_str = f"{minutes / 60:.1f}h"
+        else:
+            dur_str = f"{minutes} min"
+        return f" — {dur_str} (ends {end_str})"
 
     def _compute_next_automation_action(self, c: DayClassification | None) -> tuple[str, str]:
         """Compute the next scheduled automation action and its time.

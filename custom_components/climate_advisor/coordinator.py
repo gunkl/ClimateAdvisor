@@ -554,10 +554,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             sensor_check=self._any_sensor_open,
             # Issue #504: lets check_natural_vent_conditions()'s idle_open branch tell
             # whether any currently-open monitored sensor is still within its
-            # CONF_SENSOR_DEBOUNCE settle window (i.e. still tracked in
-            # _door_open_timers) — reused as-is rather than introducing a second
-            # debounce/lockout concept.
-            sensor_debounce_pending=lambda: bool(self._door_open_timers),
+            # CONF_SENSOR_DEBOUNCE settle window. Issue #623: _door_open_timers alone
+            # raced against the event listener that populates it — see
+            # _sensor_debounce_pending()'s docstring for why last_changed is also
+            # checked.
+            sensor_debounce_pending=self._sensor_debounce_pending,
             emit_event=self._emit_event,
             request_refresh=lambda: self.hass.async_create_task(self.async_request_refresh()),
             # Issue #359: post-grace fan check callback — called by engine when any
@@ -610,7 +611,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return AutomationEngineCallbacks(
             revisit=None,
             sensor_check=self._any_sensor_open,
-            sensor_debounce_pending=lambda: bool(self._door_open_timers),
+            sensor_debounce_pending=self._sensor_debounce_pending,
             emit_event=self._on_shadow_emit_event,
             request_refresh=lambda: None,
             post_grace_fan_check=lambda: None,
@@ -1672,6 +1673,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def _any_sensor_open(self) -> bool:
         """Return True if any monitored contact sensor is currently open."""
         return any(self._is_sensor_open(s) for s in self._resolved_sensors)
+
+    def _sensor_debounce_pending(self) -> bool:
+        """True if any monitored sensor is open and still within its debounce window.
+
+        Checks both the internal timer registry (_door_open_timers, populated once
+        _async_door_window_changed() has processed the state-changed event) and each
+        open sensor's own HA-authoritative last_changed timestamp — so a sensor that
+        has JUST opened, but whose debounce-timer registration hasn't run yet (a race
+        between this coordinator's periodic refresh cycle and the event bus dispatching
+        the state-changed callback — Issue #623), is still correctly treated as
+        pending rather than settled. This is the single shared signal consumed by both
+        automation.py's _sync_paused_by_door_with_live_sensors() (Issue #620) and
+        _idle_open (Issue #504) — fixing it here fixes both callers.
+        """
+        if self._door_open_timers:
+            return True
+        debounce_sec = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS)
+        now = dt_util.now()
+        for sensor_id in self._resolved_sensors:
+            if not self._is_sensor_open(sensor_id):
+                continue
+            state = self.hass.states.get(sensor_id)
+            last_changed = getattr(state, "last_changed", None) if state else None
+            if last_changed is not None and (now - last_changed).total_seconds() < debounce_sec:
+                return True
+        return False
 
     def _apply_outdoor_windows_gate(self) -> None:
         """Gate windows_recommended against current outdoor temp (Issue #111).

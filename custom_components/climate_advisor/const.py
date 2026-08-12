@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.6"
+VERSION = "0.6.7"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.7": [
+        "Fix #623: briefly opening a monitored door (e.g. walking outside) could trigger"
+        " an instant 'HVAC paused' notification, bypassing the debounce window you"
+        " configured to ignore momentary opens. A timing race in the previous release's"
+        " fix (0.6.6, #620) let this happen; the debounce check is now immune to that"
+        " race, so a quick in-and-out through a door is correctly ignored.",
+    ],
     "0.6.6": [
         "Fix #620: if you turned the whole-house fan off manually while a window was open"
         " and the outdoor air was still favorable, the automation could turn it back on"
@@ -1674,6 +1681,47 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    623: {
+        "version_fixed": "0.6.7",
+        "title": (
+            "Regression from Issue #620/PR #621's _sync_paused_by_door_with_live_sensors()."
+            " Its debounce guard, _sensor_debounce_pending, only meant 'is a timer currently"
+            " registered in _door_open_timers' — that timer is populated exclusively inside"
+            " _async_door_window_changed(), the state_changed event listener. But raw"
+            " sensor reads (_any_monitored_sensor_open()) reflect an open transition"
+            " immediately, independent of when the event loop schedules that listener."
+            " A concurrently-running, unrelated coordinator refresh cycle could reach"
+            " apply_classification() before the listener's turn, observe 'open, no timer"
+            " registered' and misread a just-opened, still-transient sensor as settled —"
+            " bypassing the debounce window entirely. Confirmed live 2026-08-11: a user"
+            " exiting through a door got an instant pause notification; the log showed the"
+            " pause fire 5ms before 'debounce started' logged for the same transition."
+        ),
+        "scope_covered": (
+            "coordinator.py: _sensor_debounce_pending is now a bound method (was an inline"
+            " lambda at both the production and shadow-engine callback-bundle construction"
+            " sites) that also checks each open monitored sensor's HA-authoritative"
+            " state.last_changed timestamp against CONF_SENSOR_DEBOUNCE, in addition to the"
+            " existing _door_open_timers registry check — immune to listener scheduling"
+            " order, so it only ever widens when the guard returns 'pending', never narrows"
+            " it. Fixes both existing consumers (_sync_paused_by_door_with_live_sensors()"
+            " and _idle_open) via the single shared callback — no new call sites."
+            " tools/sim_harness/fake_hass.py: FakeState gained a last_changed field (None"
+            " by default — 'not tracked', matching a seeded/long-settled sensor);"
+            " _FakeStates.async_set() now stamps it from the sim clock only on a genuine"
+            " value transition; set_simple() accepts an optional explicit last_changed for"
+            " scenario seeding. tools/sim_harness/run_production.py: new seed_fresh flag on"
+            " sensor_open events models a sensor whose raw state just changed but whose"
+            " debounce timer hasn't registered yet (the exact race). 1 new pending scenario"
+            " (issue_623_debounce_race_transient_open_not_paused), revert-tested against the"
+            " pre-fix lambda to confirm it fails without this change. Explicitly out of"
+            " scope, tracked as a follow-up: automation.py's grace-expiry re-pause check"
+            " (line ~4349, pre-existing from Issue #561) reads raw sensor state with no"
+            " debounce check and could share this race class, but its exposure window"
+            " (sensor opening at the exact instant an existing grace timer expires) is much"
+            " lower-likelihood than this issue's any-refresh-races-any-fresh-open shape."
+        ),
+    },
     620: {
         "version_fixed": "0.6.6",
         "title": (

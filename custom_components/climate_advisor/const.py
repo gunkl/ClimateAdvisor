@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.7"
+VERSION = "0.6.8"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.8": [
+        "Fix #625: the Status card's grace-period text (added in 0.6.6, #620) had grown"
+        " into a long, duplicated sentence — for a whole-house-fan override it repeated"
+        " what the Fan (WHF) card already said, in different words. It now shows a short"
+        " cause (e.g. 'WHF override', 'thermostat override') plus how long the grace"
+        " period was set for and when it ends — the same compact style the Fan (WHF)"
+        " card already uses for its remote timer. It also now shows a cause at all when"
+        " you manually change the thermostat directly (mode or temperature) — previously"
+        " that case showed no cause, or occasionally an unrelated leftover from an"
+        " earlier event.",
+    ],
     "0.6.7": [
         "Fix #623: briefly opening a monitored door (e.g. walking outside) could trigger"
         " an instant 'HVAC paused' notification, bypassing the debounce window you"
@@ -1681,6 +1692,35 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    625: {
+        "version_fixed": "0.6.8",
+        "title": (
+            "Regression from Issue #620/PR #621: _compute_automation_status()'s grace-active"
+            " branch appended the full free-text AutomationEngine._last_action_reason sentence"
+            " to the Status card. For whole-house-fan-triggered grace periods that duplicated"
+            " what the Fan (WHF) card's _compute_whf_status() already said (e.g. Status:"
+            " 'whole-house fan manually turned on — suppressing HVAC to prevent AC/fan"
+            " fighting' vs. the Fan card's 'running (manual override)' + 'remote timer: 12h"
+            " (ends 10:09 PM)'), producing a long duplicated wall of text. For a manual"
+            " thermostat override (_confirm_override(), e.g. the user turns off cooling at"
+            " the wall unit) _last_action_reason was never populated at all —"
+            " _confirm_override() doesn't call _record_action() — so the Status card showed"
+            " a blank or a stale reason left over from some unrelated earlier action."
+        ),
+        "scope_covered": (
+            "automation.py: new AutomationEngine._last_grace_trigger field, set from the"
+            " trigger= argument already passed to _start_grace_period() (previously used only"
+            " for logging/event-payload correlation), cleared alongside _last_resume_source in"
+            " _cancel_grace_timers() and the restart/reset path. coordinator.py: new module-level"
+            " _GRACE_TRIGGER_LABELS dict mapping known trigger strings to short (2-3 word) cause"
+            " labels; _compute_automation_status()'s grace branch now uses this lookup instead"
+            " of _last_action_reason, falling back to no cause segment for unmapped/unknown"
+            " triggers rather than leaking a raw internal string onto the UI."
+            " _format_grace_remaining() reworked from a 'N min left' countdown to an applied"
+            " duration + end time (e.g. '12h (ends 10:09 PM)'), matching the Fan (WHF) card's"
+            " own 'remote timer: Xh (ends HH:MM)' structural style."
+        ),
+    },
     623: {
         "version_fixed": "0.6.7",
         "title": (

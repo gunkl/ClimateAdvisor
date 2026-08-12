@@ -63,6 +63,10 @@ def _make_automation_engine(
     natural_vent_active: bool = False,
     grace_active: bool = False,
     last_resume_source: str | None = None,
+    last_grace_trigger: str | None = None,
+    grace_end_time: str | None = None,
+    grace_duration_seconds: float | None = None,
+    last_action_reason: str | None = None,
 ) -> MagicMock:
     """Create a mock AutomationEngine with given state flags.
 
@@ -76,9 +80,15 @@ def _make_automation_engine(
     ae.natural_vent_active = natural_vent_active
     ae._grace_active = grace_active
     ae._last_resume_source = last_resume_source
+    ae._last_grace_trigger = last_grace_trigger
     ae._manual_override_active = False
     ae._override_confirm_pending = False
-    ae._grace_end_time = None
+    ae._grace_end_time = grace_end_time
+    ae._grace_duration_seconds = grace_duration_seconds
+    # Issue #625: _last_action_reason must no longer influence _compute_automation_status()'s
+    # grace text — set it to a value that would fail a test if it leaked through, so any
+    # regression that starts reading it again is caught immediately.
+    ae._last_action_reason = last_action_reason or "REGRESSION: _last_action_reason leaked onto Status"
     ae._resumed_from_pause = False
     ae._is_within_planned_window_period = MagicMock(return_value=False)
     return ae
@@ -117,10 +127,44 @@ def _make_real_coordinator(automation_enabled: bool, automation_engine, occupanc
     return coord
 
 
-def _compute_automation_status(automation_enabled: bool, automation_engine) -> str:
-    """Call the real ClimateAdvisorCoordinator._compute_automation_status()."""
+def _compute_automation_status(automation_enabled: bool, automation_engine, now_dt: datetime | None = None) -> str:
+    """Call the real ClimateAdvisorCoordinator._compute_automation_status().
+
+    now_dt: when given, patches dt_util.now/parse_datetime/as_local so
+    _format_grace_remaining() (called internally for the grace-active branch) resolves
+    against a fixed, real datetime instead of the default MagicMock stubs.
+    """
+    from custom_components.climate_advisor import coordinator as _coord_mod
+
     coord = _make_real_coordinator(automation_enabled, automation_engine)
-    return coord._compute_automation_status()
+    if now_dt is None:
+        return coord._compute_automation_status()
+    with (
+        patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+        patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        patch.object(_coord_mod.dt_util, "parse_datetime", side_effect=lambda s: datetime.fromisoformat(s)),
+    ):
+        return coord._compute_automation_status()
+
+
+def _format_grace_remaining(grace_end_time: str | None, grace_duration_seconds, now_dt: datetime) -> str:
+    """Call the real ClimateAdvisorCoordinator._format_grace_remaining() directly."""
+    import types
+
+    from custom_components.climate_advisor import coordinator as _coord_mod
+    from custom_components.climate_advisor.coordinator import ClimateAdvisorCoordinator
+
+    coord = object.__new__(ClimateAdvisorCoordinator)
+    coord._format_grace_remaining = types.MethodType(ClimateAdvisorCoordinator._format_grace_remaining, coord)
+    ae = MagicMock()
+    ae._grace_end_time = grace_end_time
+    ae._grace_duration_seconds = grace_duration_seconds
+    with (
+        patch.object(_coord_mod.dt_util, "now", return_value=now_dt),
+        patch.object(_coord_mod.dt_util, "as_local", side_effect=lambda x: x),
+        patch.object(_coord_mod.dt_util, "parse_datetime", side_effect=lambda s: datetime.fromisoformat(s)),
+    ):
+        return coord._format_grace_remaining(ae)
 
 
 def _compute_next_automation_action(
@@ -196,6 +240,127 @@ class TestComputeAutomationStatus:
         ae = _make_automation_engine(is_paused_by_door=True)
         result = _compute_automation_status(False, ae)
         assert result == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# Tests: grace-period text no longer duplicates the Fan (WHF) card (Issue #625)
+# ---------------------------------------------------------------------------
+
+
+class TestGraceStatusNoLongerLeaksLastActionReason:
+    """_compute_automation_status()'s grace branch must never surface
+    _last_action_reason — that duplicated the Fan (WHF) card for fan-triggered grace
+    periods and was blank/stale for manual thermostat overrides (Issue #625)."""
+
+    NOW = datetime(2026, 8, 11, 19, 39)  # 7:39 PM
+
+    def test_whf_manual_override_grace_shows_trigger_label_not_reason(self):
+        """The exact screenshot scenario: fan_manual_override trigger → 'WHF override'
+        label, never the old free-text sentence."""
+        end = (self.NOW + timedelta(hours=12)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="manual",
+            last_grace_trigger="fan_manual_override",
+            grace_end_time=end,
+            grace_duration_seconds=12 * 3600,
+            last_action_reason="Set HVAC to off — whole-house fan manually turned on — "
+            "suppressing HVAC to prevent AC/fan fighting",
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (manual) — WHF override — 12h (ends 7:39 AM)"
+        assert "suppressing HVAC" not in result
+        assert "AC/fan fighting" not in result
+
+    def test_manual_thermostat_override_grace_shows_trigger_label(self):
+        """override_confirmed trigger (manual thermostat change, no fan involved) →
+        'thermostat override' label — this is the gap case where _last_action_reason
+        was never populated at all (_confirm_override() doesn't call _record_action())."""
+        end = (self.NOW + timedelta(minutes=30)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="manual",
+            last_grace_trigger="override_confirmed",
+            grace_end_time=end,
+            grace_duration_seconds=1800,
+            last_action_reason=None,  # the real gap: never populated
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (manual) — thermostat override — 30 min (ends 8:09 PM)"
+
+    def test_unknown_trigger_omits_cause_segment_never_leaks_raw_string(self):
+        """A trigger with no entry in _GRACE_TRIGGER_LABELS must not leak its raw
+        internal string onto the UI — just fall back to source + timing."""
+        end = (self.NOW + timedelta(minutes=15)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="automation",
+            last_grace_trigger="some_future_trigger_nobody_mapped_yet",
+            grace_end_time=end,
+            grace_duration_seconds=900,
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (automation) — 15 min (ends 7:54 PM)"
+        assert "some_future_trigger_nobody_mapped_yet" not in result
+
+    def test_no_trigger_stored_omits_cause_segment(self):
+        """last_grace_trigger=None (e.g. an older/legacy grace state) → no cause segment."""
+        end = (self.NOW + timedelta(minutes=15)).isoformat()
+        ae = _make_automation_engine(
+            grace_active=True,
+            last_resume_source="automation",
+            last_grace_trigger=None,
+            grace_end_time=end,
+            grace_duration_seconds=900,
+        )
+        result = _compute_automation_status(True, ae, now_dt=self.NOW)
+        assert result == "grace period (automation) — 15 min (ends 7:54 PM)"
+
+    def test_resumed_from_pause_branch_unaffected(self):
+        """The early-return resumed-from-pause branch never looks at the trigger map."""
+        ae = _make_automation_engine(grace_active=True, last_resume_source="manual")
+        ae._resumed_from_pause = True
+        result = _compute_automation_status(True, ae)
+        assert result == "resumed — door/window override"
+
+
+class TestFormatGraceRemaining:
+    """Unit tests for _format_grace_remaining()'s duration+end-time formatting (Issue #625)."""
+
+    NOW = datetime(2026, 8, 11, 19, 39)  # 7:39 PM
+
+    def test_sub_hour_duration(self):
+        end = (self.NOW + timedelta(minutes=30)).isoformat()
+        result = _format_grace_remaining(end, 1800, self.NOW)
+        assert result == " — 30 min (ends 8:09 PM)"
+
+    def test_whole_hour_duration(self):
+        end = (self.NOW + timedelta(minutes=120)).isoformat()
+        result = _format_grace_remaining(end, 7200, self.NOW)
+        assert result == " — 2h (ends 9:39 PM)"
+
+    def test_non_whole_hour_duration_over_an_hour(self):
+        """150 min (the screenshot's applied duration) → '2.5h', not '150 min'."""
+        end = (self.NOW + timedelta(minutes=150)).isoformat()
+        result = _format_grace_remaining(end, 150 * 60, self.NOW)
+        assert result == " — 2.5h (ends 10:09 PM)"
+
+    def test_twelve_hour_rf_remote_timer(self):
+        """The screenshot's actual WHF RF-remote timer duration."""
+        end = (self.NOW + timedelta(hours=12)).isoformat()
+        result = _format_grace_remaining(end, 12 * 3600, self.NOW)
+        assert result == " — 12h (ends 7:39 AM)"
+
+    def test_missing_end_time_returns_empty(self):
+        assert _format_grace_remaining(None, 1800, self.NOW) == ""
+
+    def test_missing_duration_returns_empty(self):
+        end = (self.NOW + timedelta(minutes=30)).isoformat()
+        assert _format_grace_remaining(end, None, self.NOW) == ""
+
+    def test_past_end_time_returns_empty(self):
+        end = (self.NOW - timedelta(minutes=5)).isoformat()
+        assert _format_grace_remaining(end, 1800, self.NOW) == ""
 
 
 # ---------------------------------------------------------------------------

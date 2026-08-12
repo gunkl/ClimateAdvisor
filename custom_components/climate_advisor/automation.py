@@ -596,6 +596,11 @@ class AutomationEngine:
         self._automation_grace_cancel: Any | None = None
         self._grace_active = False
         self._last_resume_source: str | None = None
+        # Issue #625: the `trigger` string _start_grace_period() already computes was
+        # previously used only for logging/event-payload correlation and thrown away
+        # otherwise. Retaining it lets the Status card show a short cause label (e.g.
+        # "WHF override", "thermostat override") without re-narrating a full sentence.
+        self._last_grace_trigger: str | None = None
         self._grace_end_time: str | None = None
         self._grace_duration_seconds: int = 0
         # Issue #530: whether the CURRENTLY active grace exists to protect a real override
@@ -4287,6 +4292,7 @@ class AutomationEngine:
 
         self._grace_active = True
         self._last_resume_source = source
+        self._last_grace_trigger = trigger
         self._grace_duration_seconds = duration
         self._grace_end_time = grace.at.isoformat()
         self._grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE
@@ -4459,6 +4465,7 @@ class AutomationEngine:
         self._grace_active = False
         self._grace_end_time = None  # Bug 2 fix (Issue #321): prevent stuck-at-0 display
         self._last_resume_source = None
+        self._last_grace_trigger = None
         self._grace_protects_override = False
 
     async def _re_pause_for_open_sensor(self) -> None:
@@ -6608,6 +6615,7 @@ class AutomationEngine:
         self._grace_end_time = None
         self._grace_duration_seconds = None
         self._last_resume_source = None
+        self._last_grace_trigger = None
         self._grace_protects_override = False
         # Issue #327: fan override cleared on restart — no grace timer to reschedule.
         # reconcile_fan_on_startup() runs shortly after and decides adopt-on / turn-off.

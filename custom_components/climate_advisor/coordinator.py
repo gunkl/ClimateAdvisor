@@ -95,6 +95,7 @@ from .const import (
     CONF_HOME_TOGGLE_INVERT,
     CONF_MANUAL_GRACE_PERIOD,
     CONF_NAT_VENT_HYSTERESIS_F,
+    CONF_NAT_VENT_REACTIVATION_LOCKOUT_S,
     CONF_NATURAL_VENT_DELTA,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
@@ -136,6 +137,7 @@ from .const import (
     MAX_WEATHER_BIAS_APPLY_F,
     MIN_WEATHER_BIAS_APPLY_F,
     NAT_VENT_HYSTERESIS_F,
+    NAT_VENT_REACTIVATION_LOCKOUT_S,
     OBS_TYPE_FAN_ONLY_DECAY,
     OBS_TYPE_HVAC_COOL,
     OBS_TYPE_HVAC_HEAT,
@@ -147,6 +149,7 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
+    PEAK_DECLINE_MARGIN_F,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
     REJECT_AC_INSUFFICIENT_MIDDAY_ACTIVITY,
@@ -233,6 +236,7 @@ from .fan_status import (
 )
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
+from .nat_vent_lifecycle import NatVentLifecycleState
 from .state import StatePersistence
 from .temperature import (
     convert_delta,
@@ -394,6 +398,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # See docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
         self._shadow_event_log: list[dict[str, Any]] = []
         self._shadow_engine_diagnostic: dict[str, Any] | None = None
+        # Issue #633: the unified nat-vent FSM's own independently-tracked state —
+        # never written onto either engine, purely a third comparison point. Starts
+        # INACTIVE unconditionally (same clean-slate convention as restore_state()'s
+        # documented design for _natural_vent_active).
+        self._nat_vent_fsm_state: NatVentLifecycleState = NatVentLifecycleState.INACTIVE
         self.shadow_automation_engine: AutomationEngine = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
@@ -742,6 +751,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 exc,
             )
         finally:
+            if method_name == "check_natural_vent_conditions":
+                try:
+                    self._evaluate_nat_vent_fsm()
+                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                    _LOGGER.warning(
+                        "Nat-vent FSM evaluation failed (isolated, no production impact): %s",
+                        fsm_exc,
+                    )
             try:
                 self._update_shadow_engine_diagnostic()
             except Exception as diag_exc:  # noqa: BLE001 — diagnostic is best-effort observability
@@ -750,8 +767,72 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     diag_exc,
                 )
 
+    def _evaluate_nat_vent_fsm(self) -> None:
+        """Run the unified nat-vent FSM (Issue #633) against production's current
+        live readings and track its own independently-derived state.
+
+        v1 scope, deliberately narrow: only called from ``check_natural_vent_conditions``'s
+        mirror (see ``_mirror_to_shadow()``'s call site) — the one mirrored method
+        that is unambiguously nat-vent's own periodic gate/exit re-evaluation point
+        (``nat_vent_exit.py``'s own docstring: this is exactly the chain it
+        replaces). Deliberately NOT also triggered from ``apply_classification``/
+        ``reconcile_fan_on_startup``'s mirrors — neither actually runs the gate/exit
+        chain in production, so evaluating the FSM there would create a disagreement
+        from evaluating at a moment production itself never would (the exact class of
+        test-premise mistake caught and removed from this module's own differential
+        validation — see ``tests/test_nat_vent_fsm.py``'s in-test comment). Other
+        real gate/exit-adjacent call sites (``handle_door_window_open``,
+        ``nat_vent_temperature_check``, ``fan_thermostat_check``) are additional,
+        separately-scoped future work, not this increment.
+
+        The FSM's own tracked state (``self._nat_vent_fsm_state``) is never written
+        back onto either engine — this is a third, independent computation, purely
+        for comparison against production's real derived state. Isolated the same
+        way ``_mirror_to_shadow()`` isolates the shadow replay itself: any exception
+        here is logged and swallowed, never allowed to affect production.
+        """
+        from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind, NatVentFsmInputs, transition
+
+        ae = self.automation_engine
+        now = dt_util.now()
+        config = self.config
+        comfort_heat_raw = float(config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        sleep_heat = float(config.get(CONF_SLEEP_HEAT, comfort_heat_raw))
+        thermal_model = ae._thermal_model or {}
+
+        event = NatVentFsmEvent(
+            kind=NatVentFsmEventKind.TICK,
+            inputs=NatVentFsmInputs(
+                indoor=ae._get_indoor_temp_f(),
+                outdoor=ae._last_outdoor_temp,
+                comfort_heat_raw=comfort_heat_raw,
+                sleep_heat=sleep_heat,
+                in_sleep_window=_in_sleep_window(now, config),
+                comfort_cool=float(config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                nat_vent_delta=float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+                hysteresis=float(config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F)),
+                fan_mode=str(config.get(CONF_FAN_MODE, "whole_house_fan")),
+                aggressive_savings=bool(config.get("aggressive_savings", False)),
+                occupancy_mode=ae._occupancy_mode,
+                thermal_confidence=thermal_model.get("confidence", "none"),
+                k_passive=thermal_model.get("k_passive"),
+                outdoor_today_peak=ae._outdoor_temp_today_peak,
+                outdoor_sample_count=ae._outdoor_temp_today_sample_count,
+                peak_decline_margin=PEAK_DECLINE_MARGIN_F,
+                paused_by_door=bool(ae._paused_by_door),
+                outdoor_exit_time=ae._nat_vent_outdoor_exit_time,
+                lockout_seconds=float(
+                    config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
+                ),
+                now=now,
+            ),
+        )
+        result = transition(self._nat_vent_fsm_state, event)
+        self._nat_vent_fsm_state = result.to_state
+
     def _update_shadow_engine_diagnostic(self) -> None:
-        """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613).
+        """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613),
+        plus (Issue #633) the independent nat-vent FSM's agreement with production.
 
         Reuses ``derive_nat_vent_lifecycle_state()`` (Issue #606) directly — the same
         pure function both engines' state already agreed on in Phase 3's offline sweep
@@ -775,18 +856,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         production_state = _state_for(self.automation_engine)
         shadow_state = _state_for(self.shadow_automation_engine)
-        agrees = production_state == shadow_state
+        fsm_state = self._nat_vent_fsm_state.value
+        mirror_agrees = production_state == shadow_state
+        fsm_agrees = production_state == fsm_state
+        agrees = mirror_agrees and fsm_agrees
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
             "shadow_state": shadow_state,
+            "nat_vent_fsm_state": fsm_state,
             "agrees": agrees,
             "checked_at": now.isoformat(),
         }
-        if not agrees:
+        if not mirror_agrees:
             _LOGGER.warning(
                 "Shadow engine disagreement (Issue #613): production=%s shadow=%s",
                 production_state,
                 shadow_state,
+            )
+        if not fsm_agrees:
+            _LOGGER.warning(
+                "Nat-vent FSM disagreement (Issue #633): production=%s fsm=%s",
+                production_state,
+                fsm_state,
             )
 
     @property

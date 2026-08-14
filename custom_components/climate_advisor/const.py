@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.11": [
+        "Fix #631: the diagnostic-only shadow engine (used to validate an in-progress"
+        " automation-logic refactor, never touches real hardware) could disagree with"
+        " production for hours at a stretch whenever a manual override or a fan"
+        " RF-remote override was active, because it never learned that a grace period"
+        " was in effect. It now stays in sync with production's override/grace state on"
+        " every check, closing a gap that could make its disagreement warnings"
+        " unreliable during exactly the periods they'd matter most.",
+    ],
     "0.6.10": [
         "Fix #629: right after turning off the whole-house fan, the air conditioner could"
         " silently switch itself into Cool mode while a monitored window was still open —"
@@ -1713,6 +1722,45 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    631: {
+        "version_fixed": "0.6.11",
+        "title": (
+            "Live incident 2026-08-12 21:02-23:40 (2h38m): shadow_automation_engine (Issue"
+            " #613/#615's diagnostic-only parallel engine, dry_run=True, never touches real"
+            " hardware) disagreed with production continuously for the full length of an"
+            " active manual-override grace period. Root cause: _grace_active,"
+            " _manual_override_active, _fan_override_active, and their companion"
+            " mode/source/time/duration fields are set either by AutomationEngine methods"
+            " called directly from coordinator.py/api.py (never followed by a"
+            " _mirror_to_shadow(...) call) or by purely internal async_call_later timers"
+            " with no coordinator call site at all (_on_grace_expired, the"
+            " _confirm_override_expired timer's clear path). check_natural_vent_conditions()"
+            " — a method that IS mirrored — gates nat-vent reactivation on"
+            " 'not self._grace_active', so the shadow kept deciding to reactivate nat-vent"
+            " every cycle while production correctly stayed suppressed. This is a second,"
+            " independent instance of the #615 input-parity gap class, in a field category"
+            " (#615's own coverage-registry audit) that audit's scope excluded by"
+            " construction."
+        ),
+        "scope_covered": (
+            "coordinator.py: _sync_shadow_inputs() extended with a raw-copy of the 7 grace/"
+            "override lifecycle-gate fields plus their 11 companion content fields (mode,"
+            " source, time, duration, remote-timer hours/speed, grace end time/trigger)."
+            " Deliberately NOT adding new _mirror_to_shadow(...) call sites for the 4"
+            " setter chains (handle_fan_manual_override, handle_manual_override,"
+            " clear_manual_override, cancel_override) — that would reintroduce the"
+            " 'duplicate each write at its call site' pattern _sync_shadow_inputs() exists"
+            " to eliminate, and would start real async_call_later timers against the shared"
+            " hass event loop on the shadow engine for no benefit over a raw copy refreshed"
+            " every mirrored cycle. tests/test_shadow_engine_coverage.py: _TRACKED_FIELDS"
+            " extended to the 7 gate fields; _COVERAGE_REGISTRY gained 10 new entries, all"
+            " classified 'exempted' or 'internal' with the specific reason each setter isn't"
+            " mirrored (restore_state was also newly added as 'mirrored' — it was already"
+            " mirrored in code but missing from the registry). tests/test_shadow_engine_live.py:"
+            " new TestSyncShadowInputsGraceOverride class with per-field parity tests and a"
+            " positive control reproducing the live incident."
+        ),
+    },
     629: {
         "version_fixed": "0.6.10",
         "title": (

@@ -20,6 +20,14 @@ Issue #615 (coverage-gap follow-up) adds:
   - Representative newly-mirrored decision methods: ``reconcile_fan_on_startup()``
     (the exact live-incident reproduction), ``fan_thermostat_check()`` (Issue #608's
     dominant-exit-path finding), and sync-method mirroring (``on_fan_turned_off()``).
+
+Issue #631 (second coverage-gap follow-up) adds:
+  - ``_sync_shadow_inputs()`` grace/override parity: ``_grace_active``,
+    ``_manual_override_active``, ``_fan_override_active``,
+    ``_override_confirm_pending/_mode/_source``, ``_paused_with_hvac_already_off``, and
+    their companion mode/source/time/duration fields — with a positive control
+    reproducing the confirmed live incident (shadow disagreed for 2h38m because its
+    ``_grace_active`` never reflected production's active manual-override grace period).
 """
 
 from __future__ import annotations
@@ -254,6 +262,85 @@ class TestSyncShadowInputs:
         coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
         _run(coordinator._mirror_to_shadow("apply_classification", None))
         assert coordinator.shadow_automation_engine._last_outdoor_temp is None
+
+
+class TestSyncShadowInputsGraceOverride:
+    """Issue #631: the confirmed live bug — shadow's _grace_active stayed False for
+    2h38m while production's was True (an active manual-override grace period), so
+    shadow's check_natural_vent_conditions() kept deciding "reactivate" every cycle
+    while production correctly stayed suppressed. Same shape as #615's outdoor-temp
+    gap, different field set: grace/override state set by internal timers or
+    unmirrored direct coordinator/api calls, with no per-setter mirror call added —
+    fixed via the same _sync_shadow_inputs() raw-copy mechanism instead."""
+
+    def test_grace_state_parity_after_mirror_call(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._grace_active = True
+        coordinator.automation_engine._grace_end_time = "2026-08-12T21:32:02-07:00"
+        coordinator.automation_engine._grace_duration_seconds = 1800
+        coordinator.automation_engine._last_grace_trigger = "fan_manual_override"
+        coordinator.automation_engine._grace_protects_override = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        shadow = coordinator.shadow_automation_engine
+        assert shadow._grace_active is True
+        assert shadow._grace_end_time == "2026-08-12T21:32:02-07:00"
+        assert shadow._grace_duration_seconds == 1800
+        assert shadow._last_grace_trigger == "fan_manual_override"
+        assert shadow._grace_protects_override is True
+
+    def test_manual_override_state_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._manual_override_active = True
+        coordinator.automation_engine._manual_override_mode = "off"
+        coordinator.automation_engine._manual_override_source = "normal"
+        coordinator.automation_engine._manual_override_time = "2026-08-12T18:58:47-07:00"
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        shadow = coordinator.shadow_automation_engine
+        assert shadow._manual_override_active is True
+        assert shadow._manual_override_mode == "off"
+        assert shadow._manual_override_source == "normal"
+        assert shadow._manual_override_time == "2026-08-12T18:58:47-07:00"
+
+    def test_fan_override_state_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._fan_override_active = True
+        coordinator.automation_engine._fan_override_time = "2026-08-12T21:02:02-07:00"
+        coordinator.automation_engine._fan_remote_timer_hours = 12.0
+        coordinator.automation_engine._fan_remote_speed = "high"
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        shadow = coordinator.shadow_automation_engine
+        assert shadow._fan_override_active is True
+        assert shadow._fan_override_time == "2026-08-12T21:02:02-07:00"
+        assert shadow._fan_remote_timer_hours == 12.0
+        assert shadow._fan_remote_speed == "high"
+
+    def test_override_confirm_pending_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._override_confirm_pending = True
+        coordinator.automation_engine._override_confirm_mode = "cool"
+        coordinator.automation_engine._override_confirm_source = "setpoint"
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        shadow = coordinator.shadow_automation_engine
+        assert shadow._override_confirm_pending is True
+        assert shadow._override_confirm_mode == "cool"
+        assert shadow._override_confirm_source == "setpoint"
+
+    def test_paused_with_hvac_already_off_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._paused_with_hvac_already_off = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._paused_with_hvac_already_off is True
+
+    def test_positive_control_missing_sync_reproduces_the_grace_incident(self) -> None:
+        """Without the grace/override fields in _sync_shadow_inputs(), _grace_active
+        stays False on the shadow even after production starts a real grace period —
+        proves this test would have caught the 2026-08-12 21:02-23:40 incident before
+        it shipped."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._grace_active = True
+        coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._grace_active is False
 
 
 class TestNewlyMirroredDecisionMethods:

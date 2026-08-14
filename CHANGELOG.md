@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.11] — 2026-08-13
+
+- Fix #631: the diagnostic-only shadow engine (used to validate an in-progress automation-logic refactor, never touches real hardware) could disagree with production for hours at a stretch whenever a manual override or a fan RF-remote override was active, because it never learned that a grace period was in effect. It now stays in sync with production's override/grace state on every check, closing a gap that could make its disagreement warnings unreliable during exactly the periods they'd matter most.
+
 ## [0.6.10] — 2026-08-13
 
 - Fix #629: right after turning off the whole-house fan, the air conditioner could silently switch itself into Cool mode while a monitored window was still open — with no pause, no notification, and nothing in the logs even saying the mode had changed. A routine background check that keeps the thermostat's setpoint current was allowed to also change its mode, and nothing double-checked that a window wasn't open before it did. The AC now refuses to switch itself on while a monitored window is open, the same way it already refuses to fight the whole-house fan — and any time that check changes the mode, it's now spelled out in the log.

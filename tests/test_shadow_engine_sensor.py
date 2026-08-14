@@ -63,6 +63,27 @@ class TestExtraStateAttributes:
         assert attrs["shadow_state"] == "idle"
         assert attrs["checked_at"] == "2026-08-08T12:00:00"
 
+    def test_reports_nat_vent_fsm_state_when_present(self) -> None:
+        """Issue #633: the independent nat-vent FSM's own tracked state."""
+        sensor = _make_sensor(
+            {
+                "production_state": "active_full_gate",
+                "shadow_state": "active_full_gate",
+                "nat_vent_fsm_state": "inactive",
+                "agrees": False,
+                "checked_at": "2026-08-08T12:00:00",
+            }
+        )
+        assert sensor.extra_state_attributes["nat_vent_fsm_state"] == "inactive"
+
+    def test_nat_vent_fsm_state_absent_before_first_fsm_evaluation(self) -> None:
+        """A diagnostic recomputed from a mirrored call other than
+        check_natural_vent_conditions (v1 scope) never populated the FSM key."""
+        sensor = _make_sensor(
+            {"production_state": "active", "shadow_state": "idle", "agrees": False, "checked_at": "t"}
+        )
+        assert sensor.extra_state_attributes["nat_vent_fsm_state"] is None
+
 
 class TestEntityCategory:
     def test_is_diagnostic(self) -> None:

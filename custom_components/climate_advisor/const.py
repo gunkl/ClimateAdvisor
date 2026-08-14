@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.12"
+VERSION = "0.6.13"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.13": [
+        "Feat #633: internal refactor only, no user-visible behavior change — the"
+        " diagnostic-only decision table added in 0.6.12 now actually runs"
+        " alongside production on every natural-ventilation check, compared"
+        " against what production really did. Still purely observational —"
+        " nothing it computes is ever acted on.",
+    ],
     "0.6.12": [
         "Feat #633: internal refactor only, no user-visible behavior change —"
         " assembles the natural-ventilation logic into one explicit,"
@@ -1732,24 +1739,35 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     633: {
-        "version_fixed": "0.6.12",
+        "version_fixed": "0.6.13",
         "title": (
             "Block 5 epic #594 Phase P completion: builds the unified nat-vent transition"
             " table earlier Phase P sub-issues (#606/#607, #608/#609) deliberately left"
             " unbuilt, plus a generic cross-lifecycle event dispatcher for coordinating"
-            " between the automation's independently-migrated behaviors going forward."
-            " Not wired into any live decision path yet — a self-contained, thoroughly-"
-            " tested building block, same incremental shape as its own predecessors."
+            " between the automation's independently-migrated behaviors going forward,"
+            " then wires the transition table to actually run live (0.6.13) as a third,"
+            " independent comparison point alongside the existing production/shadow"
+            " mirror. Purely observational at every stage — never wired into any"
+            " decision path that can act."
         ),
         "scope_covered": (
-            "New: lifecycle_events.py (cross-lifecycle event vocabulary), "
+            "0.6.12: New: lifecycle_events.py (cross-lifecycle event vocabulary), "
             "lifecycle_dispatcher.py (generic event routing + registry-completeness "
             "check, 12 tests), nat_vent_fsm.py (unifies derive_nat_vent_lifecycle_state()/"
             "decide_nat_vent_gate()/decide_nat_vent_soft_start_gate()/decide_nat_vent_exit() "
             "into one (state, event) -> Transition function, 26 direct tests + differential "
             "validation against all golden/pending scenarios). tools/sim_harness/run_production.py: "
             "engine_state snapshot extended with outdoor temp/peak/sample-count and a "
-            "live indoor-temp read, needed for the differential validation."
+            "live indoor-temp read, needed for the differential validation. "
+            "0.6.13: coordinator.py's new _evaluate_nat_vent_fsm() runs nat_vent_fsm.transition() "
+            "against production's real live readings, triggered only from check_natural_vent_conditions's "
+            "existing shadow mirror (the one mirrored method that unambiguously corresponds to "
+            "nat-vent's own gate/exit re-evaluation — deliberately not apply_classification/"
+            "reconcile_fan_on_startup's mirrors, neither of which runs the gate/exit chain in "
+            "production). The FSM's tracked state is never written onto either engine. Surfaced "
+            "via the existing ClimateAdvisorShadowEngineStatusSensor's nat_vent_fsm_state attribute, "
+            "folded into its overall agree/disagree value. 10 new coordinator-level tests + 2 new "
+            "sensor tests."
         ),
     },
     631: {

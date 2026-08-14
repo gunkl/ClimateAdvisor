@@ -465,7 +465,8 @@ class ClimateAdvisorForecastLowSensor(ClimateAdvisorBaseSensor):
 
 class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
     """Diagnostic sensor: agreement between the live production and shadow automation
-    engines' nat-vent lifecycle state (Issue #613, Block 5 / epic #594, subtask Q).
+    engines' nat-vent lifecycle state (Issue #613, Block 5 / epic #594, subtask Q),
+    plus (Issue #633) the independent unified nat-vent FSM's agreement with production.
 
     The shadow engine is permanently dry_run=True and never issues a real command —
     this sensor has zero occupant HVAC impact. It exists to validate the Block 5
@@ -498,5 +499,6 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
         return {
             "production_state": diag["production_state"],
             "shadow_state": diag["shadow_state"],
+            "nat_vent_fsm_state": diag.get("nat_vent_fsm_state"),
             "checked_at": diag["checked_at"],
         }

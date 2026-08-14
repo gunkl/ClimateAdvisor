@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.10] — 2026-08-13
+
+- Fix #629: right after turning off the whole-house fan, the air conditioner could silently switch itself into Cool mode while a monitored window was still open — with no pause, no notification, and nothing in the logs even saying the mode had changed. A routine background check that keeps the thermostat's setpoint current was allowed to also change its mode, and nothing double-checked that a window wasn't open before it did. The AC now refuses to switch itself on while a monitored window is open, the same way it already refuses to fight the whole-house fan — and any time that check changes the mode, it's now spelled out in the log.
+
 ## [0.6.9] — 2026-08-11
 
 - Fix #627: after a restart during an active whole-house-fan session (e.g. one started via RF remote), Climate Advisor could silently turn the fan off within the first second and then switch the air conditioner into Cool mode roughly 30 seconds later — running the AC and whole-house fan at the same time, which the automation is specifically designed to prevent. A periodic safety check meant to catch a truly stray fan was firing before the system had finished settling back in after the restart. It now waits for that settling window to close before acting, the same way every other restart-related check already does.

@@ -25,6 +25,7 @@
 | Does a fan-off grace actually stop nat-vent from immediately re-engaging, in every code path? | As of Issue #620, yes. `check_natural_vent_conditions()`'s `_idle_open` widening (Issue #244/#402/#504) never checked `_grace_active` — a user turning the WHF off could see it reactivated within seconds if outdoor stayed favorable. Fixed by adding `and not self._grace_active` to `_idle_open`; the Issue #134 comfort-ceiling exception beside it is untouched. | [§ Fan-Off Grace](#fan-off-grace-issue-359) |
 | Can a monitored sensor block a routine comfort-restore write even if it was never freshly detected as opening? | As of Issue #620, yes. `decide_scheduled_band_gate()`'s `paused_by_door` input previously reflected only event history (`_paused_by_door`, set by `handle_door_window_open()`/`_exit_nat_vent()`). A sensor open since before either ever ran left it `False` forever. `_sync_paused_by_door_with_live_sensors()` — called at the top of all four `decide_scheduled_band_gate()` callers — now reconciles the flag against live, debounce-settled sensor state first. | [§ Shared Scheduled-Band Gate (Issue #498)](#shared-scheduled-band-gate-issue-498) |
 | Does briefly opening a monitored door (e.g. walking outside) instantly pause HVAC, bypassing the configured debounce window? | It could (Issue #623 regression from #620's `_sync_paused_by_door_with_live_sensors()`). `_sensor_debounce_pending()`'s old `_door_open_timers`-only check raced against the event listener that populates that dict — a concurrent coordinator refresh could read "open, not yet registered" and misfire a pause before the debounce window even started. Fixed by also checking each open sensor's HA-authoritative `last_changed` timestamp, immune to listener scheduling order. | [§ Debounce-Timer Registration Race (Issue #623)](#debounce-timer-registration-race-issue-623) |
+| Can the routine comfort-band arm (`_apply_comfort_band()`) still write an active HVAC mode through a genuinely open window, even with `_paused_by_door` correctly tracked? | It could (Issue #629). `_apply_comfort_band()` never re-checked live window state itself — it trusted the gate computed once at the top of its caller. A coordinator refresh firing `apply_classification()` in the same tick nat-vent releases ownership could reach it with `_paused_by_door` still `False` (correct when checked) but the window still open, silently committing an active mode via `_set_temperature()`'s bundled `hvac_mode`. Fixed by a structural choke-point guard directly in `_apply_comfort_band()`, mirroring the WHF/AC mutex choke-point in `_set_hvac_mode()`. | [§ Comfort-Band Arm Had No Independent Window Check (Issue #629)](#comfort-band-arm-had-no-independent-window-check-issue-629) |
 
 ---
 
@@ -488,6 +489,43 @@ held in practice. Issue #620's Fix A reused the same signal in a new caller cont
 evaluating immediately at classification time — without re-verifying that ordering
 invariant still held there. When reusing a shared timing-dependent signal in a new caller,
 re-derive its invariants for that caller; don't assume they transfer.
+
+### Comfort-Band Arm Had No Independent Window Check (Issue #629)
+
+Issues #620/#623 above both fixed how `_paused_by_door` gets *set* — but the function that
+actually *writes* an HVAC mode, `_apply_comfort_band()` (the single choke point
+`apply_classification()`/`handle_bedtime()`/`handle_morning_wakeup()`/`handle_pre_cool()`/
+`handle_occupancy_away()`/`handle_occupancy_vacation()`/the post-fan-off reassert path all
+funnel through), never re-checked live window state itself. It trusted the gate computed
+once at the top of its caller (`decide_scheduled_band_gate()`, keyed on `_paused_by_door`)
+to still be accurate by the time it actually wrote a mode. A coordinator refresh firing
+`apply_classification()` in the same tick nat-vent releases ownership can reach
+`_apply_comfort_band()` with `_paused_by_door` still `False` — correct at the instant it was
+checked, since the thermostat genuinely was still off then — but a window still genuinely
+open. `select_comfort_band()`'s edge-selection ternary treats an "off"-day classification
+the same as "cool" (deliberate, for the Issue #249 "lazy comfort band" safety net that arms
+a wide band on any day type once windows are closed), so the routine band-arm silently
+commanded an active mode through the still-open window via `_set_temperature()`'s bundled
+`hvac_mode` parameter (Issue #301) — no `set_hvac_mode` call, and no log line even naming
+the mode that had just been sent. Confirmed live, 2026-08-13 — WHF turned off at
+06:13:44.097, `apply_classification()` fired 9ms later, `_set_temperature(mode="cool")`
+committed 14ms after that.
+
+Fixed by a structural choke-point guard directly in `_apply_comfort_band()`, mirroring the
+WHF/AC mutex choke-point already inside `_set_hvac_mode()` (Issue #392 Fix 1b): refuses to
+arm an active mode whenever a monitored sensor is genuinely (debounce-settled) open, reusing
+the existing `_pause_for_door_window()` machinery. Exempted while nat-vent/WHF genuinely
+owns HVAC — `decide_scheduled_band_gate()` checks occupancy *before* nat-vent (Issue #498),
+so `handle_occupancy_away()`/`handle_occupancy_vacation()` legitimately arm a wide, usually
+inert setback band while an active nat-vent session continues to own real HVAC behavior.
+`_set_temperature()`'s log line now includes `mode=` so a mode-changing write is visible
+without cross-referencing `_async_thermostat_changed` timing.
+
+**Lesson:** upstream flag bookkeeping (`_paused_by_door`) and the actual write point
+(`_apply_comfort_band()`) had no shared invariant enforcing they'd stay in sync within a
+single evaluation cycle — the fix that finally closed this gap moved the safety guarantee
+to the write point itself, the same choke-point pattern the pre-existing WHF/AC mutex
+already used, rather than adding yet another upstream flag-consistency fix.
 
 ### Concurrent Door/Window Events (Multiple Sensors)
 

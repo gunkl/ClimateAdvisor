@@ -856,10 +856,32 @@ def check_assertion(
     # {"forbidden_modes": ["cool", "heat"]} (defaults to ["cool", "heat"] — "off"/"fan_only"
     # are always allowed since neither engages the compressor).
     if expect == "hvac_mode_never_commanded":
+        # Issue #629: also scan set_temperature calls, not just set_hvac_mode. Since Issue
+        # #301 (single-setpoint architecture), _set_temperature() bundles hvac_mode into every
+        # climate.set_temperature call — a routine setpoint re-affirmation can silently command
+        # an active mode this way, with no set_hvac_mode call ever issued. An assertion named
+        # "hvac_mode_never_commanded" that only inspected set_hvac_mode would have missed
+        # exactly the failure this issue reports — production commanded cool mode entirely
+        # through set_temperature's embedded hvac_mode parameter.
+        #
+        # Optional "since" (ISO string) scopes the scan to entries at/after that time —
+        # needed because set_temperature is now in scope, and some scenarios (e.g.
+        # restart_whf_ac_mutex_backstop_race, Issue #627) legitimately command cool mode
+        # BEFORE the guarantee-window starts (e.g. before a fan override even begins), which
+        # a whole-scenario scan would now wrongly flag now that set_temperature is included.
+        # Default (no "since") preserves the original whole-scenario guarantee.
         forbidden = {str(m).lower() for m in assertion.get("forbidden_modes", ["cool", "heat"])}
+        since = assertion.get("since")
         for entry in result.action_log:
-            if entry.get("domain") != "climate" or entry.get("service") != "set_hvac_mode":
+            if entry.get("domain") != "climate" or entry.get("service") not in (
+                "set_hvac_mode",
+                "set_temperature",
+            ):
                 continue
+            if since is not None:
+                entry_ts = entry.get("ts")
+                if entry_ts is not None and _naive_iso(entry_ts) < since:
+                    continue
             commanded = str(entry.get("data", {}).get("hvac_mode", "")).lower()
             if commanded in forbidden:
                 return False

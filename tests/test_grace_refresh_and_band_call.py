@@ -73,6 +73,7 @@ def _minimal_engine() -> AutomationEngine:
             "_manual_override_time": None,
             "_last_override_detected_time": None,
             "_sensor_check_callback": None,
+            "_sensor_debounce_pending_callback": None,
             "_emit_event_callback": None,
             "_request_refresh_callback": None,
             "_post_grace_fan_check_callback": None,

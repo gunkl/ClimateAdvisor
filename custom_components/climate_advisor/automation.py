@@ -882,6 +882,16 @@ class AutomationEngine:
 
         When True, door/window sensor events should NOT trigger pause,
         grace periods, or notifications — the user is following the plan.
+
+        Issue #629 investigation note: condition #2 was considered for a live-thermostat-mode
+        check instead of ``classification.hvac_mode``, but that would invert the deliberate
+        Issue #51/#53 design — this exemption is intentionally keyed on the day's *recommended*
+        mode so a thermostat left in an active mode (manual override, or any other reason)
+        during a windows-recommended period doesn't get fought by the door-pause guard. Left
+        as-is; Issue #629's actual fix is the independent choke-point guard in
+        ``_apply_comfort_band()`` below, which stops CA's own comfort-band arm from writing an
+        active mode through open windows in the first place — it does not rely on this
+        function's behavior.
         """
         c = self._current_classification
         if not c or not c.windows_recommended:
@@ -2173,7 +2183,47 @@ class AutomationEngine:
           no-op).
 
         Emits ``comfort_band_applied`` event so the harness/scenarios can assert on band decisions.
+
+        Issue #629: structural choke-point guard, mirroring the WHF/AC mutex guard in
+        ``_set_hvac_mode()`` (Issue #392 Fix 1b) — enforced here, at the single write point
+        all comfort-band callers funnel through, rather than by convention at each of the
+        7 call sites. Upstream flag bookkeeping (``_paused_by_door``, set by
+        ``_sync_paused_by_door_with_live_sensors()``) is supposed to stop this call from ever
+        being reached while a monitored window is open, but that bookkeeping can lag or be
+        exempted (``_is_within_planned_window_period()``) in ways that leave this the last line
+        of defense. Confirmed production incident: a routine band re-affirmation right after
+        nat-vent released ownership silently commanded ``cool`` mode through windows that had
+        been open for over an hour.
+
+        Exempt while nat-vent/WHF genuinely owns HVAC (``_natural_vent_active``/
+        ``_whf_owns_hvac()``) — ``decide_scheduled_band_gate()`` checks occupancy *before*
+        nat-vent (Issue #498), so ``handle_occupancy_away()``/``handle_occupancy_vacation()``
+        legitimately arm a (usually wide, inert) setback band while an active nat-vent session
+        continues to own the real HVAC behavior; nat-vent's own exit logic decides when to stop,
+        independent of this choke-point. This guard exists for the case nat-vent/WHF does
+        *not* own HVAC yet the window is still open.
         """
+        if (
+            not self._natural_vent_active
+            and not self._whf_owns_hvac()
+            and not self._sensor_debounce_pending
+            and self._any_monitored_sensor_open()
+        ):
+            _LOGGER.warning(
+                "_apply_comfort_band: monitored door/window open — refusing to arm active mode "
+                "(would have been %s), pausing instead",
+                band.active,
+            )
+            await self._pause_for_door_window(
+                entity_label="monitored door/window",
+                reason="door/window open at comfort-band arm time",
+                notify_message=(
+                    "🚪 HVAC paused — a monitored door/window is open. Heating/cooling will resume when it's closed."
+                ),
+                notify_type="door_window_pause",
+            )
+            return
+
         caps = self._get_thermostat_capabilities()
 
         if band.active == "ceiling" and caps.supports_cool:
@@ -2551,11 +2601,12 @@ class AutomationEngine:
 
         async_call_later(self.hass, 10, _schedule_check)
         _LOGGER.warning(
-            "Set temperature to %s — %s",
+            "Set temperature to %s (mode=%s) — %s",
             format_temp(temperature, unit),
+            mode,
             reason,
         )
-        self._record_action(f"Set temp to {format_temp(temperature, unit)}", reason)
+        self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
 
     async def _set_temperature_for_mode(self, c: DayClassification, *, reason: str) -> None:
         """Set temperature based on the classification and current period.

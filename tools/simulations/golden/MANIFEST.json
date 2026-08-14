@@ -387,5 +387,10 @@
     "sha256": "cc23310cae55007002d180d55d2cc9ba862226cdb480b875f1da39e56a417405",
     "signed": "2026-08-11",
     "issue": 623
+  },
+  "issue_629_comfort_band_arm_through_open_window": {
+    "sha256": "3739757b54a4e3125df5fb49db3fae6911964f587c22631981009e8402e26eb2",
+    "signed": "2026-08-13",
+    "issue": 629
   }
 }

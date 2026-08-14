@@ -4,10 +4,10 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.10"
+VERSION = "0.6.11"
 
 RELEASE_NOTES: dict[str, list[str]] = {
-    "0.6.10": [
+    "0.6.11": [
         "Fix #631: the diagnostic-only shadow engine (used to validate an in-progress"
         " automation-logic refactor, never touches real hardware) could disagree with"
         " production for hours at a stretch whenever a manual override or a fan"
@@ -15,6 +15,17 @@ RELEASE_NOTES: dict[str, list[str]] = {
         " was in effect. It now stays in sync with production's override/grace state on"
         " every check, closing a gap that could make its disagreement warnings"
         " unreliable during exactly the periods they'd matter most.",
+    ],
+    "0.6.10": [
+        "Fix #629: right after turning off the whole-house fan, the air conditioner could"
+        " silently switch itself into Cool mode while a monitored window was still open —"
+        " with no pause, no notification, and nothing in the logs even saying the mode had"
+        " changed. A routine background check that keeps the thermostat's setpoint current"
+        " was allowed to also change its mode, and nothing double-checked that a window"
+        " wasn't open before it did. The AC now refuses to switch itself on while a"
+        " monitored window is open, the same way it already refuses to fight the"
+        " whole-house fan — and any time that check changes the mode, it's now spelled out"
+        " in the log.",
     ],
     "0.6.9": [
         "Fix #627: after a restart during an active whole-house-fan session (e.g. one"
@@ -1712,7 +1723,7 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
     631: {
-        "version_fixed": "0.6.10",
+        "version_fixed": "0.6.11",
         "title": (
             "Live incident 2026-08-12 21:02-23:40 (2h38m): shadow_automation_engine (Issue"
             " #613/#615's diagnostic-only parallel engine, dry_run=True, never touches real"
@@ -1748,6 +1759,44 @@ KNOWN_FIXES: dict[int, dict] = {
             " mirrored in code but missing from the registry). tests/test_shadow_engine_live.py:"
             " new TestSyncShadowInputsGraceOverride class with per-field parity tests and a"
             " positive control reproducing the live incident."
+        ),
+    },
+    629: {
+        "version_fixed": "0.6.10",
+        "title": (
+            "Live incident 2026-08-13: at 06:13:44 the user turned off the whole-house fan."
+            " A coordinator refresh fired apply_classification() 9ms later; its routine"
+            " comfort-band arm called _set_temperature(mode='cool') 14ms after that,"
+            " silently committing the thermostat to Cool mode even though a monitored window"
+            " had been open since bedtime. _apply_comfort_band() — the single write point all"
+            " 7 comfort-band callers funnel through — never independently re-checked live"
+            " window state; it trusted _paused_by_door, which was still False because it was"
+            " correct at the moment it was last checked (the thermostat genuinely was still"
+            " off then). select_comfort_band()'s edge-selection ternary deliberately treats an"
+            " 'off'-day classification the same as 'cool' for the Issue #249 'lazy comfort"
+            " band' safety net, so nothing stopped the write. Separately, _set_temperature()'s"
+            " log line never named the hvac_mode it silently bundled into the"
+            " climate.set_temperature call (Issue #301's single-setpoint architecture), which"
+            " is why the mode change was invisible in the logs even after the fact."
+        ),
+        "scope_covered": (
+            "automation.py: new structural choke-point guard directly inside"
+            " _apply_comfort_band() — mirrors the pre-existing WHF/AC mutex choke-point in"
+            " _set_hvac_mode() (Issue #392 Fix 1b) — refuses to arm an active mode whenever a"
+            " monitored sensor is genuinely (debounce-settled) open, reusing the existing"
+            " _pause_for_door_window() machinery. Exempted while nat-vent/WHF genuinely owns"
+            " HVAC, covering handle_occupancy_away()/handle_occupancy_vacation()'s legitimate"
+            " wide setback-band arm during an active nat-vent session (verified against"
+            " away_natvent_exits_at_comfort_ceiling/away_with_active_natvent_transition/"
+            " bedtime_natvent_continuation golden scenarios). Because the guard lives in the"
+            " single _apply_comfort_band() choke point, it covers all 7 call sites"
+            " (apply_classification, handle_bedtime, handle_morning_wakeup, handle_pre_cool,"
+            " handle_occupancy_away, handle_occupancy_vacation, the post-fan-off reassert"
+            " path) — not deferred for any of them. _set_temperature()'s log line now includes"
+            " mode=. tools/sim_harness/outcomes.py: hvac_mode_never_commanded now also scans"
+            " set_temperature calls (not just set_hvac_mode), with an optional 'since' scope."
+            " New golden scenario issue_629_comfort_band_arm_through_open_window"
+            " (revert-tested)."
         ),
     },
     627: {

@@ -1,0 +1,131 @@
+{
+  "name": "issue_629_comfort_band_arm_through_open_window",
+  "description": "The routine comfort-band arm (_apply_comfort_band(), all 7 call sites) must never command an active HVAC mode while a monitored window is genuinely open, even on a warm/off day when nat-vent just released ownership (Issue #629)",
+  "source": "issue-report",
+  "issue": 629,
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "notes": [
+    "Occupant impact: on 2026-08-13 the user turned off the whole-house fan at 06:13am. Within",
+    "milliseconds, CA's own routine classification cycle silently commanded the thermostat into",
+    "'cool' mode -- even though a monitored window had been open continuously since nat-vent",
+    "started, and the day's own classification recommended hvac_mode='off'. No pause fired, no",
+    "notification, and the log never even mentioned the mode change. The AC then idled through",
+    "open windows for over an hour and tripped a comfort_undertemp incident (indoor already",
+    "below the heat floor) along the way.",
+    "",
+    "Root cause: _set_temperature() (Issue #301 single-setpoint architecture) always bundles",
+    "hvac_mode into every climate.set_temperature call. select_comfort_band()'s two-way",
+    "ternary (active = 'floor' if hvac_mode == 'heat' else 'ceiling') treats an 'off'-day",
+    "classification the same as a cool day for edge-selection purposes -- by design, for the",
+    "'lazy comfort band' safety net (Issue #249) that arms a wide band on ANY day type when",
+    "windows are closed. The only thing standing between an open window and this write is",
+    "_paused_by_door -- upstream flag bookkeeping that can (and did) fail to engage in time: a",
+    "coordinator refresh fired apply_classification() moments after nat-vent released ownership,",
+    "before any door-pause reconciliation had a reason to run.",
+    "",
+    "Fix: a structural choke-point guard directly inside _apply_comfort_band() -- the single",
+    "write point all 7 comfort-band callers funnel through -- refuses to arm an active mode",
+    "while a monitored window is genuinely (debounce-settled) open, and pauses via the existing",
+    "_pause_for_door_window() machinery instead. Mirrors the WHF/AC mutex choke-point already",
+    "structural inside _set_hvac_mode() (Issue #392 Fix 1b). Exempt while nat-vent/WHF genuinely",
+    "owns HVAC (handle_occupancy_away/vacation legitimately arm a wide, inert setback band",
+    "while an active nat-vent session continues to own real HVAC behavior -- see",
+    "away_natvent_exits_at_comfort_ceiling/away_with_active_natvent_transition).",
+    "",
+    "Three-exercise protocol (CLAUDE.md Sec 10):",
+    "(a) Scenario effectiveness: reverting the choke-point guard in _apply_comfort_band()",
+    "    makes this scenario fail -- the 06:13:44 classification cycle would command",
+    "    hvac_mode=cool via set_temperature, exactly reproducing the incident. Verified via",
+    "    revert-test before promoting.",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md's Anchors table gets a new",
+    "    row for this choke-point, alongside the #620/#623 door-pause entries.",
+    "(c) User outcome: a whole-house fan turned off right after nat-vent leaves the AC exactly",
+    "    where it was (off), instead of silently starting to idle in cool mode through open",
+    "    windows -- comfort-restore now correctly pauses and notifies instead."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 79,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 10800,
+    "door_window_sensors": ["binary_sensor.bedroom_window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true
+  },
+  "events": [
+    {
+      "time": "2026-08-13T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 71.0,
+      "outdoor_f": 65.0,
+      "note": "Early morning: indoor above the heat floor, outdoor cooler -- favorable for free cooling."
+    },
+    {
+      "time": "2026-08-13T06:01:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window opens before any classification exists yet (_current_classification is still None, so _is_within_planned_window_period() trivially returns False and does not intercept this dispatch). outdoor 65F < indoor 71F, indoor > comfort_heat 68F -- nat-vent activates, WHF turns on."
+    },
+    {
+      "time": "2026-08-13T06:02:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "today_high": 79.0,
+      "note": "Warm-day classification: windows recommended, HVAC off -- matches the real incident's own classification. Nat-vent is already active, so DEFER_NAT_VENT gates this cycle regardless -- no comfort-band arm attempted, matching correct production behavior."
+    },
+    {
+      "time": "2026-08-13T06:13:44",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "User manually turns the WHF off -- no CA context, on_fan_turned_off() fires, releasing HVAC suppression and starting the fan-off grace (matches the real incident's 06:13:44.097)."
+    },
+    {
+      "time": "2026-08-13T06:13:49",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "window_open_time": "06:00",
+      "window_close_time": "10:00",
+      "today_high": 79.0,
+      "note": "A routine classification cycle fires moments later -- exactly the coordinator refresh that raced nat-vent's release in production. Window is still open, and windows_recommended=true means _is_within_planned_window_period() grants its 'don't fight the user' exemption (deliberately, per Issue #51/#53 -- see automation.py's docstring), so _paused_by_door stays False and this cycle reaches _apply_comfort_band() unguarded by the door-pause subsystem. The choke-point guard added in this issue is the only thing that can still catch it."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-13T06:01:00",
+      "expect": "natural_ventilation",
+      "reason": "Window opens with favorable conditions -- nat-vent activates normally."
+    },
+    {
+      "at": "2026-08-13T06:13:49",
+      "expect": "hvac_mode_never_commanded",
+      "forbidden_modes": ["cool", "heat"],
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "Issue #629: the comfort-band arm following the fan-off classification cycle must never command 'cool' (or 'heat') mode through the still-open window -- neither via set_hvac_mode nor via set_temperature's bundled hvac_mode parameter (the actual mechanism that fired in production)."
+    },
+    {
+      "at": "2026-08-13T06:13:49",
+      "expect": "paused_by_door",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The choke-point guard in _apply_comfort_band() must set _paused_by_door=True when it refuses to arm through the open window, so the pause is visible on the Status card and subsequent cycles correctly stay gated via decide_scheduled_band_gate()'s DEFER_PAUSED, instead of silently no-op'ing."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "The comfort-band arm refuses to command an active HVAC mode through a genuinely open monitored window, even immediately after nat-vent releases ownership (Issue #629)",
+    "observed_behavior": "sensor_open -> natural_ventilation -> user turns fan off externally -> routine classification cycle fires -> comfort-band arm is intercepted by the choke-point guard, HVAC stays off, _paused_by_door=True",
+    "expected_behavior": "No active HVAC mode is ever commanded (via any code path, including set_temperature's bundled hvac_mode) while a monitored window remains open"
+  }
+}

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.11"
+VERSION = "0.6.12"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.12": [
+        "Feat #633: internal refactor only, no user-visible behavior change —"
+        " assembles the natural-ventilation logic into one explicit,"
+        " thoroughly-tested decision table and a small generic messaging"
+        " mechanism for coordinating between the automation's different"
+        " behaviors, laying the groundwork for the same treatment to extend to"
+        " the rest of the automation logic over time. Not yet connected to"
+        " anything the system does today.",
+    ],
     "0.6.11": [
         "Fix #631: the diagnostic-only shadow engine (used to validate an in-progress"
         " automation-logic refactor, never touches real hardware) could disagree with"
@@ -1722,6 +1731,27 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    633: {
+        "version_fixed": "0.6.12",
+        "title": (
+            "Block 5 epic #594 Phase P completion: builds the unified nat-vent transition"
+            " table earlier Phase P sub-issues (#606/#607, #608/#609) deliberately left"
+            " unbuilt, plus a generic cross-lifecycle event dispatcher for coordinating"
+            " between the automation's independently-migrated behaviors going forward."
+            " Not wired into any live decision path yet — a self-contained, thoroughly-"
+            " tested building block, same incremental shape as its own predecessors."
+        ),
+        "scope_covered": (
+            "New: lifecycle_events.py (cross-lifecycle event vocabulary), "
+            "lifecycle_dispatcher.py (generic event routing + registry-completeness "
+            "check, 12 tests), nat_vent_fsm.py (unifies derive_nat_vent_lifecycle_state()/"
+            "decide_nat_vent_gate()/decide_nat_vent_soft_start_gate()/decide_nat_vent_exit() "
+            "into one (state, event) -> Transition function, 26 direct tests + differential "
+            "validation against all golden/pending scenarios). tools/sim_harness/run_production.py: "
+            "engine_state snapshot extended with outdoor temp/peak/sample-count and a "
+            "live indoor-temp read, needed for the differential validation."
+        ),
+    },
     631: {
         "version_fixed": "0.6.11",
         "title": (

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.12] — 2026-08-13
+
+- Feat #633: internal refactor only, no user-visible behavior change — assembles the natural-ventilation logic into one explicit, thoroughly-tested decision table and a small generic messaging mechanism for coordinating between the automation's different behaviors, laying the groundwork for the same treatment to extend to the rest of the automation logic over time. Not yet connected to anything the system does today.
+
 ## [0.6.11] — 2026-08-13
 
 - Fix #631: the diagnostic-only shadow engine (used to validate an in-progress automation-logic refactor, never touches real hardware) could disagree with production for hours at a stretch whenever a manual override or a fan RF-remote override was active, because it never learned that a grace period was in effect. It now stays in sync with production's override/grace state on every check, closing a gap that could make its disagreement warnings unreliable during exactly the periods they'd matter most.

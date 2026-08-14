@@ -937,8 +937,17 @@ def _snapshot_engine_state(engine: Any) -> dict[str, Any]:
         "_pre_condition_achieved_date",  # Issue #295
         "_nat_vent_soft_start",  # Issue #606
         "_nat_vent_outdoor_exit_time",  # Issue #606
+        "_last_outdoor_temp",  # Issue #633
+        "_outdoor_temp_today_peak",  # Issue #633
+        "_outdoor_temp_today_sample_count",  # Issue #633
     ):
         snap[attr] = getattr(engine, attr, None)
+
+    # Issue #633: indoor temp is never cached on the engine itself (always a
+    # live hass state read) — snapshot it explicitly the same way any other
+    # post-run inspection would, using the engine's own reader.
+    get_indoor = getattr(engine, "_get_indoor_temp_f", None)
+    snap["_last_indoor_temp"] = get_indoor() if callable(get_indoor) else None
 
     # Include classification summary if available
     c = getattr(engine, "_current_classification", None)

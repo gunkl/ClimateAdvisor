@@ -76,7 +76,8 @@
       "at": "2026-08-11T19:05:30",
       "expect": "hvac_mode_never_commanded",
       "forbidden_modes": ["cool", "heat"],
-      "reason": "The AC must never be commanded into Cool/Heat mode anywhere in this scenario -- the whole-house fan's HVAC suppression (_pre_fan_hvac_mode / _whf_owns_hvac()) must hold across the restart and the full startup-coalescing window, exactly the guarantee the live incident violated."
+      "since": "2026-08-11T18:59:41",
+      "reason": "The AC must never be commanded into Cool/Heat mode from the moment the WHF override begins onward -- the whole-house fan's HVAC suppression (_pre_fan_hvac_mode / _whf_owns_hvac()) must hold across the restart and the full startup-coalescing window, exactly the guarantee the live incident violated. 'since' (Issue #629) scopes past the 18:59:30 classification, which legitimately commands cool before any fan is running -- hvac_mode_never_commanded now also scans set_temperature's bundled hvac_mode (Issue #629), so an unscoped whole-run check would wrongly flag that earlier, correct command."
     },
     {
       "at": "2026-08-11T19:05:30",

@@ -1,0 +1,100 @@
+{
+  "name": "issue_637_paused_during_grace_nat_vent_exit",
+  "description": "Confirms the SECOND independently-evidenced path into the door/window pause FSM's new PAUSED_DURING_GRACE composite state (Issue #637, Block 5 Phase 2): _exit_nat_vent()'s sensor-still-open branch sets _paused_by_door=True unconditionally, without ever checking or clearing _grace_active. A door pauses HVAC, closes (starting a grace period), then reopens while grace is still active and outdoor has turned nat-vent-favorable -- handle_door_window_open() hands off to nat-vent WITHOUT clearing grace (production never has clearing grace be nat-vent's job). Outdoor then swings back warm, nat-vent exits via the outdoor-rise reversal check, and since the same door is still open, _exit_nat_vent() re-pauses -- landing on paused+grace simultaneously a second, structurally distinct way. Occupant impact: the same as the first path -- HVAC correctly stays off while a door is open, but the underlying flag combination this scenario proves reachable is exactly what the pre-FSM code had no name for.",
+  "source": "synthetic",
+  "issue": 637,
+  "notes": [
+    "Exercises violation path #2 from the Phase 2 plan's five-whys analysis: _exit_nat_vent()'s sensor-still-open branch (automation.py ~L5325-5347) sets _paused_by_door=True directly, with no read or write of _grace_active at all -- if a nat-vent session was entered while an earlier grace period was still running (a real, separately-evidenced path in its own right: handle_door_window_open()'s SENSOR_OPENED-during-GRACE case can hand off to nat-vent without clearing grace, matching this scenario's own 13:07 event), grace survives the whole nat-vent session and is still active when nat-vent later exits.",
+    "use_coordinator=true for the same reason as the sibling scenario (issue_637_paused_during_grace_open_fallthrough.json) -- real debounce/pause/resume/grace/listener wiring, not an approximation.",
+    "The 13:09 coordinator_refresh event is required to drive check_natural_vent_conditions() (the real periodic gate/exit re-evaluation point) against the 13:08 outdoor spike -- temp_update alone only updates the cached reading, it does not itself trigger a new decision cycle.",
+    "automation_grace_seconds=600 (10 min, grace starts 13:00, expires 13:10) is sized so the 13:09 nat-vent exit lands just before natural expiry -- confirms this is a genuine race between the grace timer and the outdoor-swing/nat-vent-exit sequence, not an artifact of an unrealistically long grace window.",
+    "Assertion at 13:09 uses the same 'paused_during_grace' custom assertion type introduced for the sibling scenario."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "automation_grace_seconds": 600,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "door_window_sensors": ["binary_sensor.back_door"]
+  },
+  "events": [
+    {
+      "time": "2026-08-14T12:30:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 88.0,
+      "note": "Hot afternoon. Indoor above comfort_cool=74F. Outdoor too warm for nat vent."
+    },
+    {
+      "time": "2026-08-14T12:31:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at 74F."
+    },
+    {
+      "time": "2026-08-14T12:45:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Back door opens. Outdoor 88F > threshold 77F -- nat vent ineligible. Automation pauses (HVAC was actively cooling)."
+    },
+    {
+      "time": "2026-08-14T13:00:00",
+      "type": "sensor_close",
+      "entity": "binary_sensor.back_door",
+      "note": "Door closes. All sensors closed -- automation resumes (restores cool mode) and a 10-min automation grace period begins (expires 13:10)."
+    },
+    {
+      "time": "2026-08-14T13:05:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 60.0,
+      "note": "A cool front moves in. Outdoor drops to 60F -- now nat-vent-favorable (below indoor, below the 77F threshold, indoor still above comfort_heat=68F)."
+    },
+    {
+      "time": "2026-08-14T13:07:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.back_door",
+      "note": "Door reopens at 13:07, while the 13:00 grace period is still active (expires 13:10). Grace's outdoor-too-warm guard does not suppress (60F < 77F threshold) -- falls through. The nat-vent gate now passes (indoor 76F > comfort_heat 68F), so handle_door_window_open() hands off to nat-vent (fan on, band armed) WITHOUT clearing the still-active grace period."
+    },
+    {
+      "time": "2026-08-14T13:08:00",
+      "type": "temp_update",
+      "indoor_f": 76.0,
+      "outdoor_f": 85.0,
+      "note": "Outdoor swings back warm (85F), reversing the airflow direction nat-vent depends on (outdoor now above indoor)."
+    },
+    {
+      "time": "2026-08-14T13:09:00",
+      "type": "coordinator_refresh",
+      "note": "Drives the real periodic cycle, which calls check_natural_vent_conditions() while nat-vent is active. The outdoor-rise exit check fires (outdoor 85F > indoor 76F) -- _exit_nat_vent() runs, sees the back door sensor is STILL open (it was never closed after the 13:07 reopen), and pauses HVAC via its unconditional _paused_by_door=True set. The 13:00 grace period (expires 13:10) has not yet elapsed, so it is still active -- production reaches _paused_by_door=True AND _grace_active=True simultaneously via this second, structurally distinct path."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-14T12:45:00",
+      "expect": "paused",
+      "reason": "Sensor opens with outdoor (88F) far above the nat-vent threshold -- automation pauses.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-08-14T13:00:00",
+      "expect": "resumed",
+      "reason": "All sensors closed -- automation resumes and starts a 10-min automation grace period.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-08-14T13:09:00",
+      "expect": "paused_during_grace",
+      "reason": "Nat-vent exits (outdoor-rise reversal) while the monitored sensor is still open and the 13:00 grace period has not yet expired. _exit_nat_vent()'s sensor-still-open branch sets _paused_by_door=True without ever reading or clearing _grace_active, so production genuinely reaches PAUSED_DURING_GRACE a second, structurally distinct way from the sibling scenario.",
+      "track": "integration"
+    }
+  ]
+}

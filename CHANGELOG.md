@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.14] — 2026-08-14
+
+- Feat #637: internal refactor only, no user-visible behavior change — Block 5 Phase 2 builds the unified door/window pause/grace transition table, the next diagnostic-only shadow comparison point after 0.6.13's nat-vent one. Confirmed (via new test scenarios, not just static analysis) that production can genuinely be paused-by-door and in-grace at the same time — the new state models that combination rather than assuming it can't happen. Purely observational — nothing it computes is ever acted on.
+
 ## [0.6.13] — 2026-08-13
 
 - Feat #633: internal refactor only, no user-visible behavior change — the diagnostic-only decision table added in 0.6.12 now actually runs alongside production on every natural-ventilation check, compared against what production really did. Still purely observational — nothing it computes is ever acted on.

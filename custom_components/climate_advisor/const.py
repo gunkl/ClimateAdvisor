@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.13"
+VERSION = "0.6.14"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.14": [
+        "Feat #637: internal refactor only, no user-visible behavior change — Block 5"
+        " Phase 2 builds the unified door/window pause/grace transition table"
+        " (door_window_fsm.py), the next diagnostic-only shadow comparison point after"
+        " 0.6.13's nat-vent one. Confirmed (via new pending scenarios, not just static"
+        " analysis) that production can genuinely be paused-by-door and in-grace at the"
+        " same time — the new PAUSED_DURING_GRACE state models that combination rather"
+        " than assuming it can't happen. Purely observational — nothing it computes is"
+        " ever acted on.",
+    ],
     "0.6.13": [
         "Feat #633: internal refactor only, no user-visible behavior change — the"
         " diagnostic-only decision table added in 0.6.12 now actually runs"
@@ -1738,6 +1748,36 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    637: {
+        "version_fixed": "0.6.14",
+        "title": (
+            "Block 5 epic #594 Phase 2: builds the unified door/window pause/grace"
+            " transition table (5 new pure functions + door_window_fsm.py assembly),"
+            " following the exact pattern #633's nat-vent FSM established. Discovered"
+            " and confirmed-by-scenario (not just static trace) that "
+            "`_paused_by_door`/`_grace_active` are NOT mutually exclusive in"
+            " production — modeled as a new PAUSED_DURING_GRACE state rather than"
+            " assumed unreachable. Wired into the shadow engine's existing diagnostic"
+            " as a third comparison point, purely observational — never wired into any"
+            " decision path that can act."
+        ),
+        "scope_covered": (
+            "New: door_window_lifecycle.py (5-state derivation), door_window_pause_entry.py, "
+            "door_window_open_response.py, door_window_close_response.py, "
+            "door_window_grace_expiry.py, door_window_fsm.py (assembly). Coordinator: "
+            "_evaluate_door_window_fsm()/_current_hvac_mode(), extended "
+            "_update_shadow_engine_diagnostic() with door_window_production_state/"
+            "door_window_shadow_state/door_window_fsm_state/door_window_mirror_agrees/"
+            "door_window_fsm_agrees, wired into _mirror_to_shadow() for "
+            "handle_door_window_open/handle_all_doors_windows_closed/"
+            "handle_manual_override_during_pause (the 3 mirrored methods with an "
+            "unambiguous door/window FSM event-kind correspondence). New pending "
+            "scenarios issue_637_paused_during_grace_open_fallthrough.json and "
+            "issue_637_paused_during_grace_nat_vent_exit.json confirm PAUSED_DURING_GRACE "
+            "is reachable via 2 structurally distinct production paths, pending user "
+            "review before promotion to golden/."
+        ),
+    },
     633: {
         "version_fixed": "0.6.13",
         "title": (

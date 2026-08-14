@@ -592,6 +592,16 @@ def check_assertion(
             return "paused_by_door"
         return False
 
+    # Issue #637 (Block 5 Phase 2, door/window pause FSM): reads the production
+    # engine's final `_paused_by_door`/`_grace_active` flags directly, same
+    # pattern as `paused_by_door` above. Confirms the composite
+    # PAUSED_DURING_GRACE state (both flags True simultaneously) is genuinely
+    # reachable in production — not just theorized from a static code trace.
+    if expect == "paused_during_grace":
+        if engine_state.get("_paused_by_door") is True and engine_state.get("_grace_active") is True:
+            return "paused_during_grace"
+        return False
+
     # --- ODE ceiling guard (Issue #236 D) ---
     # Production emits "ceiling_guard_fired" when it pre-cools.  The legacy scenarios use
     # bespoke labels; map them to the production decision at the asserted time.  "fires"/

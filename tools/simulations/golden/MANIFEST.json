@@ -392,5 +392,15 @@
     "sha256": "3739757b54a4e3125df5fb49db3fae6911964f587c22631981009e8402e26eb2",
     "signed": "2026-08-13",
     "issue": 629
+  },
+  "issue_637_paused_during_grace_open_fallthrough": {
+    "sha256": "c06e3dbb0aa583fc182954702f5a936e4206c280f3f2587be0ffc60c26af9f75",
+    "signed": "2026-08-14",
+    "issue": 637
+  },
+  "issue_637_paused_during_grace_nat_vent_exit": {
+    "sha256": "f5230d28191b77e554719d33b3fbfa9587741a9cfafc9ad17b0f06ac71208d85",
+    "signed": "2026-08-14",
+    "issue": 637
   }
 }

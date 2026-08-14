@@ -228,6 +228,7 @@ from .const import (
     VACATION_SETBACK_EXTRA,
     VERSION,
 )
+from .door_window_lifecycle import DoorWindowLifecycleState
 from .fan_status import (
     is_ca_fan_running,
     parse_remote_speed_event,
@@ -342,6 +343,21 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
     return pool[index]
 
 
+# Issue #637: which mirrored automation.py methods correspond to which door/window
+# FSM event kind. Narrower than the FSM's own 7-member DoorWindowFsmEventKind enum —
+# GRACE_TIMER_EXPIRED/DASHBOARD_RESUME/NAT_VENT_EXITED_SENSOR_STILL_OPEN/SYNC_RECONCILE
+# have no _mirror_to_shadow() call site today (see _sync_shadow_inputs()'s own
+# docstring on why _on_grace_expired can't be reached that way), same v1-scope-
+# narrowing precedent as #633's nat-vent FSM (only check_natural_vent_conditions is
+# wired, not every gate/exit-adjacent call site). Additional future work, not this
+# increment.
+_DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
+    "handle_door_window_open": "sensor_opened",
+    "handle_all_doors_windows_closed": "all_sensors_closed",
+    "handle_manual_override_during_pause": "manual_override_during_pause",
+}
+
+
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     """Coordinate all Climate Advisor activities."""
 
@@ -403,6 +419,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # INACTIVE unconditionally (same clean-slate convention as restore_state()'s
         # documented design for _natural_vent_active).
         self._nat_vent_fsm_state: NatVentLifecycleState = NatVentLifecycleState.INACTIVE
+        # Issue #637: the unified door/window pause/grace FSM's own independently-
+        # tracked state — same third-comparison-point convention as #633 above.
+        # Starts NORMAL unconditionally (no persisted pause/grace on a fresh coordinator).
+        self._door_window_fsm_state: DoorWindowLifecycleState = DoorWindowLifecycleState.NORMAL
         self.shadow_automation_engine: AutomationEngine = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
@@ -759,6 +779,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "Nat-vent FSM evaluation failed (isolated, no production impact): %s",
                         fsm_exc,
                     )
+            if method_name in _DOOR_WINDOW_FSM_EVENT_KINDS:
+                try:
+                    self._evaluate_door_window_fsm(method_name)
+                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                    _LOGGER.warning(
+                        "Door/window FSM evaluation failed (isolated, no production impact): %s",
+                        fsm_exc,
+                    )
             try:
                 self._update_shadow_engine_diagnostic()
             except Exception as diag_exc:  # noqa: BLE001 — diagnostic is best-effort observability
@@ -830,6 +858,57 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = transition(self._nat_vent_fsm_state, event)
         self._nat_vent_fsm_state = result.to_state
 
+    def _evaluate_door_window_fsm(self, method_name: str) -> None:
+        """Run the unified door/window pause/grace FSM (Issue #637) against
+        production's current live readings and track its own independently-
+        derived state.
+
+        v1 scope, narrowed to the 3 event kinds a mirrored method exists for
+        today (see ``_DOOR_WINDOW_FSM_EVENT_KINDS``) — same precedent as
+        ``_evaluate_nat_vent_fsm()``'s own v1 scope note. The FSM's own tracked
+        state (``self._door_window_fsm_state``) is never written back onto
+        either engine — a third, independent computation, purely for
+        comparison against production's real derived state. Isolated the same
+        way: any exception here is logged and swallowed by the caller, never
+        allowed to affect production.
+        """
+        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind, DoorWindowFsmInputs, transition
+
+        ae = self.automation_engine
+        now = dt_util.now()
+        config = self.config
+
+        event = DoorWindowFsmEvent(
+            kind=DoorWindowFsmEventKind(_DOOR_WINDOW_FSM_EVENT_KINDS[method_name]),
+            inputs=DoorWindowFsmInputs(
+                hvac_mode=self._current_hvac_mode(),
+                outdoor=ae._last_outdoor_temp,
+                indoor=ae._get_indoor_temp_f(),
+                comfort_heat=ae._nat_vent_reactivation_floor(),
+                comfort_cool=float(config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+                nat_vent_delta=float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+                fan_mode=str(config.get(CONF_FAN_MODE, "whole_house_fan")),
+                aggressive_savings=bool(config.get("aggressive_savings", False)),
+                within_planned_window=ae._is_within_planned_window_period(),
+                any_sensor_open=ae._any_monitored_sensor_open(),
+                sensor_debounce_pending=bool(ae._sensor_debounce_pending),
+                override_matches_current_decision=ae._override_matches_current_decision(ae._current_classification),
+                grace_source=ae._last_resume_source or "automation",
+                natural_vent_active=bool(ae._natural_vent_active),
+                whf_owns_hvac=bool(ae._whf_owns_hvac()),
+                now=now,
+            ),
+        )
+        result = transition(self._door_window_fsm_state, event)
+        self._door_window_fsm_state = result.to_state
+
+    def _current_hvac_mode(self) -> str | None:
+        """Live thermostat mode read, shared by the door/window FSM evaluation
+        (matches ``_pause_for_door_window()``'s own ``self.hass.states.get(
+        self.climate_entity)`` read)."""
+        state = self.hass.states.get(self.automation_engine.climate_entity)
+        return state.state if state else None
+
     def _update_shadow_engine_diagnostic(self) -> None:
         """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613),
         plus (Issue #633) the independent nat-vent FSM's agreement with production.
@@ -859,11 +938,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         fsm_state = self._nat_vent_fsm_state.value
         mirror_agrees = production_state == shadow_state
         fsm_agrees = production_state == fsm_state
-        agrees = mirror_agrees and fsm_agrees
+
+        # Issue #637: door/window pause/grace FSM's own agreement, same pattern.
+        from .door_window_lifecycle import DoorWindowLifecycleInputs, derive_door_window_lifecycle_state
+
+        def _door_window_state_for(ae: AutomationEngine) -> str:
+            inputs = DoorWindowLifecycleInputs(
+                paused_by_door=bool(ae._paused_by_door),
+                paused_with_hvac_already_off=bool(ae._paused_with_hvac_already_off),
+                grace_active=bool(ae._grace_active),
+            )
+            return derive_door_window_lifecycle_state(inputs).value
+
+        door_window_production_state = _door_window_state_for(self.automation_engine)
+        door_window_shadow_state = _door_window_state_for(self.shadow_automation_engine)
+        door_window_fsm_state = self._door_window_fsm_state.value
+        door_window_mirror_agrees = door_window_production_state == door_window_shadow_state
+        door_window_fsm_agrees = door_window_production_state == door_window_fsm_state
+
+        agrees = mirror_agrees and fsm_agrees and door_window_mirror_agrees and door_window_fsm_agrees
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
             "shadow_state": shadow_state,
             "nat_vent_fsm_state": fsm_state,
+            "door_window_production_state": door_window_production_state,
+            "door_window_shadow_state": door_window_shadow_state,
+            "door_window_fsm_state": door_window_fsm_state,
+            "door_window_mirror_agrees": door_window_mirror_agrees,
+            "door_window_fsm_agrees": door_window_fsm_agrees,
             "agrees": agrees,
             "checked_at": now.isoformat(),
         }
@@ -878,6 +980,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Nat-vent FSM disagreement (Issue #633): production=%s fsm=%s",
                 production_state,
                 fsm_state,
+            )
+        if not door_window_mirror_agrees:
+            _LOGGER.warning(
+                "Door/window shadow engine disagreement (Issue #637): production=%s shadow=%s",
+                door_window_production_state,
+                door_window_shadow_state,
+            )
+        if not door_window_fsm_agrees:
+            _LOGGER.warning(
+                "Door/window FSM disagreement (Issue #637): production=%s fsm=%s",
+                door_window_production_state,
+                door_window_fsm_state,
             )
 
     @property

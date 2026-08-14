@@ -1,4 +1,4 @@
-"""Tests for Issue #615: registry-enforced shadow-engine coverage.
+"""Tests for Issue #615/#631: registry-enforced shadow-engine coverage.
 
 #613 (Block 5 Phase 4/Q) shipped mirroring only 5 of ~13 real entry points that mutate
 nat-vent lifecycle state, plus never fed the shadow engine 3 input-data attributes
@@ -6,13 +6,24 @@ nat-vent lifecycle state, plus never fed the shadow engine 3 input-data attribut
 hours vs production) traced this to ad hoc, scattered mirror-writes with no way to know
 if coverage was complete.
 
+#631 found a second instance of the same class of gap: grace/override state
+(`_grace_active`, `_manual_override_active`, `_fan_override_active`,
+`_override_confirm_pending/_mode/_source`, `_paused_with_hvac_already_off`) is set by
+methods called either directly from coordinator.py/api.py (never followed by a
+`_mirror_to_shadow(...)` call) or by purely internal `async_call_later` timers with no
+coordinator call site at all — confirmed live as a 2h38m sustained false disagreement
+(2026-08-12 21:02-23:40) because `check_natural_vent_conditions()` gates nat-vent
+reactivation on `_grace_active`. Fixed via `_sync_shadow_inputs()` raw-copy (same
+pattern as outdoor temp/forecast/thermal model), not new mirror call sites — see that
+function's docstring in coordinator.py for why.
+
 This module is the durable fix for "how do we know coverage stays complete": it
 AST-scans `automation.py` for every `AutomationEngine` method that assigns to one of
-the 4 fields `derive_nat_vent_lifecycle_state()` reads, and requires each discovered
-method name to be explicitly classified in `_COVERAGE_REGISTRY` below (mirrored /
-internal / exempted-with-reason). A new method that mutates one of these fields and
-isn't registered fails immediately — the same enforcement shape as
-`tests/test_executor_offload.py`'s `_BLOCKING_METHODS` registry for blocking I/O.
+the tracked fields, and requires each discovered method name to be explicitly
+classified in `_COVERAGE_REGISTRY` below (mirrored / internal / exempted-with-reason).
+A new method that mutates one of these fields and isn't registered fails immediately —
+the same enforcement shape as `tests/test_executor_offload.py`'s `_BLOCKING_METHODS`
+registry for blocking I/O.
 """
 
 from __future__ import annotations
@@ -26,6 +37,14 @@ _TRACKED_FIELDS = {
     "_paused_by_door",
     "_nat_vent_soft_start",
     "_nat_vent_outdoor_exit_time",
+    # Issue #631: grace/override lifecycle gates.
+    "_grace_active",
+    "_manual_override_active",
+    "_fan_override_active",
+    "_override_confirm_pending",
+    "_override_confirm_mode",
+    "_override_confirm_source",
+    "_paused_with_hvac_already_off",
 }
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -76,6 +95,58 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     ),
     "_re_pause_for_open_sensor": (
         "internal: self-scheduled grace-expiry timer callback, runs independently per engine instance"
+    ),
+    # Issue #631: grace/override setters. Every one of these is a real coordinator/api
+    # call site or an internal-only timer — deliberately NOT mirrored (see
+    # coordinator.py's _sync_shadow_inputs() docstring for why a raw-value copy is
+    # correct here instead of adding _mirror_to_shadow(...) calls for these methods).
+    "restore_state": "mirrored",
+    "clear_manual_override": (
+        "exempted: called directly from 2 coordinator.py sites (unmirrored) and internally from "
+        "cancel_override()/_on_grace_expired(); _manual_override_active/_override_confirm_* covered "
+        "by _sync_shadow_inputs() raw copy (Issue #631)"
+    ),
+    "handle_fan_manual_override": (
+        "exempted: called directly from 3 coordinator.py sites (unmirrored); _fan_override_active/"
+        "_grace_active covered by _sync_shadow_inputs() raw copy (Issue #631)"
+    ),
+    "clear_fan_override": (
+        "exempted: called from clear_manual_override (exempted) and internal cascades; "
+        "_fan_override_active covered by _sync_shadow_inputs() raw copy (Issue #631)"
+    ),
+    "start_override_confirmation": (
+        "exempted: called from handle_manual_override() (3 unmirrored coordinator.py sites) and "
+        "handle_manual_override_during_pause() (mirrored); contains the internal "
+        "_confirm_override_expired timer closure. _override_confirm_*/_manual_override_* covered by "
+        "_sync_shadow_inputs() raw copy (Issue #631)"
+    ),
+    "_confirm_override": (
+        "exempted: called from start_override_confirmation()'s immediate path and its internal "
+        "confirm-delay timer closure; _manual_override_active/_grace_active covered by "
+        "_sync_shadow_inputs() raw copy (Issue #631)"
+    ),
+    "_start_grace_period": (
+        "exempted: called from both mirrored (handle_all_doors_windows_closed, "
+        "check_natural_vent_conditions, resume_from_pause, handle_manual_override_during_pause) and "
+        "unmirrored/internal (handle_fan_manual_override, _confirm_override) paths; _grace_active "
+        "covered by _sync_shadow_inputs() raw copy regardless of caller (Issue #631)"
+    ),
+    "_cancel_grace_timers": (
+        "exempted: called from cancel_override() (unmirrored) and the internal grace-expiry timer "
+        "closures (_grace_expired/_grace_expired_restored); _grace_active covered by "
+        "_sync_shadow_inputs() raw copy (Issue #631)"
+    ),
+    "_on_grace_expired": (
+        "internal: fires only from the private _grace_expired/_grace_expired_restored "
+        "async_call_later closures defined inside _start_grace_period()/_reschedule_grace_timer() — "
+        "no coordinator call site exists or could exist; cascades to _cancel_grace_timers()/"
+        "clear_manual_override() (both exempted above), covered by _sync_shadow_inputs() raw copy "
+        "(Issue #631)"
+    ),
+    "cancel_override": (
+        "exempted: called from api.py's 'Cancel Override'/'Cancel Fan Override' dashboard buttons "
+        "(2 unmirrored sites); all fields it clears are covered by _sync_shadow_inputs() raw copy "
+        "(Issue #631)"
     ),
 }
 

@@ -648,7 +648,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             self._shadow_event_log.pop(0)
 
     def _sync_shadow_inputs(self) -> None:
-        """Copy live input-data attributes onto the shadow engine (Issue #615).
+        """Copy live input-data attributes onto the shadow engine (Issue #615, #631).
 
         Several nat-vent decision methods (``handle_door_window_open()`` chief among
         them) read ``self._last_outdoor_temp``/``self._hourly_forecast_temps``/
@@ -666,6 +666,28 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         place). Copies straight from ``self.automation_engine``'s current values, never
         from local cycle variables, so it can't drift from whatever production most
         recently observed.
+
+        Issue #631: grace/override state (``_grace_active``, ``_manual_override_active``,
+        ``_fan_override_active``, and their companion mode/source/time/duration fields)
+        is a second instance of this exact class of gap. These are set by
+        ``AutomationEngine`` methods called either directly from coordinator.py/api.py
+        (never followed by a ``_mirror_to_shadow(...)`` call) or by purely internal
+        ``async_call_later`` timers with no coordinator call site at all
+        (``_on_grace_expired``, the ``_confirm_override_expired`` timer's clear path) —
+        the latter category can *never* be reached by adding a mirror call, only by a
+        raw-value copy like this one. Confirmed live: shadow disagreed
+        (``production=inactive shadow=active_full_gate``) for 2h38m straight
+        (2026-08-12 21:02–23:40) because ``check_natural_vent_conditions()`` — a mirrored
+        method — gates nat-vent reactivation on ``not self._grace_active``, and the
+        shadow's copy never reflected production's active manual-override grace period.
+        Deliberately NOT adding new ``_mirror_to_shadow(...)`` call sites for the setters
+        of these fields (``handle_fan_manual_override``, ``handle_manual_override``,
+        ``clear_manual_override``, ``cancel_override``) — that would reintroduce the
+        "duplicate each write at its call site" pattern this function exists to replace,
+        and would start real ``async_call_later`` timers against the shared ``hass``
+        event loop on the shadow engine for no benefit over a raw copy refreshed every
+        cycle. See ``tests/test_shadow_engine_coverage.py`` for the registry entries
+        documenting why each setter is exempted rather than mirrored.
         """
         se = self.shadow_automation_engine
         ae = self.automation_engine
@@ -675,6 +697,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         se._outdoor_temp_today_peak = ae._outdoor_temp_today_peak
         se._outdoor_temp_today_sample_count = ae._outdoor_temp_today_sample_count
         se.set_occupancy_mode(ae._occupancy_mode)
+
+        # Issue #631: grace/override state — see docstring above.
+        se._grace_active = ae._grace_active
+        se._grace_end_time = ae._grace_end_time
+        se._grace_duration_seconds = ae._grace_duration_seconds
+        se._last_grace_trigger = ae._last_grace_trigger
+        se._grace_protects_override = ae._grace_protects_override
+        se._last_resume_source = ae._last_resume_source
+        se._manual_override_active = ae._manual_override_active
+        se._manual_override_mode = ae._manual_override_mode
+        se._manual_override_source = ae._manual_override_source
+        se._manual_override_time = ae._manual_override_time
+        se._fan_override_active = ae._fan_override_active
+        se._fan_override_time = ae._fan_override_time
+        se._fan_remote_timer_hours = ae._fan_remote_timer_hours
+        se._fan_remote_speed = ae._fan_remote_speed
+        se._override_confirm_pending = ae._override_confirm_pending
+        se._override_confirm_mode = ae._override_confirm_mode
+        se._override_confirm_source = ae._override_confirm_source
+        se._paused_with_hvac_already_off = ae._paused_with_hvac_already_off
 
     async def _mirror_to_shadow(self, method_name: str, *args: Any, **kwargs: Any) -> None:
         """Replay a production nat-vent decision call on the shadow engine (Issue #613).

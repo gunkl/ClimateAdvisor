@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.18] — 2026-08-15
+
+- Fix #645: after a redeploy or restart, the dashboard could briefly show HVAC mode 'cool' next to 'windows open (as planned)' — a monitored window/door sensor blipping unavailable-then-on during startup reset its change timestamp, which made the automation's debounce check treat the window as still settling and skip the guard that normally refuses to command an active HVAC mode through an open window. The compressor never actually ran in the reported case (the target temperature was still above the indoor reading), but on a warmer morning this could have let real cooling run with windows open. The guard now always blocks arming an active mode while a monitored window is open, regardless of that startup timing race.
+
 ## [0.6.17] — 2026-08-15
 
 - Fix #643: internal refactor only, no user-visible behavior change — the diagnostic-only shadow comparison from the Block 5 series (0.6.13–0.6.15) wasn't seeing manual fan overrides, the most common override trigger, so it couldn't confirm its own consistency after one occurred. Now mirrored like every other tracked automation decision. Purely observational — nothing it computes is ever acted on.

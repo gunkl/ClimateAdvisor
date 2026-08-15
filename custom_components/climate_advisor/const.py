@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.17"
+VERSION = "0.6.18"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.18": [
+        "Fix #645: after a redeploy or restart, the dashboard could briefly show HVAC mode"
+        " 'cool' next to 'windows open (as planned)' — a monitored window/door sensor blipping"
+        " unavailable-then-on during startup reset its change timestamp, which made the"
+        " automation's debounce check treat the window as still settling and skip the guard"
+        " that normally refuses to command an active HVAC mode through an open window. The"
+        " compressor never actually ran in the reported case (the target temperature was still"
+        " above the indoor reading), but on a warmer morning this could have let real cooling"
+        " run with windows open. The guard now always blocks arming an active mode while a"
+        " monitored window is open, regardless of that startup timing race.",
+    ],
     "0.6.17": [
         "Fix #643: an internal diagnostic that shadows automation decisions to verify"
         " an in-progress refactor wasn't seeing manual fan overrides (the most common"
@@ -1779,6 +1790,38 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    645: {
+        "version_fixed": "0.6.18",
+        "title": "Sensor reconnect blip during restart made _sensor_debounce_pending() bypass the open-window guard",
+        "scope_covered": (
+            "coordinator.py: _async_door_window_changed() now inspects old_state when a"
+            " monitored sensor reads open — if old_state.state is 'unavailable'/'unknown' (a"
+            " reconnect, not a genuine off->on transition), it records that specific"
+            " last_changed timestamp in the new _sensor_reconnect_blip_last_changed dict and"
+            " skips debounce-timer registration entirely (old_state=None is deliberately NOT"
+            " treated the same way — only unavailable/unknown are confirmed blip signatures)."
+            " _sensor_debounce_pending() excludes any last_changed value recorded as a known"
+            " blip for that sensor; a LATER genuine off->on transition moves last_changed"
+            " again so this can never mask a real open. Root cause: a group/helper"
+            " contact-sensor entity blips unavailable->on during HA startup (confirmed via"
+            " live REST state history around a redeploy), stamping a fresh last_changed on an"
+            " already-hours-open window — automation.py's existing arm-blocking guards"
+            " (_apply_comfort_band()'s Issue #629 choke-point, _sync_paused_by_door_with_live_"
+            "sensors()) were unmodified; they simply now read a correct debounce_pending"
+            " signal. An earlier draft of this fix blanket-removed the debounce check from"
+            " those guards instead, which broke the golden scenario"
+            " issue_623_debounce_race_transient_open_not_paused (debounce's legitimate"
+            " nuisance-pause protection for a genuinely brief door-open) — reverted in favor"
+            " of this narrower, signal-level fix. Also hardened the sim harness's"
+            " simulate_restart (Issue #627) to explicitly reset _paused_by_door/"
+            "_pre_pause_mode/_natural_vent_active, matching the real clean-slate guarantee a"
+            " fresh engine instance provides in production — the harness reuses the same live"
+            " engine instance, so those fields were silently leaking across simulated"
+            " restarts and would have masked this fix's own regression scenario. New"
+            " regression coverage: tests/test_sensor_reconnect_blip.py and"
+            " tools/simulations/pending/issue_645_restart_debounce_bypass_open_window.json."
+        ),
+    },
     643: {
         "version_fixed": "0.6.17",
         "title": "Override/grace shadow FSM never saw handle_fan_manual_override (Block 5 diagnostic gap)",

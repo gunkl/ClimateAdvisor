@@ -517,6 +517,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._briefing_day_type: str | None = None
         self._door_open_timers: dict[str, Any] = {}
         self._door_open_timer_expiry: dict[str, str] = {}
+        # Issue #645: last_changed timestamps known to be a reconnect/availability blip
+        # (old_state was unavailable/unknown, not a genuine off->on transition) rather than
+        # a real door-open event — see _async_door_window_changed()/_sensor_debounce_pending().
+        self._sensor_reconnect_blip_last_changed: dict[str, Any] = {}
 
         # Overnight pre-cool phase (Issue #258): scheduled once per warming-trend day
         self._pre_cool_trigger_scheduled: bool = False
@@ -2115,6 +2119,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         pending rather than settled. This is the single shared signal consumed by both
         automation.py's _sync_paused_by_door_with_live_sensors() (Issue #620) and
         _idle_open (Issue #504) — fixing it here fixes both callers.
+
+        Issue #645: a sensor re-reporting "on" after an unavailable/unknown blip (e.g. a
+        group/helper entity re-registering during an HA restart) stamps a fresh
+        last_changed exactly like a genuine open would, even though the window has
+        physically been open for hours — _async_door_window_changed() records that
+        specific last_changed value in _sensor_reconnect_blip_last_changed so it's excluded
+        here rather than read as "just opened." A later GENUINE off->on transition moves
+        last_changed again, which no longer matches the recorded blip value, so this
+        exclusion never masks a real open.
         """
         if self._door_open_timers:
             return True
@@ -2125,7 +2138,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 continue
             state = self.hass.states.get(sensor_id)
             last_changed = getattr(state, "last_changed", None) if state else None
-            if last_changed is not None and (now - last_changed).total_seconds() < debounce_sec:
+            if last_changed is None:
+                continue
+            if self._sensor_reconnect_blip_last_changed.get(sensor_id) == last_changed:
+                continue
+            if (now - last_changed).total_seconds() < debounce_sec:
                 return True
         return False
 
@@ -3961,6 +3978,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self.hass.async_create_task(self.async_request_refresh())
 
         if self._is_sensor_open(entity_id):
+            # Issue #645: a group/helper sensor re-reporting "on" after being unavailable
+            # (e.g. re-registering during an HA restart/integration reload) is not a genuine
+            # door-open event — the physical state never changed, HA's state machine just
+            # stamped a fresh last_changed on the unavailable->on transition. Starting a
+            # normal debounce timer here would treat a window that's been open for hours the
+            # same as a window that just opened, silently re-arming the ~10-minute debounce
+            # protection on every restart. Record the blip's last_changed so
+            # _sensor_debounce_pending() can exclude it, and skip debounce entirely — a
+            # genuinely brand-new sensor (never seen this session) has no _door_open_timers
+            # entry either way, so live guards (_apply_comfort_band(), etc.) still see it as
+            # open via _any_monitored_sensor_open(); nothing here weakens that.
+            # old_state is deliberately NOT treated as a blip when None — HA's state-changed
+            # listener only fires with old_state=None when the entity had no prior state at
+            # all (not the case for an already-registered sensor waking from unavailable),
+            # and treating it as a blip would risk silently skipping debounce on a genuine
+            # first-ever open in some other, more exotic startup ordering.
+            old_state = event.data.get("old_state")
+            if old_state is not None and old_state.state in ("unavailable", "unknown"):
+                if new_state.last_changed is not None:
+                    self._sensor_reconnect_blip_last_changed[entity_id] = new_state.last_changed
+                _LOGGER.info(
+                    "Contact sensor reconnected while open: %s (was %s) — not a genuine open event, skipping debounce",
+                    entity_id,
+                    old_state.state if old_state else "none",
+                )
+                return
+
             # Sensor transitioned to open — start debounce timer if not already running
             if entity_id in self._door_open_timers:
                 return  # Timer already pending for this sensor
@@ -4025,6 +4069,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             # Sensor transitioned to closed — cancel any pending debounce timer
             cancel = self._door_open_timers.pop(entity_id, None)
             self._door_open_timer_expiry.pop(entity_id, None)
+            self._sensor_reconnect_blip_last_changed.pop(entity_id, None)
             if cancel:
                 cancel()
                 _LOGGER.info("Contact sensor closed: %s — debounce cancelled", entity_id)

@@ -78,6 +78,7 @@ def _make_coordinator_stub(*, resolved_sensors: list[str], states: dict[str, str
     coord._resolved_sensors = list(resolved_sensors)
     coord._door_open_timers = {}
     coord._door_open_timer_expiry = {}
+    coord._sensor_reconnect_blip_last_changed = {}
     coord._async_save_state = AsyncMock()
 
     def _is_sensor_open(entity_id: str) -> bool:

@@ -32,6 +32,11 @@ Event-type → production-method mapping (mirrors simulate.py process_event):
                               real listener, owns resume + all-closed grace-start
                             → (use_coordinator=False) update engine._sensor_check_callback
                               + if no sensors open: run_coro(engine.handle_all_doors_windows_closed())
+  sensor_unavailable      → (use_coordinator=True only) states.set_simple(entity_id,
+                              "unavailable") — silent, no listener dispatch. Sets up old_state
+                              for a SUBSEQUENT plain sensor_open event to correctly compute
+                              old_state.state == "unavailable" and exercise the real
+                              _async_door_window_changed() reconnect-blip path (Issue #645).
   cancel_override         → (use_coordinator=True only) replicates api.py's
                               ClimateAdvisorCancelOverrideView.post(): clear_manual_override()
                               + _cancel_grace_timers() synchronously, then a real 10s
@@ -531,6 +536,19 @@ def _dispatch_event(
             tracker.open(entity_id)
             run_coro(engine.handle_door_window_open(entity_id))
 
+    elif etype == "sensor_unavailable" and coordinator is not None:
+        # Issue #645: silently sets the entity to "unavailable" (no listener dispatch —
+        # states.set_simple(), same primitive seed_fresh/seed use above) so that a SUBSEQUENT
+        # plain sensor_open event's states.async_set(entity_id, "on") correctly computes
+        # old_state.state == "unavailable" and dispatches through the real
+        # _async_door_window_changed() listener — modeling a group/helper sensor entity
+        # going briefly unavailable during an HA restart/integration reload, then
+        # re-registering "on", exactly as confirmed via live REST state history around a
+        # real redeploy. Coordinator-only (no engine-only equivalent — this event exists
+        # purely to set up old_state for the listener path).
+        entity_id = event.get("entity", "binary_sensor.window")
+        fake_hass.states.set_simple(entity_id, "unavailable")
+
     elif etype == "sensor_close":
         entity_id = event.get("entity", "binary_sensor.window")
         if coordinator is not None:
@@ -832,6 +850,22 @@ def _dispatch_event(
         # backstop_30min misfire) without spinning up a second full coordinator.
         engine.restore_state(engine.get_serializable_state())
         coordinator._startup_coalesce_active = True
+        # Issue #645: restore_state() intentionally does NOT reset _paused_by_door/
+        # _pre_pause_mode/_paused_with_hvac_already_off/_paused_entity/_paused_since or
+        # _natural_vent_active — per its own docstring, it relies on AutomationEngine.
+        # __init__ having already set them to their clean defaults, since in real
+        # production a restart constructs a brand-new engine instance. This harness reuses
+        # the SAME live engine object across simulate_restart (there is no second
+        # construction to rely on), so those fields would otherwise silently leak across
+        # the simulated restart — masking exactly the kind of post-restart bug
+        # (Issue #645) this event type exists to reproduce. Match __init__'s literal
+        # defaults here so simulate_restart is faithful to the real clean-slate guarantee.
+        engine._paused_by_door = False
+        engine._pre_pause_mode = None
+        engine._paused_with_hvac_already_off = False
+        engine._paused_entity = None
+        engine._paused_since = None
+        engine._natural_vent_active = False
 
     # All other unknown types are silently ignored (mirrors simulate.py's final `return None`)
 

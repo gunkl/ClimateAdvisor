@@ -1,0 +1,110 @@
+{
+  "name": "override_second_override_during_grace",
+  "description": "Warm day, HVAC in cool mode at comfort_cool (74F). User bumps thermostat to heat at 14:00; confirmed at 14:10 (grace starts, protecting the heat override). At 14:20, still within the 1-hour grace window, the user changes the thermostat again to a DIFFERENT mode (off) — Issue #282's 'Fix D' supersession branch should clear the old (heat) override and re-detect a new one (off) from scratch, restarting the confirm/grace cycle rather than being silently ignored or misread as the same override continuing.",
+  "source": "synthetic",
+  "issue": 639,
+  "notes": [
+    "Block 5 Phase 3 (epic #594) — validates override_grace_fsm.py's OVERRIDE_SUPERSEDED transition against real production before shadow deployment.",
+    "Coordinator source: coordinator.py's _async_thermostat_changed() second elif branch (~4037-4058, comment references 'Fix D (Issue #282)') — a mode change to a mode DIFFERENT from the currently-overridden mode, while that override's grace is still active, fires this branch ahead of the plain-detection elif below it.",
+    "manual_grace_seconds=3600 (1 hour) so the first override's grace is still genuinely active at 14:20 — a shorter default would let it expire naturally before the second change, which would exercise plain grace-expiry instead of supersession.",
+    "override_confirm_seconds=600 (10 min) for both confirm windows, matching override_detection_and_confirmation.json's convention.",
+    "14:30's temp_update event exists only to advance the fake scheduler past the second confirm window's async_call_later timer (10 min after 14:20), same technique override_detection_and_confirmation.json uses at 14:10 for the first window."
+  ],
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "config": {
+    "comfort_heat": 70,
+    "comfort_cool": 74,
+    "setback_heat": 62,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "manual_grace_seconds": 3600,
+    "override_confirm_seconds": 600,
+    "initial_thermostat_mode": "cool",
+    "wake_time": "04:00",
+    "briefing_time": "04:15"
+  },
+  "events": [
+    {
+      "time": "2026-07-15T13:00:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 85.0,
+      "note": "Warm summer afternoon. Indoor at comfort_cool=74F. HVAC holding cool mode."
+    },
+    {
+      "time": "2026-07-15T13:01:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Warm-day classification: HVAC cool at comfort_cool=74F."
+    },
+    {
+      "time": "2026-07-15T14:00:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "heat",
+      "note": "User bumps thermostat to heat mode. Override detection fires. 10-minute confirm window starts."
+    },
+    {
+      "time": "2026-07-15T14:10:00",
+      "type": "temp_update",
+      "indoor_f": 74.5,
+      "outdoor_f": 87.0,
+      "note": "10 minutes elapsed. Thermostat still in heat mode -> first override confirmed, 1-hour grace starts (protects the heat override)."
+    },
+    {
+      "time": "2026-07-15T14:20:00",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "off",
+      "note": "Still within the first override's 1-hour grace window. User changes the thermostat AGAIN, to a mode different from the currently-overridden 'heat' -> Fix D supersession branch should fire: clear the heat override, re-detect 'off' as a fresh override, restart confirmation."
+    },
+    {
+      "time": "2026-07-15T14:30:00",
+      "type": "temp_update",
+      "indoor_f": 73.0,
+      "outdoor_f": 86.0,
+      "note": "10 minutes elapsed since the second change. Thermostat still off -> second override confirmed."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-07-15T13:01:00",
+      "expect": "classification_applied",
+      "expect_temp": 74.0,
+      "reason": "Initial warm-day classification applied: hvac_mode=cool, target=comfort_cool=74F.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T14:00:00",
+      "expect": "override_detected",
+      "reason": "Thermostat state changed to heat mode while classification says cool — first override detection fires.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T14:10:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes elapsed with thermostat still in heat mode — first override confirmed, grace starts protecting it.",
+      "track": "integration"
+    },
+    {
+      "at": "2026-07-15T14:20:00",
+      "expect": "override_detected",
+      "reason": "Issue #282 Fix D: mode changed to 'off', different from the currently-overridden 'heat', while that override's grace is still active — production clears the old override and re-detects a NEW one, so the outcome is a fresh override_detected, not a continuation of the first override_confirmed.",
+      "track": "integration",
+      "note": "This is the specific edge decide_override_supersession()/OVERRIDE_SUPERSEDED targets — no prior golden or pending scenario exercised this branch before this one."
+    },
+    {
+      "at": "2026-07-15T14:30:00",
+      "expect": "override_confirmed",
+      "reason": "10 minutes elapsed since the second change with thermostat still off — second override confirmed.",
+      "track": "integration"
+    }
+  ],
+  "verdict": {
+    "type": "pending",
+    "summary": "A second, different-mode override while the first override's grace is still active supersedes the first rather than being ignored or misread",
+    "observed_behavior": "TBD — run via tools/simulate.py --pending -v",
+    "expected_behavior": "CA treats a genuinely new user action during an active override's grace as a fresh override, not noise to be suppressed by the still-running grace period"
+  }
+}

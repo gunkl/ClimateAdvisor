@@ -45,6 +45,9 @@ _TRACKED_FIELDS = {
     "_override_confirm_mode",
     "_override_confirm_source",
     "_paused_with_hvac_already_off",
+    # Issue #639: override/grace joint-lifecycle FSM's own reads — same raw-copy
+    # discipline as the rest of the Issue #631 grace/override fields above.
+    "_grace_protects_override",
 }
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -128,8 +131,9 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     "_start_grace_period": (
         "exempted: called from both mirrored (handle_all_doors_windows_closed, "
         "check_natural_vent_conditions, resume_from_pause, handle_manual_override_during_pause) and "
-        "unmirrored/internal (handle_fan_manual_override, _confirm_override) paths; _grace_active "
-        "covered by _sync_shadow_inputs() raw copy regardless of caller (Issue #631)"
+        "unmirrored/internal (handle_fan_manual_override, _confirm_override) paths; _grace_active and "
+        "_grace_protects_override covered by _sync_shadow_inputs() raw copy regardless of caller "
+        "(Issue #631, #639)"
     ),
     "_cancel_grace_timers": (
         "exempted: called from cancel_override() (unmirrored) and the internal grace-expiry timer "

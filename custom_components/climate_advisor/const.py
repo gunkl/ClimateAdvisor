@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.14"
+VERSION = "0.6.15"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.15": [
+        "Feat #639: internal refactor only, no user-visible behavior change — Block 5"
+        " Phase 3 (the final phase) builds the unified override/grace transition table"
+        " (override_grace_fsm.py), completing the shadow-diagnostic comparison series"
+        " started by 0.6.13's nat-vent FSM and 0.6.14's door/window FSM. Unlike those"
+        " two, override and grace are modeled as two small composed states, not one flat"
+        " enum — grace routinely runs with no override behind it (fan-off, window-close,"
+        " dashboard-resume grace), so a single enum would misrepresent reachability. New"
+        " golden scenario confirms Issue #282's second-override-during-grace supersession"
+        " path, previously untested. Purely observational — nothing it computes is ever"
+        " acted on.",
+    ],
     "0.6.14": [
         "Feat #637: internal refactor only, no user-visible behavior change — Block 5"
         " Phase 2 builds the unified door/window pause/grace transition table"
@@ -1748,6 +1760,38 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    639: {
+        "version_fixed": "0.6.15",
+        "title": (
+            "Block 5 epic #594 Phase 3 (final phase): builds the unified override/grace"
+            " transition table (7 new pure functions + override_grace_fsm.py assembly),"
+            " following the pattern #633/#637 established. Modeled as two small composed"
+            " states (OverrideConfirmState x GraceState), not one flat enum — investigated"
+            " and confirmed a flat enum would misrepresent reachability, since grace"
+            " outlives or runs independently of override in most transitions. New golden"
+            " scenario (override_second_override_during_grace) confirms Issue #282's"
+            " second-override-during-grace supersession branch, previously untested by any"
+            " scenario. Investigated and ruled out a hypothesized live race between the"
+            " supersession branch and the orphaned-grace watchdog (Issue #508) — confirmed"
+            " both calls are synchronous with no await between them, so no interleaving is"
+            " possible. Wired into the shadow engine's existing diagnostic as a third"
+            " comparison point, purely observational — never wired into any decision path"
+            " that can act. v1 wiring is narrower than door/window's: only 2 of 7 event"
+            " kinds (MANUAL_OVERRIDE_DURING_PAUSE, DASHBOARD_RESUME) have an existing"
+            " _mirror_to_shadow() call site to key off; the rest await a future phase if"
+            " ever needed."
+        ),
+        "scope_covered": (
+            "New: override_grace_lifecycle.py (2-piece state derivation), "
+            "override_confirm_split.py, override_match.py, override_grace_start.py, "
+            "override_supersession.py, override_cancel_outcome.py, "
+            "override_orphaned_grace.py, override_grace_fsm.py (assembly). Coordinator: "
+            "_evaluate_override_grace_fsm(), extended _update_shadow_engine_diagnostic() "
+            "with override_grace_production_state/override_grace_shadow_state/"
+            "override_grace_fsm_state/override_grace_mirror_agrees/override_grace_fsm_agrees. "
+            "9 new test files (124 tests). Golden: override_second_override_during_grace."
+        ),
+    },
     637: {
         "version_fixed": "0.6.14",
         "title": (

@@ -362,23 +362,29 @@ _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_manual_override_during_pause": "manual_override_during_pause",
 }
 
-# Issue #639: which mirrored automation.py methods correspond to which override/grace
-# FSM event kind. Narrower still than door/window's own v1 scope above — of the 7
-# OverrideGraceFsmEventKind members, only 2 have an actual _mirror_to_shadow() call
-# site in coordinator.py/api.py today. OVERRIDE_DETECTED/OVERRIDE_CONFIRM_EXPIRED/
-# OVERRIDE_SUPERSEDED/OVERRIDE_CANCELLED all correspond to AutomationEngine methods
-# (start_override_confirmation, _confirm_override, cancel_override,
-# clear_manual_override) that are called directly from coordinator.py/api.py or from
-# internal async_call_later timer closures with no _mirror_to_shadow(...) call site at
-# all (see _sync_shadow_inputs()'s own docstring and
-# tests/test_shadow_engine_coverage.py's registry, which classifies every one of them
-# "exempted" rather than "mirrored") — same "raw copy, not a new mirror call site"
-# reasoning as Issue #631. Confirmed by grepping every _mirror_to_shadow( call site in
-# both files. GRACE_TIMER_EXPIRED also has no mirror call site (the grace-expiry timer
-# closures are internal-only, same as door/window's own GRACE_TIMER_EXPIRED omission).
+# Issue #639/#643: which mirrored automation.py methods correspond to which
+# override/grace FSM event kind. Of the 7 OverrideGraceFsmEventKind members,
+# 3 have an actual _mirror_to_shadow() call site in coordinator.py/api.py today
+# (handle_fan_manual_override added in #643 — the FSM's OVERRIDE_DETECTED
+# transition was already fully built and generically input-driven; the only
+# gap was this dict entry plus the 3 mirror call sites in
+# _async_thermostat_changed/_async_fan_entity_changed/_flush_fan_remote_burst).
+# OVERRIDE_CONFIRM_EXPIRED/OVERRIDE_SUPERSEDED/OVERRIDE_CANCELLED still
+# correspond to AutomationEngine methods (start_override_confirmation,
+# _confirm_override, cancel_override, clear_manual_override) that are called
+# directly from coordinator.py/api.py or from internal async_call_later timer
+# closures with no _mirror_to_shadow(...) call site at all (see
+# _sync_shadow_inputs()'s own docstring and tests/test_shadow_engine_coverage.py's
+# registry, which classifies every one of them "exempted" rather than
+# "mirrored") — same "raw copy, not a new mirror call site" reasoning as Issue
+# #631. GRACE_TIMER_EXPIRED also has no mirror call site (the grace-expiry
+# timer closures are internal-only, same as door/window's own
+# GRACE_TIMER_EXPIRED omission). Confirmed by grepping every
+# _mirror_to_shadow( call site in both files as of #643.
 _OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
+    "handle_fan_manual_override": "override_detected",
 }
 
 
@@ -4683,6 +4689,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine.handle_fan_manual_override(
                     fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
                 )
+                await self._mirror_to_shadow(
+                    "handle_fan_manual_override", fan_before=str(old_fan_mode), fan_after=str(new_fan_mode)
+                )
 
     async def _async_command_fan_entity(self, *, on: bool) -> bool:
         """Issue a turn_on or turn_off service call to the configured WHF fan entity (Issue #361).
@@ -4848,6 +4857,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             )
             self.automation_engine.handle_fan_manual_override(
                 fan_before=str(old_state.state), fan_after=str(new_state.state), event_context_id=event_context_id
+            )
+            await self._mirror_to_shadow(
+                "handle_fan_manual_override",
+                fan_before=str(old_state.state),
+                fan_after=str(new_state.state),
+                event_context_id=event_context_id,
             )
         elif not is_on and self.automation_engine._fan_active:
             # Fan turned off externally — route to on_fan_turned_off() to clear fan state and
@@ -5038,6 +5053,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if is_override:
             duration_seconds = burst.timer_hours * 3600 if burst.timer_hours is not None else None
             self.automation_engine.handle_fan_manual_override(
+                fan_before="?",
+                fan_after="on",
+                duration_override=duration_seconds,
+                remote_timer_hours=burst.timer_hours if burst.has_timer else None,
+                remote_speed=burst.speed,
+                is_remote_event=True,
+            )
+            await self._mirror_to_shadow(
+                "handle_fan_manual_override",
                 fan_before="?",
                 fan_after="on",
                 duration_override=duration_seconds,

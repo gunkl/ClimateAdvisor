@@ -8,10 +8,12 @@
 |---|---|---|
 | What are the 4 nat-vent session states and how do they map to flags? | `INACTIVE`, `ACTIVE_FULL_GATE`, `ACTIVE_SOFT_START`, `PAUSED_REACTIVATION_LOCKOUT` — derived purely from `_natural_vent_active`/`_nat_vent_soft_start`/`_paused_by_door`/`_nat_vent_outdoor_exit_time`. | [State Transitions](#state-transitions) |
 | Where is the derivation computed, and is it load-bearing? | `nat_vent_lifecycle.py::derive_nat_vent_lifecycle_state()`, exposed read-only via `AutomationEngine.nat_vent_lifecycle_state`. Purely observational — not called from any production decision path. | [Scope](#scope) |
-| Does every nat-vent exit hand off through the same choke point? | No — `_exit_nat_vent()` is the choke point for most exits (9 call sites), but the comfort-floor exit inside `check_natural_vent_conditions()`, the away-mode ceiling exit, the ODE ceiling-escalation exit, and two reconcile/bedtime paths mutate the flags directly instead. | [Exit Paths](#exit-paths-not-unified-through-a-single-function) |
-| What is the reactivation lockout and how long is it? | 300s default (`NAT_VENT_REACTIVATION_LOCKOUT_S`), only armed by the outdoor-warm-rise exit (the only exit that sets `_nat_vent_outdoor_exit_time`). | [State Transitions](#state-transitions) |
+| Does every nat-vent exit hand off through the same choke point? | No — `_exit_nat_vent()` is the choke point for most exits (10 call sites, per `tests/test_nat_vent_exit_lockout_coverage.py`'s AST scan), but the comfort-floor exit inside `check_natural_vent_conditions()`, the away-mode ceiling exit, the ODE ceiling-escalation exit, and two reconcile/bedtime paths mutate the flags directly instead. | [Exit Paths](#exit-paths-not-unified-through-a-single-function) |
+| What is the reactivation lockout and how long is it? | 300s default (`NAT_VENT_REACTIVATION_LOCKOUT_S`). Originally armed only by the outdoor-warm-rise exit; Issue #641 extended arming to the proactive-floor, ceiling-threshold, and fan_thermostat_check's tick-level direction-reversal exits, once all three were found to hand off into the same paused-reactivation race the lockout exists to prevent. | [State Transitions](#state-transitions) |
 | What happens when nat-vent exits and the sensor is still open — pause or grace? | `_exit_nat_vent()` forks: sensor still open → hands off into the pause lifecycle; sensors closed → hands off into the grace lifecycle. See `grace-periods-spec.md` for what happens next in either lifecycle. | [Handoff to Pause/Grace](#handoff-to-pausegrace) |
 | How was this spec's accuracy verified? | Differential replay: `derive_nat_vent_lifecycle_state()` run against the real final engine flags from all 74 golden + 4 pending scenarios (Issue #606), plus 3 hand-reasoned ground-truth scenarios. | [Verification](#verification) |
+| Is every `_exit_nat_vent()` call site's lockout-arming decision enforced, not just documented? | Yes — `tests/test_nat_vent_exit_lockout_coverage.py` AST-scans every call site and requires each to be explicitly classified `"arms lockout"` / `"exempted: <reason>"`, with a positive control that checks the claim against the actual `set_outdoor_exit_time=True` argument (Issue #641). | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
+| Is there a hard floor on how fast CA can physically toggle the fan, independent of any exit/reactivation logic? | Yes — `AutomationEngine._fan_toggle_rate_limited()` (Issue #641), a defense-in-depth backstop inside `_activate_fan()`/`_deactivate_fan()`: any reversal within `FAN_MIN_TOGGLE_INTERVAL_S` (300s) of CA's own last real toggle command is suppressed, logged at WARNING, and raised as a proactive `fan_rapid_cycling` incident (`docs/incident-classes.md`). Never affects genuine user/RF-remote fan actions. | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
 | Does `check_natural_vent_conditions()`'s exit chain always decide WHY a session ends? | No — confirmed by direct experiment (Issue #608): `nat_vent_temperature_check()` and `fan_thermostat_check()` (both dispatched from the same `temp_update`/thermostat-attribute-change trigger, both already pure-extracted by Issue #441) run FIRST and independently implement equivalent comfort-floor and outdoor-rise-style stops — they win the race and exit the session before `check_natural_vent_conditions()`'s chain ever evaluates, for every golden scenario tested. | [Known Duplicate-Logic Race](#known-duplicate-logic-race-issue-608-finding) |
 | Has a shadow engine instance been proven safe to construct alongside production, offline? | Yes — `tools/sim_harness/shadow_engine_pair.py` (Issue #611) proves, across 60 offline-eligible golden+pending scenarios, that a dry_run=True shadow instance never issues a real action AND never changes what production itself does. | [Offline Whole-Engine Shadow-Pair Validation](#offline-whole-engine-shadow-pair-validation-issue-611-subtask-o) |
 | Is there a real, live shadow engine running inside the coordinator today, and is its coverage complete? | Yes to both — `coordinator.shadow_automation_engine` (Issue #613), permanently `dry_run=True`, mirrors all 13 real nat-vent entry points, the 3 input-data attributes they depend on (Issue #615), and the 7 grace/override lifecycle-gate fields plus companions (Issue #631) — enforced by an AST-based coverage registry test so new gaps can't ship silently. Zero occupant/HVAC impact; surfaced via a diagnostic sensor, not any Status-tab card. | [Live Shadow Engine](#live-shadow-engine-issue-613-subtask-q) |
@@ -49,7 +51,7 @@
 | `ACTIVE_SOFT_START` | Full gate independently clears | `ACTIVE_FULL_GATE` | `_nat_vent_may_reactivate()` | `~L3125` — label-only, fan/HVAC untouched |
 | `INACTIVE` | Fan already physically running at startup/reconcile, eligible | `ACTIVE_FULL_GATE` | `reconcile_fan_on_startup()` eligibility check | `~L3955` |
 
-**Exit transitions via the `_exit_nat_vent()` choke point** (`automation.py:5098-5138`, Issue #411/#417/#418): 9 call sites (`~L1198, 2917, 3287, 3311, 3328, 3493, 3547, 3744, 4040`), covering door/window-closed, outdoor-rise, ceiling-threshold, and RF-timer-boundary exits. Always sets `_natural_vent_active=False, _nat_vent_soft_start=False`; only the outdoor-rise-exit caller passes `set_outdoor_exit_time=True`, which is the sole path that can produce `PAUSED_REACTIVATION_LOCKOUT`.
+**Exit transitions via the `_exit_nat_vent()` choke point** (`automation.py:5312-5367`, Issue #411/#417/#418): 10 call sites (door/window-closed, proactive-floor, outdoor-rise, ceiling-threshold, nat-vent-temperature-check's session-force-close and hard-floor, fan_thermostat_check's outdoor-rise and direction-reversal-stop and cooled-to-floor, reconcile-on-startup, and RF-timer-boundary-settle in `on_fan_turned_off`). Always sets `_natural_vent_active=False, _nat_vent_soft_start=False`. Originally only the outdoor-rise-exit caller passed `set_outdoor_exit_time=True` (the sole path able to produce `PAUSED_REACTIVATION_LOCKOUT`); Issue #641 found and fixed two more call sites (proactive-floor, ceiling-threshold in `check_natural_vent_conditions()`) plus a third (`fan_thermostat_check()`'s tick-level direction-reversal stop) that handed into the same paused-reactivation race without arming it — see [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) below. Every call site's arming decision is now enforced by `tests/test_nat_vent_exit_lockout_coverage.py`'s AST coverage registry, not just documented — a new call site added later without an explicit classification fails that test immediately.
 
 **Exit transitions that bypass `_exit_nat_vent()` entirely** — go directly to `INACTIVE`, never touch `_paused_by_door`/`_nat_vent_outdoor_exit_time`:
 
@@ -163,6 +165,60 @@ A full audit (every setter of the 7 grace/override fields, cross-referenced agai
 
 **Cleanup**: `coordinator.async_shutdown()` calls `shadow_automation_engine.cleanup()` alongside production's — the shadow engine schedules its own real `async_call_later` timers (grace, fan min-cycle, thermo backstop) directly on the real HA event loop regardless of `dry_run` (which only guards the service-call choke points), so it needs the same timer cancellation at shutdown.
 
+### Incident: WHF fast-cycling, proactive-floor exit vs. instant reactivation (Issue #641)
+
+Reported 2026-08-15: the whole-house fan cycled on/off roughly once a minute for
+several minutes (06:35-06:39) before the user disabled automation entirely. Root
+cause, confirmed by direct code reading (cross-checked by an independent second
+read): the log's "Nat-vent proactive exit — floor in 0.98 hr" is the `PROACTIVE_FLOOR`
+exit reason (`nat_vent_exit.py`), which calls `_exit_nat_vent()` **without**
+`set_outdoor_exit_time=True`. With a monitored sensor still open, `_exit_nat_vent()`
+hands off into `_paused_by_door=True` with no lockout timestamp armed — so the very
+next tick's paused-reactivation block (the same `_nat_vent_may_reactivate()` instant
+check the entry gate always uses) finds no lockout and immediately reactivates,
+producing another `PROACTIVE_FLOOR` exit next tick, repeating indefinitely. This is
+deterministic, not occasional: `PROACTIVE_FLOOR` is a *predictive* check
+(`time_to_floor_hr < 1.0`, driven by `k_passive`) independent of the *instant* gate
+condition (`outdoor < indoor - hysteresis`) it hands off into — indoor/outdoor barely
+move tick-to-tick, so if the instant gate was true just before the predictive exit
+fired, it is almost always still true immediately after.
+
+The same audit (not assumption — every `_exit_nat_vent()` call site read by hand)
+found two more exit reasons with the identical structural gap: `CEILING_THRESHOLD`
+(`check_natural_vent_conditions()`) and `fan_thermostat_check()`'s `STOP_DEACTIVATE`
+branch — the latter's own existing code comment already called it "the exact same
+boundary condition" as its sibling `STOP_VIA_NAT_VENT_EXIT`, which was already armed.
+All three now pass `set_outdoor_exit_time=True`, reusing the existing 300s lockout
+mechanism rather than inventing a new one.
+
+**Root-cause fix alone was judged insufficient** — the occupant impact (rapid relay
+cycling, forced to disable automation) demanded a backstop that holds even if a
+*different*, future gap in this exit/entry logic reproduces the same physical
+symptom. `AutomationEngine._fan_toggle_rate_limited()` is a hard floor inside
+`_activate_fan()`/`_deactivate_fan()`: any reversal within `FAN_MIN_TOGGLE_INTERVAL_S`
+(300s, `const.py`) of CA's own last real toggle command is suppressed, logged at
+WARNING, and raised as a proactive `fan_rapid_cycling` incident
+(`docs/incident-classes.md`) — visible through the existing incident pipeline with no
+new plumbing. Deliberately compares against a **separate** `_fan_toggle_command_time`
+field, not the pre-existing `_fan_command_time` echo-tracking field also used for
+provenance attribution (Issue #482) — found during this fix's own testing that
+`_reconcile_fan_physical_drift()`'s corrective "sync the stuck control entity"
+off-command legitimately stamps `_fan_command_time` immediately before an
+intentional same-tick recycle-on (that method's own docstring already documents this
+sequence), which the shared field would have wrongly rate-limited.
+
+**Prevention, not a one-time patch**: `tests/test_nat_vent_exit_lockout_coverage.py`
+AST-scans every `_exit_nat_vent()` call site and requires each to be explicitly
+classified `"arms lockout"` / `"exempted: <reason>"`, with a positive control checking
+the classification against the actual `set_outdoor_exit_time=True` argument in code —
+the same enforcement shape as `tests/test_shadow_engine_coverage.py`'s registry. A new
+exit reason added later without a classification fails immediately. Separately,
+`CONF_FAN_MIN_RUNTIME_PER_HOUR`'s cycling decisions (`desired_state.py`'s
+`decide_fan_cycle_on`/`decide_fan_cycle_off`) now floor their computed on/off phase
+durations at the same 300s minimum — a configured value outside roughly [5, 55]
+minutes would otherwise schedule its own off/on command inside the rate-limit window,
+stranding the fan far longer than the configured cycle intended.
+
 ## Code Reference
 
 - [`derive_nat_vent_lifecycle_state`](../custom_components/climate_advisor/nat_vent_lifecycle.py) — pure derivation
@@ -171,6 +227,8 @@ A full audit (every setter of the 7 grace/override fields, cross-referenced agai
 - [`_exit_nat_vent`](../custom_components/climate_advisor/automation.py#L5098) — the primary (not sole) exit choke point
 - [`decide_nat_vent_gate`, `decide_nat_vent_soft_start_gate`](../custom_components/climate_advisor/nat_vent_gate.py) — entry gates
 - [`is_reactivation_locked_out`](../custom_components/climate_advisor/nat_vent_reactivation_lockout.py) — lockout predicate
+- [`AutomationEngine._fan_toggle_rate_limited`](../custom_components/climate_advisor/automation.py) — hard fan-toggle rate-limit backstop, independent of exit/reactivation logic (Issue #641)
+- [`tests/test_nat_vent_exit_lockout_coverage.py`](../tests/test_nat_vent_exit_lockout_coverage.py) — AST-based coverage registry for every `_exit_nat_vent()` call site's lockout-arming decision (Issue #641)
 - [`run_shadow_pair_scenario`](../tools/sim_harness/shadow_engine_pair.py) — offline whole-engine shadow-pair comparator (Issue #611)
 - [`ClimateAdvisorCoordinator._mirror_to_shadow`, `_build_shadow_automation_callbacks`, `_update_shadow_engine_diagnostic`](../custom_components/climate_advisor/coordinator.py) — live shadow engine wiring (Issue #613)
 - [`ClimateAdvisorCoordinator._sync_shadow_inputs`](../custom_components/climate_advisor/coordinator.py) — input-data parity, full-coverage decision mirroring (Issue #615), extended to grace/override state (Issue #631)

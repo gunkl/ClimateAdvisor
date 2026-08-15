@@ -130,6 +130,7 @@ from .const import (
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_TEMP_DELTA,
     EVENT_LOG_CAP,
+    FAN_MIN_TOGGLE_INTERVAL_S,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
@@ -7726,27 +7727,49 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             return None
         physical_on = self._get_fan_physical_state()
         if ae._fan_override_active:
-            if ae._fan_active or physical_on is True:
-                return "running (manual override)"
-            return "off (manual override)"
-        if ae._fan_active:
+            status = "running (manual override)" if ae._fan_active or physical_on is True else "off (manual override)"
+        elif ae._fan_active:
             if physical_on is False:
                 if self._is_recent_fan_command(threshold_seconds=30.0):
-                    return "active (unconfirmed)"
-                _LOGGER.warning("WHF _fan_active=True but physical state=off — possible stale flag after manual stop")
-                return "inactive"
-            return "active"
-        if ae._natural_vent_active:
+                    status = "active (unconfirmed)"
+                else:
+                    _LOGGER.warning(
+                        "WHF _fan_active=True but physical state=off — possible stale flag after manual stop"
+                    )
+                    status = "inactive"
+            else:
+                status = "active"
+        elif ae._natural_vent_active:
             if physical_on is True:
                 _LOGGER.info(
                     "WHF nat-vent session flag stale but physical state confirms running — "
                     "displaying running (untracked) instead of trusting the session flag"
                 )
-                return "running (untracked)"
-            return "nat-vent (session active, fan idle)"
-        if physical_on is True:
-            return resolve_untracked_fan_status(recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0))
-        return "inactive"
+                status = "running (untracked)"
+            else:
+                status = "nat-vent (session active, fan idle)"
+        elif physical_on is True:
+            status = resolve_untracked_fan_status(
+                recent_fan_command=self._is_recent_fan_command(threshold_seconds=30.0)
+            )
+        else:
+            status = "inactive"
+        return status + self._whf_rate_limit_suffix(ae)
+
+    def _whf_rate_limit_suffix(self, ae: AutomationEngine) -> str:
+        """Append '(rate-limited Xs ago)' to the WHF status while a toggle is still
+        within the Issue #641 cooldown window — Status Card Ontology rule: extend the
+        existing card's value string, don't add a new one. Returns "" once the cooldown
+        has elapsed; never raises on a mocked/partial engine (isinstance guard, matching
+        _format_grace_remaining()'s existing defensive pattern for the same reason)."""
+        until = getattr(ae, "_fan_rate_limited_until", None)
+        if not isinstance(until, datetime):
+            return ""
+        remaining = (until - dt_util.now()).total_seconds()
+        if remaining <= 0:
+            return ""
+        suppressed_ago = FAN_MIN_TOGGLE_INTERVAL_S - remaining
+        return f" (rate-limited {suppressed_ago:.0f}s ago)"
 
     def _compute_hvac_fan_status(self) -> str | None:
         """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured.

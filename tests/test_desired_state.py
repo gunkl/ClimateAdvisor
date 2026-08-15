@@ -298,6 +298,15 @@ class TestDecideFanCycleOn:
         assert outcome == FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER
         assert delay == 20 * 60.0
 
+    def test_off_timer_delay_floored_at_300s_for_short_on_phase(self):
+        """Issue #641: min_runtime=2 -> raw on-phase delay would be 2*60=120s, well under
+        the 300s fan-toggle rate-limit floor — the scheduled off-command would otherwise
+        be silently suppressed by _fan_toggle_rate_limited(), stranding the fan on far
+        longer than the configured 2-min-on cycle intended."""
+        outcome, delay = decide_fan_cycle_on(**self._inputs(min_runtime_minutes=2))
+        assert outcome == FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER
+        assert delay == 300.0
+
     def test_retry_later_when_fan_already_active(self):
         outcome, delay = decide_fan_cycle_on(**self._inputs(fan_active=True))
         assert outcome == FanCycleOutcome.RETRY_LATER
@@ -316,11 +325,26 @@ class TestDecideFanCycleOff:
         assert should_deactivate is False
         assert wait_seconds > 0  # next "on" phase is always scheduled regardless
 
-    def test_wait_seconds_clamped_to_zero_when_min_runtime_exceeds_60(self):
-        """max(0, ...) guard: an (invalid but possible) min_runtime > 60 must not produce
-        a negative wait."""
+    def test_wait_seconds_clamped_to_floor_when_min_runtime_exceeds_60(self):
+        """Issue #641: an (invalid but possible) min_runtime > 60 would otherwise produce
+        a negative wait — floored at the same 300s safety minimum as every other
+        short-duration case, not 0 (0 would itself be unsafe: an immediate on-command
+        right after the off-command would be suppressed by the rate-limit backstop)."""
         _, wait_seconds = decide_fan_cycle_off(fan_min_runtime_active=True, min_runtime_minutes=90.0)
-        assert wait_seconds == 0.0
+        assert wait_seconds == 300.0
+
+    def test_wait_seconds_floored_at_300s_for_short_off_phase(self):
+        """Issue #641: min_runtime=58 -> raw off-phase wait would be (60-58)*60=120s, well
+        under the 300s fan-toggle rate-limit floor — the scheduled reactivation would
+        otherwise be silently suppressed by _fan_toggle_rate_limited(), stranding the fan
+        off far longer than the configured 58-min-on/2-min-off cycle intended."""
+        _, wait_seconds = decide_fan_cycle_off(fan_min_runtime_active=True, min_runtime_minutes=58.0)
+        assert wait_seconds == 300.0
+
+    def test_wait_seconds_unaffected_when_already_above_floor(self):
+        """Control case: a normal, already-safe configuration is untouched by the floor."""
+        _, wait_seconds = decide_fan_cycle_off(fan_min_runtime_active=True, min_runtime_minutes=20.0)
+        assert wait_seconds == (60 - 20) * 60.0
 
 
 class TestDecideScheduledBandGate:

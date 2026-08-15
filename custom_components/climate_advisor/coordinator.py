@@ -97,6 +97,7 @@ from .const import (
     CONF_NAT_VENT_HYSTERESIS_F,
     CONF_NAT_VENT_REACTIVATION_LOCKOUT_S,
     CONF_NATURAL_VENT_DELTA,
+    CONF_OVERRIDE_CONFIRM_PERIOD,
     CONF_SENSOR_DEBOUNCE,
     CONF_SENSOR_POLARITY_INVERTED,
     CONF_SLEEP_HEAT,
@@ -114,6 +115,7 @@ from .const import (
     DEFAULT_COMFORT_HEAT,
     DEFAULT_MANUAL_GRACE_SECONDS,
     DEFAULT_NATURAL_VENT_DELTA,
+    DEFAULT_OVERRIDE_CONFIRM_SECONDS,
     DEFAULT_SENSOR_DEBOUNCE_SECONDS,
     DEFAULT_SETBACK_COOL,
     DEFAULT_SETBACK_DEPTH_COOL_F,
@@ -149,6 +151,7 @@ from .const import (
     OCCUPANCY_HOME,
     OCCUPANCY_SETBACK_MINUTES,
     OCCUPANCY_VACATION,
+    OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
     PEAK_DECLINE_MARGIN_F,
     PRED_ARCHIVE_HORIZON_HOURS,
     REJECT_ABANDONED,
@@ -238,6 +241,7 @@ from .fan_status import (
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .nat_vent_lifecycle import NatVentLifecycleState
+from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
 from .state import StatePersistence
 from .temperature import (
     convert_delta,
@@ -357,6 +361,25 @@ _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_manual_override_during_pause": "manual_override_during_pause",
 }
 
+# Issue #639: which mirrored automation.py methods correspond to which override/grace
+# FSM event kind. Narrower still than door/window's own v1 scope above — of the 7
+# OverrideGraceFsmEventKind members, only 2 have an actual _mirror_to_shadow() call
+# site in coordinator.py/api.py today. OVERRIDE_DETECTED/OVERRIDE_CONFIRM_EXPIRED/
+# OVERRIDE_SUPERSEDED/OVERRIDE_CANCELLED all correspond to AutomationEngine methods
+# (start_override_confirmation, _confirm_override, cancel_override,
+# clear_manual_override) that are called directly from coordinator.py/api.py or from
+# internal async_call_later timer closures with no _mirror_to_shadow(...) call site at
+# all (see _sync_shadow_inputs()'s own docstring and
+# tests/test_shadow_engine_coverage.py's registry, which classifies every one of them
+# "exempted" rather than "mirrored") — same "raw copy, not a new mirror call site"
+# reasoning as Issue #631. Confirmed by grepping every _mirror_to_shadow( call site in
+# both files. GRACE_TIMER_EXPIRED also has no mirror call site (the grace-expiry timer
+# closures are internal-only, same as door/window's own GRACE_TIMER_EXPIRED omission).
+_OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
+    "handle_manual_override_during_pause": "manual_override_during_pause",
+    "resume_from_pause": "dashboard_resume",
+}
+
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     """Coordinate all Climate Advisor activities."""
@@ -423,6 +446,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # tracked state — same third-comparison-point convention as #633 above.
         # Starts NORMAL unconditionally (no persisted pause/grace on a fresh coordinator).
         self._door_window_fsm_state: DoorWindowLifecycleState = DoorWindowLifecycleState.NORMAL
+        # Issue #639: the unified override/grace joint-lifecycle FSM's own
+        # independently-tracked state — same third-comparison-point convention as
+        # #633/#637 above. Starts (IDLE, NONE) unconditionally (no persisted
+        # override/grace on a fresh coordinator).
+        self._override_grace_fsm_state: OverrideGraceLifecycleState = (OverrideConfirmState.IDLE, GraceState.NONE)
         self.shadow_automation_engine: AutomationEngine = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
@@ -787,6 +815,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "Door/window FSM evaluation failed (isolated, no production impact): %s",
                         fsm_exc,
                     )
+            if method_name in _OVERRIDE_GRACE_FSM_EVENT_KINDS:
+                try:
+                    self._evaluate_override_grace_fsm(method_name)
+                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                    _LOGGER.warning(
+                        "Override/grace FSM evaluation failed (isolated, no production impact): %s",
+                        fsm_exc,
+                    )
             try:
                 self._update_shadow_engine_diagnostic()
             except Exception as diag_exc:  # noqa: BLE001 — diagnostic is best-effort observability
@@ -902,6 +938,87 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = transition(self._door_window_fsm_state, event)
         self._door_window_fsm_state = result.to_state
 
+    def _evaluate_override_grace_fsm(self, method_name: str) -> None:
+        """Run the unified override/grace joint-lifecycle FSM (Issue #639) against
+        production's current live readings and track its own independently-
+        derived state.
+
+        v1 scope, narrowed to the 2 event kinds a mirrored method exists for today
+        (see ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``) — same precedent as
+        ``_evaluate_door_window_fsm()``'s own v1 scope note. The FSM's own tracked
+        state (``self._override_grace_fsm_state``) is never written back onto
+        either engine — a third, independent computation, purely for comparison
+        against production's real derived state. Isolated the same way: any
+        exception here is logged and swallowed by the caller, never allowed to
+        affect production.
+
+        ``current_setpoint_f``/``target_setpoint_f`` are resolved inline via the
+        same ``select_comfort_band()`` + ``to_fahrenheit()`` sequence
+        ``AutomationEngine._override_matches_current_decision()`` itself uses,
+        wrapped in the same defensive try/except that method's own live-state
+        reads implicitly tolerate (a missing/unparseable setpoint just means "no
+        setpoint to compare" — mode match alone is still meaningful evidence).
+        """
+        from .override_grace_fsm import (
+            OverrideGraceFsmEvent,
+            OverrideGraceFsmEventKind,
+            OverrideGraceFsmInputs,
+        )
+        from .override_grace_fsm import (
+            transition as _override_grace_transition,
+        )
+
+        ae = self.automation_engine
+        now = dt_util.now()
+        config = self.config
+
+        classification = ae._current_classification
+        classification_mode = classification.hvac_mode if classification else None
+
+        current_setpoint_f: float | None = None
+        target_setpoint_f: float | None = None
+        try:
+            if classification is not None and classification_mode in ("heat", "cool"):
+                band = select_comfort_band(
+                    classification,
+                    config,
+                    occupancy_mode=ae._occupancy_mode,
+                    in_sleep_window=_in_sleep_window(now, config),
+                    aggressive_savings=bool(config.get("aggressive_savings", False)),
+                )
+                target_setpoint_f = band.floor if classification_mode == "heat" else band.ceiling
+                state = self.hass.states.get(ae.climate_entity)
+                raw_setpoint = state.attributes.get("temperature") if state else None
+                if raw_setpoint is not None:
+                    unit = config.get("temp_unit", "fahrenheit")
+                    current_setpoint_f = to_fahrenheit(float(raw_setpoint), unit)
+        except (TypeError, ValueError, AttributeError):
+            current_setpoint_f = None
+            target_setpoint_f = None
+
+        event = OverrideGraceFsmEvent(
+            kind=OverrideGraceFsmEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name]),
+            inputs=OverrideGraceFsmInputs(
+                confirm_seconds=float(config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS)),
+                setpoint_override=bool(ae._override_confirm_source == "setpoint"),
+                current_mode=self._current_hvac_mode(),
+                classification_mode=classification_mode,
+                manual_override_active=bool(ae._manual_override_active),
+                manual_override_mode=ae._manual_override_mode,
+                manual_override_source=ae._manual_override_source,
+                fan_override_active=bool(ae._fan_override_active),
+                current_setpoint_f=current_setpoint_f,
+                target_setpoint_f=target_setpoint_f,
+                tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
+                within_planned_window=ae._is_within_planned_window_period(),
+                any_sensor_open=ae._any_monitored_sensor_open(),
+                grace_source=ae._last_resume_source or "automation",
+                now=now,
+            ),
+        )
+        result = _override_grace_transition(self._override_grace_fsm_state, event)
+        self._override_grace_fsm_state = result.to_state
+
     def _current_hvac_mode(self) -> str | None:
         """Live thermostat mode read, shared by the door/window FSM evaluation
         (matches ``_pause_for_door_window()``'s own ``self.hass.states.get(
@@ -956,7 +1073,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         door_window_mirror_agrees = door_window_production_state == door_window_shadow_state
         door_window_fsm_agrees = door_window_production_state == door_window_fsm_state
 
-        agrees = mirror_agrees and fsm_agrees and door_window_mirror_agrees and door_window_fsm_agrees
+        # Issue #639: override/grace joint-lifecycle FSM's own agreement, same pattern.
+        from .override_grace_lifecycle import OverrideGraceLifecycleInputs, derive_override_grace_lifecycle_state
+
+        def _override_grace_state_for(ae: AutomationEngine) -> str:
+            inputs = OverrideGraceLifecycleInputs(
+                override_confirm_pending=bool(ae._override_confirm_pending),
+                grace_active=bool(ae._grace_active),
+                grace_protects_override=bool(ae._grace_protects_override),
+            )
+            confirm, grace = derive_override_grace_lifecycle_state(inputs)
+            return f"{confirm.value}/{grace.value}"
+
+        override_grace_production_state = _override_grace_state_for(self.automation_engine)
+        override_grace_shadow_state = _override_grace_state_for(self.shadow_automation_engine)
+        override_grace_confirm, override_grace_grace = self._override_grace_fsm_state
+        override_grace_fsm_state = f"{override_grace_confirm.value}/{override_grace_grace.value}"
+        override_grace_mirror_agrees = override_grace_production_state == override_grace_shadow_state
+        override_grace_fsm_agrees = override_grace_production_state == override_grace_fsm_state
+
+        agrees = (
+            mirror_agrees
+            and fsm_agrees
+            and door_window_mirror_agrees
+            and door_window_fsm_agrees
+            and override_grace_mirror_agrees
+            and override_grace_fsm_agrees
+        )
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
             "shadow_state": shadow_state,
@@ -966,6 +1109,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "door_window_fsm_state": door_window_fsm_state,
             "door_window_mirror_agrees": door_window_mirror_agrees,
             "door_window_fsm_agrees": door_window_fsm_agrees,
+            "override_grace_production_state": override_grace_production_state,
+            "override_grace_shadow_state": override_grace_shadow_state,
+            "override_grace_fsm_state": override_grace_fsm_state,
+            "override_grace_mirror_agrees": override_grace_mirror_agrees,
+            "override_grace_fsm_agrees": override_grace_fsm_agrees,
             "agrees": agrees,
             "checked_at": now.isoformat(),
         }
@@ -992,6 +1140,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Door/window FSM disagreement (Issue #637): production=%s fsm=%s",
                 door_window_production_state,
                 door_window_fsm_state,
+            )
+        if not override_grace_mirror_agrees:
+            _LOGGER.warning(
+                "Override/grace shadow engine disagreement (Issue #639): production=%s shadow=%s",
+                override_grace_production_state,
+                override_grace_shadow_state,
+            )
+        if not override_grace_fsm_agrees:
+            _LOGGER.warning(
+                "Override/grace FSM disagreement (Issue #639): production=%s fsm=%s",
+                override_grace_production_state,
+                override_grace_fsm_state,
             )
 
     @property

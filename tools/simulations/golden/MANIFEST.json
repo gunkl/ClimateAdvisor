@@ -402,5 +402,10 @@
     "sha256": "f5230d28191b77e554719d33b3fbfa9587741a9cfafc9ad17b0f06ac71208d85",
     "signed": "2026-08-14",
     "issue": 637
+  },
+  "override_second_override_during_grace": {
+    "sha256": "ff043f148f3afb8afd9f6181113ad15f6eb87c71893673bdfe4d794002a74183",
+    "signed": "2026-08-14",
+    "issue": 639
   }
 }

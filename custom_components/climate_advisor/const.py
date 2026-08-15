@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.15"
+VERSION = "0.6.16"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.16": [
+        "Fix #641: the whole-house fan could rapidly cycle on and off (roughly once a"
+        " minute) when a predicted-floor or ceiling-threshold exit fired while a window"
+        " was still open — the very next check immediately turned it back on, repeating"
+        " indefinitely. Two nat-vent exit conditions now correctly hold off reactivation"
+        " for 5 minutes after exiting, matching how the outdoor-air-reversal exit already"
+        " behaved. As a second layer of protection, CA will never toggle the fan faster"
+        " than once every 5 minutes going forward, regardless of cause — any future"
+        " situation that would have caused rapid cycling is now blocked outright and"
+        " logged as an incident instead of hitting the fan.",
+    ],
     "0.6.15": [
         "Feat #639: internal refactor only, no user-visible behavior change — Block 5"
         " Phase 3 (the final phase) builds the unified override/grace transition table"
@@ -1760,6 +1771,47 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    641: {
+        "version_fixed": "0.6.16",
+        "title": (
+            "WHF rapid on/off cycling — proactive-floor/ceiling-threshold exits didn't arm the reactivation lockout"
+        ),
+        "scope_covered": (
+            "automation.py: PROACTIVE_FLOOR and CEILING_THRESHOLD exits inside"
+            " check_natural_vent_conditions(), plus fan_thermostat_check()'s STOP_DEACTIVATE"
+            " branch (found during the same audit — its own comment already called it 'the"
+            " exact same boundary condition' as its already-armed sibling"
+            " STOP_VIA_NAT_VENT_EXIT) — all three now pass set_outdoor_exit_time=True to"
+            " _exit_nat_vent(), arming the existing 300s NAT_VENT_REACTIVATION_LOCKOUT_S the"
+            " same way the original outdoor-rise exit always has. Root cause: PROACTIVE_FLOOR"
+            " is a predictive time-to-floor check independent of the instant reactivation"
+            " gate it hands off into when a monitored sensor is still open — indoor/outdoor"
+            " barely move tick-to-tick, so the instant gate is almost always still satisfied"
+            " immediately after the predictive exit fires, guaranteeing reactivation next"
+            " tick and repeating. New tests/test_nat_vent_exit_lockout_coverage.py AST-scans"
+            " every _exit_nat_vent() call site (11 total, including on_fan_turned_off, found"
+            " during the audit) and requires each to be classified 'arms lockout' /"
+            " 'exempted: <reason>', with a positive control checking the classification"
+            " against the actual set_outdoor_exit_time argument — a new call site added later"
+            " without a classification fails immediately, preventing this bug class from"
+            " silently recurring a fourth time. Separately, as defense-in-depth independent"
+            " of root cause: new AutomationEngine._fan_toggle_rate_limited() hard-floors any"
+            " CA-issued fan reversal to no faster than FAN_MIN_TOGGLE_INTERVAL_S (300s,"
+            " const.py) inside _activate_fan()/_deactivate_fan(), logging a WARNING and"
+            " raising a new proactive fan_rapid_cycling incident class"
+            " (docs/incident-classes.md) on suppression; surfaced on the WHF status-tab card"
+            " via a '(rate-limited Xs ago)' suffix. Deliberately compares against a new,"
+            " separate _fan_toggle_command_time field rather than the pre-existing"
+            " _fan_command_time echo-tracking field (Issue #482) — found during testing that"
+            " _reconcile_fan_physical_drift()'s corrective control-entity-sync command"
+            " legitimately stamps the latter immediately before an intentional same-tick"
+            " recycle-on, which the shared field would have wrongly rate-limited."
+            " desired_state.py's decide_fan_cycle_on()/decide_fan_cycle_off() (the"
+            " fan_min_runtime_per_hour feature) now floor their computed on/off phase"
+            " durations at the same 300s minimum so a configured value outside ~[5, 55]"
+            " minutes can't schedule its own off/on command inside the rate-limit window."
+        ),
+    },
     639: {
         "version_fixed": "0.6.15",
         "title": (
@@ -6715,6 +6767,13 @@ NAT_VENT_REACTIVATION_LOCKOUT_S = 300
 
 CONF_NAT_VENT_HYSTERESIS_F = "nat_vent_hysteresis_f"
 CONF_NAT_VENT_REACTIVATION_LOCKOUT_S = "nat_vent_reactivation_lockout_s"
+
+# Issue #641: hard safety floor on CA-issued fan (WHF/HVAC-fan) toggle frequency —
+# defense-in-depth against ANY future oscillation bug (not tied to one root cause),
+# protecting the physical relay from rapid on/off/on cycling. A plain internal safety
+# constant, not a CONF_* option (matching NAT_VENT_HYSTERESIS_F/MIN_VIABLE_NAT_VENT_HOURS
+# precedent) — not something a user should be able to weaken below what the hardware needs.
+FAN_MIN_TOGGLE_INTERVAL_S = 300
 
 # Nat-vent soft-start sub-mode (Issue #540, scoped from #533): WHF-purge/comfort activation
 # at outdoor/indoor parity once today's outdoor temp is confirmed past its peak and

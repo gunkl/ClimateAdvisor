@@ -64,6 +64,7 @@ from .const import (
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_MORNING_START_HOUR,
     ECONOMIZER_TEMP_DELTA,
+    FAN_MIN_TOGGLE_INTERVAL_S,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
@@ -676,6 +677,22 @@ class AutomationEngine:
         self._write_seq: int = 0  # monotonic counter: validation callbacks skip if a newer write has superseded them
         self._hvac_command_time: datetime | None = None  # last system-initiated HVAC command timestamp
         self._fan_command_time: datetime | None = None  # last system-initiated fan command timestamp (race guard)
+        # Issue #641: last time _activate_fan()/_deactivate_fan() issued a REAL fan
+        # state-changing command — deliberately separate from _fan_command_time above.
+        # _fan_command_time is also stamped by bookkeeping-only echo-tracking commands
+        # that don't represent a real physical toggle (e.g. _reconcile_fan_physical_drift()'s
+        # corrective "sync the stuck control entity" off-command, Issue #449/#482 — the
+        # physical fan was already off, only the entity's stale belief changes), and that
+        # method's docstring explicitly documents an immediately-following same-tick
+        # recycle-on as correct, expected behavior. Rate-limiting against the shared field
+        # would misfire on that documented sequence. Only _activate_fan/_deactivate_fan's
+        # own command sites touch this field.
+        self._fan_toggle_command_time: datetime | None = None
+        # Issue #641: set whenever a fan toggle is suppressed by the rate-limit backstop
+        # (_fan_toggle_rate_limited) — the timestamp the suppression will lift. None when
+        # no toggle is currently suppressed. Status-tab surfacing only, not read by any
+        # decision path — mirrors the pattern of other diagnostic-only fields.
+        self._fan_rate_limited_until: datetime | None = None
         # Issue #482: id of the HA Context CA attached to its most recent outgoing WHF
         # fan-entity service call (see _command_whf_control_entity). When the resulting
         # state-changed Event's own event.context.id (or parent_id) matches this value,
@@ -3391,12 +3408,23 @@ class AutomationEngine:
                                 ),
                             },
                         )
+                    # Issue #641: set_outdoor_exit_time=True — without this, a monitored
+                    # sensor left open hands this exit straight into the _paused_by_door
+                    # reactivation block below with no lockout armed. Since the instant
+                    # reactivation gate (outdoor < indoor - hysteresis) is a *different,
+                    # non-predictive* condition than this exit's own time-to-floor
+                    # prediction, indoor/outdoor barely move tick-to-tick, so the gate is
+                    # almost always still satisfied on the very next tick — guaranteeing
+                    # immediate reactivation, another proactive exit, and a repeating
+                    # on/off flip-flop (the WHF fast-cycling incident). Arming the same
+                    # lockout the outdoor-rise exit already uses closes this gap.
                     await self._exit_nat_vent(
                         reason=(
                             f"nat-vent proactive floor exit: indoor {indoor:.1f}°F"
                             f" predicted to reach comfort_heat {comfort_heat_now:.1f}°F"
                             f" in {time_to_floor:.2f}h"
-                        )
+                        ),
+                        set_outdoor_exit_time=True,
                     )
                     return
 
@@ -3411,8 +3439,10 @@ class AutomationEngine:
                             "nat_vent_outdoor_rise_exit",
                             {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
                         )
-                    # set_outdoor_exit_time=True: this is the only exit path whose
-                    # _nat_vent_outdoor_exit_time is consumed by the reactivation lockout below.
+                    # set_outdoor_exit_time=True: the original exit reason this lockout was
+                    # built for (Issue #115/#411). Issue #641 later extended the same
+                    # treatment to PROACTIVE_FLOOR and CEILING_THRESHOLD above/below, once
+                    # both were found to hand off into the identical paused-reactivation race.
                     await self._exit_nat_vent(
                         reason=(f"nat vent exit: outdoor {outdoor:.1f}°F > indoor {indoor:.1f}°F — airflow reversed"),
                         set_outdoor_exit_time=True,
@@ -3429,8 +3459,13 @@ class AutomationEngine:
                         outdoor,
                         threshold,
                     )
+                    # Issue #641: same lockout gap and same fix as the proactive-floor exit
+                    # above — the reactivation gate's own ceiling_ok = outdoor < threshold
+                    # check is the exact complementary boundary, so outdoor hovering near
+                    # threshold can flip-flop this exit against reactivation identically.
                     await self._exit_nat_vent(
-                        reason=f"natural vent exit: outdoor {outdoor:.1f}°F > threshold {threshold:.1f}°F"
+                        reason=f"natural vent exit: outdoor {outdoor:.1f}°F > threshold {threshold:.1f}°F",
+                        set_outdoor_exit_time=True,
                     )
                     return
 
@@ -3893,7 +3928,16 @@ class AutomationEngine:
                             "fan_device": _fan_device_label(self.config),
                         },
                     )
-            await self._exit_nat_vent(reason=f"fan thermostat check — {stop_reason}")
+            # Issue #641: same treatment as STOP_VIA_NAT_VENT_EXIT above and
+            # check_natural_vent_conditions()'s OUTDOOR_RISE exit — this branch's own
+            # docstring already documents it as "the exact same boundary condition,"
+            # just reached via the tick-level Check 1 path instead of the 30-min cycle.
+            # Arm the same lockout so outdoor hovering near the indoor boundary can't
+            # flip-flop this exit against reactivation any more than its sibling can.
+            await self._exit_nat_vent(
+                reason=f"fan thermostat check — {stop_reason}",
+                set_outdoor_exit_time=True,
+            )
             return
 
         # outcome is STOP_COOLED_TO_FLOOR
@@ -5306,10 +5350,16 @@ class AutomationEngine:
 
         Args:
             reason: Human-readable reason passed through to ``_deactivate_fan``.
-            set_outdoor_exit_time: Only the outdoor-reversal exit passes True. Records
-                ``_nat_vent_outdoor_exit_time`` for the paused-by-door reactivation
-                lockout. Other exit paths must not set this as a side effect of this
-                refactor (Issue #411 blast-radius finding).
+            set_outdoor_exit_time: Records ``_nat_vent_outdoor_exit_time`` for the
+                paused-by-door reactivation lockout. Originally only the outdoor-reversal
+                exit passed True (Issue #411); Issue #641 extended this to the
+                proactive-floor and ceiling-threshold exits too, after both were found to
+                exhibit the identical flip-flop against the instant reactivation gate
+                whenever they hand off into a sensor-still-open pause. Any exit reason
+                that can route through this pause branch should arm the lockout unless
+                it's independently proven immune to immediate re-satisfaction by the
+                instant gate (comfort-floor and away-ceiling exits don't route through
+                this function at all, so they're exempt by construction, not by omission).
         """
         self._natural_vent_active = False
         self._nat_vent_soft_start = False
@@ -5810,6 +5860,63 @@ class AutomationEngine:
             for cid, ts in self._recent_fan_command_context_ids
         )
 
+    def _fan_toggle_rate_limited(self, *, action: str, reason: str) -> bool:
+        """Hard safety backstop against rapid fan on/off/on cycling (Issue #641).
+
+        Returns True (and suppresses the caller's command) if this toggle would reverse
+        the fan's state within ``FAN_MIN_TOGGLE_INTERVAL_S`` of CA's own last command.
+        Defense-in-depth: independent of any specific root cause, protects the physical
+        WHF/HVAC-fan relay from rapid cycling regardless of which upstream decision logic
+        produced the reversal (the WHF fast-cycling incident that motivated this — a
+        proactive-floor exit immediately followed by reactivation — is fixed at its own
+        root cause elsewhere, but this backstop holds even if a different, future gap
+        produces the same physical symptom).
+
+        Only ever compares against ``self._fan_toggle_command_time`` — stamped
+        exclusively by ``_activate_fan``/``_deactivate_fan``'s own command sites, not
+        the broader ``_fan_command_time`` echo-tracking field (see that attribute's
+        declaration for why the two must stay separate: an internal bookkeeping-only
+        stamp with no real physical toggle must not poison this guard). A genuine
+        user/RF-remote fan action never reaches this check either way, since both
+        callers already return early when ``self._fan_override_active`` is set.
+
+        isinstance guard: several call sites across the codebase (e.g. the fan-mode
+        assertion inside ``_set_hvac_mode``) stamp fan-related timestamps from
+        ``dt_util.now()`` without the caller having patched a real clock in tests,
+        leaving a ``MagicMock`` rather than a ``datetime`` — matching the defensive
+        pattern this codebase already uses elsewhere for mocked-engine timestamp reads
+        (see ``_format_grace_remaining()``). Treat anything that isn't a real timestamp
+        as "no prior command", never raise.
+        """
+        if not isinstance(self._fan_toggle_command_time, datetime):
+            return False
+        elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
+        if elapsed >= FAN_MIN_TOGGLE_INTERVAL_S:
+            return False
+
+        _LOGGER.warning(
+            "Fan toggle suppressed: rate limit (%.0fs since last change, min %ds) — %s (%s)",
+            elapsed,
+            FAN_MIN_TOGGLE_INTERVAL_S,
+            action,
+            reason,
+        )
+        self._fan_rate_limited_until = self._fan_toggle_command_time + timedelta(seconds=FAN_MIN_TOGGLE_INTERVAL_S)
+        if self._emit_event_callback:
+            self._emit_event_callback(
+                "incident_detected",
+                {
+                    "incident_class": "fan_rapid_cycling",
+                    "incident_id": dt_util.now().isoformat(),
+                    "attempted_action": action,
+                    "attempted_reason": reason,
+                    "seconds_since_last_command": round(elapsed, 1),
+                    "min_interval_s": FAN_MIN_TOGGLE_INTERVAL_S,
+                    "fan_device": _fan_device_label(self.config),
+                },
+            )
+        return True
+
     async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
         """Activate fan based on configured fan_mode.
 
@@ -5834,11 +5941,15 @@ class AutomationEngine:
             _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
             return
 
+        if self._fan_toggle_rate_limited(action="activate", reason=reason):
+            return
+
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would activate fan — %s", reason)
             return
 
         self._fan_command_time = dt_util.now()
+        self._fan_toggle_command_time = self._fan_command_time
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):
@@ -6262,11 +6373,15 @@ class AutomationEngine:
                 _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
             return
 
+        if self._fan_toggle_rate_limited(action="deactivate", reason=reason):
+            return
+
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would deactivate fan — %s", reason)
             return
 
         self._fan_command_time = dt_util.now()
+        self._fan_toggle_command_time = self._fan_command_time
         self._fan_command_pending = True
         try:
             if fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH):

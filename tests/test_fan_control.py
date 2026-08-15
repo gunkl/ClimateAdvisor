@@ -1843,6 +1843,23 @@ class TestFanThermostatCheck:
         events = [c.args[0] for c in engine._emit_event_callback.call_args_list]
         assert "nat_vent_outdoor_rise_exit" not in events
 
+    def test_stop_deactivate_arms_reactivation_lockout(self):
+        """Issue #641: STOP_DEACTIVATE (this branch, the non-nat-vent-specific direction-
+        reversal stop) is documented in its own code comment as 'the exact same boundary
+        condition' as STOP_VIA_NAT_VENT_EXIT — found during this issue's coverage audit to
+        be missing the same set_outdoor_exit_time=True lockout its sibling already has,
+        letting outdoor hover near the indoor boundary flip-flop this exit against
+        reactivation. Fixed to match its sibling."""
+        engine = self._engine()
+        engine._natural_vent_active = False
+        engine._fan_active = True
+
+        asyncio.run(engine.fan_thermostat_check(indoor=72.0, outdoor=73.0, trigger="test"))
+
+        assert engine._nat_vent_outdoor_exit_time is not None, (
+            "STOP_DEACTIVATE must arm the same reactivation lockout as its sibling STOP_VIA_NAT_VENT_EXIT branch"
+        )
+
     def test_noop_when_override_active(self):
         """Manual fan override in effect → fast loop is a no-op (user has control)."""
         engine = self._engine()
@@ -3429,6 +3446,49 @@ class TestDualFanStatus:
             climate_fan_mode="auto",
         )
         assert coord._compute_hvac_fan_status() == "inactive"
+
+
+class TestWhfStatusRateLimitSuffix:
+    """Issue #641: _compute_whf_status() must surface an active rate-limit suppression
+    via a suffix on the existing status string, per the Status Card Ontology rule
+    (extend the existing card's value, don't add a new one)."""
+
+    def test_suffix_shown_while_within_cooldown(self):
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=False,
+        )
+        now = datetime(2026, 8, 15, 6, 41, 0)
+        coord.automation_engine._fan_rate_limited_until = now + timedelta(seconds=120)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
+            result = coord._compute_whf_status()
+        assert result == "inactive (rate-limited 180s ago)"
+
+    def test_suffix_absent_once_cooldown_elapses(self):
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=False,
+            physical_state=False,
+        )
+        now = datetime(2026, 8, 15, 6, 41, 0)
+        coord.automation_engine._fan_rate_limited_until = now - timedelta(seconds=1)  # already lifted
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
+            result = coord._compute_whf_status()
+        assert result == "inactive"
+
+    def test_suffix_absent_when_never_rate_limited(self):
+        """MagicMock's default unset-attribute truthiness must not be mistaken for an
+        active cooldown — the isinstance(until, datetime) guard is load-bearing here,
+        matching this codebase's established mocked-engine defensive pattern."""
+        coord = _make_coordinator_for_fan_status(
+            fan_mode=FAN_MODE_WHOLE_HOUSE,
+            fan_active=True,
+            physical_state=True,
+        )
+        # coord.automation_engine is a bare MagicMock() — _fan_rate_limited_until was
+        # never set, so accessing it returns a truthy MagicMock, not None.
+        assert coord._compute_whf_status() == "active"
 
 
 class TestCommandWhfControlEntity:

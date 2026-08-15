@@ -284,6 +284,17 @@ def decide_fan_thermo_backstop(
 _FAN_MODE_DISABLED = "disabled"  # mirrors const.FAN_MODE_DISABLED — duplicated locally per the
 # same import-independence convention nat_vent_gate.py/fan_thermostat_decision.py already use.
 
+# Issue #641: mirrors const.FAN_MIN_TOGGLE_INTERVAL_S (same import-independence convention as
+# above). CONF_FAN_MIN_RUNTIME_PER_HOUR's config-flow selector allows 1-59 minutes, but values
+# below 5 (short ON segment) or above 55 (short OFF segment) would otherwise compute an on/off
+# phase duration shorter than the hard safety floor _activate_fan()/_deactivate_fan() now
+# enforce — every such off/on command would be silently suppressed by that backstop, stranding
+# the fan on far longer than the configured cycle intended. Flooring both phase durations here
+# keeps this feature's own schedule always compatible with the safety floor, for both new and
+# already-persisted configurations, without needing a config-flow-only fix that could only
+# protect configs saved after the fix shipped.
+_FAN_MIN_TOGGLE_INTERVAL_S = 300.0
+
 
 class FanCycleOutcome(Enum):
     """The real outcomes _fan_cycle_on() can produce."""
@@ -325,7 +336,10 @@ def decide_fan_cycle_on(
     if not fan_active:
         if min_runtime_minutes >= 60:
             return FanCycleOutcome.ACTIVATE_ALWAYS_ON, None
-        return FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER, min_runtime_minutes * 60.0
+        # Issue #641: floor the ON-phase duration so the scheduled off-command is never
+        # itself suppressed by the fan-toggle rate-limit backstop (see module-level
+        # _FAN_MIN_TOGGLE_INTERVAL_S comment above).
+        return FanCycleOutcome.ACTIVATE_WITH_OFF_TIMER, max(_FAN_MIN_TOGGLE_INTERVAL_S, min_runtime_minutes * 60.0)
     return FanCycleOutcome.RETRY_LATER, 60.0 * 60.0
 
 
@@ -338,8 +352,12 @@ def decide_fan_cycle_off(*, fan_min_runtime_active: bool, min_runtime_minutes: f
     guard — the shell calls _deactivate_fan() only when True. wait_seconds (the
     "on" phase re-check delay) is ALWAYS returned, matching the real method's
     unconditional final `async_call_later` call.
+
+    Issue #641: floored at _FAN_MIN_TOGGLE_INTERVAL_S (same reasoning as
+    decide_fan_cycle_on's ACTIVATE_WITH_OFF_TIMER delay) so the subsequent on-command
+    is never itself suppressed by the rate-limit backstop.
     """
-    wait_seconds = max(0.0, (60.0 - min_runtime_minutes) * 60.0)
+    wait_seconds = max(_FAN_MIN_TOGGLE_INTERVAL_S, (60.0 - min_runtime_minutes) * 60.0)
     return fan_min_runtime_active, wait_seconds
 
 

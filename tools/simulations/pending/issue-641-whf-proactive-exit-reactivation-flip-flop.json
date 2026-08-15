@@ -1,0 +1,73 @@
+{
+  "name": "issue_641_whf_proactive_exit_reactivation_flip_flop",
+  "description": "Reproduces the reported WHF fast-cycling incident (2026-08-15, 06:35-06:39): a proactive-floor exit fires while a monitored window is still open, and the very next re-evaluation tick — with indoor/outdoor essentially unchanged — must NOT immediately reactivate nat-vent. Before the Issue #641 fix, the paused-reactivation block's instant gate (outdoor < indoor - hysteresis) re-satisfied every single tick because the proactive-floor exit never armed the reactivation lockout, producing a repeating on/off flip-flop until the user disabled automation.",
+  "source": "production_incident",
+  "issue": 641,
+  "notes": [
+    "Numbers match the real incident's own log line as closely as the scenario schema allows: indoor 69F, outdoor 58.6F, k_passive=-0.0977, comfort_heat=68F -> time_to_floor ~0.98hr, just under the 1.0hr MIN_VIABLE_NAT_VENT_HOURS threshold.",
+    "The second temp_update event repeats the SAME indoor/outdoor reading on purpose -- production's real ticks landed seconds apart with essentially no change in either value, which is exactly what makes this bug deterministic rather than occasional.",
+    "paused_by_door (final engine_state) is the correct assertion type here, not an event-type match -- nat_vent_predicted_floor_exit is a production-only, intentionally-unmapped event (see outcomes.py UNMAPPED_PRODUCTION_EVENTS), so this scenario asserts the observable BEHAVIORAL RESULT of the fix (still paused, not reactivated) rather than the internal event.",
+    "Occupant framing: before the fix, the WHF relay would have been commanded on again at this exact point, repeating every cycle; after the fix, it stays off until either the 300s lockout expires with conditions still favorable, or (more likely here, since indoor is genuinely 1F above the floor) the real comfort-floor exit ends the session properly on its own."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "setback_heat": 60,
+    "setback_cool": 80,
+    "natural_vent_delta": 3.0,
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whole_house"
+  },
+  "thermal_model": {
+    "confidence": "medium",
+    "k_passive": -0.0977
+  },
+  "events": [
+    {
+      "time": "2026-08-15T06:00:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 60.0,
+      "note": "Overnight baseline: indoor 70F, outdoor 60F -- favorable for nat-vent, well above the 68F floor."
+    },
+    {
+      "time": "2026-08-15T06:00:01",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": true,
+      "note": "Warm-day classification with HVAC off -- nat-vent is the primary control mechanism overnight."
+    },
+    {
+      "time": "2026-08-15T06:00:02",
+      "type": "sensor_open",
+      "entity": "binary_sensor.bedroom_window",
+      "note": "Window open overnight (matches the real incident's paused-by-door precondition). outdoor(60) < indoor(70) - hysteresis(1), indoor > comfort_heat(68), outdoor < threshold -- nat-vent activates, WHF turns on, HVAC suppressed."
+    },
+    {
+      "time": "2026-08-15T06:35:00",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 58.6,
+      "note": "Indoor has drifted down to 69F overnight. time_to_floor = (69-68) / (0.0977*(69-58.6)) = 0.98hr < 1.0hr -- PROACTIVE_FLOOR exit fires. Window still open (never closed) -> _exit_nat_vent() pauses rather than restoring HVAC, and (Issue #641 fix) arms the 300s reactivation lockout."
+    },
+    {
+      "time": "2026-08-15T06:35:05",
+      "type": "temp_update",
+      "indoor_f": 69.0,
+      "outdoor_f": 58.6,
+      "note": "Next re-evaluation tick, 5s later, same reading -- matches the real incident's near-instant repeat. Before the fix: the paused-reactivation block's instant gate (outdoor 58.6 < indoor 69 - hysteresis) is still satisfied, so nat-vent reactivates immediately -- the flip-flop. After the fix: the lockout armed on the prior tick blocks this reactivation outright."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-15T06:35:05",
+      "expect": "paused_by_door",
+      "reason": "The reactivation lockout armed by the proactive-floor exit at 06:35:00 must still be blocking reactivation 5s later -- reactivating here would reproduce the reported rapid on/off WHF cycling."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "A proactive-floor exit with a window still open correctly stays paused through the very next re-evaluation tick instead of immediately reactivating and repeating -- the WHF fast-cycling incident this issue reported."
+  }
+}

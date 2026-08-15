@@ -1076,6 +1076,138 @@ class TestProactiveFloorExit:
 
 
 # ---------------------------------------------------------------------------
+# Issue #641 — WHF fast-cycling: proactive-floor / ceiling-threshold exits must
+# arm the reactivation lockout when they hand off into a sensor-open pause,
+# otherwise the very next tick's instant reactivation gate immediately undoes
+# the exit, producing a repeating on/off flip-flop (occupant impact: the WHF
+# relay cycled roughly once a minute until the user disabled automation).
+# ---------------------------------------------------------------------------
+
+
+class TestIssue641ExitReactivationFlipFlop:
+    """Permanent regression coverage for the exact incident sequence: an exit that
+    hands off into `_paused_by_door=True` must be immediately followed by a
+    reactivation attempt at the SAME clock time remaining blocked, not flipping
+    straight back on. Proven load-bearing (not incidentally passing) by first
+    confirming the sensor-open exit still pauses as expected, matching
+    TestProactiveFloorExit's existing sensor-open coverage."""
+
+    def _make_active_nat_vent_engine(
+        self,
+        indoor_f: float = 71.0,
+        outdoor_f: float = 65.0,
+        k_passive: float = -0.5,
+        confidence: str = "medium",
+        comfort_heat: float = 70.0,
+        comfort_cool: float = 72.0,
+        nat_vent_delta: float = 3.0,
+    ) -> AutomationEngine:
+        engine = _make_engine(
+            comfort_heat=comfort_heat, comfort_cool=comfort_cool, nat_vent_delta=nat_vent_delta, indoor_f=indoor_f
+        )
+        engine._last_outdoor_temp = outdoor_f
+        engine._natural_vent_active = True
+        engine._paused_by_door = False
+        engine._fan_override_active = False
+        engine._thermal_model = {"confidence": confidence, "k_passive": k_passive}
+        engine._hourly_forecast_temps = []
+        engine._sensor_check_callback = lambda: True  # monitored sensor still open, per the reported incident
+        return engine
+
+    def test_proactive_floor_exit_arms_lockout_and_blocks_immediate_reactivation(self):
+        """Reproduces the reported incident's own numbers: indoor 69F, outdoor 58.6F,
+        k_passive=-0.0977 -> time_to_floor ~0.98hr, comfort_heat=68F. The exit tick and
+        the very next reactivation-check tick both run at the SAME timestamp (worst
+        case — production ticks can land seconds apart, not just minutes), matching how
+        tight the real incident's log timestamps were.
+        """
+        engine = self._make_active_nat_vent_engine(
+            indoor_f=69.0, outdoor_f=58.6, k_passive=-0.0977, comfort_heat=68.0, comfort_cool=74.0
+        )
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+        now = datetime(2026, 8, 15, 6, 36, 0)
+
+        with patch(_DT_NOW_PATH, return_value=now):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        # Sanity: this really is the proactive-floor exit, matching the incident's own log line.
+        assert any(e[0] == "nat_vent_predicted_floor_exit" for e in events)
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        assert engine._nat_vent_outdoor_exit_time == now, (
+            "Issue #641: proactive-floor exit must arm the reactivation lockout "
+            "(_nat_vent_outdoor_exit_time) when it hands off into a sensor-open pause — "
+            "without this, nothing stops the very next tick from reactivating immediately"
+        )
+
+        # Same instant reactivation attempt the real incident's next log line shows
+        # ("Fan activated -- natural vent activated..."). Indoor/outdoor unchanged,
+        # same clock tick — before the fix this reactivated every single time.
+        with patch(_DT_NOW_PATH, return_value=now):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False, (
+            "reactivation must be blocked by the lockout immediately after a proactive-floor exit"
+        )
+        assert engine._paused_by_door is True
+
+    def test_proactive_floor_exit_reactivates_normally_once_lockout_expires(self):
+        """Control case: the lockout is temporary, not permanent — once
+        NAT_VENT_REACTIVATION_LOCKOUT_S has elapsed, reactivation proceeds normally
+        if conditions still warrant it (matching TestReactivationLockout's existing
+        outdoor-rise-exit control case)."""
+        engine = self._make_active_nat_vent_engine(
+            indoor_f=69.0, outdoor_f=58.6, k_passive=-0.0977, comfort_heat=68.0, comfort_cool=74.0
+        )
+        exit_time = datetime(2026, 8, 15, 6, 36, 0)
+        with patch(_DT_NOW_PATH, return_value=exit_time):
+            asyncio.run(engine.check_natural_vent_conditions())
+        assert engine._natural_vent_active is False
+
+        # Indoor recovers slightly above the floor by the time the lockout expires,
+        # so the reactivation isn't itself blocked by anything except the lockout.
+        _set_engine_indoor(engine, 69.0)
+        late = exit_time + timedelta(seconds=NAT_VENT_REACTIVATION_LOCKOUT_S + 1)
+        with patch(_DT_NOW_PATH, return_value=late):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
+
+    def test_ceiling_threshold_exit_pauses_and_arms_lockout(self):
+        """Sibling gap found in the same audit: CEILING_THRESHOLD exit
+        (outdoor > comfort_cool + nat_vent_delta) has the identical structural gap as
+        the proactive-floor exit — it also hands off into _exit_nat_vent() and must
+        arm the same lockout when the sensor is still open. threshold = 72 + 3 = 75;
+        outdoor=75.5 triggers the exit (outdoor-rise doesn't fire first since
+        outdoor(75.5) < indoor(76) is false... actually outdoor > indoor too, so
+        outdoor-rise wins priority — use indoor=76.5 so outdoor(75.5) < indoor and
+        only the ceiling check fires).
+        """
+        engine = self._make_active_nat_vent_engine(
+            indoor_f=76.5, outdoor_f=75.5, comfort_heat=68.0, comfort_cool=72.0, nat_vent_delta=3.0
+        )
+        # No thermal model confidence -> proactive-floor check is skipped, isolating
+        # this test to the ceiling-threshold exit specifically.
+        engine._thermal_model = {"confidence": "none", "k_passive": None}
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, payload: events.append((name, payload))
+        now = datetime(2026, 8, 15, 14, 0, 0)
+
+        with patch(_DT_NOW_PATH, return_value=now):
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+        assert engine._nat_vent_outdoor_exit_time == now, (
+            "Issue #641: ceiling-threshold exit must arm the same reactivation lockout as "
+            "proactive-floor and outdoor-rise — outdoor hovering near the threshold can "
+            "flip-flop identically without it"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Bug #313 Fix — equal outdoor==indoor should NOT exit nat vent
 # ---------------------------------------------------------------------------
 

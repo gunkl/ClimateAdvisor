@@ -109,10 +109,7 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "cancel_override()/_on_grace_expired(); _manual_override_active/_override_confirm_* covered "
         "by _sync_shadow_inputs() raw copy (Issue #631)"
     ),
-    "handle_fan_manual_override": (
-        "exempted: called directly from 3 coordinator.py sites (unmirrored); _fan_override_active/"
-        "_grace_active covered by _sync_shadow_inputs() raw copy (Issue #631)"
-    ),
+    "handle_fan_manual_override": "mirrored",
     "clear_fan_override": (
         "exempted: called from clear_manual_override (exempted) and internal cascades; "
         "_fan_override_active covered by _sync_shadow_inputs() raw copy (Issue #631)"
@@ -129,11 +126,11 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "_sync_shadow_inputs() raw copy (Issue #631)"
     ),
     "_start_grace_period": (
-        "exempted: called from both mirrored (handle_all_doors_windows_closed, "
-        "check_natural_vent_conditions, resume_from_pause, handle_manual_override_during_pause) and "
-        "unmirrored/internal (handle_fan_manual_override, _confirm_override) paths; _grace_active and "
-        "_grace_protects_override covered by _sync_shadow_inputs() raw copy regardless of caller "
-        "(Issue #631, #639)"
+        "exempted: called from mirrored (handle_all_doors_windows_closed, "
+        "check_natural_vent_conditions, resume_from_pause, handle_manual_override_during_pause, "
+        "handle_fan_manual_override) and unmirrored/internal (_confirm_override) paths; _grace_active "
+        "and _grace_protects_override covered by _sync_shadow_inputs() raw copy regardless of caller "
+        "(Issue #631, #639, #643)"
     ),
     "_cancel_grace_timers": (
         "exempted: called from cancel_override() (unmirrored) and the internal grace-expiry timer "

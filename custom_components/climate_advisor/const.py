@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.16"
+VERSION = "0.6.17"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.17": [
+        "Fix #643: an internal diagnostic that shadows automation decisions to verify"
+        " an in-progress refactor wasn't seeing manual fan overrides (the most common"
+        " kind of override), so it could not confirm its own consistency after one"
+        " occurred. No occupant-visible behavior change — this only affects an"
+        " internal diagnostic used to validate the automation-engine refactor before"
+        " any of it goes live.",
+    ],
     "0.6.16": [
         "Fix #641: the whole-house fan could rapidly cycle on and off (roughly once a"
         " minute) when a predicted-floor or ceiling-threshold exit fired while a window"
@@ -1771,6 +1779,23 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    643: {
+        "version_fixed": "0.6.17",
+        "title": "Override/grace shadow FSM never saw handle_fan_manual_override (Block 5 diagnostic gap)",
+        "scope_covered": (
+            "coordinator.py: added await self._mirror_to_shadow('handle_fan_manual_override', ...)"
+            " at all 3 production call sites (_async_thermostat_changed, _async_fan_entity_changed,"
+            " _flush_fan_remote_burst) and added 'handle_fan_manual_override': 'override_detected' to"
+            " _OVERRIDE_GRACE_FSM_EVENT_KINDS. The override_grace_fsm.py OVERRIDE_DETECTED transition"
+            " was already fully implemented and input-driven generically from live automation_engine"
+            " state (Issue #639) — no new pure module, event kind, or transition logic was needed,"
+            " only the mirror wiring. tests/test_shadow_engine_coverage.py's registry reclassified"
+            " handle_fan_manual_override from 'exempted' to 'mirrored'. Shadow-only, dry_run=True,"
+            " zero production behavior change — same isolation posture as the rest of Block 5 (#594)."
+            " Root-caused from a live 06:39:08 WARNING-level disagreement on both the door/window"
+            " (#637) and override/grace (#639) shadow FSMs that never self-corrected."
+        ),
+    },
     641: {
         "version_fixed": "0.6.16",
         "title": (

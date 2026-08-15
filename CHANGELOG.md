@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.17] — 2026-08-15
+
+- Fix #643: internal refactor only, no user-visible behavior change — the diagnostic-only shadow comparison from the Block 5 series (0.6.13–0.6.15) wasn't seeing manual fan overrides, the most common override trigger, so it couldn't confirm its own consistency after one occurred. Now mirrored like every other tracked automation decision. Purely observational — nothing it computes is ever acted on.
+
 ## [0.6.16] — 2026-08-15
 
 - Fix #641: the whole-house fan could rapidly cycle on and off (roughly once a minute) when a predicted-floor or ceiling-threshold exit fired while a window was still open — the very next check immediately turned it back on, repeating indefinitely. Two nat-vent exit conditions now correctly hold off reactivation for 5 minutes after exiting, matching how the outdoor-air-reversal exit already behaved. As a second layer of protection, CA will never toggle the fan faster than once every 5 minutes going forward, regardless of cause — any future situation that would have caused rapid cycling is now blocked outright and logged as an incident instead of hitting the fan.

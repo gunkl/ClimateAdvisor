@@ -104,6 +104,10 @@ def _make_coord_stub(config: dict | None = None) -> MagicMock:
     # Issue #589: explicit, not a truthy-by-default MagicMock attr — _async_command_fan_entity
     # reads this directly to gate the dry-run/automation-disabled check.
     coord._automation_enabled = True
+    # Issue #643: _async_fan_entity_changed now mirrors handle_fan_manual_override/
+    # on_fan_turned_off to the shadow FSM diagnostic — must be an AsyncMock, not the bare
+    # MagicMock auto-attr, or awaiting it raises TypeError.
+    coord._mirror_to_shadow = AsyncMock()
 
     # Bind the real implementation so guards that call self._fan_state_feedback_enabled()
     # get the actual config value rather than a truthy MagicMock.

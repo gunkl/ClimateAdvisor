@@ -156,6 +156,10 @@ def _make_coordinator_stub(config: dict | None = None, *, physical_on: bool | No
     coord._fan_remote_burst = None
     coord._fan_remote_burst_cancel = None
     coord._get_fan_physical_state = MagicMock(return_value=physical_on)
+    # Issue #643: _flush_fan_remote_burst now mirrors handle_fan_manual_override to the
+    # shadow FSM diagnostic — must be an AsyncMock, not the bare MagicMock auto-attr, or
+    # awaiting it raises TypeError.
+    coord._mirror_to_shadow = AsyncMock()
 
     mod = importlib.import_module("custom_components.climate_advisor.coordinator")
     coord._async_fan_remote_changed = types.MethodType(mod.ClimateAdvisorCoordinator._async_fan_remote_changed, coord)

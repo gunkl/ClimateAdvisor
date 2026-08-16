@@ -89,6 +89,12 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     "_pause_for_door_window": (
         "internal: called only from handle_door_window_open (mirrored) and _re_pause_for_open_sensor (internal)"
     ),
+    "_set_door_window_pause_fields": (
+        "internal: Issue #637 Phase R Step 3 shared setter, called only from "
+        "_pause_for_door_window (internal, itself called from already-mirrored entry "
+        "points) and _exit_nat_vent (internal, shared choke point) — one definition of "
+        "the door/window pause write-shape, not itself a new entry point"
+    ),
     "_apply_door_window_fsm_state": (
         "internal: Issue #594 Phase R Step 2 helper, called only from the FSM-authoritative "
         "branches of handle_manual_override_during_pause (mirrored) and resume_from_pause "

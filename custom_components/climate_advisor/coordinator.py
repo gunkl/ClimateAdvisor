@@ -356,9 +356,10 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
 # (also event-driven). SYNC_RECONCILE is fed separately via
 # _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS (method-name-triggered, same shape as
 # _NAT_VENT_FSM_TRIGGER_METHODS — Phase R Step 1b, epic #594, v0.6.24). As of Step 1b
-# all 7 DoorWindowFsmEventKind members have a real feed path; see door_window_fsm.py's
-# own docstring for the one still-accepted residual (the "within planned window" grace
-# expiry branch emits no event at all, so that one outcome doesn't feed the FSM).
+# all 7 DoorWindowFsmEventKind members have a real feed path; door/window Step 3
+# (#637) closed the one remaining residual (the "within planned window" grace
+# expiry branch previously emitted no event at all) by adding an emit there too —
+# see door_window_fsm.py's docstring for history.
 _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_door_window_open": "sensor_opened",
     "handle_all_doors_windows_closed": "all_sensors_closed",
@@ -386,11 +387,12 @@ _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS: frozenset[str] = frozenset(
 # Issue #594 Phase R Step 1b: event types that indicate a door/window grace period just
 # expired, for feeding DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED. _on_grace_expired()
 # (automation.py) is an internal timer callback with no _mirror_to_shadow() call site,
-# but 3 of its 4 branches already emit a distinct event type after mutating state (no
-# staleness risk): "grace_expired" (the re-pause-on-still-open branch and the normal-
-# expiry branch) and "override_adopted" (the adopted-matching-decision branch). The
-# 4th branch ("within planned window") emits nothing at all — an accepted residual, see
-# door_window_fsm.py's docstring. These event-type strings are also consumed by
+# and, as of door/window Step 3 (#637), all 4 branches emit a distinct event type
+# after mutating state (no staleness risk): "grace_expired" (the re-pause-on-still-
+# open branch, the normal-expiry branch, and the within-planned-window branch — the
+# latter two share the string with a distinguishing payload key) and
+# "override_adopted" (the adopted-matching-decision branch). These event-type
+# strings are also consumed by
 # _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP for a *different* FSM's GRACE_TIMER_EXPIRED
 # concept — one event type can and does feed multiple FSMs, same as every other branch
 # in _feed_lifecycle_fsms_from_event().

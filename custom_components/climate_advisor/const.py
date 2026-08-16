@@ -4,9 +4,29 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.25"
+VERSION = "0.6.26"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.26": [
+        "Fix #655: a door/window briefly reopened during an active grace period"
+        " could still pause the AC/heat, even though the grace period exists"
+        " specifically to avoid reacting to exactly that. The grace check now uses"
+        " the same accurate indoor+outdoor reactivation check the automation"
+        " already computes a moment later, instead of a coarser outdoor-only"
+        " shortcut that could disagree with it — grace now reliably holds for its"
+        " full duration.",
+        "Fix #657: after a grace period ends with a door/window still open but"
+        " conditions now favor natural ventilation, some pause-related dashboard"
+        " and Activity Report fields (which door/window, how long it's been"
+        " paused) could keep showing stale information from an earlier pause."
+        " These now clear correctly alongside the rest of the pause state.",
+        "Fix (found during #637 Phase R Step 3 scoping, no user-facing symptom"
+        " confirmed): a nat-vent-exit pause path wrote fewer pause-tracking"
+        " fields than the equivalent door/window pause path, which could leave"
+        " a dashboard field stale and — in one specific edge case — cause a"
+        " later door-close to start an unwanted extra grace period. Both pause"
+        " paths now share one definition of what a door/window pause writes.",
+    ],
     "0.6.25": [
         "Feat #637 (Phase R Step 2, partial): begins letting the door/window"
         " pause/grace lifecycle FSM actually drive production decisions — a new,"
@@ -2099,7 +2119,7 @@ KNOWN_FIXES: dict[int, dict] = {
         ),
     },
     637: {
-        "version_fixed": "0.6.25",
+        "version_fixed": "0.6.26",
         "title": (
             "Block 5 epic #594 Phase 2: builds the unified door/window pause/grace"
             " transition table (5 new pure functions + door_window_fsm.py assembly),"
@@ -2161,6 +2181,38 @@ KNOWN_FIXES: dict[int, dict] = {
             " filed as #657): `_re_pause_for_open_sensor()`'s 0.6.23 fix only cleared"
             " `_paused_by_door`, not the 3 other stale pause fields the mirrored branch"
             " in `check_natural_vent_conditions()` clears together."
+            " Phase R Step 3 (0.6.26): closed all 4 of Step 2's documented blockers except"
+            " one. #655 fixed: `handle_door_window_open()`'s grace-active branch now shares"
+            " the same real `_nat_vent_may_reactivate()` gate result the nat-vent-vs-pause"
+            " decision further down the function already computes, instead of a coarse"
+            " outdoor-only proxy that could disagree with it -- closing the exact gap that"
+            " let a grace period be silently defeated. `door_window_open_response.py`'s"
+            " pure mirror updated to match. #657 fixed: `_re_pause_for_open_sensor()`'s"
+            " nat-vent-reactivation branch now clears `_paused_with_hvac_already_off`/"
+            "`_paused_entity`/`_paused_since` alongside `_paused_by_door`, matching"
+            " `check_natural_vent_conditions()`'s sibling branch. `_exit_nat_vent()`'s"
+            " sensor-still-open branch write-shape divergence fixed too (found while"
+            " scoping Step 3, no separate issue filed): it used to write only"
+            " `_paused_by_door`/`_pre_pause_mode`; both this branch and"
+            " `_pause_for_door_window()` now go through a new shared"
+            " `_set_door_window_pause_fields()` helper. This also closes the previously"
+            "-documented `ALL_SENSORS_CLOSED`/`pre_pause_mode`-placeholder risk in"
+            " `door_window_fsm.py`, since `_paused_with_hvac_already_off` can no longer"
+            " go stale from this branch -- so `handle_all_doors_windows_closed()` needed"
+            " no separate fix of its own, contrary to Step 2's assumption that it would."
+            " Also closed Step 1b's one documented shadow-feed residual:"
+            ' `_on_grace_expired()`\'s "within planned window" branch now emits'
+            ' `"grace_expired"` (reusing the existing event type with a distinguishing'
+            " `within_planned_window` payload key), so all 3 of its outcome branches feed"
+            " `GRACE_TIMER_EXPIRED`, not just 2. Required updating one LOCKED golden"
+            " scenario (`issue_637_paused_during_grace_open_fallthrough.json`) with"
+            " explicit user sign-off per the Golden Simulation Test Policy -- it had"
+            " deliberately encoded #655's bug as its expected final outcome"
+            " (`paused_during_grace`); re-signed to assert the fixed behavior"
+            " (`resumed`, i.e. grace correctly holds). Still blocked, deferred to a future"
+            " increment: `_re_pause_for_open_sensor()` still needs to know whether it was"
+            " reached from `GRACE` or `PAUSED_DURING_GRACE` (a signature/plumbing change,"
+            " not a body swap) before it can join FSM authority."
         ),
         "scope_covered": (
             "New: door_window_lifecycle.py (5-state derivation), door_window_pause_entry.py, "
@@ -2193,6 +2245,72 @@ KNOWN_FIXES: dict[int, dict] = {
             " sites in `_async_morning_wakeup()`/`_async_pre_cool_trigger()`. New"
             " `_DOOR_WINDOW_EVENT_KIND_REGISTRY` + `TestDoorWindowFsmEventCoverage` in"
             " test_shadow_engine_coverage.py enforces all 7 event kinds stay reachable."
+            " 0.6.26: automation.py `handle_door_window_open()`'s grace-active branch now"
+            " calls `_nat_vent_may_reactivate()` directly instead of a coarse outdoor-only"
+            " proxy (#655); `door_window_open_response.py`'s `decide_door_open_response()`"
+            " updated to match. `_re_pause_for_open_sensor()`'s nat-vent-reactivation branch"
+            " clears 4 pause fields, not 1 (#657). New `_set_door_window_pause_fields()`"
+            " helper shared by `_pause_for_door_window()` and `_exit_nat_vent()`. New event"
+            ' emit in `_on_grace_expired()`\'s "within planned window" branch. Updated'
+            " golden `issue_637_paused_during_grace_open_fallthrough.json` (re-signed)."
+            " New/extended tests: test_door_window.py"
+            "::TestGracePeriodExpiry::test_door_open_during_grace_coarse_outdoor_ok_real_gate_fails_still_blocked,"
+            " test_resume_from_pause.py"
+            "::TestGraceExpiryRecheck::test_repause_clears_paused_by_door_on_nat_vent_reactivation"
+            " (extended), test_nat_vent_activation.py"
+            "::TestNatVentOutdoorRiseExit::test_outdoor_rises_above_indoor_exits (extended),"
+            " test_grace_refresh_and_band_call.py"
+            "::TestGraceExpiryTriggersRefreshCallback::test_planned_window_path_calls_refresh_callback"
+            " (extended), test_door_window_pure_modules.py (grace-suppression tests"
+            " updated to real-gate semantics), test_door_window_fsm.py::TestFromGrace"
+            " (updated to match)."
+        ),
+    },
+    655: {
+        "version_fixed": "0.6.26",
+        "title": (
+            "A door/window briefly reopened during an active grace period could still"
+            " pause HVAC, defeating the grace period's purpose. Root cause:"
+            " `handle_door_window_open()`'s grace-active branch used a coarse"
+            " outdoor-only proxy check to decide whether to suppress the pause, while a"
+            " stricter, real 4-variable reactivation gate (`_nat_vent_may_reactivate()`)"
+            " was computed independently a few lines later in the same function — the"
+            " two could disagree, letting a 'looks cool enough' outdoor reading fall"
+            " through the grace suppression only to still land on a pause when the real"
+            " gate failed. Fixed by making the grace-active branch share the same real"
+            " gate result the fallthrough already computes, instead of a separate proxy."
+        ),
+        "scope_covered": (
+            "automation.py `handle_door_window_open()`: coarse proxy removed, grace-"
+            "active branch now calls `_nat_vent_may_reactivate()` directly. "
+            "door_window_open_response.py `decide_door_open_response()`: updated to"
+            " test `nat_vent_gate_entered` instead of a separate outdoor/threshold"
+            " comparison. Golden `issue_637_paused_during_grace_open_fallthrough.json`"
+            " re-signed — its final assertion changed from `paused_during_grace` (the"
+            " bug, confirmed with explicit user sign-off) to `resumed` (the fix)."
+        ),
+    },
+    657: {
+        "version_fixed": "0.6.26",
+        "title": (
+            "After a grace period ended with a door/window still open but conditions"
+            " now favoring natural ventilation, `_re_pause_for_open_sensor()`'s 0.6.23"
+            " fix (issue #637 Step 1) cleared only `_paused_by_door`, leaving"
+            " `_paused_with_hvac_already_off`/`_paused_entity`/`_paused_since` stale from"
+            " the earlier pause — unlike the structurally identical branch in"
+            " `check_natural_vent_conditions()`, which clears all 4 fields together."
+            " `_paused_entity`/`_paused_since` only feed diagnostic text (a stale entity"
+            " name and blank elapsed-minutes in the Activity Report's 'Settings' cell);"
+            " `_paused_with_hvac_already_off` feeds real control flow"
+            " (`derive_door_window_lifecycle_state()`'s `PAUSED_ACTIVE`/`PAUSED_IDLE`"
+            " derivation)."
+        ),
+        "scope_covered": (
+            "automation.py `_re_pause_for_open_sensor()`'s nat-vent-reactivation branch"
+            " now clears all 4 fields, matching `check_natural_vent_conditions()`."
+            " Extended test_resume_from_pause.py::TestGraceExpiryRecheck::"
+            "test_repause_clears_paused_by_door_on_nat_vent_reactivation to seed stale"
+            " values and assert all 4 are cleared."
         ),
     },
     633: {

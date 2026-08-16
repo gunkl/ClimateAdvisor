@@ -149,6 +149,8 @@ class TestGraceExpiryTriggersRefreshCallback:
         engine = _minimal_engine()
         refresh_mock = MagicMock()
         engine._request_refresh_callback = refresh_mock
+        events: list[tuple] = []
+        engine._emit_event_callback = lambda name, data: events.append((name, data))
 
         # Make _is_within_planned_window_period return True by patching
         engine._current_classification = MagicMock()
@@ -164,6 +166,11 @@ class TestGraceExpiryTriggersRefreshCallback:
             engine._on_grace_expired(source="manual", duration=1800, should_notify=False)
 
         refresh_mock.assert_called_once()
+        # Shadow-feed completion (door/window Step 3, #637): this was the one
+        # GRACE_TIMER_EXPIRED outcome that never emitted an event at all, leaving the
+        # shadow FSM's tracked state stale for this specific expiry outcome. Reuses
+        # the existing "grace_expired" event type with a distinguishing payload key.
+        assert ("grace_expired", {"source": "manual", "within_planned_window": True, "re_paused": False}) in events
 
     def test_sensor_still_open_path_calls_refresh_callback(self):
         """Re-pause path (sensor still open): callback fires after clearing grace."""

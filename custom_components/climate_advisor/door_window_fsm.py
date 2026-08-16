@@ -69,29 +69,50 @@ decides paused-vs-normal (now correctly reflected in production, per the fix
 above).
 
 **#637 Step 1 closed.** ``_exit_nat_vent()``'s unconditional sensor-still-open pause was
-investigated and verified **benign, not a bug**: the flag is accurate the moment it's
-set, and ``_on_grace_expired()`` already re-derives its decision from live sensor state
-rather than reading ``_paused_by_door``, so it self-corrects regardless of whether grace
-is left running. ``handle_door_window_open()``'s grace-fallthrough (a coarser
-outdoor-only proxy check gating a stricter gate computed later in the same function) is
-a real, independent gap — tracked on its own issue, **#655**, deliberately kept separate
-from this FSM migration since it's unrelated production behavior, not a migration
-blocker. This module continues to mirror both faithfully as-is; #655's resolution (if
-any) will land in production first, same "fix production, then the FSM inherits the fix
-for free" order Step 1's violation #3 already followed.
+investigated and verified **benign, not a bug** with respect to ``_paused_by_door``
+itself: the flag is accurate the moment it's set, and ``_on_grace_expired()`` already
+re-derives its decision from live sensor state rather than reading ``_paused_by_door``,
+so it self-corrects regardless of whether grace is left running.
 
-**Shadow-feed coverage (Issue #594 Phase R Step 1b, v0.6.24).** All 7
-``DoorWindowFsmEventKind`` members now have a real feed path — see
+**#637 Step 3 closed the remaining production gaps.** Three findings from Step 2's
+scoping pass are now fixed in production (not just documented as blockers):
+
+- ``handle_door_window_open()``'s grace-fallthrough (**#655**) — the coarse
+  outdoor-only proxy check has been removed; the grace-active branch now shares the
+  same real ``_nat_vent_may_reactivate()`` gate result used by the nat-vent-vs-pause
+  decision further down the function. This module's ``decide_door_open_response()``
+  already modeled the gate as a caller-resolved boolean input
+  (``nat_vent_gate_entered``), so no change was needed here — production simply now
+  passes it the real gate result on the grace path too, closing the prior divergence.
+- ``_re_pause_for_open_sensor()``'s incomplete field-clear (**#657**) — the
+  nat-vent-reactivation branch now clears ``_paused_with_hvac_already_off``/
+  ``_paused_entity``/``_paused_since`` alongside ``_paused_by_door``, matching the
+  sibling branches in ``check_natural_vent_conditions()``.
+- ``_exit_nat_vent()``'s sensor-still-open branch write-shape divergence — it used to
+  write only ``_paused_by_door``/``_pre_pause_mode``, omitting the same 3 fields
+  #657 fixed above. Both branches now go through a shared
+  ``_set_door_window_pause_fields()`` helper (one definition, not two hand-copies).
+  This closes the previously-documented risk to the ``ALL_SENSORS_CLOSED`` transition
+  below: ``_paused_with_hvac_already_off`` (which determines ``PAUSED_ACTIVE`` vs.
+  ``PAUSED_IDLE``) can no longer go stale from this branch.
+
+**Shadow-feed coverage (Issue #594 Phase R Step 1b, v0.6.24; residual closed in
+Step 3).** All 7 ``DoorWindowFsmEventKind`` members have a real feed path — see
 ``coordinator.py``'s ``_DOOR_WINDOW_FSM_EVENT_KINDS``/
 ``_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS``/``_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES``.
-**One accepted residual**: ``_on_grace_expired()``'s "within planned window" branch
-(automation.py, the first branch — windows recommended, sensor open is expected) emits
-no event at all, so that specific grace-expiry outcome does not feed
-``GRACE_TIMER_EXPIRED`` this increment — the shadow FSM's tracked state simply doesn't
-advance for that one case until the next event that does feed it. Explicit scope
-boundary, not a silent gap: if this needs closing before Step 2, it requires either a
-new emitted event on that branch or a bespoke direct callback (same shape as
-``_feed_override_grace_fsm_cancelled()``'s exception in override_grace_fsm.py).
+Step 1b's one documented residual — ``_on_grace_expired()``'s "within planned window"
+branch (automation.py, the first branch — windows recommended, sensor open is
+expected) previously emitted no event at all — is now closed: that branch emits
+``"grace_expired"`` (the same event type its sibling branches already use, with a
+``within_planned_window=True`` payload key to distinguish it from a real sensor
+re-check), so ``GRACE_TIMER_EXPIRED`` is now fed from all 3 of
+``_on_grace_expired()``'s outcome branches.
+
+**Remaining before this FSM can be authoritative for all 7 methods (Step 3b)**:
+``_re_pause_for_open_sensor()`` still needs to know whether it was reached from
+``GRACE`` or ``PAUSED_DURING_GRACE`` (a signature/plumbing change, not a body swap) —
+none of the Step 3 fixes above changed that. See the plan tracked on #637/#594 for the
+Step 3b scope.
 
 **Cross-lifecycle inputs.** ``natural_vent_active`` and ``whf_owns_hvac`` are
 state *reads* from other lifecycles (Issue #631's "communicating automata"

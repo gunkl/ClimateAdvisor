@@ -75,13 +75,10 @@ def decide_door_open_response(inputs: DoorOpenResponseInputs) -> DoorOpenRespons
     if inputs.paused_by_door:
         return DoorOpenResponse.ALREADY_PAUSED_NOOP
 
-    if inputs.grace_active:
-        threshold = inputs.comfort_cool + inputs.nat_vent_delta
-        outdoor_cool_enough = inputs.outdoor is not None and inputs.outdoor < threshold
-        if not outdoor_cool_enough:
-            return DoorOpenResponse.GRACE_SUPPRESSED
-        # else: outdoor cool enough — fall through to the same chain below,
-        # matching production's `pass  # outdoor cool enough — fall through`.
+    if inputs.grace_active and not inputs.nat_vent_gate_entered:
+        return DoorOpenResponse.GRACE_SUPPRESSED
+    # else (grace_active and gate entered): real reactivation gate says viable —
+    # fall through to the same chain below, matching production's fallthrough.
 
     if inputs.within_planned_window:
         return DoorOpenResponse.PLANNED_WINDOW_NOOP

@@ -1,14 +1,14 @@
 {
   "name": "issue_637_paused_during_grace_open_fallthrough",
-  "description": "Confirms the door/window pause FSM's new PAUSED_DURING_GRACE composite state is genuinely reachable in production, not just a static-trace hypothesis (Issue #637, Block 5 Phase 2). Sensor opens while hot (pauses HVAC), closes (resumes + starts a 10-min automation grace period), a cool front moves in, then the sensor reopens while grace is STILL active. handle_door_window_open()'s grace guard only suppresses when outdoor is too warm to nat-vent — with outdoor now cool, it falls through past the guard, but the nat-vent gate itself fails (indoor has not risen above comfort_heat), so _pause_for_door_window() fires with _grace_active never cleared. Occupant impact: HVAC pauses correctly (a door is genuinely open), but the system is left in an undocumented flag combination (paused + grace both active) that the pre-FSM code has no name for — this scenario proves the FSM's new composite state matches what production actually does here, not a hypothetical.",
+  "description": "Confirms grace periods genuinely hold through this exact fallthrough path in production, not just as a static-trace hypothesis (Issue #637/#655, Block 5 Phase R Step 3). Sensor opens while hot (pauses HVAC), closes (resumes + starts a 10-min automation grace period), a cool front moves in, then the sensor reopens while grace is STILL active. Before the #655 fix, handle_door_window_open()'s grace guard only suppressed the pause using a coarse outdoor-only proxy -- when outdoor looked cool enough, execution fell through past the guard to the real (indoor-and-outdoor) nat-vent gate, and if THAT gate then failed, the fallthrough paused HVAC anyway, silently defeating the grace period the occupant was just given. The #655 fix makes the grace guard share the same real gate result the fallthrough already computes, so a reopen during grace that the real gate says isn't nat-vent-viable now correctly stays suppressed -- HVAC keeps running, uninterrupted, exactly as a 'grace period' should behave. Occupant impact: before the fix, briefly reopening a door mid-grace-window could pause the AC/heat anyway; after the fix, it can't.",
   "source": "synthetic",
   "issue": 637,
   "notes": [
-    "Exercises violation path #1 from the Phase 2 plan's five-whys analysis: handle_door_window_open()'s `if self._grace_active:` guard (automation.py ~L2823) only suppresses the pause when outdoor is too warm for nat-vent; when outdoor is cool enough to fall through, execution reaches _pause_for_door_window() with grace still active if the nat-vent gate itself then fails (here: indoor has not risen above comfort_heat).",
+    "Exercises the exact fallthrough path #655 was filed against: handle_door_window_open()'s `if self._grace_active:` guard (automation.py ~L2889) now shares the same real _nat_vent_may_reactivate() gate result the nat-vent-vs-pause decision further down the function uses, instead of a coarse outdoor-only proxy. When that shared gate fails, the grace-active branch returns immediately (not pausing) rather than falling through to a second, independently-computed gate that could disagree.",
     "use_coordinator=true so the real _async_door_window_changed listener drives debounce/pause/resume/grace exactly as production does (sensor_debounce_seconds default is 0 in the harness, so debounce is effectively instant).",
-    "comfort_heat=72 (unusually high) is deliberate: at the 13:14 reopen, indoor=71 is BELOW comfort_heat=72, so decide_nat_vent_gate()'s floor check (indoor > comfort_heat) fails even though outdoor(60) is otherwise nat-vent-favorable (cool, below threshold) -- this is what forces the fall-through to land on PAUSE instead of nat-vent activation.",
-    "automation_grace_seconds=600 (10 min) gives enough room between the 13:00 resume and the 13:14 reopen for grace to still be active (expires 13:10).",
-    "Assertion at 13:14 uses the new 'paused_during_grace' custom assertion type (tools/sim_harness/outcomes.py), which reads the production engine's final _paused_by_door AND _grace_active flags directly -- the same evidence-based pattern the existing 'paused_by_door' assertion type already uses, extended to check both flags at once."
+    "comfort_heat=72 (unusually high) is deliberate: at the 13:07 reopen, indoor=71 is BELOW comfort_heat=72, so decide_nat_vent_gate()'s floor check (indoor > comfort_heat) fails even though outdoor(60) is otherwise nat-vent-favorable (cool, below threshold) -- this is exactly the shape of disagreement the old coarse proxy could miss, and the fixed shared-gate check correctly still suppresses on.",
+    "automation_grace_seconds=600 (10 min) gives enough room between the 13:00 resume and the 13:07 reopen for grace to still be active (expires 13:10).",
+    "Before the #655 fix, this scenario's final assertion was 'paused_during_grace' (the bug: HVAC paused anyway, grace silently defeated). It is now 'resumed' (the fix: grace holds, no pause) -- updated 2026-08-16 with explicit user sign-off per the Golden Simulation Test Policy, since #655's fix is what this scenario now exists to prove."
   ],
   "use_coordinator": true,
   "skip_startup_coalesce": true,
@@ -62,7 +62,7 @@
       "time": "2026-08-14T13:07:00",
       "type": "sensor_open",
       "entity": "binary_sensor.back_door",
-      "note": "Door reopens at 13:07, while the 13:00 grace period is still active (expires 13:10). Grace's own outdoor-too-warm guard does NOT suppress (60F < 77F threshold) -- falls through. Nat-vent gate then fails (indoor 71F is not > comfort_heat 72F), so the fall-through lands on a pause with grace still active: PAUSED_DURING_GRACE."
+      "note": "Door reopens at 13:07, while the 13:00 grace period is still active (expires 13:10). The real reactivation gate (outdoor 60F is favorable, but indoor 71F is not above comfort_heat 72F) fails, so the grace guard now correctly suppresses -- grace holds, HVAC stays resumed, no pause."
     },
     {
       "time": "2026-08-14T13:08:00",
@@ -87,8 +87,8 @@
     },
     {
       "at": "2026-08-14T13:08:00",
-      "expect": "paused_during_grace",
-      "reason": "Sensor reopens while grace is still active. Outdoor is cool enough to fall through the grace guard, but the nat-vent gate fails on the indoor-vs-comfort_heat floor check, so the fall-through pauses HVAC without ever clearing the still-active grace period -- production genuinely reaches _paused_by_door=True AND _grace_active=True simultaneously (Issue #637's confirmed-reachable PAUSED_DURING_GRACE state).",
+      "expect": "resumed",
+      "reason": "Sensor reopens while grace is still active. The real reactivation gate fails (indoor 71F is not above comfort_heat 72F, even though outdoor 60F is otherwise favorable) -- the #655 fix means the grace guard shares this same gate result, so it suppresses the pause instead of falling through to it. HVAC stays resumed through the entire grace window, honoring the grace period's purpose.",
       "track": "integration"
     }
   ]

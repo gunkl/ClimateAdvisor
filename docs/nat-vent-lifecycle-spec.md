@@ -13,7 +13,7 @@
 | What happens when nat-vent exits and the sensor is still open — pause or grace? | `_exit_nat_vent()` forks: sensor still open → hands off into the pause lifecycle; sensors closed → hands off into the grace lifecycle. See `grace-periods-spec.md` for what happens next in either lifecycle. | [Handoff to Pause/Grace](#handoff-to-pausegrace) |
 | How was this spec's accuracy verified? | Differential replay: `derive_nat_vent_lifecycle_state()` run against the real final engine flags from all 74 golden + 4 pending scenarios (Issue #606), plus 3 hand-reasoned ground-truth scenarios. | [Verification](#verification) |
 | Is every `_exit_nat_vent()` call site's lockout-arming decision enforced, not just documented? | Yes — `tests/test_nat_vent_exit_lockout_coverage.py` AST-scans every call site and requires each to be explicitly classified `"arms lockout"` / `"exempted: <reason>"`, with a positive control that checks the claim against the actual `set_outdoor_exit_time=True` argument (Issue #641). | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
-| Is there a hard floor on how fast CA can physically toggle the fan, independent of any exit/reactivation logic? | Yes — `AutomationEngine._fan_toggle_rate_limited()` (Issue #641), a defense-in-depth backstop inside `_activate_fan()`/`_deactivate_fan()`: any reversal within `FAN_MIN_TOGGLE_INTERVAL_S` (300s) of CA's own last real toggle command is suppressed, logged at WARNING, and raised as a proactive `fan_rapid_cycling` incident (`docs/incident-classes.md`). Never affects genuine user/RF-remote fan actions. | [Incident: WHF fast-cycling](#incident-whf-fast-cycling-proactive-floor-exit-vs-instant-reactivation-issue-641) |
+| Is there a hard floor on how fast CA can physically toggle the fan, independent of any exit/reactivation logic? | Yes — `AutomationEngine._fan_toggle_rate_limited()` (Issue #641), a defense-in-depth backstop inside `_activate_fan()`/`_deactivate_fan()`: any reversal within `FAN_MIN_TOGGLE_INTERVAL_S` (300s) of CA's own last real toggle command is suppressed and logged at INFO (a repeat block within the same deferral window logs at DEBUG only, Issue #649). No longer raised as an incident — Issue #649 removed `fan_rapid_cycling`, since a blocked-and-deferred toggle is the floor working correctly, not an anomaly; it's surfaced via an accurate Activity Report event payload and a WHF status-card suffix instead. Never affects genuine user/RF-remote fan actions. | [Follow-up: rate-limit reporting](#follow-up-rate-limit-reporting-was-misleading-and-mis-framed-as-an-incident-issue-649) |
 | Does `check_natural_vent_conditions()`'s exit chain always decide WHY a session ends? | No — confirmed by direct experiment (Issue #608): `nat_vent_temperature_check()` and `fan_thermostat_check()` (both dispatched from the same `temp_update`/thermostat-attribute-change trigger, both already pure-extracted by Issue #441) run FIRST and independently implement equivalent comfort-floor and outdoor-rise-style stops — they win the race and exit the session before `check_natural_vent_conditions()`'s chain ever evaluates, for every golden scenario tested. | [Known Duplicate-Logic Race](#known-duplicate-logic-race-issue-608-finding) |
 | Has a shadow engine instance been proven safe to construct alongside production, offline? | Yes — `tools/sim_harness/shadow_engine_pair.py` (Issue #611) proves, across 60 offline-eligible golden+pending scenarios, that a dry_run=True shadow instance never issues a real action AND never changes what production itself does. | [Offline Whole-Engine Shadow-Pair Validation](#offline-whole-engine-shadow-pair-validation-issue-611-subtask-o) |
 | Is there a real, live shadow engine running inside the coordinator today, and is its coverage complete? | Yes to both — `coordinator.shadow_automation_engine` (Issue #613), permanently `dry_run=True`, mirrors all 13 real nat-vent entry points, the 3 input-data attributes they depend on (Issue #615), and the 7 grace/override lifecycle-gate fields plus companions (Issue #631) — enforced by an AST-based coverage registry test so new gaps can't ship silently. Zero occupant/HVAC impact; surfaced via a diagnostic sensor, not any Status-tab card. | [Live Shadow Engine](#live-shadow-engine-issue-613-subtask-q) |
@@ -218,6 +218,57 @@ exit reason added later without a classification fails immediately. Separately,
 durations at the same 300s minimum — a configured value outside roughly [5, 55]
 minutes would otherwise schedule its own off/on command inside the rate-limit window,
 stranding the fan far longer than the configured cycle intended.
+
+### Follow-up: rate-limit reporting was misleading and mis-framed as an incident (Issue #649)
+
+Live logs confirmed the #641 floor itself works correctly — a real production window
+showed a clean, unbroken 5-min-on/5-min-off cadence. But reviewing the Activity Report
+for one of those blocked toggles surfaced three reporting defects, all pre-existing
+architecture exposed (not caused) by #641's rate limiter:
+
+1. **A blocked toggle was reported as if it physically happened.** Every nat-vent exit
+   branch (`nat_vent_predicted_floor_exit`, `nat_vent_comfort_floor_exit`,
+   `fan_deactivated`, etc.) built its Activity Report event **before** calling
+   `_exit_nat_vent()` → `_deactivate_fan()`/`_activate_fan()`, with no way to know
+   whether the toggle actually executed or was silently swallowed by
+   `_fan_toggle_rate_limited()`. This pattern predates #641 — before the rate limiter
+   existed, "decided" and "physically executed" were always the same instant, so no
+   caller needed to distinguish them.
+2. **The same blocked moment produced multiple rows.** Two independent mechanisms: (a)
+   two decision paths (e.g. `check_natural_vent_conditions()`'s `PROACTIVE_FLOOR` and
+   `fan_thermostat_check()`'s comfort-floor check) can notice the same condition in the
+   same tick, and (b) `fan_thermostat_check()` re-runs on every subsequent
+   temperature-change tick while the fan is still physically on but blocked — each
+   retry independently re-decided and re-triggered the limiter.
+3. **`incident_detected`/`fan_rapid_cycling` mischaracterized correct behavior** — the
+   floor blocking a too-soon toggle is the protection working, not an anomaly.
+
+**Fix, centralized rather than repeated per call site**: `_exit_nat_vent()` gained
+`event_type`/`event_payload` kwargs and now performs the toggle first, then emits the
+caller's event itself with `fan_mode_change` reflecting the real
+`FanCommandResult` — unchanged when executed, a `"deferred (5-min floor, applies
+HH:MM:SS)"` description when newly rate-limited, and not emitted at all for a
+duplicate block within an already-reported deferral window.
+`_fan_toggle_rate_limited()` now tracks `_fan_rate_limited_direction` alongside
+`_fan_rate_limited_until` so it can recognize "this is the same pending window as
+last time" — the single change that fixes both duplicate-report mechanisms above,
+since both funnel through this one function. `_activate_fan()`/`_deactivate_fan()`
+log an INFO "5-minute floor expired — applying deferred exit/activation" line when a
+previously-blocked command finally lands, ahead of the pre-existing (unchanged,
+WARNING) "Activated/Deactivated fan" line — deferred completion is normal operation,
+not a fault, so it doesn't get an elevated severity. `incident_detected`/
+`fan_rapid_cycling` was removed entirely (`docs/incident-classes.md`); the first block
+in a deferral window now logs at INFO instead of WARNING. `_whf_rate_limit_suffix()`
+was reworded from the vague `"(rate-limited Xs ago)"` to `"(<on/off> pending — 5-min
+floor, applies at HH:MM:SS)"`.
+
+No change to the #641 floor/lockout mechanism itself, no change to any event *type*
+(only payload content — the shadow-FSM re-evaluation triggers keyed on these event
+types in `coordinator.py` are unaffected), and no frontend changes (the renderers in
+`ai_skills_context.py` were already payload-driven for the nat-vent-specific event
+types; `_render_fan_activated`/`_render_fan_deactivated` gained a small
+`fan_mode_change`-override fallback since, unlike their nat-vent-specific siblings,
+they previously hardcoded the state-transition text unconditionally).
 
 ## Code Reference
 

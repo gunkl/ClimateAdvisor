@@ -13,7 +13,7 @@ import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from custom_components.climate_advisor.automation import AutomationEngine
+from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult
 from custom_components.climate_advisor.const import (
     CONF_FAN_ENTITY,
     CONF_FAN_MODE,
@@ -60,8 +60,9 @@ def _get_service_calls(engine, domain: str, service: str) -> list:
 
 
 class TestFanToggleRateLimitSuppression:
-    """A reversal within the cooldown window must be suppressed, logged, and
-    flagged as a fan_rapid_cycling incident — never silent."""
+    """A reversal within the cooldown window must be suppressed and logged at INFO —
+    never silent, but also never framed as an incident (Issue #649: a blocked-and-
+    deferred toggle is the backstop working correctly, not an anomaly)."""
 
     def test_reactivate_within_window_is_suppressed(self):
         """Fan turned on, legitimately deactivated after the cooldown has elapsed
@@ -89,18 +90,19 @@ class TestFanToggleRateLimitSuppression:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         with patch(_DT_NOW_PATH, return_value=t2), patch("custom_components.climate_advisor.automation._LOGGER") as log:
-            asyncio.run(engine._activate_fan(reason="reactivation attempt"))
+            result = asyncio.run(engine._activate_fan(reason="reactivation attempt"))
 
         assert engine._fan_active is False, "rate limit must suppress the reactivation"
         assert len(_get_service_calls(engine, "fan", "turn_on")) == 1, "no second turn_on call issued"
-        log.warning.assert_called_once()
-        assert "rate limit" in log.warning.call_args.args[0].lower()
+        assert result is FanCommandResult.RATE_LIMITED_NEW
+        log.info.assert_called_once()
+        assert "rate limit" in log.info.call_args.args[0].lower()
+        log.warning.assert_not_called()
 
-        incidents = [e for e in events if e[0] == "incident_detected"]
-        assert len(incidents) == 1
-        assert incidents[0][1]["incident_class"] == "fan_rapid_cycling"
-        assert incidents[0][1]["attempted_action"] == "activate"
-        assert incidents[0][1]["min_interval_s"] == FAN_MIN_TOGGLE_INTERVAL_S
+        assert not any(e[0] == "incident_detected" for e in events), (
+            "a blocked-and-deferred toggle must never be reported as an incident (Issue #649)"
+        )
+        assert engine._fan_rate_limited_direction == "activate"
 
     def test_deactivate_within_window_is_suppressed(self):
         """Symmetric case: activate, then a too-soon deactivate attempt is suppressed."""
@@ -114,12 +116,13 @@ class TestFanToggleRateLimitSuppression:
         events: list[tuple] = []
         engine._emit_event_callback = lambda name, payload: events.append((name, payload))
         with patch(_DT_NOW_PATH, return_value=t1):
-            asyncio.run(engine._deactivate_fan(reason="too-soon exit attempt"))
+            result = asyncio.run(engine._deactivate_fan(reason="too-soon exit attempt"))
 
         assert engine._fan_active is True, "rate limit must suppress the too-soon deactivation"
         assert len(_get_service_calls(engine, "fan", "turn_off")) == 0
-        incidents = [e for e in events if e[0] == "incident_detected"]
-        assert incidents[0][1]["attempted_action"] == "deactivate"
+        assert result is FanCommandResult.RATE_LIMITED_NEW
+        assert not any(e[0] == "incident_detected" for e in events)
+        assert engine._fan_rate_limited_direction == "deactivate"
 
     def test_suppression_sets_fan_rate_limited_until(self):
         """_fan_rate_limited_until is set to command_time + interval — the field the
@@ -134,6 +137,77 @@ class TestFanToggleRateLimitSuppression:
             asyncio.run(engine._deactivate_fan(reason="suppressed"))
 
         assert engine._fan_rate_limited_until == t0 + timedelta(seconds=FAN_MIN_TOGGLE_INTERVAL_S)
+
+
+class TestFanToggleRateLimitDedup:
+    """A repeat block within the same already-reported deferral window must be a
+    silent (DEBUG-only) duplicate — the two duplicate-report mechanisms Issue #649
+    found: two decision paths racing in the same tick, and fan_thermostat_check()
+    re-deciding on every subsequent retry tick while still blocked."""
+
+    def test_second_block_in_same_window_is_a_silent_duplicate(self):
+        engine = _make_engine()
+        t0 = datetime(2026, 8, 15, 9, 29, 0)
+        with patch(_DT_NOW_PATH, return_value=t0):
+            asyncio.run(engine._activate_fan(reason="initial activation"))
+
+        t1 = t0 + timedelta(seconds=180)
+        with (
+            patch(_DT_NOW_PATH, return_value=t1),
+            patch("custom_components.climate_advisor.automation._LOGGER") as log1,
+        ):
+            first_result = asyncio.run(engine._deactivate_fan(reason="first decision path"))
+        assert first_result is FanCommandResult.RATE_LIMITED_NEW
+        log1.info.assert_called_once()
+
+        # A second, independent decision path re-evaluates 5s later (matches the
+        # observed same-tick race) — must be recognized as the same pending window.
+        t2 = t1 + timedelta(seconds=5)
+        with (
+            patch(_DT_NOW_PATH, return_value=t2),
+            patch("custom_components.climate_advisor.automation._LOGGER") as log2,
+        ):
+            second_result = asyncio.run(engine._deactivate_fan(reason="second decision path, same tick"))
+        assert second_result is FanCommandResult.RATE_LIMITED_DUP
+        log2.info.assert_not_called()
+        log2.debug.assert_called_once()
+        assert "already deferred" in log2.debug.call_args.args[0].lower()
+
+        # A further retry tick, still within the window, is also a silent duplicate.
+        t3 = t1 + timedelta(seconds=90)
+        with (
+            patch(_DT_NOW_PATH, return_value=t3),
+            patch("custom_components.climate_advisor.automation._LOGGER") as log3,
+        ):
+            third_result = asyncio.run(engine._deactivate_fan(reason="retry tick"))
+        assert third_result is FanCommandResult.RATE_LIMITED_DUP
+        log3.info.assert_not_called()
+
+    def test_completion_logs_deferred_application_at_info_not_warning(self):
+        """Once the floor clears, the real toggle applies — Issue #649: this is normal,
+        expected operation, so it gets an INFO context line, not an elevated severity."""
+        engine = _make_engine()
+        t0 = datetime(2026, 8, 15, 9, 29, 0)
+        with patch(_DT_NOW_PATH, return_value=t0):
+            asyncio.run(engine._activate_fan(reason="initial activation"))
+
+        t1 = t0 + timedelta(seconds=180)
+        with patch(_DT_NOW_PATH, return_value=t1):
+            asyncio.run(engine._deactivate_fan(reason="blocked"))
+        assert engine._fan_active is True
+
+        t2 = t0 + timedelta(seconds=FAN_MIN_TOGGLE_INTERVAL_S + 1)
+        with patch(_DT_NOW_PATH, return_value=t2), patch("custom_components.climate_advisor.automation._LOGGER") as log:
+            result = asyncio.run(engine._deactivate_fan(reason="floor cleared"))
+
+        assert result is FanCommandResult.EXECUTED
+        assert engine._fan_active is False
+        assert engine._fan_rate_limited_until is None
+        info_messages = [c.args[0] for c in log.info.call_args_list]
+        assert any("floor expired" in m.lower() for m in info_messages), (
+            "the deferred-completion context must be its own INFO line, not folded into"
+            " the pre-existing (unchanged) WARNING 'Deactivated fan' line"
+        )
 
 
 class TestFanToggleRateLimitAllowsSpacedToggles:

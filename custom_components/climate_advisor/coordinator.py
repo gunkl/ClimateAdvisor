@@ -131,7 +131,6 @@ from .const import (
     ECONOMIZER_MORNING_END_HOUR,
     ECONOMIZER_TEMP_DELTA,
     EVENT_LOG_CAP,
-    FAN_MIN_TOGGLE_INTERVAL_S,
     FAN_MODE_BOTH,
     FAN_MODE_DISABLED,
     FAN_MODE_HVAC,
@@ -8073,19 +8072,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return status + self._whf_rate_limit_suffix(ae)
 
     def _whf_rate_limit_suffix(self, ae: AutomationEngine) -> str:
-        """Append '(rate-limited Xs ago)' to the WHF status while a toggle is still
-        within the Issue #641 cooldown window — Status Card Ontology rule: extend the
-        existing card's value string, don't add a new one. Returns "" once the cooldown
-        has elapsed; never raises on a mocked/partial engine (isinstance guard, matching
-        _format_grace_remaining()'s existing defensive pattern for the same reason)."""
+        """Append '(<direction> pending — 5-min floor, applies at HH:MM:SS)' to the WHF
+        status while a toggle is still deferred by the Issue #641 cooldown — Status Card
+        Ontology rule: extend the existing card's value string, don't add a new one.
+        Returns "" once the cooldown has elapsed; never raises on a mocked/partial engine
+        (isinstance guard, matching _format_grace_remaining()'s existing defensive pattern
+        for the same reason).
+
+        Issue #649: reworded from the original "(rate-limited Xs ago)", which didn't say
+        what was pending or when it would resolve — this names the direction (using the
+        same "activate"/"deactivate" strings _fan_toggle_rate_limited() already tracks)
+        and the exact clock time the deferred toggle will apply.
+        """
         until = getattr(ae, "_fan_rate_limited_until", None)
         if not isinstance(until, datetime):
             return ""
         remaining = (until - dt_util.now()).total_seconds()
         if remaining <= 0:
             return ""
-        suppressed_ago = FAN_MIN_TOGGLE_INTERVAL_S - remaining
-        return f" (rate-limited {suppressed_ago:.0f}s ago)"
+        direction = getattr(ae, "_fan_rate_limited_direction", None)
+        pending = "on" if direction == "activate" else "off"
+        return f" ({pending} pending — 5-min floor, applies at {until.strftime('%H:%M:%S')})"
 
     def _compute_hvac_fan_status(self) -> str | None:
         """Return HVAC-fan-blower-specific status, or None when HVAC fan is not configured.

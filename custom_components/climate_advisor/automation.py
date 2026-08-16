@@ -12,6 +12,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from homeassistant.core import Context, HomeAssistant, callback
@@ -136,6 +137,26 @@ from .temperature import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class FanCommandResult(Enum):
+    """Outcome of an `_activate_fan()`/`_deactivate_fan()` call (Issue #649).
+
+    Every early-return guard inside those two functions previously returned bare
+    `None`, giving callers no way to tell "a real command was issued" apart from any
+    of the several no-op reasons. That distinction matters once a command can be
+    silently deferred by the Issue #641 rate limiter for up to 5 minutes: callers that
+    build their own Activity Report event (the nat-vent exit branches) need it to avoid
+    reporting a state transition that hasn't happened yet.
+    """
+
+    EXECUTED = "executed"
+    ALREADY_IN_STATE = "already_in_state"
+    RATE_LIMITED_NEW = "rate_limited_new"
+    RATE_LIMITED_DUP = "rate_limited_dup"
+    OVERRIDDEN = "overridden"
+    DISABLED = "disabled"
+
 
 # Issue #530: the ONLY two `_start_grace_period(trigger=...)` values that mean "this grace
 # exists to protect an active manual/fan override" — read by `_start_grace_period()` to set
@@ -693,6 +714,11 @@ class AutomationEngine:
         # no toggle is currently suppressed. Status-tab surfacing only, not read by any
         # decision path — mirrors the pattern of other diagnostic-only fields.
         self._fan_rate_limited_until: datetime | None = None
+        # Issue #649: the direction ("activate"/"deactivate") the pending deferral above
+        # is for — lets the status card and dedup guard describe what's actually pending
+        # instead of just "something is rate-limited". None whenever
+        # _fan_rate_limited_until is None.
+        self._fan_rate_limited_direction: str | None = None
         # Issue #482: id of the HA Context CA attached to its most recent outgoing WHF
         # fan-entity service call (see _command_whf_control_entity). When the resulting
         # state-changed Event's own event.context.id (or parent_id) matches this value,
@@ -3368,9 +3394,13 @@ class AutomationEngine:
                     )
                     self._natural_vent_active = False
                     self._nat_vent_soft_start = False
-                    await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
+                    _away_ceiling_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode)")
                     # Do NOT pause -- just let away setback handle HVAC
-                    if self._emit_event_callback:
+                    # Issue #649: skip emitting a duplicate report for a repeat block within
+                    # an already-reported deferral window (same reasoning as _exit_nat_vent()'s
+                    # centralized handling — this branch doesn't route through that function,
+                    # since away-mode ceiling exit intentionally has no pause/grace machinery).
+                    if self._emit_event_callback and _away_ceiling_result is not FanCommandResult.RATE_LIMITED_DUP:
                         self._emit_event_callback(
                             "nat_vent_away_ceiling_exit",
                             {
@@ -3391,23 +3421,6 @@ class AutomationEngine:
                         time_to_floor,
                         MIN_VIABLE_NAT_VENT_HOURS,
                     )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_predicted_floor_exit",
-                            {
-                                "time_to_floor_hr": round(time_to_floor, 2),
-                                "indoor_temp": round(indoor, 1),
-                                "comfort_heat": round(comfort_heat_now, 1),
-                                "k_passive": round(k_passive, 4),
-                                "fan_mode_change": "on→auto",
-                                "fan_device": _fan_device_label(self.config),
-                                "hvac_mode_restored": (
-                                    self._current_classification.hvac_mode
-                                    if self._current_classification
-                                    else "unknown"
-                                ),
-                            },
-                        )
                     # Issue #641: set_outdoor_exit_time=True — without this, a monitored
                     # sensor left open hands this exit straight into the _paused_by_door
                     # reactivation block below with no lockout armed. Since the instant
@@ -3418,6 +3431,12 @@ class AutomationEngine:
                     # immediate reactivation, another proactive exit, and a repeating
                     # on/off flip-flop (the WHF fast-cycling incident). Arming the same
                     # lockout the outdoor-rise exit already uses closes this gap.
+                    #
+                    # Issue #649: event emission moved into _exit_nat_vent() itself (via
+                    # event_type/event_payload) instead of firing here unconditionally —
+                    # centralizes the "was this actually executed or deferred by the #641
+                    # rate limiter" check in one place instead of repeating it at every
+                    # exit-reason branch.
                     await self._exit_nat_vent(
                         reason=(
                             f"nat-vent proactive floor exit: indoor {indoor:.1f}°F"
@@ -3425,6 +3444,18 @@ class AutomationEngine:
                             f" in {time_to_floor:.2f}h"
                         ),
                         set_outdoor_exit_time=True,
+                        event_type="nat_vent_predicted_floor_exit",
+                        event_payload={
+                            "time_to_floor_hr": round(time_to_floor, 2),
+                            "indoor_temp": round(indoor, 1),
+                            "comfort_heat": round(comfort_heat_now, 1),
+                            "k_passive": round(k_passive, 4),
+                            "fan_mode_change": "on→auto",
+                            "fan_device": _fan_device_label(self.config),
+                            "hvac_mode_restored": (
+                                self._current_classification.hvac_mode if self._current_classification else "unknown"
+                            ),
+                        },
                     )
                     return
 
@@ -3434,11 +3465,6 @@ class AutomationEngine:
                         outdoor,
                         indoor,
                     )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_outdoor_rise_exit",
-                            {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
-                        )
                     # set_outdoor_exit_time=True: the original exit reason this lockout was
                     # built for (Issue #115/#411). Issue #641 later extended the same
                     # treatment to PROACTIVE_FLOOR and CEILING_THRESHOLD above/below, once
@@ -3446,6 +3472,12 @@ class AutomationEngine:
                     await self._exit_nat_vent(
                         reason=(f"nat vent exit: outdoor {outdoor:.1f}°F > indoor {indoor:.1f}°F — airflow reversed"),
                         set_outdoor_exit_time=True,
+                        event_type="nat_vent_outdoor_rise_exit",
+                        event_payload={
+                            "outdoor": outdoor,
+                            "indoor": indoor,
+                            "fan_device": _fan_device_label(self.config),
+                        },
                     )
                     return
 
@@ -3669,25 +3701,22 @@ class AutomationEngine:
                     current_temp,
                     _hard_floor,
                 )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_comfort_floor_exit",
-                        {
-                            "indoor_temp": current_temp,
-                            "comfort_heat": _hard_floor,
-                            "source": "temp_check",
-                            "fan_device": _fan_device_label(self.config),
-                            "fan_mode_change": "on→auto",
-                            "hvac_mode_restored": (
-                                self._current_classification.hvac_mode if self._current_classification else "unknown"
-                            ),
-                        },
-                    )
                 await self._exit_nat_vent(
                     reason=(
                         f"nat-vent hard floor exit [{_context}]: indoor {current_temp:.1f}°F"
                         f" ≤ floor {_hard_floor:.1f}°F"
-                    )
+                    ),
+                    event_type="nat_vent_comfort_floor_exit",
+                    event_payload={
+                        "indoor_temp": current_temp,
+                        "comfort_heat": _hard_floor,
+                        "source": "temp_check",
+                        "fan_device": _fan_device_label(self.config),
+                        "fan_mode_change": "on→auto",
+                        "hvac_mode_restored": (
+                            self._current_classification.hvac_mode if self._current_classification else "unknown"
+                        ),
+                    },
                 )
                 return
 
@@ -3875,14 +3904,11 @@ class AutomationEngine:
                 True,
                 f"stop:{stop_reason}",
             )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "nat_vent_outdoor_rise_exit",
-                    {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
-                )
             await self._exit_nat_vent(
                 reason=f"nat vent exit (fast loop): {stop_reason}",
                 set_outdoor_exit_time=True,
+                event_type="nat_vent_outdoor_rise_exit",
+                event_payload={"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
             )
             return
 
@@ -3913,21 +3939,20 @@ class AutomationEngine:
             # genuinely was; otherwise emit the same generic event _deactivate_fan() itself
             # would have (test_stops_non_natvent_fan_without_natvent_event).
             _was_nat_vent = self._natural_vent_active
-            if self._emit_event_callback:
-                if _was_nat_vent:
-                    self._emit_event_callback(
-                        "nat_vent_outdoor_rise_exit",
-                        {"outdoor": outdoor, "indoor": indoor, "fan_device": _fan_device_label(self.config)},
-                    )
-                else:
-                    self._emit_event_callback(
-                        "fan_deactivated",
-                        {
-                            "reason": f"fan thermostat check — {stop_reason}",
-                            "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-                            "fan_device": _fan_device_label(self.config),
-                        },
-                    )
+            if _was_nat_vent:
+                _event_type = "nat_vent_outdoor_rise_exit"
+                _event_payload: dict[str, Any] = {
+                    "outdoor": outdoor,
+                    "indoor": indoor,
+                    "fan_device": _fan_device_label(self.config),
+                }
+            else:
+                _event_type = "fan_deactivated"
+                _event_payload = {
+                    "reason": f"fan thermostat check — {stop_reason}",
+                    "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+                    "fan_device": _fan_device_label(self.config),
+                }
             # Issue #641: same treatment as STOP_VIA_NAT_VENT_EXIT above and
             # check_natural_vent_conditions()'s OUTDOOR_RISE exit — this branch's own
             # docstring already documents it as "the exact same boundary condition,"
@@ -3937,6 +3962,8 @@ class AutomationEngine:
             await self._exit_nat_vent(
                 reason=f"fan thermostat check — {stop_reason}",
                 set_outdoor_exit_time=True,
+                event_type=_event_type,
+                event_payload=_event_payload,
             )
             return
 
@@ -3975,30 +4002,29 @@ class AutomationEngine:
         # cycling) — only label the event nat-vent-specific when one genuinely was active,
         # mirroring the same distinction made for STOP_DEACTIVATE above.
         _was_nat_vent_floor = self._natural_vent_active
-        if self._emit_event_callback:
-            if _was_nat_vent_floor:
-                self._emit_event_callback(
-                    "nat_vent_comfort_floor_exit",
-                    {
-                        "indoor_temp": indoor,
-                        "comfort_heat": vent_floor_ftc,
-                        "fan_mode_change": "on→auto",
-                        "fan_device": _fan_device_label(self.config),
-                        "hvac_mode_restored": (
-                            self._current_classification.hvac_mode if self._current_classification else "unknown"
-                        ),
-                    },
-                )
-            else:
-                self._emit_event_callback(
-                    "fan_deactivated",
-                    {
-                        "reason": f"fan thermostat check — {stop_reason}",
-                        "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-                        "fan_device": _fan_device_label(self.config),
-                    },
-                )
-        await self._exit_nat_vent(reason=f"fan thermostat check — {stop_reason}")
+        if _was_nat_vent_floor:
+            _event_type = "nat_vent_comfort_floor_exit"
+            _event_payload: dict[str, Any] = {
+                "indoor_temp": indoor,
+                "comfort_heat": vent_floor_ftc,
+                "fan_mode_change": "on→auto",
+                "fan_device": _fan_device_label(self.config),
+                "hvac_mode_restored": (
+                    self._current_classification.hvac_mode if self._current_classification else "unknown"
+                ),
+            }
+        else:
+            _event_type = "fan_deactivated"
+            _event_payload = {
+                "reason": f"fan thermostat check — {stop_reason}",
+                "fan_mode": self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+                "fan_device": _fan_device_label(self.config),
+            }
+        await self._exit_nat_vent(
+            reason=f"fan thermostat check — {stop_reason}",
+            event_type=_event_type,
+            event_payload=_event_payload,
+        )
 
     async def reconcile_fan_on_startup(
         self,
@@ -5337,7 +5363,14 @@ class AutomationEngine:
         """
         return bool(self._sensor_check_callback and self._sensor_check_callback())
 
-    async def _exit_nat_vent(self, *, reason: str, set_outdoor_exit_time: bool = False) -> None:
+    async def _exit_nat_vent(
+        self,
+        *,
+        reason: str,
+        set_outdoor_exit_time: bool = False,
+        event_type: str | None = None,
+        event_payload: dict[str, Any] | None = None,
+    ) -> FanCommandResult:
         """Single choke point for ending a nat-vent session (Issue #411).
 
         Unifies the handoff previously hand-rolled at 4 separate call sites (Phase 2
@@ -5360,18 +5393,34 @@ class AutomationEngine:
                 it's independently proven immune to immediate re-satisfaction by the
                 instant gate (comfort-floor and away-ceiling exits don't route through
                 this function at all, so they're exempt by construction, not by omission).
+            event_type: Issue #649 — the caller's own specific Activity Report event type
+                (e.g. ``nat_vent_predicted_floor_exit``). Centralizing emission here (instead
+                of each of the 7+ call sites emitting before calling this method, as before
+                #649) lets the payload accurately reflect whether the underlying fan command
+                actually executed or was deferred by the Issue #641 rate limiter, in exactly
+                one place. None (the historical default) skips event emission entirely,
+                preserving the small number of call sites that build their own event some
+                other way.
+            event_payload: Payload for ``event_type``. Its ``fan_mode_change`` key is
+                overwritten based on the real outcome — left as given when the toggle
+                executed, replaced with a "deferred" description when newly rate-limited.
+                Ignored if ``event_type`` is None.
+
+        Returns:
+            The ``FanCommandResult`` from the underlying ``_deactivate_fan()`` call.
         """
         self._natural_vent_active = False
         self._nat_vent_soft_start = False
         if set_outdoor_exit_time:
             self._nat_vent_outdoor_exit_time = dt_util.now()
         sensor_open = self._any_monitored_sensor_open()
-        # emit_event=False on both branches: every call site already emits its own more
-        # specific exit event (nat_vent_predicted_floor_exit, nat_vent_comfort_floor_exit,
-        # nat_vent_outdoor_rise_exit, etc.) before calling this method. Letting
-        # _deactivate_fan() also emit a generic fan_deactivated event here would land at
-        # the same timestamp and shadow the specific event in outcome-ordering consumers
-        # (Issue #411 — found during test verification).
+        # emit_event=False on both branches: the caller's own specific exit event
+        # (nat_vent_predicted_floor_exit, nat_vent_comfort_floor_exit,
+        # nat_vent_outdoor_rise_exit, etc.) is emitted below, by this method, once the
+        # real outcome is known (Issue #649) — letting _deactivate_fan() also emit a
+        # generic fan_deactivated event here would land at the same timestamp and shadow
+        # the specific event in outcome-ordering consumers (Issue #411 — found during
+        # test verification).
         if sensor_open:
             # Don't restore active HVAC into an open window — pause instead. The
             # existing pause/grace machinery (_re_pause_for_open_sensor) re-evaluates
@@ -5386,19 +5435,42 @@ class AutomationEngine:
             # handle_all_doors_windows_closed() ran, but apply_classification()'s DEFER_NAT_VENT
             # gate kept deferring the HVAC-mode restore for hours because this flag was never
             # released.
-            await self._deactivate_fan(reason=reason, restore_hvac=False, release_suppression=True, emit_event=False)
+            result = await self._deactivate_fan(
+                reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
+            )
             self._paused_by_door = True
             state = self.hass.states.get(self.climate_entity)
             self._pre_pause_mode = state.state if state and state.state != "off" else None
-            _LOGGER.info(
+            # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
+            # this is the exact "one retry tick after another while still blocked" pattern
+            # that produced unbounded duplicate INFO lines before this fix.
+            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+            _log(
                 "Nat-vent exit (%s): monitored sensor still open — pausing HVAC (pre_pause_mode=%s)",
                 reason,
                 self._pre_pause_mode,
             )
         else:
-            await self._deactivate_fan(reason=reason, emit_event=False)
+            result = await self._deactivate_fan(reason=reason, emit_event=False)
             self._start_grace_period("automation", trigger="nat_vent_exit_resume")
-            _LOGGER.info("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
+            _log = _LOGGER.debug if result is FanCommandResult.RATE_LIMITED_DUP else _LOGGER.info
+            _log("Nat-vent exit (%s): sensors closed — restoring HVAC and starting grace period", reason)
+
+        if event_type and self._emit_event_callback and result is not FanCommandResult.RATE_LIMITED_DUP:
+            payload = dict(event_payload or {})
+            if result is FanCommandResult.RATE_LIMITED_NEW:
+                applies_at = self._fan_rate_limited_until
+                payload["fan_mode_change"] = (
+                    f"deferred (5-min floor, applies {applies_at.strftime('%H:%M:%S')})"
+                    if isinstance(applies_at, datetime)
+                    else "deferred (5-min floor)"
+                )
+            # EXECUTED / ALREADY_IN_STATE / OVERRIDDEN / DISABLED: payload's own
+            # fan_mode_change (if any) is left exactly as the caller built it — matches
+            # pre-#649 behavior for every outcome that isn't a fresh deferral.
+            self._emit_event_callback(event_type, payload)
+
+        return result
 
     def _nat_vent_reactivation_floor(self) -> float:
         """Sleep-aware comfort floor for nat-vent reactivation/eligibility gates (Issue #417).
@@ -5860,11 +5932,21 @@ class AutomationEngine:
             for cid, ts in self._recent_fan_command_context_ids
         )
 
-    def _fan_toggle_rate_limited(self, *, action: str, reason: str) -> bool:
+    def _fan_toggle_rate_limited(self, *, action: str, reason: str) -> FanCommandResult | None:
         """Hard safety backstop against rapid fan on/off/on cycling (Issue #641).
 
-        Returns True (and suppresses the caller's command) if this toggle would reverse
-        the fan's state within ``FAN_MIN_TOGGLE_INTERVAL_S`` of CA's own last command.
+        Returns ``None`` if this toggle is NOT rate-limited (caller should proceed).
+        Otherwise returns ``FanCommandResult.RATE_LIMITED_NEW`` the first time a given
+        deferral window is reported, or ``RATE_LIMITED_DUP`` for every later call that
+        lands in the *same* window (Issue #649) — e.g. two independent decision paths
+        noticing the same condition in one tick, or `fan_thermostat_check()` re-running
+        on every subsequent temperature-change tick while still blocked. Before #649
+        every such call logged its own WARNING and fired its own
+        ``incident_detected``/``fan_rapid_cycling`` event, producing an unbounded string
+        of duplicate, misleadingly-framed Activity Report rows for what is physically
+        one ongoing blocked state — the floor doing its job, not an anomaly, so it is no
+        longer reported as an incident at all.
+
         Defense-in-depth: independent of any specific root cause, protects the physical
         WHF/HVAC-fan relay from rapid cycling regardless of which upstream decision logic
         produced the reversal (the WHF fast-cycling incident that motivated this — a
@@ -5889,35 +5971,37 @@ class AutomationEngine:
         as "no prior command", never raise.
         """
         if not isinstance(self._fan_toggle_command_time, datetime):
-            return False
+            return None
         elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
         if elapsed >= FAN_MIN_TOGGLE_INTERVAL_S:
-            return False
+            return None
 
-        _LOGGER.warning(
-            "Fan toggle suppressed: rate limit (%.0fs since last change, min %ds) — %s (%s)",
+        applies_at = self._fan_toggle_command_time + timedelta(seconds=FAN_MIN_TOGGLE_INTERVAL_S)
+        # Issue #649: a deferral window already has a WARNING/report on record if
+        # _fan_rate_limited_until already points at this exact applies_at moment for the
+        # same direction — every later call in that same window is a silent duplicate of
+        # already-known information.
+        if self._fan_rate_limited_until == applies_at and self._fan_rate_limited_direction == action:
+            _LOGGER.debug(
+                "Fan toggle already deferred until %s — skipping duplicate report (%s)",
+                applies_at.strftime("%H:%M:%S"),
+                reason,
+            )
+            return FanCommandResult.RATE_LIMITED_DUP
+
+        _LOGGER.info(
+            "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
             elapsed,
             FAN_MIN_TOGGLE_INTERVAL_S,
             action,
             reason,
+            applies_at.strftime("%H:%M:%S"),
         )
-        self._fan_rate_limited_until = self._fan_toggle_command_time + timedelta(seconds=FAN_MIN_TOGGLE_INTERVAL_S)
-        if self._emit_event_callback:
-            self._emit_event_callback(
-                "incident_detected",
-                {
-                    "incident_class": "fan_rapid_cycling",
-                    "incident_id": dt_util.now().isoformat(),
-                    "attempted_action": action,
-                    "attempted_reason": reason,
-                    "seconds_since_last_command": round(elapsed, 1),
-                    "min_interval_s": FAN_MIN_TOGGLE_INTERVAL_S,
-                    "fan_device": _fan_device_label(self.config),
-                },
-            )
-        return True
+        self._fan_rate_limited_until = applies_at
+        self._fan_rate_limited_direction = action
+        return FanCommandResult.RATE_LIMITED_NEW
 
-    async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> None:
+    async def _activate_fan(self, *, reason: str, emit_event: bool = True) -> FanCommandResult:
         """Activate fan based on configured fan_mode.
 
         Args:
@@ -5926,27 +6010,45 @@ class AutomationEngine:
                 so the Activity Report shows every CA fan command with its source. Callers
                 that already emit a more specific event for the same transition (the nat-vent
                 cycler / exit paths) pass False to avoid a duplicate row (Issue #331 follow-up).
+
+        Returns:
+            A ``FanCommandResult`` describing what actually happened (Issue #649) — callers
+            that build their own Activity Report event for this same transition use this to
+            avoid reporting a state change that didn't happen (rate-limited) or reporting the
+            same deferral twice (a duplicate block within the same window).
         """
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
-            return
+            return FanCommandResult.DISABLED
 
         if self._fan_override_active:
             _LOGGER.info("Fan override active — skipping fan activation")
-            return
+            return FanCommandResult.OVERRIDDEN
 
         # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
         # multiple gate sites into a single real state transition.
         if self._fan_active:
             _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
-            return
+            return FanCommandResult.ALREADY_IN_STATE
 
-        if self._fan_toggle_rate_limited(action="activate", reason=reason):
-            return
+        _rate_limit_result = self._fan_toggle_rate_limited(action="activate", reason=reason)
+        if _rate_limit_result is not None:
+            return _rate_limit_result
 
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would activate fan — %s", reason)
-            return
+            return FanCommandResult.EXECUTED
+
+        _was_deferred = (
+            isinstance(self._fan_rate_limited_until, datetime) and self._fan_rate_limited_direction == "activate"
+        )
+        if _was_deferred:
+            _LOGGER.info(
+                "5-minute floor expired — applying deferred activation (original reason: %s)",
+                reason,
+            )
+            self._fan_rate_limited_until = None
+            self._fan_rate_limited_direction = None
 
         self._fan_command_time = dt_util.now()
         self._fan_toggle_command_time = self._fan_command_time
@@ -6041,6 +6143,7 @@ class AutomationEngine:
             self._start_fan_thermo_backstop()
         finally:
             self._fan_command_pending = False
+        return FanCommandResult.EXECUTED
 
     def _start_fan_thermo_backstop(self) -> None:
         """Start (or restart) the 5-minute thermostatic backstop timer (Issue #327).
@@ -6272,7 +6375,7 @@ class AutomationEngine:
         restore_hvac: bool = True,
         release_suppression: bool | None = None,
         emit_event: bool = True,
-    ) -> None:
+    ) -> FanCommandResult:
         """Deactivate fan based on configured fan_mode.
 
         Args:
@@ -6295,12 +6398,16 @@ class AutomationEngine:
                 Report shows every CA fan-off with its source. Callers that already emit a
                 more specific event for the same transition (nat-vent cycler / exit paths)
                 pass False to avoid a duplicate row (Issue #331 follow-up).
+
+        Returns:
+            A ``FanCommandResult`` describing what actually happened (Issue #649) — see
+            ``_activate_fan()``'s matching docstring note.
         """
         if release_suppression is None:
             release_suppression = restore_hvac
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         if fan_mode == FAN_MODE_DISABLED:
-            return
+            return FanCommandResult.DISABLED
 
         if self._fan_override_active:
             if self._fan_remote_timer_hours is not None:
@@ -6315,7 +6422,7 @@ class AutomationEngine:
                 )
             else:
                 _LOGGER.info("Fan override active — skipping fan deactivation")
-            return
+            return FanCommandResult.OVERRIDDEN
 
         # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
         # multiple gate sites into a single real state transition.
@@ -6371,14 +6478,26 @@ class AutomationEngine:
                     )
             else:
                 _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
-            return
+            return FanCommandResult.ALREADY_IN_STATE
 
-        if self._fan_toggle_rate_limited(action="deactivate", reason=reason):
-            return
+        _rate_limit_result = self._fan_toggle_rate_limited(action="deactivate", reason=reason)
+        if _rate_limit_result is not None:
+            return _rate_limit_result
 
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would deactivate fan — %s", reason)
-            return
+            return FanCommandResult.EXECUTED
+
+        _was_deferred = (
+            isinstance(self._fan_rate_limited_until, datetime) and self._fan_rate_limited_direction == "deactivate"
+        )
+        if _was_deferred:
+            _LOGGER.info(
+                "5-minute floor expired — applying deferred exit (original reason: %s)",
+                reason,
+            )
+            self._fan_rate_limited_until = None
+            self._fan_rate_limited_direction = None
 
         self._fan_command_time = dt_util.now()
         self._fan_toggle_command_time = self._fan_command_time
@@ -6488,6 +6607,7 @@ class AutomationEngine:
             async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_off)
         finally:
             self._fan_command_pending = False
+        return FanCommandResult.EXECUTED
 
     async def check_window_cooling_opportunity(
         self,

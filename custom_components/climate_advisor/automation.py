@@ -4665,6 +4665,15 @@ class AutomationEngine:
                 )
                 await self._activate_fan(reason=nat_vent_reason)
                 self._natural_vent_active = True
+                # Issue #637 (Phase R Step 1, violation #3): clear the stale pause flag,
+                # matching the structurally identical branch in
+                # check_natural_vent_conditions() (see _exit_nat_vent()'s callers around
+                # automation.py:3486/3518). Without this, _paused_by_door stays True even
+                # though nat-vent has taken over control, which incorrectly suppresses the
+                # away/vacation setback band (handle_occupancy_away/vacation both early-return
+                # on _paused_by_door=True) and misreports "paused by door" on the
+                # dashboard/API while nat-vent is actually running.
+                self._paused_by_door = False
                 await self._apply_nat_vent_hvac_state()
                 _LOGGER.info(
                     "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"

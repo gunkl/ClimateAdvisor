@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.22"
+VERSION = "0.6.23"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.23": [
+        "Fix #637: after a grace period expires with a door/window still open, if"
+        " natural ventilation now takes over cooling, the system was still privately"
+        ' marking itself as "paused by door" — which could suppress the away/vacation'
+        " energy setback later, and made the dashboard/API misreport the reason HVAC"
+        " was off. Now clears correctly the moment nat-vent takes over, matching how"
+        " every other nat-vent-activation path already behaves.",
+    ],
     "0.6.22": [
         "Feat #633 (Phase R prep): begins the cutover work for the nat-vent lifecycle"
         " FSM — modeled the one remaining gap in its transition table (soft-start"
@@ -2070,7 +2078,7 @@ KNOWN_FIXES: dict[int, dict] = {
         ),
     },
     637: {
-        "version_fixed": "0.6.14",
+        "version_fixed": "0.6.23",
         "title": (
             "Block 5 epic #594 Phase 2: builds the unified door/window pause/grace"
             " transition table (5 new pure functions + door_window_fsm.py assembly),"
@@ -2081,6 +2089,16 @@ KNOWN_FIXES: dict[int, dict] = {
             " assumed unreachable. Wired into the shadow engine's existing diagnostic"
             " as a third comparison point, purely observational — never wired into any"
             " decision path that can act."
+            " Phase R Step 1 (0.6.23): reading the FSM's own docstring against production"
+            " surfaced 3 `_paused_by_door` inconsistencies that must be resolved before the"
+            " lifecycle can become FSM-authoritative. Fixed the narrowest, unambiguous one:"
+            " `_re_pause_for_open_sensor()`'s nat-vent-reactivation branch never cleared"
+            " `_paused_by_door`, unlike the identical branch in"
+            " `check_natural_vent_conditions()`. The other two (`handle_door_window_open()`'s"
+            " grace-fallthrough, `_exit_nat_vent()`'s unconditional sensor-still-open pause)"
+            " are longer-standing production behavior with unclear intent from code alone —"
+            " posted to #637 for an explicit owner decision (model faithfully vs. fix first)"
+            " before Step 2's read-authority swap can close out."
         ),
         "scope_covered": (
             "New: door_window_lifecycle.py (5-state derivation), door_window_pause_entry.py, "
@@ -2097,6 +2115,10 @@ KNOWN_FIXES: dict[int, dict] = {
             "issue_637_paused_during_grace_nat_vent_exit.json confirm PAUSED_DURING_GRACE "
             "is reachable via 2 structurally distinct production paths, pending user "
             "review before promotion to golden/."
+            " 0.6.23: automation.py `_re_pause_for_open_sensor()` now clears `_paused_by_door`"
+            " in its nat-vent-reactivation branch; new test"
+            " test_resume_from_pause.py::TestGraceExpiryRecheck::"
+            "test_repause_clears_paused_by_door_on_nat_vent_reactivation."
         ),
     },
     633: {

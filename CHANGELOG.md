@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.23] — 2026-08-16
+
+- Fix #637: after a grace period expires with a door/window still open, if natural ventilation now takes over cooling, the system was still privately marking itself as "paused by door" — which could suppress the away/vacation energy setback later, and made the dashboard/API misreport the reason HVAC was off. Now clears correctly the moment nat-vent takes over, matching how every other nat-vent-activation path already behaves.
+
 ## [0.6.22] — 2026-08-16
 
 - Feat #633 (Phase R prep): begins the cutover work for the nat-vent lifecycle FSM (Block 5 series, epic #594) — modeled the one remaining gap in its transition table (soft-start escalating to full free-cooling mid-session), and added an opt-in, off-by-default switch that lets the FSM's decision drive the real whole-house-fan/HVAC calls for nat-vent instead of the legacy inline computation. Proven behavior-identical to the legacy path across the full scenario library before this shipped. The switch defaults off and does not persist across a restart — no occupant-visible behavior change unless it is explicitly turned on.

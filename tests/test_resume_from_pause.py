@@ -18,8 +18,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
+    CONF_FAN_MODE,
     CONF_MANUAL_GRACE_NOTIFY,
     CONF_MANUAL_GRACE_PERIOD,
+    FAN_MODE_WHOLE_HOUSE,
 )
 
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls in the engine)
@@ -404,6 +406,36 @@ class TestGraceExpiryRecheck:
         ]
         assert len(hvac_calls) >= 1
         assert hvac_calls[0].args[2]["hvac_mode"] == "off"
+
+    def test_repause_clears_paused_by_door_on_nat_vent_reactivation(self):
+        """Issue #637 (Phase R Step 1, violation #3): when grace expires with a sensor
+        still open but nat-vent conditions are now favorable, _re_pause_for_open_sensor()
+        must clear _paused_by_door — matching the structurally identical branch in
+        check_natural_vent_conditions() (automation.py:3486/3518). Before this fix,
+        _paused_by_door stayed stale=True even though nat-vent took over, which incorrectly
+        suppresses the away/vacation setback band (handle_occupancy_away/vacation both
+        early-return on _paused_by_door=True) and misreports "paused by door" on the
+        dashboard/API while nat-vent is actually running.
+        """
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 300,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            }
+        )
+        engine._paused_by_door = True
+        engine._last_outdoor_temp = 65.0
+        climate_state = MagicMock()
+        climate_state.state = "off"
+        climate_state.attributes.get.return_value = 78.0
+        engine.hass.states.get.return_value = climate_state
+        engine._hourly_forecast_temps = []
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
 
     def test_grace_expiry_clears_normally_when_closed(self):
         """If all sensors are closed at grace expiry, grace clears normally."""

@@ -226,6 +226,43 @@ class TestSoftStartUpgrade:
         assert engine._nat_vent_soft_start is True
 
 
+class TestSoftStartUpgradeFsmAuthoritative:
+    """Issue #594 Phase R, Step 2: with ``_natvent_fsm_authoritative=True``, the
+    same two scenarios from ``TestSoftStartUpgrade`` above must produce identical
+    outcomes — read authority moved to ``nat_vent_fsm.transition()``, but the
+    underlying pure-function inputs and expected result are unchanged."""
+
+    def test_upgrades_when_full_gate_clears(self):
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, indoor_f=76.0)
+        engine._natvent_fsm_authoritative = True
+        engine._natural_vent_active = True
+        engine._nat_vent_soft_start = True
+        engine._paused_by_door = False
+        engine._last_outdoor_temp = 70.0
+        engine._outdoor_temp_today_peak = 90.0
+        engine._outdoor_temp_today_sample_count = 5
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is False
+
+    def test_stays_soft_start_while_full_gate_not_yet_cleared(self):
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, indoor_f=76.0)
+        engine._natvent_fsm_authoritative = True
+        engine._natural_vent_active = True
+        engine._nat_vent_soft_start = True
+        engine._paused_by_door = False
+        engine._last_outdoor_temp = 75.5
+        engine._outdoor_temp_today_peak = 90.0
+        engine._outdoor_temp_today_sample_count = 5
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is True
+
+
 class TestSoftStartExitHierarchy:
     """A soft-start session reuses the existing exit hierarchy unchanged — outdoor-rise
     exit must clear the soft-start qualifier along with _natural_vent_active."""

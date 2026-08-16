@@ -17,6 +17,7 @@
 | Does `check_natural_vent_conditions()`'s exit chain always decide WHY a session ends? | No — confirmed by direct experiment (Issue #608): `nat_vent_temperature_check()` and `fan_thermostat_check()` (both dispatched from the same `temp_update`/thermostat-attribute-change trigger, both already pure-extracted by Issue #441) run FIRST and independently implement equivalent comfort-floor and outdoor-rise-style stops — they win the race and exit the session before `check_natural_vent_conditions()`'s chain ever evaluates, for every golden scenario tested. | [Known Duplicate-Logic Race](#known-duplicate-logic-race-issue-608-finding) |
 | Has a shadow engine instance been proven safe to construct alongside production, offline? | Yes — `tools/sim_harness/shadow_engine_pair.py` (Issue #611) proves, across 60 offline-eligible golden+pending scenarios, that a dry_run=True shadow instance never issues a real action AND never changes what production itself does. | [Offline Whole-Engine Shadow-Pair Validation](#offline-whole-engine-shadow-pair-validation-issue-611-subtask-o) |
 | Is there a real, live shadow engine running inside the coordinator today, and is its coverage complete? | Yes to both — `coordinator.shadow_automation_engine` (Issue #613), permanently `dry_run=True`, mirrors all 13 real nat-vent entry points, the 3 input-data attributes they depend on (Issue #615), and the 7 grace/override lifecycle-gate fields plus companions (Issue #631) — enforced by an AST-based coverage registry test so new gaps can't ship silently. Zero occupant/HVAC impact; surfaced via a diagnostic sensor, not any Status-tab card. | [Live Shadow Engine](#live-shadow-engine-issue-613-subtask-q) |
+| Can the nat-vent FSM actually drive real HVAC/fan hardware yet? | Not by default — `AutomationEngine._natvent_fsm_authoritative` (off by default, not persisted across restart) and its `switch.climate_advisor_nat_vent_fsm_authoritative` entity exist and are proven behavior-identical to the legacy path, but this is the first switch in the migration able to reach real hardware if flipped. | [Phase R prep](#phase-r-prep-soft-start-escalation-modeled--opt-in-cutover-switch-issue-633-epic-594) |
 
 ## Scope
 
@@ -285,7 +286,10 @@ they previously hardcoded the state-transition text unconditionally).
 - [`ClimateAdvisorCoordinator._sync_shadow_inputs`](../custom_components/climate_advisor/coordinator.py) — input-data parity, full-coverage decision mirroring (Issue #615), extended to grace/override state (Issue #631)
 - [`tests/test_shadow_engine_coverage.py`](../tests/test_shadow_engine_coverage.py) — AST-based coverage registry, durable enforcement (Issue #615, #631)
 - [`ClimateAdvisorShadowEngineStatusSensor`](../custom_components/climate_advisor/sensor.py) — diagnostic sensor (Issue #613)
-- [`nat_vent_fsm.transition`](../custom_components/climate_advisor/nat_vent_fsm.py) — the unified `(state, event) -> Transition` table assembling the 3 pieces above (Issue #633, Block 5 Phase P completion). See the module's own docstring for its declared scope boundaries (soft-start escalation, `_idle_open` widening — both deliberately out of v1).
+- [`nat_vent_fsm.transition`](../custom_components/climate_advisor/nat_vent_fsm.py) — the unified `(state, event) -> Transition` table assembling the 3 pieces above (Issue #633, Block 5 Phase P completion). v2 (Phase R prep, epic #594) models the soft-start→full-gate escalation via the same `decide_nat_vent_gate()` call the entry path already makes; the `_idle_open` widening remains unmodeled but is re-classified as a caller-side triggering precondition, not omitted decision logic — see the module's own docstring.
+- [`AutomationEngine._natvent_fsm_authoritative`](../custom_components/climate_advisor/automation.py) — Phase R, Step 2 cutover flag (default `False`). When set, `check_natural_vent_conditions()`'s active-session soft-start-escalation read routes through `nat_vent_fsm.transition()` instead of a hand-duplicated inline copy of the same math; the exit-chain decision was already calling the identical pure function directly, so nothing changed there.
+- [`nat_vent_fsm_authoritative_compare.py`](../tools/sim_harness/nat_vent_fsm_authoritative_compare.py), [`tests/test_nat_vent_fsm_authoritative_compare.py`](../tests/test_nat_vent_fsm_authoritative_compare.py) — full-corpus decision-equivalence proof that flipping the flag is a behavioral no-op (diffs the entire event_log/action_log, not a derived state label) — Issue #633, Phase R Step 3.
+- [`ClimateAdvisorCoordinator.set_natvent_fsm_authoritative`/`natvent_fsm_authoritative`](../custom_components/climate_advisor/coordinator.py), [`ClimateAdvisorNatVentFsmAuthoritativeSwitch`](../custom_components/climate_advisor/switch.py) — Phase R, Step 4: the per-lifecycle cutover switch. Off by default, deliberately not persisted across restart. Surfaced on `ClimateAdvisorShadowEngineStatusSensor`'s attributes, not a new card.
 - [`ClimateAdvisorCoordinator._evaluate_nat_vent_fsm`](../custom_components/climate_advisor/coordinator.py) — live wiring (Issue #633): runs `nat_vent_fsm.transition()` against production's real current readings as a **third**, independent comparison point alongside the existing production/shadow mirror. v1 scope, deliberately narrow: only triggered from `check_natural_vent_conditions`'s mirror — the one mirrored method that unambiguously corresponds to nat-vent's own periodic gate/exit re-evaluation (not `apply_classification`/`reconcile_fan_on_startup`'s mirrors, neither of which actually runs the gate/exit chain in production). The FSM's own tracked state (`coordinator._nat_vent_fsm_state`) is never written onto either engine — pure comparison, zero actuation surface, same isolation posture (try/except, swallow, log) as the shadow mirror itself. Surfaced via the same `ClimateAdvisorShadowEngineStatusSensor` as a `nat_vent_fsm_state` attribute; folded into the sensor's overall `agree`/`disagree` value alongside the mirror comparison.
 - [`LifecycleDispatcher`](../custom_components/climate_advisor/lifecycle_dispatcher.py), [`LifecycleEvent`/`LifecycleEventType`](../custom_components/climate_advisor/lifecycle_events.py) — generic cross-lifecycle event routing + registry-completeness enforcement, built once for reuse by every future lifecycle FSM (door/window pause, then override+grace) — Issue #633
 
@@ -294,3 +298,61 @@ they previously hardcoded the state-transition text unconditionally).
 Within a minute of the 0.6.13 deploy, `sensor.climate_advisor_shadow_engine_status`'s new `nat_vent_fsm_state` attribute logged its first live disagreement: `production=inactive fsm=active_full_gate`, at the exact moment a contact sensor opened (a fresh 600s debounce window starting). Traced via full log context, not assumed: production's real `check_natural_vent_conditions()` returned early — both calls that tick were complete no-ops — because its `_idle_open` widening (`self._any_monitored_sensor_open() and _hvac_off_244 and not self._sensor_debounce_pending and not self._grace_active`) requires `not self._sensor_debounce_pending`, and the debounce timer had just started; with `_idle_open` false and `_grace_active` false, the outer guard returns before ever reaching the reactivation-gate check. `nat_vent_fsm.py`'s v1 transition function has no notion of sensor debounce state at all — it evaluates `decide_nat_vent_gate()` unconditionally whenever `paused_by_door=False`, so it activated on the same favorable indoor/outdoor reading (72°F/67°F) production was correctly still withholding judgment on.
 
 This is exactly the `_idle_open` widening scope boundary the module's own docstring already declared out of v1 — not a new defect. It didn't recur on the next cycle (the debounce window settled). Left as a live, concrete data point rather than "fixed": sensor debounce timing is fundamentally a door/window-lifecycle concern (the timer, and the flag it gates, both belong to that lifecycle, not nat-vent's), which is exactly why door/window pause is next in the plan's sequencing — its own FSM, once built, will expose debounce state to nat-vent through the cross-lifecycle event channel (`lifecycle_dispatcher.py`) rather than nat-vent needing to model a concern that isn't its own.
+
+## Phase R prep: soft-start escalation modeled + opt-in cutover switch (Issue #633, epic #594)
+
+Re-scoped Phase R (the epic's final "owner-controlled cutover" step) after re-analyzing
+its cutover mechanism for DRY-ness: the FSM's `transition()` calls the *same* pure
+`decide_*()` functions production's own entry points already call directly, so the
+decision logic was never duplicated — only the read/write of *state* was. Cutover is
+therefore not "build a second actuator alongside production," it's "make the FSM's
+state the thing production's existing choke points condition on, instead of the ad-hoc
+flags." One set of `_activate_fan`/`_deactivate_fan`/`_set_hvac_mode` calls, always.
+
+**Step 1 — modeled the soft-start escalation gap.** `_transition_from_active()` now
+re-checks `decide_nat_vent_gate()` whenever the current state is `ACTIVE_SOFT_START`,
+mirroring `automation.py`'s own "soft-start → full nat-vent upgrade" block (Issue #540)
+exactly — same pure function, same condition, no new decision logic. The `_idle_open`
+widening remains unmodeled but is re-classified (see Code Reference above) rather than
+left as an open gap: it gates *whether* the FSM's entry logic runs a given tick, which
+Step 2's cutover makes moot by construction — once production's own call site is what
+invokes `transition()`, the FSM only ever runs when that precondition already held.
+
+**Step 2 — read-authority swap, feature-flagged.** `AutomationEngine._natvent_fsm_authoritative`
+defaults `False`. When set, the soft-start-escalation branch inside
+`check_natural_vent_conditions()`'s active-session block computes its answer via
+`nat_vent_fsm.transition()` instead of a second, hand-written copy of the same
+`decide_nat_vent_gate()` call — a DRY fix, not a behavior change. The exit-chain
+decision immediately below was already calling `decide_nat_vent_exit()` directly, so
+there was nothing to swap there.
+
+**Step 3 — decision-equivalence, not just state-label agreement.** Every prior FSM
+coverage test (this spec's own "Live Shadow Engine" section, `test_shadow_engine_pair.py`)
+proved the FSM's *derived state label* matched production's flags. None proved that
+flipping a "let the FSM decide" switch leaves the *real commanded actions* unchanged.
+`nat_vent_fsm_authoritative_compare.py` + its test file close that gap: `diff_runs()`
+over the full golden+pending corpus with the flag forced on, diffing the entire
+`event_log`/`action_log` against an untouched baseline. This surfaced a real,
+unrelated bug in the shared differential-harness itself — `_canon_action_log()` was
+comparing each action's raw `Context` object (a fresh `uuid4()` per call, by design,
+mirroring real HA) via `repr()`, which can never agree between two independent runs
+regardless of behavior. Fixed by excluding `context` from comparison (real decision
+content — domain/service/data/ts — is unaffected). A positive control confirms the
+comparator can still detect a genuinely broken FSM gate; the corpus itself doesn't yet
+contain a soft-start scenario, a documented gap the positive control substitutes for
+by exercising the branch directly.
+
+**Step 4 — per-lifecycle switch.** `switch.climate_advisor_nat_vent_fsm_authoritative`,
+same on/off mechanics as the pre-existing `automation_enabled` switch, but deliberately
+**not** persisted across restart — this is the first switch in the Block 5 migration
+capable of letting a bug in new code reach real hardware (every prior phase was
+`dry_run=True` shadow-only by construction), so an unattended restart always comes back
+up on the proven legacy path rather than silently carrying the choice forward.
+
+**Not yet done**: no golden/pending scenario exercises nat-vent soft-start, so the
+Step 3 corpus comparator's "clean across the corpus" result is real but narrower than
+it looks — the swapped branch is only genuinely exercised by the direct-engine positive
+control, not by any scenario file. Door/window pause and override/grace each have their
+own known state/flag inconsistency against production (see `grace-periods-spec.md`)
+that needs resolving as part of their own future Step 1, before either can repeat this
+sequence.

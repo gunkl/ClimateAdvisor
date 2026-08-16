@@ -193,6 +193,52 @@ class TestFromActiveExitWiring:
         assert t.exit_reason == NatVentExitReason.COMFORT_FLOOR
 
 
+class TestSoftStartEscalation:
+    """Issue #594 Phase R prep: soft-start -> full-gate escalation, mirroring
+    automation.py's own mid-session upgrade check (Issue #540)."""
+
+    def test_escalates_to_full_gate_when_full_gate_conditions_now_met(self) -> None:
+        # outdoor well below indoor by more than hysteresis -> full gate fires.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(indoor=75.0, outdoor=65.0, comfort_heat_raw=68.0, hysteresis=0.0),
+        )
+        assert t.changed
+        assert t.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+        assert t.exit_reason is None
+
+    def test_stays_soft_start_when_full_gate_still_not_met(self) -> None:
+        # outdoor == indoor (parity only) -> full gate condition still fails.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(indoor=74.0, outdoor=74.0, comfort_heat_raw=68.0, comfort_cool=90.0, hysteresis=0.0),
+        )
+        assert not t.changed
+        assert t.to_state == NatVentLifecycleState.ACTIVE_SOFT_START
+
+    def test_escalation_does_not_apply_when_already_full_gate(self) -> None:
+        # Full gate re-checked only from ACTIVE_SOFT_START; from ACTIVE_FULL_GATE
+        # there's nothing to escalate to, and the exit chain runs unaffected.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=75.0, outdoor=65.0, comfort_heat_raw=68.0, hysteresis=0.0),
+        )
+        assert not t.changed
+        assert t.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+
+    def test_exit_takes_priority_over_escalation_on_same_tick(self) -> None:
+        # Full-gate conditions are met AND the comfort floor has also been
+        # reached this same tick -> production's own code order (upgrade check
+        # first, then exit chain unconditionally after) means an exit still
+        # fires; escalating first must not suppress it.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(indoor=68.0, outdoor=60.0, comfort_heat_raw=68.0, hysteresis=0.0, in_sleep_window=False),
+        )
+        assert t.exit_reason == NatVentExitReason.COMFORT_FLOOR
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+
+
 class TestEventKindCapturedForAuditTrail:
     @pytest.mark.parametrize("kind", list(NatVentFsmEventKind))
     def test_event_kind_recorded_on_transition(self, kind: NatVentFsmEventKind) -> None:

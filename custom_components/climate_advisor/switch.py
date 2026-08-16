@@ -5,6 +5,9 @@ When turned off, all computation continues but thermostat and notification
 service calls are skipped and logged with a [DRY RUN] prefix.
 
 See: GitHub Issue #19
+
+Issue #594 Phase R, Step 4: also provides the per-lifecycle nat-vent
+FSM-authoritative toggle.
 """
 
 from __future__ import annotations
@@ -31,7 +34,12 @@ async def async_setup_entry(
 ) -> None:
     """Set up Climate Advisor switch entities from a config entry."""
     coordinator: ClimateAdvisorCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([ClimateAdvisorAutomationSwitch(coordinator, entry)])
+    async_add_entities(
+        [
+            ClimateAdvisorAutomationSwitch(coordinator, entry),
+            ClimateAdvisorNatVentFsmAuthoritativeSwitch(coordinator, entry),
+        ]
+    )
 
 
 class ClimateAdvisorAutomationSwitch(CoordinatorEntity, SwitchEntity):
@@ -67,4 +75,49 @@ class ClimateAdvisorAutomationSwitch(CoordinatorEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable automation actions (enter observe-only mode)."""
         self.coordinator.set_automation_enabled(False)
+        self.async_write_ha_state()
+
+
+class ClimateAdvisorNatVentFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to make the nat-vent lifecycle FSM (Issue #633) authoritative for
+    the active-session soft-start-escalation + exit-chain decision, instead of
+    the legacy inline computation (Issue #594 Phase R, Step 4).
+
+    Default OFF. Unlike the automation-enable switch above, this is NOT
+    persisted across a Home Assistant restart — see
+    ``ClimateAdvisorCoordinator.set_natvent_fsm_authoritative()``'s docstring:
+    a restart always comes back up on the proven legacy path, and the owner
+    must explicitly re-enable this each time. This is the first switch in the
+    Block 5 migration capable of letting a bug in new code reach real
+    HVAC/fan hardware (every prior shadow-diagnostic phase was `dry_run=True`
+    by construction) — instantly reversible, but not something that should
+    silently persist through an unattended restart.
+    """
+
+    _attr_icon = "mdi:state-machine"
+    _attr_entity_category = None
+
+    def __init__(
+        self,
+        coordinator: ClimateAdvisorCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the nat-vent FSM-authoritative switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_natvent_fsm_authoritative"
+        self._attr_name = "Climate Advisor Nat-Vent FSM Authoritative"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if the nat-vent FSM is authoritative for production decisions."""
+        return self.coordinator.natvent_fsm_authoritative
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Make the nat-vent FSM authoritative."""
+        self.coordinator.set_natvent_fsm_authoritative(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Revert to the legacy inline nat-vent computation."""
+        self.coordinator.set_natvent_fsm_authoritative(False)
         self.async_write_ha_state()

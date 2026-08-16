@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.22] — 2026-08-16
+
+- Feat #633 (Phase R prep): begins the cutover work for the nat-vent lifecycle FSM (Block 5 series, epic #594) — modeled the one remaining gap in its transition table (soft-start escalating to full free-cooling mid-session), and added an opt-in, off-by-default switch that lets the FSM's decision drive the real whole-house-fan/HVAC calls for nat-vent instead of the legacy inline computation. Proven behavior-identical to the legacy path across the full scenario library before this shipped. The switch defaults off and does not persist across a restart — no occupant-visible behavior change unless it is explicitly turned on.
+
 ## [0.6.21] — 2026-08-16
 
 - Fix #651: internal refactor only, no user-visible behavior change — two more gaps in the diagnostic-only shadow/FSM comparisons (Block 5 series, 0.6.13–0.6.20). A manual override made directly at the thermostat wasn't registering with the diagnostic at all (fan overrides already worked, since #643). A fan-only override cleared by the bedtime or morning-wakeup schedule now reflects immediately instead of self-correcting a cycle later. Purely observational — nothing it computes is ever acted on.

@@ -1383,6 +1383,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         self.hass.async_create_task(self._async_save_state())
 
+    @property
+    def natvent_fsm_authoritative(self) -> bool:
+        """Whether the nat-vent lifecycle FSM (Issue #633) is authoritative for
+        the active-session soft-start-escalation + exit-chain read (Issue #594
+        Phase R, Step 4). False = legacy inline computation (default)."""
+        return bool(self.automation_engine._natvent_fsm_authoritative)
+
+    def set_natvent_fsm_authoritative(self, enabled: bool) -> None:
+        """Flip nat-vent FSM authority — Step 2's read-authority swap, live.
+
+        Deliberately NOT persisted across restart (unlike ``automation_enabled``
+        above): this is the epic's first switch capable of letting a bug in new
+        code reach real hardware (see epic #594's Phase R risk framing), so a
+        restart always comes back up on the proven legacy path — the owner must
+        explicitly re-enable it each time, rather than an unattended restart
+        silently carrying the FSM-authoritative choice forward.
+        """
+        self.automation_engine._natvent_fsm_authoritative = enabled
+        _LOGGER.warning(
+            "Nat-vent FSM %s for production decisions (Issue #594 Phase R)",
+            "made authoritative" if enabled else "reverted to legacy computation",
+        )
+
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
 

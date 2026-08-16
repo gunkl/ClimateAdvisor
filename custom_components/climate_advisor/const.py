@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.21"
+VERSION = "0.6.22"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.22": [
+        "Feat #633 (Phase R prep): begins the cutover work for the nat-vent lifecycle"
+        " FSM — modeled the one remaining gap in its transition table (soft-start"
+        " escalating to full free-cooling mid-session), and added an opt-in,"
+        " off-by-default switch that lets the FSM's decision drive the real"
+        " whole-house-fan/HVAC calls for nat-vent instead of the legacy inline"
+        " computation. Proven behavior-identical to the legacy path across the full"
+        " scenario library before this shipped. The switch defaults off and does not"
+        " persist across a restart — no occupant-visible behavior change unless it is"
+        " explicitly turned on.",
+    ],
     "0.6.21": [
         "Fix #651: closed two more gaps in the internal diagnostic that shadows"
         " automation decisions to verify an in-progress refactor (#613/#633/#637/#639,"
@@ -2089,16 +2100,20 @@ KNOWN_FIXES: dict[int, dict] = {
         ),
     },
     633: {
-        "version_fixed": "0.6.13",
+        "version_fixed": "0.6.22",
         "title": (
-            "Block 5 epic #594 Phase P completion: builds the unified nat-vent transition"
-            " table earlier Phase P sub-issues (#606/#607, #608/#609) deliberately left"
-            " unbuilt, plus a generic cross-lifecycle event dispatcher for coordinating"
-            " between the automation's independently-migrated behaviors going forward,"
-            " then wires the transition table to actually run live (0.6.13) as a third,"
-            " independent comparison point alongside the existing production/shadow"
-            " mirror. Purely observational at every stage — never wired into any"
-            " decision path that can act."
+            "Block 5 epic #594 Phase P completion (0.6.12-0.6.13), then Phase R prep"
+            " (0.6.22): builds the unified nat-vent transition table earlier Phase P"
+            " sub-issues (#606/#607, #608/#609) deliberately left unbuilt, plus a generic"
+            " cross-lifecycle event dispatcher for coordinating between the automation's"
+            " independently-migrated behaviors going forward, then wires the transition"
+            " table to actually run live (0.6.13) as a third, independent comparison point"
+            " alongside the existing production/shadow mirror. Purely observational through"
+            " 0.6.13. 0.6.22 begins the actual cutover work: models the transition table's"
+            " last documented gap (soft-start mid-session escalation) and adds an opt-in,"
+            " off-by-default switch letting the FSM's decision drive real HVAC/fan calls —"
+            " the first point in this epic capable of that, proven behavior-identical to"
+            " the legacy path before shipping."
         ),
         "scope_covered": (
             "0.6.12: New: lifecycle_events.py (cross-lifecycle event vocabulary), "
@@ -2117,7 +2132,23 @@ KNOWN_FIXES: dict[int, dict] = {
             "production). The FSM's tracked state is never written onto either engine. Surfaced "
             "via the existing ClimateAdvisorShadowEngineStatusSensor's nat_vent_fsm_state attribute, "
             "folded into its overall agree/disagree value. 10 new coordinator-level tests + 2 new "
-            "sensor tests."
+            "sensor tests. "
+            "0.6.22: nat_vent_fsm.py's _transition_from_active() now re-checks decide_nat_vent_gate() "
+            "while ACTIVE_SOFT_START, mirroring automation.py's own soft-start-upgrade block (Issue #540) "
+            "exactly. AutomationEngine._natvent_fsm_authoritative (default False, automation.py): when set, "
+            "check_natural_vent_conditions()'s soft-start-escalation read routes through "
+            "nat_vent_fsm.transition() instead of a hand-duplicated inline copy — the exit-chain decision "
+            "already called decide_nat_vent_exit() directly, so nothing changed there. New "
+            "tools/sim_harness/nat_vent_fsm_authoritative_compare.py + "
+            "tests/test_nat_vent_fsm_authoritative_compare.py (90 tests): full golden+pending corpus "
+            "decision-equivalence proof (entire event_log/action_log diff, not a state label) — found and "
+            "fixed a latent false-positive bug in tools/sim_harness/differential.py's action-log "
+            "canonicalization (a per-call random Context id was being compared as decision content). New "
+            "switch.climate_advisor_nat_vent_fsm_authoritative (switch.py) + "
+            "ClimateAdvisorCoordinator.set_natvent_fsm_authoritative()/natvent_fsm_authoritative "
+            "(coordinator.py), off by default, deliberately not persisted across restart. Surfaced on "
+            "ClimateAdvisorShadowEngineStatusSensor's existing attributes (sensor.py), not a new card. "
+            "4 new coordinator-plumbing tests."
         ),
     },
     631: {

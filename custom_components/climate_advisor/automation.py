@@ -766,6 +766,13 @@ class AutomationEngine:
         # coordinator's own persisted/restored history within one update cycle.
         self._outdoor_temp_today_peak: float | None = None
         self._outdoor_temp_today_sample_count: int = 0
+        # Issue #594 Phase R, Step 2: when True, the active-session portion of
+        # check_natural_vent_conditions() (soft-start escalation + exit-chain
+        # decision) routes through nat_vent_fsm.transition() as the single
+        # source of truth instead of a hand-duplicated inline computation.
+        # Default False — zero behavior change until a future per-lifecycle
+        # switch (Phase R, Step 4) flips it. Not yet exposed to config/switch.py.
+        self._natvent_fsm_authoritative: bool = False
 
         # Override confirmation period (Issue #76) — pending window before override is formally accepted
         self._override_confirm_pending: bool = False
@@ -3275,7 +3282,14 @@ class AutomationEngine:
             # session's outdoor/indoor delta independently clears the full bulk-cooling
             # gate, drop the qualifier — the session itself (fan, HVAC suppression, exit
             # hierarchy) is already running unchanged; only the status label changes.
-            if self._natural_vent_active and self._nat_vent_soft_start:
+            #
+            # Issue #594 Phase R, Step 2: when ``_natvent_fsm_authoritative`` is set,
+            # this upgrade check is skipped here and instead computed once, together
+            # with the exit-chain decision immediately below, via a single
+            # ``nat_vent_fsm.transition()`` call — the same pure escalation check
+            # (Issue #540, mirrored into ``nat_vent_fsm.py``), now read from one
+            # shared place instead of two independent copies of the same math.
+            if self._natural_vent_active and self._nat_vent_soft_start and not self._natvent_fsm_authoritative:
                 _indoor_upg = self._get_indoor_temp_f()
                 _comfort_heat_upg = self._nat_vent_reactivation_floor()
                 _hysteresis_upg = float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
@@ -3319,6 +3333,37 @@ class AutomationEngine:
                     )
 
                 thermal = self._thermal_model or {}
+
+                # Issue #594 Phase R, Step 2: while FSM-authoritative, the
+                # soft-start escalation check (skipped above) is computed here via
+                # nat_vent_fsm.transition() instead of the hand-duplicated inline
+                # copy. The exit-chain decision immediately below is unchanged
+                # either way — it already called this same pure
+                # decide_nat_vent_exit() function directly, so there is nothing to
+                # swap there; the FSM's own transition() calls the identical
+                # function with the identical inputs (see tools/sim_harness's
+                # nat_vent_fsm_decision_compare.py for the equivalence proof).
+                if self._natvent_fsm_authoritative and self._nat_vent_soft_start:
+                    from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
+                    from .nat_vent_fsm import transition as _nat_vent_transition
+
+                    _fsm_current_state = self.nat_vent_lifecycle_state
+                    _fsm_inputs = self._build_nat_vent_fsm_inputs(now=dt_util.now(), indoor=indoor, outdoor=outdoor)
+                    _fsm_result = _nat_vent_transition(
+                        _fsm_current_state, NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs)
+                    )
+                    if (
+                        _fsm_current_state == NatVentLifecycleState.ACTIVE_SOFT_START
+                        and _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+                    ):
+                        self._nat_vent_soft_start = False
+                        _LOGGER.info(
+                            "Nat-vent soft-start upgraded to full free-cooling (FSM-authoritative):"
+                            " outdoor %.1f°F, indoor %.1f°F",
+                            outdoor if outdoor is not None else 0.0,
+                            indoor if indoor is not None else 0.0,
+                        )
+
                 exit_decision = decide_nat_vent_exit(
                     NatVentExitInputs(
                         indoor=indoor,
@@ -5490,6 +5535,42 @@ class AutomationEngine:
         if _in_sleep_window(dt_util.now(), self.config):
             return float(self.config.get(CONF_SLEEP_HEAT, comfort_heat))
         return comfort_heat
+
+    def _build_nat_vent_fsm_inputs(self, *, now: datetime, indoor: float | None, outdoor: float | None):
+        """Build the FSM's input snapshot from current engine state (Issue #594
+        Phase R, Step 2). Same field set ``coordinator._evaluate_nat_vent_fsm()``
+        already builds for the shadow-diagnostic comparison — kept as a single
+        definition callers on both sides can share rather than two independently
+        maintained copies of the same construction.
+        """
+        from .nat_vent_fsm import NatVentFsmInputs
+
+        comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+        thermal_model = self._thermal_model or {}
+        return NatVentFsmInputs(
+            indoor=indoor,
+            outdoor=outdoor,
+            comfort_heat_raw=comfort_heat_raw,
+            sleep_heat=float(self.config.get(CONF_SLEEP_HEAT, comfort_heat_raw)),
+            in_sleep_window=_in_sleep_window(now, self.config),
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+            hysteresis=float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F)),
+            fan_mode=str(self.config.get(CONF_FAN_MODE, "whole_house_fan")),
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            occupancy_mode=self._occupancy_mode,
+            thermal_confidence=thermal_model.get("confidence", "none"),
+            k_passive=thermal_model.get("k_passive"),
+            outdoor_today_peak=self._outdoor_temp_today_peak,
+            outdoor_sample_count=self._outdoor_temp_today_sample_count,
+            peak_decline_margin=PEAK_DECLINE_MARGIN_F,
+            paused_by_door=bool(self._paused_by_door),
+            outdoor_exit_time=self._nat_vent_outdoor_exit_time,
+            lockout_seconds=float(
+                self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
+            ),
+            now=now,
+        )
 
     @property
     def nat_vent_lifecycle_state(self) -> NatVentLifecycleState:

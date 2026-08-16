@@ -501,4 +501,9 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "shadow_state": diag["shadow_state"],
             "nat_vent_fsm_state": diag.get("nat_vent_fsm_state"),
             "checked_at": diag["checked_at"],
+            # Issue #594 Phase R, Step 4: whether the nat-vent FSM is currently
+            # authoritative for production decisions (vs. the legacy inline
+            # computation). Surfaced here rather than a new card/sensor, same
+            # "extend an existing diagnostic" rule this sensor itself follows.
+            "natvent_fsm_authoritative": self.coordinator.natvent_fsm_authoritative,
         }

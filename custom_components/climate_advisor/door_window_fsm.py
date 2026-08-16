@@ -51,20 +51,29 @@ violation paths already documented in the Phase 2 plan
 (``handle_door_window_open()``'s grace-fallthrough,
 ``_exit_nat_vent()``'s sensor-still-open branch), reading
 ``_re_pause_for_open_sensor()`` in full during implementation found a THIRD,
-narrower case: when grace expires from ``PAUSED_DURING_GRACE`` with a sensor
+narrower case: when grace expires from plain ``GRACE`` with a sensor
 still open (``RE_PAUSE``), and the nested nat-vent reactivation recheck inside
-``_re_pause_for_open_sensor()`` then succeeds, ``_paused_by_door`` is NOT
-cleared by that nat-vent-activation branch — unlike the structurally similar
-branch in ``check_natural_vent_conditions()`` (automation.py:3486/3518), which
-DOES clear it. This is a genuine inconsistency between two nat-vent entry
-paths, not a bug this shadow-only phase fixes (would be a production behavior
-change) — noted here so it isn't silently modeled as clean. Net effect on
-THIS module: from ``PAUSED_DURING_GRACE``, the ``RE_PAUSE`` outcome always
-lands on a plain paused state regardless of whether the nested nat-vent recheck
-succeeds, since neither of its sub-branches clears ``_paused_by_door`` — so
-(unlike the same recheck from plain ``GRACE``, where it genuinely decides
-paused-vs-normal) this module does not need to evaluate the nested gate at all
-for that specific origin state. See ``_transition_from_paused_during_grace()``.
+``_re_pause_for_open_sensor()`` then succeeds, ``_paused_by_door`` was NOT
+being cleared by that nat-vent-activation branch — unlike the structurally
+similar branch in ``check_natural_vent_conditions()`` (automation.py:3486/3518),
+which DOES clear it. **Fixed in production as of Issue #637 Phase R Step 1
+(v0.6.23)** — ``_re_pause_for_open_sensor()`` now clears ``_paused_by_door`` on
+that branch too, so this module's mirrored behavior below is no longer a
+documented inconsistency, it's simply correct. The origin-state distinction
+still matters for a different reason: from ``PAUSED_DURING_GRACE`` specifically
+(see ``_transition_from_paused_during_grace()``), the ``RE_PAUSE`` outcome
+still always lands on a plain paused state regardless of the nested nat-vent
+recheck, because pause was already separately active there and grace clearing
+doesn't touch it — unlike from plain ``GRACE``, where the recheck genuinely
+decides paused-vs-normal (now correctly reflected in production, per the fix
+above).
+
+**Still open (owner decision requested on #637, not yet resolved):**
+``handle_door_window_open()``'s grace-fallthrough and ``_exit_nat_vent()``'s
+unconditional sensor-still-open pause remain long-standing production behavior
+of unclear intent — this module continues to mirror both faithfully as-is
+until the owner decides whether to fix them or keep them, so Step 2's
+read-authority swap does not silently ship a behavior change.
 
 **Cross-lifecycle inputs.** ``natural_vent_active`` and ``whf_owns_hvac`` are
 state *reads* from other lifecycles (Issue #631's "communicating automata"

@@ -2023,7 +2023,7 @@ proving the real gate's formula is used, not the cycling-band midpoint), `TestWa
 
 Only one grace timer of each type is active at a time; starting a new one cancels the previous.
 
-**Grace expiry sensor re-check:** When either grace period expires, the system re-checks whether any monitored contact sensor is currently open. If one or more sensors are still open, HVAC is re-paused immediately (`_paused_by_door = True`, HVAC set to `off`) rather than restoring normal automation. This prevents the safety issue of running HVAC with a door or window open after the grace window closes.
+**Grace expiry sensor re-check:** When either grace period expires, the system re-checks whether any monitored contact sensor is currently open. If one or more sensors are still open, HVAC is re-paused immediately (`_paused_by_door = True`, HVAC set to `off`) rather than restoring normal automation. This prevents the safety issue of running HVAC with a door or window open after the grace window closes. If instead the nat-vent reactivation gate is satisfied (sensor open but outdoor conditions now favor free cooling), `_re_pause_for_open_sensor()` activates nat-vent and clears `_paused_by_door` (Issue #637, v0.6.23) — matching every other nat-vent-activation call site, so the away/vacation setback guard and dashboard/API status don't keep reporting "paused by door" once nat-vent has taken over.
 
 ### Clean-Slate Override State on HA Restart (Issue #282 / #306)
 

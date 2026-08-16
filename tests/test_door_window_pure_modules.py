@@ -95,19 +95,25 @@ class TestDecideDoorOpenResponse:
         result = decide_door_open_response(self._inputs(paused_by_door=True))
         assert result == DoorOpenResponse.ALREADY_PAUSED_NOOP
 
-    def test_grace_active_outdoor_too_warm_suppressed(self):
-        result = decide_door_open_response(self._inputs(grace_active=True, outdoor=85.0))
+    def test_grace_active_gate_not_entered_suppressed(self):
+        # Issue #655 fix: grace-active fallthrough is gated on the real reactivation
+        # gate result, not a coarse outdoor-only proxy — outdoor alone can no longer
+        # decide this. A cool outdoor temp with the real gate still False must NOT
+        # fall through (the exact premature-pause bug #655 reported).
+        result = decide_door_open_response(self._inputs(grace_active=True, outdoor=65.0, nat_vent_gate_entered=False))
         assert result == DoorOpenResponse.GRACE_SUPPRESSED
 
     def test_grace_active_outdoor_unavailable_suppressed(self):
         result = decide_door_open_response(self._inputs(grace_active=True, outdoor=None))
         assert result == DoorOpenResponse.GRACE_SUPPRESSED
 
-    def test_grace_active_outdoor_cool_falls_through_to_pause(self):
-        result = decide_door_open_response(self._inputs(grace_active=True, outdoor=65.0))
-        assert result == DoorOpenResponse.PAUSE
-
-    def test_grace_active_outdoor_cool_falls_through_to_nat_vent(self):
+    def test_grace_active_gate_entered_never_falls_through_to_pause(self):
+        # Once the shared gate is entered, the same result is reused at the final
+        # nat-vent-vs-pause branch below — grace-active fallthrough can only land on
+        # NAT_VENT_ELIGIBLE (or PLANNED_WINDOW_NOOP), never PAUSE. This invariant is
+        # the fix: #655's bug was reachable exactly because the old coarse proxy and
+        # the real gate could disagree, letting a "cool enough" outdoor temp fall
+        # through the grace suppression only to still land on PAUSE moments later.
         result = decide_door_open_response(self._inputs(grace_active=True, outdoor=65.0, nat_vent_gate_entered=True))
         assert result == DoorOpenResponse.NAT_VENT_ELIGIBLE
 

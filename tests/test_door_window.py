@@ -938,6 +938,30 @@ class TestGracePeriodExpiry:
         # No HVAC service call should have been made
         engine.hass.services.async_call.assert_not_called()
 
+    def test_door_open_during_grace_coarse_outdoor_ok_real_gate_fails_still_blocked(self):
+        """Issue #655 regression: a door/window open during an active grace period,
+        where outdoor alone looks 'cool enough' (would have passed the old coarse
+        proxy: outdoor 65 < comfort_cool 75 + nat_vent_delta 3 = threshold 78) but the
+        real 4-variable reactivation gate fails because indoor hasn't risen above the
+        comfort floor — must NOT pause. Before the fix, this scenario fell through
+        the grace check on the coarse proxy alone and could still land on a pause a
+        few lines later when the real gate was independently re-evaluated and failed.
+        """
+        engine = _make_automation_engine()
+        engine._grace_active = True
+        engine._last_resume_source = "automation"
+        engine._last_outdoor_temp = 65.0  # cool enough per the old coarse proxy
+
+        state_mock = MagicMock()
+        state_mock.state = "cool"
+        state_mock.attributes = {"current_temperature": 68}  # below comfort_heat=70
+        engine.hass.states.get.return_value = state_mock
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is False
+        engine.hass.services.async_call.assert_not_called()
+
     def test_door_open_after_grace_expires_triggers_pause(self):
         """After grace expires, a new door open correctly pauses HVAC."""
         engine = _make_automation_engine(

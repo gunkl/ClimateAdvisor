@@ -3,6 +3,12 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.26] — 2026-08-16
+
+- Fix #655: a door/window briefly reopened during an active grace period could still pause the AC/heat, even though the grace period exists specifically to avoid reacting to exactly that. The grace check now uses the same accurate indoor+outdoor reactivation check the automation already computes a moment later, instead of a coarser outdoor-only shortcut that could disagree with it — grace now reliably holds for its full duration.
+- Fix #657: after a grace period ends with a door/window still open but conditions now favor natural ventilation, some pause-related dashboard and Activity Report fields (which door/window, how long it's been paused) could keep showing stale information from an earlier pause. These now clear correctly alongside the rest of the pause state.
+- Fix (found during #637 Phase R Step 3 scoping, no user-facing symptom confirmed): a nat-vent-exit pause path wrote fewer pause-tracking fields than the equivalent door/window pause path, which could leave a dashboard field stale and — in one specific edge case — cause a later door-close to start an unwanted extra grace period. Both pause paths now share one definition of what a door/window pause writes.
+
 ## [0.6.25] — 2026-08-16
 
 - Feat #637 (Phase R Step 2, partial): begins letting the door/window pause/grace lifecycle FSM actually drive production decisions — a new, off-by-default switch lets it take over 2 of the lifecycle's 7 actions (a manual thermostat override detected during a pause, and resuming from a dashboard pause) instead of the older logic. Both were proven behavior-identical to the existing logic before this shipped, across the full scenario library plus dedicated tests. The switch defaults off — no occupant-visible behavior change unless it is explicitly turned on, and even then only for those 2 actions; everything else about door/window pause/grace handling is unchanged.

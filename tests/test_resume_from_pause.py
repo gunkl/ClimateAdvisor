@@ -494,6 +494,13 @@ class TestGraceExpiryRecheck:
             }
         )
         engine._paused_by_door = True
+        # Issue #657: these 3 fields were left stale by the #637 Step 1 fix above —
+        # only _paused_by_door was cleared. Seed them with stale values from a prior
+        # pause cycle to prove the fix clears all 4 fields together, matching the
+        # sibling branch in check_natural_vent_conditions().
+        engine._paused_with_hvac_already_off = True
+        engine._paused_entity = "binary_sensor.stale_from_prior_pause"
+        engine._paused_since = datetime.now()
         engine._last_outdoor_temp = 65.0
         climate_state = MagicMock()
         climate_state.state = "off"
@@ -505,6 +512,9 @@ class TestGraceExpiryRecheck:
 
         assert engine._natural_vent_active is True
         assert engine._paused_by_door is False
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._paused_entity is None
+        assert engine._paused_since is None
 
     def test_grace_expiry_clears_normally_when_closed(self):
         """If all sensors are closed at grace expiry, grace clears normally."""

@@ -322,6 +322,13 @@ class TestNatVentOutdoorRiseExit:
         assert engine._natural_vent_active is False
         assert engine._paused_by_door is True
         assert engine._nat_vent_outdoor_exit_time is not None
+        # Write-shape divergence fix (found while scoping #637 Step 3): _exit_nat_vent()'s
+        # sensor-still-open branch used to write only _paused_by_door/_pre_pause_mode —
+        # now writes the same field set _pause_for_door_window() does. climate_state
+        # reports "cool" (not off), so pre_pause_mode is truthy → hvac_already_off=False.
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._paused_entity == "nat-vent-exit"
+        assert engine._paused_since is not None
 
         rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
         assert len(rise_events) == 1

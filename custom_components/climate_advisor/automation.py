@@ -2831,6 +2831,28 @@ class AutomationEngine:
             notify_type="door_window_pause",
         )
 
+    def _set_door_window_pause_fields(self, *, entity_label: str, hvac_already_off: bool) -> None:
+        """Write the door/window pause-state fields shared across every pause entry point.
+
+        One definition of "what fields a door/window pause writes" for
+        ``_pause_for_door_window()`` and ``_exit_nat_vent()``'s sensor-still-open
+        branch — the latter used to hand-roll only ``_paused_by_door`` (plus its own
+        ``_pre_pause_mode``), silently omitting ``_paused_with_hvac_already_off``/
+        ``_paused_entity``/``_paused_since``. ``_paused_with_hvac_already_off`` feeds
+        real control flow (``derive_door_window_lifecycle_state()`` uses it to tell
+        ``PAUSED_ACTIVE`` from ``PAUSED_IDLE``); the other two are diagnostic-only
+        (Activity Report "Settings" text via ``ai_skills_context.py``'s
+        ``_render_paused_entity_settings()``).
+
+        ``_pre_pause_mode`` is intentionally NOT written here — each caller derives
+        it with its own state-read logic and writes it separately before calling
+        this helper.
+        """
+        self._paused_by_door = True
+        self._paused_with_hvac_already_off = hvac_already_off
+        self._paused_entity = entity_label
+        self._paused_since = dt_util.now()
+
     async def _pause_for_door_window(
         self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
     ) -> bool:
@@ -2849,10 +2871,7 @@ class AutomationEngine:
         mode = state.state if state else None
         if mode and mode not in ("off", "unavailable", "unknown"):
             self._pre_pause_mode = mode
-            self._paused_by_door = True
-            self._paused_with_hvac_already_off = False
-            self._paused_entity = entity_label
-            self._paused_since = dt_util.now()
+            self._set_door_window_pause_fields(entity_label=entity_label, hvac_already_off=False)
             await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
             await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
             if self._emit_event_callback:
@@ -2862,10 +2881,7 @@ class AutomationEngine:
                 )
             return True
         if mode == "off":
-            self._paused_by_door = True
-            self._paused_with_hvac_already_off = True
-            self._paused_entity = entity_label
-            self._paused_since = dt_util.now()
+            self._set_door_window_pause_fields(entity_label=entity_label, hvac_already_off=True)
             _LOGGER.info(
                 "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
                 entity_label,
@@ -2887,19 +2903,32 @@ class AutomationEngine:
                 return  # Already paused
 
             if self._grace_active:
-                outdoor = self._last_outdoor_temp
-                comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
-                nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
-                nat_vent_threshold = comfort_cool + nat_vent_delta
-                if outdoor is not None and outdoor < nat_vent_threshold:
-                    pass  # outdoor cool enough — fall through to nat-vent check below
-                else:
+                # Issue #655: this used to short-circuit on a coarse outdoor-only
+                # proxy (outdoor < comfort_cool + nat_vent_delta) instead of the real
+                # 4-variable reactivation gate computed a few lines below — the two
+                # could disagree, letting a "cool enough" outdoor reading fall through
+                # the grace suppression only to still hit a pause moments later when
+                # the real gate (which also needs indoor/comfort_heat) said no. Reuse
+                # the same shared gate here instead of a hand-copied proxy.
+                _outdoor_g = self._last_outdoor_temp
+                _comfort_cool_g = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
+                _nat_vent_delta_g = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+                _grace_gate_entered = self._nat_vent_may_reactivate(
+                    outdoor=_outdoor_g,
+                    indoor=self._get_indoor_temp_f(),
+                    comfort_heat=self._nat_vent_reactivation_floor(),
+                    comfort_cool=_comfort_cool_g,
+                    nat_vent_delta=_nat_vent_delta_g,
+                )
+                if not _grace_gate_entered:
                     _LOGGER.info(
                         "Door/window open (%s) but %s grace period active — not pausing",
                         entity_id,
                         self._last_resume_source,
                     )
                     return
+                # else: real gate says reactivation is viable — fall through to the
+                # nat-vent-vs-pause decision below, same as before.
 
             if self._is_within_planned_window_period():
                 _LOGGER.info(
@@ -4570,6 +4599,16 @@ class AutomationEngine:
                 self._request_refresh_callback()
             if self._post_grace_fan_check_callback:
                 self._post_grace_fan_check_callback()
+            # Shadow-feed completion (door/window Step 1b's documented residual): this
+            # was the one GRACE_TIMER_EXPIRED outcome with no event emit at all, so it
+            # never fed the shadow door/window FSM. Reuses the same "grace_expired"
+            # event type the sibling branches below already emit — no wiring changes
+            # to _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES needed — with a payload key
+            # distinguishing this outcome from a real sensor re-check.
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "grace_expired", {"source": source, "within_planned_window": True, "re_paused": False}
+                )
             return
 
         # If any contact sensor is still open, re-pause instead of clearing
@@ -4728,7 +4767,20 @@ class AutomationEngine:
                 # away/vacation setback band (handle_occupancy_away/vacation both early-return
                 # on _paused_by_door=True) and misreports "paused by door" on the
                 # dashboard/API while nat-vent is actually running.
+                # Issue #657: the above fix only cleared _paused_by_door, leaving
+                # _paused_with_hvac_already_off/_paused_entity/_paused_since stale —
+                # the sibling reactivation branches in check_natural_vent_conditions()
+                # (automation.py ~:3614-3617/3646-3649) clear all 4 fields together.
+                # Stale _paused_entity/_paused_since only feed diagnostic text
+                # (Activity Report "Settings" cell via ai_skills_context.py's
+                # _render_paused_entity_settings()), but a stale
+                # _paused_with_hvac_already_off feeds real control flow — it's what
+                # derive_door_window_lifecycle_state() uses to tell PAUSED_ACTIVE from
+                # PAUSED_IDLE.
                 self._paused_by_door = False
+                self._paused_with_hvac_already_off = False
+                self._paused_entity = None
+                self._paused_since = None
                 await self._apply_nat_vent_hvac_state()
                 _LOGGER.info(
                     "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
@@ -5547,9 +5599,18 @@ class AutomationEngine:
             result = await self._deactivate_fan(
                 reason=reason, restore_hvac=False, release_suppression=True, emit_event=False
             )
-            self._paused_by_door = True
             state = self.hass.states.get(self.climate_entity)
             self._pre_pause_mode = state.state if state and state.state != "off" else None
+            # Write-shape divergence fix (found while scoping #637 Step 3): this branch
+            # used to set only _paused_by_door, unlike _pause_for_door_window()'s full
+            # field set — see _set_door_window_pause_fields()'s docstring.
+            # hvac_already_off mirrors _pre_pause_mode's own truthiness: nothing to
+            # restore (pre_pause_mode is None) means the FSM-visible state is
+            # equivalent to "already off" (PAUSED_IDLE), matching
+            # decide_door_close_response()'s own truthiness test on pre_pause_mode.
+            self._set_door_window_pause_fields(
+                entity_label="nat-vent-exit", hvac_already_off=self._pre_pause_mode is None
+            )
             # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
             # this is the exact "one retry tick after another while still blocked" pattern
             # that produced unbounded duplicate INFO lines before this fix.

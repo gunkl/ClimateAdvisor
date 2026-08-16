@@ -394,8 +394,8 @@
     "issue": 629
   },
   "issue_637_paused_during_grace_open_fallthrough": {
-    "sha256": "c06e3dbb0aa583fc182954702f5a936e4206c280f3f2587be0ffc60c26af9f75",
-    "signed": "2026-08-14",
+    "sha256": "90e1a78d73f2fa27558186f57cf55b9655cb4153393683a6f8ce9318304ad15b",
+    "signed": "2026-08-16",
     "issue": 637
   },
   "issue_637_paused_during_grace_nat_vent_exit": {

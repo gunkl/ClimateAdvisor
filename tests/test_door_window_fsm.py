@@ -156,15 +156,19 @@ class TestFromGrace:
         assert t.to_state == DoorWindowLifecycleState.GRACE
         assert t.outcome == "grace_suppressed"
 
-    def test_sensor_opened_falls_through_to_composite_state(self):
-        # outdoor cool enough (76 < threshold 80) -> falls through past the grace
-        # guard; nat-vent gate then fails (outdoor == indoor, not strictly less)
-        # -> pause, with grace still active -> PAUSED_DURING_GRACE.
+    def test_sensor_opened_real_gate_fails_suppressed_not_composite_state(self):
+        # Issue #655 fix: the grace guard is now gated on the real reactivation gate
+        # (nat_vent_gate_entered), not an outdoor-only proxy. outdoor==indoor (76==76)
+        # means the real gate fails (not strictly less), so this must stay suppressed
+        # — it must NOT fall through to a composite paused state, even though outdoor
+        # alone (76 < threshold 80) would have looked "cool enough" under the old,
+        # since-removed proxy check this scenario used to exercise.
         t = transition(
             DoorWindowLifecycleState.GRACE,
             _ev(DoorWindowFsmEventKind.SENSOR_OPENED, outdoor=76.0, indoor=76.0, hvac_mode="cool"),
         )
-        assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+        assert t.to_state == DoorWindowLifecycleState.GRACE
+        assert t.outcome == "grace_suppressed"
 
     def test_sensor_opened_falls_through_to_nat_vent_eligible_stays_grace(self):
         t = transition(

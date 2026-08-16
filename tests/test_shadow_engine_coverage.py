@@ -110,13 +110,19 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "by _sync_shadow_inputs() raw copy (Issue #631)"
     ),
     "handle_fan_manual_override": "mirrored",
+    # Issue #651: not itself an AST-detected direct mutator (delegates to
+    # start_override_confirmation()), but mirrored at all 3 real call sites for the same
+    # reason handle_fan_manual_override is — see TestOverrideGraceFsmEventCoverage for
+    # the FSM-entry-kind check and TestPerCallerFsmFeedCoverage below for the
+    # per-call-site assertion.
+    "handle_manual_override": "mirrored",
     "clear_fan_override": (
         "exempted: called from clear_manual_override (exempted) and internal cascades; "
         "_fan_override_active covered by _sync_shadow_inputs() raw copy (Issue #631)"
     ),
     "start_override_confirmation": (
-        "exempted: called from handle_manual_override() (3 unmirrored coordinator.py sites) and "
-        "handle_manual_override_during_pause() (mirrored); contains the internal "
+        "exempted: called from handle_manual_override() (3 now-mirrored coordinator.py sites, "
+        "Issue #651) and handle_manual_override_during_pause() (mirrored); contains the internal "
         "_confirm_override_expired timer closure. _override_confirm_*/_manual_override_* covered by "
         "_sync_shadow_inputs() raw copy (Issue #631)"
     ),
@@ -249,9 +255,10 @@ _OVERRIDE_GRACE_EVENT_KIND_REGISTRY: dict[str, str] = {
     "OVERRIDE_SUPERSEDED": (
         "unreachable: no production code path emits this distinct kind today — the "
         "closest real case (a mode change arriving during an active override grace, "
-        "coordinator.py's 'new_override_during_grace' branch) is fed OVERRIDE_CANCELLED "
-        "instead, since handle_manual_override()'s own FSM entry wiring is a separate, "
-        "already-tracked follow-up, not this issue's scope"
+        "coordinator.py's 'new_override_during_grace' branch) still feeds OVERRIDE_CANCELLED "
+        "for the clear half then OVERRIDE_DETECTED (via the now-mirrored "
+        "handle_manual_override(), Issue #651) for the reopen half, rather than a single "
+        "distinct SUPERSEDED transition"
     ),
 }
 
@@ -310,3 +317,50 @@ class TestOverrideGraceFsmEventCoverage:
         all_kinds = {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
         unregistered = all_kinds - set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY)
         assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
+
+
+# Issue #651: the existing "reachable from *some* call site" checks above are true but
+# not sufficient — #643 shipping an entry-only wiring for handle_fan_manual_override
+# proved that a kind being reachable overall doesn't mean every real production call
+# site that should feed it actually does. These tests assert PER-CALLER reachability
+# for the two gaps this issue closes, so a future regression that re-wires one call site
+# but not its siblings (or drops the bedtime/morning-wakeup feed) fails loudly instead of
+# passing the coarser kind-level check above.
+class TestPerCallerFsmFeedCoverage:
+    def test_handle_manual_override_mirrored_at_all_three_call_sites(self) -> None:
+        """handle_manual_override() has exactly 3 real production call sites
+        (coordinator.py's _async_thermostat_changed: new-override-during-grace,
+        mode-changed-outside-pause, setpoint-only). Each must mirror, or a future new
+        call site could silently skip FSM feed the way the original gap did."""
+        src = _COORDINATOR_PY.read_text(encoding="utf-8")
+        call_sites = len(re.findall(r"\.handle_manual_override\(", src))
+        mirror_sites = len(re.findall(r'_mirror_to_shadow\(\s*"handle_manual_override"', src))
+        assert call_sites >= 3, (
+            f"Expected at least 3 handle_manual_override() call sites in coordinator.py, "
+            f"found {call_sites} — if call sites were consolidated, lower this bound "
+            f"deliberately rather than letting the test rot."
+        )
+        assert mirror_sites == call_sites, (
+            f"handle_manual_override() has {call_sites} real call site(s) in coordinator.py "
+            f'but only {mirror_sites} have a matching _mirror_to_shadow("handle_manual_override", '
+            f"...) call — every call site must mirror (Issue #651)."
+        )
+
+    def test_bedtime_and_morning_wakeup_feed_fsm_on_override_clear(self) -> None:
+        """_async_bedtime()/_async_morning_wakeup() must call
+        _feed_override_grace_fsm_if_cleared() after the real engine call, so a fan-only
+        override cleared by either handler is fed to the FSM immediately instead of
+        waiting on _check_orphaned_grace()'s one-cycle-later self-heal (Issue #651)."""
+        src = _COORDINATOR_PY.read_text(encoding="utf-8")
+        # Match each method body up to the next method definition (async or sync) at the
+        # same indent level, so the assertion is scoped to that method's own body only.
+        bedtime_match = re.search(r"    async def _async_bedtime\(.*?\n    (?:async )?def ", src, re.DOTALL)
+        wakeup_match = re.search(r"    async def _async_morning_wakeup\(.*?\n    (?:async )?def ", src, re.DOTALL)
+        assert bedtime_match and "_feed_override_grace_fsm_if_cleared" in bedtime_match.group(0), (
+            "_async_bedtime() must call _feed_override_grace_fsm_if_cleared() after "
+            "automation_engine.handle_bedtime() (Issue #651)."
+        )
+        assert wakeup_match and "_feed_override_grace_fsm_if_cleared" in wakeup_match.group(0), (
+            "_async_morning_wakeup() must call _feed_override_grace_fsm_if_cleared() after "
+            "automation_engine.handle_morning_wakeup() (Issue #651)."
+        )

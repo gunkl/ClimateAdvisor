@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.21] — 2026-08-16
+
+- Fix #651: internal refactor only, no user-visible behavior change — two more gaps in the diagnostic-only shadow/FSM comparisons (Block 5 series, 0.6.13–0.6.20). A manual override made directly at the thermostat wasn't registering with the diagnostic at all (fan overrides already worked, since #643). A fan-only override cleared by the bedtime or morning-wakeup schedule now reflects immediately instead of self-correcting a cycle later. Purely observational — nothing it computes is ever acted on.
+
 ## [0.6.20] — 2026-08-16
 
 - Fix #649: follow-up to #641's whole-house-fan rapid-cycling protection. The 5-minute floor itself was already working correctly, but the Activity Report and HA logs made a blocked toggle look like it had actually happened, and repeated the same misleading row every time the system re-checked while still blocked. A blocked-then-later-applied fan toggle now shows as a single accurate "deferred" entry followed by one real "applied" entry once the floor clears, and is no longer mislabeled as an incident — it's the protection working as intended.

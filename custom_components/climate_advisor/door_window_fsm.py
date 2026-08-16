@@ -97,6 +97,36 @@ new emitted event on that branch or a bespoke direct callback (same shape as
 state *reads* from other lifecycles (Issue #631's "communicating automata"
 design) — legacy flag-derived today, same convention as ``nat_vent_fsm.py``'s
 own ``paused_by_door`` read.
+
+**Authoritative for production, as of Step 2 (v0.6.25) — PARTIAL scope.** This
+module's ``transition()`` is no longer purely a shadow diagnostic: when
+``AutomationEngine._doorwindow_fsm_authoritative`` is True,
+``handle_manual_override_during_pause()``/``resume_from_pause()`` call it for
+real and derive their resulting flags from ``result.to_state`` (via
+``AutomationEngine._apply_door_window_fsm_state()``). Both transitions
+(``MANUAL_OVERRIDE_DURING_PAUSE``, ``DASHBOARD_RESUME``) land unconditionally on
+their target state regardless of origin state — no placeholder-inference risk,
+unlike ``_transition_from_paused()``'s ``ALL_SENSORS_CLOSED`` branch below. The
+other 5 event kinds/methods stay shadow-only, each blocked on its own documented
+gap (see automation.py's ``_doorwindow_fsm_authoritative`` docstring) — this
+module's transition table is faithful to production for all 7, but "faithful"
+and "safe to read authoritatively" are different bars, and only 2 have cleared
+the second one so far.
+
+**Known non-mechanical transition — do not swap without fixing first.**
+``_transition_from_paused()``'s ``ALL_SENSORS_CLOSED`` branch infers
+``pre_pause_mode`` from ``current_state == PAUSED_ACTIVE`` rather than taking the
+real ``AutomationEngine._pre_pause_mode`` value as an input — a placeholder, not
+the actual field ``door_window_close_response.DoorCloseResponseInputs`` was
+designed to take. Found while attempting to swap
+``handle_all_doors_windows_closed()`` in this same increment: since
+``PAUSED_ACTIVE`` vs. ``PAUSED_IDLE`` depends on ``_paused_with_hvac_already_off``,
+which the still-shadow-only ``_exit_nat_vent()`` branch can leave stale (it never
+writes that field), trusting this transition's resulting state for real
+flag-derivation risks a genuine divergence in that reachable edge case. Needs
+either a real ``pre_pause_mode``-truthiness input added to this branch, or
+another safe path, before ``handle_all_doors_windows_closed()`` can join a future
+increment.
 """
 
 from __future__ import annotations

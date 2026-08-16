@@ -101,6 +101,11 @@ from .desired_state import (
     decide_scheduled_write_seq_current,
     decide_setpoint_retry_action,
 )
+from .door_window_lifecycle import (
+    DoorWindowLifecycleInputs,
+    DoorWindowLifecycleState,
+    derive_door_window_lifecycle_state,
+)
 from .fan_drift_reconciliation import FanDriftInputs, FanDriftOutcome, decide_fan_drift_reconciliation
 from .fan_thermostat_decision import (
     FanThermostatInputs,
@@ -773,6 +778,17 @@ class AutomationEngine:
         # Default False — zero behavior change until a future per-lifecycle
         # switch (Phase R, Step 4) flips it. Not yet exposed to config/switch.py.
         self._natvent_fsm_authoritative: bool = False
+        # Issue #594 Phase R, Step 2 (door/window): PARTIAL authority only —
+        # governs handle_all_doors_windows_closed()/handle_manual_override_during_pause()/
+        # resume_from_pause() alone. The other 4 door/window methods
+        # (handle_door_window_open, _re_pause_for_open_sensor, _on_grace_expired,
+        # _exit_nat_vent's sensor-still-open branch) stay on the legacy path
+        # regardless of this flag's value — each has its own documented blocker
+        # (#655, an origin-state plumbing gap, a missing shadow-FSM feed, and a
+        # write-shape divergence, respectively) that must resolve before it can
+        # join. Default False — zero behavior change until the switch (Step 4)
+        # flips it, and even then only for the 3 methods above.
+        self._doorwindow_fsm_authoritative: bool = False
 
         # Override confirmation period (Issue #76) — pending window before override is formally accepted
         self._override_confirm_pending: bool = False
@@ -4356,8 +4372,29 @@ class AutomationEngine:
         if not self._paused_by_door:
             return
         _LOGGER.info("Manual HVAC override detected during door/window pause")
-        self._paused_by_door = False
-        self._paused_with_hvac_already_off = False
+        if self._doorwindow_fsm_authoritative:
+            # Issue #594 Phase R, Step 2: door_window_fsm.transition() decides the
+            # resulting pause/grace state instead of the unconditional inline clear
+            # below. MANUAL_OVERRIDE_DURING_PAUSE lands on NORMAL from PAUSED_ACTIVE/
+            # PAUSED_IDLE, or GRACE from PAUSED_DURING_GRACE (grace left running,
+            # matching the legacy path's own silence on _grace_active here) —
+            # unconditional on origin state either way, so this produces the same
+            # flag values the legacy branch below always wrote; only the source of
+            # truth changes.
+            from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
+            from .door_window_fsm import transition as _door_window_transition
+
+            _dw_result = _door_window_transition(
+                self.door_window_lifecycle_state,
+                DoorWindowFsmEvent(
+                    kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
+                    inputs=self._build_door_window_fsm_inputs(now=dt_util.now()),
+                ),
+            )
+            self._apply_door_window_fsm_state(_dw_result.to_state)
+        else:
+            self._paused_by_door = False
+            self._paused_with_hvac_already_off = False
         self._paused_entity = None
         self._paused_since = None
         self._pre_pause_mode = None
@@ -4382,8 +4419,26 @@ class AutomationEngine:
             return None
 
         _LOGGER.info("User resumed HVAC from door/window pause via dashboard")
-        self._paused_by_door = False
-        self._paused_with_hvac_already_off = False
+        if self._doorwindow_fsm_authoritative:
+            # Issue #594 Phase R, Step 2: same shape as
+            # handle_manual_override_during_pause()'s FSM-authoritative branch.
+            # DASHBOARD_RESUME lands unconditionally on GRACE from either origin
+            # state, matching the legacy path's own unconditional
+            # _start_grace_period() call below regardless of origin.
+            from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
+            from .door_window_fsm import transition as _door_window_transition
+
+            _dw_result = _door_window_transition(
+                self.door_window_lifecycle_state,
+                DoorWindowFsmEvent(
+                    kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+                    inputs=self._build_door_window_fsm_inputs(now=dt_util.now()),
+                ),
+            )
+            self._apply_door_window_fsm_state(_dw_result.to_state)
+        else:
+            self._paused_by_door = False
+            self._paused_with_hvac_already_off = False
         self._paused_entity = None
         self._paused_since = None
         self._pre_pause_mode = None
@@ -5601,6 +5656,87 @@ class AutomationEngine:
                 lockout_seconds=lockout_s,
             )
         )
+
+    def _build_door_window_fsm_inputs(self, *, now: datetime):
+        """Build the door/window FSM's input snapshot from current engine state
+        (Issue #594 Phase R, Step 2). Same field set
+        ``coordinator._door_window_fsm_inputs()`` already builds for the
+        shadow-diagnostic comparison — kept as a single definition callers on
+        both sides can share rather than two independently maintained copies of
+        the same construction. The one exception is ``hvac_mode``: the
+        coordinator's version reads it via ``self.hass.states.get(...)``
+        against its own ``automation_engine`` reference; this reads the exact
+        same live state directly against ``self``.
+        """
+        from .door_window_fsm import DoorWindowFsmInputs
+
+        state = self.hass.states.get(self.climate_entity)
+        hvac_mode = state.state if state else None
+        return DoorWindowFsmInputs(
+            hvac_mode=hvac_mode,
+            outdoor=self._last_outdoor_temp,
+            indoor=self._get_indoor_temp_f(),
+            comfort_heat=self._nat_vent_reactivation_floor(),
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            nat_vent_delta=float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+            fan_mode=str(self.config.get(CONF_FAN_MODE, "whole_house_fan")),
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            within_planned_window=self._is_within_planned_window_period(),
+            any_sensor_open=self._any_monitored_sensor_open(),
+            sensor_debounce_pending=bool(self._sensor_debounce_pending),
+            override_matches_current_decision=self._override_matches_current_decision(self._current_classification),
+            grace_source=self._last_resume_source or "automation",
+            natural_vent_active=bool(self._natural_vent_active),
+            whf_owns_hvac=bool(self._whf_owns_hvac()),
+            now=now,
+        )
+
+    @property
+    def door_window_lifecycle_state(self) -> DoorWindowLifecycleState:
+        """Current door/window pause/grace session state, derived from existing
+        flags (Issue #637).
+
+        Read-only observability by default — the value this property computes
+        is also fed as the ``current_state`` argument to ``door_window_fsm.transition()``
+        by the 2 methods that are FSM-authoritative as of Phase R Step 2
+        (``handle_manual_override_during_pause``, ``resume_from_pause``); see each
+        method's own FSM-authoritative branch. (``handle_all_doors_windows_closed``
+        was scoped into this increment originally but deferred — its
+        ``ALL_SENSORS_CLOSED`` transition in ``door_window_fsm.py`` infers
+        ``pre_pause_mode`` from state rather than taking the real value as input,
+        which isn't safe to trust for real flag-derivation until fixed.) Purely a
+        computed view of ``_paused_by_door``/``_paused_with_hvac_already_off``/
+        ``_grace_active``, so it cannot desync from the flags it reads. See
+        ``door_window_lifecycle.py`` for the pure derivation.
+        """
+        return derive_door_window_lifecycle_state(
+            DoorWindowLifecycleInputs(
+                paused_by_door=bool(self._paused_by_door),
+                paused_with_hvac_already_off=bool(self._paused_with_hvac_already_off),
+                grace_active=bool(self._grace_active),
+            )
+        )
+
+    def _apply_door_window_fsm_state(self, state: DoorWindowLifecycleState) -> None:
+        """Write ``_paused_by_door``/``_paused_with_hvac_already_off``/``_grace_active``
+        from a ``door_window_fsm.transition()`` result (Issue #594 Phase R, Step 2).
+
+        The inverse of ``door_window_lifecycle_state``'s derivation — see
+        ``door_window_lifecycle.py``'s state-to-flags table. Deliberately does NOT
+        touch ``_paused_entity``/``_paused_since``/``_pre_pause_mode``/
+        ``_last_resume_source``/``_last_grace_trigger``/``_grace_end_time``/
+        ``_grace_protects_override`` — those aren't part of the 5-state derivation
+        (the FSM's ``outcome``/``at`` fields don't carry entity labels or trigger
+        names), so every caller keeps writing those itself, same as before this
+        method existed.
+        """
+        self._paused_by_door = state in (
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            DoorWindowLifecycleState.PAUSED_DURING_GRACE,
+        )
+        self._paused_with_hvac_already_off = state == DoorWindowLifecycleState.PAUSED_IDLE
+        self._grace_active = state in (DoorWindowLifecycleState.GRACE, DoorWindowLifecycleState.PAUSED_DURING_GRACE)
 
     def _nat_vent_may_reactivate(
         self,

@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
     from .claude_api import ClaudeAPIClient
+    from .door_window_fsm import DoorWindowFsmEventKind
     from .override_grace_fsm import OverrideGraceFsmEventKind
 
 from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
@@ -349,18 +350,51 @@ def _pick_daily_line(pool: tuple[str, ...], salt: str) -> str:
 
 
 # Issue #637: which mirrored automation.py methods correspond to which door/window
-# FSM event kind. Narrower than the FSM's own 7-member DoorWindowFsmEventKind enum —
-# GRACE_TIMER_EXPIRED/DASHBOARD_RESUME/NAT_VENT_EXITED_SENSOR_STILL_OPEN/SYNC_RECONCILE
-# have no _mirror_to_shadow() call site today (see _sync_shadow_inputs()'s own
-# docstring on why _on_grace_expired can't be reached that way), same v1-scope-
-# narrowing precedent as #633's nat-vent FSM (only check_natural_vent_conditions is
-# wired, not every gate/exit-adjacent call site). Additional future work, not this
-# increment.
+# FSM event kind. NAT_VENT_EXITED_SENSOR_STILL_OPEN is fed separately via
+# _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES (event-driven, Issue #647).
+# GRACE_TIMER_EXPIRED is fed separately via _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES
+# (also event-driven). SYNC_RECONCILE is fed separately via
+# _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS (method-name-triggered, same shape as
+# _NAT_VENT_FSM_TRIGGER_METHODS — Phase R Step 1b, epic #594, v0.6.24). As of Step 1b
+# all 7 DoorWindowFsmEventKind members have a real feed path; see door_window_fsm.py's
+# own docstring for the one still-accepted residual (the "within planned window" grace
+# expiry branch emits no event at all, so that one outcome doesn't feed the FSM).
 _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_door_window_open": "sensor_opened",
     "handle_all_doors_windows_closed": "all_sensors_closed",
     "handle_manual_override_during_pause": "manual_override_during_pause",
+    "resume_from_pause": "dashboard_resume",
 }
+
+# Issue #594 Phase R Step 1b: door/window's SYNC_RECONCILE event kind has no natural
+# emitted event to key off (the only event on this path, "sensor_opened", is already
+# claimed by handle_door_window_open()'s semantically different fresh-open transition
+# — reusing it would silently misroute reconcile-detected pauses through the wrong
+# transition logic). Method-name-triggered dispatch is the correct fit instead — same
+# pattern _NAT_VENT_FSM_TRIGGER_METHODS already uses for nat-vent's own non-event-
+# shaped triggers. Each of these 4 methods calls
+# AutomationEngine._sync_paused_by_door_with_live_sensors() internally; all 4 already
+# have (or, for handle_pre_cool/handle_morning_wakeup, now gain) a _mirror_to_shadow()
+# call site, so this reuses that existing timing hook rather than adding a new
+# coordinator/automation-engine callback. This is a trigger-timing hook, not a data
+# dependency — the FSM still reads fresh self.automation_engine state, matching #647's
+# own stated principle that FSM re-evaluation shouldn't depend on shadow-engine replay.
+_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS: frozenset[str] = frozenset(
+    {"apply_classification", "handle_bedtime", "handle_pre_cool", "handle_morning_wakeup"}
+)
+
+# Issue #594 Phase R Step 1b: event types that indicate a door/window grace period just
+# expired, for feeding DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED. _on_grace_expired()
+# (automation.py) is an internal timer callback with no _mirror_to_shadow() call site,
+# but 3 of its 4 branches already emit a distinct event type after mutating state (no
+# staleness risk): "grace_expired" (the re-pause-on-still-open branch and the normal-
+# expiry branch) and "override_adopted" (the adopted-matching-decision branch). The
+# 4th branch ("within planned window") emits nothing at all — an accepted residual, see
+# door_window_fsm.py's docstring. These event-type strings are also consumed by
+# _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP for a *different* FSM's GRACE_TIMER_EXPIRED
+# concept — one event type can and does feed multiple FSMs, same as every other branch
+# in _feed_lifecycle_fsms_from_event().
+_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES: frozenset[str] = frozenset({"grace_expired", "override_adopted"})
 
 # Issue #639/#643: which mirrored automation.py methods correspond to which
 # override/grace FSM event kind. Of the 7 OverrideGraceFsmEventKind members,
@@ -937,6 +971,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "Door/window FSM evaluation failed (isolated, no production impact): %s",
                         fsm_exc,
                     )
+            if method_name in _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS:
+                try:
+                    from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+
+                    self._evaluate_door_window_fsm(method_name, event_kind=_DWFEventKind.SYNC_RECONCILE)
+                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                    _LOGGER.warning(
+                        "Door/window FSM evaluation (sync-reconcile) failed (isolated, no production impact): %s",
+                        fsm_exc,
+                    )
             if method_name in _OVERRIDE_GRACE_FSM_EVENT_KINDS:
                 try:
                     from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
@@ -1056,23 +1100,39 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             now=now,
         )
 
-    def _evaluate_door_window_fsm(self, method_name: str) -> None:
+    def _evaluate_door_window_fsm(self, method_name: str, event_kind: DoorWindowFsmEventKind | None = None) -> None:
         """Run the unified door/window pause/grace FSM (Issue #637) against
         production's current live readings and track its own independently-
         derived state.
 
-        v1 scope, narrowed to the 3 event kinds a mirrored method exists for
-        today (see ``_DOOR_WINDOW_FSM_EVENT_KINDS``) — same precedent as
-        ``_evaluate_nat_vent_fsm()``'s own v1 scope note. The FSM's own tracked
-        state (``self._door_window_fsm_state``) is never written back onto
-        either engine — a third, independent computation, purely for
-        comparison against production's real derived state. Isolated the same
-        way: any exception here is logged and swallowed by the caller, never
-        allowed to affect production.
+        The FSM's own tracked state (``self._door_window_fsm_state``) is never
+        written back onto either engine — a third, independent computation,
+        purely for comparison against production's real derived state.
+        Isolated the same way: any exception here is logged and swallowed by
+        the caller, never allowed to affect production.
 
-        Issue #647 adds a second, event-driven trigger for this same FSM — see
-        ``_feed_lifecycle_fsms_from_event()`` — for the ``NAT_VENT_EXITED_SENSOR_STILL_OPEN``
-        event kind, which no mirrored method name corresponds to.
+        As of Issue #594 Phase R Step 1b, all 7 ``DoorWindowFsmEventKind``
+        members have a real feed path across 3 distinct mechanisms — same
+        precedent ``_evaluate_override_grace_fsm()`` established for taking an
+        explicit event kind rather than always deriving one from
+        ``method_name``:
+          - 4 via ``_DOOR_WINDOW_FSM_EVENT_KINDS`` (method-name lookup, this
+            function's original v1 mechanism) — ``event_kind`` omitted.
+          - ``NAT_VENT_EXITED_SENSOR_STILL_OPEN`` via
+            ``_DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES`` (event-driven, #647).
+          - ``GRACE_TIMER_EXPIRED`` via ``_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES``
+            (event-driven, Step 1b).
+          - ``SYNC_RECONCILE`` via ``_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS``
+            (method-name-triggered, Step 1b) — ``event_kind`` passed explicitly
+            rather than added to ``_DOOR_WINDOW_FSM_EVENT_KINDS`` itself, since
+            that dict's method-name keys are disjoint from this trigger set's
+            (``apply_classification``/``handle_bedtime``/``handle_pre_cool``/
+            ``handle_morning_wakeup`` are not door/window "entry point" methods
+            in the same sense as the other 4), but reusing the same dict shape
+            for two different kinds per name would be confusing.
+        All non-method-name-derived kinds are resolved by the caller
+        (``_feed_lifecycle_fsms_from_event()`` or ``_mirror_to_shadow()``'s
+        finally block) and passed via ``event_kind``.
         """
         from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind, transition
 
@@ -1080,8 +1140,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         config = self.config
 
+        kind = (
+            event_kind if event_kind is not None else DoorWindowFsmEventKind(_DOOR_WINDOW_FSM_EVENT_KINDS[method_name])
+        )
         event = DoorWindowFsmEvent(
-            kind=DoorWindowFsmEventKind(_DOOR_WINDOW_FSM_EVENT_KINDS[method_name]),
+            kind=kind,
             inputs=self._door_window_fsm_inputs(ae, now, config),
         )
         result = transition(self._door_window_fsm_state, event)
@@ -3982,8 +4045,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
         _was_overridden = self._any_override_active()
-        await self.automation_engine.handle_morning_wakeup(indoor_temp=self._get_indoor_temp())
+        _indoor_temp = self._get_indoor_temp()
+        await self.automation_engine.handle_morning_wakeup(indoor_temp=_indoor_temp)
         self._feed_override_grace_fsm_if_cleared(_was_overridden)
+        # Issue #594 Phase R Step 1b: closes the door/window SYNC_RECONCILE coverage
+        # gap — see _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS.
+        await self._mirror_to_shadow("handle_morning_wakeup", indoor_temp=_indoor_temp)
 
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
@@ -4092,6 +4159,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = await self.automation_engine.handle_pre_cool(
             indoor_temp=indoor_temp,
             nat_vent_just_closed=nat_vent_just_closed,
+        )
+        # Issue #594 Phase R Step 1b: closes the door/window SYNC_RECONCILE coverage
+        # gap — see _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS.
+        await self._mirror_to_shadow(
+            "handle_pre_cool", indoor_temp=indoor_temp, nat_vent_just_closed=nat_vent_just_closed
         )
         _LOGGER.info("Pre-cool trigger handler completed: %s", result)
         if "suppressed" in result:
@@ -7648,6 +7720,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
                 _LOGGER.warning(
                     "Door/window FSM evaluation (event-driven) failed (isolated, no production impact): %s",
+                    fsm_exc,
+                )
+        if event_type in _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES:
+            try:
+                from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+
+                # "grace_expired"/"override_adopted" are both emitted by
+                # _on_grace_expired() *after* it has already mutated grace/pause state
+                # (self._cancel_grace_timers(), self.clear_manual_override()) — no
+                # staleness risk reading self.automation_engine here, unlike the
+                # NAT_VENT_EXITED_SENSOR_STILL_OPEN block above.
+                self._evaluate_door_window_fsm("_on_grace_expired", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED)
+            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                _LOGGER.warning(
+                    "Door/window FSM evaluation (grace-expiry) failed (isolated, no production impact): %s",
                     fsm_exc,
                 )
         if event_type in _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP:

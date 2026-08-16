@@ -319,6 +319,72 @@ class TestOverrideGraceFsmEventCoverage:
         assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
 
 
+# Issue #594 Phase R Step 1b: same registry-enforcement shape as
+# _OVERRIDE_GRACE_EVENT_KIND_REGISTRY above, for DoorWindowFsmEventKind. Originally only
+# 4 of 7 members had a real feed path (SENSOR_OPENED, ALL_SENSORS_CLOSED,
+# MANUAL_OVERRIDE_DURING_PAUSE via _DOOR_WINDOW_FSM_EVENT_KINDS;
+# NAT_VENT_EXITED_SENSOR_STILL_OPEN via _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES, #647) —
+# GRACE_TIMER_EXPIRED/DASHBOARD_RESUME/SYNC_RECONCILE were explicitly deferred as
+# "future work" when Phase 2 shipped. Step 1b closes all 3.
+_DOOR_WINDOW_EVENT_KIND_REGISTRY: dict[str, str] = {
+    "SENSOR_OPENED": "reachable",
+    "ALL_SENSORS_CLOSED": "reachable",
+    "GRACE_TIMER_EXPIRED": "reachable",
+    "MANUAL_OVERRIDE_DURING_PAUSE": "reachable",
+    "DASHBOARD_RESUME": "reachable",
+    "NAT_VENT_EXITED_SENSOR_STILL_OPEN": "reachable",
+    "SYNC_RECONCILE": "reachable",
+}
+
+
+class TestDoorWindowFsmEventCoverage:
+    def test_every_event_kind_is_registered(self) -> None:
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        all_kinds = {member.name for member in DoorWindowFsmEventKind}
+        unregistered = all_kinds - set(_DOOR_WINDOW_EVENT_KIND_REGISTRY)
+        assert not unregistered, (
+            f"New DoorWindowFsmEventKind member(s) aren't in "
+            f"_DOOR_WINDOW_EVENT_KIND_REGISTRY: {sorted(unregistered)}. Classify each "
+            f'as "reachable" (and wire a real trigger in coordinator.py) or '
+            f'"unreachable: <reason>" — see Issue #594 Phase R Step 1b.'
+        )
+
+    def test_registry_entries_reference_real_members(self) -> None:
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        all_kinds = {member.name for member in DoorWindowFsmEventKind}
+        unknown = set(_DOOR_WINDOW_EVENT_KIND_REGISTRY) - all_kinds
+        assert not unknown, (
+            f"Registry references DoorWindowFsmEventKind member(s) that no longer exist "
+            f"(renamed or removed?): {sorted(unknown)}. Update the registry."
+        )
+
+    def test_every_reachable_kind_has_a_real_trigger(self) -> None:
+        """Positive control: every 'reachable' entry must appear as a value somewhere
+        coordinator.py actually feeds the FSM from — either _DOOR_WINDOW_FSM_EVENT_KINDS'
+        dict values, _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES'/
+        _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES' event-type membership, or a direct
+        DoorWindowFsmEventKind.<X>/_DWFEventKind.<X> reference at a real call site."""
+        combined = _COORDINATOR_PY.read_text(encoding="utf-8")
+        for name, classification in _DOOR_WINDOW_EVENT_KIND_REGISTRY.items():
+            if classification != "reachable":
+                continue
+            value_pattern = re.compile(r'"' + re.escape(name.lower()) + r'"')
+            member_pattern = re.compile(r"\b\w*EventKind\." + re.escape(name) + r"\b")
+            assert value_pattern.search(combined) or member_pattern.search(combined), (
+                f'{name} is marked "reachable" but no dict value or direct '
+                f"DoorWindowFsmEventKind.{name} reference was found in coordinator.py"
+            )
+
+    def test_positive_control_unregistered_kind_is_caught(self) -> None:
+        """Proves test_every_event_kind_is_registered actually fails on a genuinely
+        unregistered member, not just passing vacuously."""
+        all_kinds = {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
+        unregistered = all_kinds - set(_DOOR_WINDOW_EVENT_KIND_REGISTRY)
+        assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
+
+
 # Issue #651: the existing "reachable from *some* call site" checks above are true but
 # not sufficient — #643 shipping an entry-only wiring for handle_fan_manual_override
 # proved that a kind being reachable overall doesn't mean every real production call

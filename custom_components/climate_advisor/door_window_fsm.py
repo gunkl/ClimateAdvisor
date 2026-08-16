@@ -68,12 +68,30 @@ doesn't touch it — unlike from plain ``GRACE``, where the recheck genuinely
 decides paused-vs-normal (now correctly reflected in production, per the fix
 above).
 
-**Still open (owner decision requested on #637, not yet resolved):**
-``handle_door_window_open()``'s grace-fallthrough and ``_exit_nat_vent()``'s
-unconditional sensor-still-open pause remain long-standing production behavior
-of unclear intent — this module continues to mirror both faithfully as-is
-until the owner decides whether to fix them or keep them, so Step 2's
-read-authority swap does not silently ship a behavior change.
+**#637 Step 1 closed.** ``_exit_nat_vent()``'s unconditional sensor-still-open pause was
+investigated and verified **benign, not a bug**: the flag is accurate the moment it's
+set, and ``_on_grace_expired()`` already re-derives its decision from live sensor state
+rather than reading ``_paused_by_door``, so it self-corrects regardless of whether grace
+is left running. ``handle_door_window_open()``'s grace-fallthrough (a coarser
+outdoor-only proxy check gating a stricter gate computed later in the same function) is
+a real, independent gap — tracked on its own issue, **#655**, deliberately kept separate
+from this FSM migration since it's unrelated production behavior, not a migration
+blocker. This module continues to mirror both faithfully as-is; #655's resolution (if
+any) will land in production first, same "fix production, then the FSM inherits the fix
+for free" order Step 1's violation #3 already followed.
+
+**Shadow-feed coverage (Issue #594 Phase R Step 1b, v0.6.24).** All 7
+``DoorWindowFsmEventKind`` members now have a real feed path — see
+``coordinator.py``'s ``_DOOR_WINDOW_FSM_EVENT_KINDS``/
+``_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS``/``_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES``.
+**One accepted residual**: ``_on_grace_expired()``'s "within planned window" branch
+(automation.py, the first branch — windows recommended, sensor open is expected) emits
+no event at all, so that specific grace-expiry outcome does not feed
+``GRACE_TIMER_EXPIRED`` this increment — the shadow FSM's tracked state simply doesn't
+advance for that one case until the next event that does feed it. Explicit scope
+boundary, not a silent gap: if this needs closing before Step 2, it requires either a
+new emitted event on that branch or a bespoke direct callback (same shape as
+``_feed_override_grace_fsm_cancelled()``'s exception in override_grace_fsm.py).
 
 **Cross-lifecycle inputs.** ``natural_vent_active`` and ``whf_owns_hvac`` are
 state *reads* from other lifecycles (Issue #631's "communicating automata"

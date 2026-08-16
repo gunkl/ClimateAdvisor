@@ -70,8 +70,20 @@ def _canon_event_log(log: list[tuple[str, dict, datetime | None]]) -> list[Any]:
 
 
 def _canon_action_log(log: list[dict]) -> list[Any]:
-    """Canonicalise an action_log: list of {domain, service, data, ts}."""
-    return [_canonical(entry) for entry in log]
+    """Canonicalise an action_log: list of {domain, service, data, ts, context}.
+
+    ``context`` is dropped before canonicalising (Issue #594 Phase R, Step 3
+    finding): each call attaches a fresh ``ha_stubs._MockContext`` carrying a
+    randomly-generated ``uuid4`` id (mirroring real HA's opaque per-call
+    correlation Context) — it is never derived from scenario content, so two
+    independently-run scenarios always disagree on it even when behaviorally
+    identical. Including it in comparison produced false-positive divergences
+    on every action entry (found via the first full-corpus decision-equivalence
+    comparator to exercise fan-toggle actions across two full independent runs
+    — ``test_nat_vent_fsm_authoritative_compare.py``). Every other field
+    (domain, service, data, ts) is real decision content and stays compared.
+    """
+    return [_canonical({k: v for k, v in entry.items() if k != "context"}) for entry in log]
 
 
 # ---------------------------------------------------------------------------

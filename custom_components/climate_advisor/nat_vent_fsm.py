@@ -24,21 +24,29 @@ event) alone — no hidden extra memory. This is why ``ACTIVE_SOFT_START`` and
 an out-of-band "how did we get here" flag (this precedent already exists in
 ``nat_vent_lifecycle.py``, reused here).
 
-**Explicit scope boundary — soft-start escalation, and the idle-open widening.**
-Two production behaviors are NOT modeled by this v1 table, on purpose, because
-neither is evidenced by the 3 existing pure pieces this module assembles (only
-production's own inline code has them, and folding them in here would silently
-introduce new, unvalidated behavior — the same discipline
-``nat_vent_exit.py``'s own docstring already applies to its excluded exit
-paths):
-  1. Escalation from ``ACTIVE_SOFT_START`` to ``ACTIVE_FULL_GATE`` mid-session
-     if full-gate conditions later become true while soft-start is active.
-  2. The ``_idle_open`` widening in ``check_natural_vent_conditions()``
-     (Issue #244/#402/#504/#620) — a contact-sensor-open-but-HVAC-idle
-     reactivation path with its own grace/debounce gating, layered on top of
-     (not part of) ``decide_nat_vent_gate()`` itself.
-Both are candidates for a future revision once evidenced by their own pure
-extraction, same as this module's own 3 building blocks were.
+**v2 (Phase R prep, Issue #594 follow-up): soft-start escalation now modeled.**
+``_transition_from_active()`` re-checks ``decide_nat_vent_gate()`` — the same
+pure function ``_transition_from_inactive()`` already calls — whenever the
+current state is ``ACTIVE_SOFT_START``, before running the exit chain. This
+mirrors production's own upgrade check at ``automation.py``'s
+"soft-start → full nat-vent upgrade" block (Issue #540), which independently
+re-evaluates the identical full-gate condition each active tick. No new
+decision logic was written — this reuses the one pure function already in
+scope, the same discipline every other piece of this module already follows.
+
+**Still-explicit scope boundary — the ``_idle_open`` widening.** Not modeled,
+but re-classified: this is not omitted decision logic, it's a **caller-side
+triggering precondition**. ``check_natural_vent_conditions()``
+(Issue #244/#402/#504/#620) only re-evaluates reactivation on a given tick if
+a contact sensor is open, HVAC is idle, debounce has settled, and grace isn't
+blocking it (or grace + over-ceiling). That gate decides *whether this FSM's
+entry logic runs at all this tick*, not what it should decide once run — the
+same relationship ``paused_by_door`` already has to this module (an external
+fact fed in, not re-derived here). Once Step 2's cutover work makes this FSM's
+``transition()`` the thing production's own call site invokes, it will
+naturally only fire when that same precondition already holds, since it's the
+same call site — no separate modeling needed inside the transition table
+itself.
 
 **Cross-lifecycle inputs.** ``paused_by_door`` is a state *read* from the
 door/window lifecycle (Issue #631's "communicating automata" design) — legacy
@@ -174,10 +182,19 @@ def _soft_start_inputs(inputs: NatVentFsmInputs, *, full_gate_active: bool) -> N
 
 
 def _transition_from_active(current_state: NatVentLifecycleState, event: NatVentFsmEvent) -> NatVentTransition:
+    # Issue #540 (mirrored, Phase R prep): while soft-started, re-check the full
+    # gate each tick — same pure function, same condition production's own
+    # upgrade block re-evaluates. Escalating doesn't change the exit-chain
+    # outcome below (decide_nat_vent_exit() treats soft-start and full-gate
+    # identically), it only changes what state a NONE-exit tick lands on.
+    escalated_state = current_state
+    if current_state == NatVentLifecycleState.ACTIVE_SOFT_START and decide_nat_vent_gate(_gate_inputs(event.inputs)):
+        escalated_state = NatVentLifecycleState.ACTIVE_FULL_GATE
+
     decision = decide_nat_vent_exit(_exit_inputs(event.inputs))
     if decision.reason == NatVentExitReason.NONE:
         return NatVentTransition(
-            from_state=current_state, to_state=current_state, event_kind=event.kind, at=event.inputs.now
+            from_state=current_state, to_state=escalated_state, event_kind=event.kind, at=event.inputs.now
         )
 
     # Only the outdoor-rise exit records an outdoor_exit_time in production

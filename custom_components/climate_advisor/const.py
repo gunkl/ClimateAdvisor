@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.18"
+VERSION = "0.6.19"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.19": [
+        "Fix #647: the internal diagnostic that shadows automation decisions to verify"
+        " an in-progress refactor (added in #613/#633/#637/#639, most recently touched"
+        " by #643) was disagreeing with the real automation on nearly every cycle — a"
+        " wiring gap left it permanently stuck once a real manual override, grace"
+        " period, or certain nat-vent exits occurred, instead of resetting once each"
+        " finished. No occupant-visible behavior change — this only affects an internal"
+        " diagnostic used to validate the automation-engine refactor before any of it"
+        " goes live.",
+    ],
     "0.6.18": [
         "Fix #645: after a redeploy or restart, the dashboard could briefly show HVAC mode"
         " 'cool' next to 'windows open (as planned)' — a monitored window/door sensor blipping"
@@ -1790,6 +1800,48 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    647: {
+        "version_fixed": "0.6.19",
+        "title": "Shadow-engine/FSM diagnostics (#613/#633/#637/#639) disagreed with production on nearly every cycle",
+        "scope_covered": (
+            "coordinator.py: the three lifecycle FSM diagnostics (nat-vent #633, door/window"
+            " #637, override/grace #639) each carry their own tracked state across calls, but"
+            " the 'which production call site re-evaluates the FSM' coverage was far narrower"
+            " than the actual set of production functions mutating the tracked fields. Root"
+            " cause traced via live logs + code, not guessed: (1) override/grace — #643 wired"
+            " the entry event (handle_fan_manual_override -> OVERRIDE_DETECTED) but zero exit"
+            " events (confirm/self-resolve/cancel/grace-expiry) had any trigger at all, so the"
+            " very first real fan override after #643 shipped pushed the FSM into 'pending'"
+            " permanently; (2) door/window — _exit_nat_vent()'s sensor-still-open branch"
+            " (reached via the already-mirrored check_natural_vent_conditions) could set"
+            " _paused_by_door=True with no door/window FSM re-evaluation; (3) nat-vent — audited"
+            " all 10 production call paths mutating _natural_vent_active/_nat_vent_soft_start;"
+            " 9 were already mirrored to the shadow engine but only 1 (check_natural_vent_"
+            " conditions) re-ran the FSM. Fix decouples 'feed the FSM' from 'mirror to shadow':"
+            " _evaluate_override_grace_fsm() now takes an explicit OverrideGraceFsmEventKind"
+            " instead of deriving one from a mirror method name; automation.py's existing"
+            " _emit_event_callback stream (already fired at nearly every real transition) now"
+            " also feeds the FSMs via _feed_lifecycle_fsms_from_event(), reusing named events"
+            " that were verified emitted AFTER their state mutation completes (override_"
+            " cleared was deliberately excluded from this hook — it fires BEFORE the clear, so"
+            " cancel_override()/clear_manual_override()'s ~4 real coordinator.py/api.py call"
+            " sites instead call _feed_override_grace_fsm_cancelled() directly, post-return)."
+            " door_window_fsm.py's pre-existing but never-wired NAT_VENT_EXITED_SENSOR_STILL_"
+            "OPEN event kind is now fired, gated on a live any_monitored_sensor_open() read"
+            " (not the not-yet-updated _paused_by_door flag) to avoid forcing an incorrect"
+            " pause on a clean nat-vent exit. nat-vent's trigger set widened to also include"
+            " reconcile_fan_on_startup/on_fan_turned_off (both share the same decide_nat_vent_"
+            "gate() gate the FSM already models, unlike apply_classification's periodic/"
+            "incidental trigger, which remains deliberately excluded). Zero production HVAC"
+            " impact: the shadow engine's dry_run is permanently True and none of this FSM"
+            " state is ever written back to a decision path — confirmed by inspection, not"
+            " assumption. New regression coverage:"
+            " tests/test_shadow_engine_coverage.py::TestOverrideGraceFsmEventCoverage (an"
+            " AST/regex registry asserting every OverrideGraceFsmEventKind member is fed from"
+            " a real coordinator.py call site — the specific check that would have caught"
+            " #643's asymmetric entry-only wiring)."
+        ),
+    },
     645: {
         "version_fixed": "0.6.18",
         "title": "Sensor reconnect blip during restart made _sensor_debounce_pending() bypass the open-window guard",

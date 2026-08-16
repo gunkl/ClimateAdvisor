@@ -228,3 +228,85 @@ class TestShadowEngineCoverageRegistry:
         found = {"a_totally_new_method_not_in_registry"}
         unregistered = found - set(_COVERAGE_REGISTRY)
         assert unregistered == {"a_totally_new_method_not_in_registry"}
+
+
+# Issue #647: a second, independent registry — this one for whether each
+# OverrideGraceFsmEventKind (the FSM's own tracked-state re-evaluation trigger, distinct
+# from the shadow-mirror registry above) is actually reachable from coordinator.py/api.py.
+# #643 wired the entry kind (OVERRIDE_DETECTED) without wiring any exit kind, leaving the
+# FSM permanently stuck once a real fan override occurred — an asymmetric wiring change
+# that shipped with no test catching the imbalance. This registry is that test.
+#
+# "unreachable: <reason>" is for FSM event kinds that exist in the enum but have no real
+# production trigger today (documented, not silently missing).
+_OVERRIDE_GRACE_EVENT_KIND_REGISTRY: dict[str, str] = {
+    "OVERRIDE_DETECTED": "reachable",
+    "MANUAL_OVERRIDE_DURING_PAUSE": "reachable",
+    "DASHBOARD_RESUME": "reachable",
+    "OVERRIDE_CONFIRM_EXPIRED": "reachable",
+    "OVERRIDE_CANCELLED": "reachable",
+    "GRACE_TIMER_EXPIRED": "reachable",
+    "OVERRIDE_SUPERSEDED": (
+        "unreachable: no production code path emits this distinct kind today — the "
+        "closest real case (a mode change arriving during an active override grace, "
+        "coordinator.py's 'new_override_during_grace' branch) is fed OVERRIDE_CANCELLED "
+        "instead, since handle_manual_override()'s own FSM entry wiring is a separate, "
+        "already-tracked follow-up, not this issue's scope"
+    ),
+}
+
+
+class TestOverrideGraceFsmEventCoverage:
+    def test_every_event_kind_is_registered(self) -> None:
+        from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
+
+        all_kinds = {member.name for member in OverrideGraceFsmEventKind}
+        unregistered = all_kinds - set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY)
+        assert not unregistered, (
+            f"New OverrideGraceFsmEventKind member(s) aren't in "
+            f"_OVERRIDE_GRACE_EVENT_KIND_REGISTRY: {sorted(unregistered)}. Classify each "
+            f'as "reachable" (and wire a real trigger in coordinator.py/api.py) or '
+            f'"unreachable: <reason>" — see Issue #647.'
+        )
+
+    def test_registry_entries_reference_real_members(self) -> None:
+        from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
+
+        all_kinds = {member.name for member in OverrideGraceFsmEventKind}
+        unknown = set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY) - all_kinds
+        assert not unknown, (
+            f"Registry references OverrideGraceFsmEventKind member(s) that no longer "
+            f"exist (renamed or removed?): {sorted(unknown)}. Update the registry."
+        )
+
+    def test_every_reachable_kind_has_a_real_trigger(self) -> None:
+        """Positive control: every 'reachable' entry must appear as a value somewhere
+        coordinator.py actually feeds the FSM from — either of the two mirror-name-keyed
+        dicts, the event-type map, or a direct OverrideGraceFsmEventKind.<X> reference at
+        a real call site (e.g. _feed_override_grace_fsm_cancelled()). Catches the
+        registry claiming coverage that doesn't actually exist in code — this is the
+        specific check that would have caught #643 shipping OVERRIDE_DETECTED without
+        any exit kind wired."""
+        combined = _COORDINATOR_PY.read_text(encoding="utf-8")
+        for name, classification in _OVERRIDE_GRACE_EVENT_KIND_REGISTRY.items():
+            if classification != "reachable":
+                continue
+            # Matches either a dict value like "override_cancelled" (snake_case enum
+            # value, used by the two method-name/event-type-keyed dicts) or a direct
+            # member reference — coordinator.py imports OverrideGraceFsmEventKind under
+            # a local alias (`_OGFEventKind`) at every direct-call-site import, so match
+            # any `<name ending in EventKind or aliased>.MEMBER` shape rather than the
+            # literal unaliased class name.
+            value_pattern = re.compile(r'"' + re.escape(name.lower()) + r'"')
+            member_pattern = re.compile(r"\b\w*(?:EventKind|OGFEventKind)\." + re.escape(name) + r"\b")
+            assert value_pattern.search(combined) or member_pattern.search(combined), (
+                f'{name} is marked "reachable" but no dict value or direct '
+                f"OverrideGraceFsmEventKind.{name} reference was found in coordinator.py"
+            )
+
+    def test_positive_control_unregistered_kind_is_caught(self) -> None:
+        """Proves test_every_event_kind_is_registered actually fails on a genuinely
+        unregistered member, not just passing vacuously."""
+        all_kinds = {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
+        unregistered = all_kinds - set(_OVERRIDE_GRACE_EVENT_KIND_REGISTRY)
+        assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}

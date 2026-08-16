@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from .ai_skills import AISkillRegistry
     from .claude_api import ClaudeAPIClient
+    from .override_grace_fsm import OverrideGraceFsmEventKind
 
 from homeassistant.const import EVENT_CALL_SERVICE, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
@@ -386,6 +387,107 @@ _OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
     "resume_from_pause": "dashboard_resume",
     "handle_fan_manual_override": "override_detected",
 }
+
+# Issue #647: the mirror-name-keyed dicts above only ever covered FSM *entry* paths —
+# every FSM *exit* path (override confirmed/self-resolved/cleared/cancelled, grace
+# naturally expiring) has no `_mirror_to_shadow()` call site at all (see the block
+# comment above) and was therefore silently unreachable, leaving each FSM's carried
+# state permanently stuck once it entered a non-idle state. `automation.py` already
+# emits a named event via `_emit_event_callback` at every one of these transitions —
+# that stream reaches `_emit_event()` (below) regardless of shadow-mirror status, so
+# `_feed_lifecycle_fsms_from_event()` hooks there instead of adding new dedicated call
+# sites. `OverrideGraceFsmEventKind` values are looked up dynamically (not hardcoded
+# here) to avoid importing the FSM module at coordinator import time.
+_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP: dict[str, str] = {
+    # _confirm_override_expired() closure (automation.py) — both branches resolve the
+    # same pending confirm window; the FSM re-derives which branch from its own fresh
+    # inputs, so one event kind covers both. Both branches emit AFTER their respective
+    # state mutation completes, so `self.automation_engine`'s live flags are already
+    # correct when `_feed_lifecycle_fsms_from_event()` reads them.
+    "override_confirmed": "override_confirm_expired",
+    "override_self_resolved": "override_confirm_expired",
+    # _on_grace_expired() — "adopted" is a distinct emitted event type for the one
+    # branch that returns early without also emitting "grace_expired"; both are the
+    # same underlying grace-timer-expiry transition from the FSM's point of view. Both
+    # emit only after `clear_manual_override()` has fully returned, same
+    # already-correct-by-the-time-we-read-it reasoning as above.
+    "grace_expired": "grace_timer_expired",
+    "override_adopted": "grace_timer_expired",
+    # Deliberately NOT "override_cleared": clear_manual_override() emits it *before*
+    # clearing `_manual_override_active` (the event payload needs the pre-clear
+    # was_mode/active_since values) — feeding the FSM there would read stale
+    # still-active state. cancel_override()/clear_manual_override() are called from a
+    # handful of real coordinator.py/api.py sites instead; those are fed directly,
+    # post-return, via `_feed_override_grace_fsm_cancelled()` below.
+}
+
+# Issue #647: `check_natural_vent_conditions` was, until now, the ONLY mirrored method
+# name that re-evaluated the nat-vent FSM — deliberately excluding `apply_classification`
+# (its own trigger is periodic/incidental, not gate/exit-adjacent — see
+# `_evaluate_nat_vent_fsm()`'s docstring and `test_nat_vent_fsm_shadow_wiring.py`'s
+# `test_not_triggered_by_unrelated_mirrored_call`, both left unchanged). `reconcile_fan_on_startup`
+# and `on_fan_turned_off` are added here because both mutate `_natural_vent_active` with
+# NO adjacent `_emit_event_callback` call `_feed_lifecycle_fsms_from_event()` could hook
+# instead (confirmed by inspection — `reconcile_fan_on_startup`'s "fan confirmed off"
+# branch and `on_fan_turned_off`'s `_clear_fan_flags_and_start_grace()` call are both
+# silent), AND both use the same shared `_nat_vent_may_reactivate()` -> `decide_nat_vent_gate()`
+# gate the FSM already models (automation.py:4160/Issue #417's consolidation) — unlike
+# `apply_classification`, these are genuine (if less common) instances of the same
+# gate/exit chain, not an unrelated periodic trigger. Both run production's real mutation
+# to completion before `_mirror_to_shadow()`'s finally block runs (production is always
+# called before its mirror), so there is no staleness risk reading `self.automation_engine`
+# here, unlike the event-type-driven hooks below.
+_NAT_VENT_FSM_TRIGGER_METHODS: frozenset[str] = frozenset(
+    {"check_natural_vent_conditions", "reconcile_fan_on_startup", "on_fan_turned_off"}
+)
+
+# Issue #647: nat-vent's own exit events (already emitted at every one of the 6 real
+# exit paths — see `_emit_event()`'s own #437-follow-up comment) are exactly the
+# moments `_natural_vent_active`/`_nat_vent_soft_start` change — re-running the TICK
+# re-evaluation here is not the "evaluating at a moment production never would" trap
+# `_evaluate_nat_vent_fsm()`'s docstring warns about (that was about periodic,
+# untied-to-a-transition triggers like `apply_classification`'s mirror); these are
+# 1:1 with a genuine production transition.
+_NAT_VENT_FSM_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "nat_vent_soft_start_entered",
+        "nat_vent_comfort_floor_exit",
+        "nat_vent_away_ceiling_exit",
+        "nat_vent_predicted_floor_exit",
+        "nat_vent_outdoor_rise_exit",
+        "nat_vent_reconcile_exit",
+        "sensor_all_closed",
+        "fan_activated",
+        "fan_deactivated",
+        # handle_door_window_open()'s nat-vent-activation branch (automation.py:2968-2979)
+        "sensor_opened",
+        # apply_classification()'s ODE ceiling-guard escalation branch
+        # (automation.py:2120-2132) — a 7th real nat-vent exit path not covered by the
+        # canonical 6 listed in `_emit_event()`'s own #437-follow-up comment.
+        "nat_vent_ceiling_escalation",
+        # handle_bedtime()'s nat-vent-clearing branches (automation.py:4937/4964) —
+        # emitted unconditionally at the end of handle_bedtime() regardless of whether
+        # the clear branch fired; harmless extra evaluation when it didn't.
+        "bedtime_setback",
+    }
+)
+
+# Issue #647: `_exit_nat_vent()`'s sensor-still-open branch sets `_paused_by_door=True`
+# (automation.py:5390) — reachable from any of nat-vent's 5 real exit events. The
+# door/window FSM already has a purpose-built event kind for exactly this
+# (`NAT_VENT_EXITED_SENSOR_STILL_OPEN`, see door_window_fsm.py) that was never wired
+# to any trigger. Fired unconditionally on these event types — `transition()` reads
+# live sensor/pause state fresh each time and no-ops correctly when the sensor-open
+# branch wasn't the one actually taken.
+_DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "nat_vent_comfort_floor_exit",
+        "nat_vent_away_ceiling_exit",
+        "nat_vent_predicted_floor_exit",
+        "nat_vent_outdoor_rise_exit",
+        "nat_vent_reconcile_exit",
+    }
+)
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -810,7 +912,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 exc,
             )
         finally:
-            if method_name == "check_natural_vent_conditions":
+            if method_name in _NAT_VENT_FSM_TRIGGER_METHODS:
                 try:
                     self._evaluate_nat_vent_fsm()
                 except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
@@ -828,7 +930,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     )
             if method_name in _OVERRIDE_GRACE_FSM_EVENT_KINDS:
                 try:
-                    self._evaluate_override_grace_fsm(method_name)
+                    from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+                    self._evaluate_override_grace_fsm(_OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name]))
                 except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
                     _LOGGER.warning(
                         "Override/grace FSM evaluation failed (isolated, no production impact): %s",
@@ -850,15 +954,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         mirror (see ``_mirror_to_shadow()``'s call site) — the one mirrored method
         that is unambiguously nat-vent's own periodic gate/exit re-evaluation point
         (``nat_vent_exit.py``'s own docstring: this is exactly the chain it
-        replaces). Deliberately NOT also triggered from ``apply_classification``/
-        ``reconcile_fan_on_startup``'s mirrors — neither actually runs the gate/exit
-        chain in production, so evaluating the FSM there would create a disagreement
-        from evaluating at a moment production itself never would (the exact class of
+        replaces). Issue #647 widened the trigger set (see
+        ``_NAT_VENT_FSM_TRIGGER_METHODS``) to also include ``reconcile_fan_on_startup``
+        and ``on_fan_turned_off`` — both genuine, if less common, instances of the same
+        shared ``decide_nat_vent_gate()`` chain (automation.py:4160), not the periodic/
+        incidental trigger ``apply_classification`` remains deliberately excluded for:
+        evaluating there would create a disagreement from evaluating at a moment
+        production itself never runs the gate/exit chain (the exact class of
         test-premise mistake caught and removed from this module's own differential
-        validation — see ``tests/test_nat_vent_fsm.py``'s in-test comment). Other
-        real gate/exit-adjacent call sites (``handle_door_window_open``,
-        ``nat_vent_temperature_check``, ``fan_thermostat_check``) are additional,
-        separately-scoped future work, not this increment.
+        validation — see ``tests/test_nat_vent_fsm.py``'s in-test comment, and
+        ``test_nat_vent_fsm_shadow_wiring.py``'s
+        ``test_not_triggered_by_unrelated_mirrored_call``, unchanged). Issue #647 also
+        added a second, event-driven trigger for this FSM — see
+        ``_feed_lifecycle_fsms_from_event()`` — for nat-vent's own named exit/activation
+        events, covering the remaining mutating call sites (``apply_classification``'s
+        ceiling-escalation branch, ``handle_door_window_open``, ``handle_bedtime``,
+        ``check_natural_vent_conditions``'s other exit branches) without re-running the
+        FSM on every unrelated ``apply_classification`` cycle the way a blanket
+        method-name trigger would.
 
         The FSM's own tracked state (``self._nat_vent_fsm_state``) is never written
         back onto either engine — this is a third, independent computation, purely
@@ -905,6 +1018,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = transition(self._nat_vent_fsm_state, event)
         self._nat_vent_fsm_state = result.to_state
 
+    def _door_window_fsm_inputs(self, ae: AutomationEngine, now: datetime, config: dict[str, Any]) -> Any:
+        """Build ``DoorWindowFsmInputs`` from production's current live readings.
+
+        Issue #647: extracted from ``_evaluate_door_window_fsm()`` so
+        ``_feed_lifecycle_fsms_from_event()``'s event-driven trigger (nat-vent exit
+        events) can build the identical inputs without duplicating this construction
+        — one source of truth for "what production state does this FSM read."
+        """
+        from .door_window_fsm import DoorWindowFsmInputs
+
+        return DoorWindowFsmInputs(
+            hvac_mode=self._current_hvac_mode(),
+            outdoor=ae._last_outdoor_temp,
+            indoor=ae._get_indoor_temp_f(),
+            comfort_heat=ae._nat_vent_reactivation_floor(),
+            comfort_cool=float(config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            nat_vent_delta=float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
+            fan_mode=str(config.get(CONF_FAN_MODE, "whole_house_fan")),
+            aggressive_savings=bool(config.get("aggressive_savings", False)),
+            within_planned_window=ae._is_within_planned_window_period(),
+            any_sensor_open=ae._any_monitored_sensor_open(),
+            sensor_debounce_pending=bool(ae._sensor_debounce_pending),
+            override_matches_current_decision=ae._override_matches_current_decision(ae._current_classification),
+            grace_source=ae._last_resume_source or "automation",
+            natural_vent_active=bool(ae._natural_vent_active),
+            whf_owns_hvac=bool(ae._whf_owns_hvac()),
+            now=now,
+        )
+
     def _evaluate_door_window_fsm(self, method_name: str) -> None:
         """Run the unified door/window pause/grace FSM (Issue #637) against
         production's current live readings and track its own independently-
@@ -918,8 +1060,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         comparison against production's real derived state. Isolated the same
         way: any exception here is logged and swallowed by the caller, never
         allowed to affect production.
+
+        Issue #647 adds a second, event-driven trigger for this same FSM — see
+        ``_feed_lifecycle_fsms_from_event()`` — for the ``NAT_VENT_EXITED_SENSOR_STILL_OPEN``
+        event kind, which no mirrored method name corresponds to.
         """
-        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind, DoorWindowFsmInputs, transition
+        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind, transition
 
         ae = self.automation_engine
         now = dt_util.now()
@@ -927,41 +1073,34 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         event = DoorWindowFsmEvent(
             kind=DoorWindowFsmEventKind(_DOOR_WINDOW_FSM_EVENT_KINDS[method_name]),
-            inputs=DoorWindowFsmInputs(
-                hvac_mode=self._current_hvac_mode(),
-                outdoor=ae._last_outdoor_temp,
-                indoor=ae._get_indoor_temp_f(),
-                comfort_heat=ae._nat_vent_reactivation_floor(),
-                comfort_cool=float(config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
-                nat_vent_delta=float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
-                fan_mode=str(config.get(CONF_FAN_MODE, "whole_house_fan")),
-                aggressive_savings=bool(config.get("aggressive_savings", False)),
-                within_planned_window=ae._is_within_planned_window_period(),
-                any_sensor_open=ae._any_monitored_sensor_open(),
-                sensor_debounce_pending=bool(ae._sensor_debounce_pending),
-                override_matches_current_decision=ae._override_matches_current_decision(ae._current_classification),
-                grace_source=ae._last_resume_source or "automation",
-                natural_vent_active=bool(ae._natural_vent_active),
-                whf_owns_hvac=bool(ae._whf_owns_hvac()),
-                now=now,
-            ),
+            inputs=self._door_window_fsm_inputs(ae, now, config),
         )
         result = transition(self._door_window_fsm_state, event)
         self._door_window_fsm_state = result.to_state
 
-    def _evaluate_override_grace_fsm(self, method_name: str) -> None:
+    def _evaluate_override_grace_fsm(self, event_kind: OverrideGraceFsmEventKind) -> None:
         """Run the unified override/grace joint-lifecycle FSM (Issue #639) against
         production's current live readings and track its own independently-
         derived state.
 
-        v1 scope, narrowed to the 2 event kinds a mirrored method exists for today
-        (see ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``) — same precedent as
-        ``_evaluate_door_window_fsm()``'s own v1 scope note. The FSM's own tracked
-        state (``self._override_grace_fsm_state``) is never written back onto
-        either engine — a third, independent computation, purely for comparison
-        against production's real derived state. Isolated the same way: any
-        exception here is logged and swallowed by the caller, never allowed to
-        affect production.
+        Issue #647: takes an explicit ``event_kind`` rather than deriving one from a
+        ``_mirror_to_shadow()`` method name — the FSM reads its inputs fresh from
+        **production** ``self.automation_engine`` every call (see below), never from
+        the shadow engine, so it has no actual dependency on whether the triggering
+        production call site also happens to replay onto the shadow engine. Coupling
+        "does this feed the FSM" to "does this have a mirror call site" (the original
+        v1 design) is what left every override/grace *exit* path — confirm, cancel,
+        clear, grace-timer-expiry — permanently unreachable, since none of those have
+        (or need) a shadow replay. Callers now pass the event kind explicitly: the 3
+        original mirrored entry points still resolve theirs via
+        ``_OVERRIDE_GRACE_FSM_EVENT_KINDS`` at the ``_mirror_to_shadow()`` call site;
+        the new exit-path callers (``_feed_lifecycle_fsms_from_event()``, driven by
+        ``_emit_event()``'s already-comprehensive event stream) resolve theirs via
+        ``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP``. The FSM's own tracked state
+        (``self._override_grace_fsm_state``) is never written back onto either engine
+        — a third, independent computation, purely for comparison against
+        production's real derived state. Isolated the same way: any exception here is
+        logged and swallowed by the caller, never allowed to affect production.
 
         ``current_setpoint_f``/``target_setpoint_f`` are resolved inline via the
         same ``select_comfort_band()`` + ``to_fahrenheit()`` sequence
@@ -972,7 +1111,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         """
         from .override_grace_fsm import (
             OverrideGraceFsmEvent,
-            OverrideGraceFsmEventKind,
             OverrideGraceFsmInputs,
         )
         from .override_grace_fsm import (
@@ -1008,7 +1146,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             target_setpoint_f = None
 
         event = OverrideGraceFsmEvent(
-            kind=OverrideGraceFsmEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name]),
+            kind=event_kind,
             inputs=OverrideGraceFsmInputs(
                 confirm_seconds=float(config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS)),
                 setpoint_override=bool(ae._override_confirm_source == "setpoint"),
@@ -1029,6 +1167,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         result = _override_grace_transition(self._override_grace_fsm_state, event)
         self._override_grace_fsm_state = result.to_state
+
+    def _feed_override_grace_fsm_cancelled(self) -> None:
+        """Feed the override/grace FSM an ``OVERRIDE_CANCELLED`` event (Issue #647).
+
+        ``cancel_override()``/``clear_manual_override()`` emit their own
+        ``"override_cleared"`` event *before* clearing ``_manual_override_active``
+        (the event payload needs the pre-clear values), so
+        ``_feed_lifecycle_fsms_from_event()`` deliberately does not hook that event
+        type — it would read stale, still-active state. Call this instead, after the
+        real ``cancel_override()``/``clear_manual_override()`` call has fully
+        returned, at each of the handful of real coordinator.py/api.py call sites —
+        by then ``self.automation_engine``'s flags are correctly cleared. Isolated the
+        same way every other FSM-feed call site is: an exception here is logged and
+        swallowed, never allowed to affect production.
+        """
+        try:
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            self._evaluate_override_grace_fsm(_OGFEventKind.OVERRIDE_CANCELLED)
+        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+            _LOGGER.warning(
+                "Override/grace FSM evaluation (cancel-driven) failed (isolated, no production impact): %s",
+                fsm_exc,
+            )
 
     def _current_hvac_mode(self) -> str | None:
         """Live thermostat mode read, shared by the door/window FSM evaluation
@@ -2384,6 +2546,19 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         _grace_end = ae._grace_end_time
         ae._cancel_grace_timers()
+        # Issue #647: this clears `_grace_active` directly via `_cancel_grace_timers()`,
+        # not via `clear_manual_override()`/`_on_grace_expired()` — a distinct mutation
+        # path with no other FSM feed. Closest semantic match is GRACE_TIMER_EXPIRED
+        # (grace ending with nothing left to protect).
+        try:
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            self._evaluate_override_grace_fsm(_OGFEventKind.GRACE_TIMER_EXPIRED)
+        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+            _LOGGER.warning(
+                "Override/grace FSM evaluation (orphaned-grace-driven) failed (isolated, no production impact): %s",
+                fsm_exc,
+            )
         self._emit_event(
             "stuck_grace_recovered",
             {"grace_end_time": _grace_end, "reason": "grace_without_override"},
@@ -2681,6 +2856,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     _stale_mode = _ae._manual_override_mode
                     _stale_since = _ae._manual_override_time
                     _ae.clear_manual_override(reason="stuck_grace_recovery")
+                    self._feed_override_grace_fsm_cancelled()
                     self._emit_event(
                         "stuck_grace_recovered",
                         {
@@ -4268,6 +4444,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine._manual_override_mode,
             )
             self.automation_engine.clear_manual_override(reason="new_override_during_grace")
+            # Issue #647: only feeds OVERRIDE_CANCELLED for the clear half of this
+            # clear-then-reopen sequence — `handle_manual_override()` right below has
+            # no FSM entry wiring yet (same follow-up class as #643's
+            # `handle_fan_manual_override`, tracked separately, not this issue's scope).
+            # Still strictly better than leaving the FSM stuck on the just-cleared
+            # override's stale state.
+            self._feed_override_grace_fsm_cancelled()
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
                 new_mode=new_state.state,
@@ -7332,6 +7515,70 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if getattr(self, "_nat_vent_was_active", False) and not _nat_vent_active_now:
             self._maybe_reschedule_pre_cool_on_nat_vent_exit()
         self._nat_vent_was_active = _nat_vent_active_now
+
+        self._feed_lifecycle_fsms_from_event(event_type)
+
+    def _feed_lifecycle_fsms_from_event(self, event_type: str) -> None:
+        """Re-evaluate the lifecycle FSMs whose tracked state this event just changed
+        in production (Issue #647).
+
+        Production-only — this is called from ``_emit_event`` (the real
+        ``AutomationEngine``'s callback), never from ``_on_shadow_emit_event`` (the
+        shadow engine's own event sink), matching every other ``_evaluate_*_fsm()``
+        call site's convention of reading ``self.automation_engine`` (production),
+        never the shadow engine. Each branch is isolated exactly like
+        ``_mirror_to_shadow()``'s own finally block: an exception here is logged and
+        swallowed, never allowed to affect production.
+        """
+        if event_type in _NAT_VENT_FSM_EVENT_TYPES:
+            try:
+                self._evaluate_nat_vent_fsm()
+            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                _LOGGER.warning(
+                    "Nat-vent FSM evaluation (event-driven) failed (isolated, no production impact): %s",
+                    fsm_exc,
+                )
+        if event_type in _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES:
+            try:
+                from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
+                from .door_window_fsm import transition as _door_window_transition
+
+                ae = self.automation_engine
+                # NAT_VENT_EXITED_SENSOR_STILL_OPEN's transition() unconditionally
+                # pauses (door_window_fsm.py:255-261) — it does not itself re-check
+                # any_sensor_open, so this event kind must only be sent when the
+                # sensor really is open, or every nat-vent exit (including a clean
+                # one) would incorrectly force a pause the FSM never should have
+                # entered. Read live sensor state directly rather than
+                # `ae._paused_by_door` — `_exit_nat_vent()` (which sets that flag)
+                # runs *after* the exit event these event types are emitted for
+                # (automation.py's own "caller emits its own specific event before
+                # calling this method" convention), so `_paused_by_door` is still
+                # last-cycle's stale value at this point; the live sensor read isn't.
+                if ae._any_monitored_sensor_open():
+                    now = dt_util.now()
+                    config = self.config
+                    event = DoorWindowFsmEvent(
+                        kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN,
+                        inputs=self._door_window_fsm_inputs(ae, now, config),
+                    )
+                    result = _door_window_transition(self._door_window_fsm_state, event)
+                    self._door_window_fsm_state = result.to_state
+            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                _LOGGER.warning(
+                    "Door/window FSM evaluation (event-driven) failed (isolated, no production impact): %s",
+                    fsm_exc,
+                )
+        if event_type in _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP:
+            try:
+                from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+                self._evaluate_override_grace_fsm(_OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP[event_type]))
+            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                _LOGGER.warning(
+                    "Override/grace FSM evaluation (event-driven) failed (isolated, no production impact): %s",
+                    fsm_exc,
+                )
 
     def _resolve_active_comfort_band(self) -> tuple[float | None, float | None]:
         """Resolve the currently-active (comfort_heat, comfort_cool) band.

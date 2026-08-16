@@ -598,6 +598,7 @@ class ClimateAdvisorCancelOverrideView(HomeAssistantView):
         if not cancelled:
             return self.json({"status": "ok", "message": "No active override to cancel"})
 
+        coordinator._feed_override_grace_fsm_cancelled()  # Issue #647
         _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
         return self.json(
@@ -657,6 +658,7 @@ class ClimateAdvisorCancelFanOverrideView(HomeAssistantView):
         if not cancelled:
             return self.json({"status": "ok", "message": "No active fan override to cancel."})
 
+        coordinator._feed_override_grace_fsm_cancelled()  # Issue #647
         _schedule_reclassify_after_cancel(hass, coordinator, ae)
 
         return self.json({"status": "ok", "message": "Fan override cleared."})

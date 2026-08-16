@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.19] — 2026-08-16
+
+- Fix #647: internal refactor only, no user-visible behavior change — the diagnostic-only shadow/FSM comparisons from the Block 5 series (0.6.13–0.6.17) were disagreeing with production on nearly every automation cycle, not just occasionally. A wiring gap left each FSM's tracked state stuck once a real manual override, grace period, or certain nat-vent exits occurred, instead of resetting once each finished. Fixed by feeding each FSM from every real production transition, not just the ones already replayed to the shadow engine. Purely observational — nothing it computes is ever acted on.
+
 ## [0.6.18] — 2026-08-15
 
 - Fix #645: after a redeploy or restart, the dashboard could briefly show HVAC mode 'cool' next to 'windows open (as planned)' — a monitored window/door sensor blipping unavailable-then-on during startup reset its change timestamp, which made the automation's debounce check treat the window as still settling and skip the guard that normally refuses to command an active HVAC mode through an open window. The compressor never actually ran in the reported case (the target temperature was still above the indoor reading), but on a warmer morning this could have let real cooling run with windows open. The guard now always blocks arming an active mode while a monitored window is open, regardless of that startup timing race.

@@ -2,13 +2,15 @@
 joint-lifecycle FSM live against production's real readings, tracked as a third
 comparison point alongside the existing production/shadow mirror comparison.
 
-v1 scope, deliberately narrow (see ``coordinator._evaluate_override_grace_fsm()``'s
-own docstring and ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``): only triggered from the 2
-mirrored methods with an unambiguous override/grace FSM event-kind correspondence
-(``handle_manual_override_during_pause``, ``resume_from_pause``) — of the 7
-``OverrideGraceFsmEventKind`` members, the other 5 have no ``_mirror_to_shadow(...)``
-call site today (see ``_sync_shadow_inputs()``'s own docstring and
-``tests/test_shadow_engine_coverage.py``'s registry). Mirrors
+Issue #647: ``_evaluate_override_grace_fsm()`` now takes an explicit
+``OverrideGraceFsmEventKind`` rather than deriving one from a mirrored method name —
+see its own docstring and ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``/
+``_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP``. The 3 originally-mirrored entry points
+(``handle_manual_override_during_pause``, ``resume_from_pause``,
+``handle_fan_manual_override``) still resolve their event kind via the mirror-name
+dict at the ``_mirror_to_shadow()`` call site; every override/grace *exit* path
+(confirm/self-resolve/cancel/grace-expiry) is now also reachable — see
+``tests/test_shadow_engine_coverage.py``'s registry. Mirrors
 ``tests/test_door_window_fsm_shadow_wiring.py``'s structure.
 """
 
@@ -17,6 +19,7 @@ from __future__ import annotations
 import logging
 
 from custom_components.climate_advisor.const import CONF_OVERRIDE_CONFIRM_PERIOD
+from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
 from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_coordinator
@@ -37,8 +40,8 @@ def _noop_shadow_methods(coordinator, *names: str) -> None:
 class TestFsmEvaluationScoping:
     def test_not_triggered_by_unrelated_mirrored_call(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        called: list[str] = []
-        coordinator._evaluate_override_grace_fsm = lambda method_name: called.append(method_name)  # type: ignore[method-assign]
+        called: list[OverrideGraceFsmEventKind] = []
+        coordinator._evaluate_override_grace_fsm = lambda event_kind: called.append(event_kind)  # type: ignore[method-assign]
 
         _noop_shadow_methods(coordinator, "apply_classification")
         _run(coordinator._mirror_to_shadow("apply_classification", None))
@@ -46,8 +49,8 @@ class TestFsmEvaluationScoping:
 
     def test_not_triggered_by_door_window_only_mirrored_call(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        called: list[str] = []
-        coordinator._evaluate_override_grace_fsm = lambda method_name: called.append(method_name)  # type: ignore[method-assign]
+        called: list[OverrideGraceFsmEventKind] = []
+        coordinator._evaluate_override_grace_fsm = lambda event_kind: called.append(event_kind)  # type: ignore[method-assign]
 
         _noop_shadow_methods(coordinator, "handle_door_window_open")
         _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
@@ -55,21 +58,21 @@ class TestFsmEvaluationScoping:
 
     def test_triggered_by_handle_manual_override_during_pause(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        called: list[str] = []
-        coordinator._evaluate_override_grace_fsm = lambda method_name: called.append(method_name)  # type: ignore[method-assign]
+        called: list[OverrideGraceFsmEventKind] = []
+        coordinator._evaluate_override_grace_fsm = lambda event_kind: called.append(event_kind)  # type: ignore[method-assign]
 
         _noop_shadow_methods(coordinator, "handle_manual_override_during_pause")
         _run(coordinator._mirror_to_shadow("handle_manual_override_during_pause"))
-        assert called == ["handle_manual_override_during_pause"]
+        assert called == [OverrideGraceFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE]
 
     def test_triggered_by_resume_from_pause(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
-        called: list[str] = []
-        coordinator._evaluate_override_grace_fsm = lambda method_name: called.append(method_name)  # type: ignore[method-assign]
+        called: list[OverrideGraceFsmEventKind] = []
+        coordinator._evaluate_override_grace_fsm = lambda event_kind: called.append(event_kind)  # type: ignore[method-assign]
 
         _noop_shadow_methods(coordinator, "resume_from_pause")
         _run(coordinator._mirror_to_shadow("resume_from_pause"))
-        assert called == ["resume_from_pause"]
+        assert called == [OverrideGraceFsmEventKind.DASHBOARD_RESUME]
 
 
 class TestFsmStateTracking:

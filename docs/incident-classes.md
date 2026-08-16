@@ -6,7 +6,7 @@
 
 | Question | Short answer (<= 2 sentences) | -> Full answer |
 |---|---|---|
-| Which incident classes are proactive (fire at command time)? | Two: `setpoint_mode_inconsistency` -- fires inside automation.py _set_temperature() before the HA service call; and `fan_rapid_cycling` (Issue #641) -- fires inside automation.py _activate_fan()/_deactivate_fan() when the rate-limit backstop suppresses a command. All other classes are reactive and fire post-cycle in coordinator._detect_and_emit_incidents. | [Proactive vs. Reactive column below](#incident-class-reference) |
+| Which incident classes are proactive (fire at command time)? | One: `setpoint_mode_inconsistency` -- fires inside automation.py _set_temperature() before the HA service call. All other classes are reactive and fire post-cycle in coordinator._detect_and_emit_incidents. (Issue #641 briefly added a proactive `fan_rapid_cycling` class when the rate-limit backstop suppressed a command; removed in #649 -- a suppressed-and-deferred toggle is the backstop working correctly, not an anomaly, and is now surfaced as a `fan_toggle_deferred`-flavored event payload plus a WHF status-card suffix instead of an incident.) | [Proactive vs. Reactive column below](#incident-class-reference) |
 | What is the `incident_detected` event payload schema? | `type`, `time`, `incident_class`, `incident_id`, `indoor_f`, `outdoor_f`, `hvac_mode`, `comfort_cool`, `comfort_heat`, plus class-specific fields (`nat_vent_active`, `manual_override_active`, `occupancy_mode`, `setpoint_f`). | [Event Payload](#event-payload) |
 | Does `comfort_violation`/`comfort_undertemp` require a sustained 15-min deviation? | No -- both are a **point-in-time** check (>0.5 F past the comfort band edge) with a 30-min incident-dedup window, not a duration tracker; as of Issue #411 they also skip emission when the deviation is within nat-vent-cycling tolerance (`coordinator._is_nat_vent_tolerated_deviation()`). | [Incident Class Reference below](#incident-class-reference) |
 | Which classes were added for bugs #220-222? | Four new classes: `setpoint_mode_inconsistency` (#222 -- silent wrong setpoint), `rapid_override_after_automation` (#221 -- false override detection), `occupancy_transition` (#220 -- coverage gap), `override_active_on_occupancy` (compound condition at occupancy change). | [Bug Motivation column below](#incident-class-reference) |
@@ -28,7 +28,6 @@
 | `rapid_override_after_automation` | `override_detected` event within 60s of any automation decision event in event_log | Reactive | Integration | **HIGH** | #221 -- automation-driven setpoint change falsely flagged as manual override |
 | `occupancy_transition` | Any `occupancy_change` event in event_log during the last cycle | Reactive | Both | Medium | #220 -- near-zero occupancy transition coverage in golden suite |
 | `override_active_on_occupancy` | `manual_override_active=True` at the time of an `occupancy_change` event | Reactive | Integration | Medium | Compound condition exposed by #220 investigation |
-| `fan_rapid_cycling` | `_fan_toggle_rate_limited()` suppresses a CA-issued fan activate/deactivate within `FAN_MIN_TOGGLE_INTERVAL_S` (300s) of CA's own last fan command | **Proactive** | Integration | **HIGH** | #641 -- WHF cycled on/off ~every minute (proactive-floor exit vs. instant reactivation-gate flip-flop); a suppressed command silently diverges commanded vs. physical fan state |
 
 ---
 
@@ -75,7 +74,6 @@ All numeric fields are in Fahrenheit regardless of the user's display unit setti
 | Class | Where it fires | Code location |
 |---|---|---|
 | `setpoint_mode_inconsistency` | Before HA service call | `automation.py _set_temperature()` |
-| `fan_rapid_cycling` | At the suppressed command, before any HA service call | `automation.py _fan_toggle_rate_limited()`, called from `_activate_fan()`/`_deactivate_fan()` |
 | All others | Post-cycle | `coordinator.py _detect_and_emit_incidents()` |
 
 The `incident_detected` event is appended to `coordinator._event_log` in both cases. It is visible in the event log API at `GET /api/climate_advisor/event_log`.

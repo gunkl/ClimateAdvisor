@@ -1762,14 +1762,20 @@ def _render_fan_activated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
     fan_device = p.get("fan_device", "fan")
     label = f"Fan activated -- {reason}" if reason else "Fan activated"
-    return label, f"{fan_device}: off->on"
+    # Issue #649: fan_mode_change, when present, overrides the default "device: off->on"
+    # claim -- set by _exit_nat_vent() to a "deferred (...)" description when the Issue
+    # #641 rate limiter blocked the toggle, so this row doesn't claim a state transition
+    # that hasn't happened yet.
+    settings = p.get("fan_mode_change") or f"{fan_device}: off->on"
+    return label, settings
 
 
 def _render_fan_deactivated(p: dict, unit: str) -> tuple[str, str]:
     reason = str(p.get("reason", "")).strip()
     fan_device = p.get("fan_device", "fan")
     label = f"Fan deactivated -- {reason}" if reason else "Fan deactivated"
-    return label, f"{fan_device}: on->off"
+    settings = p.get("fan_mode_change") or f"{fan_device}: on->off"
+    return label, settings
 
 
 def _render_hvac_write_blocked_whf_active(p: dict, unit: str) -> tuple[str, str]:
@@ -1899,7 +1905,10 @@ def _render_nat_vent_outdoor_rise_exit(p: dict, unit: str) -> tuple[str, str]:
                 f"Nat-vent exit -- outdoor {format_temp(float(outdoor), unit)}"
                 f" > indoor {format_temp(float(indoor), unit)}"
             )
-    return label, ""
+    # Issue #649: fan_mode_change is only present when _exit_nat_vent() overrode it to a
+    # "deferred (...)" description (the Issue #641 rate limiter blocked the toggle).
+    fan_change = p.get("fan_mode_change", "")
+    return label, f"fan: {fan_change}" if fan_change else ""
 
 
 def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
@@ -1937,7 +1946,8 @@ def _render_nat_vent_away_ceiling_exit(p: dict, unit: str) -> tuple[str, str]:
                 f"Nat-vent exit (away) -- indoor {format_temp(float(indoor), unit)}"
                 f" >= ceiling {format_temp(float(cool), unit)}"
             )
-    return label, ""
+    fan_change = p.get("fan_mode_change", "")
+    return label, f"fan: {fan_change}" if fan_change else ""
 
 
 def _render_nat_vent_predicted_floor_exit(p: dict, unit: str) -> tuple[str, str]:

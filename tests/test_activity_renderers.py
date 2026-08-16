@@ -554,9 +554,16 @@ class TestEventRenderersCoverage:
     )
 
     def _extract_emitted_types(self) -> set[str]:
-        """Read automation.py and coordinator.py; return all emitted event type literals."""
+        """Read automation.py and coordinator.py; return all emitted event type literals.
+
+        Issue #649: `_exit_nat_vent()` centralizes emission for its callers' nat-vent
+        exit events — callers now pass the type as an `event_type="..."` keyword
+        literal instead of calling `_emit_event_callback("...", ...)` directly, so the
+        extraction regex covers both call shapes.
+        """
         emitted: set[str] = set()
         pattern = re.compile(r'_emit_event(?:_callback)?\s*\(\s*["\'](\w+)["\']')
+        event_type_kwarg_pattern = re.compile(r'event_type\s*=\s*["\'](\w+)["\']')
         for fname in (
             "custom_components/climate_advisor/automation.py",
             "custom_components/climate_advisor/coordinator.py",
@@ -564,6 +571,7 @@ class TestEventRenderersCoverage:
             with open(fname, encoding="utf-8") as f:
                 content = f.read()
             emitted.update(pattern.findall(content))
+            emitted.update(event_type_kwarg_pattern.findall(content))
         return emitted
 
     def test_all_emitted_types_have_renderer(self):

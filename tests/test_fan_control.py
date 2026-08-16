@@ -3460,10 +3460,12 @@ class TestWhfStatusRateLimitSuffix:
             physical_state=False,
         )
         now = datetime(2026, 8, 15, 6, 41, 0)
-        coord.automation_engine._fan_rate_limited_until = now + timedelta(seconds=120)
+        applies_at = now + timedelta(seconds=120)
+        coord.automation_engine._fan_rate_limited_until = applies_at
+        coord.automation_engine._fan_rate_limited_direction = "deactivate"
         with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=now):
             result = coord._compute_whf_status()
-        assert result == "inactive (rate-limited 180s ago)"
+        assert result == f"inactive (off pending — 5-min floor, applies at {applies_at.strftime('%H:%M:%S')})"
 
     def test_suffix_absent_once_cooldown_elapses(self):
         coord = _make_coordinator_for_fan_status(

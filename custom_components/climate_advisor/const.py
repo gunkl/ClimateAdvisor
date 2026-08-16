@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.19"
+VERSION = "0.6.20"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.20": [
+        "Fix #649: follow-up to #641's whole-house-fan rapid-cycling protection. The"
+        " 5-minute floor itself was already working correctly, but the Activity Report"
+        " and HA logs made a blocked toggle look like it had actually happened, and"
+        " repeated the same misleading row every time the system re-checked while still"
+        " blocked. A blocked-then-later-applied fan toggle now shows as a single"
+        " accurate 'deferred' entry followed by one real 'applied' entry once the floor"
+        " clears, and is no longer mislabeled as an incident — it's the protection"
+        " working as intended.",
+    ],
     "0.6.19": [
         "Fix #647: the internal diagnostic that shadows automation decisions to verify"
         " an in-progress refactor (added in #613/#633/#637/#639, most recently touched"
@@ -1930,6 +1940,48 @@ KNOWN_FIXES: dict[int, dict] = {
             " fan_min_runtime_per_hour feature) now floor their computed on/off phase"
             " durations at the same 300s minimum so a configured value outside ~[5, 55]"
             " minutes can't schedule its own off/on command inside the rate-limit window."
+        ),
+    },
+    649: {
+        "version_fixed": "0.6.20",
+        "title": "WHF rate-limit reporting was misleading and mis-framed as an incident (follow-up to #641)",
+        "scope_covered": (
+            "automation.py: _activate_fan()/_deactivate_fan() now return a FanCommandResult"
+            " (EXECUTED / ALREADY_IN_STATE / RATE_LIMITED_NEW / RATE_LIMITED_DUP / OVERRIDDEN /"
+            " DISABLED) instead of None, so callers can tell whether a fan command actually"
+            " executed. _exit_nat_vent() gained event_type/event_payload kwargs and now"
+            " centralizes emission for its 7 call sites (check_natural_vent_conditions()'s"
+            " PROACTIVE_FLOOR/OUTDOOR_RISE/CEILING_THRESHOLD-adjacent branches,"
+            " fan_thermostat_check()'s STOP_VIA_NAT_VENT_EXIT/STOP_DEACTIVATE/STOP_COOLED_TO_FLOOR,"
+            " and nat_vent_temperature_check()'s hard-floor exit) — the caller's own"
+            " nat_vent_predicted_floor_exit/nat_vent_comfort_floor_exit/nat_vent_outdoor_rise_exit/"
+            " fan_deactivated event now fires with an accurate fan_mode_change field ('on→auto'"
+            " when the toggle executed, a 'deferred (5-min floor, applies HH:MM:SS)' description"
+            " when newly rate-limited) instead of unconditionally claiming a state transition"
+            " that may not have happened. _fan_toggle_rate_limited() gained a dedup guard"
+            " (_fan_rate_limited_direction + comparing against the already-armed"
+            " _fan_rate_limited_until) so a repeat block within the same deferral window —"
+            " either two decision paths racing in one tick, or fan_thermostat_check() re-"
+            " deciding on every retry tick while still blocked — logs at DEBUG and reports"
+            " nothing new, instead of an unbounded WARNING/incident per tick. The"
+            " incident_detected/fan_rapid_cycling emission (added in #641) was removed entirely"
+            " and its docs/incident-classes.md rows deleted — a blocked-and-deferred toggle is"
+            " the #641 floor working correctly, not an anomaly; the first block in a window now"
+            " logs at INFO (was WARNING). When a deferred toggle finally executes,"
+            " _activate_fan()/_deactivate_fan() log a new INFO '5-minute floor expired — applying"
+            " deferred ...' line ahead of the pre-existing (unchanged, WARNING) 'Activated/"
+            " Deactivated fan' line, so the completion is visible without inflating its severity."
+            " ai_skills_context.py: _render_fan_activated()/_render_fan_deactivated() now honor an"
+            " optional fan_mode_change payload override (falling back to the historical"
+            " 'device: off->on'/'on->off' when absent) — needed because those two renderers,"
+            " unlike the nat_vent_* renderers, previously hardcoded the state-transition text"
+            " regardless of payload; _render_nat_vent_outdoor_rise_exit()/"
+            " _render_nat_vent_away_ceiling_exit() also extended to surface fan_mode_change when"
+            " present, matching the pattern the comfort-floor/predicted-floor renderers already"
+            " used. coordinator.py: _whf_rate_limit_suffix() reworded from '(rate-limited Xs ago)'"
+            " to '(<on/off> pending — 5-min floor, applies at HH:MM:SS)', naming the pending"
+            " direction (via the new _fan_rate_limited_direction field) and the exact clock time"
+            " the deferred toggle will apply. No change to the #641 floor/lockout mechanism itself."
         ),
     },
     639: {

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.20] — 2026-08-16
+
+- Fix #649: follow-up to #641's whole-house-fan rapid-cycling protection. The 5-minute floor itself was already working correctly, but the Activity Report and HA logs made a blocked toggle look like it had actually happened, and repeated the same misleading row every time the system re-checked while still blocked. A blocked-then-later-applied fan toggle now shows as a single accurate "deferred" entry followed by one real "applied" entry once the floor clears, and is no longer mislabeled as an incident — it's the protection working as intended.
+
 ## [0.6.19] — 2026-08-16
 
 - Fix #647: internal refactor only, no user-visible behavior change — the diagnostic-only shadow/FSM comparisons from the Block 5 series (0.6.13–0.6.17) were disagreeing with production on nearly every automation cycle, not just occasionally. A wiring gap left each FSM's tracked state stuck once a real manual override, grace period, or certain nat-vent exits occurred, instead of resetting once each finished. Fixed by feeding each FSM from every real production transition, not just the ones already replayed to the shadow engine. Purely observational — nothing it computes is ever acted on.

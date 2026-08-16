@@ -360,6 +360,75 @@ class TestResumeFromPause:
         assert engine._last_resume_source == "manual"
 
 
+class TestResumeFromPauseFsmAuthoritative:
+    """Issue #594 Phase R Step 2: with _doorwindow_fsm_authoritative=True,
+    resume_from_pause() derives its resulting flags from
+    door_window_fsm.transition() instead of the unconditional inline clear —
+    same outcome, different source of truth. Mirrors TestResumeFromPause above
+    with the flag on.
+    """
+
+    def test_restores_mode_and_starts_grace_from_paused_active(self):
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 300,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        with patch(_PATCH_CALL_LATER) as mock_call_later, patch(_PATCH_CALLBACK, side_effect=lambda f: f):
+            mock_call_later.return_value = MagicMock()
+            result = asyncio.run(engine.resume_from_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._pre_pause_mode is None
+        assert engine._resumed_from_pause is True
+        assert engine._grace_active is True
+        assert result == "cool"
+
+        calls = engine.hass.services.async_call.call_args_list
+        hvac_calls = [c for c in calls if c.args[0] == "climate" and c.args[1] == "set_hvac_mode"]
+        assert len(hvac_calls) >= 1
+        assert hvac_calls[0].args[2]["hvac_mode"] == "cool"
+
+    def test_leaves_grace_running_from_paused_during_grace(self):
+        """From PAUSED_DURING_GRACE, DASHBOARD_RESUME lands unconditionally on
+        GRACE, same as from a plain paused state — matching the legacy path's
+        own unconditional _start_grace_period() call regardless of origin."""
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 300,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._grace_active = True
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        with patch(_PATCH_CALL_LATER) as mock_call_later, patch(_PATCH_CALLBACK, side_effect=lambda f: f):
+            mock_call_later.return_value = MagicMock()
+            asyncio.run(engine.resume_from_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is True
+
+    def test_noop_when_not_paused(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = False
+
+        result = asyncio.run(engine.resume_from_pause())
+
+        assert result is None
+        engine.hass.services.async_call.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # TestGraceExpiryRecheck
 # ---------------------------------------------------------------------------

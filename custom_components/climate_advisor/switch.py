@@ -6,8 +6,8 @@ service calls are skipped and logged with a [DRY RUN] prefix.
 
 See: GitHub Issue #19
 
-Issue #594 Phase R, Step 4: also provides the per-lifecycle nat-vent
-FSM-authoritative toggle.
+Issue #594 Phase R, Step 4: also provides the per-lifecycle nat-vent and
+door/window FSM-authoritative toggles.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ async def async_setup_entry(
         [
             ClimateAdvisorAutomationSwitch(coordinator, entry),
             ClimateAdvisorNatVentFsmAuthoritativeSwitch(coordinator, entry),
+            ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(coordinator, entry),
         ]
     )
 
@@ -120,4 +121,55 @@ class ClimateAdvisorNatVentFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntit
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Revert to the legacy inline nat-vent computation."""
         self.coordinator.set_natvent_fsm_authoritative(False)
+        self.async_write_ha_state()
+
+
+class ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to make the door/window lifecycle FSM (Issue #637) authoritative,
+    instead of the legacy inline flag writes (Issue #594 Phase R, Step 4).
+
+    **Partial authority** — unlike the nat-vent switch above, this one increment
+    only governs 2 of the door/window lifecycle's 7 methods
+    (``handle_manual_override_during_pause``, ``resume_from_pause``). The other 5
+    (``handle_door_window_open``, ``handle_all_doors_windows_closed``,
+    ``_re_pause_for_open_sensor``, ``_on_grace_expired``, ``_exit_nat_vent``'s
+    sensor-still-open branch) stay on the legacy path regardless of this switch's
+    position — each has its own documented blocker (see
+    ``AutomationEngine._doorwindow_fsm_authoritative``'s docstring in
+    automation.py) that must resolve before it can join a future increment.
+    Flipping this switch on does NOT mean "the FSM fully controls door/window."
+
+    Default OFF, NOT persisted across a Home Assistant restart — same reasoning
+    as the nat-vent switch's own docstring: a restart always comes back up on
+    the proven legacy path, and the owner must explicitly re-enable this each
+    time.
+    """
+
+    _attr_icon = "mdi:state-machine"
+    _attr_entity_category = None
+
+    def __init__(
+        self,
+        coordinator: ClimateAdvisorCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the door/window FSM-authoritative switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_doorwindow_fsm_authoritative"
+        self._attr_name = "Climate Advisor Door/Window FSM Authoritative"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if the door/window FSM is authoritative for the 2
+        methods this increment covers."""
+        return self.coordinator.doorwindow_fsm_authoritative
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Make the door/window FSM authoritative (partial scope — see class docstring)."""
+        self.coordinator.set_doorwindow_fsm_authoritative(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Revert to the legacy inline door/window flag writes."""
+        self.coordinator.set_doorwindow_fsm_authoritative(False)
         self.async_write_ha_state()

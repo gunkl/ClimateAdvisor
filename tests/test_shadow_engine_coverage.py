@@ -89,6 +89,11 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     "_pause_for_door_window": (
         "internal: called only from handle_door_window_open (mirrored) and _re_pause_for_open_sensor (internal)"
     ),
+    "_apply_door_window_fsm_state": (
+        "internal: Issue #594 Phase R Step 2 helper, called only from the FSM-authoritative "
+        "branches of handle_manual_override_during_pause (mirrored) and resume_from_pause "
+        "(mirrored) — the inverse of door_window_lifecycle_state's derivation"
+    ),
     "_clear_fan_flags_and_start_grace": (
         "internal: called only from on_fan_turned_off (mirrored) and _reconcile_fan_physical_drift (internal)"
     ),

@@ -1469,6 +1469,27 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "made authoritative" if enabled else "reverted to legacy computation",
         )
 
+    @property
+    def doorwindow_fsm_authoritative(self) -> bool:
+        """Whether the door/window lifecycle FSM (Issue #637) is authoritative
+        for ``handle_manual_override_during_pause``/``resume_from_pause`` (Issue
+        #594 Phase R, Step 4 — partial scope, see
+        ``AutomationEngine._doorwindow_fsm_authoritative``'s docstring for which
+        methods this does and doesn't cover). False = legacy inline flag writes
+        (default)."""
+        return bool(self.automation_engine._doorwindow_fsm_authoritative)
+
+    def set_doorwindow_fsm_authoritative(self, enabled: bool) -> None:
+        """Flip door/window FSM authority — Step 2's partial read-authority
+        swap, live. Same NOT-persisted-across-restart reasoning as
+        ``set_natvent_fsm_authoritative()``'s own docstring.
+        """
+        self.automation_engine._doorwindow_fsm_authoritative = enabled
+        _LOGGER.warning(
+            "Door/window FSM %s for production decisions (partial scope — Issue #594 Phase R)",
+            "made authoritative" if enabled else "reverted to legacy computation",
+        )
+
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
 

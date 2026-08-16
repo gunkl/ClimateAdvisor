@@ -506,4 +506,8 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             # computation). Surfaced here rather than a new card/sensor, same
             # "extend an existing diagnostic" rule this sensor itself follows.
             "natvent_fsm_authoritative": self.coordinator.natvent_fsm_authoritative,
+            # Issue #594 Phase R, Step 4: same rationale as natvent_fsm_authoritative
+            # above — partial scope, see AutomationEngine._doorwindow_fsm_authoritative's
+            # docstring for exactly which methods this does and doesn't cover.
+            "doorwindow_fsm_authoritative": self.coordinator.doorwindow_fsm_authoritative,
         }

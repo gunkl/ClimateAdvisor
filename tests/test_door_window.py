@@ -470,6 +470,59 @@ class TestManualOverrideDuringPause:
         assert engine._grace_active is False
 
 
+class TestManualOverrideDuringPauseFsmAuthoritative:
+    """Issue #594 Phase R Step 2: with _doorwindow_fsm_authoritative=True,
+    handle_manual_override_during_pause() derives its resulting flags from
+    door_window_fsm.transition() instead of the unconditional inline clear —
+    same outcome, different source of truth. Mirrors TestManualOverrideDuringPause
+    above with the flag on.
+    """
+
+    def test_clears_pause_and_starts_confirmation_from_paused_active(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "heat"
+
+        with patch(
+            "custom_components.climate_advisor.automation.async_call_later",
+            return_value=MagicMock(),
+        ):
+            asyncio.run(engine.handle_manual_override_during_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._pre_pause_mode is None
+        # CONF_OVERRIDE_CONFIRM_PERIOD=0 in this file's engine fixture — override
+        # confirmation is immediate (_confirm_override()), not pending.
+        assert engine._manual_override_active is True
+
+    def test_leaves_grace_running_from_paused_during_grace(self):
+        """From PAUSED_DURING_GRACE, MANUAL_OVERRIDE_DURING_PAUSE lands on GRACE —
+        pause clears but the already-running grace timer is left untouched,
+        matching the legacy path's own silence on _grace_active here."""
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._grace_active = True
+        engine._pre_pause_mode = "heat"
+
+        asyncio.run(engine.handle_manual_override_during_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is True
+
+    def test_noop_when_not_paused(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = False
+
+        asyncio.run(engine.handle_manual_override_during_pause())
+
+        assert engine._grace_active is False
+        assert engine._override_confirm_pending is False
+
+
 class TestGracePeriodDuration:
     """Tests for configurable grace period durations."""
 

@@ -4,9 +4,21 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.24"
+VERSION = "0.6.25"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.25": [
+        "Feat #637 (Phase R Step 2, partial): begins letting the door/window"
+        " pause/grace lifecycle FSM actually drive production decisions — a new,"
+        " off-by-default switch lets it take over 2 of the lifecycle's 7 actions"
+        " (a manual thermostat override detected during a pause, and resuming from"
+        " a dashboard pause) instead of the older logic. Both were proven"
+        " behavior-identical to the existing logic before this shipped, across the"
+        " full scenario library plus dedicated tests. The switch defaults off — no"
+        " occupant-visible behavior change unless it is explicitly turned on, and"
+        " even then only for those 2 actions; everything else about door/window"
+        " pause/grace handling is unchanged.",
+    ],
     "0.6.24": [
         "Feat #637 (Phase R Step 1b): internal refactor only, no user-visible behavior"
         " change — closes the last coverage gap in the door/window pause/grace"
@@ -2087,7 +2099,7 @@ KNOWN_FIXES: dict[int, dict] = {
         ),
     },
     637: {
-        "version_fixed": "0.6.24",
+        "version_fixed": "0.6.25",
         "title": (
             "Block 5 epic #594 Phase 2: builds the unified door/window pause/grace"
             " transition table (5 new pure functions + door_window_fsm.py assembly),"
@@ -2127,6 +2139,28 @@ KNOWN_FIXES: dict[int, dict] = {
             " emits no event at all, so that one grace-expiry outcome still doesn't feed"
             " the FSM — documented in door_window_fsm.py's docstring, not silently"
             " missed."
+            " Phase R Step 2 (0.6.25, PARTIAL authority): the nat-vent precedent"
+            " (`_natvent_fsm_authoritative`) swapped one boolean decision point."
+            " Door/window's full scope — deriving all 9 pause/grace flags across 7"
+            " methods from FSM state — turned out qualitatively bigger and not equally"
+            " safe by default. Per-method mapping initially found 3 mechanical/unblocked"
+            " methods and 4 blocked ones (`handle_door_window_open`: #655's gap; "
+            "`_re_pause_for_open_sensor`: needs origin-state plumbing it doesn't have;"
+            ' `_on_grace_expired`: its unfed "within planned window" branch;'
+            " `_exit_nat_vent`'s sensor-still-open branch: write-shape divergence)."
+            " `handle_all_doors_windows_closed()` looked mechanical too but was found"
+            " during implementation to have its own gap: `door_window_fsm.py`'s"
+            " `ALL_SENSORS_CLOSED` transition hardcodes `pre_pause_mode` from state"
+            " rather than taking the real value as input — unsafe to trust for real"
+            " flag-derivation given `_exit_nat_vent()` can leave `_paused_with_hvac_"
+            "already_off` stale. Shipped: `_doorwindow_fsm_authoritative` flag (off by"
+            " default) governs ONLY `handle_manual_override_during_pause`/"
+            "`resume_from_pause` — both land unconditionally on their target state"
+            " regardless of origin state, confirmed by direct code read, no"
+            " placeholder-inference risk. Also found (independent of this migration,"
+            " filed as #657): `_re_pause_for_open_sensor()`'s 0.6.23 fix only cleared"
+            " `_paused_by_door`, not the 3 other stale pause fields the mirrored branch"
+            " in `check_natural_vent_conditions()` clears together."
         ),
         "scope_covered": (
             "New: door_window_lifecycle.py (5-state derivation), door_window_pause_entry.py, "
@@ -2138,11 +2172,13 @@ KNOWN_FIXES: dict[int, dict] = {
             "door_window_fsm_agrees, wired into _mirror_to_shadow() for "
             "handle_door_window_open/handle_all_doors_windows_closed/"
             "handle_manual_override_during_pause (the 3 mirrored methods with an "
-            "unambiguous door/window FSM event-kind correspondence). New pending "
-            "scenarios issue_637_paused_during_grace_open_fallthrough.json and "
+            "unambiguous door/window FSM event-kind correspondence). New scenarios "
+            "issue_637_paused_during_grace_open_fallthrough.json and "
             "issue_637_paused_during_grace_nat_vent_exit.json confirm PAUSED_DURING_GRACE "
-            "is reachable via 2 structurally distinct production paths, pending user "
-            "review before promotion to golden/."
+            "is reachable via 2 structurally distinct production paths — both landed "
+            "directly in golden/ (this text previously said 'pending user review before "
+            "promotion to golden/', which was stale/aspirational and never updated after "
+            "that promotion actually happened; corrected during Phase R Step 2 scoping)."
             " 0.6.23: automation.py `_re_pause_for_open_sensor()` now clears `_paused_by_door`"
             " in its nat-vent-reactivation branch; new test"
             " test_resume_from_pause.py::TestGraceExpiryRecheck::"

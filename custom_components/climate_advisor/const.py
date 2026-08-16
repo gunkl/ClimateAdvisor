@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.23"
+VERSION = "0.6.24"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.24": [
+        "Feat #637 (Phase R Step 1b): internal refactor only, no user-visible behavior"
+        " change — closes the last coverage gap in the door/window pause/grace"
+        " lifecycle's diagnostic-only shadow FSM (Block 5 series, epic #594). 3 of its"
+        " 7 tracked event kinds (grace-timer expiry, dashboard resume, and a sensor-"
+        " state reconcile check) were never fed to it, deferred as future work when the"
+        " FSM was first built. All 7 are now fed. Purely observational — nothing it"
+        " computes is ever acted on.",
+    ],
     "0.6.23": [
         "Fix #637: after a grace period expires with a door/window still open, if"
         " natural ventilation now takes over cooling, the system was still privately"
@@ -2078,7 +2087,7 @@ KNOWN_FIXES: dict[int, dict] = {
         ),
     },
     637: {
-        "version_fixed": "0.6.23",
+        "version_fixed": "0.6.24",
         "title": (
             "Block 5 epic #594 Phase 2: builds the unified door/window pause/grace"
             " transition table (5 new pure functions + door_window_fsm.py assembly),"
@@ -2094,11 +2103,30 @@ KNOWN_FIXES: dict[int, dict] = {
             " lifecycle can become FSM-authoritative. Fixed the narrowest, unambiguous one:"
             " `_re_pause_for_open_sensor()`'s nat-vent-reactivation branch never cleared"
             " `_paused_by_door`, unlike the identical branch in"
-            " `check_natural_vent_conditions()`. The other two (`handle_door_window_open()`'s"
-            " grace-fallthrough, `_exit_nat_vent()`'s unconditional sensor-still-open pause)"
-            " are longer-standing production behavior with unclear intent from code alone —"
-            " posted to #637 for an explicit owner decision (model faithfully vs. fix first)"
-            " before Step 2's read-authority swap can close out."
+            " `check_natural_vent_conditions()`. The other two — `_exit_nat_vent()`'s"
+            " unconditional sensor-still-open pause (investigated, verified benign, not a"
+            " bug: the flag is accurate when set and `_on_grace_expired()` already"
+            " re-derives from live sensor state rather than reading it) and"
+            " `handle_door_window_open()`'s grace-fallthrough (real gap, five-whys traced"
+            " to Issue #87, no live evidence found of it firing, split to its own"
+            " independent issue #655 per owner steer, not blocking this migration) — are"
+            " resolved. Step 1 for door/window is closed."
+            " Phase R Step 1b (0.6.24): before Step 2's read-authority swap, the shadow"
+            " FSM had to be proven correct against all 7 `DoorWindowFsmEventKind` members,"
+            " not just 4 — `GRACE_TIMER_EXPIRED`/`DASHBOARD_RESUME`/`SYNC_RECONCILE` were"
+            " explicitly deferred as future work when Phase 2 shipped. All 3 now wired:"
+            " `dashboard_resume` reuses `resume_from_pause()`'s existing mirror call site;"
+            " `grace_timer_expired` keys off `_on_grace_expired()`'s own emitted event"
+            " types (`grace_expired`/`override_adopted`) via the existing #647 event-driven"
+            " hook; `sync_reconcile` (no natural emitted event exists for it) uses"
+            " method-name-triggered dispatch instead, the same mechanism"
+            " `_NAT_VENT_FSM_TRIGGER_METHODS` already established for nat-vent's own"
+            " non-event-shaped triggers — 2 new `_mirror_to_shadow()` call sites"
+            " (`handle_pre_cool`, `handle_morning_wakeup`) needed adding first. One"
+            ' accepted residual: `_on_grace_expired()`\'s "within planned window" branch'
+            " emits no event at all, so that one grace-expiry outcome still doesn't feed"
+            " the FSM — documented in door_window_fsm.py's docstring, not silently"
+            " missed."
         ),
         "scope_covered": (
             "New: door_window_lifecycle.py (5-state derivation), door_window_pause_entry.py, "
@@ -2119,6 +2147,16 @@ KNOWN_FIXES: dict[int, dict] = {
             " in its nat-vent-reactivation branch; new test"
             " test_resume_from_pause.py::TestGraceExpiryRecheck::"
             "test_repause_clears_paused_by_door_on_nat_vent_reactivation."
+            " 0.6.24: coordinator.py — `_DOOR_WINDOW_FSM_EVENT_KINDS` gains"
+            " `resume_from_pause`/`dashboard_resume`; new"
+            " `_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES` frozenset + branch in"
+            " `_feed_lifecycle_fsms_from_event()`; new"
+            " `_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS` frozenset + branch in"
+            " `_mirror_to_shadow()`'s finally block; `_evaluate_door_window_fsm()` now"
+            " accepts an optional explicit `event_kind`; 2 new `_mirror_to_shadow()` call"
+            " sites in `_async_morning_wakeup()`/`_async_pre_cool_trigger()`. New"
+            " `_DOOR_WINDOW_EVENT_KIND_REGISTRY` + `TestDoorWindowFsmEventCoverage` in"
+            " test_shadow_engine_coverage.py enforces all 7 event kinds stay reachable."
         ),
     },
     633: {

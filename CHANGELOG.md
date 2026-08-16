@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.24] — 2026-08-16
+
+- Feat #637 (Phase R Step 1b): internal refactor only, no user-visible behavior change — closes the last coverage gap in the door/window pause/grace lifecycle's diagnostic-only shadow FSM (Block 5 series, epic #594). 3 of its 7 tracked event kinds (grace-timer expiry, dashboard resume, and a sensor-state reconcile check) were never fed to it, deferred as future work when the FSM was first built. All 7 are now fed. Purely observational — nothing it computes is ever acted on.
+
 ## [0.6.23] — 2026-08-16
 
 - Fix #637: after a grace period expires with a door/window still open, if natural ventilation now takes over cooling, the system was still privately marking itself as "paused by door" — which could suppress the away/vacation energy setback later, and made the dashboard/API misreport the reason HVAC was off. Now clears correctly the moment nat-vent takes over, matching how every other nat-vent-activation path already behaves.

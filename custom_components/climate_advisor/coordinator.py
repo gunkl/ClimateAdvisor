@@ -385,6 +385,11 @@ _OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
     "handle_fan_manual_override": "override_detected",
+    # Issue #651: same entry-wiring gap #643 fixed for handle_fan_manual_override,
+    # never done for the thermostat-level override path. Maps to the same
+    # OVERRIDE_DETECTED kind — OverrideGraceFsmInputs.setpoint_override already
+    # differentiates a setpoint-only override from a mode-change override.
+    "handle_manual_override": "override_detected",
 }
 
 # Issue #647: the mirror-name-keyed dicts above only ever covered FSM *entry* paths —
@@ -850,13 +855,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         method — gates nat-vent reactivation on ``not self._grace_active``, and the
         shadow's copy never reflected production's active manual-override grace period.
         Deliberately NOT adding new ``_mirror_to_shadow(...)`` call sites for the setters
-        of these fields (``handle_fan_manual_override``, ``handle_manual_override``,
-        ``clear_manual_override``, ``cancel_override``) — that would reintroduce the
+        of ``clear_manual_override``/``cancel_override`` — that would reintroduce the
         "duplicate each write at its call site" pattern this function exists to replace,
         and would start real ``async_call_later`` timers against the shared ``hass``
         event loop on the shadow engine for no benefit over a raw copy refreshed every
-        cycle. See ``tests/test_shadow_engine_coverage.py`` for the registry entries
-        documenting why each setter is exempted rather than mirrored.
+        cycle. ``handle_fan_manual_override`` (#643) and ``handle_manual_override``
+        (#651) are the sole exceptions — both are mirrored anyway, but only to serve as
+        the FSM entry-event trigger hook in ``_mirror_to_shadow()``'s finally block (see
+        ``_OVERRIDE_GRACE_FSM_EVENT_KINDS``); the shadow-engine replay side-effect of
+        that call is redundant with this function's raw copy and intentionally
+        tolerated, not the reason the mirror call exists. See
+        ``tests/test_shadow_engine_coverage.py`` for the registry entries documenting
+        why each setter is exempted or mirrored.
         """
         se = self.shadow_automation_engine
         ae = self.automation_engine
@@ -1190,6 +1200,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Override/grace FSM evaluation (cancel-driven) failed (isolated, no production impact): %s",
                 fsm_exc,
             )
+
+    def _any_override_active(self) -> bool:
+        """True if either a thermostat-level or fan-only override is currently active.
+
+        Used to detect a same-cycle clear across ``handle_bedtime()``/
+        ``handle_morning_wakeup()`` (Issue #651) — see
+        ``_feed_override_grace_fsm_if_cleared()``.
+        """
+        ae = self.automation_engine
+        return bool(ae._manual_override_active or ae._fan_override_active)
+
+    def _feed_override_grace_fsm_if_cleared(self, was_active: bool) -> None:
+        """Feed OVERRIDE_CANCELLED if an override that was active before a call is gone after it (Issue #651).
+
+        ``handle_bedtime()``/``handle_morning_wakeup()`` can silently clear a fan-only
+        override via ``clear_manual_override()`` — its ``"override_cleared"`` emit is
+        gated on ``_manual_override_active`` (false for a fan-only override), so no
+        event reaches ``_feed_lifecycle_fsms_from_event()``. Without this, the FSM
+        still self-heals within one update cycle via ``_check_orphaned_grace()``'s
+        orphaned-grace backstop, but produces a transient shadow-disagreement blip
+        until then. Call with the pre-call ``_any_override_active()`` result; this
+        reads state strictly after the real engine call has returned, so no staleness
+        risk (same ordering guarantee as ``_feed_override_grace_fsm_cancelled()``).
+        """
+        if was_active and not self._any_override_active():
+            self._feed_override_grace_fsm_cancelled()
 
     def _current_hvac_mode(self) -> str | None:
         """Live thermostat mode read, shared by the door/window FSM evaluation
@@ -3922,11 +3958,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     async def _async_morning_wakeup(self, now: datetime) -> None:
         """Handle morning wake-up."""
+        _was_overridden = self._any_override_active()
         await self.automation_engine.handle_morning_wakeup(indoor_temp=self._get_indoor_temp())
+        self._feed_override_grace_fsm_if_cleared(_was_overridden)
 
     async def _async_bedtime(self, now: datetime) -> None:
         """Handle bedtime setback."""
+        _was_overridden = self._any_override_active()
         await self.automation_engine.handle_bedtime()
+        self._feed_override_grace_fsm_if_cleared(_was_overridden)
         await self._mirror_to_shadow("handle_bedtime")
 
     def _compute_pre_cool_trigger_time(self) -> datetime | None:
@@ -4443,14 +4483,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 self.automation_engine._manual_override_mode,
             )
             self.automation_engine.clear_manual_override(reason="new_override_during_grace")
-            # Issue #647: only feeds OVERRIDE_CANCELLED for the clear half of this
-            # clear-then-reopen sequence — `handle_manual_override()` right below has
-            # no FSM entry wiring yet (same follow-up class as #643's
-            # `handle_fan_manual_override`, tracked separately, not this issue's scope).
-            # Still strictly better than leaving the FSM stuck on the just-cleared
-            # override's stale state.
+            # Issue #647: feeds OVERRIDE_CANCELLED for the clear half of this
+            # clear-then-reopen sequence; Issue #651 wires the reopen half below.
             self._feed_override_grace_fsm_cancelled()
             self.automation_engine.handle_manual_override(
+                old_mode=old_state.state,
+                new_mode=new_state.state,
+                classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
+            )
+            await self._mirror_to_shadow(
+                "handle_manual_override",
                 old_mode=old_state.state,
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
@@ -4529,6 +4571,12 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     ),
                 )
             self.automation_engine.handle_manual_override(
+                old_mode=old_state.state,
+                new_mode=new_state.state,
+                classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
+            )
+            await self._mirror_to_shadow(
+                "handle_manual_override",
                 old_mode=old_state.state,
                 new_mode=new_state.state,
                 classification_mode=(self._current_classification.hvac_mode if self._current_classification else None),
@@ -4846,6 +4894,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     new_state.state,
                 )
                 ae.handle_manual_override(
+                    source="setpoint",
+                    old_mode=old_state.state,
+                    new_mode=new_state.state,
+                    classification_mode=(
+                        self._current_classification.hvac_mode if self._current_classification else None
+                    ),
+                    old_setpoint_f=old_temp,
+                    new_setpoint_f=new_temp,
+                )
+                await self._mirror_to_shadow(
+                    "handle_manual_override",
                     source="setpoint",
                     old_mode=old_state.state,
                     new_mode=new_state.state,

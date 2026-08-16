@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.20"
+VERSION = "0.6.21"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.21": [
+        "Fix #651: closed two more gaps in the internal diagnostic that shadows"
+        " automation decisions to verify an in-progress refactor (#613/#633/#637/#639,"
+        " most recently #643/#647). A manual override made directly at the thermostat"
+        " now correctly registers with the diagnostic (it was invisible before); and a"
+        " fan-only override cleared by the bedtime or morning-wakeup schedule now"
+        " reflects immediately instead of a brief delayed self-correction. No"
+        " occupant-visible behavior change — this only affects an internal diagnostic"
+        " used to validate the automation-engine refactor before any of it goes live.",
+    ],
     "0.6.20": [
         "Fix #649: follow-up to #641's whole-house-fan rapid-cycling protection. The"
         " 5-minute floor itself was already working correctly, but the Activity Report"
@@ -1810,6 +1820,38 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    651: {
+        "version_fixed": "0.6.21",
+        "title": "Override/grace shadow FSM: handle_manual_override entry gap + bedtime/wakeup exit gap",
+        "scope_covered": (
+            "coordinator.py: two remaining gaps in the override/grace lifecycle FSM diagnostic"
+            " (#613/#633/#637/#639, most recently #643/#647), same root-cause class (FSM"
+            " event-coverage narrower than the real production state-mutation surface)."
+            " Gap 1: handle_manual_override() (the thermostat-level override path, distinct"
+            " from handle_fan_manual_override which #643 already wired) was never mirrored to"
+            " the shadow FSM at any of its 3 real coordinator.py call sites"
+            " (_async_thermostat_changed's new-override-during-grace, mode-changed-outside-"
+            "pause, and setpoint-only branches) — added to _OVERRIDE_GRACE_FSM_EVENT_KINDS"
+            " and _mirror_to_shadow('handle_manual_override', ...) calls at all 3 sites,"
+            " mapping to the same OVERRIDE_DETECTED kind #643 used for the fan path. Gap 2:"
+            " handle_bedtime()/handle_morning_wakeup() can silently clear a fan-only override"
+            " via clear_manual_override() with no adjacent event emission (the emit is gated"
+            " on _manual_override_active, false for a fan-only override) — this was not"
+            " permanently stuck (the pre-existing _check_orphaned_grace() self-heal, run every"
+            " ~30s cycle, catches it as an orphaned grace within one cycle since"
+            " 'fan_manual_override' is in _GRACE_TRIGGERS_PROTECTING_OVERRIDE) but produced a"
+            " transient shadow-disagreement blip until then. Fixed via a before/after"
+            " _any_override_active() diff around both _async_bedtime()/_async_morning_wakeup()"
+            " calls, feeding _feed_override_grace_fsm_cancelled() immediately on a detected"
+            " clear rather than waiting on the backstop — coordinator.py only, no automation.py"
+            " changes, avoids duplicating either handler's own gate logic."
+            " tests/test_shadow_engine_coverage.py gained a new TestPerCallerFsmFeedCoverage"
+            " class asserting per-call-site (not just per-event-kind) reachability, the"
+            " specific gap in test coverage that let #643 ship asymmetric wiring undetected."
+            " Zero production HVAC impact: shadow engine/FSM state reaches nothing but the"
+            " Shadow Engine Status diagnostic sensor."
+        ),
+    },
     647: {
         "version_fixed": "0.6.19",
         "title": "Shadow-engine/FSM diagnostics (#613/#633/#637/#639) disagreed with production on nearly every cycle",

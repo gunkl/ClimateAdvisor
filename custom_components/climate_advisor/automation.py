@@ -782,16 +782,18 @@ class AutomationEngine:
         # Default False — zero behavior change until a future per-lifecycle
         # switch (Phase R, Step 4) flips it. Not yet exposed to config/switch.py.
         self._natvent_fsm_authoritative: bool = False
-        # Issue #594 Phase R, Step 2 (door/window): PARTIAL authority only —
-        # governs handle_all_doors_windows_closed()/handle_manual_override_during_pause()/
-        # resume_from_pause() alone. The other 4 door/window methods
-        # (handle_door_window_open, _re_pause_for_open_sensor, _on_grace_expired,
-        # _exit_nat_vent's sensor-still-open branch) stay on the legacy path
-        # regardless of this flag's value — each has its own documented blocker
-        # (#655, an origin-state plumbing gap, a missing shadow-FSM feed, and a
-        # write-shape divergence, respectively) that must resolve before it can
-        # join. Default False — zero behavior change until the switch (Step 4)
-        # flips it, and even then only for the 3 methods above.
+        # Issue #594 Phase R, Step 8 (door/window): FULL authority — as of Issue #660,
+        # this flag governs all 8 real door/window trigger sites via the shared
+        # AutomationEngine._resolve_door_window_pause_flags() dispatcher:
+        # handle_manual_override_during_pause(), resume_from_pause(),
+        # handle_all_doors_windows_closed(), _exit_nat_vent()'s sensor-still-open
+        # branch, check_natural_vent_conditions()'s two reactivation branches (the
+        # 8th site — previously had no door/window FSM event feed at all),
+        # handle_door_window_open(), and _on_grace_expired()/_re_pause_for_open_sensor()
+        # (coupled — the highest-risk pair, since _re_pause_for_open_sensor() trusts
+        # the flags _on_grace_expired() already applied rather than re-deciding them).
+        # Default False — zero behavior change until a future switch (config/switch.py)
+        # flips it; deployed OFF, live switch-flip is a separate verification step.
         self._doorwindow_fsm_authoritative: bool = False
 
         # Override confirmation period (Issue #76) — pending window before override is formally accepted
@@ -5947,16 +5949,16 @@ class AutomationEngine:
         """Current door/window pause/grace session state, derived from existing
         flags (Issue #637).
 
-        Read-only observability by default — the value this property computes
-        is also fed as the ``current_state`` argument to ``door_window_fsm.transition()``
-        by the 2 methods that are FSM-authoritative as of Phase R Step 2
-        (``handle_manual_override_during_pause``, ``resume_from_pause``); see each
-        method's own FSM-authoritative branch. (``handle_all_doors_windows_closed``
-        was scoped into this increment originally but deferred — its
-        ``ALL_SENSORS_CLOSED`` transition in ``door_window_fsm.py`` infers
-        ``pre_pause_mode`` from state rather than taking the real value as input,
-        which isn't safe to trust for real flag-derivation until fixed.) Purely a
-        computed view of ``_paused_by_door``/``_paused_with_hvac_already_off``/
+        Read-only observability by default — the value this property computes is
+        also fed as the ``current_state`` argument to ``door_window_fsm.transition()``
+        by ``AutomationEngine._resolve_door_window_pause_flags()``, the shared
+        dispatcher every one of the 8 real door/window trigger methods now calls
+        under ``_doorwindow_fsm_authoritative`` (full authority as of Issue #660
+        Phase R Step 8 — see that flag's own docstring for the full method list).
+        ``_on_grace_expired()`` is the one call site that passes an explicitly
+        captured ``origin_state`` instead of relying on this property's live read,
+        since grace is already cleared by the time it would otherwise read it. Purely
+        a computed view of ``_paused_by_door``/``_paused_with_hvac_already_off``/
         ``_grace_active``, so it cannot desync from the flags it reads. See
         ``door_window_lifecycle.py`` for the pure derivation.
         """

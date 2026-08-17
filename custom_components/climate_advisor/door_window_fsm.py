@@ -221,6 +221,13 @@ class DoorWindowFsmInputs:
                                              list: required for faithful SYNC_RECONCILE
                                              modeling (_sync_paused_by_door_with_live_sensors()'s
                                              own guard reads it)
+      pre_pause_mode_active                -> bool(self._pre_pause_mode) — added under
+                                             Issue #660 Step 2: replaces the
+                                             ``current_state == PAUSED_ACTIVE`` proxy
+                                             ``_transition_from_paused()``'s
+                                             ALL_SENSORS_CLOSED branch used to infer
+                                             ``pre_pause_mode`` truthiness from, which
+                                             could disagree with the real field.
       grace_active                        -> self._grace_active — added under Issue #660:
                                              _sync_reconcile_next_state() previously never
                                              checked live grace_active when already in a
@@ -248,6 +255,7 @@ class DoorWindowFsmInputs:
     natural_vent_active: bool
     whf_owns_hvac: bool
     grace_active: bool
+    pre_pause_mode_active: bool
     now: datetime
 
 
@@ -397,10 +405,15 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
     kind = event.kind
 
     if kind == DoorWindowFsmEventKind.ALL_SENSORS_CLOSED:
+        # Issue #660 Step 2: reads the real pre_pause_mode truthiness from the event's
+        # inputs rather than inferring it from current_state == PAUSED_ACTIVE — that
+        # proxy could disagree with the real AutomationEngine._pre_pause_mode value in
+        # a reachable edge case (see this file's module docstring, formerly "Known
+        # non-mechanical transition").
         outcome = decide_door_close_response(
             DoorCloseResponseInputs(
                 paused_by_door=True,
-                pre_pause_mode="restored" if current_state == DoorWindowLifecycleState.PAUSED_ACTIVE else None,
+                pre_pause_mode="restored" if inputs.pre_pause_mode_active else None,
             )
         )
         next_state = (

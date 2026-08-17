@@ -41,6 +41,7 @@ def _inputs(**overrides) -> DoorWindowFsmInputs:
         natural_vent_active=False,
         whf_owns_hvac=False,
         grace_active=False,
+        pre_pause_mode_active=False,
         now=_NOW,
     )
     base.update(overrides)
@@ -127,12 +128,33 @@ class TestFromNormal:
 
 class TestFromPaused:
     def test_all_sensors_closed_active_restores_and_graces(self):
-        t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED))
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED, pre_pause_mode_active=True),
+        )
         assert t.to_state == DoorWindowLifecycleState.GRACE
 
     def test_all_sensors_closed_idle_clears_no_grace(self):
-        t = transition(DoorWindowLifecycleState.PAUSED_IDLE, _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED))
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED, pre_pause_mode_active=False),
+        )
         assert t.to_state == DoorWindowLifecycleState.NORMAL
+
+    def test_all_sensors_closed_idle_origin_but_pre_pause_mode_active_restores(self):
+        """Issue #660 Step 2: the ALL_SENSORS_CLOSED branch used to infer
+        pre_pause_mode from `current_state == PAUSED_ACTIVE`, a placeholder rather
+        than the real AutomationEngine._pre_pause_mode value. PAUSED_ACTIVE vs.
+        PAUSED_IDLE depends on _paused_with_hvac_already_off, which a still-legacy
+        call site (_exit_nat_vent()'s sensor-still-open branch) could leave stale —
+        so a reachable case exists where current_state == PAUSED_IDLE but the real
+        pre_pause_mode is still set (truthy). This must now correctly restore/grace,
+        not silently clear with no restore because the origin-state proxy said IDLE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED, pre_pause_mode_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.GRACE
 
     def test_manual_override_during_pause_clears_to_normal(self):
         t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE))

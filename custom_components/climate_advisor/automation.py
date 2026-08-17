@@ -5745,6 +5745,7 @@ class AutomationEngine:
             natural_vent_active=bool(self._natural_vent_active),
             whf_owns_hvac=bool(self._whf_owns_hvac()),
             grace_active=bool(self._grace_active),
+            pre_pause_mode_active=bool(self._pre_pause_mode),
             now=now,
         )
 

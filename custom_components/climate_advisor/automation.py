@@ -5744,6 +5744,7 @@ class AutomationEngine:
             grace_source=self._last_resume_source or "automation",
             natural_vent_active=bool(self._natural_vent_active),
             whf_owns_hvac=bool(self._whf_owns_hvac()),
+            grace_active=bool(self._grace_active),
             now=now,
         )
 

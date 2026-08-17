@@ -221,6 +221,14 @@ class DoorWindowFsmInputs:
                                              list: required for faithful SYNC_RECONCILE
                                              modeling (_sync_paused_by_door_with_live_sensors()'s
                                              own guard reads it)
+      grace_active                        -> self._grace_active — added under Issue #660:
+                                             _sync_reconcile_next_state() previously never
+                                             checked live grace_active when already in a
+                                             PAUSED_* state, so the FSM's carried state
+                                             could silently disagree with production once
+                                             grace started running concurrently with an
+                                             existing pause (see that function's own
+                                             docstring for the fix).
       now                                  -> caller-resolved wall-clock time
     """
 
@@ -239,6 +247,7 @@ class DoorWindowFsmInputs:
     grace_source: str
     natural_vent_active: bool
     whf_owns_hvac: bool
+    grace_active: bool
     now: datetime
 
 
@@ -353,8 +362,21 @@ def _sync_reconcile_next_state(
     current_state: DoorWindowLifecycleState, inputs: DoorWindowFsmInputs
 ) -> DoorWindowLifecycleState:
     """Pure reimplementation of ``_sync_paused_by_door_with_live_sensors()`` (Issue #620),
-    for the two origin states where its own guard doesn't immediately no-op
-    (NORMAL, GRACE — both have ``paused_by_door=False``)."""
+    for the origin states where its own guard doesn't immediately no-op — NORMAL/GRACE
+    (both have ``paused_by_door=False``), plus PAUSED_ACTIVE/PAUSED_IDLE's own narrower
+    ``grace_active``-while-paused check (Issue #660, added below)."""
+    # Issue #660: when already paused and a grace period is independently running
+    # (live grace_active True, e.g. started by a different code path than the pause
+    # itself), the FSM's carried state must upgrade to PAUSED_DURING_GRACE — the
+    # composite state — rather than silently staying a plain paused state that no
+    # longer reflects live grace. This check must run before the early-return guards
+    # below, which are specific to the NORMAL/GRACE reconcile-into-pause direction and
+    # would otherwise leave a plain-paused + grace-active disagreement unresolved.
+    if current_state in (DoorWindowLifecycleState.PAUSED_ACTIVE, DoorWindowLifecycleState.PAUSED_IDLE):
+        if inputs.grace_active:
+            return DoorWindowLifecycleState.PAUSED_DURING_GRACE
+        return current_state
+
     if inputs.natural_vent_active or inputs.whf_owns_hvac:
         return current_state
     if inputs.within_planned_window:
@@ -396,10 +418,17 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
     if kind == DoorWindowFsmEventKind.DASHBOARD_RESUME:
         return DoorWindowTransition(current_state, DoorWindowLifecycleState.GRACE, kind, "resumed", inputs.now)
 
-    # SENSOR_OPENED / SYNC_RECONCILE: both guard on paused_by_door already
-    # being True and no-op. GRACE_TIMER_EXPIRED / NAT_VENT_EXITED_SENSOR_STILL_OPEN:
-    # not reachable from a plain paused state (no grace timer running; nat-vent
-    # cannot be active while already paused per the two evidenced entry paths).
+    if kind == DoorWindowFsmEventKind.SYNC_RECONCILE:
+        # Issue #660: dispatches to the same single reconciliation function every
+        # other origin state uses, instead of silently no-op'ing here — see
+        # _sync_reconcile_next_state()'s own grace_active-while-paused branch.
+        next_state = _sync_reconcile_next_state(current_state, inputs)
+        return DoorWindowTransition(current_state, next_state, kind, "sync_reconcile", inputs.now)
+
+    # SENSOR_OPENED: guards on paused_by_door already being True and no-ops.
+    # GRACE_TIMER_EXPIRED / NAT_VENT_EXITED_SENSOR_STILL_OPEN: not reachable from a
+    # plain paused state (no grace timer running; nat-vent cannot be active while
+    # already paused per the two evidenced entry paths).
     return DoorWindowTransition(current_state, current_state, kind, "noop_already_paused", inputs.now)
 
 

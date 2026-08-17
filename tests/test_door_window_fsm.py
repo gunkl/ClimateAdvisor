@@ -40,6 +40,7 @@ def _inputs(**overrides) -> DoorWindowFsmInputs:
         grace_source="manual",
         natural_vent_active=False,
         whf_owns_hvac=False,
+        grace_active=False,
         now=_NOW,
     )
     base.update(overrides)
@@ -148,6 +149,42 @@ class TestFromPaused:
     def test_grace_timer_expired_unreachable_noop(self):
         t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED))
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+
+    def test_sync_reconcile_grace_active_upgrades_to_paused_during_grace(self):
+        """Issue #660: _sync_reconcile_next_state() previously never checked live
+        grace_active when already in a PAUSED_* state — the FSM's own carried state
+        would silently disagree with production once grace started running
+        concurrently with an existing pause. SYNC_RECONCILE from PAUSED_ACTIVE/
+        PAUSED_IDLE with grace_active=True must now upgrade to PAUSED_DURING_GRACE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+
+    def test_sync_reconcile_grace_active_upgrades_from_paused_idle(self):
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+
+    def test_sync_reconcile_grace_inactive_stays_paused_active(self):
+        """Regression guard: grace_active=False must not change the outcome —
+        SYNC_RECONCILE from a plain paused state with no grace running is still a
+        no-op (the pre-existing behavior for this origin state)."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+
+    def test_sync_reconcile_grace_inactive_stays_paused_idle(self):
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_IDLE
 
 
 class TestFromGrace:

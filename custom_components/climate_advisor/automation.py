@@ -3657,8 +3657,19 @@ class AutomationEngine:
                         )
                     )
                     self._natural_vent_active = True
-                    self._paused_by_door = False
-                    self._paused_with_hvac_already_off = False
+
+                    from .door_window_fsm import DoorWindowFsmEventKind
+
+                    # Issue #660 Step 5: routed through the shared dispatcher — the
+                    # 8th trigger site (Step 3 gave this method an event kind at all).
+                    def _legacy_clear_pause() -> None:
+                        self._paused_by_door = False
+                        self._paused_with_hvac_already_off = False
+
+                    self._resolve_door_window_pause_flags(
+                        kind=DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED,
+                        legacy=_legacy_clear_pause,
+                    )
                     self._paused_entity = None
                     self._paused_since = None
                     _LOGGER.info(
@@ -3689,8 +3700,17 @@ class AutomationEngine:
                     )
                     self._natural_vent_active = True
                     self._nat_vent_soft_start = True
-                    self._paused_by_door = False
-                    self._paused_with_hvac_already_off = False
+
+                    from .door_window_fsm import DoorWindowFsmEventKind
+
+                    def _legacy_clear_pause() -> None:
+                        self._paused_by_door = False
+                        self._paused_with_hvac_already_off = False
+
+                    self._resolve_door_window_pause_flags(
+                        kind=DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED,
+                        legacy=_legacy_clear_pause,
+                    )
                     self._paused_entity = None
                     self._paused_since = None
                     _LOGGER.info(

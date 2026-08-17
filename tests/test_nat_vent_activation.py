@@ -449,6 +449,80 @@ class TestReactivationLockout:
         assert engine._natural_vent_active is True
 
 
+class TestReactivationFsmDispatch:
+    """Issue #660 Step 5: check_natural_vent_conditions()'s two reactivation-while-
+    paused branches (full-gate and soft-start) route their flag-clear through the
+    shared dispatcher instead of a direct 4-field write. Group A: the activation
+    action itself is unchanged; this proves the dispatcher wiring itself, since the
+    external flag outcome is identical whether legacy or FSM ran (both always clear
+    to NORMAL from a plain paused origin, per Step 3)."""
+
+    def test_full_gate_reactivation_routes_through_dispatcher(self):
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED
+
+    def test_full_gate_reactivation_clears_pause_when_authoritative(self):
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
+        assert engine._paused_entity is None
+
+    def test_soft_start_reactivation_routes_through_dispatcher(self):
+        """Same dispatcher, reached via the soft-start branch instead of the full
+        gate — isolated by forcing the full gate to decline and the soft-start gate
+        to accept, rather than reconstructing the exact peak/decline outdoor history
+        _nat_vent_may_soft_start() itself requires (that logic has its own dedicated
+        coverage elsewhere)."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+        engine._nat_vent_may_reactivate = MagicMock(return_value=False)
+        engine._nat_vent_may_soft_start = MagicMock(return_value=True)
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            asyncio.run(engine.check_natural_vent_conditions())
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED
+
+    def test_soft_start_reactivation_clears_pause_when_authoritative(self):
+        engine = _make_engine(comfort_heat=70.0, comfort_cool=76.0, nat_vent_delta=3.0, indoor_f=76.0)
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._natural_vent_active = False
+        engine._last_outdoor_temp = 68.0
+        engine._nat_vent_may_reactivate = MagicMock(return_value=False)
+        engine._nat_vent_may_soft_start = MagicMock(return_value=True)
+
+        asyncio.run(engine.check_natural_vent_conditions())
+
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is True
+        assert engine._paused_by_door is False
+
+
 class TestReactivationLockoutLoadBearing:
     """Architecture-reset Step 2: proves check_natural_vent_conditions() genuinely calls
     is_reactivation_locked_out() to decide, not some other code path that happens to agree."""

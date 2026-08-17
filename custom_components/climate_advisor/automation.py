@@ -3807,9 +3807,23 @@ class AutomationEngine:
                     # above — the reactivation gate's own ceiling_ok = outdoor < threshold
                     # check is the exact complementary boundary, so outdoor hovering near
                     # threshold can flip-flop this exit against reactivation identically.
+                    # Issue #666: event_type was missing here — every sibling exit branch in
+                    # this function (OUTDOOR_RISE above, PROACTIVE_FLOOR before it) and
+                    # fan_thermostat_check()'s own equivalent outdoor-exit branch all pass
+                    # "nat_vent_outdoor_rise_exit" (added project-wide by Issue #649, add1b8f
+                    # — this call site was the one sibling it missed). Without it, neither
+                    # _NAT_VENT_FSM_EVENT_TYPES nor _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES
+                    # ever gets fed for a CEILING_THRESHOLD exit, leaving both shadow FSMs
+                    # silently stuck whenever nat-vent exits this specific way.
                     await self._exit_nat_vent(
                         reason=f"natural vent exit: outdoor {outdoor:.1f}°F > threshold {threshold:.1f}°F",
                         set_outdoor_exit_time=True,
+                        event_type="nat_vent_outdoor_rise_exit",
+                        event_payload={
+                            "outdoor": outdoor,
+                            "indoor": indoor,
+                            "fan_device": _fan_device_label(self.config),
+                        },
                     )
                     return
 

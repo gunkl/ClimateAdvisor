@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.29"
+VERSION = "0.6.30"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.30": [
+        "Fix #666: no user-visible change. The coordinator test harness silently"
+        " dropped the shadow-diagnostic FSM feed for every nat-vent/door-window exit"
+        " event (a test-infrastructure bug, not a production one — real HVAC pause"
+        " behavior was always correct). Fixed the harness wiring, closed a matching"
+        " coverage gap where a specific nat-vent exit reason never emitted its"
+        " Activity Report event at all, and added a regression test that reproduces"
+        " the exact live disagreement pattern seen in production logs.",
+    ],
     "0.6.29": [
         "Feat #664: the override/grace lifecycle FSM (whole-house-fan and thermostat"
         " manual overrides, and the grace period that protects them from being"
@@ -1915,6 +1924,38 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    666: {
+        "version_fixed": "0.6.30",
+        "title": "Test harness silently broke event-driven shadow-FSM feed coverage (3rd occurrence of #613/#647)",
+        "scope_covered": (
+            "tools/sim_harness/build_coordinator.py: fixed build_headless_coordinator()"
+            " pointing automation_engine._emit_event_callback at a bare local"
+            " event_log-appending function instead of the real coordinator._emit_event()"
+            " — the only place _feed_lifecycle_fsms_from_event() is called in production."
+            " This silently defeated event-driven FSM-feed coverage (nat-vent, door/window,"
+            " override/grace) for every coordinator-level Tier A test, including"
+            " test_shadow_engine_live.py, which is why #647 (merged the day before this"
+            " investigation, explicitly about this bug class) could ship green and still"
+            " leave live production logging chronic 'Nat-vent FSM disagreement (#633)'/"
+            " 'Door/window FSM disagreement (#637)' WARNINGs (traced live to 2026-08-15"
+            " 06:30:43, occupant impact: none — production's own HVAC pause/nat-vent state"
+            " was always correct; this is shadow-diagnostic-only). Fix: wrap the real"
+            " coordinator._emit_event once and point the engine callback at the wrapped"
+            " version, mirroring production's own wiring exactly, so the flat scenario"
+            " event_log and the real FSM-feed side effect both fire from one call."
+            " automation.py: also fixed a real, independently-confirmed sibling gap found"
+            " during the investigation — check_natural_vent_conditions()'s"
+            " NatVentExitReason.CEILING_THRESHOLD exit branch called _exit_nat_vent()"
+            " without an event_type= kwarg (missed by #649's project-wide rollout,"
+            " add1b8f), silently starving both shadow FSMs whenever nat-vent exits that"
+            " specific way. New tests/test_shadow_fsm_harness_event_coverage.py replays the"
+            " real incident sequence (sensor open before any fresh-open event, nat-vent"
+            " hard-floor exit) against the real coordinator and proves both the fix works"
+            " and — via a positive control reproducing the harness bug — that the test is"
+            " actually load-bearing, confirmed via an explicit revert test (git-stashing"
+            " the harness fix reproduces the exact live disagreement; restoring it passes)."
+        ),
+    },
     660: {
         "version_fixed": "0.6.27",
         "title": "Door/window FSM: full authority for all 8 real trigger sites (completes #637)",

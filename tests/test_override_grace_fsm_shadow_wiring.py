@@ -74,6 +74,17 @@ class TestFsmEvaluationScoping:
         _run(coordinator._mirror_to_shadow("resume_from_pause"))
         assert called == [OverrideGraceFsmEventKind.DASHBOARD_RESUME]
 
+    def test_triggered_by_handle_fan_manual_override(self) -> None:
+        """Issue #661: handle_fan_manual_override() must resolve to the dedicated
+        FAN_OVERRIDE_DETECTED kind, not the thermostat path's OVERRIDE_DETECTED."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        called: list[OverrideGraceFsmEventKind] = []
+        coordinator._evaluate_override_grace_fsm = lambda event_kind: called.append(event_kind)  # type: ignore[method-assign]
+
+        _noop_shadow_methods(coordinator, "handle_fan_manual_override")
+        _run(coordinator._mirror_to_shadow("handle_fan_manual_override", fan_before="auto", fan_after="on"))
+        assert called == [OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED]
+
 
 class TestFsmStateTracking:
     def test_starts_idle_none(self) -> None:
@@ -98,6 +109,21 @@ class TestFsmStateTracking:
         _run(coordinator._mirror_to_shadow("handle_manual_override_during_pause"))
 
         assert coordinator._override_grace_fsm_state == (OverrideConfirmState.PENDING, GraceState.NONE)
+
+    def test_fan_manual_override_lands_protecting_regardless_of_confirm_period(self) -> None:
+        """Issue #661: this is the exact live disagreement — a nonzero confirm
+        period previously landed the FSM on (PENDING, NONE) for a fan override,
+        when handle_fan_manual_override() never uses confirm-delay at all."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.config[CONF_OVERRIDE_CONFIRM_PERIOD] = 600
+
+        _noop_shadow_methods(coordinator, "handle_fan_manual_override")
+        _run(coordinator._mirror_to_shadow("handle_fan_manual_override", fan_before="auto", fan_after="on"))
+
+        assert coordinator._override_grace_fsm_state == (
+            OverrideConfirmState.IDLE,
+            GraceState.ACTIVE_PROTECTING_OVERRIDE,
+        )
 
     def test_manual_override_during_pause_confirm_disabled_lands_protecting(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
@@ -170,6 +196,28 @@ class TestDiagnosticIntegration:
         assert diag is not None
         assert diag["override_grace_mirror_agrees"] is False
         assert diag["agrees"] is False
+
+    def test_fan_manual_override_no_longer_disagrees(self) -> None:
+        """Issue #661: closes the exact live disagreement observed 2026-08-16
+        (production=idle/active_protecting_override, fsm=pending/none) triggered
+        by a QuietCool RF remote timer press. Runs the real production
+        handle_fan_manual_override() call (as coordinator.py's real
+        _async_fan_entity_changed/_flush_fan_remote_burst call sites do,
+        production call immediately followed by the mirror), then asserts the
+        FSM's own tracked state now matches production and the diagnostic
+        reports agreement."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.config[CONF_OVERRIDE_CONFIRM_PERIOD] = 600
+
+        coordinator.automation_engine.handle_fan_manual_override(fan_before="auto", fan_after="on")
+        _noop_shadow_methods(coordinator, "handle_fan_manual_override")
+        _run(coordinator._mirror_to_shadow("handle_fan_manual_override", fan_before="auto", fan_after="on"))
+
+        diag = coordinator.shadow_engine_diagnostic
+        assert diag is not None
+        assert diag["override_grace_production_state"] == "idle/active_protecting_override"
+        assert diag["override_grace_fsm_state"] == "idle/active_protecting_override"
+        assert diag["override_grace_fsm_agrees"] is True
 
     def test_disagreement_logs_distinct_warning(self, caplog) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.28] — 2026-08-16
+
+- Fix #661: the override/grace shadow FSM's diagnostic accuracy for fan overrides (whole-house-fan remote timers, physical fan-on detection) is now correct — it previously modeled a confirmation delay that fan overrides never actually go through in production, causing a spurious disagreement reading on the most common override path. No occupant-visible change: override/grace has no authoritative switch and never drove real decisions — this only fixes what the diagnostic sensor reports.
+
 ## [0.6.27] — 2026-08-16
 
 - Fix #660: the door/window pause/grace lifecycle FSM now has full, off-by-default authority for all 8 real trigger sites — completing the migration begun in #637. Also fixes a real gap found during that work: when a grace period was already running and a door/window pause independently became active too, the FSM's own tracked state could disagree with what production actually did, and a resume-after-close could restore the wrong prior HVAC mode in a specific reachable sequence. Both are fixed at the source for every caller, not patched per call site. The switch that lets this FSM actually drive decisions (instead of just tracking them for comparison) stays off by default — no occupant-visible behavior change from this release alone.

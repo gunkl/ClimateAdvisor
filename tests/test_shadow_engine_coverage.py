@@ -258,6 +258,12 @@ class TestShadowEngineCoverageRegistry:
 # production trigger today (documented, not silently missing).
 _OVERRIDE_GRACE_EVENT_KIND_REGISTRY: dict[str, str] = {
     "OVERRIDE_DETECTED": "reachable",
+    # Issue #661: split from OVERRIDE_DETECTED — handle_fan_manual_override() never
+    # routes through start_override_confirmation()'s confirm-delay machinery the way
+    # the thermostat-override call sites (handle_manual_override(),
+    # handle_manual_override_during_pause()) genuinely do, so it needed its own kind
+    # rather than sharing OVERRIDE_DETECTED's confirm-delay landing logic.
+    "FAN_OVERRIDE_DETECTED": "reachable",
     "MANUAL_OVERRIDE_DURING_PAUSE": "reachable",
     "DASHBOARD_RESUME": "reachable",
     "OVERRIDE_CONFIRM_EXPIRED": "reachable",

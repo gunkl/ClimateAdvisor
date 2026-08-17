@@ -1496,6 +1496,25 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "made authoritative" if enabled else "reverted to legacy computation",
         )
 
+    @property
+    def override_grace_fsm_authoritative(self) -> bool:
+        """Whether the override/grace lifecycle FSM (Issue #639) is authoritative for
+        ``_override_confirm_pending``/``_grace_active``/``_grace_protects_override``
+        (Issue #664 — full authority for all 8 real call sites, no partial-scope caveat
+        unlike ``doorwindow_fsm_authoritative`` above). False = legacy inline flag
+        writes (default)."""
+        return bool(self.automation_engine._override_grace_fsm_authoritative)
+
+    def set_override_grace_fsm_authoritative(self, enabled: bool) -> None:
+        """Flip override/grace FSM authority, live. Same NOT-persisted-across-restart
+        reasoning as ``set_natvent_fsm_authoritative()``'s own docstring.
+        """
+        self.automation_engine._override_grace_fsm_authoritative = enabled
+        _LOGGER.warning(
+            "Override/grace FSM %s for production decisions (full authority — Issue #664)",
+            "made authoritative" if enabled else "reverted to legacy computation",
+        )
+
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
 
@@ -2693,14 +2712,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "Stuck grace detected: grace_active=True but no override is active — force-cancelling grace (Issue #508)."
         )
         _grace_end = ae._grace_end_time
-        ae._cancel_grace_timers()
-        # Issue #647: this clears `_grace_active` directly via `_cancel_grace_timers()`,
-        # not via `clear_manual_override()`/`_on_grace_expired()` — a distinct mutation
-        # path with no other FSM feed. Closest semantic match is GRACE_TIMER_EXPIRED
-        # (grace ending with nothing left to protect).
-        try:
-            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
+        # Issue #664: this clears `_grace_active` directly, not via `clear_manual_override()`/
+        # `_on_grace_expired()` — confirm was never involved here (Issue #647's own comment:
+        # "not via clear_manual_override()"), so only the grace half is dispatched. Closest
+        # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to protect).
+        ae._cancel_grace_timers_action()
+        ae._resolve_override_grace_fsm_state(
+            kind=_OGFEventKind.GRACE_TIMER_EXPIRED, legacy=ae._legacy_clear_grace_flags
+        )
+        try:
             self._evaluate_override_grace_fsm(_OGFEventKind.GRACE_TIMER_EXPIRED)
         except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
             _LOGGER.warning(
@@ -4604,10 +4626,35 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 new_state.state,
                 self.automation_engine._manual_override_mode,
             )
-            self.automation_engine.clear_manual_override(reason="new_override_during_grace")
-            # Issue #647: feeds OVERRIDE_CANCELLED for the clear half of this
-            # clear-then-reopen sequence; Issue #651 wires the reopen half below.
-            self._feed_override_grace_fsm_cancelled()
+            # Issue #664: this is the real production trigger for OVERRIDE_SUPERSEDED,
+            # not OVERRIDE_CANCELLED — clear_manual_override() here never calls
+            # _cancel_grace_timers() (Issue #282's "Fix D" deliberately leaves the
+            # still-running grace protecting the NEW override handle_manual_override()
+            # is about to (re)detect below), unlike cancel_override()'s real
+            # OVERRIDE_CANCELLED behavior which clears both confirm AND grace. Feeding
+            # this as OVERRIDE_CANCELLED (as Issue #647 originally did, shadow-only)
+            # would have made an authoritative FSM wrongly force grace to NONE here.
+            ae = self.automation_engine
+            _was_confirm_pending = ae._override_confirm_pending
+            if _was_confirm_pending:
+                ae._clear_override_confirm_action()
+
+            def _legacy_supersede() -> None:
+                if _was_confirm_pending:
+                    ae._legacy_clear_confirm_flag()
+                # Grace intentionally left untouched — see comment above.
+
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            ae._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_SUPERSEDED, legacy=_legacy_supersede)
+            ae._clear_manual_override_active("new_override_during_grace")
+            try:
+                self._evaluate_override_grace_fsm(_OGFEventKind.OVERRIDE_SUPERSEDED)
+            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                _LOGGER.warning(
+                    "Override/grace FSM evaluation (supersession-driven) failed (isolated, no production impact): %s",
+                    fsm_exc,
+                )
             self.automation_engine.handle_manual_override(
                 old_mode=old_state.state,
                 new_mode=new_state.state,

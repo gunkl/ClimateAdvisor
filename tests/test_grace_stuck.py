@@ -402,11 +402,11 @@ class TestOrphanedGraceDetection:
             grace_end_time="2026-06-12T21:53:00+00:00",
         )
         coord.automation_engine._fan_override_active = False
-        coord.automation_engine._cancel_grace_timers = MagicMock()
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
 
         coord._check_orphaned_grace()
 
-        coord.automation_engine._cancel_grace_timers.assert_called_once()
+        coord.automation_engine._cancel_grace_timers_action.assert_called_once()
         coord._emit_event.assert_called_once()
         event_name, event_data = coord._emit_event.call_args[0]
         assert event_name == "stuck_grace_recovered"
@@ -424,11 +424,11 @@ class TestOrphanedGraceDetection:
             grace_end_time="2026-06-12T21:53:00+00:00",
         )
         coord.automation_engine._fan_override_active = False
-        coord.automation_engine._cancel_grace_timers = MagicMock()
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
 
         coord._check_orphaned_grace()
 
-        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord.automation_engine._cancel_grace_timers_action.assert_not_called()
         coord._emit_event.assert_not_called()
 
     def test_orphaned_grace_not_cancelled_when_fan_override_active(self):
@@ -443,11 +443,11 @@ class TestOrphanedGraceDetection:
             grace_end_time="2026-06-12T21:53:00+00:00",
         )
         coord.automation_engine._fan_override_active = True
-        coord.automation_engine._cancel_grace_timers = MagicMock()
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
 
         coord._check_orphaned_grace()
 
-        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord.automation_engine._cancel_grace_timers_action.assert_not_called()
         coord._emit_event.assert_not_called()
 
     def test_no_orphaned_grace_when_grace_inactive(self):
@@ -458,11 +458,11 @@ class TestOrphanedGraceDetection:
             grace_end_time=None,
         )
         coord.automation_engine._fan_override_active = False
-        coord.automation_engine._cancel_grace_timers = MagicMock()
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
 
         coord._check_orphaned_grace()
 
-        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord.automation_engine._cancel_grace_timers_action.assert_not_called()
         coord._emit_event.assert_not_called()
 
     def test_orphaned_grace_not_cancelled_when_grace_does_not_protect_override(self):
@@ -481,11 +481,11 @@ class TestOrphanedGraceDetection:
         )
         coord.automation_engine._fan_override_active = False
         coord.automation_engine._grace_protects_override = False
-        coord.automation_engine._cancel_grace_timers = MagicMock()
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
 
         coord._check_orphaned_grace()
 
-        coord.automation_engine._cancel_grace_timers.assert_not_called()
+        coord.automation_engine._cancel_grace_timers_action.assert_not_called()
         coord._emit_event.assert_not_called()
 
     def test_orphaned_grace_still_cancelled_when_protects_override_and_flags_gone(self):
@@ -500,11 +500,11 @@ class TestOrphanedGraceDetection:
         )
         coord.automation_engine._fan_override_active = False
         coord.automation_engine._grace_protects_override = True
-        coord.automation_engine._cancel_grace_timers = MagicMock()
+        coord.automation_engine._cancel_grace_timers_action = MagicMock()
 
         coord._check_orphaned_grace()
 
-        coord.automation_engine._cancel_grace_timers.assert_called_once()
+        coord.automation_engine._cancel_grace_timers_action.assert_called_once()
         coord._emit_event.assert_called_once()
 
 

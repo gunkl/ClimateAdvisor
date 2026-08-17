@@ -32,6 +32,7 @@ sys.modules["homeassistant.util.dt"].now = lambda: _NOW_BASE
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
+from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind  # noqa: E402
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -258,7 +259,7 @@ class TestOverrideEventDeduplication:
         engine._emit_event_callback = lambda name, payload: emitted.append((name, payload))
 
         with patch("custom_components.climate_advisor.automation.async_call_later"):
-            engine.start_override_confirmation("normal")
+            engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
         override_events = [e for e in emitted if e[0] == "override_detected"]
         assert len(override_events) == 1, f"Expected exactly 1 override_detected, got {len(override_events)}: {emitted}"
@@ -277,10 +278,10 @@ class TestOverrideEventDeduplication:
             patch("custom_components.climate_advisor.automation.dt_util") as mock_dt,
         ):
             mock_dt.now.return_value = t0
-            engine.start_override_confirmation("normal")
+            engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
             mock_dt.now.return_value = t1
-            engine.start_override_confirmation("normal")
+            engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
         override_events = [e for e in emitted if e[0] == "override_detected"]
         assert len(override_events) == 1, (
@@ -303,10 +304,10 @@ class TestOverrideEventDeduplication:
             patch("custom_components.climate_advisor.automation.dt_util") as mock_dt,
         ):
             mock_dt.now.return_value = t0
-            engine.start_override_confirmation("normal")
+            engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
             mock_dt.now.return_value = t1
-            engine.start_override_confirmation("normal")
+            engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
         override_events = [e for e in emitted if e[0] == "override_detected"]
         assert len(override_events) == 2, (
@@ -332,13 +333,13 @@ class TestOverrideEventDeduplication:
 
             with patch("custom_components.climate_advisor.automation.dt_util") as mock_dt:
                 mock_dt.now.return_value = t0
-                engine.start_override_confirmation("normal")
+                engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
                 # After first call, _override_confirm_cancel should be set
                 first_cancel = engine._override_confirm_cancel
 
                 mock_dt.now.return_value = t1
-                engine.start_override_confirmation("normal")
+                engine.start_override_confirmation("normal", event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
         # The first cancel function should have been called (timer restarted)
         assert cancel_mock.called or first_cancel is None or first_cancel.called, (
@@ -366,6 +367,7 @@ class TestOverrideEventDeduplication:
             with patch("custom_components.climate_advisor.automation.async_call_later"):
                 engine.start_override_confirmation(
                     "normal",
+                    event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED,
                     old_mode="off",
                     new_mode="heat",
                     classification_mode="off",

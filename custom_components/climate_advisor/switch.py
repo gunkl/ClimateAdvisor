@@ -39,6 +39,7 @@ async def async_setup_entry(
             ClimateAdvisorAutomationSwitch(coordinator, entry),
             ClimateAdvisorNatVentFsmAuthoritativeSwitch(coordinator, entry),
             ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(coordinator, entry),
+            ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(coordinator, entry),
         ]
     )
 
@@ -172,4 +173,55 @@ class ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEn
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Revert to the legacy inline door/window flag writes."""
         self.coordinator.set_doorwindow_fsm_authoritative(False)
+        self.async_write_ha_state()
+
+
+class ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to make the override/grace lifecycle FSM (Issue #639) authoritative for
+    ``_override_confirm_pending``/``_grace_active``/``_grace_protects_override``,
+    instead of each real call site's own inline flag write (Issue #664).
+
+    **Full authority for all 8 real call sites, shipped in one increment** — unlike
+    door/window's staged partial-authority rollout, this switch does not need one.
+    Investigation for Issue #664 proved every flag value these primitives compute is a
+    pure function of their own call arguments (never of prior engine state), so the FSM
+    and the legacy inline computation are provably equivalent at every site — there was
+    no latent derivation ambiguity to discover and fix incrementally the way door/window's
+    11-step rollout did. The real timer-owning primitives (``_start_grace_period_action()``/
+    ``_cancel_grace_timers_action()``/etc.) are never gated by this switch — they always
+    run, unconditionally, exactly like ``_start_grace_period()``/``_cancel_grace_timers()``
+    are never gated by the door/window switch either; only which computation decides the
+    3 flag values is what this switch genuinely governs.
+
+    Default OFF, NOT persisted across a Home Assistant restart — same reasoning as the
+    nat-vent/door-window switches' own docstrings: a restart always comes back up on the
+    proven legacy path, and the owner must explicitly re-enable this each time.
+    """
+
+    _attr_icon = "mdi:state-machine"
+    _attr_entity_category = None
+
+    def __init__(
+        self,
+        coordinator: ClimateAdvisorCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the override/grace FSM-authoritative switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_override_grace_fsm_authoritative"
+        self._attr_name = "Climate Advisor Override/Grace FSM Authoritative"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if the override/grace FSM is authoritative for production decisions."""
+        return self.coordinator.override_grace_fsm_authoritative
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Make the override/grace FSM authoritative."""
+        self.coordinator.set_override_grace_fsm_authoritative(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Revert to the legacy inline override/grace flag writes."""
+        self.coordinator.set_override_grace_fsm_authoritative(False)
         self.async_write_ha_state()

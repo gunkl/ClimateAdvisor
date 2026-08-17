@@ -137,6 +137,15 @@ class OverrideGraceFsmInputs:
       any_sensor_open            -> self._any_monitored_sensor_open()
       grace_source               -> self._last_resume_source of the EXPIRING grace
                                     ("manual" | "automation")
+      grace_would_start           -> desired_state.decide_grace_start(source="manual", ...)
+                                    is not None for the config values live right now — i.e.
+                                    whether CONF_MANUAL_GRACE_PERIOD is currently > 0
+                                    (Issue #664: manual_grace_seconds=0 is a valid, documented
+                                    way to disable manual grace entirely — every real
+                                    manual-grace-starting transition below must land on
+                                    GraceState.NONE in that case instead of unconditionally
+                                    assuming grace starts, matching what
+                                    ``_start_grace_period_action()`` actually does)
       now                        -> caller-resolved wall-clock time
     """
 
@@ -155,6 +164,7 @@ class OverrideGraceFsmInputs:
     any_sensor_open: bool
     grace_source: str
     now: datetime
+    grace_would_start: bool = True
 
 
 @dataclass(frozen=True)
@@ -187,8 +197,11 @@ def _land_after_detection(inputs: OverrideGraceFsmInputs, current_grace: GraceSt
     )
     if pending is not None:
         return (OverrideConfirmState.PENDING, current_grace)
-    # Confirmation disabled — _confirm_override() fires immediately, which always
-    # (re)starts a manual grace with trigger="override_confirmed" (protects).
+    # Confirmation disabled — _confirm_override() fires immediately, which (re)starts a
+    # manual grace with trigger="override_confirmed" (protects) UNLESS manual grace is
+    # itself disabled via config (Issue #664 — manual_grace_seconds=0 is valid).
+    if not inputs.grace_would_start:
+        return (OverrideConfirmState.IDLE, GraceState.NONE)
     return (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
 
 
@@ -232,7 +245,7 @@ def _transition_from_no_grace(
             current_mode=inputs.current_mode or "unknown",
             classification_mode=inputs.classification_mode,
         )
-        if path == OverrideConfirmPathOutcome.CONFIRM:
+        if path == OverrideConfirmPathOutcome.CONFIRM and inputs.grace_would_start:
             next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
         else:
             next_state = (OverrideConfirmState.IDLE, GraceState.NONE)
@@ -243,10 +256,12 @@ def _transition_from_no_grace(
         return OverrideGraceTransition(current_state, next_state, kind, "override_confirmation_started", inputs.now)
 
     if kind == OverrideGraceFsmEventKind.DASHBOARD_RESUME:
-        # resume_from_pause() unconditionally (re)starts grace with
-        # trigger="dashboard_resume" — not in GRACE_TRIGGERS_PROTECTING_OVERRIDE.
+        # resume_from_pause() unconditionally attempts to (re)start grace with
+        # trigger="dashboard_resume" — not in GRACE_TRIGGERS_PROTECTING_OVERRIDE — but
+        # (Issue #664) only actually starts it if manual grace isn't disabled by config.
         assert not decide_grace_protects_override(_TRIGGER_DASHBOARD_RESUME)
-        next_state = (confirm, GraceState.ACTIVE_UNPROTECTED)
+        grace_next = GraceState.ACTIVE_UNPROTECTED if inputs.grace_would_start else GraceState.NONE
+        next_state = (confirm, grace_next)
         return OverrideGraceTransition(current_state, next_state, kind, "resumed", inputs.now)
 
     if kind == OverrideGraceFsmEventKind.OVERRIDE_CANCELLED:
@@ -337,10 +352,19 @@ def _transition_from_grace_unprotected(
             classification_mode=inputs.classification_mode,
         )
         if path == OverrideConfirmPathOutcome.CONFIRM:
-            # _confirm_override() cancels the unprotected grace and starts a
-            # fresh protecting one.
-            next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+            # _confirm_override() cancels the unprotected grace and starts a fresh
+            # protecting one — unless manual grace is disabled by config (Issue #664),
+            # in which case _start_grace_period_action() itself no-ops and the prior
+            # unprotected grace (cancelled by the same call regardless) does not get
+            # replaced by anything.
+            next_state = (
+                OverrideConfirmState.IDLE,
+                GraceState.ACTIVE_PROTECTING_OVERRIDE if inputs.grace_would_start else GraceState.NONE,
+            )
         else:
+            # PATH B (self-resolve): production never touches grace at all here — the
+            # pre-existing, independent unprotected grace (fan-off/window-close/
+            # dashboard-resume) is left running untouched.
             next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_UNPROTECTED)
         return OverrideGraceTransition(current_state, next_state, kind, path.value, inputs.now)
 
@@ -384,7 +408,11 @@ def transition(current_state: OverrideGraceLifecycleState, event: OverrideGraceF
     untouched by the fan path's different contract.
     """
     if event.kind == OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED:
-        next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+        # Issue #664: "unconditional" means unconditional on ORIGIN STATE — it does not
+        # mean grace is guaranteed to actually start; manual_grace_seconds=0 still
+        # disables it, same as every other manual-grace-starting transition.
+        grace_next = GraceState.ACTIVE_PROTECTING_OVERRIDE if event.inputs.grace_would_start else GraceState.NONE
+        next_state = (OverrideConfirmState.IDLE, grace_next)
         return OverrideGraceTransition(
             current_state, next_state, event.kind, "fan_override_immediate", event.inputs.now
         )

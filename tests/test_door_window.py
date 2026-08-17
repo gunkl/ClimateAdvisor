@@ -775,6 +775,125 @@ class TestGracePeriodDuration:
 
 
 # ---------------------------------------------------------------------------
+# Issue #660 Step 6 — _pause_for_door_window() action/flags split
+# ---------------------------------------------------------------------------
+
+
+class TestPauseForDoorWindowActionSplit:
+    """_pause_for_door_window_action() (the extracted HVAC-affecting half) and the
+    thin _pause_for_door_window() wrapper that combines it with the shared flags
+    dispatcher — behavioral equivalence with the pre-split monolithic method."""
+
+    def test_action_returns_false_and_turns_off_when_active(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        result = asyncio.run(
+            engine._pause_for_door_window_action(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is False  # hvac_already_off=False -- was actively turned off
+        assert engine._pre_pause_mode == "cool"
+        engine.hass.services.async_call.assert_any_call(
+            "climate", "set_hvac_mode", {"entity_id": "climate.thermostat", "hvac_mode": "off"}
+        )
+
+    def test_action_returns_true_when_already_off(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="off"))
+
+        result = asyncio.run(
+            engine._pause_for_door_window_action(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is True  # hvac_already_off=True
+
+    def test_action_returns_none_when_unavailable(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=None)
+
+        result = asyncio.run(
+            engine._pause_for_door_window_action(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is None  # no pause at all -- disambiguated from hvac_already_off=False
+
+    def test_wrapper_returns_true_when_actively_turned_off(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        result = asyncio.run(
+            engine._pause_for_door_window(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is True
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False
+
+    def test_wrapper_returns_false_when_unavailable_no_pause(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=None)
+
+        result = asyncio.run(
+            engine._pause_for_door_window(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is False
+        assert engine._paused_by_door is False
+
+    def test_wrapper_routes_through_shared_dispatcher_when_authoritative(self):
+        """Direct proof of the wiring change: the thin wrapper must call the shared
+        dispatcher with SENSOR_OPENED — this covers _apply_comfort_band()'s guard and
+        _sync_paused_by_door_with_live_sensors()'s direct-pause path automatically,
+        since both call this same wrapper rather than needing individual treatment."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            asyncio.run(
+                engine._pause_for_door_window(
+                    entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+                )
+            )
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.SENSOR_OPENED
+
+    def test_wrapper_sets_paused_entity_and_since_when_authoritative(self):
+        """Regression guard: _apply_door_window_fsm_state() does NOT write
+        _paused_entity/_paused_since (they aren't part of its 3-field derivation),
+        so the wrapper must still set them directly regardless of which branch the
+        dispatcher took -- found during Step 6 verification when the corpus-wide
+        FSM-authoritative comparator caught a real divergence (paused_minutes going
+        None) from this exact omission."""
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        asyncio.run(
+            engine._pause_for_door_window(
+                entity_label="test-entity", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert engine._paused_entity == "test-entity"
+        assert engine._paused_since is not None
+
+
+# ---------------------------------------------------------------------------
 # Issue #216 — sensor_opened event payload fields (nat_vent result)
 # ---------------------------------------------------------------------------
 

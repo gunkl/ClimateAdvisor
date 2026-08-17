@@ -2857,6 +2857,49 @@ class AutomationEngine:
         self._paused_entity = entity_label
         self._paused_since = dt_util.now()
 
+    async def _pause_for_door_window_action(
+        self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
+    ) -> bool | None:
+        """The HVAC-affecting half of a door/window pause (Issue #660 Step 6):
+        thermostat mode capture, turning HVAC off (or noting it's already off),
+        notifying, and emitting the "sensor_opened" event. Split out of the former
+        monolithic ``_pause_for_door_window()`` so Group B callers
+        (``handle_door_window_open()``, ``_re_pause_for_open_sensor()``) can run this
+        action half unconditionally while deriving their resulting pause *flags*
+        through the shared FSM dispatcher under their own event kind.
+
+        Returns ``hvac_already_off``: ``False`` if HVAC was actively turned off (a
+        real mode transition happened), ``True`` if HVAC was already off (pause flag
+        only). Returns ``None`` if the thermostat state was unavailable/unknown — no
+        pause happens at all in that case (disambiguated from ``hvac_already_off``,
+        which only makes sense once a pause is actually occurring; the original
+        monolithic method's ``return False`` for this case conflated the two).
+        """
+        state = self.hass.states.get(self.climate_entity)
+        mode = state.state if state else None
+        if mode and mode not in ("off", "unavailable", "unknown"):
+            self._pre_pause_mode = mode
+            await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
+            await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "sensor_opened",
+                    {"entity": entity_label, "result": "paused", "hvac_mode_change": f"{mode}→off"},
+                )
+            return False
+        if mode == "off":
+            _LOGGER.info(
+                "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
+                entity_label,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "sensor_opened",
+                    {"entity": entity_label, "result": "paused"},
+                )
+            return True
+        return None
+
     async def _pause_for_door_window(
         self, *, entity_label: str, reason: str, notify_message: str, notify_type: str
     ) -> bool:
@@ -2868,34 +2911,42 @@ class AutomationEngine:
         silently leaving the next apply_classification() cycle unguarded. Single source of
         truth for both call sites now.
 
+        Issue #660 Step 6: thin wrapper over the split action half
+        (``_pause_for_door_window_action()``) and flags half (the shared
+        ``_resolve_door_window_pause_flags()`` dispatcher, kind=SENSOR_OPENED — the
+        same event kind ``handle_door_window_open()`` uses under Step 7, since this
+        is semantically the same "a door/window is open, pause" outcome). Kept
+        callable for its own generic callers (``_apply_comfort_band()``'s guard,
+        ``_sync_paused_by_door_with_live_sensors()``'s SYNC_RECONCILE-adjacent
+        direct-pause path) — both automatically become FSM-authoritative-capable
+        through this one shared wrapper rather than needing individual treatment.
+
         Returns True if HVAC was actively turned off (a real mode transition happened),
-        False if HVAC was already off and only the pause flag was set.
+        False if HVAC was already off and only the pause flag was set (or if the
+        thermostat state was unavailable/unknown and no pause happened at all).
         """
-        state = self.hass.states.get(self.climate_entity)
-        mode = state.state if state else None
-        if mode and mode not in ("off", "unavailable", "unknown"):
-            self._pre_pause_mode = mode
-            self._set_door_window_pause_fields(entity_label=entity_label, hvac_already_off=False)
-            await self._set_hvac_mode("off", reason=f"{reason}, was {mode} mode")
-            await self._notify(notify_message, "Climate Advisor", notification_type=notify_type)
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "sensor_opened",
-                    {"entity": entity_label, "result": "paused", "hvac_mode_change": f"{mode}→off"},
-                )
-            return True
-        if mode == "off":
-            self._set_door_window_pause_fields(entity_label=entity_label, hvac_already_off=True)
-            _LOGGER.info(
-                "Door/window pause (%s): HVAC already off — pause flag set, no mode change needed",
-                entity_label,
-            )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "sensor_opened",
-                    {"entity": entity_label, "result": "paused"},
-                )
-        return False
+        hvac_already_off = await self._pause_for_door_window_action(
+            entity_label=entity_label, reason=reason, notify_message=notify_message, notify_type=notify_type
+        )
+        if hvac_already_off is None:
+            return False
+
+        from .door_window_fsm import DoorWindowFsmEventKind
+
+        def _legacy_set_pause() -> None:
+            self._set_door_window_pause_fields(entity_label=entity_label, hvac_already_off=hvac_already_off)
+
+        self._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.SENSOR_OPENED,
+            legacy=_legacy_set_pause,
+        )
+        # _paused_entity/_paused_since aren't part of _apply_door_window_fsm_state()'s
+        # 3-field derivation (see its own docstring) — direct writes here regardless
+        # of which branch the dispatcher took, matching what
+        # _set_door_window_pause_fields() would have written on the legacy path.
+        self._paused_entity = entity_label
+        self._paused_since = dt_util.now()
+        return not hvac_already_off
 
     async def handle_door_window_open(self, entity_id: str) -> None:
         """Handle a door/window being opened for longer than the debounce period.

@@ -93,6 +93,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._economizer_phase = "inactive"
     ae._paused_by_door = False
     ae._pre_pause_mode = None
+    ae._doorwindow_fsm_authoritative = False
     ae._grace_active = False
     ae._grace_end_time = None
     ae._last_resume_source = None

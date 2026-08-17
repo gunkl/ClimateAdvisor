@@ -60,7 +60,9 @@ def _minimal_engine() -> AutomationEngine:
             "_active_listeners": [],
             "_current_classification": None,
             "_paused_by_door": False,
+            "_paused_with_hvac_already_off": False,
             "_pre_pause_mode": None,
+            "_doorwindow_fsm_authoritative": False,
             "_manual_grace_cancel": None,
             "_automation_grace_cancel": None,
             "_grace_active": True,  # grace is active when expiry fires

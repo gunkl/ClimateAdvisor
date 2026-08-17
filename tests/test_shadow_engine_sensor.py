@@ -84,6 +84,39 @@ class TestExtraStateAttributes:
         )
         assert sensor.extra_state_attributes["nat_vent_fsm_state"] is None
 
+    def test_reports_door_window_fields_when_present(self) -> None:
+        """Issue #660: door/window's own production/shadow/FSM state fields were
+        already computed in coordinator.shadow_engine_diagnostic but never exposed
+        on this sensor -- an observability gap fixed alongside the door/window FSM
+        authority extension."""
+        sensor = _make_sensor(
+            {
+                "production_state": "active",
+                "shadow_state": "active",
+                "agrees": True,
+                "checked_at": "t",
+                "door_window_production_state": "paused_active",
+                "door_window_shadow_state": "paused_active",
+                "door_window_fsm_state": "paused_active",
+                "door_window_mirror_agrees": True,
+                "door_window_fsm_agrees": True,
+            }
+        )
+        attrs = sensor.extra_state_attributes
+        assert attrs["door_window_production_state"] == "paused_active"
+        assert attrs["door_window_shadow_state"] == "paused_active"
+        assert attrs["door_window_fsm_state"] == "paused_active"
+        assert attrs["door_window_mirror_agrees"] is True
+        assert attrs["door_window_fsm_agrees"] is True
+
+    def test_door_window_fields_absent_before_first_evaluation(self) -> None:
+        sensor = _make_sensor(
+            {"production_state": "active", "shadow_state": "idle", "agrees": False, "checked_at": "t"}
+        )
+        attrs = sensor.extra_state_attributes
+        assert attrs["door_window_production_state"] is None
+        assert attrs["door_window_fsm_agrees"] is None
+
 
 class TestEntityCategory:
     def test_is_diagnostic(self) -> None:

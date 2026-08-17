@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.26"
+VERSION = "0.6.27"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.27": [
+        "Fix #660: the door/window pause/grace lifecycle FSM now has full,"
+        " off-by-default authority for all 8 real trigger sites — completing"
+        " the migration begun in #637. Also fixes a real gap found during that"
+        " work: when a grace period was already running and a door/window pause"
+        " independently became active too, the FSM's own tracked state could"
+        " disagree with what production actually did, and a resume-after-close"
+        " could restore the wrong prior HVAC mode in a specific reachable"
+        " sequence. Both are fixed at the source for every caller, not"
+        " patched per call site. The switch that lets this FSM actually drive"
+        " decisions (instead of just tracking them for comparison) stays off"
+        " by default — no occupant-visible behavior change from this release"
+        " alone.",
+    ],
     "0.6.26": [
         "Fix #655: a door/window briefly reopened during an active grace period"
         " could still pause the AC/heat, even though the grace period exists"
@@ -1880,6 +1894,51 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    660: {
+        "version_fixed": "0.6.27",
+        "title": "Door/window FSM: full authority for all 8 real trigger sites (completes #637)",
+        "scope_covered": (
+            "door_window_fsm.py/automation.py/coordinator.py: completes the door/window"
+            " pause/grace lifecycle FSM migration begun in #637. Fixed 2 real gaps found"
+            " during the investigation: (1) _sync_reconcile_next_state() never checked live"
+            " grace_active when the FSM was already in a PAUSED_* state (added a"
+            " grace_active-while-paused branch, and made _transition_from_paused() dispatch"
+            " SYNC_RECONCILE to it, matching NORMAL/GRACE's existing dispatch); (2)"
+            " _transition_from_paused()'s ALL_SENSORS_CLOSED branch inferred pre_pause_mode"
+            " truthiness from current_state == PAUSED_ACTIVE (a placeholder) instead of the"
+            " real AutomationEngine._pre_pause_mode value, which could disagree in a"
+            " reachable edge case involving a still-legacy _exit_nat_vent() branch. Also"
+            " found and added the FSM's real 8th trigger site,"
+            " check_natural_vent_conditions()'s two reactivation-while-paused branches,"
+            " previously fed to the nat-vent FSM but never the door/window FSM at all"
+            " (new DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED). Structural"
+            " consolidation (Step 0, provable no-op): deleted a fully-redundant"
+            " coordinator-side FSM-inputs builder in favor of automation.py's single"
+            " definition; added AutomationEngine._resolve_door_window_pause_flags(), one"
+            " shared authoritative-vs-legacy dispatcher all 8 sites now call instead of a"
+            " hand-copied if/else each; collapsed _mirror_to_shadow()'s and"
+            " _feed_lifecycle_fsms_from_event()'s repeated try/except FSM-dispatch blocks"
+            " into one declarative loop. Split _pause_for_door_window() into an action half"
+            " (_pause_for_door_window_action()) and a flags half, letting"
+            " handle_door_window_open()/_re_pause_for_open_sensor() run the action"
+            " unconditionally while deriving flags under their own event kind (the highest-"
+            " risk step: _re_pause_for_open_sensor() now trusts the flags"
+            " _on_grace_expired() already applied via an explicitly captured pre-grace-"
+            " clear origin state, rather than independently re-deciding and re-writing"
+            " them). Exposed door/window's shadow-diagnostic fields on the Shadow Engine"
+            " Status sensor (previously computed but never surfaced). The"
+            " _doorwindow_fsm_authoritative switch (config/switch.py, not touched by this"
+            " PR) still defaults False — zero occupant-visible behavior change from this"
+            " release alone; a live switch-flip verification is a separate follow-up step."
+            " Two callers of the shared _pause_for_door_window() wrapper"
+            " (_apply_comfort_band()'s door/window guard,"
+            " _sync_paused_by_door_with_live_sensors()'s Issue #620 direct-pause path) were"
+            " not among the 8 sites the originating investigation enumerated, but"
+            " automatically gained FSM-authoritative capability through that one shared"
+            " wrapper rather than needing individual treatment — noted here since it's a"
+            " correction to the investigation's own site count, not a new gap."
+        ),
+    },
     651: {
         "version_fixed": "0.6.21",
         "title": "Override/grace shadow FSM: handle_manual_override entry gap + bedtime/wakeup exit gap",

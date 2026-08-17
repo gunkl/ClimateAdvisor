@@ -40,6 +40,8 @@ def _inputs(**overrides) -> DoorWindowFsmInputs:
         grace_source="manual",
         natural_vent_active=False,
         whf_owns_hvac=False,
+        grace_active=False,
+        pre_pause_mode_active=False,
         now=_NOW,
     )
     base.update(overrides)
@@ -126,12 +128,33 @@ class TestFromNormal:
 
 class TestFromPaused:
     def test_all_sensors_closed_active_restores_and_graces(self):
-        t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED))
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED, pre_pause_mode_active=True),
+        )
         assert t.to_state == DoorWindowLifecycleState.GRACE
 
     def test_all_sensors_closed_idle_clears_no_grace(self):
-        t = transition(DoorWindowLifecycleState.PAUSED_IDLE, _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED))
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED, pre_pause_mode_active=False),
+        )
         assert t.to_state == DoorWindowLifecycleState.NORMAL
+
+    def test_all_sensors_closed_idle_origin_but_pre_pause_mode_active_restores(self):
+        """Issue #660 Step 2: the ALL_SENSORS_CLOSED branch used to infer
+        pre_pause_mode from `current_state == PAUSED_ACTIVE`, a placeholder rather
+        than the real AutomationEngine._pre_pause_mode value. PAUSED_ACTIVE vs.
+        PAUSED_IDLE depends on _paused_with_hvac_already_off, which a still-legacy
+        call site (_exit_nat_vent()'s sensor-still-open branch) could leave stale —
+        so a reachable case exists where current_state == PAUSED_IDLE but the real
+        pre_pause_mode is still set (truthy). This must now correctly restore/grace,
+        not silently clear with no restore because the origin-state proxy said IDLE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.ALL_SENSORS_CLOSED, pre_pause_mode_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.GRACE
 
     def test_manual_override_during_pause_clears_to_normal(self):
         t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE))
@@ -148,6 +171,58 @@ class TestFromPaused:
     def test_grace_timer_expired_unreachable_noop(self):
         t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED))
         assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+
+    def test_sync_reconcile_grace_active_upgrades_to_paused_during_grace(self):
+        """Issue #660: _sync_reconcile_next_state() previously never checked live
+        grace_active when already in a PAUSED_* state — the FSM's own carried state
+        would silently disagree with production once grace started running
+        concurrently with an existing pause. SYNC_RECONCILE from PAUSED_ACTIVE/
+        PAUSED_IDLE with grace_active=True must now upgrade to PAUSED_DURING_GRACE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+
+    def test_sync_reconcile_grace_active_upgrades_from_paused_idle(self):
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+
+    def test_sync_reconcile_grace_inactive_stays_paused_active(self):
+        """Regression guard: grace_active=False must not change the outcome —
+        SYNC_RECONCILE from a plain paused state with no grace running is still a
+        no-op (the pre-existing behavior for this origin state)."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+
+    def test_sync_reconcile_grace_inactive_stays_paused_idle(self):
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, grace_active=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.PAUSED_IDLE
+
+    def test_nat_vent_reactivated_lands_on_normal(self):
+        """Issue #660 Step 3: the 8th event kind. From a plain paused state, nat-vent
+        reactivating always lands on NORMAL (origin has no grace by definition)."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
+
+    def test_nat_vent_reactivated_lands_on_normal_from_idle(self):
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
 
 
 class TestFromGrace:
@@ -280,3 +355,12 @@ class TestFromPausedDuringGrace:
     def test_sensor_opened_noop(self):
         t = transition(DoorWindowLifecycleState.PAUSED_DURING_GRACE, _ev(DoorWindowFsmEventKind.SENSOR_OPENED))
         assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+
+    def test_nat_vent_reactivated_lands_on_grace(self):
+        """Issue #660 Step 3: from PAUSED_DURING_GRACE, nat-vent reactivating clears
+        the pause but leaves grace running (untouched) -- lands on plain GRACE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_DURING_GRACE,
+            _ev(DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED),
+        )
+        assert t.to_state == DoorWindowLifecycleState.GRACE

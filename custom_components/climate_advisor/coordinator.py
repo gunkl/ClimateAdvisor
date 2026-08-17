@@ -14,7 +14,7 @@ import hashlib
 import inspect
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -365,6 +365,17 @@ _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_all_doors_windows_closed": "all_sensors_closed",
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
+    # Issue #660: check_natural_vent_conditions()'s two reactivation branches clear
+    # all 4 door/window pause fields directly when nat-vent may reactivate while
+    # paused -- previously this method had NO door/window FSM event feed at all (it
+    # was only registered in _NAT_VENT_FSM_TRIGGER_METHODS, feeding the *nat-vent*
+    # FSM). It already has a _mirror_to_shadow("check_natural_vent_conditions") call
+    # site (coordinator.py), so adding this entry is enough to reach
+    # _evaluate_door_window_fsm() via _dispatch_fsm_evaluators() -- no new call site
+    # needed. Most invocations of this periodic method aren't a reactivation-while-
+    # paused at all; PAUSED_NAT_VENT_REACTIVATED is a defensive no-op from any
+    # non-paused origin state, same convention SENSOR_OPENED already uses.
+    "check_natural_vent_conditions": "paused_nat_vent_reactivated",
 }
 
 # Issue #594 Phase R Step 1b: door/window's SYNC_RECONCILE event kind has no natural
@@ -933,6 +944,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         se._override_confirm_source = ae._override_confirm_source
         se._paused_with_hvac_already_off = ae._paused_with_hvac_already_off
 
+    def _dispatch_fsm_evaluators(
+        self,
+        key: str,
+        dispatches: list[tuple[Container[str], Callable[[], None], str]],
+    ) -> None:
+        """Shared try/except-and-log dispatch loop for FSM re-evaluation (Issue #660,
+        Phase R Step 0).
+
+        Each dispatch tuple is ``(registry, evaluator, label)``. If ``key`` (a
+        mirrored method name or an emitted event type, depending on caller) is a
+        member of ``registry``, ``evaluator()`` runs isolated: any exception is
+        logged under ``label`` and swallowed, never allowed to affect production.
+        Replaces what used to be a hand-copied ``if key in <registry>: try: ...
+        except: _LOGGER.warning(...)`` block per FSM — both in ``_mirror_to_shadow()``'s
+        ``finally`` block and in ``_feed_lifecycle_fsms_from_event()`` — so adding a
+        future FSM (or fixing a missing registration, as Issue #660 did for
+        ``check_natural_vent_conditions()``) is a one-line registry addition instead
+        of a new copy-pasted try/except block.
+        """
+        for registry, evaluator, label in dispatches:
+            if key in registry:
+                try:
+                    evaluator()
+                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                    _LOGGER.warning("%s failed (isolated, no production impact): %s", label, fsm_exc)
+
     async def _mirror_to_shadow(self, method_name: str, *args: Any, **kwargs: Any) -> None:
         """Replay a production nat-vent decision call on the shadow engine (Issue #613).
 
@@ -957,42 +994,32 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 exc,
             )
         finally:
-            if method_name in _NAT_VENT_FSM_TRIGGER_METHODS:
-                try:
-                    self._evaluate_nat_vent_fsm()
-                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                    _LOGGER.warning(
-                        "Nat-vent FSM evaluation failed (isolated, no production impact): %s",
-                        fsm_exc,
-                    )
-            if method_name in _DOOR_WINDOW_FSM_EVENT_KINDS:
-                try:
-                    self._evaluate_door_window_fsm(method_name)
-                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                    _LOGGER.warning(
-                        "Door/window FSM evaluation failed (isolated, no production impact): %s",
-                        fsm_exc,
-                    )
-            if method_name in _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS:
-                try:
-                    from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+            from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-                    self._evaluate_door_window_fsm(method_name, event_kind=_DWFEventKind.SYNC_RECONCILE)
-                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                    _LOGGER.warning(
-                        "Door/window FSM evaluation (sync-reconcile) failed (isolated, no production impact): %s",
-                        fsm_exc,
-                    )
-            if method_name in _OVERRIDE_GRACE_FSM_EVENT_KINDS:
-                try:
-                    from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
-
-                    self._evaluate_override_grace_fsm(_OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name]))
-                except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                    _LOGGER.warning(
-                        "Override/grace FSM evaluation failed (isolated, no production impact): %s",
-                        fsm_exc,
-                    )
+            self._dispatch_fsm_evaluators(
+                method_name,
+                [
+                    (_NAT_VENT_FSM_TRIGGER_METHODS, self._evaluate_nat_vent_fsm, "Nat-vent FSM evaluation"),
+                    (
+                        _DOOR_WINDOW_FSM_EVENT_KINDS,
+                        lambda: self._evaluate_door_window_fsm(method_name),
+                        "Door/window FSM evaluation",
+                    ),
+                    (
+                        _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS,
+                        lambda: self._evaluate_door_window_fsm(method_name, event_kind=_DWFEventKind.SYNC_RECONCILE),
+                        "Door/window FSM evaluation (sync-reconcile)",
+                    ),
+                    (
+                        _OVERRIDE_GRACE_FSM_EVENT_KINDS,
+                        lambda: self._evaluate_override_grace_fsm(
+                            _OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_KINDS[method_name])
+                        ),
+                        "Override/grace FSM evaluation",
+                    ),
+                ],
+            )
             try:
                 self._update_shadow_engine_diagnostic()
             except Exception as diag_exc:  # noqa: BLE001 — diagnostic is best-effort observability
@@ -1073,35 +1100,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         result = transition(self._nat_vent_fsm_state, event)
         self._nat_vent_fsm_state = result.to_state
 
-    def _door_window_fsm_inputs(self, ae: AutomationEngine, now: datetime, config: dict[str, Any]) -> Any:
-        """Build ``DoorWindowFsmInputs`` from production's current live readings.
-
-        Issue #647: extracted from ``_evaluate_door_window_fsm()`` so
-        ``_feed_lifecycle_fsms_from_event()``'s event-driven trigger (nat-vent exit
-        events) can build the identical inputs without duplicating this construction
-        — one source of truth for "what production state does this FSM read."
-        """
-        from .door_window_fsm import DoorWindowFsmInputs
-
-        return DoorWindowFsmInputs(
-            hvac_mode=self._current_hvac_mode(),
-            outdoor=ae._last_outdoor_temp,
-            indoor=ae._get_indoor_temp_f(),
-            comfort_heat=ae._nat_vent_reactivation_floor(),
-            comfort_cool=float(config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
-            nat_vent_delta=float(config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA)),
-            fan_mode=str(config.get(CONF_FAN_MODE, "whole_house_fan")),
-            aggressive_savings=bool(config.get("aggressive_savings", False)),
-            within_planned_window=ae._is_within_planned_window_period(),
-            any_sensor_open=ae._any_monitored_sensor_open(),
-            sensor_debounce_pending=bool(ae._sensor_debounce_pending),
-            override_matches_current_decision=ae._override_matches_current_decision(ae._current_classification),
-            grace_source=ae._last_resume_source or "automation",
-            natural_vent_active=bool(ae._natural_vent_active),
-            whf_owns_hvac=bool(ae._whf_owns_hvac()),
-            now=now,
-        )
-
     def _evaluate_door_window_fsm(self, method_name: str, event_kind: DoorWindowFsmEventKind | None = None) -> None:
         """Run the unified door/window pause/grace FSM (Issue #637) against
         production's current live readings and track its own independently-
@@ -1140,14 +1138,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
         ae = self.automation_engine
         now = dt_util.now()
-        config = self.config
 
         kind = (
             event_kind if event_kind is not None else DoorWindowFsmEventKind(_DOOR_WINDOW_FSM_EVENT_KINDS[method_name])
         )
         event = DoorWindowFsmEvent(
             kind=kind,
-            inputs=self._door_window_fsm_inputs(ae, now, config),
+            inputs=ae._build_door_window_fsm_inputs(now=now),
         )
         result = transition(self._door_window_fsm_state, event)
         self._door_window_fsm_state = result.to_state
@@ -7706,70 +7703,64 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         ``_mirror_to_shadow()``'s own finally block: an exception here is logged and
         swallowed, never allowed to affect production.
         """
-        if event_type in _NAT_VENT_FSM_EVENT_TYPES:
-            try:
-                self._evaluate_nat_vent_fsm()
-            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                _LOGGER.warning(
-                    "Nat-vent FSM evaluation (event-driven) failed (isolated, no production impact): %s",
-                    fsm_exc,
-                )
-        if event_type in _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES:
-            try:
-                from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
-                from .door_window_fsm import transition as _door_window_transition
+        from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-                ae = self.automation_engine
-                # NAT_VENT_EXITED_SENSOR_STILL_OPEN's transition() unconditionally
-                # pauses (door_window_fsm.py:255-261) — it does not itself re-check
-                # any_sensor_open, so this event kind must only be sent when the
-                # sensor really is open, or every nat-vent exit (including a clean
-                # one) would incorrectly force a pause the FSM never should have
-                # entered. Read live sensor state directly rather than
-                # `ae._paused_by_door` — `_exit_nat_vent()` (which sets that flag)
-                # runs *after* the exit event these event types are emitted for
-                # (automation.py's own "caller emits its own specific event before
-                # calling this method" convention), so `_paused_by_door` is still
-                # last-cycle's stale value at this point; the live sensor read isn't.
-                if ae._any_monitored_sensor_open():
-                    now = dt_util.now()
-                    config = self.config
-                    event = DoorWindowFsmEvent(
-                        kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN,
-                        inputs=self._door_window_fsm_inputs(ae, now, config),
-                    )
-                    result = _door_window_transition(self._door_window_fsm_state, event)
-                    self._door_window_fsm_state = result.to_state
-            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                _LOGGER.warning(
-                    "Door/window FSM evaluation (event-driven) failed (isolated, no production impact): %s",
-                    fsm_exc,
-                )
-        if event_type in _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES:
-            try:
-                from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+        self._dispatch_fsm_evaluators(
+            event_type,
+            [
+                (_NAT_VENT_FSM_EVENT_TYPES, self._evaluate_nat_vent_fsm, "Nat-vent FSM evaluation (event-driven)"),
+                (
+                    _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES,
+                    self._evaluate_door_window_fsm_nat_vent_exit,
+                    "Door/window FSM evaluation (event-driven)",
+                ),
+                (
+                    _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES,
+                    lambda: self._evaluate_door_window_fsm(
+                        "_on_grace_expired", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED
+                    ),
+                    "Door/window FSM evaluation (grace-expiry)",
+                ),
+                (
+                    _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP,
+                    lambda: self._evaluate_override_grace_fsm(
+                        _OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP[event_type])
+                    ),
+                    "Override/grace FSM evaluation (event-driven)",
+                ),
+            ],
+        )
 
-                # "grace_expired"/"override_adopted" are both emitted by
-                # _on_grace_expired() *after* it has already mutated grace/pause state
-                # (self._cancel_grace_timers(), self.clear_manual_override()) — no
-                # staleness risk reading self.automation_engine here, unlike the
-                # NAT_VENT_EXITED_SENSOR_STILL_OPEN block above.
-                self._evaluate_door_window_fsm("_on_grace_expired", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED)
-            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                _LOGGER.warning(
-                    "Door/window FSM evaluation (grace-expiry) failed (isolated, no production impact): %s",
-                    fsm_exc,
-                )
-        if event_type in _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP:
-            try:
-                from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+    def _evaluate_door_window_fsm_nat_vent_exit(self) -> None:
+        """Evaluate the door/window FSM's ``NAT_VENT_EXITED_SENSOR_STILL_OPEN`` event
+        (Issue #647; extracted as its own method under Issue #660 Phase R Step 0 so
+        ``_feed_lifecycle_fsms_from_event()`` can dispatch it through the same shared
+        ``_dispatch_fsm_evaluators()`` loop as every other FSM re-evaluation).
 
-                self._evaluate_override_grace_fsm(_OGFEventKind(_OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP[event_type]))
-            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
-                _LOGGER.warning(
-                    "Override/grace FSM evaluation (event-driven) failed (isolated, no production impact): %s",
-                    fsm_exc,
-                )
+        ``NAT_VENT_EXITED_SENSOR_STILL_OPEN``'s ``transition()`` unconditionally pauses
+        (door_window_fsm.py's ``_transition_from_normal``/``_transition_from_grace``
+        branches) — it does not itself re-check ``any_sensor_open``, so this event kind
+        must only be sent when the sensor really is open, or every nat-vent exit
+        (including a clean one) would incorrectly force a pause the FSM never should
+        have entered. Reads live sensor state directly rather than ``ae._paused_by_door``
+        — ``_exit_nat_vent()`` (which sets that flag) runs *after* the exit event this
+        method is triggered for (automation.py's own "caller emits its own specific
+        event before calling this method" convention), so ``_paused_by_door`` is still
+        last-cycle's stale value at this point; the live sensor read isn't.
+        """
+        from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
+        from .door_window_fsm import transition as _door_window_transition
+
+        ae = self.automation_engine
+        if ae._any_monitored_sensor_open():
+            now = dt_util.now()
+            event = DoorWindowFsmEvent(
+                kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN,
+                inputs=ae._build_door_window_fsm_inputs(now=now),
+            )
+            result = _door_window_transition(self._door_window_fsm_state, event)
+            self._door_window_fsm_state = result.to_state
 
     def _resolve_active_comfort_band(self) -> tuple[float | None, float | None]:
         """Resolve the currently-active (comfort_heat, comfort_cool) band.

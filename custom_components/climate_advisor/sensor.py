@@ -501,13 +501,24 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "shadow_state": diag["shadow_state"],
             "nat_vent_fsm_state": diag.get("nat_vent_fsm_state"),
             "checked_at": diag["checked_at"],
+            # Issue #660: door/window's own production/shadow/FSM state fields were
+            # already computed in coordinator.shadow_engine_diagnostic (Step 1b) but
+            # never exposed here — an observability gap alongside the door/window FSM
+            # authority extension itself, fixed in the same PR since both touch this
+            # diagnostic surface.
+            "door_window_production_state": diag.get("door_window_production_state"),
+            "door_window_shadow_state": diag.get("door_window_shadow_state"),
+            "door_window_fsm_state": diag.get("door_window_fsm_state"),
+            "door_window_mirror_agrees": diag.get("door_window_mirror_agrees"),
+            "door_window_fsm_agrees": diag.get("door_window_fsm_agrees"),
             # Issue #594 Phase R, Step 4: whether the nat-vent FSM is currently
             # authoritative for production decisions (vs. the legacy inline
             # computation). Surfaced here rather than a new card/sensor, same
             # "extend an existing diagnostic" rule this sensor itself follows.
             "natvent_fsm_authoritative": self.coordinator.natvent_fsm_authoritative,
-            # Issue #594 Phase R, Step 4: same rationale as natvent_fsm_authoritative
-            # above — partial scope, see AutomationEngine._doorwindow_fsm_authoritative's
-            # docstring for exactly which methods this does and doesn't cover.
+            # Issue #660: as of Phase R Step 8, this flag governs all 8 real
+            # door/window trigger sites (full parity — see
+            # AutomationEngine._doorwindow_fsm_authoritative's docstring), not a
+            # partial subset as previously documented here.
             "doorwindow_fsm_authoritative": self.coordinator.doorwindow_fsm_authoritative,
         }

@@ -97,57 +97,56 @@ scoping pass are now fixed in production (not just documented as blockers):
   ``PAUSED_IDLE``) can no longer go stale from this branch.
 
 **Shadow-feed coverage (Issue #594 Phase R Step 1b, v0.6.24; residual closed in
-Step 3).** All 7 ``DoorWindowFsmEventKind`` members have a real feed path — see
-``coordinator.py``'s ``_DOOR_WINDOW_FSM_EVENT_KINDS``/
-``_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS``/``_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES``.
-Step 1b's one documented residual — ``_on_grace_expired()``'s "within planned window"
-branch (automation.py, the first branch — windows recommended, sensor open is
-expected) previously emitted no event at all — is now closed: that branch emits
-``"grace_expired"`` (the same event type its sibling branches already use, with a
-``within_planned_window=True`` payload key to distinguish it from a real sensor
-re-check), so ``GRACE_TIMER_EXPIRED`` is now fed from all 3 of
-``_on_grace_expired()``'s outcome branches.
-
-**Remaining before this FSM can be authoritative for all 7 methods (Step 3b)**:
-``_re_pause_for_open_sensor()`` still needs to know whether it was reached from
-``GRACE`` or ``PAUSED_DURING_GRACE`` (a signature/plumbing change, not a body swap) —
-none of the Step 3 fixes above changed that. See the plan tracked on #637/#594 for the
-Step 3b scope.
+Step 3; 8th event kind added Issue #660 Step 3).** All 8 ``DoorWindowFsmEventKind``
+members have a real feed path — see ``coordinator.py``'s
+``_DOOR_WINDOW_FSM_EVENT_KINDS``/``_DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS``/
+``_DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES``. Step 1b's one documented residual —
+``_on_grace_expired()``'s "within planned window" branch (automation.py, the first
+branch — windows recommended, sensor open is expected) previously emitted no event
+at all — was closed by reusing the same ``"grace_expired"`` event type its sibling
+branches already use (with a ``within_planned_window=True`` payload key to
+distinguish it from a real sensor re-check), so ``GRACE_TIMER_EXPIRED`` is fed from
+all 3 of ``_on_grace_expired()``'s outcome branches. ``PAUSED_NAT_VENT_REACTIVATED``
+(Issue #660 Step 3) is the 8th kind: ``check_natural_vent_conditions()``'s two
+reactivation-while-paused branches previously had zero door/window FSM event feed
+at all (only registered for the *nat-vent* FSM) — now fed via
+``_DOOR_WINDOW_FSM_EVENT_KINDS["check_natural_vent_conditions"]``.
 
 **Cross-lifecycle inputs.** ``natural_vent_active`` and ``whf_owns_hvac`` are
 state *reads* from other lifecycles (Issue #631's "communicating automata"
 design) — legacy flag-derived today, same convention as ``nat_vent_fsm.py``'s
 own ``paused_by_door`` read.
 
-**Authoritative for production, as of Step 2 (v0.6.25) — PARTIAL scope.** This
-module's ``transition()`` is no longer purely a shadow diagnostic: when
-``AutomationEngine._doorwindow_fsm_authoritative`` is True,
-``handle_manual_override_during_pause()``/``resume_from_pause()`` call it for
-real and derive their resulting flags from ``result.to_state`` (via
-``AutomationEngine._apply_door_window_fsm_state()``). Both transitions
-(``MANUAL_OVERRIDE_DURING_PAUSE``, ``DASHBOARD_RESUME``) land unconditionally on
-their target state regardless of origin state — no placeholder-inference risk,
-unlike ``_transition_from_paused()``'s ``ALL_SENSORS_CLOSED`` branch below. The
-other 5 event kinds/methods stay shadow-only, each blocked on its own documented
-gap (see automation.py's ``_doorwindow_fsm_authoritative`` docstring) — this
-module's transition table is faithful to production for all 7, but "faithful"
-and "safe to read authoritatively" are different bars, and only 2 have cleared
-the second one so far.
+**Authoritative for production, as of Step 8 (Issue #660) — FULL scope, all 8
+real trigger sites.** This module's ``transition()`` is no longer purely a shadow
+diagnostic: when ``AutomationEngine._doorwindow_fsm_authoritative`` is True, every
+one of the 8 real trigger methods
+(``handle_manual_override_during_pause()``, ``resume_from_pause()``,
+``handle_all_doors_windows_closed()``, ``_exit_nat_vent()``'s sensor-still-open
+branch, ``check_natural_vent_conditions()``'s two reactivation branches,
+``handle_door_window_open()``, and the coupled
+``_on_grace_expired()``/``_re_pause_for_open_sensor()`` pair) derives its resulting
+flags from ``result.to_state`` via the shared
+``AutomationEngine._resolve_door_window_pause_flags()`` dispatcher (which calls
+``AutomationEngine._apply_door_window_fsm_state()``), instead of a direct/inline
+flag write. Two structural fixes made this possible for the branches that weren't
+already mechanical:
 
-**Known non-mechanical transition — do not swap without fixing first.**
-``_transition_from_paused()``'s ``ALL_SENSORS_CLOSED`` branch infers
-``pre_pause_mode`` from ``current_state == PAUSED_ACTIVE`` rather than taking the
-real ``AutomationEngine._pre_pause_mode`` value as an input — a placeholder, not
-the actual field ``door_window_close_response.DoorCloseResponseInputs`` was
-designed to take. Found while attempting to swap
-``handle_all_doors_windows_closed()`` in this same increment: since
-``PAUSED_ACTIVE`` vs. ``PAUSED_IDLE`` depends on ``_paused_with_hvac_already_off``,
-which the still-shadow-only ``_exit_nat_vent()`` branch can leave stale (it never
-writes that field), trusting this transition's resulting state for real
-flag-derivation risks a genuine divergence in that reachable edge case. Needs
-either a real ``pre_pause_mode``-truthiness input added to this branch, or
-another safe path, before ``handle_all_doors_windows_closed()`` can join a future
-increment.
+- The ``ALL_SENSORS_CLOSED`` branch below now takes ``pre_pause_mode_active`` as a
+  real input (Issue #660 Step 2) instead of inferring it from
+  ``current_state == PAUSED_ACTIVE`` — the former placeholder risked a genuine
+  divergence whenever ``_paused_with_hvac_already_off`` went stale via a
+  differently-timed write.
+- ``_on_grace_expired()``/``_re_pause_for_open_sensor()`` needed to know whether
+  ``_re_pause_for_open_sensor()`` was reached from ``GRACE`` or
+  ``PAUSED_DURING_GRACE`` — resolved not by a signature change on this pair
+  directly, but by having ``_on_grace_expired()`` apply the FSM's outcome
+  synchronously (using an explicitly captured pre-``_cancel_grace_timers()``
+  origin state) *before* scheduling ``_re_pause_for_open_sensor()`` as a task; that
+  method then just reads the already-applied flag rather than re-deriving it.
+
+Deploying with the switch flipped True is a separate, explicit live-verification
+step (Issue #660 ships with it still defaulting False).
 """
 
 from __future__ import annotations
@@ -189,6 +188,13 @@ class DoorWindowFsmEventKind(Enum):
     DASHBOARD_RESUME = "dashboard_resume"
     NAT_VENT_EXITED_SENSOR_STILL_OPEN = "nat_vent_exited_sensor_still_open"
     SYNC_RECONCILE = "sync_reconcile"  # Issue #620's 4 reconcile call sites
+    # Issue #660: check_natural_vent_conditions()'s two reactivation branches
+    # (automation.py) clear all 4 door/window pause fields directly when nat-vent
+    # reactivates while paused -- this method previously had zero door/window FSM
+    # event feed at all (it was only in _NAT_VENT_FSM_TRIGGER_METHODS, feeding the
+    # *nat-vent* FSM, not door/window's), making it the real 8th production trigger
+    # site the module docstring's "7 event kinds are exhaustive" claim missed.
+    PAUSED_NAT_VENT_REACTIVATED = "paused_nat_vent_reactivated"
 
 
 @dataclass(frozen=True)
@@ -221,6 +227,21 @@ class DoorWindowFsmInputs:
                                              list: required for faithful SYNC_RECONCILE
                                              modeling (_sync_paused_by_door_with_live_sensors()'s
                                              own guard reads it)
+      pre_pause_mode_active                -> bool(self._pre_pause_mode) — added under
+                                             Issue #660 Step 2: replaces the
+                                             ``current_state == PAUSED_ACTIVE`` proxy
+                                             ``_transition_from_paused()``'s
+                                             ALL_SENSORS_CLOSED branch used to infer
+                                             ``pre_pause_mode`` truthiness from, which
+                                             could disagree with the real field.
+      grace_active                        -> self._grace_active — added under Issue #660:
+                                             _sync_reconcile_next_state() previously never
+                                             checked live grace_active when already in a
+                                             PAUSED_* state, so the FSM's carried state
+                                             could silently disagree with production once
+                                             grace started running concurrently with an
+                                             existing pause (see that function's own
+                                             docstring for the fix).
       now                                  -> caller-resolved wall-clock time
     """
 
@@ -239,6 +260,8 @@ class DoorWindowFsmInputs:
     grace_source: str
     natural_vent_active: bool
     whf_owns_hvac: bool
+    grace_active: bool
+    pre_pause_mode_active: bool
     now: datetime
 
 
@@ -353,8 +376,21 @@ def _sync_reconcile_next_state(
     current_state: DoorWindowLifecycleState, inputs: DoorWindowFsmInputs
 ) -> DoorWindowLifecycleState:
     """Pure reimplementation of ``_sync_paused_by_door_with_live_sensors()`` (Issue #620),
-    for the two origin states where its own guard doesn't immediately no-op
-    (NORMAL, GRACE — both have ``paused_by_door=False``)."""
+    for the origin states where its own guard doesn't immediately no-op — NORMAL/GRACE
+    (both have ``paused_by_door=False``), plus PAUSED_ACTIVE/PAUSED_IDLE's own narrower
+    ``grace_active``-while-paused check (Issue #660, added below)."""
+    # Issue #660: when already paused and a grace period is independently running
+    # (live grace_active True, e.g. started by a different code path than the pause
+    # itself), the FSM's carried state must upgrade to PAUSED_DURING_GRACE — the
+    # composite state — rather than silently staying a plain paused state that no
+    # longer reflects live grace. This check must run before the early-return guards
+    # below, which are specific to the NORMAL/GRACE reconcile-into-pause direction and
+    # would otherwise leave a plain-paused + grace-active disagreement unresolved.
+    if current_state in (DoorWindowLifecycleState.PAUSED_ACTIVE, DoorWindowLifecycleState.PAUSED_IDLE):
+        if inputs.grace_active:
+            return DoorWindowLifecycleState.PAUSED_DURING_GRACE
+        return current_state
+
     if inputs.natural_vent_active or inputs.whf_owns_hvac:
         return current_state
     if inputs.within_planned_window:
@@ -375,10 +411,15 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
     kind = event.kind
 
     if kind == DoorWindowFsmEventKind.ALL_SENSORS_CLOSED:
+        # Issue #660 Step 2: reads the real pre_pause_mode truthiness from the event's
+        # inputs rather than inferring it from current_state == PAUSED_ACTIVE — that
+        # proxy could disagree with the real AutomationEngine._pre_pause_mode value in
+        # a reachable edge case (see this file's module docstring, formerly "Known
+        # non-mechanical transition").
         outcome = decide_door_close_response(
             DoorCloseResponseInputs(
                 paused_by_door=True,
-                pre_pause_mode="restored" if current_state == DoorWindowLifecycleState.PAUSED_ACTIVE else None,
+                pre_pause_mode="restored" if inputs.pre_pause_mode_active else None,
             )
         )
         next_state = (
@@ -396,10 +437,26 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
     if kind == DoorWindowFsmEventKind.DASHBOARD_RESUME:
         return DoorWindowTransition(current_state, DoorWindowLifecycleState.GRACE, kind, "resumed", inputs.now)
 
-    # SENSOR_OPENED / SYNC_RECONCILE: both guard on paused_by_door already
-    # being True and no-op. GRACE_TIMER_EXPIRED / NAT_VENT_EXITED_SENSOR_STILL_OPEN:
-    # not reachable from a plain paused state (no grace timer running; nat-vent
-    # cannot be active while already paused per the two evidenced entry paths).
+    if kind == DoorWindowFsmEventKind.SYNC_RECONCILE:
+        # Issue #660: dispatches to the same single reconciliation function every
+        # other origin state uses, instead of silently no-op'ing here — see
+        # _sync_reconcile_next_state()'s own grace_active-while-paused branch.
+        next_state = _sync_reconcile_next_state(current_state, inputs)
+        return DoorWindowTransition(current_state, next_state, kind, "sync_reconcile", inputs.now)
+
+    if kind == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED:
+        # Issue #660 Step 3: check_natural_vent_conditions()'s reactivation branches
+        # clear all 4 pause fields unconditionally when nat-vent may reactivate while
+        # paused. From a plain paused state there is no grace running by definition,
+        # so this always lands on NORMAL.
+        return DoorWindowTransition(
+            current_state, DoorWindowLifecycleState.NORMAL, kind, "nat_vent_reactivated", inputs.now
+        )
+
+    # SENSOR_OPENED: guards on paused_by_door already being True and no-ops.
+    # GRACE_TIMER_EXPIRED / NAT_VENT_EXITED_SENSOR_STILL_OPEN: not reachable from a
+    # plain paused state (no grace timer running; nat-vent cannot be active while
+    # already paused per the two evidenced entry paths).
     return DoorWindowTransition(current_state, current_state, kind, "noop_already_paused", inputs.now)
 
 
@@ -519,6 +576,15 @@ def _transition_from_paused_during_grace(
     if kind == DoorWindowFsmEventKind.DASHBOARD_RESUME:
         # Clears pause, unconditionally re-arms grace — lands on GRACE.
         return DoorWindowTransition(current_state, DoorWindowLifecycleState.GRACE, kind, "resumed", inputs.now)
+
+    if kind == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED:
+        # Issue #660 Step 3: clears the pause but leaves the already-running grace
+        # timer untouched — production's reactivation branches never touch
+        # _grace_active — so this lands on plain GRACE, not NORMAL (unlike the
+        # plain-paused-origin case above, where there is no grace to preserve).
+        return DoorWindowTransition(
+            current_state, DoorWindowLifecycleState.GRACE, kind, "nat_vent_reactivated", inputs.now
+        )
 
     # SENSOR_OPENED / SYNC_RECONCILE: both guard on paused_by_door already
     # being True and no-op. NAT_VENT_EXITED_SENSOR_STILL_OPEN: not reachable

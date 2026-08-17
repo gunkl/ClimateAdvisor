@@ -398,6 +398,72 @@ class TestHandleDoorWindowOpenWithGrace:
         assert ("sensor_opened", {"entity": "binary_sensor.front_door", "result": "paused"}) in events
 
 
+class TestHandleDoorWindowOpenFsmAuthoritative:
+    """Issue #660 Step 7: handle_door_window_open()'s terminal pause path calls the
+    action half directly and derives its own flags via the shared dispatcher,
+    instead of routing through the _pause_for_door_window() wrapper. No change to
+    the decision logic above the terminal pause (grace real-gate, planned-window
+    check, both Phase 2 guards) -- only the flag-write mechanism."""
+
+    def test_pauses_when_authoritative_and_no_grace(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with patch("custom_components.climate_advisor.automation.async_call_later"):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._paused_entity == "binary_sensor.front_door"
+
+    def test_sets_pause_flag_when_hvac_already_off_and_authoritative(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get.return_value = _make_state("off")
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
+
+    def test_routes_through_shared_dispatcher_with_sensor_opened_kind(self):
+        """Direct proof of the wiring change itself (Issue #660 Step 7)."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with (
+            patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch,
+            patch("custom_components.climate_advisor.automation.async_call_later"),
+        ):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.SENSOR_OPENED
+
+    def test_calls_action_directly_bypassing_the_wrapper(self):
+        """Distinguishes Step 7's specific change from Step 6's wrapper wiring
+        (which alone already makes the dispatch-verification test above pass,
+        since the wrapper used the same SENSOR_OPENED kind): the method must call
+        _pause_for_door_window_action() directly, never the _pause_for_door_window()
+        wrapper -- per the plan's Group B design (own event kind, own dispatcher
+        call, action half only)."""
+        engine = _make_automation_engine()
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with (
+            patch.object(engine, "_pause_for_door_window") as mock_wrapper,
+            patch("custom_components.climate_advisor.automation.async_call_later"),
+        ):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        mock_wrapper.assert_not_called()
+        assert engine._paused_by_door is True
+
+
 class TestHandleAllDoorsWindowsClosed:
     """Tests for handle_all_doors_windows_closed starting grace periods."""
 
@@ -440,6 +506,129 @@ class TestHandleAllDoorsWindowsClosed:
             "set_hvac_mode",
             {"entity_id": "climate.thermostat", "hvac_mode": "cool"},
         )
+
+
+class TestHandleAllDoorsWindowsClosedFsmAuthoritative:
+    """Issue #660 Step 4: with _doorwindow_fsm_authoritative=True,
+    handle_all_doors_windows_closed() derives its resulting flags from
+    door_window_fsm.transition() instead of the unconditional inline clear —
+    same outcome, different source of truth. Mirrors TestHandleAllDoorsWindowsClosed
+    above with the flag on."""
+
+    def test_resume_starts_automation_grace_from_paused_active(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE
+        engine._pre_pause_mode = "heat"
+
+        with patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later:
+            mock_call_later.return_value = MagicMock()
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is True
+        mock_call_later.assert_called_once()
+
+    def test_routes_through_shared_dispatcher_with_all_sensors_closed_kind(self):
+        """Direct proof of the wiring change itself (Issue #660 Step 4): the method
+        must call the shared dispatcher with ALL_SENSORS_CLOSED — this is the actual
+        fix under test, since the two methods' external flag outcomes are, by design,
+        identical whether the legacy or FSM branch runs (Group A: "action already
+        unconditional")."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._pre_pause_mode = None
+
+        with (
+            patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch,
+            patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()),
+        ):
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.ALL_SENSORS_CLOSED
+
+    def test_resume_clears_no_grace_from_paused_idle(self):
+        """PAUSED_IDLE (hvac_already_off=True, pre_pause_mode unset) -> CLEAR_NO_GRACE
+        -> NORMAL, no restore action, no grace started."""
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = True  # PAUSED_IDLE
+        engine._pre_pause_mode = None
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_no_resume_when_not_paused(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = False
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        engine.hass.services.async_call.assert_not_called()
+
+
+class TestExitNatVentSensorStillOpenFsmAuthoritative:
+    """Issue #660 Step 4: _exit_nat_vent()'s sensor-still-open branch, with
+    _doorwindow_fsm_authoritative=True, derives its resulting pause flags from
+    door_window_fsm.transition() instead of the unconditional
+    _set_door_window_pause_fields() call — same outcome, different source of truth.
+    The _deactivate_fan()/_pre_pause_mode-capture action stays unconditional and is
+    mocked out here to isolate the flag-derivation behavior under test."""
+
+    def _make_engine_exiting_nat_vent(self, *, hvac_mode: str | None) -> AutomationEngine:
+        from custom_components.climate_advisor.automation import FanCommandResult
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._natural_vent_active = True
+        engine._sensor_check_callback = lambda: True  # monitored sensor still open
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state=hvac_mode) if hvac_mode is not None else None)
+        return engine
+
+    def test_active_pause_from_normal(self):
+        """No prior pause -> NORMAL origin. NAT_VENT_EXITED_SENSOR_STILL_OPEN
+        unconditionally pauses; hvac_mode not off -> PAUSED_ACTIVE."""
+        engine = self._make_engine_exiting_nat_vent(hvac_mode="cool")
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._paused_entity == "nat-vent-exit"
+        assert engine._pre_pause_mode == "cool"
+
+    def test_idle_pause_when_hvac_off(self):
+        engine = self._make_engine_exiting_nat_vent(hvac_mode="off")
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
+        assert engine._pre_pause_mode is None
+
+    def test_routes_through_shared_dispatcher_with_nat_vent_exit_kind(self):
+        """Direct proof of the wiring change itself (Issue #660 Step 4)."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = self._make_engine_exiting_nat_vent(hvac_mode="cool")
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN
 
 
 class TestManualOverrideDuringPause:
@@ -523,6 +712,87 @@ class TestManualOverrideDuringPauseFsmAuthoritative:
         assert engine._override_confirm_pending is False
 
 
+class TestResolveDoorWindowPauseFlagsDispatcher:
+    """Issue #660 Phase R Step 0: unit tests for the shared
+    ``_resolve_door_window_pause_flags()`` dispatcher in isolation, covering just
+    the authoritative-vs-legacy branch (not any specific call site's semantics —
+    those are covered by each call site's own tests)."""
+
+    def test_switch_off_calls_legacy_not_transition(self):
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = False
+        legacy = MagicMock()
+
+        with patch("custom_components.climate_advisor.door_window_fsm.transition") as mock_transition:
+            engine._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
+                legacy=legacy,
+            )
+
+        legacy.assert_called_once()
+        mock_transition.assert_not_called()
+
+    def test_switch_on_applies_transition_result_not_legacy(self):
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._grace_active = False
+        legacy = MagicMock()
+
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
+            legacy=legacy,
+        )
+
+        legacy.assert_not_called()
+        # MANUAL_OVERRIDE_DURING_PAUSE from PAUSED_ACTIVE lands on NORMAL —
+        # _apply_door_window_fsm_state() clears the pause flags.
+        assert engine._paused_by_door is False
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.NORMAL
+
+    def test_origin_state_override_used_instead_of_live_read(self):
+        """The one documented exception (_on_grace_expired()'s need to capture state
+        before _cancel_grace_timers() clears it): passing origin_state must be used
+        in place of a live self.door_window_lifecycle_state read.
+
+        DASHBOARD_RESUME from PAUSED_ACTIVE lands on GRACE
+        (``_transition_from_paused``); from NORMAL it's a defensive no-op that stays
+        NORMAL (``_transition_from_normal``'s catch-all). The two origins produce
+        different outcomes, so this is a real behavioral distinguisher: if the live
+        read (NORMAL) were used instead of the passed-in origin_state (PAUSED_ACTIVE),
+        grace would stay inactive.
+        """
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        # Live state reads as NORMAL (no pause/grace flags set)...
+        engine._paused_by_door = False
+        engine._paused_with_hvac_already_off = False
+        engine._grace_active = False
+
+        # ...but origin_state claims PAUSED_ACTIVE.
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+            legacy=MagicMock(),
+            origin_state=DoorWindowLifecycleState.PAUSED_ACTIVE,
+        )
+
+        assert engine._grace_active is True
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.GRACE
+
+
 class TestGracePeriodDuration:
     """Tests for configurable grace period durations."""
 
@@ -568,6 +838,125 @@ class TestGracePeriodDuration:
 
     def test_default_automation_grace_is_5_min(self):
         assert DEFAULT_AUTOMATION_GRACE_SECONDS == 300
+
+
+# ---------------------------------------------------------------------------
+# Issue #660 Step 6 — _pause_for_door_window() action/flags split
+# ---------------------------------------------------------------------------
+
+
+class TestPauseForDoorWindowActionSplit:
+    """_pause_for_door_window_action() (the extracted HVAC-affecting half) and the
+    thin _pause_for_door_window() wrapper that combines it with the shared flags
+    dispatcher — behavioral equivalence with the pre-split monolithic method."""
+
+    def test_action_returns_false_and_turns_off_when_active(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        result = asyncio.run(
+            engine._pause_for_door_window_action(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is False  # hvac_already_off=False -- was actively turned off
+        assert engine._pre_pause_mode == "cool"
+        engine.hass.services.async_call.assert_any_call(
+            "climate", "set_hvac_mode", {"entity_id": "climate.thermostat", "hvac_mode": "off"}
+        )
+
+    def test_action_returns_true_when_already_off(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="off"))
+
+        result = asyncio.run(
+            engine._pause_for_door_window_action(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is True  # hvac_already_off=True
+
+    def test_action_returns_none_when_unavailable(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=None)
+
+        result = asyncio.run(
+            engine._pause_for_door_window_action(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is None  # no pause at all -- disambiguated from hvac_already_off=False
+
+    def test_wrapper_returns_true_when_actively_turned_off(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        result = asyncio.run(
+            engine._pause_for_door_window(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is True
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False
+
+    def test_wrapper_returns_false_when_unavailable_no_pause(self):
+        engine = _make_automation_engine()
+        engine.hass.states.get = MagicMock(return_value=None)
+
+        result = asyncio.run(
+            engine._pause_for_door_window(
+                entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert result is False
+        assert engine._paused_by_door is False
+
+    def test_wrapper_routes_through_shared_dispatcher_when_authoritative(self):
+        """Direct proof of the wiring change: the thin wrapper must call the shared
+        dispatcher with SENSOR_OPENED — this covers _apply_comfort_band()'s guard and
+        _sync_paused_by_door_with_live_sensors()'s direct-pause path automatically,
+        since both call this same wrapper rather than needing individual treatment."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            asyncio.run(
+                engine._pause_for_door_window(
+                    entity_label="test", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+                )
+            )
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.SENSOR_OPENED
+
+    def test_wrapper_sets_paused_entity_and_since_when_authoritative(self):
+        """Regression guard: _apply_door_window_fsm_state() does NOT write
+        _paused_entity/_paused_since (they aren't part of its 3-field derivation),
+        so the wrapper must still set them directly regardless of which branch the
+        dispatcher took -- found during Step 6 verification when the corpus-wide
+        FSM-authoritative comparator caught a real divergence (paused_minutes going
+        None) from this exact omission."""
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state="cool"))
+
+        asyncio.run(
+            engine._pause_for_door_window(
+                entity_label="test-entity", reason="test reason", notify_message="msg", notify_type="door_window_pause"
+            )
+        )
+
+        assert engine._paused_entity == "test-entity"
+        assert engine._paused_since is not None
 
 
 # ---------------------------------------------------------------------------
@@ -989,6 +1378,164 @@ class TestGracePeriodExpiry:
 
         assert engine._paused_by_door is True
         engine.hass.services.async_call.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #660 Step 8 (highest-risk) — _on_grace_expired() + _re_pause_for_open_sensor()
+# ---------------------------------------------------------------------------
+
+
+class TestOnGraceExpiredFsmAuthoritative:
+    """_on_grace_expired()'s 3 branches, with _doorwindow_fsm_authoritative=True,
+    apply the FSM's GRACE_TIMER_EXPIRED outcome via the shared dispatcher using an
+    origin_state captured BEFORE _cancel_grace_timers() clears _grace_active --
+    the one call site the dispatcher's origin_state override exists for."""
+
+    def _make_engine_grace_origin(self, *, paused_during_grace: bool, outdoor: float) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {"comfort_heat": 70, "comfort_cool": 76, "natural_vent_delta": 3, "sensor_debounce_seconds": 0}
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._grace_active = True
+        engine._last_resume_source = "automation"
+        engine._paused_by_door = paused_during_grace  # False -> plain GRACE, True -> PAUSED_DURING_GRACE
+        engine._paused_with_hvac_already_off = False
+        engine._sensor_check_callback = lambda: True  # any_monitored_sensor_open() -> True
+        engine._last_outdoor_temp = outdoor
+        engine._get_indoor_temp_f = MagicMock(return_value=76.0)
+        engine.hass.states.get.return_value = _make_state("cool")
+        return engine
+
+    def test_grace_origin_sensor_open_gate_fails_lands_paused(self):
+        """Origin GRACE (not already paused), sensor still open, nat-vent gate fails
+        (outdoor too warm) -> RE_PAUSE -> nested gate says no -> plain paused
+        sub-state. Applied synchronously, before _re_pause_for_open_sensor() is
+        even scheduled."""
+        engine = self._make_engine_grace_origin(paused_during_grace=False, outdoor=90.0)
+
+        engine._on_grace_expired(source="automation", duration=300, should_notify=False)
+
+        assert engine._paused_by_door is True
+
+    def test_grace_origin_sensor_open_gate_succeeds_lands_normal(self):
+        """Same origin, but nat-vent gate succeeds (outdoor cool enough) -> RE_PAUSE's
+        nested nat-vent recheck decides NORMAL (hand-off to nat-vent) instead."""
+        engine = self._make_engine_grace_origin(paused_during_grace=False, outdoor=68.0)
+
+        engine._on_grace_expired(source="automation", duration=300, should_notify=False)
+
+        assert engine._paused_by_door is False
+
+    def test_paused_during_grace_origin_stays_paused_regardless_of_gate(self):
+        """From PAUSED_DURING_GRACE specifically, the RE_PAUSE outcome always lands on
+        a plain paused state regardless of the nested nat-vent recheck -- pause was
+        already separately active, and grace clearing doesn't touch it (module
+        docstring's documented origin-state distinction)."""
+        engine = self._make_engine_grace_origin(paused_during_grace=True, outdoor=68.0)
+
+        engine._on_grace_expired(source="automation", duration=300, should_notify=False)
+
+        assert engine._paused_by_door is True
+
+    def test_dispatcher_called_with_captured_origin_state_not_live_read(self):
+        """Direct proof that origin_state is passed and used: grace gets cleared by
+        _cancel_grace_timers() (live door_window_lifecycle_state would read GRACE-less
+        NORMAL/paused-only by the time the dispatcher would otherwise read it), but the
+        dispatcher must still receive the pre-clear origin state."""
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = self._make_engine_grace_origin(paused_during_grace=False, outdoor=90.0)
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            engine._on_grace_expired(source="automation", duration=300, should_notify=False)
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED
+        assert mock_dispatch.call_args.kwargs["origin_state"] == DoorWindowLifecycleState.GRACE
+
+    def test_within_planned_window_branch_dispatches_as_safe_noop(self):
+        engine = self._make_engine_grace_origin(paused_during_grace=False, outdoor=90.0)
+        engine._is_within_planned_window_period = MagicMock(return_value=True)
+
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            engine._on_grace_expired(source="automation", duration=300, should_notify=False)
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED
+        # No sensor pause -- outcome stays NORMAL, no change to _paused_by_door.
+        assert engine._paused_by_door is False
+
+    def test_normal_expiry_branch_dispatches_as_safe_noop(self):
+        engine = self._make_engine_grace_origin(paused_during_grace=False, outdoor=90.0)
+        engine._sensor_check_callback = lambda: False  # no sensor open -> normal expiry path
+
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            engine._on_grace_expired(source="automation", duration=300, should_notify=False)
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED
+        assert engine._paused_by_door is False
+
+
+class TestRePauseForOpenSensorFsmAuthoritative:
+    """_re_pause_for_open_sensor(), with _doorwindow_fsm_authoritative=True, selects
+    its action by reading the already-applied _paused_by_door flag (set by
+    _on_grace_expired()'s authoritative dispatcher call before this was scheduled)
+    instead of independently recomputing _nat_vent_may_reactivate()."""
+
+    def _make_engine(self, *, paused_by_door: bool) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {"comfort_heat": 70, "comfort_cool": 76, "natural_vent_delta": 3, "sensor_debounce_seconds": 0}
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = paused_by_door
+        engine._last_outdoor_temp = 68.0
+        engine._get_indoor_temp_f = MagicMock(return_value=76.0)
+        engine.hass.states.get.return_value = _make_state("cool")
+        return engine
+
+    def test_reads_already_applied_flag_instead_of_recomputing_gate(self):
+        """_paused_by_door already False (FSM decided reactivate) -> nat-vent action
+        runs without calling _nat_vent_may_reactivate() again."""
+        engine = self._make_engine(paused_by_door=False)
+        engine._nat_vent_may_reactivate = MagicMock(side_effect=AssertionError("must not recompute when authoritative"))
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+
+    def test_reads_already_applied_flag_selects_pause_action(self):
+        """_paused_by_door already True (FSM decided re-pause) -> pause action runs
+        via _pause_for_door_window_action() directly, and _paused_entity/_paused_since
+        are set as direct writes (not part of _apply_door_window_fsm_state())."""
+        engine = self._make_engine(paused_by_door=True)
+        engine._nat_vent_may_reactivate = MagicMock(side_effect=AssertionError("must not recompute when authoritative"))
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._paused_entity == "re-check"
+        assert engine._paused_since is not None
+        engine.hass.services.async_call.assert_any_call(
+            "climate", "set_hvac_mode", {"entity_id": "climate.thermostat", "hvac_mode": "off"}
+        )
+
+    def test_does_not_call_full_wrapper_when_authoritative(self):
+        """Distinguishes the authoritative branch from the legacy one: must call
+        _pause_for_door_window_action() (action only), never the full
+        _pause_for_door_window() wrapper (which would re-derive flags a second time)."""
+        engine = self._make_engine(paused_by_door=True)
+
+        with patch.object(engine, "_pause_for_door_window") as mock_wrapper:
+            asyncio.run(engine._re_pause_for_open_sensor())
+
+        mock_wrapper.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

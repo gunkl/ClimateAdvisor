@@ -66,6 +66,18 @@ class TestFsmEvaluationScoping:
         _run(coordinator._mirror_to_shadow("handle_manual_override_during_pause"))
         assert called == ["handle_manual_override_during_pause"]
 
+    def test_triggered_by_check_natural_vent_conditions(self) -> None:
+        """Issue #660 Step 3: the 8th real trigger site. check_natural_vent_conditions()
+        previously had zero door/window FSM event feed at all -- it was only
+        registered in _NAT_VENT_FSM_TRIGGER_METHODS (feeding the nat-vent FSM)."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        called: list[str] = []
+        coordinator._evaluate_door_window_fsm = lambda method_name: called.append(method_name)  # type: ignore[method-assign]
+
+        _noop_shadow_methods(coordinator, "check_natural_vent_conditions")
+        _run(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
+        assert called == ["check_natural_vent_conditions"]
+
 
 class TestFsmStateTracking:
     def test_starts_normal(self) -> None:

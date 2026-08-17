@@ -345,6 +345,7 @@ _DOOR_WINDOW_EVENT_KIND_REGISTRY: dict[str, str] = {
     "DASHBOARD_RESUME": "reachable",
     "NAT_VENT_EXITED_SENSOR_STILL_OPEN": "reachable",
     "SYNC_RECONCILE": "reachable",
+    "PAUSED_NAT_VENT_REACTIVATED": "reachable",
 }
 
 

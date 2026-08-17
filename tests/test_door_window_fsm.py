@@ -208,6 +208,22 @@ class TestFromPaused:
         )
         assert t.to_state == DoorWindowLifecycleState.PAUSED_IDLE
 
+    def test_nat_vent_reactivated_lands_on_normal(self):
+        """Issue #660 Step 3: the 8th event kind. From a plain paused state, nat-vent
+        reactivating always lands on NORMAL (origin has no grace by definition)."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
+
+    def test_nat_vent_reactivated_lands_on_normal_from_idle(self):
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
+
 
 class TestFromGrace:
     def test_sensor_opened_outdoor_too_warm_suppressed(self):
@@ -339,3 +355,12 @@ class TestFromPausedDuringGrace:
     def test_sensor_opened_noop(self):
         t = transition(DoorWindowLifecycleState.PAUSED_DURING_GRACE, _ev(DoorWindowFsmEventKind.SENSOR_OPENED))
         assert t.to_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+
+    def test_nat_vent_reactivated_lands_on_grace(self):
+        """Issue #660 Step 3: from PAUSED_DURING_GRACE, nat-vent reactivating clears
+        the pause but leaves grace running (untouched) -- lands on plain GRACE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_DURING_GRACE,
+            _ev(DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED),
+        )
+        assert t.to_state == DoorWindowLifecycleState.GRACE

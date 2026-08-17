@@ -365,6 +365,17 @@ _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_all_doors_windows_closed": "all_sensors_closed",
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
+    # Issue #660: check_natural_vent_conditions()'s two reactivation branches clear
+    # all 4 door/window pause fields directly when nat-vent may reactivate while
+    # paused -- previously this method had NO door/window FSM event feed at all (it
+    # was only registered in _NAT_VENT_FSM_TRIGGER_METHODS, feeding the *nat-vent*
+    # FSM). It already has a _mirror_to_shadow("check_natural_vent_conditions") call
+    # site (coordinator.py), so adding this entry is enough to reach
+    # _evaluate_door_window_fsm() via _dispatch_fsm_evaluators() -- no new call site
+    # needed. Most invocations of this periodic method aren't a reactivation-while-
+    # paused at all; PAUSED_NAT_VENT_REACTIVATED is a defensive no-op from any
+    # non-paused origin state, same convention SENSOR_OPENED already uses.
+    "check_natural_vent_conditions": "paused_nat_vent_reactivated",
 }
 
 # Issue #594 Phase R Step 1b: door/window's SYNC_RECONCILE event kind has no natural

@@ -189,6 +189,13 @@ class DoorWindowFsmEventKind(Enum):
     DASHBOARD_RESUME = "dashboard_resume"
     NAT_VENT_EXITED_SENSOR_STILL_OPEN = "nat_vent_exited_sensor_still_open"
     SYNC_RECONCILE = "sync_reconcile"  # Issue #620's 4 reconcile call sites
+    # Issue #660: check_natural_vent_conditions()'s two reactivation branches
+    # (automation.py) clear all 4 door/window pause fields directly when nat-vent
+    # reactivates while paused -- this method previously had zero door/window FSM
+    # event feed at all (it was only in _NAT_VENT_FSM_TRIGGER_METHODS, feeding the
+    # *nat-vent* FSM, not door/window's), making it the real 8th production trigger
+    # site the module docstring's "7 event kinds are exhaustive" claim missed.
+    PAUSED_NAT_VENT_REACTIVATED = "paused_nat_vent_reactivated"
 
 
 @dataclass(frozen=True)
@@ -438,6 +445,15 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
         next_state = _sync_reconcile_next_state(current_state, inputs)
         return DoorWindowTransition(current_state, next_state, kind, "sync_reconcile", inputs.now)
 
+    if kind == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED:
+        # Issue #660 Step 3: check_natural_vent_conditions()'s reactivation branches
+        # clear all 4 pause fields unconditionally when nat-vent may reactivate while
+        # paused. From a plain paused state there is no grace running by definition,
+        # so this always lands on NORMAL.
+        return DoorWindowTransition(
+            current_state, DoorWindowLifecycleState.NORMAL, kind, "nat_vent_reactivated", inputs.now
+        )
+
     # SENSOR_OPENED: guards on paused_by_door already being True and no-ops.
     # GRACE_TIMER_EXPIRED / NAT_VENT_EXITED_SENSOR_STILL_OPEN: not reachable from a
     # plain paused state (no grace timer running; nat-vent cannot be active while
@@ -561,6 +577,15 @@ def _transition_from_paused_during_grace(
     if kind == DoorWindowFsmEventKind.DASHBOARD_RESUME:
         # Clears pause, unconditionally re-arms grace — lands on GRACE.
         return DoorWindowTransition(current_state, DoorWindowLifecycleState.GRACE, kind, "resumed", inputs.now)
+
+    if kind == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED:
+        # Issue #660 Step 3: clears the pause but leaves the already-running grace
+        # timer untouched — production's reactivation branches never touch
+        # _grace_active — so this lands on plain GRACE, not NORMAL (unlike the
+        # plain-paused-origin case above, where there is no grace to preserve).
+        return DoorWindowTransition(
+            current_state, DoorWindowLifecycleState.GRACE, kind, "nat_vent_reactivated", inputs.now
+        )
 
     # SENSOR_OPENED / SYNC_RECONCILE: both guard on paused_by_door already
     # being True and no-op. NAT_VENT_EXITED_SENSOR_STILL_OPEN: not reachable

@@ -180,29 +180,33 @@ def build_headless_coordinator(
     #    — only hass.config.config_dir, set above.
     coordinator = ClimateAdvisorCoordinator(fake_hass, merged_config)
 
-    # Wire the event log the same way build_headless_engine does — the
-    # coordinator already wires its own callbacks onto automation_engine in
-    # __init__, so overriding _emit_event_callback here replaces the
-    # coordinator's own (which forwards to self._event_log, a ring buffer we
-    # don't need for scenario assertions) with the flat scenario event_log.
-    coordinator.automation_engine._emit_event_callback = _emit_event
-
-    # 7b. Issue #481: coordinator-originated events (e.g. _emit_incident()'s
-    #     incident_detected, occupancy_transition/rapid_override_after_automation from
-    #     _detect_and_emit_incidents()) call self._emit_event() DIRECTLY — a bound
-    #     coordinator method, not routed through automation_engine._emit_event_callback
-    #     (that wiring only covers events the ENGINE emits). In real production both
-    #     paths funnel into the same self._event_log ring buffer (coordinator.py:280 wires
-    #     automation_engine._emit_event_callback = self._emit_event, so it's genuinely one
-    #     buffer there) — but here, step 7 above already redirected the engine's callback
-    #     to the flat scenario event_log directly, bypassing coordinator._emit_event
-    #     entirely for engine events. That left coordinator-originated events writing ONLY
-    #     to the internal self._event_log ring buffer, invisible to any scenario assertion
-    #     reading ProductionRunResult.event_log. Wrap coordinator._emit_event so it ALSO
-    #     feeds the flat list — purely additive (adds visibility for a class of real
-    #     production events the harness previously dropped silently); it does not change
-    #     what any existing event type is captured as, so it cannot make an existing
-    #     regression pass silently (CLAUDE.md §8).
+    # 7b. Issue #481 / Issue #666: coordinator-originated events (e.g.
+    #     _emit_incident()'s incident_detected, occupancy_transition/
+    #     rapid_override_after_automation from _detect_and_emit_incidents()) call
+    #     self._emit_event() DIRECTLY — a bound coordinator method — while
+    #     engine-originated events reach the identical coordinator._emit_event()
+    #     only via automation_engine._emit_event_callback. In real production both
+    #     paths funnel into the same method (coordinator.py wires
+    #     automation_engine._emit_event_callback = self._emit_event), which is also
+    #     the ONLY place _feed_lifecycle_fsms_from_event() is called — the real
+    #     side effect that feeds the nat-vent/door-window/override-grace shadow
+    #     FSMs their event-driven transitions.
+    #
+    #     Issue #666: this used to point automation_engine._emit_event_callback at
+    #     a bare local function that only appended to the flat scenario event_log,
+    #     bypassing coordinator._emit_event (and therefore
+    #     _feed_lifecycle_fsms_from_event()) entirely for every engine-originated
+    #     event. The accompanying comment claimed this was "purely additive" and
+    #     "does not change what any existing event type is captured as" — false:
+    #     it silently dropped the FSM-feed side effect for the whole coordinator-
+    #     level Tier A suite, which is exactly why #647 (a real fix to this event-
+    #     feed wiring) could ship with green tests and still leave the live bug
+    #     class (#613/#633/#637/#647) unresolved — no test in this harness could
+    #     ever have caught a regression there. Fix: wrap the REAL
+    #     coordinator._emit_event once, point automation_engine._emit_event_callback
+    #     at the wrapped version (mirroring production's own wiring exactly), and
+    #     have the wrapper append to the flat event_log as an additional step, not
+    #     a replacement one.
     _coordinator_emit_event = coordinator._emit_event
 
     def _emit_event_and_capture(event_type: str, data: dict) -> None:
@@ -210,6 +214,7 @@ def build_headless_coordinator(
         _emit_event(event_type, data)
 
     coordinator._emit_event = _emit_event_and_capture
+    coordinator.automation_engine._emit_event_callback = _emit_event_and_capture
 
     # 8. Replicate __init__.py's exact startup sequence (__init__.py:396-405):
     #      coordinator = ClimateAdvisorCoordinator(hass, dict(entry.data))

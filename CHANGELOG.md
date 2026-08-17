@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.30] — 2026-08-17
+
+- Fix #666: no user-visible change. The coordinator test harness silently dropped the shadow-diagnostic FSM feed for every nat-vent/door-window exit event — a test-infrastructure bug, not a production one (real HVAC pause behavior was always correct). Fixed the harness wiring, closed a matching coverage gap where one specific nat-vent exit reason never emitted its Activity Report event at all, and added a regression test proven load-bearing against a real revert.
+
 ## [0.6.29] — 2026-08-17
 
 - Feat #664: the override/grace lifecycle FSM (whole-house-fan and thermostat manual overrides, and the grace period that protects them from being undone) can now optionally drive real production decisions instead of only observing them — a new, off-by-default, non-persisted switch, matching the same pattern nat-vent and door/window already have. Unlike door/window's staged rollout, this ships full authority for all 8 real trigger sites at once, since investigation proved the FSM and the existing logic always compute identical results, confirmed across the full scenario library with the switch turned on. Also fixes a config edge case found during this work: a manual grace period disabled via configuration (0 seconds) could have been reported as active with no way to ever clear it, had the switch been turned on before this fix. The switch defaults off — no occupant-visible behavior change from this release alone.

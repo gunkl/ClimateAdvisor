@@ -521,4 +521,14 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             # AutomationEngine._doorwindow_fsm_authoritative's docstring), not a
             # partial subset as previously documented here.
             "doorwindow_fsm_authoritative": self.coordinator.doorwindow_fsm_authoritative,
+            # Issue #661: override/grace's own production/shadow/FSM state fields were
+            # already computed in coordinator.shadow_engine_diagnostic but never exposed
+            # here — the same observability gap door/window had before #660, now closed
+            # for override/grace too. No authoritative switch exists for override/grace
+            # (see AutomationEngine's override/grace handlers) — this is diagnostic only.
+            "override_grace_production_state": diag.get("override_grace_production_state"),
+            "override_grace_shadow_state": diag.get("override_grace_shadow_state"),
+            "override_grace_fsm_state": diag.get("override_grace_fsm_state"),
+            "override_grace_mirror_agrees": diag.get("override_grace_mirror_agrees"),
+            "override_grace_fsm_agrees": diag.get("override_grace_fsm_agrees"),
         }

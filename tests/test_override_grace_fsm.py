@@ -288,3 +288,48 @@ class TestDispatchOnGraceAxisNotConfirmAxis:
         t_idle = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.DASHBOARD_RESUME))
         t_pending = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.DASHBOARD_RESUME))
         assert t_idle.outcome == t_pending.outcome == "resumed"
+
+
+class TestFanOverrideDetected:
+    """Issue #661: handle_fan_manual_override() never routes through
+    start_override_confirmation()'s confirm-delay machinery — it always lands
+    immediately on (IDLE, ACTIVE_PROTECTING_OVERRIDE), regardless of origin
+    state and regardless of confirm_seconds. FAN_OVERRIDE_DETECTED is
+    short-circuited at the top of transition(), before the state-based
+    dispatch, so this holds from all three origin states."""
+
+    def test_from_no_grace_lands_protecting_immediately(self):
+        t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == _IDLE_PROTECTING
+        assert t.outcome == "fan_override_immediate"
+        assert t.changed
+
+    def test_from_pending_none_lands_protecting_immediately(self):
+        t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == _IDLE_PROTECTING
+        assert t.outcome == "fan_override_immediate"
+
+    def test_from_grace_protecting_stays_protecting_idempotent(self):
+        t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == _IDLE_PROTECTING
+        assert t.outcome == "fan_override_immediate"
+        assert not t.changed
+
+    def test_from_grace_unprotected_lands_protecting_immediately(self):
+        t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == _IDLE_PROTECTING
+        assert t.outcome == "fan_override_immediate"
+        assert t.changed
+
+    def test_confirm_seconds_irrelevant_never_lands_pending(self):
+        """Regression guard: unlike OVERRIDE_DETECTED, a nonzero confirm_seconds
+        must never produce a PENDING landing state for the fan path."""
+        t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED, confirm_seconds=9999.0))
+        assert t.to_state[0] == OverrideConfirmState.IDLE
+
+    def test_thermostat_override_detected_unaffected_still_confirm_delayed(self):
+        """Regression guard: the fix must not change OVERRIDE_DETECTED's own
+        real confirm-delay behavior on the thermostat path."""
+        t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.OVERRIDE_DETECTED, confirm_seconds=600.0))
+        assert t.to_state == _PENDING_NONE
+        assert t.outcome == "detected"

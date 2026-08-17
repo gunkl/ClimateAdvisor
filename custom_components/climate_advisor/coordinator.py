@@ -410,7 +410,7 @@ _DOOR_WINDOW_SYNC_RECONCILE_TRIGGER_METHODS: frozenset[str] = frozenset(
 _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES: frozenset[str] = frozenset({"grace_expired", "override_adopted"})
 
 # Issue #639/#643: which mirrored automation.py methods correspond to which
-# override/grace FSM event kind. Of the 7 OverrideGraceFsmEventKind members,
+# override/grace FSM event kind. Of the 8 OverrideGraceFsmEventKind members,
 # 3 have an actual _mirror_to_shadow() call site in coordinator.py/api.py today
 # (handle_fan_manual_override added in #643 — the FSM's OVERRIDE_DETECTED
 # transition was already fully built and generically input-driven; the only
@@ -431,7 +431,14 @@ _DOOR_WINDOW_GRACE_EXPIRY_EVENT_TYPES: frozenset[str] = frozenset({"grace_expire
 _OVERRIDE_GRACE_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
-    "handle_fan_manual_override": "override_detected",
+    # Issue #661: was "override_detected" — handle_fan_manual_override() never
+    # routes through start_override_confirmation()'s confirm-delay machinery
+    # like the two OVERRIDE_DETECTED call sites below do, so it was landing the
+    # FSM on a spurious PENDING confirm state that production never creates.
+    # FAN_OVERRIDE_DETECTED is a dedicated kind the dispatcher short-circuits to
+    # (IDLE, ACTIVE_PROTECTING_OVERRIDE) immediately, matching production's
+    # actual unconditional behavior.
+    "handle_fan_manual_override": "fan_override_detected",
     # Issue #651: same entry-wiring gap #643 fixed for handle_fan_manual_override,
     # never done for the thermostat-level override path. Maps to the same
     # OVERRIDE_DETECTED kind — OverrideGraceFsmInputs.setpoint_override already

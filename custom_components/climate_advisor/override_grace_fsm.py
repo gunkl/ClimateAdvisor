@@ -101,6 +101,18 @@ class OverrideGraceFsmEventKind(Enum):
     GRACE_TIMER_EXPIRED = "grace_timer_expired"
     MANUAL_OVERRIDE_DURING_PAUSE = "manual_override_during_pause"
     DASHBOARD_RESUME = "dashboard_resume"
+    # Issue #661: distinct from OVERRIDE_DETECTED. That kind models the
+    # thermostat-mode/setpoint override path, which genuinely routes through
+    # start_override_confirmation()'s disabled-vs-pending branch. Fan overrides
+    # (handle_fan_manual_override()) never touch that machinery at all — they set
+    # _fan_override_active and start a protecting grace directly and
+    # unconditionally, every time, regardless of origin state. Landing this on
+    # the same OVERRIDE_DETECTED kind made _land_after_detection()'s confirm-delay
+    # model misfire for the fan path (it would model a PENDING confirmation that
+    # production never creates). A dedicated kind lets the fan path land
+    # immediately at the dispatcher level without touching the thermostat path's
+    # shared confirm-delay logic at all.
+    FAN_OVERRIDE_DETECTED = "fan_override_detected"
 
 
 @dataclass(frozen=True)
@@ -359,7 +371,23 @@ def transition(current_state: OverrideGraceLifecycleState, event: OverrideGraceF
     Dispatches on the grace axis first (the dominant axis — grace outlives or
     is independent of confirm state in most transitions), then the confirm axis
     only where it matters, mirroring ``door_window_fsm.py``'s own precedent of
-    collapsing sub-states that share almost all their transition logic."""
+    collapsing sub-states that share almost all their transition logic.
+
+    ``FAN_OVERRIDE_DETECTED`` (Issue #661) is handled here, before the
+    state-based dispatch, rather than inside any of the three
+    ``_transition_from_*`` functions: ``handle_fan_manual_override()`` is fully
+    idempotent and unconditional in production (always lands on
+    ``ACTIVE_PROTECTING_OVERRIDE`` regardless of origin state — see
+    ``_GRACE_TRIGGERS_PROTECTING_OVERRIDE`` in automation.py), so there is no
+    state-dependent branching to do, and short-circuiting here keeps
+    ``_land_after_detection()``'s thermostat-only confirm-delay model completely
+    untouched by the fan path's different contract.
+    """
+    if event.kind == OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED:
+        next_state = (OverrideConfirmState.IDLE, GraceState.ACTIVE_PROTECTING_OVERRIDE)
+        return OverrideGraceTransition(
+            current_state, next_state, event.kind, "fan_override_immediate", event.inputs.now
+        )
     _confirm, grace = current_state
     if grace == GraceState.NONE:
         return _transition_from_no_grace(current_state, event)

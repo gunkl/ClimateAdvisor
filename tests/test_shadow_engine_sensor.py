@@ -117,6 +117,39 @@ class TestExtraStateAttributes:
         assert attrs["door_window_production_state"] is None
         assert attrs["door_window_fsm_agrees"] is None
 
+    def test_reports_override_grace_fields_when_present(self) -> None:
+        """Issue #661: override/grace's own production/shadow/FSM state fields were
+        already computed in coordinator.shadow_engine_diagnostic but never exposed
+        on this sensor -- the same observability gap #660 fixed for door/window,
+        closed here for override/grace."""
+        sensor = _make_sensor(
+            {
+                "production_state": "active",
+                "shadow_state": "active",
+                "agrees": True,
+                "checked_at": "t",
+                "override_grace_production_state": "idle/active_protecting_override",
+                "override_grace_shadow_state": "idle/active_protecting_override",
+                "override_grace_fsm_state": "idle/active_protecting_override",
+                "override_grace_mirror_agrees": True,
+                "override_grace_fsm_agrees": True,
+            }
+        )
+        attrs = sensor.extra_state_attributes
+        assert attrs["override_grace_production_state"] == "idle/active_protecting_override"
+        assert attrs["override_grace_shadow_state"] == "idle/active_protecting_override"
+        assert attrs["override_grace_fsm_state"] == "idle/active_protecting_override"
+        assert attrs["override_grace_mirror_agrees"] is True
+        assert attrs["override_grace_fsm_agrees"] is True
+
+    def test_override_grace_fields_absent_before_first_evaluation(self) -> None:
+        sensor = _make_sensor(
+            {"production_state": "active", "shadow_state": "idle", "agrees": False, "checked_at": "t"}
+        )
+        attrs = sensor.extra_state_attributes
+        assert attrs["override_grace_production_state"] is None
+        assert attrs["override_grace_fsm_agrees"] is None
+
 
 class TestEntityCategory:
     def test_is_diagnostic(self) -> None:

@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.27"
+VERSION = "0.6.28"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.28": [
+        "Fix #661: the override/grace shadow FSM's diagnostic accuracy for fan"
+        " overrides (whole-house-fan remote timers, physical fan-on detection)"
+        " is now correct — it previously modeled a confirmation delay that"
+        " fan overrides never actually go through in production, causing a"
+        " spurious disagreement reading on the most common override path. No"
+        " occupant-visible change: override/grace has no authoritative switch"
+        " and never drove real decisions — this only fixes what the diagnostic"
+        " sensor reports.",
+    ],
     "0.6.27": [
         "Fix #660: the door/window pause/grace lifecycle FSM now has full,"
         " off-by-default authority for all 8 real trigger sites — completing"
@@ -1937,6 +1947,31 @@ KNOWN_FIXES: dict[int, dict] = {
             " automatically gained FSM-authoritative capability through that one shared"
             " wrapper rather than needing individual treatment — noted here since it's a"
             " correction to the investigation's own site count, not a new gap."
+        ),
+    },
+    661: {
+        "version_fixed": "0.6.28",
+        "title": "Override/grace shadow FSM: fan-override path incorrectly modeled a confirm delay",
+        "scope_covered": (
+            "override_grace_fsm.py/coordinator.py: handle_fan_manual_override() was mapped"
+            " to the same OVERRIDE_DETECTED event kind as the two genuinely"
+            " confirm-delay-eligible thermostat-override call sites"
+            " (handle_manual_override(), handle_manual_override_during_pause()), causing"
+            " _land_after_detection() to model a PENDING confirmation for fan overrides"
+            " that production never creates (handle_fan_manual_override() sets"
+            " _fan_override_active and starts a protecting grace directly and"
+            " unconditionally, never touching start_override_confirmation()/"
+            " decide_override_confirm() at all). Added a dedicated FAN_OVERRIDE_DETECTED"
+            " event kind, short-circuited at the top of transition() to"
+            " (IDLE, ACTIVE_PROTECTING_OVERRIDE) before any state-based dispatch — keeps"
+            " _land_after_detection()'s thermostat-only confirm-delay logic completely"
+            " untouched. Exposed override/grace's shadow-diagnostic fields on the Shadow"
+            " Engine Status sensor (previously computed but never surfaced, same gap #660"
+            " fixed for door/window). No authoritative switch exists for override/grace —"
+            " zero occupant-visible behavior change; this is a diagnostic-accuracy fix"
+            " only, closing the live disagreement observed 2026-08-16"
+            " (production=idle/active_protecting_override, fsm=pending/none) on a QuietCool"
+            " RF remote timer press."
         ),
     },
     651: {

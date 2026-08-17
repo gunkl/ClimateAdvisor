@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.27] — 2026-08-16
+
+- Fix #660: the door/window pause/grace lifecycle FSM now has full, off-by-default authority for all 8 real trigger sites — completing the migration begun in #637. Also fixes a real gap found during that work: when a grace period was already running and a door/window pause independently became active too, the FSM's own tracked state could disagree with what production actually did, and a resume-after-close could restore the wrong prior HVAC mode in a specific reachable sequence. Both are fixed at the source for every caller, not patched per call site. The switch that lets this FSM actually drive decisions (instead of just tracking them for comparison) stays off by default — no occupant-visible behavior change from this release alone.
+
 ## [0.6.26] — 2026-08-16
 
 - Fix #655: a door/window briefly reopened during an active grace period could still pause the AC/heat, even though the grace period exists specifically to avoid reacting to exactly that. The grace check now uses the same accurate indoor+outdoor reactivation check the automation already computes a moment later, instead of a coarser outdoor-only shortcut that could disagree with it — grace now reliably holds for its full duration.

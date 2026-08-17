@@ -22,6 +22,7 @@ from custom_components.climate_advisor.classifier import DayClassification
 from custom_components.climate_advisor.const import (
     CONF_OVERRIDE_CONFIRM_PERIOD,
 )
+from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
 
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 6, 1, 17, 0, 0)
@@ -105,7 +106,7 @@ def _start_confirmation_and_capture(engine, source="normal"):
         patch("custom_components.climate_advisor.automation.callback", side_effect=lambda fn: fn),
         patch("custom_components.climate_advisor.automation.async_call_later", side_effect=_fake_async_call_later),
     ):
-        engine.start_override_confirmation(source=source)
+        engine.start_override_confirmation(source=source, event_kind=OverrideGraceFsmEventKind.OVERRIDE_DETECTED)
 
     return captured[0] if captured else None
 

@@ -18,10 +18,11 @@ its own caller-resolved boolean.
 
 from __future__ import annotations
 
-OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F = 1.0
-"""Mirrors automation.py's OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F — duplicated as a default
-only; callers should pass the real constant explicitly via ``tolerance_f`` rather than
-relying on this value drifting in sync."""
+from .const import OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F
+
+# Issue #664: previously a hand-duplicated literal (1.0) here, independent of
+# const.py's real OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F that automation.py itself
+# imports. Now the same single definition both modules import.
 
 
 def decide_override_matches_decision(

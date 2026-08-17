@@ -366,7 +366,13 @@ class TestNewOverrideDuringGrace:
 
         asyncio.run(coord._async_thermostat_changed(event))
 
-        coord.automation_engine.clear_manual_override.assert_called_once()
+        # Issue #664: clear_manual_override() itself is no longer called directly here —
+        # the confirm-clear half is dispatched via _resolve_override_grace_fsm_state()
+        # (OVERRIDE_SUPERSEDED), and _clear_manual_override_active() performs the rest
+        # (was clear_manual_override()'s own second half). See coordinator.py's
+        # 'new_override_during_grace' branch docstring for why this is OVERRIDE_SUPERSEDED,
+        # not OVERRIDE_CANCELLED (grace must stay untouched here).
+        coord.automation_engine._clear_manual_override_active.assert_called_once()
         coord.automation_engine.handle_manual_override.assert_called_once()
 
     def test_same_mode_during_grace_not_refired(self):

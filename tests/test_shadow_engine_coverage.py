@@ -166,6 +166,47 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "(2 unmirrored sites); all fields it clears are covered by _sync_shadow_inputs() raw copy "
         "(Issue #631)"
     ),
+    # Issue #664: override/grace full authoritative migration. The action/flags split
+    # (mirroring door/window's own _pause_for_door_window_action() precedent) introduced
+    # several small internal helpers — none are new entry points, all are called only
+    # from the real call sites already classified above (now routed through
+    # _resolve_override_grace_fsm_state() instead of writing flags inline).
+    "_apply_override_grace_fsm_state": (
+        "internal: Issue #664 helper, called only from the FSM-authoritative branch of "
+        "_resolve_override_grace_fsm_state() — the inverse of override_grace_lifecycle_state's "
+        "derivation, same role as _apply_door_window_fsm_state above"
+    ),
+    "_confirm_override_action": (
+        "internal: Issue #664 action half of _confirm_override (exempted above) — called from "
+        "start_override_confirmation()'s immediate-accept branch and the internal "
+        "_confirm_override_expired timer closure's PATH A, both already covered by "
+        "start_override_confirmation's own exemption"
+    ),
+    "_clear_override_confirm_action": (
+        "internal: Issue #664 action half of clear_manual_override's confirm-clear branch — "
+        "called from cancel_override() (exempted), _on_grace_expired() (internal), and "
+        "clear_manual_override() itself (exempted)"
+    ),
+    "_clear_manual_override_active": (
+        "internal: Issue #664 helper extracted from clear_manual_override's second half — "
+        "called from clear_manual_override() (exempted) and cancel_override() (exempted)"
+    ),
+    "_legacy_set_grace_flags": (
+        "internal: Issue #664 trivial 2-line flag-set, passed as the non-authoritative "
+        "'legacy' closure to _resolve_override_grace_fsm_state() at every real grace-starting "
+        "call site, and reused by _start_grace_period()'s own thin wrapper for every "
+        "non-FSM-modeled trigger (fan-off, window-close, nat-vent-exit)"
+    ),
+    "_legacy_clear_grace_flags": (
+        "internal: Issue #664 trivial 2-line flag-clear, passed as the non-authoritative "
+        "'legacy' closure to _resolve_override_grace_fsm_state() at the GRACE_TIMER_EXPIRED/"
+        "OVERRIDE_CANCELLED call sites, and reused by _cancel_grace_timers()'s own thin wrapper"
+    ),
+    "_legacy_clear_confirm_flag": (
+        "internal: Issue #664 trivial 1-line flag-clear, passed as the non-authoritative "
+        "'legacy' closure to _resolve_override_grace_fsm_state() wherever confirm is cleared, "
+        "and reused by clear_manual_override()'s own thin wrapper"
+    ),
 }
 
 
@@ -269,14 +310,17 @@ _OVERRIDE_GRACE_EVENT_KIND_REGISTRY: dict[str, str] = {
     "OVERRIDE_CONFIRM_EXPIRED": "reachable",
     "OVERRIDE_CANCELLED": "reachable",
     "GRACE_TIMER_EXPIRED": "reachable",
-    "OVERRIDE_SUPERSEDED": (
-        "unreachable: no production code path emits this distinct kind today — the "
-        "closest real case (a mode change arriving during an active override grace, "
-        "coordinator.py's 'new_override_during_grace' branch) still feeds OVERRIDE_CANCELLED "
-        "for the clear half then OVERRIDE_DETECTED (via the now-mirrored "
-        "handle_manual_override(), Issue #651) for the reopen half, rather than a single "
-        "distinct SUPERSEDED transition"
-    ),
+    # Issue #664: re-classified reachable. Investigation for the full-authority migration
+    # found the OVERRIDE_CANCELLED classification above was a real, dangerous mismatch —
+    # coordinator.py's 'new_override_during_grace' branch (clear_manual_override() call)
+    # never touches grace (Issue #282's "Fix D" deliberately leaves the still-running
+    # grace protecting the NEW override handle_manual_override() immediately re-detects),
+    # but OVERRIDE_CANCELLED's own transition unconditionally forces grace to NONE. Feeding
+    # this real site as OVERRIDE_CANCELLED would have made an authoritative FSM wrongly
+    # clear a grace period production intentionally preserves. OVERRIDE_SUPERSEDED's own
+    # transition (_land_after_detection with grace fixed at ACTIVE_PROTECTING_OVERRIDE)
+    # correctly matches production's real "confirm re-evaluated, grace untouched" behavior.
+    "OVERRIDE_SUPERSEDED": "reachable",
 }
 
 

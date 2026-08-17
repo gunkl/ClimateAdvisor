@@ -95,7 +95,10 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._paused_with_hvac_already_off = False
     ae._pre_pause_mode = None
     ae._doorwindow_fsm_authoritative = False
+    ae._override_grace_fsm_authoritative = False
     ae._grace_active = False
+    ae._grace_protects_override = False
+    ae._override_confirm_pending = False
     ae._grace_end_time = None
     ae._last_resume_source = None
     ae._last_outdoor_temp = 65.0
@@ -132,6 +135,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._start_grace_period = types.MethodType(_ae_mod.AutomationEngine._start_grace_period, ae)
     ae._cancel_grace_timers = types.MethodType(_ae_mod.AutomationEngine._cancel_grace_timers, ae)
     ae.clear_manual_override = MagicMock()
+    ae._clear_manual_override_active = MagicMock()
 
     return ae
 

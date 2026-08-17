@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.28"
+VERSION = "0.6.29"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.29": [
+        "Feat #664: the override/grace lifecycle FSM (whole-house-fan and thermostat"
+        " manual overrides, and the grace period that protects them from being"
+        " undone) can now optionally drive real production decisions instead of only"
+        " observing them, matching the same opt-in switch nat-vent and door/window"
+        " already have. Off by default and not persisted across a restart — nothing"
+        " changes for any occupant unless this switch is explicitly turned on. Also"
+        " fixes a config edge case found during this work: a manual grace period"
+        " disabled via configuration (0 seconds) could have been reported as active"
+        " with no way to ever clear it, had the switch been turned on before this fix.",
+    ],
     "0.6.28": [
         "Fix #661: the override/grace shadow FSM's diagnostic accuracy for fan"
         " overrides (whole-house-fan remote timers, physical fan-on detection)"
@@ -1947,6 +1958,51 @@ KNOWN_FIXES: dict[int, dict] = {
             " automatically gained FSM-authoritative capability through that one shared"
             " wrapper rather than needing individual treatment — noted here since it's a"
             " correction to the investigation's own site count, not a new gap."
+        ),
+    },
+    664: {
+        "version_fixed": "0.6.29",
+        "title": "Override/grace FSM: full authoritative migration (switch, no partial-scope staging)",
+        "scope_covered": (
+            "override_grace_fsm.py/override_grace_lifecycle.py/automation.py/coordinator.py/"
+            "switch.py/const.py: adds override_grace_fsm_authoritative (default OFF, not"
+            " persisted across restart, same convention as natvent_fsm_authoritative/"
+            " doorwindow_fsm_authoritative), governing _override_confirm_pending/"
+            " _grace_active/_grace_protects_override for all 8 real OverrideGraceFsmEventKind"
+            " call sites in one increment — full authority shipped directly rather than"
+            " door/window's staged partial-scope rollout, because investigation proved every"
+            " flag value these primitives compute is a pure function of their own call"
+            " arguments (never of prior engine state), so the FSM and the legacy inline"
+            " computation are provably equivalent at every site (confirmed by a"
+            " corpus-wide decision-equivalence comparator, switch flipped True, across all"
+            " 81 golden + 7 pending scenarios). Split the 4 timer/flag-owning primitives"
+            " (_start_grace_period(), _cancel_grace_timers(), start_override_confirmation(),"
+            " clear_manual_override()) into an action half (real async_call_later"
+            " scheduling + non-derived bookkeeping, always runs unconditionally — timer"
+            " ownership never transfers to the FSM, same rule door/window's own switch"
+            " already established) and a flags half (dispatcher-owned, genuinely mutually"
+            " exclusive between the FSM and legacy computation — an earlier draft called"
+            " both unconditionally, which would have made the switch behaviorally inert;"
+            " fixed before landing). Found and fixed 2 real correctness gaps the shadow-only"
+            " phase's own tests never exercised: (1) override_grace_fsm.py's landing"
+            " branches (_land_after_detection, DASHBOARD_RESUME, FAN_OVERRIDE_DETECTED)"
+            " never checked whether manual grace is disabled via config"
+            " (manual_grace_seconds=0), which would have made an authoritative FSM claim"
+            " grace_active=True with no real timer behind it — a stuck-forever phantom"
+            " grace, a worse bug class than #661; (2) coordinator.py's 'new_override_during_"
+            " grace' Fix D branch was mis-modeled as OVERRIDE_CANCELLED (Issue #647,"
+            " shadow-only) when its real production behavior never touches grace at all"
+            " (Issue #282's 'Fix D' deliberately leaves the still-running grace protecting"
+            " the new override about to be redetected) — re-classified as OVERRIDE_SUPERSEDED,"
+            " the previously-unreachable 8th event kind, whose own transition already"
+            " correctly preserves grace. Also fixed 2 pre-existing DRY violations found"
+            " during investigation: GRACE_TRIGGERS_PROTECTING_OVERRIDE and"
+            " OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F were each hand-duplicated (override_grace_"
+            "start.py/override_match.py vs automation.py) with no import connecting the"
+            " copies — consolidated into single const.py definitions. Default OFF — zero"
+            " occupant-visible behavior change from this release alone; a live switch-flip"
+            " verification is a separate follow-up step, same as door/window's and"
+            " nat-vent's own switches."
         ),
     },
     661: {
@@ -8198,6 +8254,21 @@ CEILING_ESCALATION_SAVINGS_MARGIN_F: float = 2.0
 # automation.py). Deliberately tight -- this only exists to catch minor floating-point/
 # rounding noise, not to treat a genuinely different user-chosen temperature as a match.
 OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F: float = 1.0
+
+# Issue #664: the ONLY two `_start_grace_period(trigger=...)` values that mean "this grace
+# exists to protect an active manual/fan override" — read by `_start_grace_period()` to set
+# `_grace_protects_override`, which `coordinator._check_orphaned_grace()` uses to scope its
+# self-heal to grace types that can actually BE orphaned (an override was cleared without its
+# grace being cancelled alongside it). Every other grace trigger (fan-off cooldown, physical-
+# drift correction, window-close resume, nat-vent-exit resume, dashboard resume) never sets
+# `_manual_override_active`/`_fan_override_active` in the first place by design — treating
+# their absence as "orphaned" was the root cause of #530's fan-off grace being killed within
+# ~1ms of starting. A future grace-starting call site is automatically excluded here unless
+# its trigger string is deliberately added to this set — if it's meant to protect a real
+# override, add it; if not, leave it out. Single source of truth (Issue #664) — previously
+# also hand-duplicated in override_grace_start.py's own module-level default, which risked
+# silent drift since override_grace_fsm.py's call site never passed the real set explicitly.
+GRACE_TRIGGERS_PROTECTING_OVERRIDE: frozenset[str] = frozenset({"fan_manual_override", "override_confirmed"})
 
 # Issue #249 — thermostat capability detection. Home Assistant's
 # ClimateEntityFeature.TARGET_TEMPERATURE_RANGE bit: when set in a climate entity's

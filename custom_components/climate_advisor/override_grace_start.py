@@ -14,11 +14,13 @@ resolves duration/should_notify; this module resolves the one remaining branch
 
 from __future__ import annotations
 
-GRACE_TRIGGERS_PROTECTING_OVERRIDE = frozenset({"fan_manual_override", "override_confirmed"})
-"""Mirrors automation.py's _GRACE_TRIGGERS_PROTECTING_OVERRIDE. Callers should pass the
-real frozenset explicitly via ``protecting_triggers`` rather than relying on this
-duplicate staying in sync — this default exists only so the function is usable
-standalone in tests."""
+from .const import GRACE_TRIGGERS_PROTECTING_OVERRIDE
+
+# Issue #664: previously a hand-duplicated frozenset literal here, independent of
+# automation.py's own copy — override_grace_fsm.py's call site never passed
+# `protecting_triggers=` explicitly, so it silently depended on this duplicate staying
+# in sync by hand. Both automation.py and this module now import the same const.py
+# definition; there is exactly one frozenset, not two kept manually consistent.
 
 
 def decide_grace_protects_override(

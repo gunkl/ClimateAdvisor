@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.29] — 2026-08-17
+
+- Feat #664: the override/grace lifecycle FSM (whole-house-fan and thermostat manual overrides, and the grace period that protects them from being undone) can now optionally drive real production decisions instead of only observing them — a new, off-by-default, non-persisted switch, matching the same pattern nat-vent and door/window already have. Unlike door/window's staged rollout, this ships full authority for all 8 real trigger sites at once, since investigation proved the FSM and the existing logic always compute identical results, confirmed across the full scenario library with the switch turned on. Also fixes a config edge case found during this work: a manual grace period disabled via configuration (0 seconds) could have been reported as active with no way to ever clear it, had the switch been turned on before this fix. The switch defaults off — no occupant-visible behavior change from this release alone.
+
 ## [0.6.28] — 2026-08-16
 
 - Fix #661: the override/grace shadow FSM's diagnostic accuracy for fan overrides (whole-house-fan remote timers, physical fan-on detection) is now correct — it previously modeled a confirmation delay that fan overrides never actually go through in production, causing a spurious disagreement reading on the most common override path. No occupant-visible change: override/grace has no authoritative switch and never drove real decisions — this only fixes what the diagnostic sensor reports.

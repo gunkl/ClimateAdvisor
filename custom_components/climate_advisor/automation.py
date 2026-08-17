@@ -2953,6 +2953,8 @@ class AutomationEngine:
 
         Called by the coordinator after the debounce period.
         """
+        from .door_window_fsm import DoorWindowFsmEventKind
+
         async with self._decision_pass("handle_door_window_open"):
             if self._paused_by_door:
                 return  # Already paused
@@ -3133,7 +3135,14 @@ class AutomationEngine:
 
             debounce_minutes = self.config.get(CONF_SENSOR_DEBOUNCE, DEFAULT_SENSOR_DEBOUNCE_SECONDS) // 60
             friendly_name = entity_id.split(".")[-1].replace("_", " ").title()
-            await self._pause_for_door_window(
+            # Issue #660 Step 7: calls the action half directly (instead of going
+            # through the _pause_for_door_window() wrapper) and derives its own flags
+            # under its own event kind (SENSOR_OPENED — same kind the wrapper already
+            # used for this outcome, no change in FSM behavior, just explicit routing
+            # matching this method's Group B role). No change to any decision logic
+            # above this point — both Phase 2 guards, the grace real-gate, and the
+            # planned-window check stay byte-for-byte unchanged.
+            hvac_already_off = await self._pause_for_door_window_action(
                 entity_label=entity_id,
                 reason=f"door/window open — {entity_id}",
                 notify_message=(
@@ -3143,6 +3152,17 @@ class AutomationEngine:
                 ),
                 notify_type="door_window_pause",
             )
+            if hvac_already_off is not None:
+
+                def _legacy_set_pause() -> None:
+                    self._set_door_window_pause_fields(entity_label=entity_id, hvac_already_off=hvac_already_off)
+
+                self._resolve_door_window_pause_flags(
+                    kind=DoorWindowFsmEventKind.SENSOR_OPENED,
+                    legacy=_legacy_set_pause,
+                )
+                self._paused_entity = entity_id
+                self._paused_since = dt_util.now()
 
     async def handle_all_doors_windows_closed(self) -> None:
         """Resume HVAC after all monitored doors/windows are closed."""

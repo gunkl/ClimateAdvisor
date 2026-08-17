@@ -398,6 +398,72 @@ class TestHandleDoorWindowOpenWithGrace:
         assert ("sensor_opened", {"entity": "binary_sensor.front_door", "result": "paused"}) in events
 
 
+class TestHandleDoorWindowOpenFsmAuthoritative:
+    """Issue #660 Step 7: handle_door_window_open()'s terminal pause path calls the
+    action half directly and derives its own flags via the shared dispatcher,
+    instead of routing through the _pause_for_door_window() wrapper. No change to
+    the decision logic above the terminal pause (grace real-gate, planned-window
+    check, both Phase 2 guards) -- only the flag-write mechanism."""
+
+    def test_pauses_when_authoritative_and_no_grace(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with patch("custom_components.climate_advisor.automation.async_call_later"):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._paused_entity == "binary_sensor.front_door"
+
+    def test_sets_pause_flag_when_hvac_already_off_and_authoritative(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get.return_value = _make_state("off")
+
+        asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
+
+    def test_routes_through_shared_dispatcher_with_sensor_opened_kind(self):
+        """Direct proof of the wiring change itself (Issue #660 Step 7)."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with (
+            patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch,
+            patch("custom_components.climate_advisor.automation.async_call_later"),
+        ):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.SENSOR_OPENED
+
+    def test_calls_action_directly_bypassing_the_wrapper(self):
+        """Distinguishes Step 7's specific change from Step 6's wrapper wiring
+        (which alone already makes the dispatch-verification test above pass,
+        since the wrapper used the same SENSOR_OPENED kind): the method must call
+        _pause_for_door_window_action() directly, never the _pause_for_door_window()
+        wrapper -- per the plan's Group B design (own event kind, own dispatcher
+        call, action half only)."""
+        engine = _make_automation_engine()
+        engine.hass.states.get.return_value = _make_state("heat")
+
+        with (
+            patch.object(engine, "_pause_for_door_window") as mock_wrapper,
+            patch("custom_components.climate_advisor.automation.async_call_later"),
+        ):
+            asyncio.run(engine.handle_door_window_open("binary_sensor.front_door"))
+
+        mock_wrapper.assert_not_called()
+        assert engine._paused_by_door is True
+
+
 class TestHandleAllDoorsWindowsClosed:
     """Tests for handle_all_doors_windows_closed starting grace periods."""
 

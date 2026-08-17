@@ -442,6 +442,129 @@ class TestHandleAllDoorsWindowsClosed:
         )
 
 
+class TestHandleAllDoorsWindowsClosedFsmAuthoritative:
+    """Issue #660 Step 4: with _doorwindow_fsm_authoritative=True,
+    handle_all_doors_windows_closed() derives its resulting flags from
+    door_window_fsm.transition() instead of the unconditional inline clear —
+    same outcome, different source of truth. Mirrors TestHandleAllDoorsWindowsClosed
+    above with the flag on."""
+
+    def test_resume_starts_automation_grace_from_paused_active(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE
+        engine._pre_pause_mode = "heat"
+
+        with patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later:
+            mock_call_later.return_value = MagicMock()
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is True
+        mock_call_later.assert_called_once()
+
+    def test_routes_through_shared_dispatcher_with_all_sensors_closed_kind(self):
+        """Direct proof of the wiring change itself (Issue #660 Step 4): the method
+        must call the shared dispatcher with ALL_SENSORS_CLOSED — this is the actual
+        fix under test, since the two methods' external flag outcomes are, by design,
+        identical whether the legacy or FSM branch runs (Group A: "action already
+        unconditional")."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._pre_pause_mode = None
+
+        with (
+            patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch,
+            patch("custom_components.climate_advisor.automation.async_call_later", return_value=MagicMock()),
+        ):
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.ALL_SENSORS_CLOSED
+
+    def test_resume_clears_no_grace_from_paused_idle(self):
+        """PAUSED_IDLE (hvac_already_off=True, pre_pause_mode unset) -> CLEAR_NO_GRACE
+        -> NORMAL, no restore action, no grace started."""
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = True  # PAUSED_IDLE
+        engine._pre_pause_mode = None
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        engine.hass.services.async_call.assert_not_called()
+
+    def test_no_resume_when_not_paused(self):
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = False
+
+        asyncio.run(engine.handle_all_doors_windows_closed())
+
+        engine.hass.services.async_call.assert_not_called()
+
+
+class TestExitNatVentSensorStillOpenFsmAuthoritative:
+    """Issue #660 Step 4: _exit_nat_vent()'s sensor-still-open branch, with
+    _doorwindow_fsm_authoritative=True, derives its resulting pause flags from
+    door_window_fsm.transition() instead of the unconditional
+    _set_door_window_pause_fields() call — same outcome, different source of truth.
+    The _deactivate_fan()/_pre_pause_mode-capture action stays unconditional and is
+    mocked out here to isolate the flag-derivation behavior under test."""
+
+    def _make_engine_exiting_nat_vent(self, *, hvac_mode: str | None) -> AutomationEngine:
+        from custom_components.climate_advisor.automation import FanCommandResult
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._natural_vent_active = True
+        engine._sensor_check_callback = lambda: True  # monitored sensor still open
+        engine._deactivate_fan = AsyncMock(return_value=FanCommandResult.EXECUTED)
+        engine.hass.states.get = MagicMock(return_value=MagicMock(state=hvac_mode) if hvac_mode is not None else None)
+        return engine
+
+    def test_active_pause_from_normal(self):
+        """No prior pause -> NORMAL origin. NAT_VENT_EXITED_SENSOR_STILL_OPEN
+        unconditionally pauses; hvac_mode not off -> PAUSED_ACTIVE."""
+        engine = self._make_engine_exiting_nat_vent(hvac_mode="cool")
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is False
+        assert engine._paused_entity == "nat-vent-exit"
+        assert engine._pre_pause_mode == "cool"
+
+    def test_idle_pause_when_hvac_off(self):
+        engine = self._make_engine_exiting_nat_vent(hvac_mode="off")
+
+        asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        assert engine._paused_by_door is True
+        assert engine._paused_with_hvac_already_off is True
+        assert engine._pre_pause_mode is None
+
+    def test_routes_through_shared_dispatcher_with_nat_vent_exit_kind(self):
+        """Direct proof of the wiring change itself (Issue #660 Step 4)."""
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = self._make_engine_exiting_nat_vent(hvac_mode="cool")
+
+        with patch.object(engine, "_resolve_door_window_pause_flags") as mock_dispatch:
+            asyncio.run(engine._exit_nat_vent(reason="test exit"))
+
+        mock_dispatch.assert_called_once()
+        assert mock_dispatch.call_args.kwargs["kind"] == DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN
+
+
 class TestManualOverrideDuringPause:
     """Tests for handle_manual_override_during_pause."""
 

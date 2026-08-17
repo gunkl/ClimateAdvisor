@@ -3142,8 +3142,21 @@ class AutomationEngine:
             if not self._paused_by_door:
                 return
 
-            self._paused_by_door = False
-            self._paused_with_hvac_already_off = False
+            from .door_window_fsm import DoorWindowFsmEventKind
+
+            # Issue #660 Step 4: routed through the shared dispatcher. The restore-or-
+            # clear action below stays unconditional on the flag branch taken (legacy
+            # vs. FSM) — it is driven by self._pre_pause_mode's own truthiness, the
+            # same input the FSM's ALL_SENSORS_CLOSED transition consults
+            # (pre_pause_mode_active, Step 2's fix), so both paths agree on when to act.
+            def _legacy_clear_pause() -> None:
+                self._paused_by_door = False
+                self._paused_with_hvac_already_off = False
+
+            self._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.ALL_SENSORS_CLOSED,
+                legacy=_legacy_clear_pause,
+            )
             self._paused_entity = None
             self._paused_since = None
             if self._pre_pause_mode:
@@ -5602,9 +5615,26 @@ class AutomationEngine:
             # restore (pre_pause_mode is None) means the FSM-visible state is
             # equivalent to "already off" (PAUSED_IDLE), matching
             # decide_door_close_response()'s own truthiness test on pre_pause_mode.
-            self._set_door_window_pause_fields(
-                entity_label="nat-vent-exit", hvac_already_off=self._pre_pause_mode is None
+            #
+            # Issue #660 Step 4: routed through the shared dispatcher for the 3 fields
+            # it derives (_paused_by_door/_paused_with_hvac_already_off/_grace_active).
+            # _paused_entity/_paused_since aren't part of that derivation (see
+            # _apply_door_window_fsm_state()'s own docstring), so they stay direct
+            # writes below regardless of which branch the dispatcher took — same
+            # values _set_door_window_pause_fields() would have written.
+            from .door_window_fsm import DoorWindowFsmEventKind
+
+            _hvac_already_off = self._pre_pause_mode is None
+
+            def _legacy_set_pause() -> None:
+                self._set_door_window_pause_fields(entity_label="nat-vent-exit", hvac_already_off=_hvac_already_off)
+
+            self._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.NAT_VENT_EXITED_SENSOR_STILL_OPEN,
+                legacy=_legacy_set_pause,
             )
+            self._paused_entity = "nat-vent-exit"
+            self._paused_since = dt_util.now()
             # Issue #649: a repeat of an already-reported deferral logs at DEBUG, not INFO —
             # this is the exact "one retry tick after another while still blocked" pattern
             # that produced unbounded duplicate INFO lines before this fix.

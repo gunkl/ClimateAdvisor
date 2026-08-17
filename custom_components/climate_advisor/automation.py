@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later
@@ -101,6 +101,10 @@ from .desired_state import (
     decide_scheduled_write_seq_current,
     decide_setpoint_retry_action,
 )
+
+if TYPE_CHECKING:
+    from .door_window_fsm import DoorWindowFsmEventKind
+
 from .door_window_lifecycle import (
     DoorWindowLifecycleInputs,
     DoorWindowLifecycleState,
@@ -4401,29 +4405,23 @@ class AutomationEngine:
         if not self._paused_by_door:
             return
         _LOGGER.info("Manual HVAC override detected during door/window pause")
-        if self._doorwindow_fsm_authoritative:
-            # Issue #594 Phase R, Step 2: door_window_fsm.transition() decides the
-            # resulting pause/grace state instead of the unconditional inline clear
-            # below. MANUAL_OVERRIDE_DURING_PAUSE lands on NORMAL from PAUSED_ACTIVE/
-            # PAUSED_IDLE, or GRACE from PAUSED_DURING_GRACE (grace left running,
-            # matching the legacy path's own silence on _grace_active here) —
-            # unconditional on origin state either way, so this produces the same
-            # flag values the legacy branch below always wrote; only the source of
-            # truth changes.
-            from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
-            from .door_window_fsm import transition as _door_window_transition
 
-            _dw_result = _door_window_transition(
-                self.door_window_lifecycle_state,
-                DoorWindowFsmEvent(
-                    kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
-                    inputs=self._build_door_window_fsm_inputs(now=dt_util.now()),
-                ),
-            )
-            self._apply_door_window_fsm_state(_dw_result.to_state)
-        else:
+        from .door_window_fsm import DoorWindowFsmEventKind
+
+        # Issue #594 Phase R, Step 0: routed through the shared dispatcher instead of
+        # an inline if/else — MANUAL_OVERRIDE_DURING_PAUSE lands on NORMAL from
+        # PAUSED_ACTIVE/PAUSED_IDLE, or GRACE from PAUSED_DURING_GRACE (grace left
+        # running, matching the legacy closure's own silence on _grace_active here) —
+        # unconditional on origin state either way, so this produces the same flag
+        # values the legacy closure always wrote; only the source of truth changes.
+        def _legacy_clear_pause() -> None:
             self._paused_by_door = False
             self._paused_with_hvac_already_off = False
+
+        self._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
+            legacy=_legacy_clear_pause,
+        )
         self._paused_entity = None
         self._paused_since = None
         self._pre_pause_mode = None
@@ -4448,26 +4446,22 @@ class AutomationEngine:
             return None
 
         _LOGGER.info("User resumed HVAC from door/window pause via dashboard")
-        if self._doorwindow_fsm_authoritative:
-            # Issue #594 Phase R, Step 2: same shape as
-            # handle_manual_override_during_pause()'s FSM-authoritative branch.
-            # DASHBOARD_RESUME lands unconditionally on GRACE from either origin
-            # state, matching the legacy path's own unconditional
-            # _start_grace_period() call below regardless of origin.
-            from .door_window_fsm import DoorWindowFsmEvent, DoorWindowFsmEventKind
-            from .door_window_fsm import transition as _door_window_transition
 
-            _dw_result = _door_window_transition(
-                self.door_window_lifecycle_state,
-                DoorWindowFsmEvent(
-                    kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
-                    inputs=self._build_door_window_fsm_inputs(now=dt_util.now()),
-                ),
-            )
-            self._apply_door_window_fsm_state(_dw_result.to_state)
-        else:
+        from .door_window_fsm import DoorWindowFsmEventKind
+
+        # Issue #594 Phase R, Step 0: routed through the shared dispatcher — same
+        # shape as handle_manual_override_during_pause()'s call. DASHBOARD_RESUME
+        # lands unconditionally on GRACE from either origin state, matching the
+        # legacy closure's own unconditional _start_grace_period() call below
+        # regardless of origin.
+        def _legacy_clear_pause() -> None:
             self._paused_by_door = False
             self._paused_with_hvac_already_off = False
+
+        self._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+            legacy=_legacy_clear_pause,
+        )
         self._paused_entity = None
         self._paused_since = None
         self._pre_pause_mode = None
@@ -5720,14 +5714,15 @@ class AutomationEngine:
 
     def _build_door_window_fsm_inputs(self, *, now: datetime):
         """Build the door/window FSM's input snapshot from current engine state
-        (Issue #594 Phase R, Step 2). Same field set
-        ``coordinator._door_window_fsm_inputs()`` already builds for the
-        shadow-diagnostic comparison — kept as a single definition callers on
-        both sides can share rather than two independently maintained copies of
-        the same construction. The one exception is ``hvac_mode``: the
-        coordinator's version reads it via ``self.hass.states.get(...)``
-        against its own ``automation_engine`` reference; this reads the exact
-        same live state directly against ``self``.
+        (Issue #594 Phase R, Step 2).
+
+        Issue #594 Phase R, Step 0: this is now the SOLE builder for
+        ``DoorWindowFsmInputs`` — ``coordinator._door_window_fsm_inputs()`` was
+        deleted because both of its call sites always ran against
+        ``self.automation_engine`` (production, never the shadow engine), so it
+        was the same computation written twice, not two builders that happened
+        to agree. Both coordinator call sites now call this method directly
+        (``ae._build_door_window_fsm_inputs(now=now)``).
         """
         from .door_window_fsm import DoorWindowFsmInputs
 
@@ -5798,6 +5793,37 @@ class AutomationEngine:
         )
         self._paused_with_hvac_already_off = state == DoorWindowLifecycleState.PAUSED_IDLE
         self._grace_active = state in (DoorWindowLifecycleState.GRACE, DoorWindowLifecycleState.PAUSED_DURING_GRACE)
+
+    def _resolve_door_window_pause_flags(
+        self,
+        *,
+        kind: DoorWindowFsmEventKind,
+        legacy: Callable[[], None],
+        origin_state: DoorWindowLifecycleState | None = None,
+    ) -> None:
+        """Single dispatch point for every door/window flag-derivation call site
+        (Issue #594 Phase R / #660). Each of the 8 real trigger methods supplies its own
+        event kind and its own legacy closure; this function owns the
+        authoritative-vs-legacy branch exactly once, instead of once per call site.
+
+        ``origin_state``: defaults to a live read of ``self.door_window_lifecycle_state``
+        — correct for every site except ``_on_grace_expired()``, which must capture
+        state *before* ``_cancel_grace_timers()`` clears ``_grace_active`` and pass it
+        explicitly here (grace has already been cleared by the time this function
+        would otherwise read it live).
+        """
+        if self._doorwindow_fsm_authoritative:
+            from .door_window_fsm import DoorWindowFsmEvent
+            from .door_window_fsm import transition as _door_window_transition
+
+            state = origin_state if origin_state is not None else self.door_window_lifecycle_state
+            result = _door_window_transition(
+                state,
+                DoorWindowFsmEvent(kind=kind, inputs=self._build_door_window_fsm_inputs(now=dt_util.now())),
+            )
+            self._apply_door_window_fsm_state(result.to_state)
+        else:
+            legacy()
 
     def _nat_vent_may_reactivate(
         self,

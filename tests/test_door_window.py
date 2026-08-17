@@ -523,6 +523,87 @@ class TestManualOverrideDuringPauseFsmAuthoritative:
         assert engine._override_confirm_pending is False
 
 
+class TestResolveDoorWindowPauseFlagsDispatcher:
+    """Issue #660 Phase R Step 0: unit tests for the shared
+    ``_resolve_door_window_pause_flags()`` dispatcher in isolation, covering just
+    the authoritative-vs-legacy branch (not any specific call site's semantics —
+    those are covered by each call site's own tests)."""
+
+    def test_switch_off_calls_legacy_not_transition(self):
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = False
+        legacy = MagicMock()
+
+        with patch("custom_components.climate_advisor.door_window_fsm.transition") as mock_transition:
+            engine._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
+                legacy=legacy,
+            )
+
+        legacy.assert_called_once()
+        mock_transition.assert_not_called()
+
+    def test_switch_on_applies_transition_result_not_legacy(self):
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False
+        engine._grace_active = False
+        legacy = MagicMock()
+
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE,
+            legacy=legacy,
+        )
+
+        legacy.assert_not_called()
+        # MANUAL_OVERRIDE_DURING_PAUSE from PAUSED_ACTIVE lands on NORMAL —
+        # _apply_door_window_fsm_state() clears the pause flags.
+        assert engine._paused_by_door is False
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.NORMAL
+
+    def test_origin_state_override_used_instead_of_live_read(self):
+        """The one documented exception (_on_grace_expired()'s need to capture state
+        before _cancel_grace_timers() clears it): passing origin_state must be used
+        in place of a live self.door_window_lifecycle_state read.
+
+        DASHBOARD_RESUME from PAUSED_ACTIVE lands on GRACE
+        (``_transition_from_paused``); from NORMAL it's a defensive no-op that stays
+        NORMAL (``_transition_from_normal``'s catch-all). The two origins produce
+        different outcomes, so this is a real behavioral distinguisher: if the live
+        read (NORMAL) were used instead of the passed-in origin_state (PAUSED_ACTIVE),
+        grace would stay inactive.
+        """
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = _make_automation_engine()
+        engine._doorwindow_fsm_authoritative = True
+        # Live state reads as NORMAL (no pause/grace flags set)...
+        engine._paused_by_door = False
+        engine._paused_with_hvac_already_off = False
+        engine._grace_active = False
+
+        # ...but origin_state claims PAUSED_ACTIVE.
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+            legacy=MagicMock(),
+            origin_state=DoorWindowLifecycleState.PAUSED_ACTIVE,
+        )
+
+        assert engine._grace_active is True
+        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.GRACE
+
+
 class TestGracePeriodDuration:
     """Tests for configurable grace period durations."""
 

@@ -4685,6 +4685,24 @@ class AutomationEngine:
                 TIMER_BOUNDARY_SETTLE_SECONDS,
             )
 
+        # Issue #660 Step 8: captured once, before any branch's _cancel_grace_timers()
+        # runs (that call clears _grace_active, which door_window_lifecycle_state
+        # reads) — nothing between here and each branch's own _cancel_grace_timers()
+        # call touches door/window pause/grace state, so one capture at the top
+        # covers all 3 branches. The shared dispatcher always reads
+        # self.door_window_lifecycle_state *live* by default, which would be wrong
+        # here specifically since grace will already be cleared by the time it runs
+        # — this is the one call site that needs the origin_state override.
+        from .door_window_fsm import DoorWindowFsmEventKind
+
+        _origin_state = self.door_window_lifecycle_state
+
+        def _legacy_noop() -> None:
+            # None of the 3 branches below write _paused_by_door/_paused_with_hvac_already_off
+            # directly from _on_grace_expired() itself in legacy mode — the "any sensor
+            # open" branch defers that to the scheduled _re_pause_for_open_sensor() task.
+            pass
+
         # If within planned window period, sensors open is expected — just clear grace
         if self._is_within_planned_window_period():
             _LOGGER.info(
@@ -4692,6 +4710,11 @@ class AutomationEngine:
                 source,
             )
             self._cancel_grace_timers()
+            self._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
+                legacy=_legacy_noop,
+                origin_state=_origin_state,
+            )
             self.clear_manual_override(reason="grace_expired")
             if self._request_refresh_callback:
                 self._request_refresh_callback()
@@ -4716,6 +4739,18 @@ class AutomationEngine:
                 source,
             )
             self._cancel_grace_timers()
+            # Issue #660 Step 8: when authoritative, this applies the FSM's RE_PAUSE
+            # outcome (including its own nested nat-vent reactivation gate check) to
+            # _paused_by_door/_paused_with_hvac_already_off/_grace_active BEFORE
+            # _re_pause_for_open_sensor() is scheduled below, so that task can select
+            # its action by reading the already-applied flag instead of independently
+            # recomputing the gate and re-writing them. Legacy mode: no-op, matching
+            # today's behavior of deferring the write entirely to that scheduled task.
+            self._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
+                legacy=_legacy_noop,
+                origin_state=_origin_state,
+            )
             self.clear_manual_override(reason="grace_expired")
             if self._request_refresh_callback:
                 self._request_refresh_callback()
@@ -4753,6 +4788,11 @@ class AutomationEngine:
             )
 
         self._cancel_grace_timers()
+        self._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED,
+            legacy=_legacy_noop,
+            origin_state=_origin_state,
+        )
         self.clear_manual_override(reason="adopted_matching_decision" if _adopted else "grace_expired")
         if self._request_refresh_callback:
             self._request_refresh_callback()
@@ -4834,51 +4874,62 @@ class AutomationEngine:
                     "Skipping re-pause — within planned window period (windows recommended)",
                 )
                 return
-            # Check nat-vent conditions before blindly re-pausing
             outdoor = self._last_outdoor_temp
             comfort_cool = float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL))
             nat_vent_delta = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
             indoor = self._get_indoor_temp_f()
             comfort_heat = self._nat_vent_reactivation_floor()
-            # Issue #411 (Pass 4): shared reactivation gate, previously hand-copied here as
-            # "Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy condition." No
-            # hysteresis applied at this call site (default 0.0).
             nat_vent_threshold = comfort_cool + nat_vent_delta
-            if self._nat_vent_may_reactivate(
-                outdoor=outdoor,
-                indoor=indoor,
-                comfort_heat=comfort_heat,
-                comfort_cool=comfort_cool,
-                nat_vent_delta=nat_vent_delta,
-            ):
+
+            if self._doorwindow_fsm_authoritative:
+                # Issue #660 Step 8: when authoritative, _on_grace_expired() already
+                # applied the FSM's RE_PAUSE outcome (including its own nested
+                # nat-vent reactivation gate check, identical to
+                # _nat_vent_may_reactivate() below) to _paused_by_door BEFORE
+                # scheduling this task — select the matching action by reading that
+                # already-applied flag instead of independently recomputing the gate.
+                _reactivates = not self._paused_by_door
+            else:
+                # Issue #411 (Pass 4): shared reactivation gate, previously hand-copied
+                # here as "Issue #392 Fix 1: mirror the ODE ceiling guard's dormancy
+                # condition." No hysteresis applied at this call site (default 0.0).
+                _reactivates = self._nat_vent_may_reactivate(
+                    outdoor=outdoor,
+                    indoor=indoor,
+                    comfort_heat=comfort_heat,
+                    comfort_cool=comfort_cool,
+                    nat_vent_delta=nat_vent_delta,
+                )
+
+            if _reactivates:
                 nat_vent_reason = (
                     f"grace expired — nat-vent: outdoor {outdoor:.1f}°F < indoor {indoor:.1f}°F,"
                     f" outdoor {outdoor:.1f}°F ≤ {nat_vent_threshold:.1f}°F"
                 )
                 await self._activate_fan(reason=nat_vent_reason)
                 self._natural_vent_active = True
-                # Issue #637 (Phase R Step 1, violation #3): clear the stale pause flag,
-                # matching the structurally identical branch in
-                # check_natural_vent_conditions() (see _exit_nat_vent()'s callers around
-                # automation.py:3486/3518). Without this, _paused_by_door stays True even
-                # though nat-vent has taken over control, which incorrectly suppresses the
-                # away/vacation setback band (handle_occupancy_away/vacation both early-return
-                # on _paused_by_door=True) and misreports "paused by door" on the
-                # dashboard/API while nat-vent is actually running.
-                # Issue #657: the above fix only cleared _paused_by_door, leaving
-                # _paused_with_hvac_already_off/_paused_entity/_paused_since stale —
-                # the sibling reactivation branches in check_natural_vent_conditions()
-                # (automation.py ~:3614-3617/3646-3649) clear all 4 fields together.
-                # Stale _paused_entity/_paused_since only feed diagnostic text
-                # (Activity Report "Settings" cell via ai_skills_context.py's
-                # _render_paused_entity_settings()), but a stale
-                # _paused_with_hvac_already_off feeds real control flow — it's what
-                # derive_door_window_lifecycle_state() uses to tell PAUSED_ACTIVE from
-                # PAUSED_IDLE.
-                self._paused_by_door = False
-                self._paused_with_hvac_already_off = False
-                self._paused_entity = None
-                self._paused_since = None
+                if not self._doorwindow_fsm_authoritative:
+                    # Issue #637 (Phase R Step 1, violation #3): clear the stale pause
+                    # flag, matching the structurally identical branch in
+                    # check_natural_vent_conditions() (see _exit_nat_vent()'s callers
+                    # around automation.py:3486/3518). Without this, _paused_by_door
+                    # stays True even though nat-vent has taken over control, which
+                    # incorrectly suppresses the away/vacation setback band
+                    # (handle_occupancy_away/vacation both early-return on
+                    # _paused_by_door=True) and misreports "paused by door" on the
+                    # dashboard/API while nat-vent is actually running.
+                    # Issue #657: the above fix only cleared _paused_by_door, leaving
+                    # _paused_with_hvac_already_off/_paused_entity/_paused_since stale
+                    # — the sibling reactivation branches in
+                    # check_natural_vent_conditions() clear all 4 fields together.
+                    # When authoritative, _on_grace_expired()'s dispatcher call already
+                    # applied this (RE_PAUSE -> NORMAL from plain GRACE) before this
+                    # task ran — re-clearing here would be redundant, not wrong, but
+                    # skipped for clarity that the flags are already correct.
+                    self._paused_by_door = False
+                    self._paused_with_hvac_already_off = False
+                    self._paused_entity = None
+                    self._paused_since = None
                 await self._apply_nat_vent_hvac_state()
                 _LOGGER.info(
                     "Re-check after grace: nat-vent conditions met — outdoor %.1f°F < indoor %.1f°F,"
@@ -4899,12 +4950,33 @@ class AutomationEngine:
                         },
                     )
                 return
-            await self._pause_for_door_window(
-                entity_label="re-check",
-                reason="grace expired — door/window still open, re-pausing",
-                notify_message=("Grace period expired but a door/window is still open. HVAC has been paused again."),
-                notify_type="grace_repause",
-            )
+
+            if self._doorwindow_fsm_authoritative:
+                # Flags already applied by _on_grace_expired()'s dispatcher call —
+                # only the HVAC-affecting action half runs here.
+                await self._pause_for_door_window_action(
+                    entity_label="re-check",
+                    reason="grace expired — door/window still open, re-pausing",
+                    notify_message=(
+                        "Grace period expired but a door/window is still open. HVAC has been paused again."
+                    ),
+                    notify_type="grace_repause",
+                )
+                # _paused_entity/_paused_since aren't part of
+                # _apply_door_window_fsm_state()'s 3-field derivation — direct writes
+                # here, matching what _set_door_window_pause_fields() would have
+                # written on the legacy path below.
+                self._paused_entity = "re-check"
+                self._paused_since = dt_util.now()
+            else:
+                await self._pause_for_door_window(
+                    entity_label="re-check",
+                    reason="grace expired — door/window still open, re-pausing",
+                    notify_message=(
+                        "Grace period expired but a door/window is still open. HVAC has been paused again."
+                    ),
+                    notify_type="grace_repause",
+                )
 
     async def _apply_current_scheduled_state(self, reason: str = "grace_expired") -> None:
         """After override clears, converge to the scheduled automation state.

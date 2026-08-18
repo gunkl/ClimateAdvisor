@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.33"
+VERSION = "0.6.34"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.34": [
+        "Fix #673: no user-visible change. Closes a structural gap in the shadow-"
+        " diagnostic safety net related to #672 — four nat-vent/door-window fields"
+        " (whether natural ventilation is active, soft-start state, door-pause"
+        " state, and the outdoor-rise exit timer) were never included in the"
+        " periodic raw-copy step that keeps the shadow diagnostic engine in sync,"
+        " so a single missed update anywhere in the code could cause a permanent"
+        " false 'disagreement' reading with no way to self-correct. Real HVAC/fan"
+        " behavior was always correct throughout; only the diagnostic mirror could"
+        " drift.",
+    ],
     "0.6.33": [
         "Fix #672: no user-visible change. Three shadow-diagnostic state machines"
         " (door/window, nat-vent, override/grace) each had their own reason for"
@@ -1952,6 +1963,32 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    673: {
+        "version_fixed": "0.6.34",
+        "title": (
+            "Shadow-engine mirror comparison's periodic raw-copy safety net was missing 4"
+            " nat-vent/door-window fields, so any missed or exception-interrupted"
+            " _mirror_to_shadow() call site touching them caused a permanent,"
+            " non-self-healing divergence"
+        ),
+        "scope_covered": (
+            "coordinator.py: _sync_shadow_inputs() now raw-copies _natural_vent_active,"
+            " _nat_vent_soft_start, _paused_by_door, and _nat_vent_outdoor_exit_time from"
+            " the production engine to the shadow engine every cycle, extending the same"
+            " precedent #613/#631 already established for outdoor temp/forecast/thermal"
+            " model and grace/override state. _paused_by_door is read by both the"
+            " nat-vent and door/window mirror derivations, so this closes both classes of"
+            " shadow-engine disagreement in one change. Phase 3 audit (same issue): the"
+            " test_shadow_engine_coverage.py registry already tracked all 4 fields and"
+            " classified every mutating method mirrored/internal — confirmed still"
+            " accurate, no gap found. nat_vent_fsm.py's 6 unused NatVentFsmEventKind"
+            " members (DOOR_PAUSE_STARTED, DOOR_PAUSE_ENDED, GRACE_STARTED, GRACE_ENDED,"
+            " OVERRIDE_CONFIRMED, OVERRIDE_CLEARED) confirmed safe as documented: only"
+            " TICK is ever fed from a real call site, and transition() never branches on"
+            " event.kind (grepped — it's only ever recorded into the result), so feeding"
+            " TICK for any of those triggers produces an identical transition."
+        ),
+    },
     672: {
         "version_fixed": "0.6.33",
         "title": (

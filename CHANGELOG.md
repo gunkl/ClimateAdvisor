@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.34] — 2026-08-17
+
+- Fix #673: no user-visible change. Closes a structural gap in the shadow-diagnostic safety net related to #672 — four nat-vent/door-window fields were never included in the periodic raw-copy step that keeps the shadow diagnostic engine in sync, so a single missed update anywhere in the code could cause a permanent false "disagreement" reading with no way to self-correct. Real HVAC/fan behavior was always correct throughout; only the diagnostic mirror could drift.
+
 ## [0.6.33] — 2026-08-17
 
 - Fix #672: no user-visible change. Three shadow-diagnostic state machines (door/window, nat-vent, override/grace) each had their own reason for getting permanently stuck out of sync with real production state after a restart or a specific state transition — real HVAC/fan behavior was always correct throughout. Fixed all three.

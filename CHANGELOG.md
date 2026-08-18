@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.32] — 2026-08-17
+
+- Fix #670: right after an HA restart, if a door or window was already open, the whole-house fan could switch on before the startup-reconciliation logic had a chance to check the fan's actual state — occasionally causing a fan on/off flap in the minutes after restart. The regular-cycle nat-vent and window-cooling checks now wait for startup reconciliation to finish before acting, same fix already applied to a sibling check in #627.
+
 ## [0.6.31] — 2026-08-17
 
 - Fix #668: no user-visible change. The shadow-diagnostic door/window FSM was being wrongly reset every automation cycle whenever a door/window was left open with no imminent free-cooling opportunity — a diagnostic-only bug (real HVAC pause behavior was always correct). The periodic nat-vent re-check was unconditionally signalling "nat-vent just reactivated while paused" on every call, regardless of whether that actually happened. Made the signal event-driven instead, so it only fires when nat-vent genuinely reactivates.

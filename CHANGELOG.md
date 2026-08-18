@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.31] — 2026-08-17
+
+- Fix #668: no user-visible change. The shadow-diagnostic door/window FSM was being wrongly reset every automation cycle whenever a door/window was left open with no imminent free-cooling opportunity — a diagnostic-only bug (real HVAC pause behavior was always correct). The periodic nat-vent re-check was unconditionally signalling "nat-vent just reactivated while paused" on every call, regardless of whether that actually happened. Made the signal event-driven instead, so it only fires when nat-vent genuinely reactivates.
+
 ## [0.6.30] — 2026-08-17
 
 - Fix #666: no user-visible change. The coordinator test harness silently dropped the shadow-diagnostic FSM feed for every nat-vent/door-window exit event — a test-infrastructure bug, not a production one (real HVAC pause behavior was always correct). Fixed the harness wiring, closed a matching coverage gap where one specific nat-vent exit reason never emitted its Activity Report event at all, and added a regression test proven load-bearing against a real revert.

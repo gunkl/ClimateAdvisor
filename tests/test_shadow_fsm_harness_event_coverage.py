@@ -151,3 +151,154 @@ class TestHarnessEventFeedPositiveControl:
         assert any(evt[0] == "nat_vent_comfort_floor_exit" for evt in captured), (
             "sanity check: the event really was emitted, just not routed to the FSM feed"
         )
+
+
+def _build_paused_by_door_coordinator(*, outdoor: float, indoor: float, hvac_already_off: bool):
+    """Builds a coordinator already paused by an open door/window (PAUSED_IDLE), for
+    exercising ``check_natural_vent_conditions()`` (Issue #668).
+
+    ``hvac_already_off`` selects which of the two structurally-distinct reactivation
+    code paths inside ``check_natural_vent_conditions()`` is reachable:
+      - ``True`` (``_paused_with_hvac_already_off=True``, matching the actual live
+        incident — HVAC was already off when the door was noticed open) makes
+        ``_actively_paused`` False, which routes into the "idle_open" re-evaluation
+        branch (Issue #244/#402/#504, automation.py ~3459-3546) — that branch never
+        calls ``_resolve_door_window_pause_flags()`` at all (by design: nat-vent can
+        legitimately re-engage through an open door without clearing the pause) and
+        unconditionally ``return``s afterward, so the paused-by-door block below it
+        (~3830) is never reached this call.
+      - ``False`` makes ``_actively_paused`` True, skipping the idle_open branch
+        entirely and reaching the paused-by-door reactivation block (~3830-3934) —
+        the 2 real call sites this fix's new event emit was added to.
+    """
+    config = {
+        "door_window_sensors": ["binary_sensor.front_door"],
+        "comfort_heat": 68.0,
+        "comfort_cool": 76.0,
+        "fan_mode": "whole_house_fan",
+    }
+    coordinator, fake_hass, scheduler, event_log = build_headless_coordinator(
+        config=config,
+        climate_state="off",
+        climate_attributes={"current_temperature": indoor},
+        skip_startup_coalesce=True,
+    )
+    ae = coordinator.automation_engine
+
+    fake_hass.states.set_simple("binary_sensor.front_door", "on")
+    coordinator._resolved_sensors = ["binary_sensor.front_door"]
+    ae.update_outdoor_temp(outdoor)
+    ae._natural_vent_active = False
+    ae._nat_vent_soft_start = False
+    ae._paused_by_door = True
+    ae._paused_with_hvac_already_off = hvac_already_off
+    ae._paused_entity = "monitored door/window"
+
+    from custom_components.climate_advisor.door_window_lifecycle import (
+        DoorWindowLifecycleState as _DWLState,
+    )
+
+    coordinator._door_window_fsm_state = _DWLState.PAUSED_IDLE
+
+    return coordinator, fake_hass, scheduler, event_log, ae
+
+
+class TestPausedNatVentReactivatedEventCoverage:
+    """Issue #668: check_natural_vent_conditions() was, until now, registered as a
+    method-name-keyed, UNCONDITIONAL door/window FSM trigger (#660 Step 3) — every
+    call, regardless of which internal branch it took, fired
+    ``DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED``, which
+    ``_transition_from_paused()`` handles unconditionally by resetting to ``NORMAL``.
+    On a hot day with a door left open and no imminent nat-vent reactivation, this
+    wrongly reset the shadow FSM to ``NORMAL`` every single cycle, moments after
+    ``SYNC_RECONCILE`` correctly restored ``PAUSED_IDLE`` — a permanent live
+    disagreement (confirmed via HA log timestamps, 2026-08-17). The feed is now
+    event-driven: only fired when one of the 2 real, deeply-conditional reactivation
+    branches in ``automation.py`` actually runs.
+    """
+
+    def test_no_reactivation_leaves_shadow_fsm_paused(self) -> None:
+        """The exact live-incident shape: HVAC already off, door open, outdoor far
+        above the reactivation threshold — the idle_open branch runs but doesn't
+        reactivate, and never touches the paused-by-door block at all. Calls
+        production's real ``ae.check_natural_vent_conditions()`` directly (not
+        ``_mirror_to_shadow``, which replays on the *shadow* engine and can never
+        reach the new event-driven feed — that's fed only from production's own
+        ``_emit_event_callback``, wired to ``coordinator._emit_event``). The shadow
+        FSM must stay PAUSED_IDLE, not get reset to NORMAL."""
+        coordinator, _fake_hass, scheduler, _event_log, ae = _build_paused_by_door_coordinator(
+            outdoor=85.0, indoor=73.0, hvac_already_off=True
+        )
+
+        with scheduler.installed():
+            run_coro(ae.check_natural_vent_conditions())
+            # Settle any fire-and-forget hass.async_create_task() calls queued by a
+            # real HVAC-mode/state change, same pattern build_headless_coordinator()
+            # itself uses (Issue #476) — otherwise an unawaited-coroutine warning
+            # surfaces at interpreter shutdown, unrelated to this test's assertions.
+            scheduler.advance_to(scheduler.now())
+
+        assert ae._paused_by_door is True, "production's own pause flag must be unaffected — sanity check"
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.PAUSED_IDLE, (
+            f"shadow door/window FSM ({coordinator._door_window_fsm_state}) was wrongly reset — "
+            "check_natural_vent_conditions() ran but did not actually reactivate nat-vent, so "
+            "the FSM must not have received a PAUSED_NAT_VENT_REACTIVATED event (Issue #668)"
+        )
+
+    def test_real_reactivation_still_clears_shadow_fsm(self) -> None:
+        """The mirror-image, correctness-preserving direction: HVAC was actively
+        paused (not already off) and outdoor is genuinely cool enough to reactivate
+        nat-vent while paused — reaching the paused-by-door block's real
+        ``_resolve_door_window_pause_flags(kind=PAUSED_NAT_VENT_REACTIVATED, ...)``
+        call site this fix's new event emit sits beside. Calls production's real
+        engine directly, same reasoning as the sibling test above. The shadow FSM
+        must still correctly reach NORMAL, proving the fix isn't just a blanket
+        suppression."""
+        coordinator, _fake_hass, scheduler, _event_log, ae = _build_paused_by_door_coordinator(
+            outdoor=58.5, indoor=73.0, hvac_already_off=False
+        )
+
+        with scheduler.installed():
+            run_coro(ae.check_natural_vent_conditions())
+            # Settle any fire-and-forget hass.async_create_task() calls queued by a
+            # real HVAC-mode/state change, same pattern build_headless_coordinator()
+            # itself uses (Issue #476) — otherwise an unawaited-coroutine warning
+            # surfaces at interpreter shutdown, unrelated to this test's assertions.
+            scheduler.advance_to(scheduler.now())
+
+        assert ae._paused_by_door is False, "production must have actually reactivated — sanity check"
+        assert ae._natural_vent_active is True, "production must have actually reactivated — sanity check"
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.NORMAL, (
+            f"shadow door/window FSM ({coordinator._door_window_fsm_state}) disagreed with "
+            "production's real reactivation — the new event-driven feed must still fire when "
+            "the real branch actually runs (Issue #668)"
+        )
+
+
+class TestPausedNatVentReactivatedPositiveControl:
+    """Proves the two tests above are load-bearing: reintroducing the old
+    unconditional method-name trigger must make the no-reactivation test fail."""
+
+    def test_reintroducing_unconditional_trigger_reproduces_the_bug(self) -> None:
+        import custom_components.climate_advisor.coordinator as _coordinator_mod
+
+        coordinator, _fake_hass, scheduler, _event_log, ae = _build_paused_by_door_coordinator(
+            outdoor=85.0, indoor=73.0, hvac_already_off=True
+        )
+
+        # Reintroduce the Issue #660/#668 bug: method-name-keyed, unconditional trigger.
+        original_kinds = dict(_coordinator_mod._DOOR_WINDOW_FSM_EVENT_KINDS)
+        _coordinator_mod._DOOR_WINDOW_FSM_EVENT_KINDS["check_natural_vent_conditions"] = "paused_nat_vent_reactivated"
+        try:
+            with scheduler.installed():
+                run_coro(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
+        finally:
+            _coordinator_mod._DOOR_WINDOW_FSM_EVENT_KINDS.clear()
+            _coordinator_mod._DOOR_WINDOW_FSM_EVENT_KINDS.update(original_kinds)
+
+        assert ae._paused_by_door is True, "production's own flag is unaffected by the dispatch-table bug"
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.NORMAL, (
+            "positive control FAILED: reintroducing the unconditional method-name trigger should "
+            "reproduce the live bug (shadow FSM wrongly reset to NORMAL) — if this assertion "
+            "fails, the tests above are not actually exercising the dispatch table they claim to"
+        )

@@ -3889,6 +3889,17 @@ class AutomationEngine:
                         kind=DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED,
                         legacy=_legacy_clear_pause,
                     )
+                    # Issue #668: explicit event for this exact branch — the coordinator
+                    # previously fed the door/window shadow FSM's PAUSED_NAT_VENT_REACTIVATED
+                    # kind unconditionally on every call to this method (method-name-keyed
+                    # trigger), not just when this deeply-conditional branch actually fired,
+                    # wrongly resetting the shadow FSM to NORMAL on every paused-but-not-
+                    # reactivating cycle. Event-driven, matching nat-vent's own 6 exit events.
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_reactivated_while_paused",
+                            {"outdoor": outdoor, "indoor": indoor, "threshold": threshold},
+                        )
                     self._paused_entity = None
                     self._paused_since = None
                     _LOGGER.info(
@@ -3930,6 +3941,13 @@ class AutomationEngine:
                         kind=DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED,
                         legacy=_legacy_clear_pause,
                     )
+                    # Issue #668: see the sibling emit in the activate-fan branch above for
+                    # rationale — same explicit, branch-gated event for the soft-start case.
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_reactivated_while_paused",
+                            {"outdoor": outdoor, "indoor": indoor, "threshold": threshold},
+                        )
                     self._paused_entity = None
                     self._paused_since = None
                     _LOGGER.info(

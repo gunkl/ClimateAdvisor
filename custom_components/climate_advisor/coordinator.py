@@ -365,17 +365,19 @@ _DOOR_WINDOW_FSM_EVENT_KINDS: dict[str, str] = {
     "handle_all_doors_windows_closed": "all_sensors_closed",
     "handle_manual_override_during_pause": "manual_override_during_pause",
     "resume_from_pause": "dashboard_resume",
-    # Issue #660: check_natural_vent_conditions()'s two reactivation branches clear
-    # all 4 door/window pause fields directly when nat-vent may reactivate while
-    # paused -- previously this method had NO door/window FSM event feed at all (it
-    # was only registered in _NAT_VENT_FSM_TRIGGER_METHODS, feeding the *nat-vent*
-    # FSM). It already has a _mirror_to_shadow("check_natural_vent_conditions") call
-    # site (coordinator.py), so adding this entry is enough to reach
-    # _evaluate_door_window_fsm() via _dispatch_fsm_evaluators() -- no new call site
-    # needed. Most invocations of this periodic method aren't a reactivation-while-
-    # paused at all; PAUSED_NAT_VENT_REACTIVATED is a defensive no-op from any
-    # non-paused origin state, same convention SENSOR_OPENED already uses.
-    "check_natural_vent_conditions": "paused_nat_vent_reactivated",
+    # Issue #668: "check_natural_vent_conditions": "paused_nat_vent_reactivated" used to
+    # live here (added by #660) as a method-name-keyed, UNCONDITIONAL trigger — every
+    # call to check_natural_vent_conditions() fed PAUSED_NAT_VENT_REACTIVATED regardless
+    # of which internal branch it took. #660's own comment claimed this kind is "a
+    # defensive no-op from any non-paused origin state" — true for NORMAL, but silently
+    # FALSE from a PAUSED_* origin: _transition_from_paused() lands unconditionally on
+    # NORMAL for this kind, so every paused-but-not-actually-reactivating cycle wrongly
+    # reset the shadow FSM, producing a permanent live disagreement (confirmed via HA log
+    # timestamps: SYNC_RECONCILE correctly restores PAUSED_IDLE, then this unconditional
+    # trigger immediately clobbers it back to NORMAL moments later, every cycle). Removed
+    # in favor of the event-driven feed below (_DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES),
+    # matching nat-vent's own 6-exit-event convention — only fires when one of the 2 real,
+    # deeply-conditional reactivation branches (automation.py) actually runs.
 }
 
 # Issue #594 Phase R Step 1b: door/window's SYNC_RECONCILE event kind has no natural
@@ -546,6 +548,15 @@ _DOOR_WINDOW_NAT_VENT_EXIT_EVENT_TYPES: frozenset[str] = frozenset(
         "nat_vent_reconcile_exit",
     }
 )
+
+# Issue #668: event-driven replacement for the removed method-name-keyed
+# "check_natural_vent_conditions" entry in _DOOR_WINDOW_FSM_EVENT_KINDS above. Fed only
+# from the 2 real, deeply-conditional reactivation-while-paused branches in
+# check_natural_vent_conditions() (automation.py's activate-fan and soft-start branches),
+# each of which now emits this event type explicitly, right alongside the existing
+# _resolve_door_window_pause_flags(kind=PAUSED_NAT_VENT_REACTIVATED, ...) call — unlike
+# the old trigger, this only fires when one of those branches actually runs.
+_DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES: frozenset[str] = frozenset({"nat_vent_reactivated_while_paused"})
 
 
 class ClimateAdvisorCoordinator(DataUpdateCoordinator):
@@ -7775,6 +7786,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         "_on_grace_expired", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED
                     ),
                     "Door/window FSM evaluation (grace-expiry)",
+                ),
+                (
+                    _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES,
+                    lambda: self._evaluate_door_window_fsm(
+                        "check_natural_vent_conditions", event_kind=_DWFEventKind.PAUSED_NAT_VENT_REACTIVATED
+                    ),
+                    "Door/window FSM evaluation (nat-vent-reactivated-while-paused, event-driven)",
                 ),
                 (
                     _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP,

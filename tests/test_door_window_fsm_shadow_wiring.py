@@ -66,17 +66,24 @@ class TestFsmEvaluationScoping:
         _run(coordinator._mirror_to_shadow("handle_manual_override_during_pause"))
         assert called == ["handle_manual_override_during_pause"]
 
-    def test_triggered_by_check_natural_vent_conditions(self) -> None:
-        """Issue #660 Step 3: the 8th real trigger site. check_natural_vent_conditions()
-        previously had zero door/window FSM event feed at all -- it was only
-        registered in _NAT_VENT_FSM_TRIGGER_METHODS (feeding the nat-vent FSM)."""
+    def test_not_triggered_by_check_natural_vent_conditions_mirror_alone(self) -> None:
+        """Issue #668: check_natural_vent_conditions() was, until now, registered as a
+        method-name-keyed, UNCONDITIONAL trigger for PAUSED_NAT_VENT_REACTIVATED (#660
+        Step 3) -- merely mirroring this method (with no real reactivation-while-paused
+        branch taken) wrongly fired the door/window FSM every single cycle, permanently
+        resetting it to NORMAL moments after SYNC_RECONCILE correctly restored a paused
+        state (confirmed live, Issue #668). The feed is now event-driven instead (see
+        TestFsmEvaluationScoping's sibling test in test_shadow_fsm_harness_event_coverage.py
+        for the positive case where the real branch DOES fire) -- mirroring this method
+        alone, with no emitted "nat_vent_reactivated_while_paused" event, must not call
+        _evaluate_door_window_fsm at all."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         called: list[str] = []
-        coordinator._evaluate_door_window_fsm = lambda method_name: called.append(method_name)  # type: ignore[method-assign]
+        coordinator._evaluate_door_window_fsm = lambda method_name, event_kind=None: called.append(method_name)  # type: ignore[method-assign]
 
         _noop_shadow_methods(coordinator, "check_natural_vent_conditions")
         _run(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
-        assert called == ["check_natural_vent_conditions"]
+        assert called == []
 
 
 class TestFsmStateTracking:

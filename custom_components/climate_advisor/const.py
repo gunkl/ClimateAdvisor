@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.30"
+VERSION = "0.6.31"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.31": [
+        "Fix #668: no user-visible change. The shadow-diagnostic door/window FSM was"
+        " being wrongly reset every automation cycle whenever a door/window was left"
+        " open with no imminent free-cooling opportunity (a diagnostic-only bug — real"
+        " HVAC pause behavior was always correct). The periodic nat-vent re-check was"
+        " unconditionally signalling 'nat-vent just reactivated while paused' on every"
+        " call, regardless of whether that actually happened. Made the signal"
+        " event-driven instead, so it only fires when nat-vent genuinely reactivates.",
+    ],
     "0.6.30": [
         "Fix #666: no user-visible change. The coordinator test harness silently"
         " dropped the shadow-diagnostic FSM feed for every nat-vent/door-window exit"
@@ -1924,6 +1933,41 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    668: {
+        "version_fixed": "0.6.31",
+        "title": (
+            "Door/window shadow FSM unconditionally reset by check_natural_vent_conditions()"
+            " re-check (4th occurrence of #613/#647/#666, opposite failure mode)"
+        ),
+        "scope_covered": (
+            "coordinator.py: _DOOR_WINDOW_FSM_EVENT_KINDS['check_natural_vent_conditions']"
+            " = 'paused_nat_vent_reactivated' was a method-name-keyed, UNCONDITIONAL"
+            " trigger (added by #660 Step 3) — every call to check_natural_vent_conditions()"
+            " fired DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED regardless of which"
+            " internal branch it took, and door_window_fsm.py's _transition_from_paused()"
+            " handles that kind unconditionally by landing on NORMAL. Production only"
+            " actually reactivates nat-vent while paused in 2 deeply conditional branches"
+            " (automation.py's activate-fan and soft-start branches); every other cycle"
+            " with a door left open and no imminent reactivation wrongly reset the shadow"
+            " FSM to NORMAL moments after apply_classification()'s SYNC_RECONCILE dispatch"
+            " correctly restored PAUSED_IDLE — a permanent live disagreement surviving"
+            " deploys and restarts (traced live via HA log timestamps, 2026-08-17;"
+            " occupant impact: none — production's own pause state was always correct;"
+            " this is shadow-diagnostic-only, unrelated to and independent of #666's"
+            " harness fix earlier the same day). Fix: emit an explicit"
+            " nat_vent_reactivated_while_paused event at the 2 real branch call sites,"
+            " removed the unconditional method-name mapping, added an event-type-keyed"
+            " feed instead (matching nat-vent's own 6-exit-event convention) so the shadow"
+            " FSM only reacts when a reactivation genuinely happened. New renderer added"
+            " to ai_skills_context.py's EVENT_RENDERERS for the new event type (Activity"
+            " Report coverage guardrail, Issue #330). Regression tests in"
+            " tests/test_shadow_fsm_harness_event_coverage.py cover both directions (no"
+            " reactivation leaves the FSM alone; a real reactivation still clears it) plus"
+            " a positive control reproducing the old unconditional trigger; the now-stale"
+            " assertion in tests/test_door_window_fsm_shadow_wiring.py that pinned the old"
+            " unconditional behavior as correct was rewritten to assert the opposite."
+        ),
+    },
     666: {
         "version_fixed": "0.6.30",
         "title": "Test harness silently broke event-driven shadow-FSM feed coverage (3rd occurrence of #613/#647)",

@@ -2001,6 +2001,24 @@ def _render_nat_vent_soft_start_entered(p: dict, unit: str) -> tuple[str, str]:
     return label, ", ".join(parts)
 
 
+def _render_nat_vent_reactivated_while_paused(p: dict, unit: str) -> tuple[str, str]:
+    outdoor = p.get("outdoor")
+    indoor = p.get("indoor")
+    threshold = p.get("threshold")
+    label = "Nat-vent reactivated while paused by an open door/window"
+    if outdoor is not None and indoor is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            label = (
+                f"Nat-vent reactivated while paused -- outdoor {format_temp(float(outdoor), unit)}"
+                f" cooled below indoor {format_temp(float(indoor), unit)}"
+            )
+    settings = ""
+    if threshold is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            settings = f"threshold: {format_temp(float(threshold), unit)}"
+    return label, settings
+
+
 def _render_nat_vent_ceiling_escalation(p: dict, unit: str) -> tuple[str, str]:
     indoor = p.get("indoor")
     cool = p.get("comfort_cool")
@@ -2373,6 +2391,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
     "nat_vent_soft_start_entered": _render_nat_vent_soft_start_entered,
+    "nat_vent_reactivated_while_paused": _render_nat_vent_reactivated_while_paused,
     "nat_vent_predicted_floor_exit": _render_nat_vent_predicted_floor_exit,
     "nat_vent_ceiling_escalation": _render_nat_vent_ceiling_escalation,
     "nat_vent_ac_assist_armed": _render_nat_vent_ac_assist_armed,

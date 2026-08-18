@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.31"
+VERSION = "0.6.32"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.32": [
+        "Fix #670: right after an HA restart, if a door or window was already open, the"
+        " whole-house fan could switch on before the startup-reconciliation logic had a"
+        " chance to check the fan's actual state — occasionally causing a fan on/off"
+        " flap in the minutes after restart. The regular-cycle nat-vent and window-"
+        " cooling checks now wait for startup reconciliation to finish before acting,"
+        " same fix already applied to a sibling check in #627.",
+    ],
     "0.6.31": [
         "Fix #668: no user-visible change. The shadow-diagnostic door/window FSM was"
         " being wrongly reset every automation cycle whenever a door/window was left"
@@ -1933,6 +1941,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    670: {
+        "version_fixed": "0.6.32",
+        "title": (
+            "Regular-cycle nat-vent/economizer checks fired during the startup-coalescing"
+            " window, before startup reconciliation ran (same bug class as #627)"
+        ),
+        "scope_covered": (
+            "coordinator.py: the regular _async_update_data() cycle's"
+            " check_natural_vent_conditions() and check_window_cooling_opportunity() calls"
+            " had no _startup_coalesce_active gate, unlike every sibling override-detection"
+            " check in this file. HA-restart-triggered extra coordinator refreshes (fan-"
+            " state listener churn) gave the ungated nat-vent check multiple chances to"
+            " activate the whole-house fan for real before _do_startup_coalesce()'s"
+            " reconcile_fan_on_startup() — the single-shot startup-reconciliation mechanism"
+            " (#321/#327) — had run, so reconciliation's own decision arrived minutes late"
+            " and against a fan state it never actually chose (traced live via HA log"
+            " timestamps, 2026-08-17: fan activated at t+66s post-restart, reconcile ran at"
+            " t+5min and read back the self-caused state). This is the same gap #627 fixed"
+            " for the backstop_30min untracked-fan reconcile, in two call sites #627 didn't"
+            " cover. Extracted _should_run_regular_cycle_nat_vent_check() and"
+            " _should_run_regular_cycle_window_cooling_check() gating both behind the"
+            " existing shared _suppress_during_startup_coalescing() helper."
+        ),
+    },
     668: {
         "version_fixed": "0.6.31",
         "title": (

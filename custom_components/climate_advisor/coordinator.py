@@ -3118,7 +3118,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                         self._today_record.comfort_violations_minutes += elapsed_minutes
 
             # Check economizer opportunity (window cooling on hot days)
-            if self._today_record:
+            if self._should_run_regular_cycle_window_cooling_check():
                 windows_open = self._today_record.windows_physically_opened and (
                     self._today_record.window_physical_close_time is None
                 )
@@ -3130,7 +3130,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 )
 
             # Re-evaluate natural vent conditions while any sensor is open
-            if self._any_sensor_open():
+            if self._should_run_regular_cycle_nat_vent_check():
                 _LOGGER.debug("[coalesce-diag] before check_natural_vent_conditions()")
                 await self.automation_engine.check_natural_vent_conditions()
                 await self._mirror_to_shadow("check_natural_vent_conditions")
@@ -5777,6 +5777,36 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and not self._startup_coalesce_active
             and not self.automation_engine._fan_override_active
             and not self.automation_engine._grace_active
+        )
+
+    def _should_run_regular_cycle_nat_vent_check(self) -> bool:
+        """Whether the regular-cycle ``check_natural_vent_conditions()`` call should fire now.
+
+        Issue #670: same bug class as #627 above, a different call site. This check can
+        activate real hardware (the WHF) and had no ``_startup_coalesce_active`` gate at
+        all — unlike every sibling override-detection check in this file. HA-restart-
+        triggered extra coordinator refreshes (fan-state listener churn) gave this
+        ungated call multiple chances to activate nat-vent for real before
+        ``_do_startup_coalesce()``'s ``reconcile_fan_on_startup()`` — the single-shot,
+        purpose-built startup-reconciliation mechanism (#321/#327) — had run, so the
+        reconciliation's own decision arrived minutes late and against a fan state it
+        never actually chose. Extracted to its own method so this exact predicate can be
+        unit tested directly, matching ``_should_run_untracked_fan_backstop``'s pattern.
+        """
+        return self._any_sensor_open() and not self._suppress_during_startup_coalescing(
+            "check_natural_vent_conditions (regular cycle)"
+        )
+
+    def _should_run_regular_cycle_window_cooling_check(self) -> bool:
+        """Whether the regular-cycle ``check_window_cooling_opportunity()`` call should fire now.
+
+        Issue #670: sibling gap to ``_should_run_regular_cycle_nat_vent_check`` above, same
+        file, same missing gate, same fix. This check can command real AC and was never
+        observed live only because it's independently gated to ``day_type == "hot"`` — the
+        gap is real, just not yet triggered on a warm day.
+        """
+        return bool(self._today_record) and not self._suppress_during_startup_coalescing(
+            "check_window_cooling_opportunity (regular cycle)"
         )
 
     def _derive_thermostat_fan_running_for_reconcile(self, *, fan_mode_attr: str, hvac_action_attr: str) -> bool:

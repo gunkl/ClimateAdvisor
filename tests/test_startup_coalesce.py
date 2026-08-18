@@ -572,3 +572,81 @@ class TestStartupCoalesceDoCoalesce:
 
         _, event_data = coord._emit_event.call_args[0]
         assert event_data["sensors_open_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# TestRegularCycleCoalesceGating: Issue #670 — regular-cycle nat-vent/economizer
+# checks must not act during the startup-coalescing window
+# ---------------------------------------------------------------------------
+
+
+class TestRegularCycleCoalesceGating:
+    """Issue #670: coordinator._should_run_regular_cycle_nat_vent_check() and
+    _should_run_regular_cycle_window_cooling_check() gate the regular-cycle
+    check_natural_vent_conditions()/check_window_cooling_opportunity() calls behind
+    the startup-coalescing window — the same idiom #627 already established for
+    _should_run_untracked_fan_backstop().
+
+    Before this fix, the regular _async_update_data() cycle's nat-vent check had no
+    _startup_coalesce_active gate at all. Live incident 2026-08-17: an HA-restart-
+    triggered extra coordinator refresh (fan-state listener churn) let this check
+    activate the whole-house fan for real ~65s after restart, before
+    _do_startup_coalesce()'s reconcile_fan_on_startup() — the single-shot startup-
+    reconciliation mechanism (#321/#327) — ever ran. reconcile_fan_on_startup() then
+    read back the self-caused fan state 4 minutes later and decided "turn-off" against
+    a decision it never actually made.
+    """
+
+    def _make_coord(self, *, startup_coalesce_active: bool, any_sensor_open: bool, today_record):
+        mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+        coord = MagicMock()
+        coord._should_run_regular_cycle_nat_vent_check = types.MethodType(
+            mod.ClimateAdvisorCoordinator._should_run_regular_cycle_nat_vent_check, coord
+        )
+        coord._should_run_regular_cycle_window_cooling_check = types.MethodType(
+            mod.ClimateAdvisorCoordinator._should_run_regular_cycle_window_cooling_check, coord
+        )
+        coord._suppress_during_startup_coalescing = types.MethodType(
+            mod.ClimateAdvisorCoordinator._suppress_during_startup_coalescing, coord
+        )
+        coord._startup_coalesce_active = startup_coalesce_active
+        coord._any_sensor_open = MagicMock(return_value=any_sensor_open)
+        coord._today_record = today_record
+        return coord
+
+    def test_nat_vent_check_suppressed_during_startup_coalescing_window(self):
+        """REGRESSION GUARD: a sensor open while _startup_coalesce_active is True (the
+        exact post-restart state from the live incident) must NOT trigger the regular-
+        cycle nat-vent check."""
+        coord = self._make_coord(startup_coalesce_active=True, any_sensor_open=True, today_record=_make_today_record())
+        assert coord._should_run_regular_cycle_nat_vent_check() is False
+
+    def test_nat_vent_check_fires_once_coalescing_window_closes(self):
+        """The exact same open-sensor state must fire normally once
+        _startup_coalesce_active flips False — the fix delays the decision, it doesn't
+        remove it."""
+        coord = self._make_coord(startup_coalesce_active=False, any_sensor_open=True, today_record=_make_today_record())
+        assert coord._should_run_regular_cycle_nat_vent_check() is True
+
+    def test_nat_vent_check_never_fires_with_no_sensor_open_regardless_of_window(self):
+        coord = self._make_coord(
+            startup_coalesce_active=False, any_sensor_open=False, today_record=_make_today_record()
+        )
+        assert coord._should_run_regular_cycle_nat_vent_check() is False
+
+    def test_window_cooling_check_suppressed_during_startup_coalescing_window(self):
+        """Sibling gap: check_window_cooling_opportunity() can command real AC and had
+        the same missing gate — never observed live only because it's independently
+        restricted to hot days."""
+        coord = self._make_coord(startup_coalesce_active=True, any_sensor_open=False, today_record=_make_today_record())
+        assert coord._should_run_regular_cycle_window_cooling_check() is False
+
+    def test_window_cooling_check_fires_once_coalescing_window_closes(self):
+        coord = self._make_coord(
+            startup_coalesce_active=False, any_sensor_open=False, today_record=_make_today_record()
+        )
+        assert coord._should_run_regular_cycle_window_cooling_check() is True
+
+    def test_window_cooling_check_never_fires_with_no_today_record_regardless_of_window(self):
+        coord = self._make_coord(startup_coalesce_active=False, any_sensor_open=False, today_record=None)
+        assert coord._should_run_regular_cycle_window_cooling_check() is False

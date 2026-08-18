@@ -193,6 +193,88 @@ class TestFromActiveExitWiring:
         assert t.exit_reason == NatVentExitReason.COMFORT_FLOOR
 
 
+class TestActiveBranchLockoutRecognition:
+    """Issue #672: _transition_from_active() previously had no way to ever recognize a
+    door-pause/reactivation-lockout condition once wrongly active — only the thermal/
+    comfort exit chain was checked. Live incident 2026-08-17: ticks landed on this branch
+    for 34+ minutes across 2 full startup-coalesce cycles with no path to
+    PAUSED_REACTIVATION_LOCKOUT/INACTIVE while production correctly showed
+    inactive/paused_reactivation_lockout.
+    """
+
+    def test_stuck_active_soft_start_corrects_to_locked_out(self) -> None:
+        """Positive control: a wrongly-active FSM with paused_by_door + an unexpired
+        lockout window must now correct on the very next tick, regardless of what the
+        thermal exit chain would otherwise conclude."""
+        now = datetime(2026, 1, 1, 12, 0, 30, tzinfo=UTC)
+        exit_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(
+                indoor=75.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                paused_by_door=True,
+                outdoor_exit_time=exit_time,
+                now=now,
+                lockout_seconds=300.0,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+
+    def test_stuck_active_full_gate_corrects_to_locked_out(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, 30, tzinfo=UTC)
+        exit_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(
+                indoor=75.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                paused_by_door=True,
+                outdoor_exit_time=exit_time,
+                now=now,
+                lockout_seconds=300.0,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+
+    def test_genuinely_active_session_unaffected(self) -> None:
+        """Negative control: no pause, no lockout — the normal exit chain still runs
+        unchanged (this is TestFromActiveExitWiring's own territory; re-asserted here to
+        pin that the new check doesn't fire for the common case)."""
+        t = transition(NatVentLifecycleState.ACTIVE_FULL_GATE, _tick(indoor=72.0, outdoor=65.0))
+        assert not t.changed
+        assert t.exit_reason is None
+
+    def test_live_authoritative_shaped_inputs_never_trigger_new_branch(self) -> None:
+        """Blast-radius pin (Issue #672 investigation): production's real flags never
+        present natural_vent_active=True simultaneously with an active lockout window
+        (_exit_nat_vent() always clears the former before/as part of setting the field
+        that drives the latter) — so the live authoritative escalation check
+        (automation.py:3613-3632), which always feeds a freshly-derived current_state via
+        the nat_vent_lifecycle_state property, can never actually reach this branch with
+        paused_by_door=True + locked-out. This test pins that the new check is additive
+        only for the coordinator's separately-tracked, staleness-prone diagnostic state —
+        confirmed by construction: paused_by_door=False (the only state the live property
+        would ever present alongside a genuinely active session) leaves this branch inert."""
+        now = datetime(2026, 1, 1, 12, 0, 30, tzinfo=UTC)
+        exit_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(
+                indoor=75.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                paused_by_door=False,  # the live-property-derived shape while genuinely active
+                outdoor_exit_time=exit_time,
+                now=now,
+                lockout_seconds=300.0,
+            ),
+        )
+        assert t.to_state != NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+
+
 class TestSoftStartEscalation:
     """Issue #594 Phase R prep: soft-start -> full-gate escalation, mirroring
     automation.py's own mid-session upgrade check (Issue #540)."""

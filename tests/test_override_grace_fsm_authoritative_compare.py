@@ -145,6 +145,55 @@ class TestDashboardResumePositiveControl:
         assert engine._grace_protects_override is False
 
 
+class TestUnprotectedGraceStartedPositiveControl:
+    """Issue #672: the 4 triggers _start_grace_period() historically never modeled at
+    all (fan-off, window-close, nat-vent-exit, drift-correction) now route through
+    UNPROTECTED_GRACE_STARTED. All 4 share one dispatcher call site
+    (_start_grace_period() itself), so on_fan_turned_off() — the most directly
+    callable — is sufficient to prove the wiring; window-close/nat-vent-exit/drift-
+    correction reuse the exact same code path, not a separate implementation."""
+
+    def test_broken_transition_detected(self) -> None:
+        from unittest.mock import patch
+
+        from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
+
+        engine = _make_engine()
+        with patch(
+            "custom_components.climate_advisor.override_grace_fsm.transition",
+            side_effect=lambda *a, **k: type(
+                "T",
+                (),
+                {"to_state": (OverrideConfirmState.IDLE, GraceState.NONE), "outcome": "broken", "at": None},
+            )(),
+        ):
+            engine.on_fan_turned_off(fan_before="on", fan_after="off")
+
+        assert engine._grace_active is False, (
+            "positive control FAILED: forcing override_grace_fsm.transition() to return grace=NONE "
+            "was not reflected in engine._grace_active — the mock wasn't actually exercised (real "
+            "outcome should be grace=ACTIVE_UNPROTECTED, so an undetected broken swap would "
+            "incorrectly show _grace_active=True instead)"
+        )
+
+    def test_unbroken_transition_starts_unprotected_grace(self) -> None:
+        engine = _make_engine()
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+        assert engine._grace_active is True
+        assert engine._grace_protects_override is False, (
+            "fan_off is not in GRACE_TRIGGERS_PROTECTING_OVERRIDE — must land on "
+            "ACTIVE_UNPROTECTED, never ACTIVE_PROTECTING_OVERRIDE"
+        )
+
+    def test_confirm_state_preserved_not_reset(self) -> None:
+        """Unlike FAN_OVERRIDE_DETECTED (which hardcodes IDLE), UNPROTECTED_GRACE_STARTED
+        must preserve whatever _override_confirm_pending was before — production's real
+        _legacy_set_grace_flags() never touches that field."""
+        engine = _make_engine(_override_confirm_pending=True)
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
+        assert engine._override_confirm_pending is True
+
+
 class TestGraceDisabledPositiveControl:
     """Issue #664's own core finding: manual_grace_seconds=0 must land on
     GraceState.NONE, not be forced to an active state regardless of config. This is
@@ -167,4 +216,12 @@ class TestGraceDisabledPositiveControl:
             _current_classification=None,
         )
         asyncio.run(engine.resume_from_pause())
+        assert engine._grace_active is False
+
+    def test_unprotected_grace_with_grace_disabled_does_not_claim_active(self) -> None:
+        """Issue #672: on_fan_turned_off()'s new UNPROTECTED_GRACE_STARTED path is gated
+        the same way as every other real call site — _start_grace_period_action()
+        returning False (grace disabled) means the dispatcher is never even called."""
+        engine = _make_engine(config={"comfort_heat": 70.0, "comfort_cool": 76.0, "manual_grace_seconds": 0})
+        engine.on_fan_turned_off(fan_before="on", fan_after="off")
         assert engine._grace_active is False

@@ -479,6 +479,14 @@ _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP: dict[str, str] = {
     # still-active state. cancel_override()/clear_manual_override() are called from a
     # handful of real coordinator.py/api.py sites instead; those are fed directly,
     # post-return, via `_feed_override_grace_fsm_cancelled()` below.
+    # Issue #672: _start_grace_period()'s "every other trigger" callers (fan-off,
+    # window-close, nat-vent-exit, drift-correction) emit this DISTINCT event type —
+    # deliberately not the pre-existing generic "grace_started" (which also fires for
+    # the 3 protecting triggers via their own direct dispatcher call sites; reusing it
+    # here would wrongly feed UNPROTECTED_GRACE_STARTED for those too). Confirmed live:
+    # this closes the "production=idle/active_unprotected fsm=idle/none" disagreement
+    # that persisted indefinitely because none of these 4 triggers had ANY feed at all.
+    "unprotected_grace_started": "unprotected_grace_started",
 }
 
 # Issue #647: `check_natural_vent_conditions` was, until now, the ONLY mirrored method

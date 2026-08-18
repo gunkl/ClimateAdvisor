@@ -182,6 +182,31 @@ def _soft_start_inputs(inputs: NatVentFsmInputs, *, full_gate_active: bool) -> N
 
 
 def _transition_from_active(current_state: NatVentLifecycleState, event: NatVentFsmEvent) -> NatVentTransition:
+    # Issue #672: before anything else, recognize a door-pause/reactivation-lockout
+    # condition — the one thing this branch previously had NO way to ever detect once
+    # wrongly active. _transition_from_inactive() already checks this same condition on
+    # every tick from an inactive-like origin, but transition() never routes back there
+    # once current_state is ACTIVE_*, so a stale/incorrect ACTIVE_SOFT_START/ACTIVE_FULL_GATE
+    # state was permanently stuck — decide_nat_vent_exit()'s exit chain below only
+    # recognizes thermal/comfort exit reasons, never a pause/lockout condition. Confirmed
+    # live: 34+ minutes and 2 full startup-coalesce cycles of real ticks landing here with
+    # no way to reach PAUSED_REACTIVATION_LOCKOUT/INACTIVE (2026-08-17). Provably inert on
+    # the live authoritative escalation path (automation.py's soft-start upgrade check) —
+    # production's real flags never present natural_vent_active=True simultaneously with an
+    # active lockout (_exit_nat_vent() always clears the former before/as part of setting
+    # the field that drives the latter) — this only ever fires for the separately-tracked,
+    # staleness-prone coordinator diagnostic state.
+    inputs = event.inputs
+    if inputs.paused_by_door and is_reactivation_locked_out(
+        outdoor_exit_time=inputs.outdoor_exit_time, now=inputs.now, lockout_seconds=inputs.lockout_seconds
+    ):
+        return NatVentTransition(
+            from_state=current_state,
+            to_state=NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT,
+            event_kind=event.kind,
+            at=inputs.now,
+        )
+
     # Issue #540 (mirrored, Phase R prep): while soft-started, re-check the full
     # gate each tick — same pure function, same condition production's own
     # upgrade block re-evaluates. Escalating doesn't change the exit-chain

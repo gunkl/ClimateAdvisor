@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.33] — 2026-08-17
+
+- Fix #672: no user-visible change. Three shadow-diagnostic state machines (door/window, nat-vent, override/grace) each had their own reason for getting permanently stuck out of sync with real production state after a restart or a specific state transition — real HVAC/fan behavior was always correct throughout. Fixed all three.
+
 ## [0.6.32] — 2026-08-17
 
 - Fix #670: right after an HA restart, if a door or window was already open, the whole-house fan could switch on before the startup-reconciliation logic had a chance to check the fan's actual state — occasionally causing a fan on/off flap in the minutes after restart. The regular-cycle nat-vent and window-cooling checks now wait for startup reconciliation to finish before acting, same fix already applied to a sibling check in #627.

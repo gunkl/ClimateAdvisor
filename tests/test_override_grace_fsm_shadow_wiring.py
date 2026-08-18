@@ -139,6 +139,68 @@ class TestFsmStateTracking:
         )
 
 
+class TestUnprotectedGraceStartedEventWiring:
+    """Issue #672: closes the exact live disagreement observed 2026-08-17
+    (production=idle/active_unprotected, fsm=idle/none) for fan-off/window-close/
+    nat-vent-exit/drift-correction grace starts — none of these had ANY feed to the
+    coordinator's diagnostic FSM tracker at all before this fix. Runs the real
+    production on_fan_turned_off() call (not direct engine construction) so
+    _emit_event_callback genuinely fires through coordinator._emit_event() ->
+    _feed_lifecycle_fsms_from_event(), the same path the live bug went through.
+    """
+
+    def test_on_fan_turned_off_lands_unprotected_grace_via_event(self) -> None:
+        coordinator, _fake_hass, scheduler, _event_log = build_headless_coordinator()
+        # Pre-fix baseline: a fresh coordinator's tracked state starts (IDLE, NONE) and
+        # nothing would ever move it for this trigger — this assertion is itself the
+        # positive control (the "before" state fails it by construction).
+        assert coordinator._override_grace_fsm_state == (OverrideConfirmState.IDLE, GraceState.NONE)
+
+        _noop_shadow_methods(coordinator, "on_fan_turned_off")
+        with scheduler.installed():
+            coordinator.automation_engine.on_fan_turned_off(fan_before="on", fan_after="off")
+            # Drains the real hass.async_create_task(start_min_fan_runtime_cycles())
+            # fire-and-forget task on_fan_turned_off() schedules — same pattern
+            # build_headless_coordinator()'s own startup sequence uses (Issue #476).
+            scheduler.advance_to(scheduler.now())
+
+        assert coordinator._override_grace_fsm_state == (OverrideConfirmState.IDLE, GraceState.ACTIVE_UNPROTECTED)
+
+    def test_on_fan_turned_off_no_longer_disagrees(self) -> None:
+        coordinator, _fake_hass, scheduler, _event_log = build_headless_coordinator()
+
+        # Matches coordinator.py's real call sites (production call immediately followed
+        # by the mirror) — the diagnostic is only computed inside _mirror_to_shadow()'s
+        # finally block, same pattern test_fan_manual_override_no_longer_disagrees uses.
+        _noop_shadow_methods(coordinator, "on_fan_turned_off")
+        with scheduler.installed():
+            coordinator.automation_engine.on_fan_turned_off(fan_before="on", fan_after="off")
+            _run(coordinator._mirror_to_shadow("on_fan_turned_off", fan_before="on", fan_after="off"))
+            scheduler.advance_to(scheduler.now())
+
+        diag = coordinator.shadow_engine_diagnostic
+        assert diag is not None
+        assert diag["override_grace_production_state"] == "idle/active_unprotected"
+        assert diag["override_grace_fsm_state"] == "idle/active_unprotected"
+        assert diag["override_grace_fsm_agrees"] is True
+
+    def test_shadow_engine_isolated_does_not_leak_into_coordinator_state(self) -> None:
+        """The shadow engine also runs on_fan_turned_off() (it's a mirrored method), but
+        its own emit_event callback (_on_shadow_emit_event) is isolated from
+        coordinator._emit_event() — verify that isolation holds for this new event
+        rather than assuming it, per _build_shadow_automation_callbacks()'s own design."""
+        coordinator, _fake_hass, scheduler, _event_log = build_headless_coordinator()
+
+        with scheduler.installed():
+            coordinator.automation_engine.on_fan_turned_off(fan_before="on", fan_after="off")
+            _run(coordinator._mirror_to_shadow("on_fan_turned_off", fan_before="on", fan_after="off"))
+            scheduler.advance_to(scheduler.now())
+
+        # Exactly one real transition happened (production's own call above) — the
+        # shadow replay must not have fed a second, duplicate event into the tracker.
+        assert coordinator._override_grace_fsm_state == (OverrideConfirmState.IDLE, GraceState.ACTIVE_UNPROTECTED)
+
+
 class TestDiagnosticIntegration:
     def test_diagnostic_includes_override_grace_fsm_state(self) -> None:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()

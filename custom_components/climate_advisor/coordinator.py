@@ -970,6 +970,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         se._override_confirm_source = ae._override_confirm_source
         se._paused_with_hvac_already_off = ae._paused_with_hvac_already_off
 
+        # Issue #673: nat-vent/door-window state — same gap class as #613/#631 above.
+        # These 4 fields were never added to this raw-copy block when it was created,
+        # so any missed or exception-interrupted _mirror_to_shadow() call site touching
+        # them causes a permanent, non-self-healing divergence. _paused_by_door is read
+        # by both the nat-vent and door/window mirror derivations.
+        se._natural_vent_active = ae._natural_vent_active
+        se._nat_vent_soft_start = ae._nat_vent_soft_start
+        se._paused_by_door = ae._paused_by_door
+        se._nat_vent_outdoor_exit_time = ae._nat_vent_outdoor_exit_time
+
     def _dispatch_fsm_evaluators(
         self,
         key: str,

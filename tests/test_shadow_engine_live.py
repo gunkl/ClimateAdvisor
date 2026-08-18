@@ -28,6 +28,13 @@ Issue #631 (second coverage-gap follow-up) adds:
     their companion mode/source/time/duration fields — with a positive control
     reproducing the confirmed live incident (shadow disagreed for 2h38m because its
     ``_grace_active`` never reflected production's active manual-override grace period).
+
+Issue #673 (third coverage-gap follow-up, Phase 2) adds:
+  - ``_sync_shadow_inputs()`` nat-vent/door-window parity: ``_natural_vent_active``,
+    ``_nat_vent_soft_start``, ``_paused_by_door``, ``_nat_vent_outdoor_exit_time`` —
+    the 4 fields confirmed absent from the raw-copy block despite the #613/#631
+    precedent already covering everything else. Same shape as #615/#631: a positive
+    control proves the fields stay stale on the shadow without the raw copy.
 """
 
 from __future__ import annotations
@@ -341,6 +348,51 @@ class TestSyncShadowInputsGraceOverride:
         coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
         _run(coordinator._mirror_to_shadow("apply_classification", None))
         assert coordinator.shadow_automation_engine._grace_active is False
+
+
+class TestSyncShadowInputsNatVentDoorWindow:
+    """Issue #673: same gap class as #615/#631, different field set — nat-vent/
+    door-window state confirmed absent from _sync_shadow_inputs()'s raw-copy block.
+    Any missed or exception-interrupted _mirror_to_shadow() call site touching these
+    fields caused a permanent, non-self-healing divergence with no way to recover
+    short of a coordinator restart."""
+
+    def test_natural_vent_active_parity_after_mirror_call(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._natural_vent_active = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._natural_vent_active is True
+
+    def test_nat_vent_soft_start_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._nat_vent_soft_start = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._nat_vent_soft_start is True
+
+    def test_paused_by_door_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._paused_by_door = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._paused_by_door is True
+
+    def test_nat_vent_outdoor_exit_time_parity(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._nat_vent_outdoor_exit_time = "2026-08-17T21:02:02-07:00"
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._nat_vent_outdoor_exit_time == "2026-08-17T21:02:02-07:00"
+
+    def test_positive_control_missing_sync_reproduces_the_stuck_disagreement(self) -> None:
+        """Without these 4 fields in _sync_shadow_inputs(), _natural_vent_active stays
+        False on the shadow even after production activates nat-vent for real — proves
+        this test would have caught the confirmed live "production=active fsm/shadow=
+        inactive, stuck for hours" class of incident before it shipped."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._natural_vent_active = True
+        coordinator.automation_engine._paused_by_door = True
+        coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._natural_vent_active is False
+        assert coordinator.shadow_automation_engine._paused_by_door is False
 
 
 class TestNewlyMirroredDecisionMethods:

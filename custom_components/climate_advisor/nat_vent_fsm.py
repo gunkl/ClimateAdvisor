@@ -82,6 +82,13 @@ class NatVentFsmEventKind(Enum):
     GRACE_ENDED = "grace_ended"
     OVERRIDE_CONFIRMED = "override_confirmed"
     OVERRIDE_CLEARED = "override_cleared"
+    # Issue #673 Phase 3 audit: confirmed only TICK is fed from any real call site
+    # (automation.py, coordinator.py) — the other 6 members are unused-in-v1, exactly
+    # as this class's own docstring above says. Confirmed safe by grep: transition()
+    # only ever assigns `event_kind=event.kind` into the result record, never branches
+    # on it (`if`/`==` against .kind does not appear anywhere in this module), so
+    # feeding TICK for a door-pause/grace/override-triggered re-evaluation produces the
+    # identical transition a "correctly" kinded event would. No gap; not wired further.
 
 
 @dataclass(frozen=True)

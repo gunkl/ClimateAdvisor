@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.34"
+VERSION = "0.6.35"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.35": [
+        "Fix #676: no user-visible change. Closes a second, separate shadow-diagnostic"
+        " gap found immediately after #672/#673 shipped: when a grace period expired"
+        " with a door/window sensor still open and free-cooling conditions happened to"
+        " be favorable, natural ventilation correctly resumed and the pause was"
+        " correctly cleared, but the shadow diagnostic engine was never told about it"
+        " and could show a stuck false 'disagreement' for 20+ minutes. Real HVAC/fan"
+        " behavior was always correct throughout; only the diagnostic mirror could"
+        " drift.",
+    ],
     "0.6.34": [
         "Fix #673: no user-visible change. Closes a structural gap in the shadow-"
         " diagnostic safety net related to #672 — four nat-vent/door-window fields"
@@ -1963,6 +1973,28 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    676: {
+        "version_fixed": "0.6.35",
+        "title": (
+            "Door/window shadow FSM stuck at paused_idle when a grace-expiry re-pause"
+            " check was preempted by nat-vent reactivation — production correctly"
+            " resumed but the shadow FSM never received the transition"
+        ),
+        "scope_covered": (
+            "automation.py: AutomationEngine._re_pause_for_open_sensor()'s nat-vent"
+            " reactivation branch (_reactivates=True) now calls"
+            " _resolve_door_window_pause_flags(kind=PAUSED_NAT_VENT_REACTIVATED, ...)"
+            " and emits the dedicated 'nat_vent_reactivated_while_paused' event type,"
+            " matching the structurally identical sibling branch already fixed in"
+            " check_natural_vent_conditions() by Issues #647/#660/#668. This call site"
+            " was the one remaining place emitting only the unrelated 'sensor_opened'"
+            " event (kept unchanged for its own consumers), which is not wired to any"
+            " door/window-FSM-clearing transition. Confirmed unrelated to the"
+            " natvent_fsm_authoritative switch (Issue #594 Phase R) and to #672/#673's"
+            " raw-flag-sync fix — this is a distinct event-wiring gap in a third call"
+            " site, found via live overnight logs the night #672/#673 shipped."
+        ),
+    },
     673: {
         "version_fixed": "0.6.34",
         "title": (

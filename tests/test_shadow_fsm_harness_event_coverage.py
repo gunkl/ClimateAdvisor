@@ -302,3 +302,91 @@ class TestPausedNatVentReactivatedPositiveControl:
             "reproduce the live bug (shadow FSM wrongly reset to NORMAL) — if this assertion "
             "fails, the tests above are not actually exercising the dispatch table they claim to"
         )
+
+
+class TestRePauseForOpenSensorReactivationEventCoverage:
+    """Issue #676: ``_re_pause_for_open_sensor()`` (the async task ``_on_grace_expired()``
+    schedules when grace expires with a sensor still open) has a reactivation branch
+    structurally identical to ``check_natural_vent_conditions()``'s own paused-by-door
+    reactivation block (covered above by ``TestPausedNatVentReactivatedEventCoverage``) —
+    but it was never updated when Issues #647/#660/#668 wired
+    ``PAUSED_NAT_VENT_REACTIVATED``/``"nat_vent_reactivated_while_paused"`` into that
+    sibling branch. Confirmed live, 2026-08-18: after grace expired with a sensor still
+    open, production correctly reactivated nat-vent and cleared its own pause flags, but
+    the shadow door/window FSM stuck at ``PAUSED_IDLE`` for 20+ minutes
+    (``production=normal fsm=paused_idle``).
+    """
+
+    def test_real_reactivation_clears_shadow_fsm(self) -> None:
+        """Outdoor genuinely cool enough to reactivate nat-vent while paused — reaches
+        the ``_reactivates`` branch's ``_resolve_door_window_pause_flags(kind=
+        PAUSED_NAT_VENT_REACTIVATED, ...)`` call this fix added. Calls production's real
+        ``ae._re_pause_for_open_sensor()`` directly (not ``_mirror_to_shadow``, which
+        replays on the shadow engine and never reaches the event-driven feed — that's
+        fed only from production's own ``_emit_event_callback``, wired to
+        ``coordinator._emit_event``, same reasoning as the sibling tests above)."""
+        coordinator, _fake_hass, scheduler, _event_log, ae = _build_paused_by_door_coordinator(
+            outdoor=58.5, indoor=73.0, hvac_already_off=False
+        )
+
+        with scheduler.installed():
+            run_coro(ae._re_pause_for_open_sensor())
+            scheduler.advance_to(scheduler.now())
+
+        assert ae._paused_by_door is False, "production must have actually reactivated — sanity check"
+        assert ae._natural_vent_active is True, "production must have actually reactivated — sanity check"
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.NORMAL, (
+            f"shadow door/window FSM ({coordinator._door_window_fsm_state}) disagreed with "
+            "production's real reactivation via _re_pause_for_open_sensor() — the fix's new "
+            "event emit must reach the shadow FSM feed (Issue #676)"
+        )
+
+    def test_no_reactivation_leaves_shadow_fsm_paused(self) -> None:
+        """Outdoor too warm to reactivate — the `_reactivates` branch is never taken, so
+        the shadow FSM must stay PAUSED_IDLE, not get reset (mirrors the sibling
+        no-reactivation test's correctness-preserving direction)."""
+        coordinator, _fake_hass, scheduler, _event_log, ae = _build_paused_by_door_coordinator(
+            outdoor=85.0, indoor=73.0, hvac_already_off=False
+        )
+
+        with scheduler.installed():
+            run_coro(ae._re_pause_for_open_sensor())
+            scheduler.advance_to(scheduler.now())
+
+        assert ae._paused_by_door is True, "production must not have reactivated — sanity check"
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.PAUSED_IDLE, (
+            f"shadow door/window FSM ({coordinator._door_window_fsm_state}) was wrongly reset — "
+            "_re_pause_for_open_sensor() ran but did not actually reactivate nat-vent"
+        )
+
+
+class TestRePauseForOpenSensorReactivationPositiveControl:
+    """Proves the test above is load-bearing: filtering out just the new
+    "nat_vent_reactivated_while_paused" emit (simulating the pre-#676 code, which never
+    emitted it from this call site) must make the shadow FSM stick at PAUSED_IDLE even
+    though production correctly reactivated."""
+
+    def test_filtering_the_new_event_reproduces_the_bug(self) -> None:
+        coordinator, _fake_hass, scheduler, _event_log, ae = _build_paused_by_door_coordinator(
+            outdoor=58.5, indoor=73.0, hvac_already_off=False
+        )
+
+        real_emit = coordinator._emit_event
+
+        def _filtered_emit(event_type: str, data: dict | None = None) -> None:
+            if event_type == "nat_vent_reactivated_while_paused":
+                return
+            real_emit(event_type, data)
+
+        ae._emit_event_callback = _filtered_emit
+
+        with scheduler.installed():
+            run_coro(ae._re_pause_for_open_sensor())
+            scheduler.advance_to(scheduler.now())
+
+        assert ae._paused_by_door is False, "production's own reactivation is unaffected by the filter"
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.PAUSED_IDLE, (
+            "positive control FAILED: filtering out the new event should reproduce the live bug "
+            "(shadow FSM stuck at PAUSED_IDLE) — if this assertion fails, the test above is not "
+            "actually exercising the new event this fix added"
+        )

@@ -5192,6 +5192,31 @@ class AutomationEngine:
                 )
                 await self._activate_fan(reason=nat_vent_reason)
                 self._natural_vent_active = True
+
+                from .door_window_fsm import DoorWindowFsmEventKind
+
+                # Issue #676: this branch is structurally identical to
+                # check_natural_vent_conditions()'s own paused-reactivation branch
+                # (automation.py ~3860-3953), which already routes through
+                # _resolve_door_window_pause_flags() and emits
+                # "nat_vent_reactivated_while_paused" — the only event type wired to the
+                # shadow door/window FSM's PAUSED_NAT_VENT_REACTIVATED transition
+                # (coordinator.py's _DOOR_WINDOW_NAT_VENT_REACTIVATED_EVENT_TYPES). This
+                # call site was never updated to match when that mechanism was built
+                # (Issues #647/#660/#668), so the shadow FSM never left paused_idle when
+                # grace expired into this specific reactivation path — production
+                # correctly reactivated nat-vent and cleared its own pause flags below,
+                # but the shadow FSM had no event telling it to do the same, sticking at
+                # paused_idle indefinitely (confirmed live, 2026-08-18: 20+ minutes of
+                # stuck "production=normal fsm=paused_idle" disagreement).
+                def _legacy_clear_pause() -> None:
+                    self._paused_by_door = False
+                    self._paused_with_hvac_already_off = False
+
+                self._resolve_door_window_pause_flags(
+                    kind=DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED,
+                    legacy=_legacy_clear_pause,
+                )
                 if not self._doorwindow_fsm_authoritative:
                     # Issue #637 (Phase R Step 1, violation #3): clear the stale pause
                     # flag, matching the structurally identical branch in
@@ -5223,6 +5248,20 @@ class AutomationEngine:
                     nat_vent_threshold,
                 )
                 if self._emit_event_callback:
+                    # Issue #676: emitted BEFORE "sensor_opened" below, deliberately —
+                    # feeds the shadow door/window FSM's PAUSED_NAT_VENT_REACTIVATED
+                    # transition; unrelated to and consumed independently of
+                    # "sensor_opened" (Activity Report rendering, etc.). Ordered first
+                    # so "sensor_opened" — the event the golden-scenario harness's
+                    # production_outcome_at() already maps to this branch's
+                    # "natural_ventilation" outcome — remains the last-emitted event at
+                    # this instant, unchanged from pre-fix behavior; this new event type
+                    # has no outcome mapping of its own (diagnostic-only) and would
+                    # otherwise shadow it.
+                    self._emit_event_callback(
+                        "nat_vent_reactivated_while_paused",
+                        {"outdoor": outdoor, "indoor": indoor, "threshold": nat_vent_threshold},
+                    )
                     self._emit_event_callback(
                         "sensor_opened",
                         {

@@ -333,3 +333,47 @@ class TestFanOverrideDetected:
         t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.OVERRIDE_DETECTED, confirm_seconds=600.0))
         assert t.to_state == _PENDING_NONE
         assert t.outcome == "detected"
+
+
+class TestUnprotectedGraceStarted:
+    """Issue #672: _start_grace_period()'s "every other trigger" callers (fan-off,
+    window-close, nat-vent-exit, drift-correction) were deliberately never modeled at
+    all — production genuinely starts a real, non-protecting grace for these, but the
+    FSM had no event kind to represent it, so it stayed permanently stuck (confirmed
+    live: production=idle/active_unprotected vs fsm=idle/none, indefinitely).
+    UNPROTECTED_GRACE_STARTED is short-circuited at the top of transition(), same
+    shape as FAN_OVERRIDE_DETECTED, so this holds from all three origin states."""
+
+    def test_from_no_grace_lands_unprotected_immediately(self):
+        t = transition(_IDLE_NONE, _ev(OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED))
+        assert t.to_state == _IDLE_UNPROTECTED
+        assert t.outcome == "unprotected_grace_started"
+        assert t.changed
+
+    def test_from_grace_protecting_downgrades_to_unprotected(self):
+        """A new unprotected-trigger grace always REPLACES whatever was running before
+        — production's _start_grace_period_action() unconditionally cancels the prior
+        timer first, and _legacy_set_grace_flags() derives fresh from only the new
+        trigger, never the prior state."""
+        t = transition(_IDLE_PROTECTING, _ev(OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED))
+        assert t.to_state == _IDLE_UNPROTECTED
+        assert t.changed
+
+    def test_from_grace_unprotected_stays_unprotected_idempotent(self):
+        t = transition(_IDLE_UNPROTECTED, _ev(OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED))
+        assert t.to_state == _IDLE_UNPROTECTED
+        assert not t.changed
+
+    def test_confirm_state_preserved_not_reset_to_idle(self):
+        """Regression guard distinguishing this from FAN_OVERRIDE_DETECTED: that kind
+        hardcodes IDLE on the confirm axis; this one must not, since
+        _legacy_set_grace_flags() never touches _override_confirm_pending."""
+        t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED))
+        assert t.to_state == _PENDING_UNPROTECTED
+        assert t.to_state[0] == OverrideConfirmState.PENDING
+
+    def test_fan_override_detected_unaffected_still_hardcodes_idle(self):
+        """Regression guard: the fix must not change FAN_OVERRIDE_DETECTED's own
+        existing confirm-axis behavior."""
+        t = transition(_PENDING_NONE, _ev(OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED))
+        assert t.to_state[0] == OverrideConfirmState.IDLE

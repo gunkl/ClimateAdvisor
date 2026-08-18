@@ -519,6 +519,10 @@ class TestGraceProtectsOverrideClassification:
         ae = _make_automation_engine_stub()
         ae._start_grace_period = types.MethodType(AutomationEngine._start_grace_period, ae)
         ae._cancel_grace_timers = types.MethodType(AutomationEngine._cancel_grace_timers, ae)
+        ae._resolve_override_grace_fsm_state = types.MethodType(AutomationEngine._resolve_override_grace_fsm_state, ae)
+        # Issue #672: _start_grace_period() now routes through the dispatcher, which
+        # reads this flag directly (not via a bound-method default) even in legacy mode.
+        ae._override_grace_fsm_authoritative = False
         ae._emit_event_callback = None
         ae.config = {}
         return ae

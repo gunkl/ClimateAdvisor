@@ -113,6 +113,16 @@ class OverrideGraceFsmEventKind(Enum):
     # immediately at the dispatcher level without touching the thermostat path's
     # shared confirm-delay logic at all.
     FAN_OVERRIDE_DETECTED = "fan_override_detected"
+    # Issue #672: _start_grace_period()'s "every other trigger" callers (fan-off,
+    # window-close, nat-vent-exit, drift-correction) were deliberately never modeled at
+    # all — production genuinely starts a real, non-override-protecting grace for these,
+    # but the FSM had no event kind to represent it, so it stayed permanently stuck
+    # wherever it last was (confirmed live: production=idle/active_unprotected vs
+    # fsm=idle/none, indefinitely). Like FAN_OVERRIDE_DETECTED, this is unconditional on
+    # origin state — _legacy_set_grace_flags() never reads prior grace/confirm state,
+    # only the new trigger — so it's handled the same way, before the state-based
+    # dispatch, not inside any of the three _transition_from_* functions.
+    UNPROTECTED_GRACE_STARTED = "unprotected_grace_started"
 
 
 @dataclass(frozen=True)
@@ -397,15 +407,15 @@ def transition(current_state: OverrideGraceLifecycleState, event: OverrideGraceF
     only where it matters, mirroring ``door_window_fsm.py``'s own precedent of
     collapsing sub-states that share almost all their transition logic.
 
-    ``FAN_OVERRIDE_DETECTED`` (Issue #661) is handled here, before the
-    state-based dispatch, rather than inside any of the three
-    ``_transition_from_*`` functions: ``handle_fan_manual_override()`` is fully
-    idempotent and unconditional in production (always lands on
-    ``ACTIVE_PROTECTING_OVERRIDE`` regardless of origin state — see
-    ``_GRACE_TRIGGERS_PROTECTING_OVERRIDE`` in automation.py), so there is no
-    state-dependent branching to do, and short-circuiting here keeps
-    ``_land_after_detection()``'s thermostat-only confirm-delay model completely
-    untouched by the fan path's different contract.
+    ``FAN_OVERRIDE_DETECTED`` (Issue #661) and ``UNPROTECTED_GRACE_STARTED`` (Issue #672)
+    are both handled here, before the state-based dispatch, rather than inside any of the
+    three ``_transition_from_*`` functions: both are fully idempotent and unconditional on
+    origin state in production (``handle_fan_manual_override()`` always lands on
+    ``ACTIVE_PROTECTING_OVERRIDE``; ``_legacy_set_grace_flags()`` — the "every other
+    trigger" flag-write ``_start_grace_period()`` always performs — always lands on
+    ``ACTIVE_UNPROTECTED`` for a non-protecting trigger), so there is no state-dependent
+    branching to do, and short-circuiting here keeps ``_land_after_detection()``'s
+    thermostat-only confirm-delay model completely untouched by either's different contract.
     """
     if event.kind == OverrideGraceFsmEventKind.FAN_OVERRIDE_DETECTED:
         # Issue #664: "unconditional" means unconditional on ORIGIN STATE — it does not
@@ -415,6 +425,28 @@ def transition(current_state: OverrideGraceLifecycleState, event: OverrideGraceF
         next_state = (OverrideConfirmState.IDLE, grace_next)
         return OverrideGraceTransition(
             current_state, next_state, event.kind, "fan_override_immediate", event.inputs.now
+        )
+
+    if event.kind == OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED:
+        # Unlike FAN_OVERRIDE_DETECTED, this does NOT consult inputs.grace_would_start:
+        # that field is computed by _manual_grace_would_start(), which only ever resolves
+        # against the MANUAL grace duration (its own docstring: "every override/grace-
+        # modeled event that starts grace uses source='manual'") — but 3 of this event's
+        # 4 real triggers (window-close, nat-vent-exit x2) use source="automation". Using
+        # it here would silently check the wrong config value. Instead, this event is only
+        # ever dispatched by the caller AFTER _start_grace_period_action() has already
+        # returned True (a real grace, resolved against the correct source, definitely
+        # started) — same established gating convention every other real call site uses
+        # (see resume_from_pause()) — so landing unconditionally on ACTIVE_UNPROTECTED is
+        # correct by construction, not an assumption.
+        #
+        # _legacy_set_grace_flags() never touches _override_confirm_pending — preserve
+        # whatever confirm state carried over, unlike FAN_OVERRIDE_DETECTED above (which
+        # hardcodes IDLE per its own established precedent); only the grace axis changes.
+        confirm, _grace = current_state
+        next_state = (confirm, GraceState.ACTIVE_UNPROTECTED)
+        return OverrideGraceTransition(
+            current_state, next_state, event.kind, "unprotected_grace_started", event.inputs.now
         )
     _confirm, grace = current_state
     if grace == GraceState.NONE:

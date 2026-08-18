@@ -4766,11 +4766,11 @@ class AutomationEngine:
     def _legacy_set_grace_flags(self, trigger: str) -> None:
         """The 2-line flag computation ``_start_grace_period()`` always used to perform
         inline (Issue #664) — extracted so it can be passed as the ``legacy`` closure to
-        ``_resolve_override_grace_fsm_state()`` at the real override/grace call sites,
-        and reused unchanged by ``_start_grace_period()`` itself for every other trigger
-        (fan-off, window-close, nat-vent-exit, drift-correction) that isn't a modeled
-        ``OverrideGraceFsmEventKind`` at all — those callers never touch the dispatcher,
-        by design (there is nothing for the FSM to arbitrate; only this flag-write runs).
+        ``_resolve_override_grace_fsm_state()`` at every real override/grace call site,
+        including (as of Issue #672) ``_start_grace_period()``'s own "every other
+        trigger" callers (fan-off, window-close, nat-vent-exit, drift-correction),
+        under the ``UNPROTECTED_GRACE_STARTED`` kind — this is the non-authoritative
+        branch's flag computation for all of them now, not a legacy-only path.
         """
         self._grace_active = True
         self._grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE
@@ -4863,17 +4863,42 @@ class AutomationEngine:
                 source == "manual"; ignored otherwise.
 
         Issue #664: thin wrapper — real work lives in ``_start_grace_period_action()``.
-        This wrapper is for every caller whose ``trigger`` is NOT a modeled
+        This wrapper is for every caller whose ``trigger`` was historically NOT a modeled
         ``OverrideGraceFsmEventKind`` (fan-off, window-close, nat-vent-exit,
-        drift-correction, etc.) — those callers keep this exact unconditional
-        action-then-flags shape, unchanged. The ~3 callers whose trigger IS modeled
+        drift-correction, etc.). The ~3 callers whose trigger IS modeled
         (``fan_manual_override``, ``dashboard_resume``, ``override_confirmed``) call
         ``_start_grace_period_action()`` directly instead and route the flag-write
         through ``_resolve_override_grace_fsm_state()`` — see ``handle_fan_manual_override()``,
         ``resume_from_pause()``, ``_confirm_override()``.
+
+        Issue #672: this wrapper's own "every other trigger" callers now ALSO route
+        through the dispatcher, under ``UNPROTECTED_GRACE_STARTED`` — closing the gap
+        where those triggers set real production state (``_grace_active=True``,
+        never protecting) but the FSM had no way to ever find out. One shared edit here
+        covers all of them (fan-off, window-close, nat-vent-exit, drift-correction),
+        instead of touching each of their individual call sites.
         """
         if self._start_grace_period_action(source, trigger, duration_override):
-            self._legacy_set_grace_flags(trigger)
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            self._resolve_override_grace_fsm_state(
+                kind=_OGFEventKind.UNPROTECTED_GRACE_STARTED,
+                legacy=lambda: self._legacy_set_grace_flags(trigger),
+            )
+            # Issue #672: a second, DISTINCT event from _start_grace_period_action()'s own
+            # "grace_started" (which also fires for the 3 protecting triggers, via their
+            # own direct dispatcher call sites — reusing it here would wrongly feed
+            # UNPROTECTED_GRACE_STARTED for those too). This wrapper is, by construction
+            # per its own docstring, called only for the non-protecting triggers, so this
+            # event type is exactly and only ever "an unprotected grace genuinely started"
+            # — feeds coordinator.py's diagnostic FSM tracker via
+            # _OVERRIDE_GRACE_FSM_EVENT_TYPE_MAP, closing the live production=idle/
+            # active_unprotected vs fsm=idle/none gap this whole fix targets.
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "unprotected_grace_started",
+                    {"source": source, "trigger": trigger},
+                )
 
     def _on_grace_expired(self, source: str, duration: int, should_notify: bool) -> None:
         """Handle grace period expiry — re-check sensors then clear state.

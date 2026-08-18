@@ -321,6 +321,11 @@ _OVERRIDE_GRACE_EVENT_KIND_REGISTRY: dict[str, str] = {
     # transition (_land_after_detection with grace fixed at ACTIVE_PROTECTING_OVERRIDE)
     # correctly matches production's real "confirm re-evaluated, grace untouched" behavior.
     "OVERRIDE_SUPERSEDED": "reachable",
+    # Issue #672: automation.py's _start_grace_period() — the shared wrapper for every
+    # trigger that was never modeled at all (fan-off, window-close, nat-vent-exit,
+    # drift-correction) — now dispatches this kind after _start_grace_period_action()
+    # confirms a real grace actually started.
+    "UNPROTECTED_GRACE_STARTED": "reachable",
 }
 
 

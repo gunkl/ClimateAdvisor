@@ -129,6 +129,11 @@ UNMAPPED_PRODUCTION_EVENTS: frozenset[str] = frozenset(
         "nat_vent_floor_imminent_skip",
         "nat_vent_predicted_floor_exit",
         "grace_started",
+        # Issue #672: emitted from the exact same _start_grace_period() call site as
+        # "grace_started" above, moments later — same "always fires last, shadows the
+        # real outcome" reasoning. Feeds coordinator.py's diagnostic override/grace FSM
+        # tracker only; not a decision outcome of its own.
+        "unprotected_grace_started",
         "incident_detected",
         # Issue #523: startup_coalesced is a bookkeeping summary (nat_vent_activated/
         # hvac_commanded/sensors_open_count echoing what the coalesce cycle already

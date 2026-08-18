@@ -391,6 +391,15 @@ def _sync_reconcile_next_state(
             return DoorWindowLifecycleState.PAUSED_DURING_GRACE
         return current_state
 
+    # Issue #672: a grace period started for a reason unrelated to any door/window pause
+    # (override grace, fan-off grace — cross-lifecycle, same "communicating automata"
+    # convention as natural_vent_active/whf_owns_hvac below) is invisible from a NORMAL
+    # origin — the pause-entry checks below never consult grace_active at all, so a live
+    # production=grace vs fsm=normal disagreement never self-corrects. Mirrors the
+    # PAUSED_ACTIVE/PAUSED_IDLE branch's own "grace_active wins" shape above.
+    if current_state == DoorWindowLifecycleState.NORMAL and inputs.grace_active:
+        return DoorWindowLifecycleState.GRACE
+
     if inputs.natural_vent_active or inputs.whf_owns_hvac:
         return current_state
     if inputs.within_planned_window:

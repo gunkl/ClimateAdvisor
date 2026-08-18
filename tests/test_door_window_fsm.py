@@ -106,6 +106,27 @@ class TestFromNormal:
         )
         assert t.to_state == DoorWindowLifecycleState.NORMAL
 
+    def test_sync_reconcile_grace_active_upgrades_from_normal(self):
+        """Issue #672: a grace period started for a reason unrelated to any door/window
+        pause (override grace, fan-off grace) must not be invisible from NORMAL forever —
+        live incident 2026-08-17 showed production=grace/fsm=normal stuck for 90+ minutes
+        across many SYNC_RECONCILE cycles because this branch never consulted grace_active
+        at all. No sensor open, so the pause-entry checks below would otherwise no-op."""
+        t = transition(
+            DoorWindowLifecycleState.NORMAL,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, any_sensor_open=False, grace_active=True),
+        )
+        assert t.to_state == DoorWindowLifecycleState.GRACE
+
+    def test_sync_reconcile_no_grace_stays_normal(self):
+        """Negative control: NORMAL with no sensor open and no grace stays NORMAL —
+        confirms the new grace_active check doesn't fire when grace is genuinely inactive."""
+        t = transition(
+            DoorWindowLifecycleState.NORMAL,
+            _ev(DoorWindowFsmEventKind.SYNC_RECONCILE, any_sensor_open=False, grace_active=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
+
     def test_nat_vent_exited_sensor_still_open_active(self):
         t = transition(
             DoorWindowLifecycleState.NORMAL,

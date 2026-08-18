@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.32"
+VERSION = "0.6.33"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.33": [
+        "Fix #672: no user-visible change. Three shadow-diagnostic state machines"
+        " (door/window, nat-vent, override/grace) each had their own reason for"
+        " getting permanently stuck out of sync with real production state after a"
+        " restart or a specific state transition — real HVAC/fan behavior was"
+        " always correct throughout. Fixed all three: door/window now notices a"
+        " grace period that starts for an unrelated reason, nat-vent can recognize"
+        " a door-pause condition even after wrongly staying active, and"
+        " override/grace now tracks fan-off/window-close/nat-vent-exit/drift-"
+        " correction grace periods it previously never modeled at all.",
+    ],
     "0.6.32": [
         "Fix #670: right after an HA restart, if a door or window was already open, the"
         " whole-house fan could switch on before the startup-reconciliation logic had a"
@@ -1941,6 +1952,35 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    672: {
+        "version_fixed": "0.6.33",
+        "title": (
+            "Door/window, nat-vent, and override/grace shadow-FSM diagnostics each had a"
+            " different, previously-unexamined reason for staying permanently stuck"
+            " out of sync with production"
+        ),
+        "scope_covered": (
+            "door_window_fsm.py: _sync_reconcile_next_state() never checked grace_active"
+            " from a NORMAL origin, so a grace period started for a reason unrelated to any"
+            " door/window pause (override grace, fan-off grace) was invisible forever"
+            " (production=grace fsm=normal, confirmed live for 90+ minutes 2026-08-17)."
+            " nat_vent_fsm.py: _transition_from_active() only checked the thermal/comfort"
+            " exit chain, never a door-pause/reactivation-lockout condition, so a wrongly-"
+            " active FSM had no path back once stuck (confirmed live for 34+ minutes across"
+            " 2 full startup-coalesce cycles). override_grace_fsm.py: added"
+            " UNPROTECTED_GRACE_STARTED — automation.py's _start_grace_period() (the shared"
+            " wrapper for fan-off/window-close/nat-vent-exit/drift-correction grace starts)"
+            " now routes through _resolve_override_grace_fsm_state() instead of calling"
+            " _legacy_set_grace_flags() directly, closing the one gap those 4 triggers all"
+            " shared. All three fixes proven inert on real decisions today: door/window's"
+            " SYNC_RECONCILE and nat-vent's new check can never reach the live authoritative"
+            " path (confirmed structurally); override/grace's fix was proven equivalent"
+            " to the legacy path across the full golden+pending scenario corpus with"
+            " _override_grace_fsm_authoritative=True (same rigor #664's original cutover"
+            " used) before merging, since it does extend what that switch would drive if"
+            " ever flipped."
+        ),
+    },
     670: {
         "version_fixed": "0.6.32",
         "title": (

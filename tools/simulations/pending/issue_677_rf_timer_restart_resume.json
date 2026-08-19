@@ -1,0 +1,104 @@
+{
+  "name": "issue_677_rf_timer_restart_resume",
+  "description": "Issue #677: an HA restart mid-QuietCool-RF-timer session wiped CA's in-memory RF-timer bookkeeping. Without a live re-read of the remote entity's still-valid re-announced timer token at startup coalescing, the eventual natural hardware shutoff hours later was misread as a fresh, unexplained manual fan action — starting a brand-new configured-default grace period (potentially hours long) that locked whole-house-fan/nat-vent free cooling out the next morning despite favorable outdoor air.",
+  "source": "synthetic",
+  "issue": 677,
+  "notes": [
+    "Occupant impact: the user presses the QuietCool wall remote's 8-hour timer to run the whole-house fan overnight. A routine software restart mid-session (e.g. an integration update) silently forgets that a timer is running. When the fan's own hardware timer naturally turns it off hours later, without this fix CA has zero memory this was expected and treats it as a surprise manual action, arming a fresh multi-hour grace period that keeps the AC/nat-vent locked out the next morning even though outdoor conditions are ideal for free cooling.",
+    "Fix (coordinator._read_live_remote_timer_provenance(), Issue #677): _do_startup_coalesce() now performs one additional LIVE read (not new persisted state — climate_advisor_state.json is unchanged) of the configured fan_remote_entity's current HA state immediately before its existing reconcile_fan_on_startup() call. The QuietCool ESPHome device re-announces its last retained event_type as it reconnects post-restart (docs/fan-remote-spec.md § Restart Behavior — already relied on by Issue #491's startup-coalescing suppression for the live-press path). If that re-announced token is a still-unexpired timer (computed from the press timestamp + the token's own duration, entirely from live data — no new TTL constant), reconcile_fan_on_startup()'s new remote_timer_provenance branch (automation.py, checked before the existing adopt-on/turn-off nat-vent logic) re-arms handle_fan_manual_override() with duration_override set to the REMAINING seconds and remote_timer_hours set to the token's hours — restoring _fan_remote_timer_hours, which is what Issue #530's existing _timer_boundary_settle_until mechanism depends on to recognize the eventual natural hardware shutoff as the tail of the SAME timer session rather than a fresh event.",
+    "(a) Scenario effectiveness: without Step 3 (the remote_timer_provenance branch in automation.py's _reconcile_fan_on_startup_locked), remote_timer_provenance is computed by the coordinator but never acted on — reconcile_fan_on_startup() falls straight into the pre-existing adopt-on/turn-off nat-vent logic, no second fan_manual_override event is ever emitted post-restart, and _fan_remote_timer_hours stays None. remote_timer_rearmed_after_restart would find no matching event and fail (return False) — directly proven via a standalone revert-test during development (temporarily short-circuiting the branch made the equivalent unit-level assertion in tests/test_fan_remote.py::TestReconcileFanOnStartupRemoteTimerProvenance fail with 'Expected mock to be called once. Called 0 times.'). Without Step 1 (_read_live_remote_timer_provenance() itself), remote_timer_provenance would always be None regardless of a live remote press, silently disabling the whole feature — this scenario's restart+coalesce sequence exercises the real live-read call site, not a mocked value.",
+    "(b) Docs-production alignment: docs/fan-remote-spec.md § Restart Behavior already documented that the remote entity re-announces its retained event_type post-restart and that _suppress_during_startup_coalescing() covers the live-press misread case; this fix's rationale (reading that same live re-announcement specifically for provenance recovery, not live-press suppression) is a natural extension of already-documented firmware behavior, not a new undocumented assumption.",
+    "(c) User outcome if this scenario's assertions fail in the future: after any restart during an active RF-remote whole-house-fan timer session, the eventual natural hardware shutoff would again be misread as a fresh manual fan action, arming an unwarranted grace period and denying the occupant free cooling for its full duration the next time conditions are favorable — silently reverting to the exact Issue #677 defect.",
+    "Scope note: this scenario deliberately does NOT model a door/window sensor or assert nat-vent's full reactivation sequence. The re-armed override's natural expiry (in sync with the physical hardware shutoff) feeds Issue #530's existing _timer_boundary_settle_until mechanism, whose own downstream behavior (settle-window fan-off handling, post-grace fan reconcile) already has dedicated coverage elsewhere. What THIS scenario proves — and what Issue #677's fix actually changes — is narrower and more direct: that the override/grace/_fan_remote_timer_hours bookkeeping Issue #530's mechanism depends on is correctly re-armed after a restart in the first place, and that no fresh, unexplained fan_manual_override event (the concrete mechanism of the reported hours-long lockout) is ever emitted for the natural hardware shutoff. remote_timer_rearmed_after_restart and no_new_manual_override_after are new, purely additive assertion types in tools/sim_harness/outcomes.py — CLAUDE.md's test-infrastructure-change rule (§8): they read only the pre-existing remote_timer_hours field of the pre-existing fan_manual_override event (Issue #486/#495), so no prior scenario's semantics changed. The generalized external_entity_state_change harness event type (tools/sim_harness/run_production.py) is likewise purely additive — a strict superset of external_fan_state_change (which continues unchanged) needed only because the RF remote entity's decoded command lives in attributes['event_type'], not the bare state string external_fan_state_change hardcodes to an empty attributes dict.",
+    "Correction made during authoring: an earlier draft of this scenario also asserted hvac_mode_never_commanded (forbidden cool/heat) across the WHOLE scenario, mirroring restart_whf_ac_mutex_backstop_race.json's own use of that assertion. Running it (python tools/simulate.py --pending -v) surfaced that this scenario's timeline legitimately commands cool mode again once the settle-window mechanism ends the session at 04:00:35 — this scenario's monitored window sensor is never opened, so once the RF-timer session correctly concludes there is no free-cooling condition left and the automation is SUPPOSED to resume cooling per its current hot-day classification. That is correct behavior, not a regression; a whole-scenario hvac_mode_never_commanded assertion would have encoded a wrong expectation (the AC permanently stranded off) rather than protecting the real guarantee (no AC/fan fight WHILE the session is active). Removed rather than papering over with a broader-scoped variant — restart_whf_ac_mutex_backstop_race.json already owns that guarantee for its own restart-timing bug, at an assertion time still inside the active session window; this scenario's own two assertions (remote_timer_rearmed_after_restart, no_new_manual_override_after) are the ones that actually exercise Issue #677's fix."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "fan_remote_entity": "event.quietcool_remote"
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-08-11T20:00:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a real prior state for fan.whf -- _async_fan_entity_changed requires both old_state and new_state to be non-None to evaluate a transition (mirrors restart_whf_ac_mutex_backstop_race.json's identical seeding rationale)."
+    },
+    {
+      "time": "2026-08-11T20:00:05",
+      "type": "classification",
+      "day_type": "hot",
+      "hvac_mode": "cool",
+      "windows_recommended": false,
+      "note": "Hot evening, thermostat commanded to cool -- gives the WHF override below a real prior HVAC mode to capture/suppress via _pre_fan_hvac_mode."
+    },
+    {
+      "time": "2026-08-11T20:00:10",
+      "type": "temp_update",
+      "indoor_f": 78.0,
+      "outdoor_f": 68.0,
+      "note": "Evening: outdoor well below indoor -- realistic conditions for choosing to run the whole-house fan overnight (not itself asserted on by this scenario -- see notes' scope note)."
+    },
+    {
+      "time": "2026-08-11T20:00:30",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "User turns the whole-house fan on via the QuietCool RF remote's 8-hour timer button."
+    },
+    {
+      "time": "2026-08-11T20:00:35",
+      "type": "external_entity_state_change",
+      "entity": "event.quietcool_remote",
+      "state": "2026-08-11T20:00:35+00:00",
+      "attributes": {"event_type": "timer_8h"},
+      "note": "The RF remote's decoded firmware event: state is the press timestamp, attributes.event_type carries the selected 8-hour timer token (docs/fan-remote-spec.md). Real coordinator listener (_async_fan_remote_changed) processes this and, after the burst-combining window elapses (REMOTE_BURST_WINDOW_SECONDS=1.5s, well before the next event 9m25s later), calls handle_fan_manual_override(duration_override=28800, remote_timer_hours=8.0, is_remote_event=True) -- setting _fan_override_active=True, _fan_remote_timer_hours=8.0, and a grace period running to 2026-08-12T04:00:35."
+    },
+    {
+      "time": "2026-08-11T20:10:00",
+      "type": "simulate_restart",
+      "note": "Models an HA restart 10 minutes into the 8-hour timer session -- e.g. a routine integration update. engine.restore_state(engine.get_serializable_state()) wipes _fan_override_active/_fan_remote_timer_hours/_grace_active/_timer_boundary_settle_until (Issue #282/#327 clean-slate policy, deliberately unchanged by this fix) but the fan.whf and event.quietcool_remote entities' live HA state is untouched by restart -- fan.whf is still 'on' and event.quietcool_remote still holds its last-retained timer_8h token, exactly matching the real ESPHome device's post-restart reconnect/re-announce behavior this fix reads from."
+    },
+    {
+      "time": "2026-08-11T20:10:01",
+      "type": "startup_coalesce",
+      "note": "Real coordinator._do_startup_coalesce() entry point. With the Issue #677 fix: reads event.quietcool_remote live (_read_live_remote_timer_provenance()), computes remaining_seconds = (2026-08-11T20:00:35 + 8h) - 2026-08-11T20:10:01 = ~28234s, and — since the archetype-aware physical-state read confirms fan.whf is still physically 'on' — reconcile_fan_on_startup()'s new branch re-arms handle_fan_manual_override(duration_override=~28234, remote_timer_hours=8.0, is_remote_event=True) BEFORE the pre-existing adopt-on/turn-off nat-vent logic ever runs. Without the fix, remote_timer_provenance is never computed/passed and this reconcile falls straight into the pre-existing logic with no memory of the live timer at all."
+    },
+    {
+      "time": "2026-08-12T04:00:36",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "The QuietCool hardware's own internal timer clock naturally turns the fan off, ~8 hours after the original press (2026-08-11T20:00:35 + 8h = 2026-08-12T04:00:35) -- independent of and not synchronized to CA's software grace clock. With the fix, CA's re-armed grace (armed at restart to the correct REMAINING duration) expires at essentially this same real moment, so _on_grace_expired() has already cleared the override and armed the Issue #530 _timer_boundary_settle_until window by the time this physical transition arrives -- recognized as the tail of the same timer session, not a fresh event. Without the fix, no override/grace was ever tracked post-restart at all, so this physical off-transition reaches _async_fan_entity_changed()'s normal override-detection path with zero timer memory."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-11T20:10:01",
+      "expect": "remote_timer_rearmed_after_restart",
+      "since": "2026-08-11T20:10:01",
+      "remote_timer_hours": 8.0,
+      "reason": "The startup-coalesce reconcile must re-arm a fan_manual_override carrying the SAME 8-hour token the physical remote originally selected, proving _read_live_remote_timer_provenance()'s live read actually drove a real handle_fan_manual_override() call rather than merely computing a value that was silently discarded. 'since' is pinned to the restart/coalesce timestamp so this cannot accidentally match the original pre-restart press event, which also carries remote_timer_hours=8.0."
+    },
+    {
+      "at": "2026-08-12T04:01:00",
+      "expect": "no_new_manual_override_after",
+      "since": "2026-08-11T20:10:02",
+      "reason": "No SECOND fan_manual_override event may ever fire after the coalesce-time re-arm (which itself lands at 20:10:01, one second before this window starts) -- including at/after the RF timer's natural hardware shutoff at 04:00:36. A fresh fan_manual_override here is exactly the Issue #677 defect: the natural, expected shutoff being misread as a brand-new unexplained manual action and locking out free cooling behind an unwarranted fresh grace period."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After the Issue #677 fix, an HA restart mid-QuietCool-RF-timer session no longer causes the timer's natural hardware shutoff to be misread as a fresh manual action -- the live re-announced timer token is re-armed with the correct remaining duration at startup coalescing, so the existing Issue #530 timer-boundary mechanism (not a fresh multi-hour grace) handles the eventual natural shutoff.",
+    "observed_behavior": "A second fan_manual_override event (remote_timer_hours=8.0) fires at startup coalescing immediately after the restart; no further fan_manual_override event fires for the rest of the scenario, including at the RF timer's natural hardware shutoff at 04:00:36 — instead, the re-armed grace expires in sync at 04:00:35, the Issue #530 settle window absorbs the physical off-transition, and the session ends cleanly (nat_vent_reconcile_exit / fan_untracked_cleared), after which the automation legitimately resumes its current hot-day cool classification since no window was ever open to warrant continued free cooling.",
+    "expected_behavior": "A live, still-valid RF remote timer token surviving in HA state (not CA's own wiped bookkeeping) across a restart must be re-armed as the SAME override with the correct remaining duration, so the timer's own eventual natural end is never re-interpreted as a fresh, unexplained manual fan action."
+  }
+}

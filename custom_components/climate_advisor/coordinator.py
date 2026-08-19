@@ -2670,6 +2670,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             fan_mode_attr=_fan_mode_reconcile,
             hvac_action_attr=_hvac_action_reconcile,
         )
+        # Issue #677: live read (not persisted state) of whatever timer token the RF remote
+        # entity is still re-announcing at restart — lets reconcile re-arm the remaining
+        # grace instead of misreading the eventual natural hardware shutoff as a fresh
+        # manual action hours later. See _read_live_remote_timer_provenance()'s docstring.
+        _remote_timer_provenance = self._read_live_remote_timer_provenance()
         _LOGGER.debug("[coalesce-diag] before reconcile_fan_on_startup()")
         await self.automation_engine.reconcile_fan_on_startup(
             indoor=indoor,
@@ -2677,6 +2682,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             thermostat_fan_running=_thermostat_fan_running,
             any_sensor_open=self._any_sensor_open(),
             trigger="ha_restart",
+            remote_timer_provenance=_remote_timer_provenance,
         )
         # Issue #615: this exact call site is what tonight's bug reproduces — the
         # startup-time fan reconciliation that can set _natural_vent_active=True from
@@ -2688,6 +2694,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             thermostat_fan_running=_thermostat_fan_running,
             any_sensor_open=self._any_sensor_open(),
             trigger="ha_restart",
+            remote_timer_provenance=_remote_timer_provenance,
         )
         _LOGGER.debug("[coalesce-diag] after reconcile_fan_on_startup()")
 
@@ -5609,6 +5616,81 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if state is None or state.state in ("unknown", "unavailable"):
             return None
         return state.state
+
+    def _read_live_remote_timer_provenance(self) -> tuple[float, float] | None:
+        """Read the QuietCool RF remote's live re-announced timer state at restart (Issue #677).
+
+        The clean-slate restart policy (#282/#327) never persists CA's own
+        ``_fan_remote_timer_hours``/``_grace_active``/``_timer_boundary_settle_until`` —
+        deliberately unchanged here, this reads nothing new into ``climate_advisor_state.json``.
+        But the ``fan_remote_entity`` (the same ``event.*`` entity ``_async_fan_remote_changed()``
+        listens to) independently re-announces its last retained ``event_type`` as the ESPHome
+        device reconnects after restart (see docs/fan-remote-spec.md § Restart Behavior, already
+        relied on by Issue #491's startup-coalescing suppression). This is a LIVE read of that
+        re-announcement — the same category of live-entity read ``_do_startup_coalesce()``
+        already performs for the thermostat mode/fan mode — not new persisted state.
+
+        Without this, when the physical hardware timer naturally shuts the fan off hours after
+        a restart wiped CA's in-memory timer bookkeeping, ``on_fan_turned_off()`` starts a fresh
+        3-hour "manual" grace period with no memory this was expected, blocking nat-vent
+        reactivation for hours despite favorable outdoor air (Issue #677).
+
+        Returns ``(remaining_seconds, token_hours)`` if a genuine, still-unexpired timer token
+        is currently retained by the entity, else ``None`` — mirrors ``_read_fan_remote_speed()``'s
+        "returns None on anything not applicable" convention. Never raises: any parse failure or
+        missing data degrades to None rather than affecting startup.
+        """
+        try:
+            remote_entity_id = self.config.get(CONF_FAN_REMOTE_ENTITY)
+            if not remote_entity_id:
+                return None
+            state = self.hass.states.get(remote_entity_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                _LOGGER.debug(
+                    "RF timer provenance: fan_remote_entity %s unavailable at startup — nothing to resume",
+                    remote_entity_id,
+                )
+                return None
+            event_type = state.attributes.get("event_type")
+            is_timer, token_hours = parse_remote_timer_event(event_type)
+            if not is_timer or token_hours is None:
+                # Not a timer token, or `timer_none` (no fixed duration to resume from) —
+                # both degrade to "nothing to resume", matching parse_remote_timer_event()'s
+                # own contract.
+                _LOGGER.debug(
+                    "RF timer provenance: event_type=%s is not a resumable timer token — nothing to resume",
+                    event_type,
+                )
+                return None
+            press_time = dt_util.parse_datetime(state.state)
+            if press_time is None:
+                _LOGGER.debug("RF timer provenance: could not parse press timestamp %r", state.state)
+                return None
+            expires_at = press_time + timedelta(hours=token_hours)
+            now = dt_util.now()
+            if now >= expires_at:
+                # The timer's own natural end already passed — this is what makes a long
+                # power outage self-resolving; no separate TTL constant needed.
+                _LOGGER.info(
+                    "RF timer provenance: %sh timer pressed at %s already expired before restart — nothing to resume",
+                    token_hours,
+                    state.state,
+                )
+                return None
+            remaining_seconds = (expires_at - now).total_seconds()
+            _LOGGER.info(
+                "RF timer provenance: live re-announced %sh timer still has %.0fs remaining at"
+                " restart — will re-arm on reconcile if fan is still physically running",
+                token_hours,
+                remaining_seconds,
+            )
+            return remaining_seconds, token_hours
+        except Exception:
+            _LOGGER.debug(
+                "RF timer provenance read failed — treating as no active timer",
+                exc_info=True,
+            )
+            return None
 
     async def _async_reassert_setpoint_after_fan_off(self) -> None:
         """Re-assert CA's intended setpoint after an ecobee fan-off echo (Issue #359 Fix A).

@@ -1057,3 +1057,247 @@ class TestFanRemoteEchoGuard:
         asyncio.run(_dispatch_and_flush(coord, _make_fake_event(new_state)))
 
         ae.handle_fan_manual_override.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 8. _read_live_remote_timer_provenance() (Issue #677)
+# ---------------------------------------------------------------------------
+
+_PATCH_COORDINATOR_PARSE_DATETIME = "custom_components.climate_advisor.coordinator.dt_util.parse_datetime"
+
+
+def _make_provenance_coord(config: dict | None = None, *, remote_state: MagicMock | None = None) -> MagicMock:
+    """Minimal coordinator stub for _read_live_remote_timer_provenance() (Issue #677).
+
+    Mirrors _make_coordinator_stub()'s minimal-stub + importlib pattern (avoids stale
+    __globals__ from test_occupancy.py's module deletion) but only needs hass.states.get
+    and self.config -- the method under test performs no other coordinator access.
+    """
+    config = config if config is not None else {CONF_FAN_REMOTE_ENTITY: "event.quietcool_remote"}
+    hass = MagicMock()
+    hass.states = MagicMock()
+    hass.states.get = MagicMock(return_value=remote_state)
+
+    coord = MagicMock()
+    coord.hass = hass
+    coord.config = config
+
+    mod = importlib.import_module("custom_components.climate_advisor.coordinator")
+    coord._read_live_remote_timer_provenance = types.MethodType(
+        mod.ClimateAdvisorCoordinator._read_live_remote_timer_provenance, coord
+    )
+    return coord
+
+
+def _patched_dt():
+    """dt_util.now/parse_datetime are bare MagicMocks in the stub env; give them real
+    behavior anchored to _FIXED_NOW, matching the pattern test_startup_coalesce.py already
+    uses for this same stub gap."""
+    return (
+        patch(_PATCH_COORDINATOR_DT_NOW, return_value=_FIXED_NOW),
+        patch(_PATCH_COORDINATOR_PARSE_DATETIME, side_effect=lambda s: datetime.fromisoformat(s)),
+    )
+
+
+class TestReadLiveRemoteTimerProvenance:
+    """coordinator._read_live_remote_timer_provenance() (Issue #677).
+
+    Live read (not persisted state) of the RF remote entity's re-announced timer token at
+    restart -- the entity re-announces its last retained event_type as the ESPHome device
+    reconnects (docs/fan-remote-spec.md § Restart Behavior; already relied on by Issue #491's
+    startup-coalescing suppression). This lets startup reconcile re-arm the remaining grace
+    instead of misreading the timer's eventual natural hardware shutoff, hours later, as a
+    fresh unexplained manual action (Issue #677's occupant-facing bug: nat-vent locked out
+    for a fresh 3h "manual" grace despite favorable outdoor air).
+    """
+
+    def test_valid_unexpired_token_returns_remaining_seconds_and_hours(self):
+        # timer_8h pressed 1 hour before "now" -> 7 hours (25200s) remaining.
+        press_time = (_FIXED_NOW - timedelta(hours=1)).isoformat()
+        state = _make_fake_state(press_time, {"event_type": "timer_8h"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is not None
+        remaining_seconds, token_hours = result
+        assert token_hours == 8.0
+        assert remaining_seconds == 7 * 3600
+
+    def test_expired_token_returns_none(self):
+        # timer_2h pressed 3 hours before "now" -- the timer's own natural end already
+        # passed, which is what makes a long power outage self-resolving.
+        press_time = (_FIXED_NOW - timedelta(hours=3)).isoformat()
+        state = _make_fake_state(press_time, {"event_type": "timer_2h"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_no_fan_remote_entity_configured_returns_none(self):
+        coord = _make_provenance_coord(config={})
+        result = coord._read_live_remote_timer_provenance()
+        assert result is None
+        coord.hass.states.get.assert_not_called()
+
+    def test_malformed_event_type_returns_none(self):
+        state = _make_fake_state(_FIXED_NOW.isoformat(), {"event_type": "not_a_real_token"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_missing_event_type_returns_none(self):
+        state = _make_fake_state(_FIXED_NOW.isoformat(), {})
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_timer_none_token_returns_none(self):
+        """timer_none has no fixed duration to resume from -- degrades to None just like a
+        non-timer token, matching parse_remote_timer_event()'s own (True, None) contract."""
+        state = _make_fake_state(_FIXED_NOW.isoformat(), {"event_type": "timer_none"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_entity_unavailable_returns_none(self):
+        state = _make_fake_state("unavailable", {"event_type": "timer_8h"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_entity_unknown_returns_none(self):
+        state = _make_fake_state("unknown", {"event_type": "timer_8h"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_entity_missing_returns_none(self):
+        coord = _make_provenance_coord(remote_state=None)
+        result = coord._read_live_remote_timer_provenance()
+        assert result is None
+
+    def test_unparseable_timestamp_returns_none(self):
+        state = _make_fake_state("not-a-timestamp", {"event_type": "timer_8h"})
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+    def test_never_raises_on_unexpected_exception(self):
+        """The function must degrade to None on any failure, never affect startup -- confirm
+        a state.attributes access blowing up is swallowed, not propagated."""
+        state = MagicMock()
+        state.state = _FIXED_NOW.isoformat()
+        type(state).attributes = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
+        coord = _make_provenance_coord(remote_state=state)
+
+        p1, p2 = _patched_dt()
+        with p1, p2:
+            result = coord._read_live_remote_timer_provenance()
+
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# 9. reconcile_fan_on_startup(remote_timer_provenance=...) (Issue #677)
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileFanOnStartupRemoteTimerProvenance:
+    """automation.reconcile_fan_on_startup()'s new remote_timer_provenance branch (Issue #677).
+
+    This is the revert-test: without Step 3's new branch in
+    _reconcile_fan_on_startup_locked(), a valid provenance tuple would simply be ignored and
+    fall through to the pre-existing adopt-on/turn-off nat-vent logic, so
+    handle_fan_manual_override() would never be called here -- these assertions would fail
+    against the pre-fix code.
+    """
+
+    def test_valid_provenance_and_fan_running_rearms_manual_override(self):
+        ae = _make_automation_engine()
+        ae.handle_fan_manual_override = MagicMock()
+
+        asyncio.run(
+            ae.reconcile_fan_on_startup(
+                indoor=75.0,
+                outdoor=70.0,
+                thermostat_fan_running=True,
+                any_sensor_open=True,
+                trigger="ha_restart",
+                remote_timer_provenance=(25200.0, 8.0),
+            )
+        )
+
+        ae.handle_fan_manual_override.assert_called_once_with(
+            fan_before="on",
+            fan_after="on",
+            duration_override=25200.0,
+            remote_timer_hours=8.0,
+            is_remote_event=True,
+        )
+
+    def test_provenance_present_but_fan_off_takes_no_special_action(self):
+        """Fan already reads off -- provenance is provided but deliberately ignored; falls
+        through to the existing no-fan/turn-off path instead of re-arming an override for a
+        fan that isn't running."""
+        ae = _make_automation_engine()
+        ae.handle_fan_manual_override = MagicMock()
+
+        asyncio.run(
+            ae.reconcile_fan_on_startup(
+                indoor=75.0,
+                outdoor=70.0,
+                thermostat_fan_running=False,
+                any_sensor_open=True,
+                trigger="ha_restart",
+                remote_timer_provenance=(25200.0, 8.0),
+            )
+        )
+
+        ae.handle_fan_manual_override.assert_not_called()
+
+    def test_provenance_none_is_byte_for_byte_unchanged(self):
+        """Critical regression-safety property: remote_timer_provenance=None (every
+        pre-#677 caller, and every restart with no live remote timer token) must not call
+        handle_fan_manual_override() from this new branch -- the rest of the method's
+        pre-existing adopt-on/turn-off logic runs exactly as before."""
+        ae = _make_automation_engine()
+        ae.handle_fan_manual_override = MagicMock()
+
+        asyncio.run(
+            ae.reconcile_fan_on_startup(
+                indoor=75.0,
+                outdoor=70.0,
+                thermostat_fan_running=True,
+                any_sensor_open=True,
+                trigger="ha_restart",
+                remote_timer_provenance=None,
+            )
+        )
+
+        ae.handle_fan_manual_override.assert_not_called()

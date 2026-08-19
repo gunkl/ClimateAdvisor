@@ -4399,6 +4399,7 @@ class AutomationEngine:
         any_sensor_open: bool,
         trigger: str = "startup",
         recent_hvac_session_ended: bool = False,
+        remote_timer_provenance: tuple[float, float] | None = None,
     ) -> None:
         """Reconcile fan state on HA startup / coalesce window (Issue #327).
 
@@ -4447,6 +4448,13 @@ class AutomationEngine:
                                     since a legitimate active/just-finished cooling or heating
                                     session must never be interrupted by this reconcile
                                     (Issue #618).
+            remote_timer_provenance: ``(remaining_seconds, token_hours)`` from the coordinator's
+                                    live read of the RF remote entity's still-unexpired
+                                    re-announced timer token (Issue #677), or None. Pre-filtered
+                                    to "still valid" by the caller — this method does not
+                                    re-check expiry. None (the default, and the case for every
+                                    pre-#677 caller) leaves this method's behavior byte-for-byte
+                                    identical to before Issue #677.
         """
         # Issue #561: reentrancy guard — this method is called from 4 independent sites
         # with no coordination between them. Two overlapping calls previously each
@@ -4468,6 +4476,7 @@ class AutomationEngine:
                 any_sensor_open=any_sensor_open,
                 trigger=trigger,
                 recent_hvac_session_ended=recent_hvac_session_ended,
+                remote_timer_provenance=remote_timer_provenance,
             )
         finally:
             self._reconcile_fan_in_progress = False
@@ -4481,10 +4490,42 @@ class AutomationEngine:
         any_sensor_open: bool,
         trigger: str,
         recent_hvac_session_ended: bool = False,
+        remote_timer_provenance: tuple[float, float] | None = None,
     ) -> None:
         """Body of reconcile_fan_on_startup(), run under its reentrancy guard (Issue #561)."""
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         archetype = fan_mode
+
+        # Issue #677: a live-re-announced, still-unexpired RF remote timer takes priority
+        # over the adopt-on/turn-off nat-vent logic below. Without this, the natural
+        # hardware shutoff hours later is read as a fresh, unexplained manual action by
+        # on_fan_turned_off() (a brand-new 3-hour "manual" grace, blocking nat-vent
+        # reactivation despite favorable outdoor air) — this restores the SAME grace CA
+        # would have already been honoring had the restart not wiped its in-memory
+        # bookkeeping, sized to the timer's remaining duration. Only acts when the fan is
+        # still physically running; if it already read off, provenance is provided but
+        # deliberately ignored here — falls through to the unchanged turn-off/no-op path.
+        # When remote_timer_provenance is None (every pre-#677 caller, and every restart
+        # with no live remote timer token), this branch is skipped entirely and the rest of
+        # this method is byte-for-byte unchanged from before Issue #677.
+        if remote_timer_provenance is not None and thermostat_fan_running:
+            _remaining_seconds, _token_hours = remote_timer_provenance
+            _LOGGER.info(
+                "Fan reconcile: live RF remote timer still valid at restart (%sh token,"
+                " %.0fs remaining) and fan is still running — re-arming manual override"
+                " instead of treating this as an unexplained fan state (archetype=%s)",
+                _token_hours,
+                _remaining_seconds,
+                archetype,
+            )
+            self.handle_fan_manual_override(
+                fan_before="on",
+                fan_after="on",
+                duration_override=_remaining_seconds,
+                remote_timer_hours=_token_hours,
+                is_remote_event=True,
+            )
+            return
 
         if not thermostat_fan_running:
             # Fan is off — ensure CA flags are clean (defence in depth), and release any

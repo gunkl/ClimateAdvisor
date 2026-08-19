@@ -531,4 +531,9 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "override_grace_fsm_state": diag.get("override_grace_fsm_state"),
             "override_grace_mirror_agrees": diag.get("override_grace_mirror_agrees"),
             "override_grace_fsm_agrees": diag.get("override_grace_fsm_agrees"),
+            # Issue #685: cascade-noise wall-clock debounce state per comparison axis
+            # (disagreement_seconds, sustained, cumulative_seconds_today), plus the
+            # date the cumulative counters last reset. Additive only.
+            "debounce": diag.get("debounce"),
+            "cumulative_reset_date": diag.get("cumulative_reset_date"),
         }

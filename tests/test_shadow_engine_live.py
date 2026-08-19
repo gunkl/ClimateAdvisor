@@ -40,7 +40,9 @@ Issue #673 (third coverage-gap follow-up, Phase 2) adds:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_coordinator
@@ -49,6 +51,14 @@ from tools.sim_harness.ha_stubs import install_ha_stubs
 install_ha_stubs()
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
+from custom_components.climate_advisor.const import SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S  # noqa: E402
+
+# Issue #685: build_headless_coordinator's stub environment leaves
+# homeassistant.util.dt.now() returning a MagicMock (never exercised
+# arithmetically before this issue's wall-clock debounce). Tests that exercise
+# a disagreement path — where the debounce helper subtracts two "now" values —
+# must patch coordinator.dt_util.now to a real, fixed datetime.
+_FIXED_NOW = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 class TestShadowEngineConstruction:
@@ -209,22 +219,58 @@ class TestShadowEngineDiagnostic:
 
     def test_positive_control_disagreement_is_detected(self) -> None:
         """Forces a real divergence (shadow thinks nat-vent is active, production
-        doesn't) and confirms the diagnostic — and its WARNING log — catch it."""
+        doesn't) and confirms the diagnostic — and its WARNING log — catch it.
+
+        Issue #685: patches dt_util.now to a real fixed datetime because the
+        debounce helper now subtracts two "now" values, which raises against the
+        stub environment's default MagicMock clock — a change from this test's
+        original form, needed only because a disagreement path is exercised.
+        """
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         coordinator.shadow_automation_engine._natural_vent_active = True
         coordinator.automation_engine._natural_vent_active = False
-        coordinator._update_shadow_engine_diagnostic()
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
         diag = coordinator.shadow_engine_diagnostic
         assert diag["agrees"] is False
         assert diag["production_state"] != diag["shadow_state"]
 
     def test_disagreement_logs_warning(self, caplog) -> None:
+        """Issue #685: a WARNING only fires once the mirror axis has continuously
+        disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S — seed the streak as
+        already past threshold so this test still proves a real, persistent
+        divergence gets reported."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         coordinator.shadow_automation_engine._natural_vent_active = True
         coordinator.automation_engine._natural_vent_active = False
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"):
+        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
             coordinator._update_shadow_engine_diagnostic()
         assert any("Shadow engine disagreement" in r.message for r in caplog.records)
+
+    def test_fresh_disagreement_does_not_log_warning(self, caplog) -> None:
+        """Issue #685: the actual bug fix — a single-tick, fresh disagreement
+        (the shape of a real multi-step production cascade's momentary,
+        self-resolving divergence, confirmed via live log evidence) must NOT log
+        a WARNING. Without the debounce, this fires immediately."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.shadow_automation_engine._natural_vent_active = True
+        coordinator.automation_engine._natural_vent_active = False
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            coordinator._update_shadow_engine_diagnostic()
+        assert not any("Shadow engine disagreement" in r.message for r in caplog.records)
+        diag = coordinator.shadow_engine_diagnostic
+        assert diag is not None
+        assert diag["debounce"]["mirror"]["sustained"] is False
+        assert 0.0 <= diag["debounce"]["mirror"]["disagreement_seconds"] < 1.0
 
 
 class TestShadowEngineShutdown:

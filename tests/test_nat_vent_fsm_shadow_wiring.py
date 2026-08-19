@@ -14,10 +14,24 @@ correctly across calls, disagreement detection works, and isolation holds
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
-from custom_components.climate_advisor.nat_vent_lifecycle import NatVentLifecycleState
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_coordinator
+from tools.sim_harness.ha_stubs import install_ha_stubs
+
+install_ha_stubs()
+
+from custom_components.climate_advisor.const import SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S  # noqa: E402
+from custom_components.climate_advisor.nat_vent_lifecycle import NatVentLifecycleState  # noqa: E402
+
+# Issue #685: build_headless_coordinator's stub environment leaves
+# homeassistant.util.dt.now() returning a MagicMock (never exercised
+# arithmetically before this issue's wall-clock debounce). Tests that exercise
+# a disagreement path — where the debounce helper subtracts two "now" values —
+# must patch coordinator.dt_util.now to a real, fixed datetime.
+_FIXED_NOW = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def _run(coro):
@@ -105,7 +119,12 @@ class TestDiagnosticIntegration:
         """Forces a real divergence: production is (incorrectly, for this test)
         marked active while conditions clearly favor the FSM staying inactive —
         confirms the diagnostic's overall agrees flag reflects it and the
-        disagreement is logged distinctly from the mirror-based one."""
+        disagreement is logged distinctly from the mirror-based one.
+
+        Issue #685: patches dt_util.now to a real fixed datetime because the
+        debounce helper now subtracts two "now" values, which raises against the
+        stub environment's default MagicMock clock.
+        """
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator(
             climate_attributes={"current_temperature": 70.0}
         )
@@ -116,7 +135,8 @@ class TestDiagnosticIntegration:
             return None
 
         coordinator.shadow_automation_engine.check_natural_vent_conditions = _noop
-        _run(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -125,6 +145,35 @@ class TestDiagnosticIntegration:
         assert diag["production_state"] == NatVentLifecycleState.ACTIVE_FULL_GATE.value
 
     def test_disagreement_logs_distinct_warning(self, caplog) -> None:
+        """Issue #685: a WARNING only fires once the fsm axis has continuously
+        disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S — seed the streak as
+        already past threshold so this test still proves a real, persistent
+        divergence gets reported."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator(
+            climate_attributes={"current_temperature": 70.0}
+        )
+        coordinator.automation_engine.update_outdoor_temp(80.0)
+        coordinator.automation_engine._natural_vent_active = True
+        coordinator._shadow_diag_disagreement_since["fsm"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+
+        async def _noop(*args, **kwargs):
+            return None
+
+        coordinator.shadow_automation_engine.check_natural_vent_conditions = _noop
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            _run(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
+        assert any("Nat-vent FSM disagreement" in r.message for r in caplog.records)
+
+    def test_fresh_disagreement_does_not_log_warning(self, caplog) -> None:
+        """Issue #685 regression test: the actual bug fix — a single-tick, fresh
+        FSM disagreement (the shape of a real multi-step production cascade's
+        momentary, self-resolving divergence) must NOT log a WARNING. Without the
+        debounce, this would fire immediately."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator(
             climate_attributes={"current_temperature": 70.0}
         )
@@ -135,9 +184,16 @@ class TestDiagnosticIntegration:
             return None
 
         coordinator.shadow_automation_engine.check_natural_vent_conditions = _noop
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"):
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
             _run(coordinator._mirror_to_shadow("check_natural_vent_conditions"))
-        assert any("Nat-vent FSM disagreement" in r.message for r in caplog.records)
+        assert not any("Nat-vent FSM disagreement" in r.message for r in caplog.records)
+        diag = coordinator.shadow_engine_diagnostic
+        assert diag is not None
+        assert diag["debounce"]["fsm"]["sustained"] is False
+        assert 0.0 <= diag["debounce"]["fsm"]["disagreement_seconds"] < 1.0
 
 
 class TestIsolation:

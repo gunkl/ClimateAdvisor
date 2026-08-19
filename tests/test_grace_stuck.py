@@ -508,6 +508,57 @@ class TestOrphanedGraceDetection:
         coord._emit_event.assert_called_once()
 
 
+class TestOrphanedGraceRefreshesDoorWindowFsm:
+    """Issue #679: ``_check_orphaned_grace()`` force-cancels a stuck grace and notifies
+    the override/grace diagnostic FSM (Issue #639), but ``derive_door_window_lifecycle_state()``
+    also takes ``grace_active`` as an input — this method previously never told the
+    door/window diagnostic FSM (Issue #637) that ``grace_active`` had just flipped to
+    False, leaving ``coordinator._door_window_fsm_state`` stuck at whatever stale value
+    it held (e.g. ``GRACE``/``PAUSED_DURING_GRACE``) for up to 10 minutes, until an
+    unrelated later event happened to resync it.
+
+    Occupant impact: purely diagnostic (this FSM never writes back to production HVAC/
+    fan/grace/override decisions) — but a stale door/window FSM state means the Debug
+    tab's shadow-engine comparison misreports the door/window pause lifecycle as still
+    mid-grace right after the real grace was force-cancelled, which would misdirect any
+    developer using that diagnostic to debug a real grace/pause issue.
+
+    Uses the real headless coordinator (production ``AutomationEngine`` + the real
+    ``transition()`` function), not a mocked engine — a ``MagicMock`` automation_engine
+    can't produce real ``DoorWindowFsmInputs``, so asserting the FSM's *computed* output
+    state requires the real production engine, per CLAUDE.md's no-mirror-tests doctrine.
+    """
+
+    def test_door_window_fsm_state_resyncs_immediately_after_orphaned_grace_cancel(self) -> None:
+        from custom_components.climate_advisor.door_window_lifecycle import DoorWindowLifecycleState
+        from tools.sim_harness.build_coordinator import build_headless_coordinator
+
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        ae = coordinator.automation_engine
+
+        # Build the exact stuck-grace shape _check_orphaned_grace() self-heals: grace
+        # active, protecting an override, but no override actually active anymore.
+        ae._grace_active = True
+        ae._grace_protects_override = True
+        ae._manual_override_active = False
+        ae._fan_override_active = False
+        ae._grace_end_time = "2024-01-15T09:00:00+00:00"
+
+        # Simulate the door/window FSM having been left at a stale mid-grace value by
+        # an earlier event, before this method's fix would have refreshed it. GRACE (not
+        # PAUSED_DURING_GRACE) matches the realistic orphaned-grace shape: no door/window
+        # is paused (ae._paused_by_door is False, matching production's real state here),
+        # just a grace timer left dangling with nothing left to protect.
+        coordinator._door_window_fsm_state = DoorWindowLifecycleState.GRACE
+
+        coordinator._check_orphaned_grace()
+
+        # Without the fix, this stays PAUSED_DURING_GRACE — derive_door_window_lifecycle_state()
+        # is never re-run, so the diagnostic FSM keeps reporting stale grace state even
+        # though ae._grace_active is now False.
+        assert coordinator._door_window_fsm_state == DoorWindowLifecycleState.NORMAL
+
+
 class TestGraceProtectsOverrideClassification:
     """automation._start_grace_period() sets _grace_protects_override from `trigger`
     membership in _GRACE_TRIGGERS_PROTECTING_OVERRIDE (Issue #530) — centralized

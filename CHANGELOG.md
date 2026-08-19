@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.37] — 2026-08-19
+
+- Fix #679: no user-visible change. Closes another instance of the same shadow-diagnostic gap class as #676: the Issue #508 stuck-grace backstop correctly notified the override/grace diagnostic FSM when force-cancelling an orphaned grace, but never the door/window diagnostic FSM, which could show a stale "disagreement" for up to 10 minutes after a real recovery. Real HVAC/fan behavior was always correct throughout; only the diagnostic mirror could drift.
+
 ## [0.6.36] — 2026-08-19
 
 - Fix #677: after a restart that lands in the middle of an active QuietCool RF remote timer, Climate Advisor now reads the remote's own live state to recognize the timer is still running and re-arms the correct remaining time, instead of forgetting about it. Previously, when the physical timer later shut the fan off naturally, CA misread it as a fresh manual power-off and started a fresh 3-hour lockout — blocking free cooling for hours even with ideal outdoor air.

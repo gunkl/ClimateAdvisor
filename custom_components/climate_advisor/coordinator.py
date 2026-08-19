@@ -2765,6 +2765,20 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "Override/grace FSM evaluation (orphaned-grace-driven) failed (isolated, no production impact): %s",
                 fsm_exc,
             )
+        # Issue #679: derive_door_window_lifecycle_state() also takes grace_active as an
+        # input, but this method previously only notified the override/grace FSM above —
+        # leaving the door/window FSM's tracked state stale (stuck at whatever it was
+        # showing pre-force-cancel) until an unrelated later event happened to resync it.
+        # Same closest-semantic-match reasoning as the override/grace call above.
+        from .door_window_fsm import DoorWindowFsmEventKind as _DWFEventKind
+
+        try:
+            self._evaluate_door_window_fsm("_check_orphaned_grace", event_kind=_DWFEventKind.GRACE_TIMER_EXPIRED)
+        except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+            _LOGGER.warning(
+                "Door/window FSM evaluation (orphaned-grace-driven) failed (isolated, no production impact): %s",
+                fsm_exc,
+            )
         self._emit_event(
             "stuck_grace_recovered",
             {"grace_end_time": _grace_end, "reason": "grace_without_override"},

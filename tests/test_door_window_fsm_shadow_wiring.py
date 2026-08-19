@@ -11,10 +11,24 @@ Mirrors ``tests/test_nat_vent_fsm_shadow_wiring.py``'s structure.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
-from custom_components.climate_advisor.door_window_lifecycle import DoorWindowLifecycleState
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_coordinator
+from tools.sim_harness.ha_stubs import install_ha_stubs
+
+install_ha_stubs()
+
+from custom_components.climate_advisor.const import SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S  # noqa: E402
+from custom_components.climate_advisor.door_window_lifecycle import DoorWindowLifecycleState  # noqa: E402
+
+# Issue #685: build_headless_coordinator's stub environment leaves
+# homeassistant.util.dt.now() returning a MagicMock (never exercised
+# arithmetically before this issue's wall-clock debounce). Tests that exercise
+# a disagreement path — where the debounce helper subtracts two "now" values —
+# must patch coordinator.dt_util.now to a real, fixed datetime.
+_FIXED_NOW = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def _run(coro):
@@ -106,10 +120,15 @@ class TestFsmStateTracking:
 
 class TestDiagnosticIntegration:
     def test_diagnostic_includes_door_window_fsm_state(self) -> None:
+        """Issue #685: patches dt_util.now — the noop'd shadow handler leaves the
+        shadow/production door-window state disagreeing, which now exercises the
+        debounce helper's datetime arithmetic (raises against the stub
+        environment's default MagicMock clock without a fixed patch)."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
 
         _noop_shadow_methods(coordinator, "handle_door_window_open")
-        _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -118,6 +137,9 @@ class TestDiagnosticIntegration:
         assert "door_window_fsm_agrees" in diag
 
     def test_positive_control_fsm_disagreement_is_detected(self) -> None:
+        """Issue #685: patches dt_util.now to a real fixed datetime because the
+        debounce helper now subtracts two "now" values, which raises against the
+        stub environment's default MagicMock clock when a disagreement occurs."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator(
             climate_state="cool", climate_attributes={"current_temperature": 76.0}
         )
@@ -127,7 +149,8 @@ class TestDiagnosticIntegration:
         coordinator.automation_engine._paused_by_door = False
 
         _noop_shadow_methods(coordinator, "handle_door_window_open")
-        _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -143,11 +166,44 @@ class TestDiagnosticIntegration:
         coordinator.automation_engine.update_outdoor_temp(90.0)
         coordinator.config["comfort_cool"] = 78.0
         coordinator.automation_engine._paused_by_door = False
+        # Issue #685: WARNING now only fires once the axis has continuously
+        # disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S — seed the streak as
+        # already past threshold so this test still exercises a real, persistent
+        # divergence (its original intent) rather than a fresh, momentary one.
+        coordinator._shadow_diag_disagreement_since["door_window_fsm"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
 
         _noop_shadow_methods(coordinator, "handle_door_window_open")
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"):
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
             _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
         assert any("Door/window FSM disagreement" in r.message for r in caplog.records)
+
+    def test_fresh_door_window_fsm_disagreement_does_not_log_warning(self, caplog) -> None:
+        """Issue #685: the actual bug fix — a single-tick, fresh door/window FSM
+        disagreement must NOT log a WARNING. Without the debounce, this fires
+        immediately."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator(
+            climate_state="cool", climate_attributes={"current_temperature": 76.0}
+        )
+        coordinator.automation_engine.update_outdoor_temp(90.0)
+        coordinator.config["comfort_cool"] = 78.0
+        coordinator.automation_engine._paused_by_door = False
+
+        _noop_shadow_methods(coordinator, "handle_door_window_open")
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            _run(coordinator._mirror_to_shadow("handle_door_window_open", "binary_sensor.test"))
+        assert not any("Door/window FSM disagreement" in r.message for r in caplog.records)
+        diag = coordinator.shadow_engine_diagnostic
+        assert diag is not None
+        assert diag["debounce"]["door_window_fsm"]["sustained"] is False
+        assert 0.0 <= diag["debounce"]["door_window_fsm"]["disagreement_seconds"] < 1.0
 
 
 class TestIsolation:

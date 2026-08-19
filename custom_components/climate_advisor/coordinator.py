@@ -172,6 +172,7 @@ from .const import (
     REJECT_WINDOW_TOO_SHORT,
     REMOTE_BURST_WINDOW_SECONDS,
     REMOTE_SPEED_SENSOR_OBJECT_ID_HINTS,
+    SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S,
     TEMP_SOURCE_CLIMATE_FALLBACK,
     TEMP_SOURCE_INPUT_NUMBER,
     TEMP_SOURCE_SENSOR,
@@ -259,6 +260,18 @@ _LOGGER = logging.getLogger(__name__)
 # Degrees below comfort_heat at which outdoor temp is too cold to recommend opening windows.
 # With default comfort_heat=70°F this means outdoor must be ≥ 55°F for windows to be recommended.
 _WINDOWS_EXTREME_COLD_MARGIN = 15.0
+
+# Issue #685: the 6 comparison axes tracked by _update_shadow_engine_diagnostic()'s
+# wall-clock cascade-noise debounce (mirror + FSM comparisons for nat-vent,
+# door/window, and override/grace).
+_SHADOW_DIAG_AXES = (
+    "mirror",
+    "fsm",
+    "door_window_mirror",
+    "door_window_fsm",
+    "override_grace_mirror",
+    "override_grace_fsm",
+)
 
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
 # Matches the per-obs-type cap enforced by LearningState.rejection_log on load.
@@ -623,6 +636,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # See docs/02-ARCHITECTURE-REFERENCE.md "Engine Callback Isolation".
         self._shadow_event_log: list[dict[str, Any]] = []
         self._shadow_engine_diagnostic: dict[str, Any] | None = None
+        # Issue #685: wall-clock cascade-noise debounce state for the 6 comparison
+        # axes above — see _shadow_diag_update_axis() and SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
+        self._shadow_diag_disagreement_since: dict[str, datetime | None] = dict.fromkeys(_SHADOW_DIAG_AXES)
+        self._shadow_diag_cumulative_seconds: dict[str, float] = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
+        self._shadow_diag_cumulative_date: date = dt_util.now().date()
         # Issue #633: the unified nat-vent FSM's own independently-tracked state —
         # never written onto either engine, purely a third comparison point. Starts
         # INACTIVE unconditionally (same clean-slate convention as restore_state()'s
@@ -1332,6 +1350,26 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         state = self.hass.states.get(self.automation_engine.climate_entity)
         return state.state if state else None
 
+    def _shadow_diag_update_axis(self, axis: str, agrees: bool, now: datetime) -> tuple[float, bool]:
+        """Update the wall-clock disagreement streak for one comparison axis and
+        return (seconds_disagreeing_now, sustained). Cascade-noise fix (Issue #685):
+        time-based, not count-based — duplicate mirrored calls fire sub-millisecond
+        apart during a real cascade (confirmed via live log evidence), so a
+        consecutive-snapshot counter would trip immediately on the exact noise this
+        exists to suppress.
+        """
+        since = self._shadow_diag_disagreement_since[axis]
+        if not agrees:
+            if since is None:
+                since = now
+                self._shadow_diag_disagreement_since[axis] = since
+            duration = (now - since).total_seconds()
+            return duration, duration >= SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S
+        if since is not None:
+            self._shadow_diag_cumulative_seconds[axis] += (now - since).total_seconds()
+            self._shadow_diag_disagreement_since[axis] = None
+        return 0.0, False
+
     def _update_shadow_engine_diagnostic(self) -> None:
         """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613),
         plus (Issue #633) the independent nat-vent FSM's agreement with production.
@@ -1344,6 +1382,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         from .nat_vent_lifecycle import NatVentLifecycleInputs, derive_nat_vent_lifecycle_state
 
         now = dt_util.now()
+
+        # Issue #685: lazy daily reset of cumulative disagreement seconds, same
+        # style as claude_api.py's _reset_daily_counters_if_needed() — self-heals
+        # across HA restarts that cross midnight, no scheduled callback needed.
+        today = now.date()
+        if today != self._shadow_diag_cumulative_date:
+            self._shadow_diag_cumulative_seconds = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
+            self._shadow_diag_cumulative_date = today
 
         def _state_for(ae: AutomationEngine) -> str:
             inputs = NatVentLifecycleInputs(
@@ -1406,6 +1452,24 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and override_grace_mirror_agrees
             and override_grace_fsm_agrees
         )
+
+        # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
+        # comparison axis has continuously disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S.
+        mirror_duration, mirror_sustained = self._shadow_diag_update_axis("mirror", mirror_agrees, now)
+        fsm_duration, fsm_sustained = self._shadow_diag_update_axis("fsm", fsm_agrees, now)
+        door_window_mirror_duration, door_window_mirror_sustained = self._shadow_diag_update_axis(
+            "door_window_mirror", door_window_mirror_agrees, now
+        )
+        door_window_fsm_duration, door_window_fsm_sustained = self._shadow_diag_update_axis(
+            "door_window_fsm", door_window_fsm_agrees, now
+        )
+        override_grace_mirror_duration, override_grace_mirror_sustained = self._shadow_diag_update_axis(
+            "override_grace_mirror", override_grace_mirror_agrees, now
+        )
+        override_grace_fsm_duration, override_grace_fsm_sustained = self._shadow_diag_update_axis(
+            "override_grace_fsm", override_grace_fsm_agrees, now
+        )
+
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
             "shadow_state": shadow_state,
@@ -1422,42 +1486,81 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "override_grace_fsm_agrees": override_grace_fsm_agrees,
             "agrees": agrees,
             "checked_at": now.isoformat(),
+            "debounce": {
+                "mirror": {
+                    "disagreement_seconds": mirror_duration,
+                    "sustained": mirror_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["mirror"],
+                },
+                "fsm": {
+                    "disagreement_seconds": fsm_duration,
+                    "sustained": fsm_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["fsm"],
+                },
+                "door_window_mirror": {
+                    "disagreement_seconds": door_window_mirror_duration,
+                    "sustained": door_window_mirror_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["door_window_mirror"],
+                },
+                "door_window_fsm": {
+                    "disagreement_seconds": door_window_fsm_duration,
+                    "sustained": door_window_fsm_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["door_window_fsm"],
+                },
+                "override_grace_mirror": {
+                    "disagreement_seconds": override_grace_mirror_duration,
+                    "sustained": override_grace_mirror_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["override_grace_mirror"],
+                },
+                "override_grace_fsm": {
+                    "disagreement_seconds": override_grace_fsm_duration,
+                    "sustained": override_grace_fsm_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["override_grace_fsm"],
+                },
+            },
+            "cumulative_reset_date": self._shadow_diag_cumulative_date.isoformat(),
         }
-        if not mirror_agrees:
+        if mirror_sustained:
             _LOGGER.warning(
-                "Shadow engine disagreement (Issue #613): production=%s shadow=%s",
+                "Shadow engine disagreement (Issue #613): production=%s shadow=%s (sustained %.0fs)",
                 production_state,
                 shadow_state,
+                mirror_duration,
             )
-        if not fsm_agrees:
+        if fsm_sustained:
             _LOGGER.warning(
-                "Nat-vent FSM disagreement (Issue #633): production=%s fsm=%s",
+                "Nat-vent FSM disagreement (Issue #633): production=%s fsm=%s (sustained %.0fs)",
                 production_state,
                 fsm_state,
+                fsm_duration,
             )
-        if not door_window_mirror_agrees:
+        if door_window_mirror_sustained:
             _LOGGER.warning(
-                "Door/window shadow engine disagreement (Issue #637): production=%s shadow=%s",
+                "Door/window shadow engine disagreement (Issue #637): production=%s shadow=%s (sustained %.0fs)",
                 door_window_production_state,
                 door_window_shadow_state,
+                door_window_mirror_duration,
             )
-        if not door_window_fsm_agrees:
+        if door_window_fsm_sustained:
             _LOGGER.warning(
-                "Door/window FSM disagreement (Issue #637): production=%s fsm=%s",
+                "Door/window FSM disagreement (Issue #637): production=%s fsm=%s (sustained %.0fs)",
                 door_window_production_state,
                 door_window_fsm_state,
+                door_window_fsm_duration,
             )
-        if not override_grace_mirror_agrees:
+        if override_grace_mirror_sustained:
             _LOGGER.warning(
-                "Override/grace shadow engine disagreement (Issue #639): production=%s shadow=%s",
+                "Override/grace shadow engine disagreement (Issue #639): production=%s shadow=%s (sustained %.0fs)",
                 override_grace_production_state,
                 override_grace_shadow_state,
+                override_grace_mirror_duration,
             )
-        if not override_grace_fsm_agrees:
+        if override_grace_fsm_sustained:
             _LOGGER.warning(
-                "Override/grace FSM disagreement (Issue #639): production=%s fsm=%s",
+                "Override/grace FSM disagreement (Issue #639): production=%s fsm=%s (sustained %.0fs)",
                 override_grace_production_state,
                 override_grace_fsm_state,
+                override_grace_fsm_duration,
             )
 
     @property

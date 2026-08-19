@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.38"
+VERSION = "0.6.39"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.39": [
+        "Fix #685: no user-visible change. The shadow-diagnostic 'disagreement'"
+        " warning (used to validate the new state-machine engines against the"
+        " existing production logic before any future switchover) used to fire the"
+        " instant a real multi-step transition briefly looked different between the"
+        " two computations, even when both settled on the same answer within"
+        " seconds. It now only logs once a disagreement has genuinely persisted for"
+        " 60 seconds, so the diagnostic signal reflects real problems instead of"
+        " momentary timing noise.",
+    ],
     "0.6.38": [
         "Fix #680: no user-visible change. Closes a minor structural gap in the"
         " override/grace FSM dispatcher (Issue #664): the restart clean-slate reset"
@@ -1999,6 +2009,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    685: {
+        "version_fixed": "0.6.39",
+        "title": (
+            "Shadow-diagnostic disagreement WARNINGs fired instantly on any"
+            " transient mismatch during a real multi-step production transition,"
+            " producing false-alarm noise that undermined the A/B validation signal"
+        ),
+        "scope_covered": (
+            "coordinator.py: new _shadow_diag_update_axis() tracks wall-clock"
+            " elapsed time (not a snapshot count — proven necessary, since duplicate"
+            " disagreement snapshots during a real cascade fire 1-2ms apart) since a"
+            " continuous disagreement streak began, per comparison axis. All 6 axes"
+            " (mirror, fsm, door_window_mirror, door_window_fsm,"
+            " override_grace_mirror, override_grace_fsm) now only log a WARNING"
+            " once a streak exceeds SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S=60 seconds."
+            " A new 'debounce' sub-dict and 'cumulative_reset_date' key were added"
+            " to _shadow_engine_diagnostic (additive only — no existing key removed"
+            " or renamed), plus a daily-reset cumulative-seconds-of-disagreement"
+            " counter per axis, surfaced additively on"
+            " ClimateAdvisorShadowEngineStatusSensor. Diagnostic-only — no"
+            " production HVAC/fan/grace/override logic touched."
+        ),
+    },
     680: {
         "version_fixed": "0.6.38",
         "title": (
@@ -7688,6 +7721,15 @@ NAT_VENT_REACTIVATION_LOCKOUT_S = 300
 
 CONF_NAT_VENT_HYSTERESIS_F = "nat_vent_hysteresis_f"
 CONF_NAT_VENT_REACTIVATION_LOCKOUT_S = "nat_vent_reactivation_lockout_s"
+
+# Issue #685: shadow-engine diagnostic cascade-noise debounce. Real multi-step
+# production transitions can fire several distinct top-level automation-engine
+# method calls in a fast cascade (confirmed via live log evidence: a 2026-08-19
+# 04:55:20-04:55:31 cascade hit 4 comparison axes, resolved in 11.71s). A WARNING
+# is only logged once a comparison axis has continuously disagreed for this many
+# wall-clock seconds — not a count of consecutive snapshots, since duplicate
+# mirrored calls can fire 1-2ms apart during a real cascade.
+SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S = 60  # Issue #685: cascade-noise debounce, see investigation evidence
 
 # Issue #641: hard safety floor on CA-issued fan (WHF/HVAC-fan) toggle frequency —
 # defense-in-depth against ANY future oscillation bug (not tied to one root cause),

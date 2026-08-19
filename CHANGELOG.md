@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.39] — 2026-08-19
+
+- Fix #685: no user-visible change. The shadow-diagnostic "disagreement" warning (used to validate the new state-machine engines against the existing production logic before any future switchover) used to fire the instant a real multi-step transition briefly looked different between the two computations, even when both settled on the same answer within seconds. It now only logs once a disagreement has genuinely persisted for 60 seconds, so the diagnostic signal reflects real problems instead of momentary timing noise.
+
 ## [0.6.38] — 2026-08-19
 
 - Fix #680: no user-visible change. Closes a minor structural gap in the override/grace FSM dispatcher (Issue #664): the restart clean-slate reset directly assigned its 3 governed flags instead of routing through the single dispatch point every other real call site uses. Both paths already produced the same clean-slate result, so there was no behavioral bug — this closes the "exactly one writer" gap before it's relied upon.

@@ -17,12 +17,28 @@ dict at the ``_mirror_to_shadow()`` call site; every override/grace *exit* path
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
-from custom_components.climate_advisor.const import CONF_OVERRIDE_CONFIRM_PERIOD
-from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind
-from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState
 from tools.sim_harness._loop import run_coro
 from tools.sim_harness.build_coordinator import build_headless_coordinator
+from tools.sim_harness.ha_stubs import install_ha_stubs
+
+install_ha_stubs()
+
+from custom_components.climate_advisor.const import (  # noqa: E402
+    CONF_OVERRIDE_CONFIRM_PERIOD,
+    SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S,
+)
+from custom_components.climate_advisor.override_grace_fsm import OverrideGraceFsmEventKind  # noqa: E402
+from custom_components.climate_advisor.override_grace_lifecycle import GraceState, OverrideConfirmState  # noqa: E402
+
+# Issue #685: build_headless_coordinator's stub environment leaves
+# homeassistant.util.dt.now() returning a MagicMock (never exercised
+# arithmetically before this issue's wall-clock debounce). Tests that exercise
+# a disagreement path — where the debounce helper subtracts two "now" values —
+# must patch coordinator.dt_util.now to a real, fixed datetime.
+_FIXED_NOW = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def _run(coro):
@@ -203,10 +219,15 @@ class TestUnprotectedGraceStartedEventWiring:
 
 class TestDiagnosticIntegration:
     def test_diagnostic_includes_override_grace_fsm_state(self) -> None:
+        """Issue #685: patches dt_util.now — the noop'd shadow handler leaves
+        production/shadow override-grace state disagreeing, which now exercises
+        the debounce helper's datetime arithmetic (raises against the stub
+        environment's default MagicMock clock without a fixed patch)."""
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
 
         _noop_shadow_methods(coordinator, "resume_from_pause")
-        _run(coordinator._mirror_to_shadow("resume_from_pause"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("resume_from_pause"))
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -229,7 +250,8 @@ class TestDiagnosticIntegration:
         coordinator.automation_engine._grace_protects_override = True
 
         _noop_shadow_methods(coordinator, "resume_from_pause")
-        _run(coordinator._mirror_to_shadow("resume_from_pause"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("resume_from_pause"))
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -244,15 +266,16 @@ class TestDiagnosticIntegration:
         coordinator.automation_engine._grace_protects_override = False
 
         _noop_shadow_methods(coordinator, "resume_from_pause")
-        _run(coordinator._mirror_to_shadow("resume_from_pause"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("resume_from_pause"))
 
-        # Shadow engine never actually ran resume_from_pause() (noop'd above), so
-        # its own flags stay whatever _sync_shadow_inputs() raw-copied from
-        # production just before the noop ran (i.e. now in sync). Force a genuine
-        # shadow-mirror disagreement by directly diverging the shadow's flag AFTER
-        # that sync already happened, then recompute the diagnostic.
-        coordinator.shadow_automation_engine._grace_active = False
-        coordinator._update_shadow_engine_diagnostic()
+            # Shadow engine never actually ran resume_from_pause() (noop'd above), so
+            # its own flags stay whatever _sync_shadow_inputs() raw-copied from
+            # production just before the noop ran (i.e. now in sync). Force a genuine
+            # shadow-mirror disagreement by directly diverging the shadow's flag AFTER
+            # that sync already happened, then recompute the diagnostic.
+            coordinator.shadow_automation_engine._grace_active = False
+            coordinator._update_shadow_engine_diagnostic()
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -273,7 +296,8 @@ class TestDiagnosticIntegration:
 
         coordinator.automation_engine.handle_fan_manual_override(fan_before="auto", fan_after="on")
         _noop_shadow_methods(coordinator, "handle_fan_manual_override")
-        _run(coordinator._mirror_to_shadow("handle_fan_manual_override", fan_before="auto", fan_after="on"))
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            _run(coordinator._mirror_to_shadow("handle_fan_manual_override", fan_before="auto", fan_after="on"))
 
         diag = coordinator.shadow_engine_diagnostic
         assert diag is not None
@@ -285,11 +309,41 @@ class TestDiagnosticIntegration:
         coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
         coordinator.automation_engine._grace_active = True
         coordinator.automation_engine._grace_protects_override = True
+        # Issue #685: WARNING now only fires once the axis has continuously
+        # disagreed for SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S — seed the streak as
+        # already past threshold so this test still exercises a real, persistent
+        # divergence (its original intent) rather than a fresh, momentary one.
+        coordinator._shadow_diag_disagreement_since["override_grace_fsm"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
 
         _noop_shadow_methods(coordinator, "resume_from_pause")
-        with caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"):
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
             coordinator._update_shadow_engine_diagnostic()
         assert any("Override/grace FSM disagreement" in r.message for r in caplog.records)
+
+    def test_fresh_override_grace_fsm_disagreement_does_not_log_warning(self, caplog) -> None:
+        """Issue #685: the actual bug fix — a single-tick, fresh override/grace FSM
+        disagreement must NOT log a WARNING. Without the debounce, this fires
+        immediately."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._grace_active = True
+        coordinator.automation_engine._grace_protects_override = True
+
+        _noop_shadow_methods(coordinator, "resume_from_pause")
+        with (
+            patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW),
+            caplog.at_level(logging.WARNING, logger="custom_components.climate_advisor.coordinator"),
+        ):
+            coordinator._update_shadow_engine_diagnostic()
+        assert not any("Override/grace FSM disagreement" in r.message for r in caplog.records)
+        diag = coordinator.shadow_engine_diagnostic
+        assert diag is not None
+        assert diag["debounce"]["override_grace_fsm"]["sustained"] is False
+        assert 0.0 <= diag["debounce"]["override_grace_fsm"]["disagreement_seconds"] < 1.0
 
 
 class TestIsolation:

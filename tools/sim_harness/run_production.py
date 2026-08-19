@@ -810,6 +810,24 @@ def _dispatch_event(
         # No engine-only equivalent — command-only/bare-engine mode has no
         # _async_fan_entity_changed listener to dispatch to at all.
 
+    elif etype == "external_entity_state_change":
+        # Issue #677: generalizes external_fan_state_change above to set an arbitrary
+        # entity's state AND attributes — needed to model the QuietCool RF remote's
+        # event.* entity (fan_remote_entity) re-announcing a still-valid timer_* token
+        # after a restart, which coordinator._read_live_remote_timer_provenance() reads
+        # live from hass.states.get() during startup coalescing. Unlike
+        # external_fan_state_change (hardcoded empty attributes dict, sufficient for a
+        # plain on/off fan entity), this entity's decoded command lives in
+        # attributes["event_type"] and its state field IS the press timestamp (see
+        # docs/fan-remote-spec.md § Firmware Event Contract) — both need to be settable.
+        # Only meaningful with use_coordinator=True — same rationale as
+        # external_fan_state_change.
+        entity_id = event.get("entity")
+        new_state = event.get("state", "unknown")
+        attributes = event.get("attributes", {})
+        if entity_id and coordinator is not None:
+            fake_hass.states.async_set(entity_id, new_state, attributes)
+
     elif etype == "pre_cool":
         # Issue #258: Dispatch the pre-cool trigger to the production engine.
         # nat_vent_just_closed=True when the event marks the post-nat-vent trigger;

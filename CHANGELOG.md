@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.36] — 2026-08-19
+
+- Fix #677: after a restart that lands in the middle of an active QuietCool RF remote timer, Climate Advisor now reads the remote's own live state to recognize the timer is still running and re-arms the correct remaining time, instead of forgetting about it. Previously, when the physical timer later shut the fan off naturally, CA misread it as a fresh manual power-off and started a fresh 3-hour lockout — blocking free cooling for hours even with ideal outdoor air.
+
 ## [0.6.35] — 2026-08-18
 
 - Fix #676: no user-visible change. Closes a second, separate shadow-diagnostic gap found immediately after #672/#673 shipped: when a grace period expired with a door/window sensor still open and free-cooling conditions happened to be favorable, natural ventilation correctly resumed and the pause was correctly cleared, but the shadow diagnostic engine was never told about it and could show a stuck false "disagreement" for 20+ minutes. Real HVAC/fan behavior was always correct throughout; only the diagnostic mirror could drift.

@@ -902,6 +902,53 @@ def check_assertion(
                 return False
         return expect
 
+    # --- remote_timer_rearmed_after_restart (Issue #677) ---
+    # Positive GUARANTEE: after an HA restart wipes CA's in-memory RF-timer bookkeeping
+    # (_fan_remote_timer_hours/_grace_active/_timer_boundary_settle_until — the existing
+    # clean-slate policy, Issue #282/#327, deliberately unchanged), a QuietCool RF remote
+    # timer token the fan_remote_entity is still live-re-announcing (ESPHome reconnect
+    # behavior, docs/fan-remote-spec.md § Restart Behavior) must be re-armed as a manual
+    # override with the SAME remote_timer_hours the physical remote originally selected —
+    # proving coordinator._read_live_remote_timer_provenance()'s live read at startup
+    # coalesce actually drove a fresh handle_fan_manual_override() call (Issue #677), not
+    # merely computed a value that was silently discarded. Scans event_log for a SECOND
+    # fan_manual_override event (remote_timer_hours matching, if given) at/after "since"
+    # (the restart boundary) — "since" is required so this can't accidentally match the
+    # original pre-restart press event, which also carries the same remote_timer_hours.
+    # Payload: {"since": <ISO>, "remote_timer_hours": <float, optional>}.
+    # §8 justification: brand-new event field (remote_timer_hours already existed on
+    # fan_manual_override, Issue #486/#495) read by a brand-new assertion type — no
+    # existing outcome/decision semantics touched.
+    if expect == "remote_timer_rearmed_after_restart":
+        since = assertion.get("since")
+        expected_hours = assertion.get("remote_timer_hours")
+        for ev_type, ev_payload, ev_ts in result.event_log:
+            if ev_type != "fan_manual_override" or ev_ts is None:
+                continue
+            if since is not None and _naive_iso(ev_ts) < since:
+                continue
+            if expected_hours is not None and ev_payload.get("remote_timer_hours") != expected_hours:
+                continue
+            return "remote_timer_rearmed_after_restart"
+        return False
+
+    # --- no_new_manual_override_after (Issue #677) ---
+    # Negative GUARANTEE, same shape as hvac_mode_never_commanded/override_not_detected
+    # above: proves no NEW fan_manual_override event fires at/after "since" — the
+    # occupant-facing guarantee that the RF timer's own natural hardware shutoff, hours
+    # later, is never misread by CA as a fresh, unexplained manual action (the Issue #677
+    # bug: a brand-new configured-default grace period — up to hours long — with no memory
+    # the timer was already running and about to end on schedule, blocking nat-vent
+    # reactivation despite favorable outdoor air). Payload: {"since": <ISO>}.
+    if expect == "no_new_manual_override_after":
+        since = assertion.get("since")
+        for ev_type, _ev_payload, ev_ts in result.event_log:
+            if ev_type != "fan_manual_override" or ev_ts is None or since is None:
+                continue
+            if _naive_iso(ev_ts) >= since:
+                return False
+        return expect
+
     return False
 
 

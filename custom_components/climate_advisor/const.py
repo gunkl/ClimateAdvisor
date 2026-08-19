@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.35"
+VERSION = "0.6.36"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.36": [
+        "Fix #677: after a restart that lands in the middle of an active QuietCool RF"
+        " remote timer, Climate Advisor now reads the remote's own live state to"
+        " recognize the timer is still running and re-arms the correct remaining"
+        " time, instead of forgetting about it. Previously, when the physical timer"
+        " later shut the fan off naturally, CA misread it as a fresh manual power-off"
+        " and started a fresh 3-hour lockout — blocking free cooling for hours even"
+        " with ideal outdoor air.",
+    ],
     "0.6.35": [
         "Fix #676: no user-visible change. Closes a second, separate shadow-diagnostic"
         " gap found immediately after #672/#673 shipped: when a grace period expired"
@@ -1973,6 +1982,32 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    677: {
+        "version_fixed": "0.6.36",
+        "title": (
+            "Restart mid-RF-timer wiped CA's memory of an active QuietCool remote"
+            " timer session, causing a spurious 3-hour manual grace lockout when the"
+            " hardware timer naturally elapsed hours later"
+        ),
+        "scope_covered": (
+            "coordinator.py: new _read_live_remote_timer_provenance(), called from"
+            " _do_startup_coalesce() before reconcile_fan_on_startup(). Reads the"
+            " configured fan_remote_entity's live HA state (which re-announces its"
+            " last retained event_type after a restart), parses the timer token +"
+            " press timestamp via the existing fan_status.parse_remote_timer_event(),"
+            " and computes the token's own natural expiry — no new persisted CA state."
+            " automation.py: reconcile_fan_on_startup()/_reconcile_fan_on_startup_locked()"
+            " gained a new optional remote_timer_provenance parameter; when present and"
+            " unexpired and the fan is still physically running, calls the existing"
+            " handle_fan_manual_override(duration_override=remaining_seconds,"
+            " is_remote_event=True, remote_timer_hours=token_hours) to re-arm a grace"
+            " period sized to the timer's actual remaining time. When provenance is"
+            " None (the common case — no active timer, unconfigured, or already"
+            " expired), behavior is byte-for-byte unchanged. The existing"
+            " _timer_boundary_settle_until mechanism (Issue #530) then arms naturally"
+            " when the re-armed grace expires, exactly as it would with no restart."
+        ),
+    },
     676: {
         "version_fixed": "0.6.35",
         "title": (

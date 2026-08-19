@@ -7949,16 +7949,48 @@ class AutomationEngine:
         self._manual_override_mode = None
         self._manual_override_source = None
         self._manual_override_time = None
-        self._override_confirm_pending = False
         self._override_confirm_time = None
         self._override_confirm_mode = None
         self._override_confirm_source = None
-        self._grace_active = False
         self._grace_end_time = None
         self._grace_duration_seconds = None
         self._last_resume_source = None
         self._last_grace_trigger = None
-        self._grace_protects_override = False
+
+        # Issue #680: route the 3 FSM-modeled flags (_override_confirm_pending /
+        # _grace_active / _grace_protects_override) through
+        # _resolve_override_grace_fsm_state() instead of assigning them directly. That
+        # dispatcher's own docstring (Issue #664) claims to be the single writer of these
+        # 3 flags across every real override/grace call site — this direct assignment was
+        # a third, ungoverned writer, bypassing it. Closest semantic match is
+        # GRACE_TIMER_EXPIRED (grace ending with nothing left to protect) — same reasoning
+        # coordinator._check_orphaned_grace() already uses for this event kind.
+        # origin_state is passed explicitly (unlike most real call sites, which default to
+        # a live read) because there is no real prior FSM-tracked transition to read here —
+        # nothing survives a restart — so the origin modeled is the synthetic "nothing was
+        # running" state restart itself guarantees, not whichever residual value these
+        # fields happened to carry from __init__.
+        #
+        # Both branches land on the identical clean-slate result for this specific call:
+        # - FSM branch: transition((IDLE, NONE), GRACE_TIMER_EXPIRED) hits
+        #   _transition_from_no_grace()'s fallthrough ("unreachable_no_grace" — grace can't
+        #   expire with none active) and returns the origin state unchanged, i.e. (IDLE,
+        #   NONE) — which _apply_override_grace_fsm_state() writes back as
+        #   confirm_pending=False, grace_active=False, grace_protects_override=False.
+        # - legacy branch: clears all 3 flags directly to the same False/False/False.
+        # This is a pure "route through the dispatcher" change — the clean-slate restart
+        # POLICY is unchanged; override/grace/pause state is still always cleared on restart.
+        def _legacy_clear_all_override_grace_flags() -> None:
+            self._legacy_clear_confirm_flag()
+            self._legacy_clear_grace_flags()
+
+        from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+        self._resolve_override_grace_fsm_state(
+            kind=_OGFEventKind.GRACE_TIMER_EXPIRED,
+            legacy=_legacy_clear_all_override_grace_flags,
+            origin_state=(OverrideConfirmState.IDLE, GraceState.NONE),
+        )
         # Issue #327: fan override cleared on restart — no grace timer to reschedule.
         # reconcile_fan_on_startup() runs shortly after and decides adopt-on / turn-off.
         self._fan_override_active = False

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from custom_components.climate_advisor.automation import AutomationEngine
 from custom_components.climate_advisor.classifier import DayClassification
@@ -172,3 +172,51 @@ class TestActionTracking:
         assert engine._manual_override_active is False
         assert engine._manual_override_mode is None
         assert engine._manual_override_time is None
+
+    def test_restore_state_clears_override_grace_fsm_flags_legacy(self):
+        """Issue #680: restore_state()'s clean-slate reset of the 3 FSM-modeled flags
+        (_override_confirm_pending/_grace_active/_grace_protects_override) must still
+        land on the same all-clear result now that it routes through
+        _resolve_override_grace_fsm_state() instead of assigning them directly.
+        This is a behavior-preservation test — the observable outcome (all 3 flags
+        False after restore) must be identical to before the fix. Default engine
+        config leaves _override_grace_fsm_authoritative False, so this exercises the
+        legacy() closure branch.
+        """
+        engine = _make_automation_engine()
+        # Pre-set the 3 flags to non-clean values, as if a real override/grace session
+        # was somehow live at construction time — restore_state() must still land on
+        # all-clear regardless of these starting values.
+        engine._override_confirm_pending = True
+        engine._grace_active = True
+        engine._grace_protects_override = True
+
+        engine.restore_state({})
+
+        assert engine._override_confirm_pending is False
+        assert engine._grace_active is False
+        assert engine._grace_protects_override is False
+
+    def test_restore_state_clears_override_grace_fsm_flags_authoritative(self):
+        """Issue #680: with _override_grace_fsm_authoritative=True, restore_state()'s
+        clean-slate reset must route through _apply_override_grace_fsm_state() (the FSM
+        branch of _resolve_override_grace_fsm_state()) and produce the identical
+        all-clear result as the legacy branch — proving the switch genuinely governs
+        which computation determines these 3 flags, rather than the direct assignments
+        existing independently of it.
+        """
+        engine = _make_automation_engine()
+        engine._override_grace_fsm_authoritative = True
+        engine._override_confirm_pending = True
+        engine._grace_active = True
+        engine._grace_protects_override = True
+
+        with patch.object(
+            engine, "_apply_override_grace_fsm_state", wraps=engine._apply_override_grace_fsm_state
+        ) as spy:
+            engine.restore_state({})
+
+        spy.assert_called_once()
+        assert engine._override_confirm_pending is False
+        assert engine._grace_active is False
+        assert engine._grace_protects_override is False

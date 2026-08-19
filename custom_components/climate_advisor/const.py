@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.36"
+VERSION = "0.6.37"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.37": [
+        "Fix #679: no user-visible change. Closes another instance of the same"
+        " shadow-diagnostic gap class as #676: the Issue #508 stuck-grace backstop"
+        " correctly notified the override/grace diagnostic FSM when force-cancelling"
+        " an orphaned grace, but never the door/window diagnostic FSM, which could"
+        " show a stale 'disagreement' for up to 10 minutes after a real recovery."
+        " Real HVAC/fan behavior was always correct throughout; only the diagnostic"
+        " mirror could drift.",
+    ],
     "0.6.36": [
         "Fix #677: after a restart that lands in the middle of an active QuietCool RF"
         " remote timer, Climate Advisor now reads the remote's own live state to"
@@ -1982,6 +1991,21 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    679: {
+        "version_fixed": "0.6.37",
+        "title": (
+            "Issue #508's stuck-grace backstop notified the override/grace"
+            " diagnostic FSM when force-cancelling an orphaned grace, but never the"
+            " door/window diagnostic FSM, which also reads grace_active"
+        ),
+        "scope_covered": (
+            "coordinator.py: _check_orphaned_grace() now also calls"
+            " self._evaluate_door_window_fsm('_check_orphaned_grace',"
+            " event_kind=DoorWindowFsmEventKind.GRACE_TIMER_EXPIRED), mirroring the"
+            " existing override/grace FSM call in the same function. Diagnostic-only"
+            " — _evaluate_door_window_fsm() never writes back to production."
+        ),
+    },
     677: {
         "version_fixed": "0.6.36",
         "title": (

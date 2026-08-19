@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.37"
+VERSION = "0.6.38"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.38": [
+        "Fix #680: no user-visible change. Closes a minor structural gap in the"
+        " override/grace FSM dispatcher (Issue #664): the restart clean-slate reset"
+        " directly assigned its 3 governed flags instead of routing through the"
+        " single dispatch point every other real call site uses. Both paths already"
+        " produced the same clean-slate result, so there was no behavioral bug —"
+        " this closes the 'exactly one writer' gap before it's relied upon.",
+    ],
     "0.6.37": [
         "Fix #679: no user-visible change. Closes another instance of the same"
         " shadow-diagnostic gap class as #676: the Issue #508 stuck-grace backstop"
@@ -1991,6 +1999,25 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    680: {
+        "version_fixed": "0.6.38",
+        "title": (
+            "Restart clean-slate reset bypassed the override/grace FSM dispatcher,"
+            " leaving a third, ungoverned writer of _override_confirm_pending/"
+            "_grace_active/_grace_protects_override alongside the FSM and legacy"
+            " branches"
+        ),
+        "scope_covered": (
+            "automation.py: AutomationEngine.restore_state()'s clean-slate block now"
+            " routes through _resolve_override_grace_fsm_state(kind="
+            "GRACE_TIMER_EXPIRED, origin_state=(OverrideConfirmState.IDLE,"
+            " GraceState.NONE)) instead of assigning the 3 flags directly. Both the"
+            " FSM branch (transition() falls through to the origin state unchanged"
+            " for this event/state combination) and the legacy branch produce the"
+            " identical all-clear result — the clean-slate restart policy itself is"
+            " unchanged, only how the flags get cleared."
+        ),
+    },
     679: {
         "version_fixed": "0.6.37",
         "title": (

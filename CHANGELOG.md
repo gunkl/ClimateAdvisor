@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.38] — 2026-08-19
+
+- Fix #680: no user-visible change. Closes a minor structural gap in the override/grace FSM dispatcher (Issue #664): the restart clean-slate reset directly assigned its 3 governed flags instead of routing through the single dispatch point every other real call site uses. Both paths already produced the same clean-slate result, so there was no behavioral bug — this closes the "exactly one writer" gap before it's relied upon.
+
 ## [0.6.37] — 2026-08-19
 
 - Fix #679: no user-visible change. Closes another instance of the same shadow-diagnostic gap class as #676: the Issue #508 stuck-grace backstop correctly notified the override/grace diagnostic FSM when force-cancelling an orphaned grace, but never the door/window diagnostic FSM, which could show a stale "disagreement" for up to 10 minutes after a real recovery. Real HVAC/fan behavior was always correct throughout; only the diagnostic mirror could drift.

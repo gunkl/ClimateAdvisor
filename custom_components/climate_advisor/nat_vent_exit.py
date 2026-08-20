@@ -34,7 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from .fan_thermostat_decision import resolve_hard_exit_floor
+from .fan_thermostat_decision import is_outdoor_rise_exit, resolve_hard_exit_floor
 
 # Mirrors custom_components.climate_advisor.const.MIN_VIABLE_NAT_VENT_HOURS —
 # duplicated here (a plain float constant, not logic), matching nat_vent_gate.py's
@@ -150,7 +150,15 @@ def decide_nat_vent_exit(inputs: NatVentExitInputs) -> NatVentExitDecision:
                     )
 
     # 4. Outdoor-rise exit (Issue #115) — airflow reversed.
-    if inputs.outdoor is not None and inputs.indoor is not None and inputs.outdoor > inputs.indoor:
+    # Delegates to is_outdoor_rise_exit(), the single source of truth shared
+    # with fan_thermostat_decision.py's Check 1 (Issue #690). BEHAVIOR CHANGE:
+    # this boundary was previously strict (>), disagreeing with Check 1's
+    # non-strict (>=) at exact outdoor==indoor equality — the fast-loop path
+    # would stop nat-vent one tick before this slow-loop path did. Now
+    # non-strict to match: at equality, no cooling benefit remains, so this
+    # exit now also fires immediately rather than waiting for the next check
+    # (comfort-floor/ceiling-threshold) to catch it.
+    if is_outdoor_rise_exit(indoor=inputs.indoor, outdoor=inputs.outdoor):
         return NatVentExitDecision(reason=NatVentExitReason.OUTDOOR_RISE)
 
     # 5. Ceiling-threshold exit — outdoor too warm.

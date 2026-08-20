@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.41"
+VERSION = "0.6.42"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.42": [
+        "Fix #690: two separate places that decide when to end a natural-"
+        "ventilation session (a fast check and a slower 30-minute check) used"
+        " to disagree by one degree of temperature precision at the exact"
+        " moment outdoor and indoor temperatures matched — the fast check"
+        " would end the session, the slow one wouldn't, for up to 30 minutes."
+        " Both now agree and end the session at the same instant once free"
+        " cooling is genuinely gone. Rare edge case; no change for the"
+        " common case where temperatures aren't at exact equality.",
+    ],
     "0.6.41": [
         "Fix #691: no user-visible change. Adds a new internal method that will"
         " let the nat-vent state-machine engine (still not authoritative over"
@@ -2025,6 +2035,26 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    690: {
+        "version_fixed": "0.6.42",
+        "title": (
+            "Fast-loop and slow-loop nat-vent outdoor-rise exit checks used"
+            " different boundary comparisons (>= vs >), disagreeing for up to"
+            " 30 minutes at exact outdoor==indoor temperature equality"
+        ),
+        "scope_covered": (
+            "New is_outdoor_rise_exit(indoor, outdoor) in"
+            " fan_thermostat_decision.py (same module as the existing shared"
+            " resolve_hard_exit_floor()) — non-strict (>=). Both"
+            " fan_thermostat_check()'s fast-loop Check 1 and"
+            " nat_vent_exit.py's OUTDOOR_RISE check now delegate to it."
+            " nat_vent_exit.py's check changes from strict (>) to non-strict"
+            " (>=) — a deliberate, real behavior change at exact equality."
+            " automation.py's Debug-tab-visible exit reason string corrected"
+            " to match (was still displaying '>' after the boundary became"
+            " non-strict)."
+        ),
+    },
     691: {
         "version_fixed": "0.6.41",
         "title": (

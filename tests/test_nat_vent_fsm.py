@@ -375,10 +375,16 @@ class TestSoftStartEscalation:
         assert t.exit_reason is None
 
     def test_stays_soft_start_when_full_gate_still_not_met(self) -> None:
-        # outdoor == indoor (parity only) -> full gate condition still fails.
+        # Issue #690: outdoor==indoor parity now fires the OUTDOOR_RISE exit (the
+        # is_outdoor_rise_exit() consolidation made that boundary non-strict), so it
+        # no longer isolates "full gate not met" from "exit chain not triggered."
+        # Use the hysteresis band instead: outdoor=73.5 is within [indoor-hysteresis,
+        # indoor) = [73.0, 74.0) -> full gate's stricter `outdoor < indoor - hysteresis`
+        # still fails (73.5 is not < 73.0), while outdoor < indoor keeps the exit
+        # chain's OUTDOOR_RISE check (outdoor >= indoor) from firing either.
         t = transition(
             NatVentLifecycleState.ACTIVE_SOFT_START,
-            _tick(indoor=74.0, outdoor=74.0, comfort_heat_raw=68.0, comfort_cool=90.0, hysteresis=0.0),
+            _tick(indoor=74.0, outdoor=73.5, comfort_heat_raw=68.0, comfort_cool=90.0, hysteresis=1.0),
         )
         assert not t.changed
         assert t.to_state == NatVentLifecycleState.ACTIVE_SOFT_START

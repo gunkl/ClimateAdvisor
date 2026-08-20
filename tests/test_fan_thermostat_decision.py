@@ -12,6 +12,7 @@ from custom_components.climate_advisor.fan_thermostat_decision import (
     FanThermostatOutcome,
     _resolve_vent_floor,
     decide_fan_thermostat_check,
+    is_outdoor_rise_exit,
     resolve_hard_exit_floor,
 )
 
@@ -119,6 +120,32 @@ class TestCheck2CooledToFloor:
 
     def test_none_indoor_never_triggers_check2(self):
         assert decide_fan_thermostat_check(_inputs(indoor=None, outdoor=65.0)) == FanThermostatOutcome.KEEP
+
+
+class TestIsOutdoorRiseExitConsolidation:
+    """Issue #690: is_outdoor_rise_exit() is the single source of truth for the
+    airflow-reversed / free-cooling-gone condition, consolidating this module's
+    own Check 1 (previously non-strict >=) and nat_vent_exit.py's OUTDOOR_RISE
+    check (previously strict >), which disagreed at exact temperature equality."""
+
+    def test_outdoor_below_indoor_is_not_reversed(self):
+        assert is_outdoor_rise_exit(indoor=74.0, outdoor=70.0) is False
+
+    def test_outdoor_equals_indoor_is_reversed(self):
+        """The boundary fix: equality now counts as reversed for BOTH call sites."""
+        assert is_outdoor_rise_exit(indoor=74.0, outdoor=74.0) is True
+
+    def test_outdoor_above_indoor_is_reversed(self):
+        assert is_outdoor_rise_exit(indoor=74.0, outdoor=75.0) is True
+
+    def test_none_indoor_is_not_reversed(self):
+        assert is_outdoor_rise_exit(indoor=None, outdoor=75.0) is False
+
+    def test_none_outdoor_is_not_reversed(self):
+        assert is_outdoor_rise_exit(indoor=74.0, outdoor=None) is False
+
+    def test_both_none_is_not_reversed(self):
+        assert is_outdoor_rise_exit(indoor=None, outdoor=None) is False
 
 
 class TestResolveHardExitFloorConsolidation:

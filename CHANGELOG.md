@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.42] — 2026-08-19
+
+- Fix #690: two separate places that decide when to end a natural-ventilation session (a fast check and a slower 30-minute check) used to disagree by one degree of temperature precision at the exact moment outdoor and indoor temperatures matched — the fast check would end the session, the slow one wouldn't, for up to 30 minutes. Both now agree and end the session at the same instant once free cooling is genuinely gone. Rare edge case; no change for the common case where temperatures aren't at exact equality.
+
 ## [0.6.41] — 2026-08-19
 
 - Fix #691: no user-visible change. Adds a new internal method that will let the nat-vent state-machine engine (still not authoritative over any real decision today) eventually drive real fan state the same proven way the door/window engine already does. Not yet connected to anything — preparation work only.

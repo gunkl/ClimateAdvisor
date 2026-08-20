@@ -3773,7 +3773,7 @@ class AutomationEngine:
 
                 if exit_decision.reason == NatVentExitReason.OUTDOOR_RISE:
                     _LOGGER.info(
-                        "Natural vent exit: outdoor %.1f°F > indoor %.1f°F — airflow reversed",
+                        "Natural vent exit: outdoor %.1f°F >= indoor %.1f°F — airflow reversed",
                         outdoor,
                         indoor,
                     )
@@ -3781,8 +3781,10 @@ class AutomationEngine:
                     # built for (Issue #115/#411). Issue #641 later extended the same
                     # treatment to PROACTIVE_FLOOR and CEILING_THRESHOLD above/below, once
                     # both were found to hand off into the identical paused-reactivation race.
+                    # Issue #690: boundary is now non-strict (>=, via is_outdoor_rise_exit()) —
+                    # this text is user-visible on the Debug tab via _last_action_reason.
                     await self._exit_nat_vent(
-                        reason=(f"nat vent exit: outdoor {outdoor:.1f}°F > indoor {indoor:.1f}°F — airflow reversed"),
+                        reason=(f"nat vent exit: outdoor {outdoor:.1f}°F >= indoor {indoor:.1f}°F — airflow reversed"),
                         set_outdoor_exit_time=True,
                         event_type="nat_vent_outdoor_rise_exit",
                         event_payload={

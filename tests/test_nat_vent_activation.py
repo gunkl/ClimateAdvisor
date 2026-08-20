@@ -335,11 +335,16 @@ class TestNatVentOutdoorRiseExit:
         assert rise_events[0][1]["outdoor"] == 74.5
         assert rise_events[0][1]["indoor"] == 74.0
 
-    def test_outdoor_equal_indoor_does_not_exit(self):
-        """outdoor 74.0F == indoor 74.0F (boundary) → directional exit does NOT fire (Bug #313 fix).
+    def test_outdoor_equal_indoor_does_exit(self):
+        """outdoor 74.0F == indoor 74.0F (boundary) → directional exit DOES fire (Issue #690).
 
-        Equal temps mean neutral airflow — not reversed — so nat vent should stay active.
-        The exit condition is strict: outdoor > indoor (not >=).
+        Originally (Bug #313) this boundary was strict (outdoor > indoor, not >=), on the
+        reasoning that equal temps mean neutral airflow. Issue #690 found this disagreed with
+        fan_thermostat_decision.py's Check 1, which used non-strict >= for the identical
+        real-world condition (free-cooling-gone) — the fast-loop tick-level check would stop
+        nat-vent one tick before this slow-loop path did. Both call sites now delegate to
+        is_outdoor_rise_exit(), which is non-strict: at equality no cooling benefit remains,
+        so the exit fires immediately rather than waiting for a subsequent check to catch it.
         """
         engine = _make_engine(indoor_f=74.0)
         engine._natural_vent_active = True
@@ -353,9 +358,9 @@ class TestNatVentOutdoorRiseExit:
         with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        assert engine._natural_vent_active is True, "nat vent must stay active when outdoor == indoor"
+        assert engine._natural_vent_active is False, "nat vent must exit when outdoor == indoor (Issue #690)"
         rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
-        assert len(rise_events) == 0, "nat_vent_outdoor_rise_exit must not fire on equal temps"
+        assert len(rise_events) == 1, "nat_vent_outdoor_rise_exit must fire on equal temps (Issue #690)"
 
     def test_outdoor_rise_exit_fires_before_threshold_exit(self):
         """outdoor 74.5F >= indoor 74.0F but still below threshold 75F — directional exit fires first."""
@@ -1289,28 +1294,32 @@ class TestIssue641ExitReactivationFlipFlop:
 
 
 # ---------------------------------------------------------------------------
-# Bug #313 Fix — equal outdoor==indoor should NOT exit nat vent
+# Bug #313 / Issue #690 — outdoor==indoor exit boundary
 # ---------------------------------------------------------------------------
 
 
 class TestNatVentExitEqualTemps:
-    """Bug #313: outdoor >= indoor exit condition must be strict (>), not >=.
+    """Bug #313 originally made this exit strict (outdoor > indoor, not >=), reasoning
+    that equal temps mean neutral airflow. Issue #690 revisited this: the tick-level
+    fast-loop check (fan_thermostat_decision.py's Check 1) had always used non-strict
+    >= for the identical real-world condition (free-cooling-gone/airflow-reversed),
+    so at exact equality the fast-loop path would stop nat-vent one tick before this
+    slow-loop path did. Both call sites now delegate to the shared
+    is_outdoor_rise_exit() (non-strict >=), so equality now exits on both paths.
 
-    Equal temps mean neutral airflow — not reversed.  Exiting nat vent when
-    outdoor == indoor causes the occupant to lose free cooling unnecessarily
-    every time a sensor read happens to land on exactly the same value as indoor.
-
-    These three tests document the correct post-fix semantics:
-      1. Equal temps → nat vent STAYS active  (was wrong: exited)
+    These three tests document the current, consolidated semantics:
+      1. outdoor == indoor → nat vent EXITS   (Issue #690 — boundary now matches Check 1)
       2. outdoor > indoor → nat vent exits     (regression guard, unchanged)
       3. outdoor < indoor → nat vent stays     (regression guard, unchanged)
     """
 
-    def test_equal_temps_does_not_exit_nat_vent(self):
-        """outdoor == indoor (72.0 == 72.0) → nat vent stays active after fix.
+    def test_equal_temps_exits_nat_vent(self):
+        """outdoor == indoor (72.0 == 72.0) → nat vent exits (Issue #690).
 
-        Before the fix (outdoor >= indoor) this test FAILS because the engine
-        exits nat vent on equal temps.  After the fix (outdoor > indoor) it passes.
+        Before Issue #690 (outdoor > indoor, strict) this test asserted the opposite —
+        nat vent stayed active at equality. The consolidated is_outdoor_rise_exit()
+        boundary is now non-strict (>=), matching fan_thermostat_decision.py's Check 1:
+        at equality, no cooling benefit remains, so both call sites now exit.
         """
         engine = _make_engine(comfort_heat=70.0, comfort_cool=72.0, nat_vent_delta=3.0, indoor_f=72.0)
         engine._natural_vent_active = True
@@ -1325,12 +1334,10 @@ class TestNatVentExitEqualTemps:
         with patch(_DT_NOW_PATH, return_value=datetime(2026, 4, 20, 20, 0, 0)):
             asyncio.run(engine.check_natural_vent_conditions())
 
-        # Equal temps → airflow is neutral, not reversed → do NOT exit
-        assert engine._natural_vent_active is True, (
-            "nat vent should stay active when outdoor == indoor (neutral airflow)"
-        )
+        # Equal temps → no cooling benefit remains → exit (Issue #690)
+        assert engine._natural_vent_active is False, "nat vent must exit when outdoor == indoor (Issue #690)"
         rise_events = [e for e in events if e[0] == "nat_vent_outdoor_rise_exit"]
-        assert len(rise_events) == 0, "nat_vent_outdoor_rise_exit must NOT fire on equal temps"
+        assert len(rise_events) == 1, "nat_vent_outdoor_rise_exit must fire on equal temps (Issue #690)"
 
     def test_outdoor_above_indoor_exits_nat_vent(self):
         """outdoor > indoor (73.0 > 72.0) → nat vent exits (regression guard).

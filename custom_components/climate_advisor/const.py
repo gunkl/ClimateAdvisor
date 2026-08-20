@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.40"
+VERSION = "0.6.41"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.41": [
+        "Fix #691: no user-visible change. Adds a new internal method that will"
+        " let the nat-vent state-machine engine (still not authoritative over"
+        " any real decision today) eventually drive real fan state the same"
+        " proven way the door/window engine already does. Not yet connected to"
+        " anything — preparation work only.",
+    ],
     "0.6.40": [
         "Fix #687: no user-visible change. The nat-vent diagnostic engine (used"
         " to validate a future state-machine switchover, not authoritative over"
@@ -2018,6 +2025,28 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    691: {
+        "version_fixed": "0.6.41",
+        "title": (
+            "Added _apply_nat_vent_fsm_state() — nat-vent's FSM-state-to-flags"
+            " projection layer, mirroring the door/window engine's existing"
+            " _apply_door_window_fsm_state() pattern"
+        ),
+        "scope_covered": (
+            "automation.py: new AutomationEngine._apply_nat_vent_fsm_state()"
+            " derives _natural_vent_active/_nat_vent_soft_start/_paused_by_door"
+            " from a NatVentLifecycleState value. Deliberately excludes"
+            " _nat_vent_outdoor_exit_time — the enum's to_state alone cannot"
+            " distinguish 'just entered lockout' from 'already mid-lockout,'"
+            " same exclusion-list treatment as door/window's _grace_end_time."
+            " Purely additive — zero call sites anywhere in the codebase"
+            " (confirmed by grep), not wired into any production path yet;"
+            " that wiring is a separate, future phase. Registered in the"
+            " shadow-engine flag-mutation coverage registry (test_shadow_"
+            "engine_coverage.py) as 'internal', matching the same category"
+            " already used for its door/window and override/grace siblings."
+        ),
+    },
     687: {
         "version_fixed": "0.6.40",
         "title": (

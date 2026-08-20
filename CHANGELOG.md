@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.45] — 2026-08-20
+
+- Fix #684: no user-visible change. A diagnostic-only comparison that checks whether the nat-vent state-machine engine (still not authoritative over any real decision unless you've opted in) agrees with production used a fixed 5-minute reactivation cooldown instead of your actually configured value, when they differ. Only affects installs that changed the reactivation lockout from its default — no change to any real fan/HVAC decision either way.
+
 ## [0.6.44] — 2026-08-20
 
 - Feat #698: the whole-house fan can now briefly pause itself mid-session once the room hits your comfort target, then resume automatically if it drifts back — instead of running the whole time regardless. With the state-machine switch enabled, a running free-cooling session also now reacts immediately (instead of waiting up to 30 minutes) if conditions change enough to end it for any reason, not just if the house gets too cold. Also fixed a small pre-existing mismatch where the fan could stay on slightly too long after outdoor air warmed past indoor, by reusing the same shared check used elsewhere. No change for installs that haven't opted into the state-machine switch, aside from the outdoor-air mismatch fix, which applies to everyone.

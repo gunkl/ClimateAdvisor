@@ -1400,7 +1400,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 paused_by_door=bool(ae._paused_by_door),
                 outdoor_exit_time=ae._nat_vent_outdoor_exit_time,
                 now=now,
-                lockout_seconds=300,
+                lockout_seconds=float(
+                    self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
+                ),
             )
             return derive_nat_vent_lifecycle_state(inputs).value
 

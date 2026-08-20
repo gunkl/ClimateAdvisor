@@ -272,6 +272,35 @@ class TestShadowEngineDiagnostic:
         assert diag["debounce"]["mirror"]["sustained"] is False
         assert 0.0 <= diag["debounce"]["mirror"]["disagreement_seconds"] < 1.0
 
+    def test_production_state_honors_configured_lockout_seconds(self) -> None:
+        """Issue #684: ``_state_for()`` used to hardcode ``lockout_seconds=300``
+        instead of reading the configured ``CONF_NAT_VENT_REACTIVATION_LOCKOUT_S``
+        value (which ``_evaluate_nat_vent_fsm()`` has always read correctly).
+        Default lockout is also 300s, so the bug was invisible on any install
+        using the default — this test configures a shorter lockout (60s) and
+        an outdoor-exit timestamp 120s in the past: with the fix, the
+        (already-elapsed) lockout means the derived state is INACTIVE; with the
+        old hardcoded 300s, 120s is still inside the window and the state would
+        incorrectly read PAUSED_REACTIVATION_LOCKOUT.
+        """
+        from custom_components.climate_advisor.const import CONF_NAT_VENT_REACTIVATION_LOCKOUT_S
+
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.config[CONF_NAT_VENT_REACTIVATION_LOCKOUT_S] = 60
+        for ae in (coordinator.automation_engine, coordinator.shadow_automation_engine):
+            ae._natural_vent_active = False
+            ae._paused_by_door = True
+            ae._nat_vent_outdoor_exit_time = _FIXED_NOW - timedelta(seconds=120)
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+        diag = coordinator.shadow_engine_diagnostic
+        # Nat-vent-specific fields only — setting _paused_by_door also feeds the
+        # unrelated door/window FSM comparison, which is out of scope here and
+        # not staged for this test.
+        assert diag["production_state"] == "inactive"
+        assert diag["shadow_state"] == "inactive"
+        assert diag["nat_vent_fsm_state"] == "inactive"
+
 
 class TestShadowEngineShutdown:
     def test_async_shutdown_cleans_up_shadow_timers(self) -> None:

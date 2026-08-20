@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.44"
+VERSION = "0.6.45"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.45": [
+        "Fix #684: no user-visible change. A diagnostic-only comparison that"
+        " checks whether the nat-vent state-machine engine (still not"
+        " authoritative over any real decision unless you've opted in) agrees"
+        " with production used a fixed 5-minute reactivation cooldown instead"
+        " of your actually configured value, when they differ. Only affects"
+        " installs that changed the reactivation lockout from its default —"
+        " no change to any real fan/HVAC decision either way.",
+    ],
     "0.6.44": [
         "Feat #698: the whole-house fan can now briefly pause itself mid-session"
         " once the room hits your comfort target, then resume automatically if"
@@ -2060,6 +2069,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    684: {
+        "version_fixed": "0.6.45",
+        "title": (
+            "Shadow diagnostic's nat-vent lifecycle re-derivation hardcoded"
+            " lockout_seconds=300 instead of reading the configured"
+            " CONF_NAT_VENT_REACTIVATION_LOCKOUT_S value"
+        ),
+        "scope_covered": (
+            "coordinator.py: _update_shadow_engine_diagnostic()'s nested"
+            " _state_for() helper now reads"
+            " self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S,"
+            " NAT_VENT_REACTIVATION_LOCKOUT_S), matching the pattern"
+            " _evaluate_nat_vent_fsm() has always used correctly. Since the"
+            " default lockout is also 300s, the bug was invisible on any"
+            " install using the default value — only installs with a"
+            " configured lockout different from 300s could see this"
+            " diagnostic-only comparison's production_state/shadow_state re-"
+            " derivation systematically disagree with the FSM's own"
+            " (correctly config-driven) state for the full duration of any"
+            " lockout window. No real fan/HVAC decision was ever affected —"
+            " this function's output is never written back to either engine."
+        ),
+    },
     698: {
         "version_fixed": "0.6.44",
         "title": (

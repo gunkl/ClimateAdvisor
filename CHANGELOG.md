@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.43] — 2026-08-19
+
+- Fix #694: fixed 3 defects introduced by the previous nat-vent state-machine wiring pass (still not authoritative over any real decision by default). With the state-machine switch enabled, an in-flight natural-ventilation session (free cooling already running) could be killed outright or silently downgraded from a stronger cooling mode to a weaker one whenever a second door or window was opened during that session — even though nothing about outdoor/indoor conditions had changed. Also fixed a case where reopening a window during an existing door/window pause could leave the automation's internal pause bookkeeping in an inconsistent state. No change for installs that haven't opted into the state-machine switch.
+
 ## [0.6.42] — 2026-08-19
 
 - Fix #690: two separate places that decide when to end a natural-ventilation session (a fast check and a slower 30-minute check) used to disagree by one degree of temperature precision at the exact moment outdoor and indoor temperatures matched — the fast check would end the session, the slow one wouldn't, for up to 30 minutes. Both now agree and end the session at the same instant once free cooling is genuinely gone. Rare edge case; no change for the common case where temperatures aren't at exact equality.

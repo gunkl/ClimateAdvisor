@@ -51,6 +51,32 @@ itself.
 **Cross-lifecycle inputs.** ``paused_by_door`` is a state *read* from the
 door/window lifecycle (Issue #631's "communicating automata" design) — legacy
 flag-derived today, unchanged in shape once door/window gets its own FSM.
+
+**Override/grace awareness (Issue #687, Phase 2a).** ``override_active``
+(``AutomationEngine._fan_override_active`` or ``_manual_override_active``) and
+``grace_active`` (``AutomationEngine._grace_active``) are now read inputs too.
+While either is true, both ``_transition_from_inactive()`` and
+``_transition_from_active()`` short-circuit straight to ``INACTIVE`` before any
+gate/exit math runs. This mirrors production's real guarding, but split across
+two different call sites, not one: ``_activate_fan()``'s own early return
+("Fan override active — skipping fan activation") checks only
+``_fan_override_active``; the ``_grace_active`` guard is separately enforced in
+``check_natural_vent_conditions()``. Previously the FSM had no way to see
+either flag and would report ``ACTIVE_FULL_GATE`` for the full duration of a
+manual override/grace window while production correctly stayed inactive —
+confirmed live as the single largest disagreement bucket in a night of logs
+(38 of 114 disagreement lines). This closes that specific gap; it does not
+implement any other new decision authority (see epic #594 Phase R for the
+larger authority question).
+
+**Known remaining edge (diagnostic-only, zero occupant impact — tracked in
+Issue #688):** production's grace guard has an Issue #134 exception that
+*allows* nat-vent to engage during grace when indoor exceeds ``comfort_cool``
+(overheat protection). This short-circuit does not model that exception —
+it always returns ``INACTIVE`` while ``grace_active`` is true. This trades the
+38-line disagreement bucket above for a narrower, rarer one; since this
+tracker is never written back to production, occupant behavior is unaffected
+either way.
 """
 
 from __future__ import annotations
@@ -120,6 +146,16 @@ class NatVentFsmInputs:
     outdoor_exit_time: datetime | None
     lockout_seconds: float
     now: datetime
+    # Default False (rather than requiring every existing construction site to be
+    # updated) is a deliberate choice: automation.py's own
+    # ``_build_nat_vent_fsm_inputs()`` construction site is out of scope for this
+    # fix (Issue #687, Phase 2a is confined to nat_vent_fsm.py + how
+    # coordinator.py feeds it — see that issue's scope note). A default lets this
+    # dataclass change land without touching production automation.py logic;
+    # coordinator.py's own construction site is updated explicitly below to pass
+    # real values rather than relying on the default.
+    override_active: bool = False
+    grace_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,6 +225,21 @@ def _soft_start_inputs(inputs: NatVentFsmInputs, *, full_gate_active: bool) -> N
 
 
 def _transition_from_active(current_state: NatVentLifecycleState, event: NatVentFsmEvent) -> NatVentTransition:
+    # Issue #687 (Phase 2a): a manual override or grace period wins over everything
+    # else in this function, including the lockout-recognition check right below it.
+    # Mirrors production's real guarding, split across two call sites: override
+    # is _activate_fan()'s own early return ("Fan override active — skipping fan
+    # activation"); grace is enforced separately in check_natural_vent_conditions()
+    # (minus its Issue #134 overheat-during-grace exception — see module docstring,
+    # tracked in Issue #688). Placed first, before any other branch.
+    if event.inputs.override_active or event.inputs.grace_active:
+        return NatVentTransition(
+            from_state=current_state,
+            to_state=NatVentLifecycleState.INACTIVE,
+            event_kind=event.kind,
+            at=event.inputs.now,
+        )
+
     # Issue #672: before anything else, recognize a door-pause/reactivation-lockout
     # condition — the one thing this branch previously had NO way to ever detect once
     # wrongly active. _transition_from_inactive() already checks this same condition on
@@ -250,6 +301,19 @@ def _transition_from_active(current_state: NatVentLifecycleState, event: NatVent
 
 def _transition_from_inactive(current_state: NatVentLifecycleState, event: NatVentFsmEvent) -> NatVentTransition:
     inputs = event.inputs
+
+    # Issue #687 (Phase 2a): same override/grace short-circuit as
+    # _transition_from_active() — see that function's comment for the production
+    # mirror this reflects. Placed first, before the lockout check, so an
+    # override/grace window can never be masked by (or race with) lockout state.
+    if inputs.override_active or inputs.grace_active:
+        return NatVentTransition(
+            from_state=current_state,
+            to_state=NatVentLifecycleState.INACTIVE,
+            event_kind=event.kind,
+            at=inputs.now,
+        )
+
     if inputs.paused_by_door and is_reactivation_locked_out(
         outdoor_exit_time=inputs.outdoor_exit_time, now=inputs.now, lockout_seconds=inputs.lockout_seconds
     ):

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.40] — 2026-08-19
+
+- Fix #687: no user-visible change. The nat-vent diagnostic engine (used to validate a future state-machine switchover, not authoritative over any real fan/HVAC decision today) couldn't see when a manual fan override or grace period was active, so it reported "would activate" for the full duration of any manual override — the single largest diagnostic-disagreement bucket found this session. It now correctly recognizes both.
+
 ## [0.6.39] — 2026-08-19
 
 - Fix #685: no user-visible change. The shadow-diagnostic "disagreement" warning (used to validate the new state-machine engines against the existing production logic before any future switchover) used to fire the instant a real multi-step transition briefly looked different between the two computations, even when both settled on the same answer within seconds. It now only logs once a disagreement has genuinely persisted for 60 seconds, so the diagnostic signal reflects real problems instead of momentary timing noise.

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.39"
+VERSION = "0.6.40"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.40": [
+        "Fix #687: no user-visible change. The nat-vent diagnostic engine (used"
+        " to validate a future state-machine switchover, not authoritative over"
+        " any real fan/HVAC decision today) couldn't see when a manual fan"
+        " override or grace period was active, so it reported 'would activate'"
+        " for the full duration of any manual override — the single largest"
+        " diagnostic-disagreement bucket found this session. It now correctly"
+        " recognizes both.",
+    ],
     "0.6.39": [
         "Fix #685: no user-visible change. The shadow-diagnostic 'disagreement'"
         " warning (used to validate the new state-machine engines against the"
@@ -2009,6 +2018,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    687: {
+        "version_fixed": "0.6.40",
+        "title": (
+            "Nat-vent diagnostic FSM blind to manual override/grace state,"
+            " reporting 'would activate' for the full duration of any manual"
+            " override window"
+        ),
+        "scope_covered": (
+            "nat_vent_fsm.py: NatVentFsmInputs gained override_active/"
+            "grace_active fields; both _transition_from_inactive() and"
+            " _transition_from_active() now short-circuit to INACTIVE while"
+            " either is true, before any gate/exit math runs. coordinator.py:"
+            " _evaluate_nat_vent_fsm() populates the new fields from"
+            " ae._fan_override_active/_manual_override_active/_grace_active."
+            " Diagnostic-only — self._nat_vent_fsm_state is never written back"
+            " to production; the existing narrow _natvent_fsm_authoritative"
+            " production feature (soft-start escalation only) is provably"
+            " unaffected, since its own input-construction call site in"
+            " automation.py does not pass the new fields, which default to"
+            " False. Known remaining gap tracked separately in Issue #688: the"
+            " short-circuit doesn't yet model the Issue #134"
+            " overheat-during-grace exception."
+        ),
+    },
     685: {
         "version_fixed": "0.6.39",
         "title": (

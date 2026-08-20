@@ -59,6 +59,8 @@ def _inputs(
     outdoor_exit_time: datetime | None = None,
     lockout_seconds: float = 300.0,
     now: datetime = _NOW,
+    override_active: bool = False,
+    grace_active: bool = False,
 ) -> NatVentFsmInputs:
     return NatVentFsmInputs(
         indoor=indoor,
@@ -81,6 +83,8 @@ def _inputs(
         outdoor_exit_time=outdoor_exit_time,
         lockout_seconds=lockout_seconds,
         now=now,
+        override_active=override_active,
+        grace_active=grace_active,
     )
 
 
@@ -273,6 +277,87 @@ class TestActiveBranchLockoutRecognition:
             ),
         )
         assert t.to_state != NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+
+
+class TestOverrideGraceShortCircuit:
+    """Issue #687 (Phase 2a): a manual override or grace period must win over
+    the gate/exit math entirely, mirroring production's own early return in
+    ``_activate_fan()`` ("Fan override active — skipping fan activation") —
+    which never reaches the gate math this FSM otherwise re-derives every
+    tick. Confirmed live: for the full duration of a manual RF-remote override
+    grace, the FSM previously reported ``ACTIVE_FULL_GATE`` while production
+    correctly stayed inactive (38 of 114 disagreement lines in one night)."""
+
+    def test_inactive_with_override_active_and_favorable_gate_stays_inactive(self) -> None:
+        # Conditions alone (indoor 75, outdoor 65, comfort_heat 68) would activate
+        # full gate per test_activates_full_gate_when_conditions_favorable above —
+        # override_active must suppress that entirely.
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=75.0, outdoor=65.0, comfort_heat_raw=68.0, override_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert not t.changed
+
+    def test_inactive_with_grace_active_and_favorable_gate_stays_inactive(self) -> None:
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=75.0, outdoor=65.0, comfort_heat_raw=68.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert not t.changed
+
+    def test_active_full_gate_transitions_to_inactive_when_override_becomes_active(self) -> None:
+        # Nothing in the exit chain would otherwise trigger an exit (matches
+        # test_stays_active_when_nothing_triggers_exit's conditions) — override
+        # must force INACTIVE anyway, not "stay in whatever active state it was in".
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=72.0, outdoor=65.0, override_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert t.changed
+
+    def test_active_soft_start_transitions_to_inactive_when_grace_becomes_active(self) -> None:
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(indoor=72.0, outdoor=65.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert t.changed
+
+    def test_override_short_circuit_takes_priority_over_lockout_recognition(self) -> None:
+        # Even when paused_by_door + an unexpired lockout window are ALSO present
+        # (which would otherwise route to PAUSED_REACTIVATION_LOCKOUT per
+        # TestActiveBranchLockoutRecognition), override_active must win and land
+        # on plain INACTIVE, not PAUSED_REACTIVATION_LOCKOUT.
+        now = datetime(2026, 1, 1, 12, 0, 30, tzinfo=UTC)
+        exit_time = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        t = transition(
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+            _tick(
+                indoor=75.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                paused_by_door=True,
+                outdoor_exit_time=exit_time,
+                now=now,
+                lockout_seconds=300.0,
+                override_active=True,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+
+    def test_both_flags_false_leaves_favorable_conditions_unaffected(self) -> None:
+        """Regression-safety proof: with override_active/grace_active both False
+        (the default), behavior is byte-for-byte the existing pre-#687 path —
+        same assertion as test_activates_full_gate_when_conditions_favorable."""
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=75.0, outdoor=65.0, comfort_heat_raw=68.0, override_active=False, grace_active=False),
+        )
+        assert t.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+        assert t.changed
 
 
 class TestSoftStartEscalation:

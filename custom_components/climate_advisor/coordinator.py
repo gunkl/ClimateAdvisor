@@ -1149,6 +1149,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
                 ),
                 now=now,
+                override_active=bool(ae._fan_override_active or ae._manual_override_active),
+                grace_active=bool(ae._grace_active),
             ),
         )
         result = transition(self._nat_vent_fsm_state, event)

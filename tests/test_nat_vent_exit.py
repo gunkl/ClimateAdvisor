@@ -167,9 +167,14 @@ class TestOutdoorRiseExit:
         decision = decide_nat_vent_exit(_inputs(indoor=74.0, outdoor=74.5))
         assert decision.reason == NatVentExitReason.OUTDOOR_RISE
 
-    def test_no_fire_when_outdoor_equals_indoor(self) -> None:
+    def test_fires_when_outdoor_equals_indoor(self) -> None:
+        """Issue #690: boundary was previously strict (>), so outdoor==indoor did
+        NOT fire OUTDOOR_RISE here — disagreeing with fan_thermostat_decision.py's
+        Check 1, which already used non-strict (>=) for the same real-world
+        condition. Now non-strict here too: at equality no cooling benefit
+        remains, so the exit fires immediately instead of waiting a tick."""
         decision = decide_nat_vent_exit(_inputs(indoor=74.0, outdoor=74.0))
-        assert decision.reason == NatVentExitReason.NONE
+        assert decision.reason == NatVentExitReason.OUTDOOR_RISE
 
     def test_takes_priority_over_ceiling_threshold(self) -> None:
         # outdoor > indoor AND outdoor > threshold -- outdoor-rise checked first.

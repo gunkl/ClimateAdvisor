@@ -98,6 +98,22 @@ def resolve_hard_exit_floor(
     return comfort_heat_raw
 
 
+def is_outdoor_rise_exit(*, indoor: float | None, outdoor: float | None) -> bool:
+    """The airflow-reversed / free-cooling-gone condition: outdoor temp has
+    risen to meet or exceed indoor, so venting no longer helps (Issue #690 —
+    single source of truth, consolidating two prior copies: this module's
+    Check 1 free-cooling-direction guard and nat_vent_exit.py's OUTDOOR_RISE
+    check, which disagreed at the exact-equality boundary).
+
+    Non-strict (``>=``): equality means no cooling benefit remains, matching
+    Check 1's existing non-strict boundary (Issue #327) rather than
+    OUTDOOR_RISE's previous strict ``>`` (Issue #690 fix — at outdoor==indoor
+    the exit now also fires, slightly earlier than before for the slow-loop
+    OUTDOOR_RISE path).
+    """
+    return outdoor is not None and indoor is not None and outdoor >= indoor
+
+
 def _resolve_vent_floor(inputs: FanThermostatInputs) -> float:
     """Pure reimplementation of Check 2's floor resolution — delegates to
     resolve_hard_exit_floor(), the single source of truth (Issue #456)."""
@@ -118,7 +134,9 @@ def decide_fan_thermostat_check(inputs: FanThermostatInputs) -> FanThermostatOut
     # --- Check 1: free-cooling direction guard (Issue #327) ---
     # Non-strict >=, NO hysteresis — this boundary is deliberately different
     # from the reactivation gate's strict < with configurable hysteresis.
-    if inputs.outdoor is not None and inputs.indoor is not None and inputs.outdoor >= inputs.indoor:
+    # Delegates to is_outdoor_rise_exit(), the single source of truth shared
+    # with nat_vent_exit.py's OUTDOOR_RISE check (Issue #690).
+    if is_outdoor_rise_exit(indoor=inputs.indoor, outdoor=inputs.outdoor):
         if inputs.natural_vent_active:
             return FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT
         return FanThermostatOutcome.STOP_DEACTIVATE

@@ -24,7 +24,14 @@ Use via ``tools.sim_harness.differential.diff_runs(scenario,
 mutate_b=fsm_authoritative_mutation)`` — run A is untouched production (flag
 default False), run B forces the flag True on every engine instance
 constructed during that run. ``diff.is_clean`` must be True for every
-scenario in the golden/pending corpus.
+scenario in the golden/pending corpus, EXCEPT the individually-diagnosed
+entries in ``tests/test_nat_vent_fsm_authoritative_compare.py``'s own
+``_KNOWN_DIVERGENT_SCENARIOS`` dict (see its comments for each root cause).
+Issue #698 (Phase 2d, Decision 1) intentionally widened the fast per-tick
+exit check inside ``nat_vent_temperature_check()`` to the full 5-check exit
+chain, so the swap is no longer a universal no-op the way Phases 2a-2c's pure
+wiring changes were — this comparator remains a real regression net for
+every scenario NOT in that known-divergence list.
 """
 
 from __future__ import annotations

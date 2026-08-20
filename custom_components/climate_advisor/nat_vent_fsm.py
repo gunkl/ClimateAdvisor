@@ -85,6 +85,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from .nat_vent_cycling import NatVentCyclingInputs, decide_nat_vent_cycling
 from .nat_vent_exit import NatVentExitInputs, NatVentExitReason, decide_nat_vent_exit
 from .nat_vent_gate import (
     NatVentGateInputs,
@@ -156,6 +157,18 @@ class NatVentFsmInputs:
     # real values rather than relying on the default.
     override_active: bool = False
     grace_active: bool = False
+    # Issue #698 (Phase 2d): the live fan-hardware on/off flag (AutomationEngine's
+    # ``_fan_active``) -- distinct from the session flag ``_natural_vent_active``
+    # this FSM's states already model. Default False mirrors ``override_active``/
+    # ``grace_active``'s own non-breaking-default precedent: only
+    # ``nat_vent_temperature_check()``'s FSM-authoritative branch (the one caller
+    # that needs mid-session cycling decisions) passes a real value; every other
+    # existing call site's inputs are unaffected by this field, since
+    # ``decide_nat_vent_cycling()`` is only reached when the exit chain returns
+    # NONE and the resulting state is one of the two ACTIVE_* states (see
+    # ``_transition_from_active()`` below) -- those other call sites don't read
+    # ``NatVentTransition.fan_should_be_active`` at all.
+    fan_hardware_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,6 +186,12 @@ class NatVentTransition:
     event_kind: NatVentFsmEventKind
     exit_reason: NatVentExitReason | None = None
     at: datetime | None = None
+    # Issue #698 (Phase 2d): populated ONLY when the exit chain returned NONE and
+    # to_state is one of the two ACTIVE_* states (see _transition_from_active()) --
+    # None in every other case (inactive states, any exit reason firing). Callers
+    # that don't care about mid-session cycling (every call site wired before
+    # Phase 2d) simply never read this field.
+    fan_should_be_active: bool | None = None
 
     @property
     def changed(self) -> bool:
@@ -207,6 +226,19 @@ def _gate_inputs(inputs: NatVentFsmInputs) -> NatVentGateInputs:
         hysteresis=inputs.hysteresis,
         fan_mode=inputs.fan_mode,
         aggressive_savings=inputs.aggressive_savings,
+    )
+
+
+def _cycling_inputs(inputs: NatVentFsmInputs) -> NatVentCyclingInputs:
+    return NatVentCyclingInputs(
+        indoor=inputs.indoor,
+        outdoor=inputs.outdoor,
+        comfort_heat_raw=inputs.comfort_heat_raw,
+        sleep_heat=inputs.sleep_heat,
+        in_sleep_window=inputs.in_sleep_window,
+        comfort_cool=inputs.comfort_cool,
+        hysteresis=inputs.hysteresis,
+        fan_hardware_active=inputs.fan_hardware_active,
     )
 
 
@@ -276,8 +308,19 @@ def _transition_from_active(current_state: NatVentLifecycleState, event: NatVent
 
     decision = decide_nat_vent_exit(_exit_inputs(event.inputs))
     if decision.reason == NatVentExitReason.NONE:
+        # Issue #698 (Phase 2d): the session continues -- now also decide whether the
+        # fan HARDWARE should be on or off this tick (thermostat-style cycling around
+        # the comfort midpoint). Only reached once the exit chain has cleared, mirroring
+        # nat_vent_temperature_check()'s own priority order (hard-floor/exit checks
+        # first, cycling second) -- decide_nat_vent_cycling() does not re-check any exit
+        # condition itself (see its own docstring).
+        cycling_decision = decide_nat_vent_cycling(_cycling_inputs(event.inputs))
         return NatVentTransition(
-            from_state=current_state, to_state=escalated_state, event_kind=event.kind, at=event.inputs.now
+            from_state=current_state,
+            to_state=escalated_state,
+            event_kind=event.kind,
+            at=event.inputs.now,
+            fan_should_be_active=cycling_decision.fan_should_be_active,
         )
 
     # Only the outdoor-rise exit records an outdoor_exit_time in production

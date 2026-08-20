@@ -4,9 +4,20 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.43"
+VERSION = "0.6.44"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.44": [
+        "Feat #698: the whole-house fan can now briefly pause itself mid-session"
+        " once the room hits your comfort target, then resume automatically if"
+        " it drifts back — instead of running the whole time regardless. With"
+        " the state-machine switch enabled, a running free-cooling session also"
+        " now reacts immediately (instead of waiting up to 30 minutes) if"
+        " conditions change enough to end it for any reason, not just if the"
+        " house gets too cold. Also fixed a small pre-existing mismatch where"
+        " the fan could stay on slightly too long after outdoor air warmed past"
+        " indoor, by reusing the same shared check used elsewhere.",
+    ],
     "0.6.43": [
         "Fix #694: fixed 3 defects introduced by the previous nat-vent"
         " state-machine wiring pass (still not authoritative over any real"
@@ -2049,6 +2060,53 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    698: {
+        "version_fixed": "0.6.44",
+        "title": (
+            "Nat-vent mid-session fan cycling (on/off while a session stays"
+            " active) and the fast in-session exit check both had no FSM"
+            " equivalent — the largest remaining gap in the Epic #594 Phase R"
+            " nat-vent build-out"
+        ),
+        "scope_covered": (
+            "New pure module nat_vent_cycling.py (decide_nat_vent_cycling(),"
+            " NatVentCyclingInputs, NatVentCyclingDecision) reimplements"
+            " nat_vent_temperature_check()'s cycle-off/cycle-on threshold"
+            " math. nat_vent_fsm.py: NatVentFsmInputs gained"
+            " fan_hardware_active; NatVentTransition gained"
+            " fan_should_be_active, populated by _transition_from_active()"
+            " when the exit chain returns NONE. automation.py's"
+            " nat_vent_temperature_check() (fast per-tick check) now, when"
+            " _natvent_fsm_authoritative is enabled: (1) runs the full 5-check"
+            " decide_nat_vent_exit() priority chain instead of re-checking"
+            " only the comfort floor, so a session can now end via any of the"
+            " 5 exit reasons on the fast loop instead of waiting up to 30 min"
+            " for the slow loop; (2) drives cycle-off/cycle-on via"
+            " decide_nat_vent_cycling(), applying results through the same"
+            " _activate_fan()/_deactivate_fan() side-effect code legacy uses."
+            " Also fixed a hand-duplicated outdoor-warm-past-indoor comparison"
+            " in the cycle-on reactivation guard by delegating to the shared"
+            " is_outdoor_rise_exit() (fan_thermostat_decision.py) — applies in"
+            " both the authoritative and legacy branches, a plain"
+            " bugfix independent of the FSM switch. Dashboard visibility for"
+            " a cycled-off/'resting' session required no new code — confirmed"
+            " via git archaeology that 'nat-vent (session active, fan idle)'"
+            " has existed in _compute_fan_status()/_compute_whf_status()/"
+            " _compute_hvac_fan_status() since Issue #321 (v0.4.18) and was"
+            " already wired to the dashboard. Two-pass verification caught and"
+            " fixed 4 defects before merge: a dropped k_passive diagnostic"
+            " field in the fast loop's PROACTIVE_FLOOR exit payload, two"
+            " inaccurate descriptions on the differential-harness's allowlist"
+            " for known pre-existing scenario divergences, and — the most"
+            " consequential — the allowlist's assertion was tightened from a"
+            " bare 'some divergence exists' check to pinned exact"
+            " event/action divergence counts per scenario, so a future"
+            " regression in any of the 6 allowlisted golden scenarios can no"
+            " longer pass silently. Surfaced (not fixed, tracked separately)"
+            " a same-tick reactivation race after a fast-loop exit — see"
+            " issue #699."
+        ),
+    },
     694: {
         "version_fixed": "0.6.43",
         "title": (

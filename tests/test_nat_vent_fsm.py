@@ -61,6 +61,7 @@ def _inputs(
     now: datetime = _NOW,
     override_active: bool = False,
     grace_active: bool = False,
+    fan_hardware_active: bool = False,
 ) -> NatVentFsmInputs:
     return NatVentFsmInputs(
         indoor=indoor,
@@ -85,6 +86,7 @@ def _inputs(
         now=now,
         override_active=override_active,
         grace_active=grace_active,
+        fan_hardware_active=fan_hardware_active,
     )
 
 
@@ -195,6 +197,79 @@ class TestFromActiveExitWiring:
         )
         assert t.to_state == NatVentLifecycleState.INACTIVE
         assert t.exit_reason == NatVentExitReason.COMFORT_FLOOR
+
+
+class TestCyclingWiring:
+    """Issue #698 (Phase 2d): NatVentTransition.fan_should_be_active is populated
+    only when the exit chain returns NONE and the resulting state is ACTIVE_* —
+    None in every other case (exit fired, or the branch never reaches the active
+    exit chain at all)."""
+
+    def test_populated_when_no_exit_and_indoor_between_thresholds_holds_fan_on(self) -> None:
+        # comfort_heat=68, comfort_cool=76, hysteresis=1 -> target=72, off=71, on=73.
+        # indoor=72 is between both thresholds -> holds current (active) state.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=72.0, outdoor=65.0, hysteresis=1.0, fan_hardware_active=True),
+        )
+        assert t.exit_reason is None
+        assert t.fan_should_be_active is True
+
+    def test_populated_when_no_exit_and_indoor_crosses_off_threshold(self) -> None:
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=70.0, outdoor=65.0, hysteresis=1.0, fan_hardware_active=True),
+        )
+        assert t.exit_reason is None
+        assert t.fan_should_be_active is False
+
+    def test_populated_when_no_exit_and_indoor_crosses_on_threshold(self) -> None:
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=74.0, outdoor=65.0, hysteresis=1.0, fan_hardware_active=False),
+        )
+        assert t.exit_reason is None
+        assert t.fan_should_be_active is True
+
+    def test_outdoor_at_or_above_indoor_exits_via_chain_before_cycling_runs(self) -> None:
+        # NOTE: decide_nat_vent_cycling()'s own outdoor-warm reactivation guard
+        # (proven directly, in isolation, by test_nat_vent_cycling.py's
+        # TestOutdoorWarmGuardBlocksReactivation) is NOT reachable through
+        # transition() specifically -- decide_nat_vent_exit()'s check 4
+        # (OUTDOOR_RISE) already exits the whole session on ANY outdoor>=indoor
+        # reading, unconditionally, before cycling ever runs. So whenever
+        # transition() reaches the cycling call at all (exit_reason is None),
+        # outdoor < indoor is already guaranteed by construction -- the
+        # cycling-level guard is structurally dead code on THIS call path,
+        # kept only for the pure function's own standalone correctness/future
+        # callers. This asserts that guarantee: the exit chain, not cycling,
+        # is what fires here.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=74.0, outdoor=74.0, hysteresis=1.0, fan_hardware_active=False),
+        )
+        assert t.exit_reason == NatVentExitReason.OUTDOOR_RISE
+        assert t.fan_should_be_active is None
+
+    def test_none_when_exit_fires_instead_of_cycling(self) -> None:
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=68.0, comfort_heat_raw=68.0, in_sleep_window=False, paused_by_door=False),
+        )
+        assert t.exit_reason == NatVentExitReason.COMFORT_FLOOR
+        assert t.fan_should_be_active is None
+
+    def test_none_when_override_active_short_circuits(self) -> None:
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=72.0, outdoor=65.0, hysteresis=1.0, override_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert t.fan_should_be_active is None
+
+    def test_none_from_inactive_state(self) -> None:
+        t = transition(NatVentLifecycleState.INACTIVE, _tick(indoor=70.0, outdoor=75.0))
+        assert t.fan_should_be_active is None
 
 
 class TestActiveBranchLockoutRecognition:

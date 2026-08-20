@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.44] — 2026-08-20
+
+- Feat #698: the whole-house fan can now briefly pause itself mid-session once the room hits your comfort target, then resume automatically if it drifts back — instead of running the whole time regardless. With the state-machine switch enabled, a running free-cooling session also now reacts immediately (instead of waiting up to 30 minutes) if conditions change enough to end it for any reason, not just if the house gets too cold. Also fixed a small pre-existing mismatch where the fan could stay on slightly too long after outdoor air warmed past indoor, by reusing the same shared check used elsewhere. No change for installs that haven't opted into the state-machine switch, aside from the outdoor-air mismatch fix, which applies to everyone.
+
 ## [0.6.43] — 2026-08-19
 
 - Fix #694: fixed 3 defects introduced by the previous nat-vent state-machine wiring pass (still not authoritative over any real decision by default). With the state-machine switch enabled, an in-flight natural-ventilation session (free cooling already running) could be killed outright or silently downgraded from a stronger cooling mode to a weaker one whenever a second door or window was opened during that session — even though nothing about outdoor/indoor conditions had changed. Also fixed a case where reopening a window during an existing door/window pause could leave the automation's internal pause bookkeeping in an inconsistent state. No change for installs that haven't opted into the state-machine switch.

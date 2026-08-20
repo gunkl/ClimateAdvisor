@@ -118,8 +118,10 @@ from .fan_thermostat_decision import (
     FanThermostatOutcome,
     _resolve_vent_floor,
     decide_fan_thermostat_check,
+    is_outdoor_rise_exit,
     resolve_hard_exit_floor,
 )
+from .nat_vent_cycling import NatVentCyclingInputs, decide_nat_vent_cycling
 from .nat_vent_exit import (
     NatVentExitInputs,
     NatVentExitReason,
@@ -4341,34 +4343,239 @@ class AutomationEngine:
             off_threshold = nat_vent_target - hysteresis
             on_threshold = nat_vent_target + hysteresis
 
-            # Hard floor exit takes priority over cycling.
-            # Sleep window: _hard_floor = sleep_heat - hysteresis (one step below cycling-off threshold),
-            # allowing the fan to cycle off gracefully at sleep_heat before the session terminates.
-            # Daytime: _hard_floor = comfort_heat (unchanged behaviour).
-            if current_temp <= _hard_floor:
-                _LOGGER.info(
-                    "Nat-vent hard exit [%s] via temp-check: indoor %.1f°F ≤ floor %.1f°F — ending session",
-                    _context,
-                    current_temp,
-                    _hard_floor,
+            # Issue #698 (epic #594 Phase R, Phase 2d, Decision 1): while FSM-authoritative,
+            # the fast per-tick hard-exit check is upgraded from a narrow comfort-floor-only
+            # re-implementation to a real call into decide_nat_vent_exit() — the SAME 5-check
+            # priority chain (comfort-floor, away-ceiling, proactive-floor, outdoor-rise,
+            # ceiling-threshold) check_natural_vent_conditions()'s slow loop already uses.
+            # Intentional behavior change (approved): a session can now end via any of the
+            # other 4 reasons within this fast loop's own tick cadence, instead of waiting up
+            # to 30 min for the slow loop to catch it. The non-authoritative branch is
+            # unchanged — comfort-floor only, via resolve_hard_exit_floor()/_hard_floor.
+            if self._natvent_fsm_authoritative:
+                thermal_nvtc = self._thermal_model or {}
+                nat_vent_delta_nvtc = float(self.config.get(CONF_NATURAL_VENT_DELTA, DEFAULT_NATURAL_VENT_DELTA))
+                exit_decision = decide_nat_vent_exit(
+                    NatVentExitInputs(
+                        indoor=current_temp,
+                        outdoor=outdoor,
+                        comfort_heat_raw=comfort_heat,
+                        sleep_heat=sleep_heat,
+                        in_sleep_window=in_sleep_window,
+                        hysteresis=hysteresis,
+                        comfort_cool=comfort_cool,
+                        nat_vent_delta=nat_vent_delta_nvtc,
+                        occupancy_mode=self._occupancy_mode,
+                        thermal_confidence=thermal_nvtc.get("confidence", "none"),
+                        k_passive=thermal_nvtc.get("k_passive"),
+                    )
                 )
-                await self._exit_nat_vent(
-                    reason=(
-                        f"nat-vent hard floor exit [{_context}]: indoor {current_temp:.1f}°F"
-                        f" ≤ floor {_hard_floor:.1f}°F"
-                    ),
-                    event_type="nat_vent_comfort_floor_exit",
-                    event_payload={
+                _exit_reason = exit_decision.reason
+            else:
+                exit_decision = None
+                _exit_reason = (
+                    NatVentExitReason.COMFORT_FLOOR if current_temp <= _hard_floor else NatVentExitReason.NONE
+                )
+
+            # Hard floor (or, while FSM-authoritative, any of the 5 exit reasons) takes
+            # priority over cycling. Sleep window: _hard_floor = sleep_heat - hysteresis (one
+            # step below cycling-off threshold), allowing the fan to cycle off gracefully at
+            # sleep_heat before the session terminates. Daytime: _hard_floor = comfort_heat
+            # (unchanged behaviour).
+            if _exit_reason != NatVentExitReason.NONE:
+                # Away-mode ceiling exit is intentionally NOT routed through _exit_nat_vent()
+                # here either — same documented exclusion as check_natural_vent_conditions()'s
+                # own AWAY_CEILING branch and _exit_nat_vent()'s own docstring ("a different
+                # concept with no pause/grace state machine"). Mirrors that branch's exact
+                # side effects at this new call site.
+                if _exit_reason == NatVentExitReason.AWAY_CEILING:
+                    _LOGGER.info(
+                        "Nat-vent away-mode ceiling exit via temp-check: indoor %.1f°F >= comfort_cool %.1f°F"
+                        " while away",
+                        current_temp,
+                        comfort_cool,
+                    )
+                    self._natural_vent_active = False
+                    self._nat_vent_soft_start = False
+                    _away_result = await self._deactivate_fan(reason="nat-vent ceiling exit (away mode) via temp_check")
+                    if self._emit_event_callback and _away_result is not FanCommandResult.RATE_LIMITED_DUP:
+                        self._emit_event_callback(
+                            "nat_vent_away_ceiling_exit",
+                            {
+                                "indoor": current_temp,
+                                "comfort_cool": comfort_cool,
+                                "fan_device": _fan_device_label(self.config),
+                                "source": "temp_check",
+                            },
+                        )
+                    return
+
+                # Remaining 4 reasons all route through the canonical _exit_nat_vent() choke
+                # point (Issue #418), same as their slow-loop siblings — event_type/payload
+                # shape and set_outdoor_exit_time match check_natural_vent_conditions()'s own
+                # branches exactly (Issue #641 lockout-arming included for the 3 reasons that
+                # can hand off into a sensor-still-open pause).
+                if _exit_reason == NatVentExitReason.COMFORT_FLOOR:
+                    _floor_for_log = (
+                        exit_decision.vent_floor
+                        if exit_decision is not None and exit_decision.vent_floor is not None
+                        else _hard_floor
+                    )
+                    _log_detail = f"indoor {current_temp:.1f}°F ≤ floor {_floor_for_log:.1f}°F"
+                    _event_type = "nat_vent_comfort_floor_exit"
+                    _payload: dict[str, Any] = {
                         "indoor_temp": current_temp,
-                        "comfort_heat": _hard_floor,
+                        "comfort_heat": _floor_for_log,
                         "source": "temp_check",
                         "fan_device": _fan_device_label(self.config),
                         "fan_mode_change": "on→auto",
                         "hvac_mode_restored": (
                             self._current_classification.hvac_mode if self._current_classification else "unknown"
                         ),
-                    },
+                    }
+                    _set_outdoor_exit_time = False
+                elif _exit_reason == NatVentExitReason.PROACTIVE_FLOOR:
+                    _ttf = (exit_decision.time_to_floor_hr if exit_decision is not None else None) or 0.0
+                    _cf_now = (exit_decision.comfort_heat_now if exit_decision is not None else None) or _hard_floor
+                    _log_detail = (
+                        f"floor predicted in {_ttf:.2f}h — indoor {current_temp:.1f}°F -> comfort_heat {_cf_now:.1f}°F"
+                    )
+                    _event_type = "nat_vent_predicted_floor_exit"
+                    _k_passive_nvtc = thermal_nvtc.get("k_passive")
+                    _payload = {
+                        "time_to_floor_hr": round(_ttf, 2),
+                        "indoor_temp": round(current_temp, 1),
+                        "comfort_heat": round(_cf_now, 1),
+                        "k_passive": round(_k_passive_nvtc, 4) if _k_passive_nvtc is not None else None,
+                        "source": "temp_check",
+                        "fan_mode_change": "on→auto",
+                        "fan_device": _fan_device_label(self.config),
+                        "hvac_mode_restored": (
+                            self._current_classification.hvac_mode if self._current_classification else "unknown"
+                        ),
+                    }
+                    _set_outdoor_exit_time = True
+                else:
+                    # OUTDOOR_RISE / CEILING_THRESHOLD — both mapped to the same
+                    # nat_vent_outdoor_rise_exit event type as their slow-loop siblings
+                    # (see check_natural_vent_conditions()'s own CEILING_THRESHOLD branch
+                    # comment, Issue #666, for why CEILING_THRESHOLD reuses this type).
+                    _outdoor_log = outdoor if outdoor is not None else 0.0
+                    _log_detail = (
+                        f"outdoor {_outdoor_log:.1f}°F >= indoor {current_temp:.1f}°F — airflow reversed"
+                        if _exit_reason == NatVentExitReason.OUTDOOR_RISE
+                        else f"outdoor {_outdoor_log:.1f}°F > ceiling threshold"
+                    )
+                    _event_type = "nat_vent_outdoor_rise_exit"
+                    _payload = {
+                        "outdoor": outdoor,
+                        "indoor": current_temp,
+                        "source": "temp_check",
+                        "fan_device": _fan_device_label(self.config),
+                    }
+                    _set_outdoor_exit_time = True
+
+                _LOGGER.info(
+                    "Nat-vent hard exit [%s] via temp-check (%s): %s — ending session",
+                    _context,
+                    _exit_reason.value,
+                    _log_detail,
                 )
+                await self._exit_nat_vent(
+                    reason=f"nat-vent {_exit_reason.value} exit [{_context}] via temp-check: {_log_detail}",
+                    set_outdoor_exit_time=_set_outdoor_exit_time,
+                    event_type=_event_type,
+                    event_payload=_payload,
+                )
+                return
+
+            # Issue #698 (Decision 3): the on-threshold outdoor-warm reactivation guard now
+            # delegates to is_outdoor_rise_exit() — the single source of truth already shared
+            # by nat_vent_exit.py's OUTDOOR_RISE check and this module's other outdoor-warm
+            # comparisons — instead of a third hand-duplicated `outdoor >= current_temp` copy.
+            # Applies unconditionally (both branches below): this is a de-duplication bug fix,
+            # not new FSM-only behavior — the boundary semantics (non-strict >=) are unchanged.
+            if self._natvent_fsm_authoritative:
+                cycling_decision = decide_nat_vent_cycling(
+                    NatVentCyclingInputs(
+                        indoor=current_temp,
+                        outdoor=outdoor,
+                        comfort_heat_raw=comfort_heat,
+                        sleep_heat=sleep_heat,
+                        in_sleep_window=in_sleep_window,
+                        comfort_cool=comfort_cool,
+                        hysteresis=hysteresis,
+                        fan_hardware_active=self._fan_active,
+                    )
+                )
+                _should_be_active = cycling_decision.fan_should_be_active
+                _outdoor_rise_blocked = cycling_decision.outdoor_rise_blocked
+
+                if self._fan_active and not _should_be_active:
+                    _LOGGER.info(
+                        "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
+                        " — indoor %.1f°F ≤ off_threshold, cycling fan off, session remains active",
+                        _context,
+                        nat_vent_target,
+                        off_threshold,
+                        on_threshold,
+                        _fan_device_label(self.config),
+                        current_temp,
+                    )
+                    await self._deactivate_fan(reason="nat_vent_cycling_off", restore_hvac=False, emit_event=False)
+                    if (
+                        self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
+                        and self._emit_event_callback
+                    ):
+                        self._emit_event_callback(
+                            "nat_vent_fan_off",
+                            {
+                                "indoor_temp": current_temp,
+                                "off_threshold": off_threshold,
+                                "target": nat_vent_target,
+                                "fan_device": _fan_device_label(self.config),
+                            },
+                        )
+                    return
+
+                if not self._fan_active and _should_be_active:
+                    _LOGGER.info(
+                        "Nat-vent cycling [%s]: target=%.1f°F, off=%.1f°F, on=%.1f°F (fan_device=%s)"
+                        " — indoor %.1f°F ≥ on_threshold, outdoor=%.1f°F, cycling fan on",
+                        _context,
+                        nat_vent_target,
+                        off_threshold,
+                        on_threshold,
+                        _fan_device_label(self.config),
+                        current_temp,
+                        outdoor if outdoor is not None else 0.0,
+                    )
+                    await self._activate_fan(reason="nat_vent_cycling_on", emit_event=False)
+                    if (
+                        self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED) != FAN_MODE_DISABLED
+                        and self._emit_event_callback
+                    ):
+                        self._emit_event_callback(
+                            "nat_vent_fan_on",
+                            {
+                                "indoor_temp": current_temp,
+                                "outdoor_temp": outdoor,
+                                "on_threshold": on_threshold,
+                                "target": nat_vent_target,
+                                "fan_device": _fan_device_label(self.config),
+                            },
+                        )
+                    return
+
+                if not self._fan_active and not _should_be_active and _outdoor_rise_blocked:
+                    _LOGGER.info(
+                        "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F"
+                        " but outdoor %.1f°F ≥ indoor — skipping re-activation"
+                        " (outdoor-warm exit condition active)",
+                        current_temp,
+                        on_threshold,
+                        outdoor if outdoor is not None else 0.0,
+                    )
                 return
 
             if self._fan_active and current_temp <= off_threshold:
@@ -4406,14 +4613,14 @@ class AutomationEngine:
                 return
 
             if not self._fan_active and current_temp >= on_threshold:
-                if outdoor is not None and outdoor >= current_temp:
+                if is_outdoor_rise_exit(indoor=current_temp, outdoor=outdoor):
                     _LOGGER.info(
                         "Nat-vent cycling: indoor %.1f°F ≥ on_threshold %.1f°F"
                         " but outdoor %.1f°F ≥ indoor — skipping re-activation"
                         " (outdoor-warm exit condition active)",
                         current_temp,
                         on_threshold,
-                        outdoor,
+                        outdoor if outdoor is not None else 0.0,
                     )
                     return
                 _LOGGER.info(
@@ -6543,6 +6750,7 @@ class AutomationEngine:
         outdoor: float | None,
         hysteresis: float | None = None,
         paused_by_door: bool | None = None,
+        fan_hardware_active: bool | None = None,
     ):
         """Build the FSM's input snapshot from current engine state (Issue #594
         Phase R, Step 2). Same field set ``coordinator._evaluate_nat_vent_fsm()``
@@ -6573,6 +6781,13 @@ class AutomationEngine:
                 is passed explicitly at that one call site to preserve the exact legacy
                 gap; ``None`` (every other caller) keeps this method's prior behavior
                 (``self._paused_by_door``) unchanged.
+            fan_hardware_active: Overrides ``self._fan_active`` when provided. Issue #698
+                (Phase 2d): only ``nat_vent_temperature_check()``'s FSM-authoritative
+                branch needs this — it's the sole caller whose ``transition()`` result
+                is read for ``fan_should_be_active`` (mid-session cycling). ``None``
+                (every other caller) keeps this method's prior behavior
+                (``self._fan_active``) unchanged — harmless either way, since none of
+                those other call sites read ``NatVentTransition.fan_should_be_active``.
         """
         from .nat_vent_fsm import NatVentFsmInputs
 
@@ -6584,6 +6799,7 @@ class AutomationEngine:
             else float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
         )
         _paused_by_door = paused_by_door if paused_by_door is not None else bool(self._paused_by_door)
+        _fan_hardware_active = fan_hardware_active if fan_hardware_active is not None else bool(self._fan_active)
         return NatVentFsmInputs(
             indoor=indoor,
             outdoor=outdoor,
@@ -6607,6 +6823,7 @@ class AutomationEngine:
                 self.config.get(CONF_NAT_VENT_REACTIVATION_LOCKOUT_S, NAT_VENT_REACTIVATION_LOCKOUT_S)
             ),
             now=now,
+            fan_hardware_active=_fan_hardware_active,
         )
 
     @property

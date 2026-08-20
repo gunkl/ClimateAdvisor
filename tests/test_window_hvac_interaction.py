@@ -95,6 +95,7 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._paused_with_hvac_already_off = False
     ae._pre_pause_mode = None
     ae._doorwindow_fsm_authoritative = False
+    ae._natvent_fsm_authoritative = False
     ae._override_grace_fsm_authoritative = False
     ae._grace_active = False
     ae._grace_protects_override = False

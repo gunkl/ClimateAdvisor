@@ -4,9 +4,23 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.42"
+VERSION = "0.6.43"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.43": [
+        "Fix #694: fixed 3 defects introduced by the previous nat-vent"
+        " state-machine wiring pass (still not authoritative over any real"
+        " decision by default). With the state-machine switch enabled, an"
+        " in-flight natural-ventilation session (free cooling already"
+        " running) could be killed outright or silently downgraded from a"
+        " stronger cooling mode to a weaker one whenever a second door or"
+        " window was opened during that session — even though nothing about"
+        " outdoor/indoor conditions had changed. Also fixed a case where"
+        " reopening a window during an existing door/window pause could"
+        " leave the automation's internal pause bookkeeping in an"
+        " inconsistent state. No change for installs that haven't opted"
+        " into the state-machine switch.",
+    ],
     "0.6.42": [
         "Fix #690: two separate places that decide when to end a natural-"
         "ventilation session (a fast check and a slower 30-minute check) used"
@@ -2035,6 +2049,44 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    694: {
+        "version_fixed": "0.6.43",
+        "title": (
+            "Phase 2b FSM wiring (nat-vent decision points behind"
+            " _natvent_fsm_authoritative) killed or silently downgraded an"
+            " in-flight nat-vent session on a second door/window opening"
+        ),
+        "scope_covered": (
+            "automation.py: 3 defects in the Phase 2b wiring, all gated"
+            " behind _natvent_fsm_authoritative (off by default). (1)"
+            " handle_door_window_open()'s nat-vent gate check (~line 3163)"
+            " read self.nat_vent_lifecycle_state as the FSM's starting"
+            " state for what is a pure entry-gate question, routing an"
+            " already-active session through the FSM's exit chain instead"
+            " of the entry gate on a second window opening; now forces"
+            " NatVentLifecycleState.INACTIVE, matching"
+            " reconcile_fan_on_startup()'s existing rationale for the same"
+            " pattern. (2) The same call site's activation branch"
+            " hardcoded NatVentLifecycleState.ACTIVE_FULL_GATE regardless"
+            " of the FSM result, silently demoting an in-flight soft-start"
+            " session to full-gate via _apply_nat_vent_fsm_state()'s"
+            " unconditional projection; now projects ACTIVE_SOFT_START when"
+            " _nat_vent_soft_start is already set, matching legacy's"
+            " narrower write at this site. (3) The idle-open re-entry site"
+            " (both ACTIVE_FULL_GATE and ACTIVE_SOFT_START branches, ~lines"
+            " 3560/3589) called _apply_nat_vent_fsm_state(), whose"
+            " projection unconditionally clears _paused_by_door, whereas"
+            " legacy's write here never touched that flag — now the"
+            " pre-call value of _paused_by_door is captured and restored"
+            " after the apply. The paused-reactivation site (~line 4006)"
+            " was confirmed unaffected — it deliberately clears pause flags"
+            " via _resolve_door_window_pause_flags(), matching legacy"
+            " already. Also corrected nat_vent_lifecycle_state's stale"
+            " 'read-only observability' docstring, which no longer reflects"
+            " its Phase 2b role as a production decision input at 3 of the"
+            " 4 wired call sites."
+        ),
+    },
     690: {
         "version_fixed": "0.6.42",
         "title": (

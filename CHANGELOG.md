@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.41] — 2026-08-19
+
+- Fix #691: no user-visible change. Adds a new internal method that will let the nat-vent state-machine engine (still not authoritative over any real decision today) eventually drive real fan state the same proven way the door/window engine already does. Not yet connected to anything — preparation work only.
+
 ## [0.6.40] — 2026-08-19
 
 - Fix #687: no user-visible change. The nat-vent diagnostic engine (used to validate a future state-machine switchover, not authoritative over any real fan/HVAC decision today) couldn't see when a manual fan override or grace period was active, so it reported "would activate" for the full duration of any manual override — the single largest diagnostic-disagreement bucket found this session. It now correctly recognizes both.

@@ -6269,6 +6269,30 @@ class AutomationEngine:
             )
         )
 
+    def _apply_nat_vent_fsm_state(self, state: NatVentLifecycleState) -> None:
+        """Write ``_natural_vent_active``/``_nat_vent_soft_start``/``_paused_by_door``
+        from a ``nat_vent_fsm.transition()`` result (Issue #594 Phase R, Phase 2f).
+
+        Inverse of ``nat_vent_lifecycle_state``'s derivation — see
+        ``nat_vent_lifecycle.py``'s ``derive_nat_vent_lifecycle_state()``.
+        Deliberately does NOT touch ``_nat_vent_outdoor_exit_time`` — the FSM's
+        ``to_state`` alone cannot distinguish "just entered lockout" from
+        "already mid-lockout," and only the outdoor-reversal exit path
+        (``_exit_nat_vent(set_outdoor_exit_time=True)``) has the information
+        needed to arm it, same exclusion-list treatment as door/window's
+        ``_grace_end_time``.
+
+        Not yet called from any production code path — added ahead of the
+        wiring work that will invoke it, matching the same additive-first
+        pattern already used for Issue #687's override/grace awareness.
+        """
+        self._natural_vent_active = state in (
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            NatVentLifecycleState.ACTIVE_SOFT_START,
+        )
+        self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
+        self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+
     def _build_door_window_fsm_inputs(self, *, now: datetime):
         """Build the door/window FSM's input snapshot from current engine state
         (Issue #594 Phase R, Step 2).

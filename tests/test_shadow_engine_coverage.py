@@ -100,6 +100,12 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "branches of handle_manual_override_during_pause (mirrored) and resume_from_pause "
         "(mirrored) — the inverse of door_window_lifecycle_state's derivation"
     ),
+    "_apply_nat_vent_fsm_state": (
+        "internal: Issue #594 Phase R Phase 2f helper, added ahead of any production wiring — "
+        "has zero call sites as of Issue #691 (see that issue's own docstring). Same "
+        "additive-first pattern as _apply_door_window_fsm_state above; will be reclassified "
+        "when a future issue wires it into a real entry point"
+    ),
     "_clear_fan_flags_and_start_grace": (
         "internal: called only from on_fan_turned_off (mirrored) and _reconcile_fan_physical_drift (internal)"
     ),

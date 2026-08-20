@@ -793,6 +793,85 @@ class TestResolveDoorWindowPauseFlagsDispatcher:
         assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.GRACE
 
 
+class TestApplyNatVentFsmState:
+    """Tests for AutomationEngine._apply_nat_vent_fsm_state() (Issue #691).
+
+    This method is new, additive code with zero call sites in production yet
+    (Issue #594 Phase R, Phase 2f) -- these tests exercise it directly by
+    invoking it on a bare engine and asserting the three flags it writes,
+    plus the exclusion-list proof for _nat_vent_outdoor_exit_time.
+    """
+
+    def _make_engine(self) -> AutomationEngine:
+        engine = object.__new__(AutomationEngine)
+        engine._natural_vent_active = None
+        engine._nat_vent_soft_start = None
+        engine._paused_by_door = None
+        engine._nat_vent_outdoor_exit_time = "SENTINEL_UNTOUCHED"
+        return engine
+
+    def test_active_full_gate_sets_active_only(self):
+        from custom_components.climate_advisor.nat_vent_lifecycle import (
+            NatVentLifecycleState,
+        )
+
+        engine = self._make_engine()
+        engine._apply_nat_vent_fsm_state(NatVentLifecycleState.ACTIVE_FULL_GATE)
+
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is False
+        assert engine._paused_by_door is False
+
+    def test_active_soft_start_sets_active_and_soft_start(self):
+        from custom_components.climate_advisor.nat_vent_lifecycle import (
+            NatVentLifecycleState,
+        )
+
+        engine = self._make_engine()
+        engine._apply_nat_vent_fsm_state(NatVentLifecycleState.ACTIVE_SOFT_START)
+
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is True
+        assert engine._paused_by_door is False
+
+    def test_inactive_clears_all_three_flags(self):
+        from custom_components.climate_advisor.nat_vent_lifecycle import (
+            NatVentLifecycleState,
+        )
+
+        engine = self._make_engine()
+        engine._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)
+
+        assert engine._natural_vent_active is False
+        assert engine._nat_vent_soft_start is False
+        assert engine._paused_by_door is False
+
+    def test_paused_reactivation_lockout_sets_paused_only(self):
+        from custom_components.climate_advisor.nat_vent_lifecycle import (
+            NatVentLifecycleState,
+        )
+
+        engine = self._make_engine()
+        engine._apply_nat_vent_fsm_state(NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT)
+
+        assert engine._natural_vent_active is False
+        assert engine._nat_vent_soft_start is False
+        assert engine._paused_by_door is True
+
+    def test_outdoor_exit_time_untouched_by_any_state(self):
+        """Regression guard for the documented exclusion: no state value may
+        write _nat_vent_outdoor_exit_time -- only _exit_nat_vent(set_outdoor_exit_time=True)
+        may do that, per this method's own docstring."""
+        from custom_components.climate_advisor.nat_vent_lifecycle import (
+            NatVentLifecycleState,
+        )
+
+        for state in NatVentLifecycleState:
+            engine = self._make_engine()
+            engine._apply_nat_vent_fsm_state(state)
+            assert engine._nat_vent_outdoor_exit_time == "SENTINEL_UNTOUCHED"
+
+
 class TestGracePeriodDuration:
     """Tests for configurable grace period durations."""
 

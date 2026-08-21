@@ -1,9 +1,11 @@
 # HACS Compliance Brief
 
-**Anchor:** `hacs-compliance` | **Tier:** 2 | **Status:** Current as of 2026-07-02
+**Anchor:** `hacs-compliance` | **Tier:** 2 | **Status:** Current as of 2026-08-21
 
 This document captures all requirements for ClimateAdvisor to remain compliant with HACS
-(Home Assistant Community Store) and for the default repository PR (#8117) to merge smoothly.
+(Home Assistant Community Store). ClimateAdvisor is in the HACS default store
+(`hacs/default#8117`, merged 2026-08-20) — users can install it by searching HACS directly,
+no custom repository step required.
 
 ## Integration Type
 
@@ -118,8 +120,9 @@ and re-submitted (editing a bot-rejected PR does not work).
 and CI, then merges. Of the last 10+ merged integration PRs, Frenck's comment was always:
 > "Hi @username, thanks for the submission! 👋 Approving and merging now. ../Frenck"
 
-PRs are processed FIFO — the queue has 60+ pending integrations (as of 2026-07-02). Typical
-wait: 6–10 weeks depending on queue depth.
+This is now historical context — CA's own PR merged 2026-08-20. Kept here for reference in case
+CA ever needs to resubmit to `hacs/default` (e.g. after a domain rename): PRs are processed FIFO,
+and the queue ran 60+ pending integrations deep as of 2026-07-02, with a typical 6–10 week wait.
 
 ## Merge Conflict Strategy
 

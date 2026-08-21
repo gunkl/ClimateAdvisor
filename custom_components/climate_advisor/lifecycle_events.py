@@ -7,9 +7,12 @@ forwarding (see the plan's tabulated comparison for why the latter was rejected
 — it reproduces the same "forgot to wire one site" bug class as Issue #615/#631,
 just relocated).
 
-Extended only when a new, concrete coupling is found (the existing 6 below are
-each justified by a real finding — #584's Finding 3, or the #631 investigation),
-never speculatively for a lifecycle whose actual needs aren't known yet.
+Extended only when a new, concrete coupling is found (the original 6 below are
+each justified by a real finding — #584's Finding 3, or the #631 investigation;
+the nat-vent session pair added for Issue #717 is justified by
+door_window_fsm.py's own documented cross-read of natural_vent_active/
+whf_owns_hvac), never speculatively for a lifecycle whose actual needs aren't
+known yet.
 """
 
 from __future__ import annotations
@@ -28,6 +31,15 @@ class LifecycleEventType(Enum):
     DOOR_PAUSE_ENDED = "door_pause_ended"
     OVERRIDE_CONFIRMED = "override_confirmed"
     OVERRIDE_CLEARED = "override_cleared"
+    # Issue #717: door_window_fsm.py's own inputs read natural_vent_active/
+    # whf_owns_hvac directly off the engine — nat-vent has no single real
+    # activation chokepoint the way door/window and override/grace do (it's
+    # written at ~18 scattered call sites), so this pair is emitted from a
+    # before/after diff wrapped around _decision_pass() (the one point every
+    # nat-vent-mutating entry point already funnels through under
+    # _decision_lock) rather than at each individual write site.
+    NAT_VENT_SESSION_STARTED = "nat_vent_session_started"
+    NAT_VENT_SESSION_ENDED = "nat_vent_session_ended"
 
 
 @dataclass(frozen=True)

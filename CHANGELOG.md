@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.50] — 2026-08-21
+
+- Fix #717: no user-visible change. Wires the internal cross-check that lets the natural-ventilation, door/window, and manual-override safety logic confirm they're seeing the same events, into production for real — closes a piece of scaffolding that existed but was never connected. Every decision still comes from the same logic as before; this only makes the audit trail behind it real.
+
 ## [0.6.49] — 2026-08-21
 
 - Fix #716: no user-visible change. The internal shadow-engine diagnostic that validates upcoming automation changes before they're allowed to affect real HVAC behavior wasn't tracking whether the whole-house/HVAC fan was on — so a related check could never meaningfully agree or disagree with production. It now does, closing a gap in the safety net that gates future automation changes; nothing about how the fan itself is controlled changed.

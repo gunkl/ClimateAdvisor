@@ -4,6 +4,9 @@ An intelligent HVAC management integration that uses weather forecasts, occupanc
 
 [![Latest Release](https://img.shields.io/github/v/release/gunkl/ClimateAdvisor?label=released&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/releases/latest)
 [![Development Version](https://img.shields.io/github/manifest-json/v/gunkl/ClimateAdvisor?filename=custom_components%2Fclimate_advisor%2Fmanifest.json&label=development&style=flat-square)](https://github.com/gunkl/ClimateAdvisor/blob/main/custom_components/climate_advisor/manifest.json)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=gunkl&repository=ClimateAdvisor&category=integration)
+
+Climate Advisor is available in the [HACS](https://hacs.xyz) default store — search for "Climate Advisor" directly in HACS, no custom repository needed.
 
 ## Dashboard
 
@@ -155,11 +158,9 @@ Parameters are extracted via OLS regression over the full decay or active-phase 
 ### HACS (Recommended)
 
 1. Open HACS in Home Assistant
-2. Click the three dots → Custom repositories
-3. Add `https://github.com/gunkl/ClimateAdvisor` as an Integration
-4. Search for "Climate Advisor" and install
-5. Restart Home Assistant
-6. Go to Settings → Integrations → Add Integration → Climate Advisor
+2. Search for "Climate Advisor" and install
+3. Restart Home Assistant
+4. Go to Settings → Integrations → Add Integration → Climate Advisor
 
 ### Manual
 

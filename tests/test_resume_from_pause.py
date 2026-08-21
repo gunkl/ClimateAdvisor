@@ -581,6 +581,97 @@ class TestGraceExpiryRecheck:
 
 
 # ---------------------------------------------------------------------------
+# TestGraceExpiryRecheckFsmAuthoritative (Issue #708)
+# ---------------------------------------------------------------------------
+
+
+class TestGraceExpiryRecheckFsmAuthoritative:
+    """Issue #708: _re_pause_for_open_sensor()'s reactivation decision was
+    previously gated ONLY on _doorwindow_fsm_authoritative (reading a flag
+    already written by the door/window FSM's own *nested* duplicate nat-vent
+    reactivation check) -- _natvent_fsm_authoritative was never consulted at
+    all, regardless of its own state. These tests prove:
+
+    (a) with _natvent_fsm_authoritative=True, the reactivation decision
+        genuinely comes from nat_vent_fsm.transition() -- via a positive-
+        control monkeypatch of decide_nat_vent_gate() (the same technique
+        TestFsmAuthoritativePositiveControl in
+        test_nat_vent_fsm_authoritative_compare.py uses) that forces the
+        gate closed and confirms reactivation is correspondingly
+        suppressed. If the fix merely happened to produce the right answer
+        via legacy code without really calling the FSM, this patch would
+        have no effect and the test would fail.
+    (b) legacy behavior (_natvent_fsm_authoritative=False, the default) is
+        unchanged -- same fixture/assertions as the pre-existing
+        test_repause_clears_paused_by_door_on_nat_vent_reactivation above.
+    """
+
+    def _make_engine_for_reactivation(self) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 300,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            }
+        )
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = True
+        engine._paused_entity = "binary_sensor.stale_from_prior_pause"
+        engine._paused_since = datetime.now()
+        engine._last_outdoor_temp = 65.0
+        climate_state = MagicMock()
+        climate_state.state = "off"
+        climate_state.attributes.get.return_value = 78.0
+        engine.hass.states.get.return_value = climate_state
+        engine._hourly_forecast_temps = []
+        return engine
+
+    def test_reactivates_via_nat_vent_fsm_when_authoritative(self):
+        """Genuine outdoor/indoor conditions favor reactivation (outdoor 65°F <
+        indoor 78°F, well within the nat-vent delta/comfort-floor gates). With
+        the switch on, this must reactivate via the real FSM path."""
+        engine = self._make_engine_for_reactivation()
+        engine._natvent_fsm_authoritative = True
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
+
+    def test_positive_control_forcing_fsm_gate_closed_suppresses_reactivation(self):
+        """Monkeypatch nat_vent_fsm.decide_nat_vent_gate() to always return
+        False. If _re_pause_for_open_sensor() genuinely routes its
+        reactivation decision through nat_vent_fsm.transition() when
+        authoritative, this forces the function to re-pause instead of
+        reactivating -- proving the FSM function is actually invoked and its
+        result actually consulted, not just a legacy calculation happening to
+        match (the differential-parity check the plan called for)."""
+        engine = self._make_engine_for_reactivation()
+        engine._natvent_fsm_authoritative = True
+
+        with patch("custom_components.climate_advisor.nat_vent_fsm.decide_nat_vent_gate", lambda inputs: False):
+            asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+
+    def test_legacy_unchanged_when_switch_off(self):
+        """Regression: with _natvent_fsm_authoritative left at its default
+        False, behavior is unchanged from before this fix -- same fixture and
+        outcome as test_repause_clears_paused_by_door_on_nat_vent_reactivation
+        above, restated explicitly alongside the FSM-authoritative tests so
+        the three scenarios (default off / on / on-but-forced-closed) sit
+        together."""
+        engine = self._make_engine_for_reactivation()
+        assert engine._natvent_fsm_authoritative is False
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
+
+
+# ---------------------------------------------------------------------------
 # TestResumedFromPauseFlag
 # ---------------------------------------------------------------------------
 

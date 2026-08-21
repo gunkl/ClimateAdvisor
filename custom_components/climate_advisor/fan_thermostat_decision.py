@@ -33,9 +33,10 @@ from enum import Enum
 
 
 class FanThermostatOutcome(Enum):
-    """The four real outcomes fan_thermostat_check() can produce."""
+    """The real outcomes fan_thermostat_check() can produce."""
 
     KEEP = "keep"
+    STOP_MANUAL_OVERRIDE_CONFLICT = "stop_manual_override_conflict"
     STOP_VIA_NAT_VENT_EXIT = "stop_via_nat_vent_exit"
     STOP_DEACTIVATE = "stop_deactivate"
     STOP_COOLED_TO_FLOOR = "stop_cooled_to_floor"
@@ -58,6 +59,8 @@ class FanThermostatInputs:
       natural_vent_active  -> self._natural_vent_active — determines whether Check 1's
                                stop routes through the nat-vent exit path or a plain
                                deactivate
+      manual_override_active -> self._manual_override_active (Issue #714)
+      manual_override_mode   -> self._manual_override_mode (Issue #714)
     """
 
     indoor: float | None
@@ -67,6 +70,8 @@ class FanThermostatInputs:
     in_sleep_window: bool
     hysteresis: float
     natural_vent_active: bool
+    manual_override_active: bool
+    manual_override_mode: str | None
 
 
 def resolve_hard_exit_floor(
@@ -131,6 +136,13 @@ def decide_fan_thermostat_check(inputs: FanThermostatInputs) -> FanThermostatOut
     Preconditions (fan active, not overridden) are the shell's responsibility,
     not this function's — mirrors decide_nat_vent_gate()'s scoping.
     """
+    # --- Check 0: manual override conflict (Issue #714) ---
+    # A manual override to an active HVAC mode structurally conflicts with WHF/nat-vent —
+    # checked before every other condition, mirroring nat_vent_exit.decide_nat_vent_exit()'s
+    # own priority order for the same reason.
+    if inputs.manual_override_active and inputs.manual_override_mode not in (None, "off"):
+        return FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT
+
     # --- Check 1: free-cooling direction guard (Issue #327) ---
     # Non-strict >=, NO hysteresis — this boundary is deliberately different
     # from the reactivation gate's strict < with configurable hysteresis.

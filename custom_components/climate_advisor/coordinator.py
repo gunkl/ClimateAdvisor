@@ -1151,6 +1151,8 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 now=now,
                 override_active=bool(ae._fan_override_active or ae._manual_override_active),
                 grace_active=bool(ae._grace_active),
+                manual_override_active=bool(ae._manual_override_active),
+                manual_override_mode=ae._manual_override_mode,
             ),
         )
         result = transition(self._nat_vent_fsm_state, event)

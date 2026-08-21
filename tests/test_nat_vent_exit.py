@@ -33,6 +33,8 @@ def _inputs(
     occupancy_mode: str = "home",
     thermal_confidence: str = "none",
     k_passive: float | None = None,
+    manual_override_active: bool = False,
+    manual_override_mode: str | None = None,
 ) -> NatVentExitInputs:
     return NatVentExitInputs(
         indoor=indoor,
@@ -46,6 +48,8 @@ def _inputs(
         occupancy_mode=occupancy_mode,
         thermal_confidence=thermal_confidence,
         k_passive=k_passive,
+        manual_override_active=manual_override_active,
+        manual_override_mode=manual_override_mode,
     )
 
 
@@ -55,6 +59,67 @@ class TestNoExit:
         # below indoor and below threshold.
         decision = decide_nat_vent_exit(_inputs(indoor=72.0, outdoor=65.0, comfort_cool=76.0, nat_vent_delta=3.0))
         assert decision.reason == NatVentExitReason.NONE
+
+
+class TestManualOverrideConflictExit:
+    """Issue #714/#705: a manual override to an active HVAC mode structurally
+    conflicts with WHF/nat-vent and must win over every other exit reason."""
+
+    def test_fires_when_override_active_and_mode_is_active(self) -> None:
+        decision = decide_nat_vent_exit(
+            _inputs(indoor=72.0, outdoor=65.0, manual_override_active=True, manual_override_mode="cool")
+        )
+        assert decision.reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT
+
+    def test_fires_for_heat_mode_too_not_just_cool(self) -> None:
+        decision = decide_nat_vent_exit(
+            _inputs(indoor=72.0, outdoor=65.0, manual_override_active=True, manual_override_mode="heat")
+        )
+        assert decision.reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT
+
+    def test_no_fire_when_override_mode_is_off(self) -> None:
+        decision = decide_nat_vent_exit(
+            _inputs(indoor=72.0, outdoor=65.0, manual_override_active=True, manual_override_mode="off")
+        )
+        assert decision.reason == NatVentExitReason.NONE
+
+    def test_no_fire_when_override_mode_is_none(self) -> None:
+        decision = decide_nat_vent_exit(
+            _inputs(indoor=72.0, outdoor=65.0, manual_override_active=True, manual_override_mode=None)
+        )
+        assert decision.reason == NatVentExitReason.NONE
+
+    def test_no_fire_when_override_not_active_even_with_a_mode_set(self) -> None:
+        # Stale/cleared override: mode string lingers but active=False must not fire.
+        decision = decide_nat_vent_exit(
+            _inputs(indoor=72.0, outdoor=65.0, manual_override_active=False, manual_override_mode="cool")
+        )
+        assert decision.reason == NatVentExitReason.NONE
+
+    def test_takes_priority_over_comfort_floor(self) -> None:
+        # Both conditions technically satisfiable — override conflict must win (checked first).
+        decision = decide_nat_vent_exit(
+            _inputs(
+                indoor=70.0,
+                comfort_heat_raw=70.0,
+                manual_override_active=True,
+                manual_override_mode="cool",
+            )
+        )
+        assert decision.reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT
+
+    def test_takes_priority_over_away_ceiling(self) -> None:
+        decision = decide_nat_vent_exit(
+            _inputs(
+                indoor=76.0,
+                comfort_cool=76.0,
+                occupancy_mode="away",
+                comfort_heat_raw=60.0,
+                manual_override_active=True,
+                manual_override_mode="cool",
+            )
+        )
+        assert decision.reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT
 
 
 class TestComfortFloorExit:

@@ -24,11 +24,48 @@ _BASE = {
     "in_sleep_window": False,
     "hysteresis": 1.0,
     "natural_vent_active": False,
+    "manual_override_active": False,
+    "manual_override_mode": None,
 }
 
 
 def _inputs(**overrides) -> FanThermostatInputs:
     return FanThermostatInputs(**{**_BASE, **overrides})
+
+
+class TestCheck0ManualOverrideConflict:
+    """Issue #714/#705: a manual override to an active HVAC mode structurally
+    conflicts with WHF and must win over every other check, including a
+    favorable outdoor/indoor direction that would otherwise KEEP the fan on."""
+
+    def test_fires_even_with_favorable_direction(self):
+        result = decide_fan_thermostat_check(
+            _inputs(outdoor=65.0, indoor=74.0, manual_override_active=True, manual_override_mode="cool")
+        )
+        assert result == FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT
+
+    def test_fires_ahead_of_comfort_floor(self):
+        result = decide_fan_thermostat_check(
+            _inputs(
+                indoor=70.0,
+                comfort_heat_raw=70.0,
+                manual_override_active=True,
+                manual_override_mode="heat",
+            )
+        )
+        assert result == FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT
+
+    def test_no_fire_when_mode_is_off(self):
+        result = decide_fan_thermostat_check(
+            _inputs(outdoor=65.0, indoor=74.0, manual_override_active=True, manual_override_mode="off")
+        )
+        assert result == FanThermostatOutcome.KEEP
+
+    def test_no_fire_when_override_not_active(self):
+        result = decide_fan_thermostat_check(
+            _inputs(outdoor=65.0, indoor=74.0, manual_override_active=False, manual_override_mode="cool")
+        )
+        assert result == FanThermostatOutcome.KEEP
 
 
 class TestCheck1DirectionReversal:

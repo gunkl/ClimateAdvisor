@@ -1930,6 +1930,18 @@ def _render_nat_vent_comfort_floor_exit(p: dict, unit: str) -> tuple[str, str]:
     return label, ", ".join(parts)
 
 
+def _render_nat_vent_manual_override_exit(p: dict, unit: str) -> tuple[str, str]:
+    indoor = p.get("indoor_temp")
+    mode = p.get("override_mode", "")
+    label = "Nat-vent exit -- manual override conflict"
+    if mode:
+        label = f"Nat-vent exit -- manual override to {mode}"
+        if indoor is not None:
+            with contextlib.suppress(TypeError, ValueError):
+                label += f" (indoor {format_temp(float(indoor), unit)})"
+    return label, "fan: on->auto"
+
+
 def _render_nat_vent_reconcile_exit(p: dict, unit: str) -> tuple[str, str]:
     label = "Nat-vent exit -- fan found running without a CA-owned session"
     reason = p.get("reason", "")
@@ -2389,6 +2401,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "nat_vent_outdoor_rise_exit": _render_nat_vent_outdoor_rise_exit,
     "nat_vent_reconcile_exit": _render_nat_vent_reconcile_exit,
     "nat_vent_comfort_floor_exit": _render_nat_vent_comfort_floor_exit,
+    "nat_vent_manual_override_exit": _render_nat_vent_manual_override_exit,
     "nat_vent_away_ceiling_exit": _render_nat_vent_away_ceiling_exit,
     "nat_vent_soft_start_entered": _render_nat_vent_soft_start_entered,
     "nat_vent_reactivated_while_paused": _render_nat_vent_reactivated_while_paused,

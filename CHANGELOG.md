@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.48] — 2026-08-21
+
+- Fix #714: the whole-house fan and an active thermostat mode (cool/heat) can no longer run at the same time. If you manually change the thermostat mode while free cooling is running, the fan now stops immediately instead of continuing to cycle in the background, and it won't silently turn your thermostat back off anymore if it happens to reactivate while your manual change is still in effect.
+
 ## [0.6.47] — 2026-08-21
 
 - Fix #711: closes a gap where an active whole-house-fan free-cooling session that was already running when you wake up wasn't re-checked against the daytime comfort band until whatever the next unrelated check happened to be — up to 5 minutes later. If indoor drifted below the graceful cycle-off point in that window, the fan could end up cycling off and back on again shortly after, instead of cycling off smoothly right at wake-up.

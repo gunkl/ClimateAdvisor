@@ -1648,6 +1648,46 @@ class AutomationEngine:
         detected_mode = state.state if state else "unknown"
         confirm_seconds = int(self.config.get(CONF_OVERRIDE_CONFIRM_PERIOD, DEFAULT_OVERRIDE_CONFIRM_SECONDS))
 
+        # Issue #714: a manual override to an active HVAC mode structurally conflicts
+        # with WHF/nat-vent (Issue #392's whole premise) — stand the session down the
+        # instant the mode change is observed, independent of whether the confirmation
+        # window below later accepts it as a durable override or it self-resolves as a
+        # transient glitch. The physical fact "the thermostat currently reads an active
+        # mode" is real right now, the same way a sensor-close event is real right now —
+        # mirrors handle_all_doors_windows_closed()'s immediate, event-driven reaction
+        # rather than waiting for nat-vent's own next tick-based re-evaluation to notice.
+        # Deliberately does NOT call _exit_nat_vent(): its sensors-closed branch restores
+        # _pre_fan_hvac_mode (captured before nat-vent started) via _set_hvac_mode(),
+        # which has no override awareness of its own and would silently overwrite the
+        # user's just-set mode right back — the same bug this fix closes elsewhere.
+        if detected_mode not in ("off", "unavailable", "unknown") and self._whf_owns_hvac():
+            _LOGGER.warning(
+                "Manual override to %s detected while WHF owns HVAC — ending free cooling session immediately",
+                detected_mode,
+            )
+            self._natural_vent_active = False
+            self._nat_vent_soft_start = False
+
+            async def _stand_down_nat_vent_for_override(_mode: str = detected_mode) -> None:
+                await self._deactivate_fan(
+                    reason=f"manual override to {_mode} detected — ending free cooling",
+                    restore_hvac=False,
+                    release_suppression=True,
+                    emit_event=False,
+                )
+                if self._emit_event_callback:
+                    self._emit_event_callback(
+                        "nat_vent_manual_override_exit",
+                        {
+                            "indoor_temp": self._indoor_f_for_event(),
+                            "override_mode": _mode,
+                            "fan_device": _fan_device_label(self.config),
+                            "source": "override_detected",
+                        },
+                    )
+
+            self.hass.async_create_task(_stand_down_nat_vent_for_override())
+
         # Architecture-reset Step 2 (session state machine slice): the disabled-vs-pending
         # branch now lives in desired_state.decide_override_confirm() — this method still
         # owns the immediate-accept side effect and the real async_call_later scheduling.
@@ -3808,8 +3848,45 @@ class AutomationEngine:
                         occupancy_mode=self._occupancy_mode,
                         thermal_confidence=thermal.get("confidence", "none"),
                         k_passive=thermal.get("k_passive"),
+                        manual_override_active=self._manual_override_active,
+                        manual_override_mode=self._manual_override_mode,
                     )
                 )
+
+                if exit_decision.reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT:
+                    # Issue #714: a manual override to an active HVAC mode structurally
+                    # conflicts with WHF/nat-vent — end the session immediately. Deliberately
+                    # does NOT call _exit_nat_vent() here: that function's sensors-closed
+                    # branch restores _pre_fan_hvac_mode (the mode captured BEFORE nat-vent
+                    # started) via _set_hvac_mode(), which has no override awareness of its
+                    # own and would silently overwrite the user's just-set mode right back —
+                    # the exact bug this fix closes. Release suppression without writing any
+                    # mode; the thermostat already reads the user's chosen mode and that's
+                    # exactly where it should stay.
+                    _LOGGER.warning(
+                        "Nat-vent exit: manual override to %s conflicts with WHF — ending free"
+                        " cooling session (indoor %.1f°F)",
+                        self._manual_override_mode,
+                        indoor if indoor is not None else 0.0,
+                    )
+                    self._natural_vent_active = False
+                    self._nat_vent_soft_start = False
+                    await self._deactivate_fan(
+                        reason=f"manual override to {self._manual_override_mode} — ending free cooling",
+                        restore_hvac=False,
+                        release_suppression=True,
+                        emit_event=False,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_manual_override_exit",
+                            {
+                                "indoor_temp": indoor,
+                                "override_mode": self._manual_override_mode,
+                                "fan_device": _fan_device_label(self.config),
+                            },
+                        )
+                    return
 
                 if exit_decision.reason == NatVentExitReason.COMFORT_FLOOR:
                     # Note (Issue #620 investigation): like fan_thermostat_check()'s
@@ -4386,14 +4463,22 @@ class AutomationEngine:
                         occupancy_mode=self._occupancy_mode,
                         thermal_confidence=thermal_nvtc.get("confidence", "none"),
                         k_passive=thermal_nvtc.get("k_passive"),
+                        manual_override_active=self._manual_override_active,
+                        manual_override_mode=self._manual_override_mode,
                     )
                 )
                 _exit_reason = exit_decision.reason
             else:
                 exit_decision = None
-                _exit_reason = (
-                    NatVentExitReason.COMFORT_FLOOR if current_temp <= _hard_floor else NatVentExitReason.NONE
-                )
+                # Issue #714: manual-override conflict takes priority over the hard floor,
+                # matching decide_nat_vent_exit()'s own priority order — a manual override to
+                # an active mode structurally conflicts with WHF regardless of indoor temp.
+                if self._manual_override_active and self._manual_override_mode not in (None, "off"):
+                    _exit_reason = NatVentExitReason.MANUAL_OVERRIDE_CONFLICT
+                elif current_temp <= _hard_floor:
+                    _exit_reason = NatVentExitReason.COMFORT_FLOOR
+                else:
+                    _exit_reason = NatVentExitReason.NONE
 
             # Hard floor (or, while FSM-authoritative, any of the 5 exit reasons) takes
             # priority over cycling. Sleep window: _hard_floor = sleep_heat - hysteresis (one
@@ -4422,6 +4507,37 @@ class AutomationEngine:
                             {
                                 "indoor": current_temp,
                                 "comfort_cool": comfort_cool,
+                                "fan_device": _fan_device_label(self.config),
+                                "source": "temp_check",
+                            },
+                        )
+                    return
+
+                if _exit_reason == NatVentExitReason.MANUAL_OVERRIDE_CONFLICT:
+                    # Issue #714: same bypass as check_natural_vent_conditions()'s own branch —
+                    # deliberately not routed through _exit_nat_vent(), whose sensors-closed
+                    # path would restore _pre_fan_hvac_mode (captured before nat-vent started)
+                    # via _set_hvac_mode(), overwriting the user's just-set mode right back.
+                    _LOGGER.warning(
+                        "Nat-vent exit: manual override to %s conflicts with WHF via temp-check —"
+                        " ending free cooling session (indoor %.1f°F)",
+                        self._manual_override_mode,
+                        current_temp,
+                    )
+                    self._natural_vent_active = False
+                    self._nat_vent_soft_start = False
+                    await self._deactivate_fan(
+                        reason=f"manual override to {self._manual_override_mode} — ending free cooling",
+                        restore_hvac=False,
+                        release_suppression=True,
+                        emit_event=False,
+                    )
+                    if self._emit_event_callback:
+                        self._emit_event_callback(
+                            "nat_vent_manual_override_exit",
+                            {
+                                "indoor_temp": current_temp,
+                                "override_mode": self._manual_override_mode,
                                 "fan_device": _fan_device_label(self.config),
                                 "source": "temp_check",
                             },
@@ -4749,6 +4865,8 @@ class AutomationEngine:
             in_sleep_window=in_sleep_window,
             hysteresis=hysteresis_ftc,
             natural_vent_active=self._natural_vent_active,
+            manual_override_active=self._manual_override_active,
+            manual_override_mode=self._manual_override_mode,
         )
         outcome = decide_fan_thermostat_check(inputs)
 
@@ -4760,6 +4878,37 @@ class AutomationEngine:
                 f"{outdoor:.1f}" if outdoor is not None else "unavailable",
                 True,
             )
+            return
+
+        if outcome is FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT:
+            # Issue #714: deliberately not routed through _exit_nat_vent() — its
+            # sensors-closed branch restores _pre_fan_hvac_mode (captured before nat-vent
+            # started) via _set_hvac_mode(), which has no override awareness of its own
+            # and would silently overwrite the user's just-set mode right back.
+            _LOGGER.warning(
+                "Fan thermostat check: manual override to %s conflicts with WHF —"
+                " ending free cooling session (indoor %.1f°F)",
+                self._manual_override_mode,
+                indoor if indoor is not None else 0.0,
+            )
+            self._natural_vent_active = False
+            self._nat_vent_soft_start = False
+            await self._deactivate_fan(
+                reason=f"manual override to {self._manual_override_mode} — ending free cooling",
+                restore_hvac=False,
+                release_suppression=True,
+                emit_event=False,
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "nat_vent_manual_override_exit",
+                    {
+                        "indoor_temp": indoor,
+                        "override_mode": self._manual_override_mode,
+                        "fan_device": _fan_device_label(self.config),
+                        "source": "fan_thermostat_check",
+                    },
+                )
             return
 
         if outcome is FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT:
@@ -6922,6 +7071,8 @@ class AutomationEngine:
             fan_hardware_active=_fan_hardware_active,
             override_active=_override_active,
             grace_active=_grace_active,
+            manual_override_active=bool(self._manual_override_active),
+            manual_override_mode=self._manual_override_mode,
         )
 
     @property
@@ -7875,6 +8026,21 @@ class AutomationEngine:
 
         if self._fan_override_active:
             _LOGGER.info("Fan override active — skipping fan activation")
+            return FanCommandResult.OVERRIDDEN
+
+        # Issue #714: a manual override to an active HVAC mode (heat/cool/heat_cool)
+        # structurally conflicts with WHF — starting the fan would call
+        # _suppress_hvac_for_whf() below and force the thermostat straight back to "off",
+        # silently reverting the user's manual choice with no override check at all (the
+        # entry-side half of the #705 bug; the exit-side half is handled by the new
+        # MANUAL_OVERRIDE_CONFLICT checks in nat_vent_exit.py/fan_thermostat_decision.py).
+        # Mirrors the _fan_override_active guard immediately above.
+        if self._manual_override_active and self._manual_override_mode not in (None, "off"):
+            _LOGGER.info(
+                "Manual override active (mode=%s) — skipping fan activation (%s)",
+                self._manual_override_mode,
+                reason,
+            )
             return FanCommandResult.OVERRIDDEN
 
         # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from

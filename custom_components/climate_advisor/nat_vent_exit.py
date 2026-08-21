@@ -46,10 +46,11 @@ OCCUPANCY_AWAY = "away"
 
 
 class NatVentExitReason(Enum):
-    """The 5 exit reasons check_natural_vent_conditions() checks, in priority
+    """The exit reasons check_natural_vent_conditions() checks, in priority
     order — first match wins. NONE means the session should continue."""
 
     NONE = "none"
+    MANUAL_OVERRIDE_CONFLICT = "manual_override_conflict"
     COMFORT_FLOOR = "comfort_floor"
     AWAY_CEILING = "away_ceiling"
     PROACTIVE_FLOOR = "proactive_floor"
@@ -87,6 +88,8 @@ class NatVentExitInputs:
       occupancy_mode         -> self._occupancy_mode
       thermal_confidence     -> (self._thermal_model or {}).get("confidence", "none")
       k_passive              -> (self._thermal_model or {}).get("k_passive")
+      manual_override_active -> self._manual_override_active (Issue #714)
+      manual_override_mode   -> self._manual_override_mode (Issue #714)
     """
 
     indoor: float | None
@@ -100,6 +103,8 @@ class NatVentExitInputs:
     occupancy_mode: str
     thermal_confidence: str
     k_passive: float | None
+    manual_override_active: bool
+    manual_override_mode: str | None
 
 
 def _resolve_reactivation_floor(inputs: NatVentExitInputs) -> float:
@@ -120,7 +125,16 @@ def decide_nat_vent_exit(inputs: NatVentExitInputs) -> NatVentExitDecision:
     real call site's own ``if self._natural_vent_active:`` guard, which this
     function does not re-check (the flag itself isn't one of its inputs).
     """
-    # 1. Comfort-floor exit (Issue #99/#456) — checked first.
+    # 0. Manual override conflict (Issue #714) — checked before every other
+    # reason. A manual override to an active HVAC mode (heat/cool/heat_cool)
+    # structurally conflicts with WHF/nat-vent (Issue #392's whole premise) —
+    # this must win over every other condition, including comfort-floor,
+    # since the user's own thermostat choice is not something the automation
+    # should keep silently working around.
+    if inputs.manual_override_active and inputs.manual_override_mode not in (None, "off"):
+        return NatVentExitDecision(reason=NatVentExitReason.MANUAL_OVERRIDE_CONFLICT)
+
+    # 1. Comfort-floor exit (Issue #99/#456).
     vent_floor = resolve_hard_exit_floor(
         comfort_heat_raw=inputs.comfort_heat_raw,
         sleep_heat=inputs.sleep_heat,

@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.51"
+VERSION = "0.6.52"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.52": [
+        "Fix #724: no user-visible change. Closes a gap in the internal diagnostic"
+        " that shadows automation decisions to verify safety-logic correctness — its"
+        " copy of the whole-house-fan suppression state was never kept in sync,"
+        " which could make the diagnostic falsely report a disagreement during"
+        " completely normal overnight whole-house-fan use with a window open.",
+    ],
     "0.6.51": [
         "Fix #721/#722: no user-visible change. Closes the last two internal"
         " cross-checks left open by #717 — the door/window pause guard and the"
@@ -2356,6 +2363,36 @@ KNOWN_FIXES: dict[int, dict] = {
             " _release_whf_and_reclassify(), and both of _deactivate_fan()'s"
             " stranded-suppression-release branches (Issue #618) — the latter two"
             " were missed in the original write-up and are now covered."
+        ),
+    },
+    724: {
+        "version_fixed": "0.6.52",
+        "title": (
+            "Shadow diagnostic never mirrored _pre_fan_hvac_mode, so its"
+            " _whf_owns_hvac() was permanently False — a separate, distinct gap from"
+            " #721/#722 found during their verification pass (shadow raw-copy sync,"
+            " not lifecycle_dispatcher.py)."
+        ),
+        "scope_covered": (
+            "coordinator.py: _sync_shadow_inputs() now raw-copies _pre_fan_hvac_mode,"
+            " same one-line pattern as _fan_active (Issue #716). Investigation"
+            " corrected the issue's own 'dormant, not urgent' framing: traced"
+            " _whf_owns_hvac() to a live-reachable divergence via"
+            " _sync_paused_by_door_with_live_sensors() (called from 4 already-mirrored"
+            " entry points — apply_classification/handle_bedtime/"
+            " handle_morning_wakeup/handle_pre_cool), which reads it as an"
+            " early-return guard before calling _pause_for_door_window() (sets"
+            " _paused_by_door, a field the shadow diagnostic directly compares)."
+            " Without the fix, a genuine WHF session with a window open — WHF's"
+            " designed use case — made the shadow incorrectly self-pause while"
+            " production correctly did not. tests/test_shadow_engine_coverage.py:"
+            " _pre_fan_hvac_mode added to _TRACKED_FIELDS; _suppress_hvac_for_whf()/"
+            " _release_whf_and_reclassify() newly registered (internal, raw-copy"
+            " covered); _deactivate_fan()/restore_state() already covered."
+            " tests/test_shadow_engine_live.py: new TestSyncShadowInputsWhfOwnsHvac"
+            " (parity, positive control, and a direct reproduction of the guard"
+            " divergence with/without the fix). Zero production/HVAC impact — shadow"
+            " engine is permanently dry_run=True."
         ),
     },
     684: {

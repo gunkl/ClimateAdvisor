@@ -55,6 +55,13 @@ _TRACKED_FIELDS = {
     # field on the permanently-dry_run shadow instance. Same raw-copy fix as the fields
     # above — see _sync_shadow_inputs()'s docstring in coordinator.py.
     "_fan_active",
+    # Issue #724: same gap class again — _whf_owns_hvac() depends on this field, and it
+    # was never added to _sync_shadow_inputs()'s raw-copy block. Confirmed live-reachable
+    # (not dormant): _sync_paused_by_door_with_live_sensors() (called from 4 mirrored
+    # entry points) reads _whf_owns_hvac() as an early-return guard before calling
+    # _pause_for_door_window(), which sets _paused_by_door — a tracked field feeding the
+    # door_window/nat_vent diagnostic axes. Same raw-copy fix as _fan_active above.
+    "_pre_fan_hvac_mode",
 }
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -234,7 +241,23 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     ),
     "_deactivate_fan": (
         "internal: real writer of _fan_active, but the field is covered by "
-        "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #716"
+        "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #716; also a real "
+        "writer of _pre_fan_hvac_mode (2 release branches), same raw-copy coverage — "
+        "Issue #724"
+    ),
+    # Issue #724: _pre_fan_hvac_mode's two remaining real writers, not otherwise
+    # registered (restore_state() and _deactivate_fan() already are — see above and the
+    # "mirrored" entry for restore_state). Both are covered by _sync_shadow_inputs()'s raw
+    # copy, not a mirror call, for the same reason _activate_fan/_deactivate_fan are for
+    # _fan_active: WHF suppression state has no mirror path that would reach the
+    # permanently-dry_run shadow instance correctly.
+    "_suppress_hvac_for_whf": (
+        "internal: real writer of _pre_fan_hvac_mode, but the field is covered by "
+        "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #724"
+    ),
+    "_release_whf_and_reclassify": (
+        "internal: real writer of _pre_fan_hvac_mode, but the field is covered by "
+        "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #724"
     ),
 }
 

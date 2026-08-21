@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.52] — 2026-08-21
+
+- Fix #724: no user-visible change. Closes a gap in the internal diagnostic that shadows automation decisions to verify safety-logic correctness — its copy of the whole-house-fan suppression state was never kept in sync, which could make the diagnostic falsely report a disagreement during completely normal overnight whole-house-fan use with a window open.
+
 ## [0.6.51] — 2026-08-21
 
 - Fix #721/#722: no user-visible change. Closes the last two internal cross-checks left open by #717 — the door/window pause guard and the whole-house-fan/HVAC suppression tracker now both get the same audit trail as the rest of the safety logic. Also found and fixed two untracked fan-suppression release points that a prior investigation had missed.

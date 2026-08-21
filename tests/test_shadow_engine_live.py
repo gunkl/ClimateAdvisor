@@ -35,6 +35,17 @@ Issue #673 (third coverage-gap follow-up, Phase 2) adds:
     the 4 fields confirmed absent from the raw-copy block despite the #613/#631
     precedent already covering everything else. Same shape as #615/#631: a positive
     control proves the fields stay stale on the shadow without the raw copy.
+
+Issue #724 (fifth coverage-gap follow-up, same class as #716) adds:
+  - ``_sync_shadow_inputs()`` WHF-suppression parity: ``_pre_fan_hvac_mode``, the field
+    ``_whf_owns_hvac()`` depends on. Corrects the filed issue's own "dormant, not urgent"
+    claim — traced to a live-reachable divergence: ``_sync_paused_by_door_with_live_
+    sensors()`` (called from 4 mirrored entry points) reads ``_whf_owns_hvac()`` as an
+    early-return guard before calling ``_pause_for_door_window()``, which sets
+    ``_paused_by_door`` — a tracked field feeding the door_window/nat_vent diagnostic
+    axes. Without the raw copy, the shadow incorrectly self-pauses during a genuine WHF
+    session with a window open (WHF's designed use case) while production correctly
+    does not. Positive control reproduces this exact divergence directly.
 """
 
 from __future__ import annotations
@@ -51,7 +62,11 @@ from tools.sim_harness.ha_stubs import install_ha_stubs
 install_ha_stubs()
 
 from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
-from custom_components.climate_advisor.const import SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S  # noqa: E402
+from custom_components.climate_advisor.const import (  # noqa: E402
+    CONF_FAN_MODE,
+    FAN_MODE_WHOLE_HOUSE,
+    SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S,
+)
 
 # Issue #685: build_headless_coordinator's stub environment leaves
 # homeassistant.util.dt.now() returning a MagicMock (never exercised
@@ -518,6 +533,97 @@ class TestSyncShadowInputsFanActive:
         shadow._fan_active = False
         _run(shadow._activate_fan(reason="test"))
         assert shadow._fan_active is False
+
+
+class TestSyncShadowInputsWhfOwnsHvac:
+    """Issue #724: same gap class as #716 (TestSyncShadowInputsFanActive above), one
+    field over. _pre_fan_hvac_mode was never added to _sync_shadow_inputs()'s raw-copy
+    block, so shadow_automation_engine._whf_owns_hvac() (which depends on it) was
+    permanently False regardless of production's real WHF state.
+
+    The last test in this class proves the finding that corrected the filed issue's own
+    "dormant, not urgent" claim: _sync_paused_by_door_with_live_sensors() (called from 4
+    mirrored entry points — apply_classification/handle_bedtime/handle_morning_wakeup/
+    handle_pre_cool) reads _whf_owns_hvac() as an early-return guard before calling
+    _pause_for_door_window(), which sets _paused_by_door — a tracked field feeding the
+    door_window/nat_vent shadow-diagnostic axes. Without the raw copy, the shadow
+    incorrectly self-pauses during a genuine WHF session with a window open (WHF's
+    designed use case) while production correctly does not.
+    """
+
+    def test_pre_fan_hvac_mode_parity_after_mirror_call(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._pre_fan_hvac_mode = "cool"
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._pre_fan_hvac_mode == "cool"
+
+    def test_pre_fan_hvac_mode_parity_flips_to_none_too(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._pre_fan_hvac_mode = "cool"
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._pre_fan_hvac_mode == "cool"
+        coordinator.automation_engine._pre_fan_hvac_mode = None
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._pre_fan_hvac_mode is None
+
+    def test_positive_control_missing_sync_leaves_pre_fan_hvac_mode_stale(self) -> None:
+        """Without _pre_fan_hvac_mode in _sync_shadow_inputs(), the shadow's copy stays
+        None even after production genuinely starts a WHF suppression session — the
+        exact staleness this issue closes, reproduced directly."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._pre_fan_hvac_mode = "cool"
+        coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._pre_fan_hvac_mode is None
+
+    def test_whf_guard_agrees_between_engines_once_synced(self) -> None:
+        """Reproduces Finding 1: a genuine WHF session (_pre_fan_hvac_mode set) with a
+        monitored window open must make BOTH engines' _sync_paused_by_door_with_live_
+        sensors() early-return via _whf_owns_hvac() — neither should self-pause.
+        Before the fix (with the positive control below), the shadow's copy of
+        _whf_owns_hvac() is always False, so only production's guard fires correctly.
+        """
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        ae = coordinator.automation_engine
+        se = coordinator.shadow_automation_engine
+        for engine in (ae, se):
+            engine._paused_by_door = False
+            engine._natural_vent_active = False
+            engine._sensor_check_callback = lambda: True  # a monitored window is open
+            engine._sensor_debounce_pending_callback = lambda: False  # settled, not a blip
+        ae._pre_fan_hvac_mode = "cool"  # production: genuine WHF session owns HVAC
+
+        coordinator._sync_shadow_inputs()  # the Issue #724 fix — copies _pre_fan_hvac_mode
+        assert se._whf_owns_hvac() is True  # shadow now sees WHF ownership too
+
+        _run(ae._sync_paused_by_door_with_live_sensors())
+        _run(se._sync_paused_by_door_with_live_sensors())
+        assert ae._paused_by_door is False  # production correctly does not self-pause
+        assert se._paused_by_door is False  # shadow now agrees
+
+    def test_positive_control_whf_guard_disagrees_without_the_sync(self) -> None:
+        """Same setup as above, but with the raw copy disabled — proves the shadow
+        really does incorrectly self-pause without this issue's fix, the actual bug
+        Finding 1 identified (not just a theoretical staleness risk)."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.config[CONF_FAN_MODE] = FAN_MODE_WHOLE_HOUSE
+        ae = coordinator.automation_engine
+        se = coordinator.shadow_automation_engine
+        for engine in (ae, se):
+            engine._paused_by_door = False
+            engine._natural_vent_active = False
+            engine._sensor_check_callback = lambda: True
+            engine._sensor_debounce_pending_callback = lambda: False
+        ae._pre_fan_hvac_mode = "cool"
+        # Simulate the pre-fix world: se's _pre_fan_hvac_mode is never synced.
+        assert se._pre_fan_hvac_mode is None
+        assert se._whf_owns_hvac() is False
+
+        _run(ae._sync_paused_by_door_with_live_sensors())
+        _run(se._sync_paused_by_door_with_live_sensors())
+        assert ae._paused_by_door is False  # production correctly does not self-pause
+        assert se._paused_by_door is True  # shadow incorrectly self-pauses — the bug
 
 
 class TestNewlyMirroredDecisionMethods:

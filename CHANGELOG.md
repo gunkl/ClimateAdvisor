@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.51] — 2026-08-21
+
+- Fix #721/#722: no user-visible change. Closes the last two internal cross-checks left open by #717 — the door/window pause guard and the whole-house-fan/HVAC suppression tracker now both get the same audit trail as the rest of the safety logic. Also found and fixed two untracked fan-suppression release points that a prior investigation had missed.
+
 ## [0.6.50] — 2026-08-21
 
 - Fix #717: no user-visible change. Wires the internal cross-check that lets the natural-ventilation, door/window, and manual-override safety logic confirm they're seeing the same events, into production for real — closes a piece of scaffolding that existed but was never connected. Every decision still comes from the same logic as before; this only makes the audit trail behind it real.

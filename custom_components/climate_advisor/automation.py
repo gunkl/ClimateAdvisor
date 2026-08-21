@@ -3271,7 +3271,7 @@ class AutomationEngine:
                         f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
                         f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
                     )
-                    await self._activate_fan(reason=nat_vent_reason)
+                    _activation_result = await self._activate_fan(reason=nat_vent_reason)
                     if self._natvent_fsm_authoritative:
                         # Project onto the FSM state that matches legacy's writes at this
                         # site exactly: legacy only ever set _natural_vent_active = True
@@ -3281,10 +3281,16 @@ class AutomationEngine:
                         # ACTIVE_FULL_GATE regardless of _fsm_result.to_state would
                         # silently demote an in-flight soft-start session to full-gate on
                         # a second window opening, which legacy never did.
-                        self._apply_nat_vent_fsm_state(
+                        #
+                        # Issue #706 (Bug F): routed through
+                        # _apply_nat_vent_fsm_state_after_activation() rather than applying
+                        # this pre-await decision directly — a manual override arriving
+                        # during the await above must not be silently overwritten.
+                        self._apply_nat_vent_fsm_state_after_activation(
                             NatVentLifecycleState.ACTIVE_SOFT_START
                             if self._nat_vent_soft_start
-                            else NatVentLifecycleState.ACTIVE_FULL_GATE
+                            else NatVentLifecycleState.ACTIVE_FULL_GATE,
+                            _activation_result,
                         )
                     else:
                         self._natural_vent_active = True
@@ -3552,7 +3558,7 @@ class AutomationEngine:
 
                     if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
                         # Band stays armed — just activate the fan; the compressor self-arbitrates.
-                        await self._activate_fan(
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"nat-vent re-engaged: outdoor {outdoor:.1f}°F < indoor {_indoor:.1f}°F"
                                 f" − {_hysteresis:.1f}°F hysteresis, indoor > comfort_heat {_comfort_heat:.1f}°F,"
@@ -3567,8 +3573,12 @@ class AutomationEngine:
                         # here with _paused_by_door=True (e.g. also
                         # _paused_with_hvac_already_off=True) would flip to
                         # _paused_by_door=False, an incoherent pair legacy never produced.
+                        #
+                        # Issue #706 (Bug F): routed through
+                        # _apply_nat_vent_fsm_state_after_activation() — an override
+                        # arriving during the await above must not be silently overwritten.
                         _pre_paused_by_door = self._paused_by_door
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                         self._paused_by_door = _pre_paused_by_door
                         await self._apply_nat_vent_hvac_state()
                         # Issue #244: emit so the re-evaluation activation is visible in the
@@ -3592,7 +3602,7 @@ class AutomationEngine:
                             PEAK_DECLINE_MARGIN_F,
                             _comfort_heat,
                         )
-                        await self._activate_fan(
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"nat-vent soft-start: outdoor {outdoor:.1f}°F at/below indoor {_indoor:.1f}°F"
                                 " parity, past today's peak and declining — purge/comfort air movement"
@@ -3600,8 +3610,10 @@ class AutomationEngine:
                         )
                         # Preserve _paused_by_door across the apply — see the matching
                         # comment on the ACTIVE_FULL_GATE branch above for the rationale.
+                        # Issue #706 (Bug F): same override-race guard as the
+                        # ACTIVE_FULL_GATE branch above.
                         _pre_paused_by_door = self._paused_by_door
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                         self._paused_by_door = _pre_paused_by_door
                         await self._apply_nat_vent_hvac_state()
                         if self._emit_event_callback:
@@ -4026,14 +4038,18 @@ class AutomationEngine:
                         _to_state = NatVentLifecycleState.INACTIVE
 
                     if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
-                        await self._activate_fan(
+                        # Issue #706 (Bug F): route through
+                        # _apply_nat_vent_fsm_state_after_activation() — an override
+                        # arriving during the await below must not be silently
+                        # overwritten by this pre-await _to_state decision.
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"natural vent activated: outdoor {outdoor:.1f}°F"
                                 f" < indoor {indoor:.1f}°F − {hysteresis:.1f}°F hysteresis,"
                                 f" outdoor ≤ threshold {threshold:.1f}°F"
                             )
                         )
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
 
                         from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -4062,13 +4078,15 @@ class AutomationEngine:
                         )
                         await self._apply_nat_vent_hvac_state()
                     elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
-                        await self._activate_fan(
+                        # Issue #706 (Bug F): same override-race guard as the
+                        # ACTIVE_FULL_GATE branch above.
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"nat-vent soft-start while paused: outdoor {outdoor:.1f}°F at/below"
                                 f" indoor {indoor:.1f}°F parity, past today's peak and declining"
                             )
                         )
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
 
                         from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -6788,6 +6806,16 @@ class AutomationEngine:
                 (every other caller) keeps this method's prior behavior
                 (``self._fan_active``) unchanged — harmless either way, since none of
                 those other call sites read ``NatVentTransition.fan_should_be_active``.
+
+        Issue #706 (Bug D): ``override_active``/``grace_active`` are now always read
+        live from engine state — ``bool(self._fan_override_active or
+        self._manual_override_active)`` and ``bool(self._grace_active)`` — the same
+        flags ``coordinator._evaluate_nat_vent_fsm()``'s shadow-diagnostic
+        construction already reads correctly. Before this fix, every real production
+        caller of this method left both fields at their dataclass default (``False``,
+        added for Issue #687/Phase 2a but never wired here), so the FSM was blind to
+        a real override/grace window and could disagree with what
+        ``_activate_fan()``'s own override guard actually did.
         """
         from .nat_vent_fsm import NatVentFsmInputs
 
@@ -6800,6 +6828,8 @@ class AutomationEngine:
         )
         _paused_by_door = paused_by_door if paused_by_door is not None else bool(self._paused_by_door)
         _fan_hardware_active = fan_hardware_active if fan_hardware_active is not None else bool(self._fan_active)
+        _override_active = bool(self._fan_override_active or self._manual_override_active)
+        _grace_active = bool(self._grace_active)
         return NatVentFsmInputs(
             indoor=indoor,
             outdoor=outdoor,
@@ -6824,6 +6854,8 @@ class AutomationEngine:
             ),
             now=now,
             fan_hardware_active=_fan_hardware_active,
+            override_active=_override_active,
+            grace_active=_grace_active,
         )
 
     @property
@@ -6880,6 +6912,38 @@ class AutomationEngine:
         )
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
         self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+
+    def _apply_nat_vent_fsm_state_after_activation(
+        self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
+    ) -> None:
+        """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
+        call, guarding against the Issue #706 Bug F race.
+
+        All 5 production call sites for ``_apply_nat_vent_fsm_state()`` share the
+        same shape: compute a ``to_state`` decision, then ``await
+        self._activate_fan(...)`` — a real event-loop yield point — under
+        ``_decision_lock``/``_decision_pass``, then apply that pre-await decision.
+        ``handle_fan_manual_override()``/``coordinator._async_fan_entity_changed()``
+        are NOT lock-protected and can run to completion during that await window,
+        setting ``_fan_override_active``/starting grace. When that happens,
+        ``_activate_fan()``'s own override guard rejects the real fan command and
+        returns ``FanCommandResult.OVERRIDDEN`` — the definitive, race-free signal
+        that the pre-await ``to_state`` is now stale. In that case, apply
+        ``INACTIVE`` instead of the stale decision so ``_natural_vent_active`` never
+        disagrees with the fact the real command was rejected. Every other
+        ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
+        ``RATE_LIMITED_NEW``/``DUP``, ``DISABLED``) means no override intervened
+        mid-await, so the pre-await ``to_state`` is still correct to apply.
+        """
+        if activation_result is FanCommandResult.OVERRIDDEN:
+            _LOGGER.warning(
+                "Nat-vent FSM state application skipped: fan override became active"
+                " during activation — applying INACTIVE instead of stale %s decision",
+                to_state,
+            )
+            self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)
+        else:
+            self._apply_nat_vent_fsm_state(to_state)
 
     def _build_door_window_fsm_inputs(self, *, now: datetime):
         """Build the door/window FSM's input snapshot from current engine state

@@ -578,6 +578,76 @@ class TestHandleAllDoorsWindowsClosedFsmAuthoritative:
         engine.hass.services.async_call.assert_not_called()
 
 
+class TestHandleAllDoorsWindowsClosedZeroDurationGrace:
+    """Issue #709 regression: end-to-end proof that handle_all_doors_windows_closed()'s
+    FINAL state, after the full method returns, is never a phantom
+    _grace_active=True with no real timer scheduled.
+
+    Same caveat as TestResumeFromPauseZeroDurationGrace in test_resume_from_pause.py:
+    _start_grace_period_action()'s internal _cancel_grace_timers() call washes out
+    the pre-fix phantom before this method returns, so this class alone does not
+    prove the fix (confirmed while authoring it — reverting the production fix
+    alone leaves this test green). See
+    TestResolveDoorWindowPauseFlagsAllSensorsClosedZeroDurationGraceIsolated below
+    for the real, always-failing-without-the-fix proof, and
+    tests/test_fsm_flag_ownership.py's AST-based ownership check."""
+
+    def test_no_phantom_grace_when_automation_grace_disabled(self):
+        engine = _make_automation_engine({CONF_AUTOMATION_GRACE_PERIOD: 0})
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE
+        engine._pre_pause_mode = "heat"
+
+        with patch("custom_components.climate_advisor.automation.async_call_later") as mock_call_later:
+            asyncio.run(engine.handle_all_doors_windows_closed())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        assert engine._grace_protects_override is False
+        mock_call_later.assert_not_called()
+        # Mode restore still happens — only grace is affected by the disabled config.
+        engine.hass.services.async_call.assert_any_call(
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": "climate.thermostat", "hvac_mode": "heat"},
+        )
+
+
+class TestResolveDoorWindowPauseFlagsAllSensorsClosedZeroDurationGraceIsolated:
+    """Issue #709: the real proof, mirroring
+    TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated in
+    test_resume_from_pause.py but for ALL_SENSORS_CLOSED -> RESTORE_AND_GRACE
+    (handle_all_doors_windows_closed()'s real dispatcher call, which also runs
+    before the real _start_grace_period() action). Calling the dispatcher in
+    isolation observes the state immediately after only that one call, before
+    the later real action's wash-out — the only way to see the actual pre-fix
+    bug. Revert-tested: reverting the production fix makes this fail — confirmed
+    while authoring this fix."""
+
+    def test_all_sensors_closed_no_phantom_when_automation_grace_disabled(self):
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine({CONF_AUTOMATION_GRACE_PERIOD: 0})
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE
+        engine._pre_pause_mode = "heat"  # truthy -> decide_door_close_response == RESTORE_AND_GRACE
+        engine._grace_active = False
+
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.ALL_SENSORS_CLOSED,
+            legacy=MagicMock(),
+        )
+
+        assert engine._grace_active is False, (
+            "_resolve_door_window_pause_flags(ALL_SENSORS_CLOSED) set a phantom "
+            "_grace_active=True with CONF_AUTOMATION_GRACE_PERIOD=0 — no real "
+            "grace timer has been touched at this point in the real call "
+            "sequence yet."
+        )
+
+
 class TestExitNatVentSensorStillOpenFsmAuthoritative:
     """Issue #660 Step 4: _exit_nat_vent()'s sensor-still-open branch, with
     _doorwindow_fsm_authoritative=True, derives its resulting pause flags from
@@ -768,8 +838,17 @@ class TestResolveDoorWindowPauseFlagsDispatcher:
         NORMAL (``_transition_from_normal``'s catch-all). The two origins produce
         different outcomes, so this is a real behavioral distinguisher: if the live
         read (NORMAL) were used instead of the passed-in origin_state (PAUSED_ACTIVE),
-        grace would stay inactive.
+        the pure ``transition()`` call would be invoked with NORMAL instead.
+
+        Issue #709: this used to assert ``_grace_active is True`` as its proxy signal
+        for "the pure transition landed on GRACE" — but ``_apply_door_window_fsm_state()``
+        no longer writes ``_grace_active`` at all (that flag is override/grace's sole
+        write now), so that channel can no longer distinguish the two origins. Asserts
+        directly on the ``current_state`` argument the dispatcher actually passed to
+        ``door_window_fsm.transition()`` instead — a more direct proof of the mechanism
+        under test than a downstream flag that may or may not still be wired to it.
         """
+        from custom_components.climate_advisor import door_window_fsm as dwfsm
         from custom_components.climate_advisor.door_window_fsm import (
             DoorWindowFsmEventKind,
             DoorWindowLifecycleState,
@@ -783,14 +862,19 @@ class TestResolveDoorWindowPauseFlagsDispatcher:
         engine._grace_active = False
 
         # ...but origin_state claims PAUSED_ACTIVE.
-        engine._resolve_door_window_pause_flags(
-            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
-            legacy=MagicMock(),
-            origin_state=DoorWindowLifecycleState.PAUSED_ACTIVE,
-        )
+        with patch.object(dwfsm, "transition", wraps=dwfsm.transition) as mock_transition:
+            engine._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+                legacy=MagicMock(),
+                origin_state=DoorWindowLifecycleState.PAUSED_ACTIVE,
+            )
 
-        assert engine._grace_active is True
-        assert engine.door_window_lifecycle_state == DoorWindowLifecycleState.GRACE
+        mock_transition.assert_called_once()
+        passed_current_state = mock_transition.call_args[0][0]
+        assert passed_current_state == DoorWindowLifecycleState.PAUSED_ACTIVE
+        # PAUSED_ACTIVE + DASHBOARD_RESUME (manual grace enabled by default config)
+        # clears the pause either way — the 2 fields this method still derives.
+        assert engine._paused_by_door is False
 
 
 class TestApplyNatVentFsmState:
@@ -1019,7 +1103,7 @@ class TestPauseForDoorWindowActionSplit:
 
     def test_wrapper_sets_paused_entity_and_since_when_authoritative(self):
         """Regression guard: _apply_door_window_fsm_state() does NOT write
-        _paused_entity/_paused_since (they aren't part of its 3-field derivation),
+        _paused_entity/_paused_since (they aren't part of its 2-field derivation),
         so the wrapper must still set them directly regardless of which branch the
         dispatcher took -- found during Step 6 verification when the corpus-wide
         FSM-authoritative comparator caught a real divergence (paused_minutes going
@@ -1036,6 +1120,37 @@ class TestPauseForDoorWindowActionSplit:
 
         assert engine._paused_entity == "test-entity"
         assert engine._paused_since is not None
+
+
+class TestApplyDoorWindowFsmStateNeverWritesGraceActive:
+    """Issue #709 regression: _apply_door_window_fsm_state() must never write
+    _grace_active — override_grace_fsm.py's dispatcher (_apply_override_grace_fsm_state()
+    / its paired legacy() closures) is the sole writer. Exercises the method directly
+    across every DoorWindowLifecycleState member, from both a True and False starting
+    value, to prove it is left completely untouched either way (not just "happens to
+    end up correct" for one particular state)."""
+
+    def test_grace_active_untouched_across_all_states_starting_true(self):
+        from custom_components.climate_advisor.door_window_lifecycle import DoorWindowLifecycleState
+
+        engine = _make_automation_engine()
+        for state in DoorWindowLifecycleState:
+            engine._grace_active = True
+            engine._apply_door_window_fsm_state(state)
+            assert engine._grace_active is True, (
+                f"_apply_door_window_fsm_state({state}) modified _grace_active — it must never write this flag"
+            )
+
+    def test_grace_active_untouched_across_all_states_starting_false(self):
+        from custom_components.climate_advisor.door_window_lifecycle import DoorWindowLifecycleState
+
+        engine = _make_automation_engine()
+        for state in DoorWindowLifecycleState:
+            engine._grace_active = False
+            engine._apply_door_window_fsm_state(state)
+            assert engine._grace_active is False, (
+                f"_apply_door_window_fsm_state({state}) modified _grace_active — it must never write this flag"
+            )
 
 
 # ---------------------------------------------------------------------------

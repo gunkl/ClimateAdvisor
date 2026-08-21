@@ -242,6 +242,43 @@ class DoorWindowFsmInputs:
                                              grace started running concurrently with an
                                              existing pause (see that function's own
                                              docstring for the fix).
+      manual_grace_would_start             -> self._grace_would_start("manual", now) —
+                                             added under Issue #709 (mirrors
+                                             override_grace_fsm.py's own
+                                             ``grace_would_start`` field, Issue #664):
+                                             whether CONF_MANUAL_GRACE_PERIOD is
+                                             currently > 0. Feeds
+                                             ``_transition_from_paused()``'s
+                                             DASHBOARD_RESUME handler (the real
+                                             ``resume_from_pause()`` call always
+                                             attempts a *manual* grace) and
+                                             ``_transition_from_paused_during_grace()``'s
+                                             DASHBOARD_RESUME handler (same real
+                                             caller, reachable from that origin too
+                                             since ``_paused_by_door`` stays True
+                                             through PAUSED_DURING_GRACE).
+      automation_grace_would_start          -> self._grace_would_start("automation", now)
+                                             — added under Issue #709: whether
+                                             CONF_AUTOMATION_GRACE_PERIOD is currently
+                                             > 0. Feeds ``_transition_from_paused()``'s
+                                             ALL_SENSORS_CLOSED -> RESTORE_AND_GRACE
+                                             handler (the real
+                                             ``handle_all_doors_windows_closed()`` call
+                                             always attempts an *automation* grace via
+                                             ``_start_grace_period("automation", ...)``).
+                                             Deliberately a distinct field from
+                                             ``manual_grace_would_start`` rather than one
+                                             shared boolean — the two real call sites
+                                             this FSM models grace-starting for use
+                                             different sources, and
+                                             ``decide_grace_start()`` resolves duration
+                                             per-source, so collapsing them into one
+                                             field would silently check the wrong config
+                                             value for one of the two (see
+                                             ``override_grace_fsm.py``'s own
+                                             ``UNPROTECTED_GRACE_STARTED`` docstring for
+                                             the same source-mismatch pitfall already
+                                             found there).
       now                                  -> caller-resolved wall-clock time
     """
 
@@ -263,6 +300,8 @@ class DoorWindowFsmInputs:
     grace_active: bool
     pre_pause_mode_active: bool
     now: datetime
+    manual_grace_would_start: bool = True
+    automation_grace_would_start: bool = True
 
 
 @dataclass(frozen=True)
@@ -431,11 +470,20 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
                 pre_pause_mode="restored" if inputs.pre_pause_mode_active else None,
             )
         )
-        next_state = (
-            DoorWindowLifecycleState.GRACE
-            if outcome == DoorCloseResponseOutcome.RESTORE_AND_GRACE
-            else DoorWindowLifecycleState.NORMAL
-        )
+        # Issue #709: RESTORE_AND_GRACE only actually lands on GRACE if the real
+        # automation grace period would start (handle_all_doors_windows_closed()
+        # always attempts source="automation" here) — CONF_AUTOMATION_GRACE_PERIOD=0
+        # is a valid, documented way to disable it (Issue #664's same convention,
+        # extended to door/window), in which case pause still clears but no grace
+        # follows.
+        if outcome == DoorCloseResponseOutcome.RESTORE_AND_GRACE:
+            next_state = (
+                DoorWindowLifecycleState.GRACE
+                if inputs.automation_grace_would_start
+                else DoorWindowLifecycleState.NORMAL
+            )
+        else:
+            next_state = DoorWindowLifecycleState.NORMAL
         return DoorWindowTransition(current_state, next_state, kind, outcome.value, inputs.now)
 
     if kind == DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE:
@@ -444,7 +492,13 @@ def _transition_from_paused(current_state: DoorWindowLifecycleState, event: Door
         )
 
     if kind == DoorWindowFsmEventKind.DASHBOARD_RESUME:
-        return DoorWindowTransition(current_state, DoorWindowLifecycleState.GRACE, kind, "resumed", inputs.now)
+        # Issue #709: resume_from_pause() always attempts a real source="manual"
+        # grace after clearing the pause, but CONF_MANUAL_GRACE_PERIOD=0 disables it
+        # (Issue #664) — in that case pause clears but the FSM must not claim GRACE.
+        next_state = (
+            DoorWindowLifecycleState.GRACE if inputs.manual_grace_would_start else DoorWindowLifecycleState.NORMAL
+        )
+        return DoorWindowTransition(current_state, next_state, kind, "resumed", inputs.now)
 
     if kind == DoorWindowFsmEventKind.SYNC_RECONCILE:
         # Issue #660: dispatches to the same single reconciliation function every
@@ -583,8 +637,18 @@ def _transition_from_paused_during_grace(
         )
 
     if kind == DoorWindowFsmEventKind.DASHBOARD_RESUME:
-        # Clears pause, unconditionally re-arms grace — lands on GRACE.
-        return DoorWindowTransition(current_state, DoorWindowLifecycleState.GRACE, kind, "resumed", inputs.now)
+        # Issue #709: resume_from_pause() is reachable from PAUSED_DURING_GRACE too
+        # (it guards only on _paused_by_door, which stays True through this
+        # composite state) and always attempts to re-arm a real source="manual"
+        # grace via _start_grace_period_action(), which unconditionally cancels
+        # the existing timer first — so if CONF_MANUAL_GRACE_PERIOD is now 0
+        # (Issue #664), the pre-existing grace does NOT survive; it's cancelled
+        # and nothing replaces it. Clears pause either way; lands on GRACE only
+        # if a real grace would actually (re)start.
+        next_state = (
+            DoorWindowLifecycleState.GRACE if inputs.manual_grace_would_start else DoorWindowLifecycleState.NORMAL
+        )
+        return DoorWindowTransition(current_state, next_state, kind, "resumed", inputs.now)
 
     if kind == DoorWindowFsmEventKind.PAUSED_NAT_VENT_REACTIVATED:
         # Issue #660 Step 3: clears the pause but leaves the already-running grace

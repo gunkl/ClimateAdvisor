@@ -429,6 +429,153 @@ class TestResumeFromPauseFsmAuthoritative:
         engine.hass.services.async_call.assert_not_called()
 
 
+class TestResumeFromPauseZeroDurationGrace:
+    """Issue #709 regression: end-to-end proof that resume_from_pause()'s FINAL
+    state, after the full method returns, is never a phantom _grace_active=True
+    with no real timer scheduled.
+
+    **Revert-tested caveat, documented honestly**: this class alone does NOT
+    prove the fix, because the pre-fix bug was a *transient* phantom, not a
+    permanently-stuck one — _start_grace_period_action()'s own internal
+    _cancel_grace_timers() call unconditionally resets _grace_active=False
+    before it ever checks whether a new grace should start, which happens to
+    wash out door/window's earlier phantom write by the time this async method
+    returns, even on the old buggy code. Reverting only the production fix (git
+    stash push on automation.py/door_window_fsm.py, keeping this test) leaves
+    these particular tests GREEN — confirmed while authoring this fix. The real,
+    always-failing-without-the-fix proof is
+    TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated below (calls the
+    dispatcher directly, observing the state immediately after just that one
+    call, before the later real action's wash-out) and
+    tests/test_fsm_flag_ownership.py's AST-based ownership check. This class is
+    kept anyway as an end-to-end regression guard against a *different*
+    potential future break (e.g. someone removing the wash-out itself)."""
+
+    def test_no_phantom_grace_from_paused_active_when_manual_grace_disabled(self):
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 0,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        with patch(_PATCH_CALL_LATER), patch(_PATCH_CALLBACK, side_effect=lambda f: f):
+            result = asyncio.run(engine.resume_from_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        assert engine._grace_protects_override is False
+        assert engine._manual_grace_cancel is None
+        assert result == "cool"
+
+    def test_no_phantom_grace_from_paused_during_grace_when_manual_grace_disabled(self):
+        """Same zero-duration edge case, but starting from PAUSED_DURING_GRACE — a
+        pre-existing real grace was running; resume_from_pause() unconditionally
+        cancels it and (with duration now 0) does not replace it. The FSM's own
+        DASHBOARD_RESUME transition from this origin must also land on NORMAL, not
+        GRACE, for the same reason."""
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 0,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._grace_active = True
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        with patch(_PATCH_CALL_LATER), patch(_PATCH_CALLBACK, side_effect=lambda f: f):
+            asyncio.run(engine.resume_from_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        assert engine._manual_grace_cancel is None
+
+
+class TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated:
+    """Issue #709: the real proof. Calls _resolve_door_window_pause_flags()
+    directly with kind=DASHBOARD_RESUME — the exact call resume_from_pause()
+    makes BEFORE it ever reaches the real _start_grace_period_action() (which is
+    what washes out the pre-fix phantom by the time the full async method
+    returns, per TestResumeFromPauseZeroDurationGrace's docstring). Observing
+    _grace_active immediately after only this one call is the only way to see
+    the actual pre-fix bug: with CONF_MANUAL_GRACE_PERIOD=0,
+    _apply_door_window_fsm_state() used to write _grace_active=True right here,
+    with no real timer anywhere in existence yet — visible to any concurrently
+    scheduled task for as long as the caller's subsequent awaits take.
+
+    Revert-tested: reverting the production fix (door_window_fsm.py's
+    manual_grace_would_start gating, or restoring _apply_door_window_fsm_state()'s
+    _grace_active write) makes both tests below fail — confirmed while authoring
+    this fix, see the PR/commit description for the exact revert-and-rerun log.
+    """
+
+    def test_dashboard_resume_from_paused_active_no_phantom_when_manual_grace_disabled(self):
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE origin
+        engine._grace_active = False
+
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+            legacy=MagicMock(),
+        )
+
+        assert engine._grace_active is False, (
+            "_resolve_door_window_pause_flags(DASHBOARD_RESUME) set a phantom "
+            "_grace_active=True with CONF_MANUAL_GRACE_PERIOD=0 — no real grace "
+            "timer has been touched at this point in the real call sequence yet."
+        )
+
+    def test_dashboard_resume_from_paused_during_grace_lands_on_normal_when_manual_grace_disabled(self):
+        """Same origin family, but starting from PAUSED_DURING_GRACE — a
+        pre-existing real grace was already running, so _grace_active is
+        already True going in and (correctly, post-fix) the dispatcher never
+        writes it either way, meaning this specific origin can't demonstrate a
+        False -> True phantom the way the PAUSED_ACTIVE case above can (a
+        version of this test asserting engine._grace_active is False here would
+        pass identically whether the fix is applied or not, since the flag was
+        never False to begin with — caught while authoring this fix). What CAN
+        regress for this origin is the FSM's own transition decision: it must
+        resolve to NORMAL (matching what resume_from_pause()'s real, unconditional
+        cancel-then-maybe-restart action is about to enforce), not GRACE — proven
+        directly against the real transition() call, mirroring
+        TestFromPausedDuringGrace's pure-function-level coverage in
+        test_door_window_fsm.py but confirming the real dispatcher actually
+        threads manual_grace_would_start=False through to it end to end."""
+        from custom_components.climate_advisor import door_window_fsm as dwfsm
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._grace_active = True  # PAUSED_DURING_GRACE origin
+
+        real_transition = dwfsm.transition
+        with patch.object(dwfsm, "transition", wraps=real_transition) as mock_transition:
+            engine._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+                legacy=MagicMock(),
+            )
+
+        mock_transition.assert_called_once()
+        called_state, called_event = mock_transition.call_args[0]
+        assert called_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+        result = real_transition(called_state, called_event)
+        assert result.to_state == DoorWindowLifecycleState.NORMAL
+
+
 # ---------------------------------------------------------------------------
 # TestGraceExpiryRecheck
 # ---------------------------------------------------------------------------

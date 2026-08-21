@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.50"
+VERSION = "0.6.51"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.51": [
+        "Fix #721/#722: no user-visible change. Closes the last two internal"
+        " cross-checks left open by #717 — the door/window pause guard and the"
+        " whole-house-fan/HVAC suppression tracker now both get the same audit"
+        " trail as the rest of the safety logic. Also found and fixed two"
+        " untracked fan-suppression release points that a prior investigation"
+        " had missed.",
+    ],
     "0.6.50": [
         "Fix #717: no user-visible change. Wires the internal cross-check that lets"
         " the natural-ventilation, door/window, and manual-override safety logic"
@@ -2305,6 +2313,49 @@ KNOWN_FIXES: dict[int, dict] = {
             " (reached via the raw copy, not a mirror call); new per-caller coverage"
             " test for fan_thermostat_check(), matching the existing"
             " handle_manual_override() precedent."
+        ),
+    },
+    721: {
+        "version_fixed": "0.6.51",
+        "title": (
+            "The paused_by_door guard in handle_manual_override_during_pause()/"
+            "resume_from_pause() was the one door/window cross-read Issue #717 left"
+            " reading the raw canonical attribute instead of a dispatcher mirror."
+        ),
+        "scope_covered": (
+            "Investigated re-sourcing it to _dispatched_paused_by_door — an audit"
+            " confirmed the two values are always equal in production (every real"
+            " writer already funnels through a before/after diff), but 14+ existing"
+            " tests (test_resume_from_pause.py and 3 sibling files) set"
+            " engine._paused_by_door = True directly, bypassing the dispatcher, then"
+            " call these methods immediately. Re-sourcing would have silently"
+            " no-op'd every one of those tests' scenario, reproducing #717's own"
+            " FSM-builder regression for a different field. The guard stays"
+            " canonical; no code change to the guard itself. Also extracted"
+            " _emit_boolean_transition() (a shared helper for the before/after-diff"
+            "-emit shape #717 hand-rolled 3 times) and refactored all 3 existing"
+            " sites onto it as a DRY cleanup found while scoping the WHF chokepoint"
+            " for #722 below."
+        ),
+    },
+    722: {
+        "version_fixed": "0.6.51",
+        "title": (
+            "door_window_fsm.py's whf_owns_hvac cross-read stayed a direct"
+            " _whf_owns_hvac() call under #717 — deriving it from the wrong signal"
+            " (the nat-vent session diff) was caught and reverted before #717 shipped."
+        ),
+        "scope_covered": (
+            "automation.py: new _resolve_whf_hvac_suppression() chokepoint wraps"
+            " every real write of _pre_fan_hvac_mode and emits WHF_HVAC_SUPPRESSED/"
+            "RELEASED into a new _dispatched_whf_owns_hvac mirror (audit-trail only,"
+            " same role as every other _dispatched_* mirror — the FSM input itself"
+            " still reads _whf_owns_hvac() directly, for the same test-fixture reason"
+            " #721 above kept its guard canonical). Investigation found 4 real"
+            " writers, not the 2 originally suspected: _suppress_hvac_for_whf(),"
+            " _release_whf_and_reclassify(), and both of _deactivate_fan()'s"
+            " stranded-suppression-release branches (Issue #618) — the latter two"
+            " were missed in the original write-up and are now covered."
         ),
     },
     684: {

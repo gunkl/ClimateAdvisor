@@ -40,6 +40,18 @@ class LifecycleEventType(Enum):
     # _decision_lock) rather than at each individual write site.
     NAT_VENT_SESSION_STARTED = "nat_vent_session_started"
     NAT_VENT_SESSION_ENDED = "nat_vent_session_ended"
+    # Issue #722: door_window_fsm.py's whf_owns_hvac input was left as a direct
+    # _whf_owns_hvac() call under #717 because that method depends on
+    # _pre_fan_hvac_mode, not _natural_vent_active — deriving it from the
+    # NAT_VENT_SESSION_* pair above would have been wrong, not just
+    # differently-sourced. This pair is keyed on _pre_fan_hvac_mode's own
+    # before/after diff instead, emitted from the new
+    # _resolve_whf_hvac_suppression() chokepoint (automation.py) covering all 4
+    # real writers of that field. Names match the pre-existing
+    # "whf_hvac_suppressed"/"whf_hvac_released" _emit_event_callback strings
+    # already used at 2 of those 4 sites.
+    WHF_HVAC_SUPPRESSED = "whf_hvac_suppressed_dispatch"
+    WHF_HVAC_RELEASED = "whf_hvac_released_dispatch"
 
 
 @dataclass(frozen=True)

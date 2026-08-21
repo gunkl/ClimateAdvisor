@@ -843,17 +843,15 @@ class AutomationEngine:
         self._dispatched_grace_active: bool = False
         self._dispatched_manual_override_active: bool = False
         self._dispatched_natural_vent_active: bool = False
-        # Deliberately no _dispatched_whf_owns_hvac: _whf_owns_hvac() depends on
-        # _pre_fan_hvac_mode, a separate piece of state the NAT_VENT_SESSION_*
-        # before/after diff (keyed on _natural_vent_active alone) does not track —
-        # HVAC-fan-mode nat-vent leaves HVAC unsuppressed (whf_owns_hvac=False) even
-        # while a session is active, so deriving one from the other would be wrong,
-        # not just differently-sourced. door_window_fsm.py's read of whf_owns_hvac
-        # stays a direct _whf_owns_hvac() call — accurately modeling this cross-read
-        # would need its own _pre_fan_hvac_mode-keyed event pair, which is a real
-        # finding for a future issue, not something to invent speculatively here
-        # (Decision Point 6's precedent: don't build structure a concrete coupling
-        # hasn't actually justified).
+        # Issue #722: reintroduced now that the write-site gap is fixed. The prior
+        # exclusion (see the removed comment this replaces) objected to deriving
+        # this from the NAT_VENT_SESSION_* diff — the wrong signal. This mirror is
+        # instead sourced from _pre_fan_hvac_mode's own before/after diff, via the
+        # new _resolve_whf_hvac_suppression() chokepoint covering all 4 real
+        # writers of that field (_suppress_hvac_for_whf(), _release_whf_and_
+        # reclassify(), and _deactivate_fan()'s two release branches — the latter
+        # two were not named in #722's original text; found during investigation).
+        self._dispatched_whf_owns_hvac: bool = False
         self._lifecycle_dispatcher.register(
             "automation_engine",
             emits=frozenset(
@@ -866,6 +864,8 @@ class AutomationEngine:
                     LifecycleEventType.OVERRIDE_CLEARED,
                     LifecycleEventType.NAT_VENT_SESSION_STARTED,
                     LifecycleEventType.NAT_VENT_SESSION_ENDED,
+                    LifecycleEventType.WHF_HVAC_SUPPRESSED,
+                    LifecycleEventType.WHF_HVAC_RELEASED,
                 }
             ),
             consumes=frozenset(
@@ -878,6 +878,8 @@ class AutomationEngine:
                     LifecycleEventType.OVERRIDE_CLEARED,
                     LifecycleEventType.NAT_VENT_SESSION_STARTED,
                     LifecycleEventType.NAT_VENT_SESSION_ENDED,
+                    LifecycleEventType.WHF_HVAC_SUPPRESSED,
+                    LifecycleEventType.WHF_HVAC_RELEASED,
                 }
             ),
             on_event=self._on_lifecycle_event,
@@ -2077,6 +2079,10 @@ class AutomationEngine:
             self._dispatched_natural_vent_active = True
         elif event.event_type is LifecycleEventType.NAT_VENT_SESSION_ENDED:
             self._dispatched_natural_vent_active = False
+        elif event.event_type is LifecycleEventType.WHF_HVAC_SUPPRESSED:
+            self._dispatched_whf_owns_hvac = True
+        elif event.event_type is LifecycleEventType.WHF_HVAC_RELEASED:
+            self._dispatched_whf_owns_hvac = False
 
     @contextlib.asynccontextmanager
     async def _decision_pass(self, method_name: str):
@@ -5575,6 +5581,16 @@ class AutomationEngine:
         Called by the coordinator when it detects a thermostat mode change
         from 'off' to something else while paused_by_door is True.
         """
+        # Issue #721: investigated re-sourcing this to _dispatched_paused_by_door.
+        # Rejected — every real production writer keeps the mirror in lockstep
+        # (Finding 1's write-site audit), but 14+ existing tests
+        # (test_resume_from_pause.py, test_manual_override_respect.py, etc.) set
+        # engine._paused_by_door = True directly, bypassing the dispatcher, then
+        # call this method immediately — the same direct-attribute-assignment
+        # fixture convention whose incompatibility with dispatcher-mirror reads
+        # was already discovered and reverted once for the FSM input builders
+        # (see _dispatched_paused_by_door's declaration comment in __init__).
+        # Re-sourcing here would reproduce that exact regression. Stays canonical.
         if not self._paused_by_door:
             return
         _LOGGER.info("Manual HVAC override detected during door/window pause")
@@ -5618,6 +5634,8 @@ class AutomationEngine:
 
         Returns the restored mode string, or None if not currently paused.
         """
+        # Issue #721: see handle_manual_override_during_pause()'s matching comment —
+        # same test-fixture-breaking reason to keep this canonical, not dispatched.
         if not self._paused_by_door:
             return None
 
@@ -7316,28 +7334,14 @@ class AutomationEngine:
         )
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
         self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
-        try:
-            _paused_after = bool(self._paused_by_door)
-            if _paused_after and not _paused_before:
-                self._lifecycle_dispatcher.emit(
-                    LifecycleEvent(
-                        event_type=LifecycleEventType.DOOR_PAUSE_STARTED,
-                        source="automation_engine",
-                        at=dt_util.now(),
-                        detail="nat_vent_fsm_authoritative",
-                    )
-                )
-            elif _paused_before and not _paused_after:
-                self._lifecycle_dispatcher.emit(
-                    LifecycleEvent(
-                        event_type=LifecycleEventType.DOOR_PAUSE_ENDED,
-                        source="automation_engine",
-                        at=dt_util.now(),
-                        detail="nat_vent_fsm_authoritative",
-                    )
-                )
-        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real nat-vent decision
-            _LOGGER.exception("_apply_nat_vent_fsm_state: lifecycle event emit failed (isolated)")
+        self._emit_boolean_transition(
+            before=_paused_before,
+            after=bool(self._paused_by_door),
+            started=LifecycleEventType.DOOR_PAUSE_STARTED,
+            ended=LifecycleEventType.DOOR_PAUSE_ENDED,
+            detail="nat_vent_fsm_authoritative",
+            caller="_apply_nat_vent_fsm_state",
+        )
 
     def _apply_nat_vent_fsm_state_after_activation(
         self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
@@ -7383,13 +7387,20 @@ class AutomationEngine:
         to agree. Both coordinator call sites now call this method directly
         (``ae._build_door_window_fsm_inputs(now=now)``).
 
-        Issue #717: ``natural_vent_active``/``grace_active``/``whf_owns_hvac`` still
-        read the canonical attributes/method directly here — see
+        Issue #717/#722: ``natural_vent_active``/``grace_active``/``whf_owns_hvac``
+        all still read the canonical attributes/method directly here — see
         ``_dispatched_paused_by_door``'s declaration comment in ``__init__`` for why a
         same-instance dispatcher-only mirror was the wrong design for these reads.
-        The dispatcher's real value is the emit/audit-trail wiring at every genuine
-        transition, proven by ``check_registry_completeness()`` and its own
-        ``event_log`` — not gating these already-fresh same-object reads.
+        ``_dispatched_whf_owns_hvac`` (added for #722, sourced from
+        ``_resolve_whf_hvac_suppression()``'s before/after diff) is deliberately NOT
+        read here for the same reason: tests across `test_fan_control.py`,
+        `test_whole_house_fan_hvac_suppression.py`, etc. set
+        ``engine._pre_fan_hvac_mode`` directly, bypassing the dispatcher — routing
+        this input through the mirror would reproduce the exact regression #717's
+        own FSM-builder wiring hit and reverted. The dispatcher's value here is the
+        emit/audit-trail wiring at every genuine transition, proven by
+        ``check_registry_completeness()`` and its own ``event_log`` — not gating
+        these already-fresh same-object reads.
         """
         from .door_window_fsm import DoorWindowFsmInputs
 
@@ -7499,6 +7510,38 @@ class AutomationEngine:
         )
         self._paused_with_hvac_already_off = state == DoorWindowLifecycleState.PAUSED_IDLE
 
+    def _emit_boolean_transition(
+        self,
+        *,
+        before: bool,
+        after: bool,
+        started: LifecycleEventType,
+        ended: LifecycleEventType,
+        detail: str | None,
+        caller: str,
+    ) -> None:
+        """Shared before/after-diff-emit shape (Issue #721/#722 DRY finding).
+
+        Extracted from 3 call sites that each hand-rolled this identical
+        try/except + if/elif block (``_apply_nat_vent_fsm_state()``,
+        ``_resolve_door_window_pause_flags()``, ``_resolve_override_grace_fsm_state()``)
+        before a 4th copy was about to be added for WHF-suppression tracking
+        (``_resolve_whf_hvac_suppression()``). Pure extraction — same emitted
+        events, same exception isolation — so it must not change any of the 3
+        existing sites' observable behavior.
+        """
+        try:
+            if after and not before:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(event_type=started, source="automation_engine", at=dt_util.now(), detail=detail)
+                )
+            elif before and not after:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(event_type=ended, source="automation_engine", at=dt_util.now(), detail=detail)
+                )
+        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real decision
+            _LOGGER.exception("%s: lifecycle event emit failed (isolated)", caller)
+
     def _resolve_door_window_pause_flags(
         self,
         *,
@@ -7539,28 +7582,14 @@ class AutomationEngine:
             self._apply_door_window_fsm_state(result.to_state)
         else:
             legacy()
-        try:
-            _paused_after = bool(self._paused_by_door)
-            if _paused_after and not _paused_before:
-                self._lifecycle_dispatcher.emit(
-                    LifecycleEvent(
-                        event_type=LifecycleEventType.DOOR_PAUSE_STARTED,
-                        source="automation_engine",
-                        at=dt_util.now(),
-                        detail=kind.value,
-                    )
-                )
-            elif _paused_before and not _paused_after:
-                self._lifecycle_dispatcher.emit(
-                    LifecycleEvent(
-                        event_type=LifecycleEventType.DOOR_PAUSE_ENDED,
-                        source="automation_engine",
-                        at=dt_util.now(),
-                        detail=kind.value,
-                    )
-                )
-        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real pause decision
-            _LOGGER.exception("_resolve_door_window_pause_flags: lifecycle event emit failed (isolated)")
+        self._emit_boolean_transition(
+            before=_paused_before,
+            after=bool(self._paused_by_door),
+            started=LifecycleEventType.DOOR_PAUSE_STARTED,
+            ended=LifecycleEventType.DOOR_PAUSE_ENDED,
+            detail=kind.value,
+            caller="_resolve_door_window_pause_flags",
+        )
 
     def _build_override_grace_fsm_inputs(self):
         """Build the override/grace FSM's input snapshot from current engine state
@@ -7772,28 +7801,14 @@ class AutomationEngine:
             self._apply_override_grace_fsm_state(result.to_state)
         else:
             legacy()
-        try:
-            _grace_after = bool(self._grace_active)
-            if _grace_after and not _grace_before:
-                self._lifecycle_dispatcher.emit(
-                    LifecycleEvent(
-                        event_type=LifecycleEventType.GRACE_STARTED,
-                        source="automation_engine",
-                        at=dt_util.now(),
-                        detail=kind.value,
-                    )
-                )
-            elif _grace_before and not _grace_after:
-                self._lifecycle_dispatcher.emit(
-                    LifecycleEvent(
-                        event_type=LifecycleEventType.GRACE_ENDED,
-                        source="automation_engine",
-                        at=dt_util.now(),
-                        detail=kind.value,
-                    )
-                )
-        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real grace decision
-            _LOGGER.exception("_resolve_override_grace_fsm_state: lifecycle event emit failed (isolated)")
+        self._emit_boolean_transition(
+            before=_grace_before,
+            after=bool(self._grace_active),
+            started=LifecycleEventType.GRACE_STARTED,
+            ended=LifecycleEventType.GRACE_ENDED,
+            detail=kind.value,
+            caller="_resolve_override_grace_fsm_state",
+        )
 
     def _nat_vent_may_reactivate(
         self,
@@ -7934,6 +7949,34 @@ class AutomationEngine:
         fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
         return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._pre_fan_hvac_mode is not None
 
+    def _resolve_whf_hvac_suppression(self, *, legacy: Callable[[], None]) -> None:
+        """Single dispatch point for every real ``_pre_fan_hvac_mode`` write site (Issue #722).
+
+        There are 4 real writers: ``_suppress_hvac_for_whf()`` (sets it),
+        ``_release_whf_and_reclassify()`` (clears it), and ``_deactivate_fan()``'s two
+        release branches (both clear it — found during investigation; #722's original
+        text named only the first two). Each calls this with its own ``legacy``
+        closure wrapping its actual assignment; this function owns the before/after
+        diff and emit exactly once instead of once per site — same shape as
+        ``_resolve_door_window_pause_flags()``/``_resolve_override_grace_fsm_state()``,
+        applied here for the same reason (a real, previously-untracked cross-read:
+        ``door_window_fsm.py``'s ``whf_owns_hvac`` input).
+
+        No FSM-authoritative branch here (unlike the door/window and override/grace
+        dispatchers) — ``_whf_owns_hvac()`` has no companion FSM to switch to; this is
+        purely the mirror-sync half of the pattern, not an extraction of decision logic.
+        """
+        _before = self._whf_owns_hvac()
+        legacy()
+        self._emit_boolean_transition(
+            before=_before,
+            after=self._whf_owns_hvac(),
+            started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
+            ended=LifecycleEventType.WHF_HVAC_RELEASED,
+            detail=None,
+            caller="_resolve_whf_hvac_suppression",
+        )
+
     async def _suppress_hvac_for_whf(self, *, reason: str) -> None:
         """Capture current HVAC mode and turn it off for a whole-house-fan session (Issue #495).
 
@@ -7956,7 +7999,11 @@ class AutomationEngine:
             return
         _cs = self.hass.states.get(self.climate_entity)
         prior_mode = _cs.state if _cs else None
-        self._pre_fan_hvac_mode = prior_mode
+
+        def _legacy_capture() -> None:
+            self._pre_fan_hvac_mode = prior_mode
+
+        self._resolve_whf_hvac_suppression(legacy=_legacy_capture)
         await self._set_hvac_mode("off", reason=reason)
         if self._emit_event_callback:
             self._emit_event_callback("whf_hvac_suppressed", {"prior_mode": prior_mode, "reason": reason})
@@ -8002,7 +8049,12 @@ class AutomationEngine:
         if self._get_fan_physical_state_callback and self._get_fan_physical_state_callback():
             _LOGGER.debug("WHF release-and-reclassify skipped (%s) — fan still physically on", reason)
             return
-        self._pre_fan_hvac_mode = None  # release _whf_owns_hvac() BEFORE the reclassify write
+
+        def _legacy_release() -> None:
+            self._pre_fan_hvac_mode = None
+
+        # release _whf_owns_hvac() BEFORE the reclassify write
+        self._resolve_whf_hvac_suppression(legacy=_legacy_release)
         _LOGGER.info("WHF session ended (%s) — releasing HVAC suppression, reclassifying current state", reason)
         if self._emit_event_callback:
             self._emit_event_callback("whf_hvac_released", {"reason": reason})
@@ -8742,7 +8794,11 @@ class AutomationEngine:
         if not self._fan_active:
             if release_suppression and self._pre_fan_hvac_mode is not None:
                 _restore_mode = self._pre_fan_hvac_mode
-                self._pre_fan_hvac_mode = None
+
+                def _legacy_release_already_inactive() -> None:
+                    self._pre_fan_hvac_mode = None
+
+                self._resolve_whf_hvac_suppression(legacy=_legacy_release_already_inactive)
                 if restore_hvac:
                     _LOGGER.debug(
                         "_deactivate_fan: fan already inactive but restoring stranded HVAC suppression (%s)", reason
@@ -8821,13 +8877,17 @@ class AutomationEngine:
                 # the already-inactive branch above.
                 if release_suppression and self._pre_fan_hvac_mode is not None:
                     _restore_mode = self._pre_fan_hvac_mode
+
                     # Issue #392: clear _pre_fan_hvac_mode BEFORE issuing the restore write, not
                     # after. _whf_owns_hvac() (the Fix 1b choke-point guard in _set_hvac_mode())
                     # treats "_pre_fan_hvac_mode is not None" as "WHF still owns the thermostat" —
                     # the restore write itself ends the suppression session, so ownership must be
                     # released before the write, or the guard self-blocks the very call that is
                     # supposed to un-suppress HVAC.
-                    self._pre_fan_hvac_mode = None
+                    def _legacy_release_active() -> None:
+                        self._pre_fan_hvac_mode = None
+
+                    self._resolve_whf_hvac_suppression(legacy=_legacy_release_active)
                     if restore_hvac:
                         await self._set_hvac_mode(
                             _restore_mode,

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.49] — 2026-08-21
+
+- Fix #716: no user-visible change. The internal shadow-engine diagnostic that validates upcoming automation changes before they're allowed to affect real HVAC behavior wasn't tracking whether the whole-house/HVAC fan was on — so a related check could never meaningfully agree or disagree with production. It now does, closing a gap in the safety net that gates future automation changes; nothing about how the fan itself is controlled changed.
+
 ## [0.6.48] — 2026-08-21
 
 - Fix #714: the whole-house fan and an active thermostat mode (cool/heat) can no longer run at the same time. If you manually change the thermostat mode while free cooling is running, the fan now stops immediately instead of continuing to cycle in the background, and it won't silently turn your thermostat back off anymore if it happens to reactivate while your manual change is still in effect.

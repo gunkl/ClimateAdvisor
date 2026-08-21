@@ -177,6 +177,24 @@ class TestFromPaused:
         )
         assert t.to_state == DoorWindowLifecycleState.GRACE
 
+    def test_all_sensors_closed_restores_without_grace_when_automation_grace_disabled(self):
+        """Issue #709: handle_all_doors_windows_closed() always attempts a real
+        source="automation" grace after restoring pre_pause_mode, but
+        CONF_AUTOMATION_GRACE_PERIOD=0 disables it (Issue #664's convention,
+        extended to door/window). RESTORE_AND_GRACE must land on NORMAL, not
+        GRACE, when automation_grace_would_start is False — pause still clears
+        (the restore itself is unconditional on config)."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_ACTIVE,
+            _ev(
+                DoorWindowFsmEventKind.ALL_SENSORS_CLOSED,
+                pre_pause_mode_active=True,
+                automation_grace_would_start=False,
+            ),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
+        assert t.outcome == "restore_and_grace"
+
     def test_manual_override_during_pause_clears_to_normal(self):
         t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.MANUAL_OVERRIDE_DURING_PAUSE))
         assert t.to_state == DoorWindowLifecycleState.NORMAL
@@ -184,6 +202,17 @@ class TestFromPaused:
     def test_dashboard_resume_starts_grace(self):
         t = transition(DoorWindowLifecycleState.PAUSED_IDLE, _ev(DoorWindowFsmEventKind.DASHBOARD_RESUME))
         assert t.to_state == DoorWindowLifecycleState.GRACE
+
+    def test_dashboard_resume_clears_to_normal_when_manual_grace_disabled(self):
+        """Issue #709: resume_from_pause() always attempts a real source="manual"
+        grace after clearing pause, but CONF_MANUAL_GRACE_PERIOD=0 disables it
+        (Issue #664). DASHBOARD_RESUME must land on NORMAL, not GRACE, when
+        manual_grace_would_start is False."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_IDLE,
+            _ev(DoorWindowFsmEventKind.DASHBOARD_RESUME, manual_grace_would_start=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
 
     def test_sensor_opened_already_paused_noop(self):
         t = transition(DoorWindowLifecycleState.PAUSED_ACTIVE, _ev(DoorWindowFsmEventKind.SENSOR_OPENED))
@@ -365,6 +394,18 @@ class TestFromPausedDuringGrace:
     def test_dashboard_resume_lands_on_grace(self):
         t = transition(DoorWindowLifecycleState.PAUSED_DURING_GRACE, _ev(DoorWindowFsmEventKind.DASHBOARD_RESUME))
         assert t.to_state == DoorWindowLifecycleState.GRACE
+
+    def test_dashboard_resume_clears_to_normal_when_manual_grace_disabled(self):
+        """Issue #709: resume_from_pause() is reachable from PAUSED_DURING_GRACE too
+        (it guards only on _paused_by_door) and always attempts to re-arm a real
+        source="manual" grace, unconditionally cancelling the pre-existing one
+        first. With CONF_MANUAL_GRACE_PERIOD=0, the old grace does not survive —
+        this must land on NORMAL (pause clears, no grace), not GRACE."""
+        t = transition(
+            DoorWindowLifecycleState.PAUSED_DURING_GRACE,
+            _ev(DoorWindowFsmEventKind.DASHBOARD_RESUME, manual_grace_would_start=False),
+        )
+        assert t.to_state == DoorWindowLifecycleState.NORMAL
 
     def test_manual_override_during_pause_lands_on_grace(self):
         t = transition(

@@ -3,6 +3,13 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.46] — 2026-08-20
+
+- Fix #706: closes a gap where, if you opt into the nat-vent state-machine engine, it could lose track of an active manual override in two ways: not recognizing one was already in effect, and — in rare timing cases — briefly overwriting a fan override that started while a decision was in flight. Also teaches it the existing rule that free cooling should keep running during a protected period if the house is genuinely overheating. No change unless you've opted in.
+- Fix #707: no user-visible change. After certain restarts with an active whole-house-fan remote timer, a diagnostic comparison (not any real fan/HVAC decision) could report a false disagreement for several minutes. Purely a live-verification signal fix.
+- Fix #708: closes a gap where, if you opt into the nat-vent state-machine engine, one specific moment — deciding whether to resume free cooling right after a grace period ends — was still always decided by the old code regardless of that setting. No change unless you've opted in.
+- Fix #709: closes a gap where, if you opt into the door/window state-machine engine, two of its eight decision points didn't actually change your grace-period status the way the setting implied, and a rare zero-length-grace configuration could leave a phantom grace period reported that never cleared on its own. No change unless you've opted in.
+
 ## [0.6.45] — 2026-08-20
 
 - Fix #684: no user-visible change. A diagnostic-only comparison that checks whether the nat-vent state-machine engine (still not authoritative over any real decision unless you've opted in) agrees with production used a fixed 5-minute reactivation cooldown instead of your actually configured value, when they differ. Only affects installs that changed the reactivation lockout from its default — no change to any real fan/HVAC decision either way.

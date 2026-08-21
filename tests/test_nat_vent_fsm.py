@@ -435,6 +435,91 @@ class TestOverrideGraceShortCircuit:
         assert t.changed
 
 
+class TestGraceOverheatException:
+    """Issue #706 (closes #688): the Issue #134 overheat-during-grace exception.
+
+    Production legitimately keeps nat-vent running during grace when indoor
+    genuinely exceeds comfort_cool (automation.py's real condition:
+    ``self._grace_active and indoor is not None and indoor > comfort_cool``).
+    Modeled here via ``_grace_blocks_natvent()``, shared by both
+    ``_transition_from_active()`` and ``_transition_from_inactive()``."""
+
+    def test_grace_active_and_indoor_exceeds_comfort_cool_does_not_block_entry(self) -> None:
+        # indoor (78) > comfort_cool (76) -> overheat exception applies -> grace
+        # must NOT force INACTIVE; ordinary gate math decides instead.
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=78.0, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+        assert t.changed
+
+    def test_grace_active_and_indoor_at_comfort_cool_still_blocks(self) -> None:
+        # indoor == comfort_cool is NOT "exceeds" (strict >) -> exception does not
+        # apply -> grace still blocks.
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=76.0, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert not t.changed
+
+    def test_grace_active_and_indoor_below_comfort_cool_blocks(self) -> None:
+        # indoor (72) < comfort_cool (76) -> no overheat -> grace blocks as before.
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=72.0, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+        assert not t.changed
+
+    def test_grace_active_and_indoor_unknown_blocks(self) -> None:
+        # indoor=None -> "exceeds comfort_cool" cannot be evaluated -> conservative
+        # default is grace blocks (matches production's `indoor is not None` guard).
+        t = transition(
+            NatVentLifecycleState.INACTIVE,
+            _tick(indoor=None, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+
+    def test_active_session_stays_active_during_grace_when_overheating(self) -> None:
+        # Already-active session (e.g. ACTIVE_FULL_GATE) must not be forced to
+        # INACTIVE by grace while indoor is genuinely above comfort_cool -- this
+        # is the actual occupant-facing case: nat-vent already running, grace
+        # starts (e.g. a manual override elsewhere), but the home is overheating
+        # so free cooling should keep running.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=78.0, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, grace_active=True),
+        )
+        assert t.to_state != NatVentLifecycleState.INACTIVE
+
+    def test_active_session_exits_during_grace_when_not_overheating(self) -> None:
+        # Same active session, but indoor has NOT exceeded comfort_cool -> grace
+        # blocks as normal -> forced to INACTIVE.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(indoor=72.0, outdoor=65.0, comfort_heat_raw=68.0, comfort_cool=76.0, grace_active=True),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+
+    def test_override_active_still_wins_even_while_overheating(self) -> None:
+        # A manual override always wins regardless of temperature -- only the
+        # grace short-circuit gets the Issue #134 exception, not override.
+        t = transition(
+            NatVentLifecycleState.ACTIVE_FULL_GATE,
+            _tick(
+                indoor=78.0,
+                outdoor=65.0,
+                comfort_heat_raw=68.0,
+                comfort_cool=76.0,
+                override_active=True,
+                grace_active=True,
+            ),
+        )
+        assert t.to_state == NatVentLifecycleState.INACTIVE
+
+
 class TestSoftStartEscalation:
     """Issue #594 Phase R prep: soft-start -> full-gate escalation, mirroring
     automation.py's own mid-session upgrade check (Issue #540)."""

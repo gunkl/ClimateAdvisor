@@ -2805,6 +2805,42 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         )
         _LOGGER.debug("[coalesce-diag] after reconcile_fan_on_startup()")
 
+        # Issue #707: reconcile_fan_on_startup()'s RF-timer-survives-restart branch
+        # (_reconcile_fan_on_startup_locked(), automation.py ~5005-5022) calls
+        # handle_fan_manual_override() INTERNALLY when a live remote timer is still
+        # valid — that inner call correctly updates production's real override/grace
+        # flags via _resolve_override_grace_fsm_state(), but is invisible to
+        # _mirror_to_shadow()'s dispatch above, since "reconcile_fan_on_startup" (the
+        # outer mirrored method name) isn't a key in _OVERRIDE_GRACE_FSM_EVENT_KINDS —
+        # only "handle_fan_manual_override" is, and that key is only ever consulted
+        # when _mirror_to_shadow() itself is invoked with that method name, which never
+        # happens here since the inner call is a direct synchronous call inside
+        # automation.py, not a coordinator-level mirrored call. Left the shadow tracker
+        # permanently stuck reporting "none" after every restart with an active RF
+        # timer (confirmed live: production=idle/active_protecting_override vs
+        # fsm=idle/none, sustained 993s+, 2026-08-20 06:54-07:11).
+        #
+        # Fix: feed the FSM tracker directly here, gated on the EXACT same condition
+        # _reconcile_fan_on_startup_locked() uses to decide whether to call
+        # handle_fan_manual_override() (remote_timer_provenance is not None and
+        # thermostat_fan_running) — so this only fires when the inner override call
+        # actually happened, never on the plain "nothing to reconcile" path. By this
+        # point reconcile_fan_on_startup() has already fully returned (including its
+        # synchronous inner handle_fan_manual_override() call), so
+        # self.automation_engine's live flags are already correct — same
+        # read-fresh-from-production pattern _check_orphaned_grace() uses at ~2865-2869.
+        if _remote_timer_provenance is not None and _thermostat_fan_running:
+            from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
+
+            try:
+                self._evaluate_override_grace_fsm(_OGFEventKind.FAN_OVERRIDE_DETECTED)
+            except Exception as fsm_exc:  # noqa: BLE001 — FSM errors must never affect production
+                _LOGGER.warning(
+                    "Override/grace FSM evaluation (restart-resume RF-timer-driven) failed"
+                    " (isolated, no production impact): %s",
+                    fsm_exc,
+                )
+
         self._emit_event(
             "startup_coalesced",
             {

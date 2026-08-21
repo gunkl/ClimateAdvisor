@@ -4,9 +4,32 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.45"
+VERSION = "0.6.46"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.46": [
+        "Fix #707: no user-visible change. After certain restarts with an active"
+        " whole-house-fan remote timer, a diagnostic comparison (not any real"
+        " fan/HVAC decision) could report a false disagreement for several"
+        " minutes. Purely a live-verification signal fix.",
+        "Fix #708: closes a gap where, if you opt into the nat-vent state-machine"
+        " engine, one specific moment — deciding whether to resume free cooling"
+        " right after a grace period ends — was still always decided by the old"
+        " code regardless of that setting. No change unless you've opted in.",
+        "Fix #706: closes a gap where, if you opt into the nat-vent state-machine"
+        " engine, it could lose track of an active manual override in two ways:"
+        " not recognizing one was already in effect, and — in rare timing"
+        " cases — briefly overwriting a fan override that started while a"
+        " decision was in flight. Also teaches it the existing rule that free"
+        " cooling should keep running during a protected period if the house is"
+        " genuinely overheating. No change unless you've opted in.",
+        "Fix #709: closes a gap where, if you opt into the door/window"
+        " state-machine engine, two of its eight decision points didn't"
+        " actually change your grace-period status the way the setting implied,"
+        " and a rare zero-length-grace configuration could leave a phantom"
+        " grace period reported that never cleared on its own. No change unless"
+        " you've opted in.",
+    ],
     "0.6.45": [
         "Fix #684: no user-visible change. A diagnostic-only comparison that"
         " checks whether the nat-vent state-machine engine (still not"
@@ -2069,6 +2092,76 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    706: {
+        "version_fixed": "0.6.46",
+        "title": (
+            "Nat-vent FSM's production input builder never populated"
+            " override_active/grace_active (Bug D); a decision computed before"
+            " an await could clobber a real override that started mid-await"
+            " (Bug F); the FSM's grace short-circuit didn't model the Issue"
+            " #134 overheat-during-grace exception (#688)"
+        ),
+        "scope_covered": (
+            "automation.py: _build_nat_vent_fsm_inputs() now reads live"
+            " override/grace state; new _apply_nat_vent_fsm_state_after_"
+            " activation() checks _activate_fan()'s FanCommandResult and"
+            " applies INACTIVE instead of a stale decision when it returns"
+            " OVERRIDDEN, wired into all 5 real call sites. nat_vent_fsm.py:"
+            " new shared _grace_blocks_natvent() models the Issue #134"
+            " exception in both transition functions."
+        ),
+    },
+    707: {
+        "version_fixed": "0.6.46",
+        "title": (
+            "RF-timer restart-resume's inner handle_fan_manual_override() call"
+            " never fed the override/grace shadow FSM tracker, since it's"
+            " invisible to _mirror_to_shadow()'s outer-method-name dispatch"
+        ),
+        "scope_covered": (
+            "coordinator.py: _do_startup_coalesce() now explicitly feeds"
+            " _evaluate_override_grace_fsm(FAN_OVERRIDE_DETECTED) when the"
+            " RF-timer-survives-restart branch actually fires. Diagnostic-only"
+            " — production's real override/grace flags were always correct."
+        ),
+    },
+    708: {
+        "version_fixed": "0.6.46",
+        "title": (
+            "Grace-expiry paused-reactivation (_re_pause_for_open_sensor())"
+            " never consulted the nat-vent FSM at all, gated only by the"
+            " door/window switch"
+        ),
+        "scope_covered": (
+            "automation.py: _re_pause_for_open_sensor() now routes its"
+            " reactivation decision through nat_vent_fsm.transition() when"
+            " natvent_fsm_authoritative is True, independent of the"
+            " door/window switch."
+        ),
+    },
+    709: {
+        "version_fixed": "0.6.46",
+        "title": (
+            "Door/window FSM's _grace_active write conflicted with"
+            " override/grace's sole ownership of that flag; door_window_fsm.py"
+            " had no equivalent of grace_would_start, so 3 grace-landing"
+            " transitions could set a phantom _grace_active with no real timer"
+            " when grace was configured off"
+        ),
+        "scope_covered": (
+            "automation.py: _apply_door_window_fsm_state() no longer writes"
+            " _grace_active/_grace_protects_override — override/grace's"
+            " dispatcher is the sole writer. door_window_fsm.py: new"
+            " manual_grace_would_start/automation_grace_would_start input"
+            " fields gate the 3 real grace-landing transitions"
+            " (_transition_from_paused()'s DASHBOARD_RESUME and"
+            " ALL_SENSORS_CLOSED->RESTORE_AND_GRACE,"
+            " _transition_from_paused_during_grace()'s DASHBOARD_RESUME)."
+            " New tests/test_fsm_flag_ownership.py adds a generalized,"
+            " AST-based 'exactly one writer' regression guard for all 3 FSMs'"
+            " modeled flags."
+        ),
+    },
     684: {
         "version_fixed": "0.6.45",
         "title": (

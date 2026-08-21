@@ -69,14 +69,26 @@ confirmed live as the single largest disagreement bucket in a night of logs
 implement any other new decision authority (see epic #594 Phase R for the
 larger authority question).
 
-**Known remaining edge (diagnostic-only, zero occupant impact — tracked in
-Issue #688):** production's grace guard has an Issue #134 exception that
-*allows* nat-vent to engage during grace when indoor exceeds ``comfort_cool``
-(overheat protection). This short-circuit does not model that exception —
-it always returns ``INACTIVE`` while ``grace_active`` is true. This trades the
-38-line disagreement bucket above for a narrower, rarer one; since this
-tracker is never written back to production, occupant behavior is unaffected
-either way.
+**Issue #134 overheat-during-grace exception (Issue #706, closes #688).**
+Production's grace guard has an exception that *allows* nat-vent to engage
+during grace when indoor genuinely exceeds ``comfort_cool`` (overheat
+protection — ``automation.py``'s real condition:
+``self._grace_active and indoor is not None and indoor > comfort_cool``).
+This module's grace short-circuit now models that same exception via
+``_grace_blocks_natvent()``, shared by both ``_transition_from_active()`` and
+``_transition_from_inactive()``: grace blocks nat-vent UNLESS indoor is known
+and exceeds ``comfort_cool``, in which case the short-circuit does not fire.
+``override_active`` is unaffected — a manual fan override always wins
+regardless of temperature.
+
+This was originally shipped (Issue #687) as a known diagnostic-only gap,
+because at the time this FSM was shadow/diagnostic-only and the field
+defaulted to ``False`` in every real production construction (Issue #706
+Bug D). Once Bug D wires ``grace_active`` to a real live value in
+``automation.py``'s own ``_build_nat_vent_fsm_inputs()``, this exception
+becomes load-bearing — without it, nat-vent would wrongly shut off during a
+genuine overheat-during-grace window once ``_natvent_fsm_authoritative`` is
+enabled.
 """
 
 from __future__ import annotations
@@ -256,15 +268,32 @@ def _soft_start_inputs(inputs: NatVentFsmInputs, *, full_gate_active: bool) -> N
     )
 
 
+def _grace_blocks_natvent(inputs: NatVentFsmInputs) -> bool:
+    """Whether an active grace period should block nat-vent this tick (Issue #706,
+    closes #688).
+
+    Grace blocks nat-vent UNLESS indoor is known and genuinely exceeds
+    ``comfort_cool`` — the Issue #134 overheat-during-grace exception production
+    applies (``automation.py``: ``self._grace_active and indoor is not None and
+    indoor > comfort_cool``). Shared by both ``_transition_from_active()`` and
+    ``_transition_from_inactive()`` so the exception can't drift between the two
+    call paths.
+    """
+    if not inputs.grace_active:
+        return False
+    return not (inputs.indoor is not None and inputs.comfort_cool is not None and inputs.indoor > inputs.comfort_cool)
+
+
 def _transition_from_active(current_state: NatVentLifecycleState, event: NatVentFsmEvent) -> NatVentTransition:
     # Issue #687 (Phase 2a): a manual override or grace period wins over everything
     # else in this function, including the lockout-recognition check right below it.
     # Mirrors production's real guarding, split across two call sites: override
     # is _activate_fan()'s own early return ("Fan override active — skipping fan
     # activation"); grace is enforced separately in check_natural_vent_conditions()
-    # (minus its Issue #134 overheat-during-grace exception — see module docstring,
-    # tracked in Issue #688). Placed first, before any other branch.
-    if event.inputs.override_active or event.inputs.grace_active:
+    # WITH its Issue #134 overheat-during-grace exception, modeled here via
+    # _grace_blocks_natvent() (Issue #706, closes #688). Placed first, before any
+    # other branch.
+    if event.inputs.override_active or _grace_blocks_natvent(event.inputs):
         return NatVentTransition(
             from_state=current_state,
             to_state=NatVentLifecycleState.INACTIVE,
@@ -347,9 +376,11 @@ def _transition_from_inactive(current_state: NatVentLifecycleState, event: NatVe
 
     # Issue #687 (Phase 2a): same override/grace short-circuit as
     # _transition_from_active() — see that function's comment for the production
-    # mirror this reflects. Placed first, before the lockout check, so an
-    # override/grace window can never be masked by (or race with) lockout state.
-    if inputs.override_active or inputs.grace_active:
+    # mirror this reflects, including the Issue #134/#688 overheat-during-grace
+    # exception via _grace_blocks_natvent() (Issue #706). Placed first, before the
+    # lockout check, so an override/grace window can never be masked by (or race
+    # with) lockout state.
+    if inputs.override_active or _grace_blocks_natvent(inputs):
         return NatVentTransition(
             from_state=current_state,
             to_state=NatVentLifecycleState.INACTIVE,

@@ -429,6 +429,153 @@ class TestResumeFromPauseFsmAuthoritative:
         engine.hass.services.async_call.assert_not_called()
 
 
+class TestResumeFromPauseZeroDurationGrace:
+    """Issue #709 regression: end-to-end proof that resume_from_pause()'s FINAL
+    state, after the full method returns, is never a phantom _grace_active=True
+    with no real timer scheduled.
+
+    **Revert-tested caveat, documented honestly**: this class alone does NOT
+    prove the fix, because the pre-fix bug was a *transient* phantom, not a
+    permanently-stuck one — _start_grace_period_action()'s own internal
+    _cancel_grace_timers() call unconditionally resets _grace_active=False
+    before it ever checks whether a new grace should start, which happens to
+    wash out door/window's earlier phantom write by the time this async method
+    returns, even on the old buggy code. Reverting only the production fix (git
+    stash push on automation.py/door_window_fsm.py, keeping this test) leaves
+    these particular tests GREEN — confirmed while authoring this fix. The real,
+    always-failing-without-the-fix proof is
+    TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated below (calls the
+    dispatcher directly, observing the state immediately after just that one
+    call, before the later real action's wash-out) and
+    tests/test_fsm_flag_ownership.py's AST-based ownership check. This class is
+    kept anyway as an end-to-end regression guard against a *different*
+    potential future break (e.g. someone removing the wash-out itself)."""
+
+    def test_no_phantom_grace_from_paused_active_when_manual_grace_disabled(self):
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 0,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._pre_pause_mode = "cool"
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        with patch(_PATCH_CALL_LATER), patch(_PATCH_CALLBACK, side_effect=lambda f: f):
+            result = asyncio.run(engine.resume_from_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        assert engine._grace_protects_override is False
+        assert engine._manual_grace_cancel is None
+        assert result == "cool"
+
+    def test_no_phantom_grace_from_paused_during_grace_when_manual_grace_disabled(self):
+        """Same zero-duration edge case, but starting from PAUSED_DURING_GRACE — a
+        pre-existing real grace was running; resume_from_pause() unconditionally
+        cancels it and (with duration now 0) does not replace it. The FSM's own
+        DASHBOARD_RESUME transition from this origin must also land on NORMAL, not
+        GRACE, for the same reason."""
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 0,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+            }
+        )
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._grace_active = True
+        engine._current_classification = _make_classification(hvac_mode="cool")
+
+        with patch(_PATCH_CALL_LATER), patch(_PATCH_CALLBACK, side_effect=lambda f: f):
+            asyncio.run(engine.resume_from_pause())
+
+        assert engine._paused_by_door is False
+        assert engine._grace_active is False
+        assert engine._manual_grace_cancel is None
+
+
+class TestResolveDoorWindowPauseFlagsZeroDurationGraceIsolated:
+    """Issue #709: the real proof. Calls _resolve_door_window_pause_flags()
+    directly with kind=DASHBOARD_RESUME — the exact call resume_from_pause()
+    makes BEFORE it ever reaches the real _start_grace_period_action() (which is
+    what washes out the pre-fix phantom by the time the full async method
+    returns, per TestResumeFromPauseZeroDurationGrace's docstring). Observing
+    _grace_active immediately after only this one call is the only way to see
+    the actual pre-fix bug: with CONF_MANUAL_GRACE_PERIOD=0,
+    _apply_door_window_fsm_state() used to write _grace_active=True right here,
+    with no real timer anywhere in existence yet — visible to any concurrently
+    scheduled task for as long as the caller's subsequent awaits take.
+
+    Revert-tested: reverting the production fix (door_window_fsm.py's
+    manual_grace_would_start gating, or restoring _apply_door_window_fsm_state()'s
+    _grace_active write) makes both tests below fail — confirmed while authoring
+    this fix, see the PR/commit description for the exact revert-and-rerun log.
+    """
+
+    def test_dashboard_resume_from_paused_active_no_phantom_when_manual_grace_disabled(self):
+        from custom_components.climate_advisor.door_window_fsm import DoorWindowFsmEventKind
+
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = False  # PAUSED_ACTIVE origin
+        engine._grace_active = False
+
+        engine._resolve_door_window_pause_flags(
+            kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+            legacy=MagicMock(),
+        )
+
+        assert engine._grace_active is False, (
+            "_resolve_door_window_pause_flags(DASHBOARD_RESUME) set a phantom "
+            "_grace_active=True with CONF_MANUAL_GRACE_PERIOD=0 — no real grace "
+            "timer has been touched at this point in the real call sequence yet."
+        )
+
+    def test_dashboard_resume_from_paused_during_grace_lands_on_normal_when_manual_grace_disabled(self):
+        """Same origin family, but starting from PAUSED_DURING_GRACE — a
+        pre-existing real grace was already running, so _grace_active is
+        already True going in and (correctly, post-fix) the dispatcher never
+        writes it either way, meaning this specific origin can't demonstrate a
+        False -> True phantom the way the PAUSED_ACTIVE case above can (a
+        version of this test asserting engine._grace_active is False here would
+        pass identically whether the fix is applied or not, since the flag was
+        never False to begin with — caught while authoring this fix). What CAN
+        regress for this origin is the FSM's own transition decision: it must
+        resolve to NORMAL (matching what resume_from_pause()'s real, unconditional
+        cancel-then-maybe-restart action is about to enforce), not GRACE — proven
+        directly against the real transition() call, mirroring
+        TestFromPausedDuringGrace's pure-function-level coverage in
+        test_door_window_fsm.py but confirming the real dispatcher actually
+        threads manual_grace_would_start=False through to it end to end."""
+        from custom_components.climate_advisor import door_window_fsm as dwfsm
+        from custom_components.climate_advisor.door_window_fsm import (
+            DoorWindowFsmEventKind,
+            DoorWindowLifecycleState,
+        )
+
+        engine = _make_automation_engine({CONF_MANUAL_GRACE_PERIOD: 0})
+        engine._doorwindow_fsm_authoritative = True
+        engine._paused_by_door = True
+        engine._grace_active = True  # PAUSED_DURING_GRACE origin
+
+        real_transition = dwfsm.transition
+        with patch.object(dwfsm, "transition", wraps=real_transition) as mock_transition:
+            engine._resolve_door_window_pause_flags(
+                kind=DoorWindowFsmEventKind.DASHBOARD_RESUME,
+                legacy=MagicMock(),
+            )
+
+        mock_transition.assert_called_once()
+        called_state, called_event = mock_transition.call_args[0]
+        assert called_state == DoorWindowLifecycleState.PAUSED_DURING_GRACE
+        result = real_transition(called_state, called_event)
+        assert result.to_state == DoorWindowLifecycleState.NORMAL
+
+
 # ---------------------------------------------------------------------------
 # TestGraceExpiryRecheck
 # ---------------------------------------------------------------------------
@@ -578,6 +725,97 @@ class TestGraceExpiryRecheck:
         ]
         assert len(hvac_calls) == 0
         assert ("sensor_opened", {"entity": "re-check", "result": "paused"}) in events
+
+
+# ---------------------------------------------------------------------------
+# TestGraceExpiryRecheckFsmAuthoritative (Issue #708)
+# ---------------------------------------------------------------------------
+
+
+class TestGraceExpiryRecheckFsmAuthoritative:
+    """Issue #708: _re_pause_for_open_sensor()'s reactivation decision was
+    previously gated ONLY on _doorwindow_fsm_authoritative (reading a flag
+    already written by the door/window FSM's own *nested* duplicate nat-vent
+    reactivation check) -- _natvent_fsm_authoritative was never consulted at
+    all, regardless of its own state. These tests prove:
+
+    (a) with _natvent_fsm_authoritative=True, the reactivation decision
+        genuinely comes from nat_vent_fsm.transition() -- via a positive-
+        control monkeypatch of decide_nat_vent_gate() (the same technique
+        TestFsmAuthoritativePositiveControl in
+        test_nat_vent_fsm_authoritative_compare.py uses) that forces the
+        gate closed and confirms reactivation is correspondingly
+        suppressed. If the fix merely happened to produce the right answer
+        via legacy code without really calling the FSM, this patch would
+        have no effect and the test would fail.
+    (b) legacy behavior (_natvent_fsm_authoritative=False, the default) is
+        unchanged -- same fixture/assertions as the pre-existing
+        test_repause_clears_paused_by_door_on_nat_vent_reactivation above.
+    """
+
+    def _make_engine_for_reactivation(self) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {
+                CONF_MANUAL_GRACE_PERIOD: 300,
+                CONF_MANUAL_GRACE_NOTIFY: False,
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+            }
+        )
+        engine._paused_by_door = True
+        engine._paused_with_hvac_already_off = True
+        engine._paused_entity = "binary_sensor.stale_from_prior_pause"
+        engine._paused_since = datetime.now()
+        engine._last_outdoor_temp = 65.0
+        climate_state = MagicMock()
+        climate_state.state = "off"
+        climate_state.attributes.get.return_value = 78.0
+        engine.hass.states.get.return_value = climate_state
+        engine._hourly_forecast_temps = []
+        return engine
+
+    def test_reactivates_via_nat_vent_fsm_when_authoritative(self):
+        """Genuine outdoor/indoor conditions favor reactivation (outdoor 65°F <
+        indoor 78°F, well within the nat-vent delta/comfort-floor gates). With
+        the switch on, this must reactivate via the real FSM path."""
+        engine = self._make_engine_for_reactivation()
+        engine._natvent_fsm_authoritative = True
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
+
+    def test_positive_control_forcing_fsm_gate_closed_suppresses_reactivation(self):
+        """Monkeypatch nat_vent_fsm.decide_nat_vent_gate() to always return
+        False. If _re_pause_for_open_sensor() genuinely routes its
+        reactivation decision through nat_vent_fsm.transition() when
+        authoritative, this forces the function to re-pause instead of
+        reactivating -- proving the FSM function is actually invoked and its
+        result actually consulted, not just a legacy calculation happening to
+        match (the differential-parity check the plan called for)."""
+        engine = self._make_engine_for_reactivation()
+        engine._natvent_fsm_authoritative = True
+
+        with patch("custom_components.climate_advisor.nat_vent_fsm.decide_nat_vent_gate", lambda inputs: False):
+            asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is False
+        assert engine._paused_by_door is True
+
+    def test_legacy_unchanged_when_switch_off(self):
+        """Regression: with _natvent_fsm_authoritative left at its default
+        False, behavior is unchanged from before this fix -- same fixture and
+        outcome as test_repause_clears_paused_by_door_on_nat_vent_reactivation
+        above, restated explicitly alongside the FSM-authoritative tests so
+        the three scenarios (default off / on / on-but-forced-closed) sit
+        together."""
+        engine = self._make_engine_for_reactivation()
+        assert engine._natvent_fsm_authoritative is False
+
+        asyncio.run(engine._re_pause_for_open_sensor())
+
+        assert engine._natural_vent_active is True
+        assert engine._paused_by_door is False
 
 
 # ---------------------------------------------------------------------------

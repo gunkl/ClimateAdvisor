@@ -3077,7 +3077,7 @@ class AutomationEngine:
             legacy=_legacy_set_pause,
         )
         # _paused_entity/_paused_since aren't part of _apply_door_window_fsm_state()'s
-        # 3-field derivation (see its own docstring) — direct writes here regardless
+        # 2-field derivation (see its own docstring) — direct writes here regardless
         # of which branch the dispatcher took, matching what
         # _set_door_window_pause_fields() would have written on the legacy path.
         self._paused_entity = entity_label
@@ -3271,7 +3271,7 @@ class AutomationEngine:
                         f"natural ventilation: outdoor {outdoor:.1f}F < indoor {indoor:.1f}F,"
                         f" outdoor {outdoor:.1f}F <= {nat_vent_threshold:.1f}F"
                     )
-                    await self._activate_fan(reason=nat_vent_reason)
+                    _activation_result = await self._activate_fan(reason=nat_vent_reason)
                     if self._natvent_fsm_authoritative:
                         # Project onto the FSM state that matches legacy's writes at this
                         # site exactly: legacy only ever set _natural_vent_active = True
@@ -3281,10 +3281,16 @@ class AutomationEngine:
                         # ACTIVE_FULL_GATE regardless of _fsm_result.to_state would
                         # silently demote an in-flight soft-start session to full-gate on
                         # a second window opening, which legacy never did.
-                        self._apply_nat_vent_fsm_state(
+                        #
+                        # Issue #706 (Bug F): routed through
+                        # _apply_nat_vent_fsm_state_after_activation() rather than applying
+                        # this pre-await decision directly — a manual override arriving
+                        # during the await above must not be silently overwritten.
+                        self._apply_nat_vent_fsm_state_after_activation(
                             NatVentLifecycleState.ACTIVE_SOFT_START
                             if self._nat_vent_soft_start
-                            else NatVentLifecycleState.ACTIVE_FULL_GATE
+                            else NatVentLifecycleState.ACTIVE_FULL_GATE,
+                            _activation_result,
                         )
                     else:
                         self._natural_vent_active = True
@@ -3552,7 +3558,7 @@ class AutomationEngine:
 
                     if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
                         # Band stays armed — just activate the fan; the compressor self-arbitrates.
-                        await self._activate_fan(
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"nat-vent re-engaged: outdoor {outdoor:.1f}°F < indoor {_indoor:.1f}°F"
                                 f" − {_hysteresis:.1f}°F hysteresis, indoor > comfort_heat {_comfort_heat:.1f}°F,"
@@ -3567,8 +3573,12 @@ class AutomationEngine:
                         # here with _paused_by_door=True (e.g. also
                         # _paused_with_hvac_already_off=True) would flip to
                         # _paused_by_door=False, an incoherent pair legacy never produced.
+                        #
+                        # Issue #706 (Bug F): routed through
+                        # _apply_nat_vent_fsm_state_after_activation() — an override
+                        # arriving during the await above must not be silently overwritten.
                         _pre_paused_by_door = self._paused_by_door
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                         self._paused_by_door = _pre_paused_by_door
                         await self._apply_nat_vent_hvac_state()
                         # Issue #244: emit so the re-evaluation activation is visible in the
@@ -3592,7 +3602,7 @@ class AutomationEngine:
                             PEAK_DECLINE_MARGIN_F,
                             _comfort_heat,
                         )
-                        await self._activate_fan(
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"nat-vent soft-start: outdoor {outdoor:.1f}°F at/below indoor {_indoor:.1f}°F"
                                 " parity, past today's peak and declining — purge/comfort air movement"
@@ -3600,8 +3610,10 @@ class AutomationEngine:
                         )
                         # Preserve _paused_by_door across the apply — see the matching
                         # comment on the ACTIVE_FULL_GATE branch above for the rationale.
+                        # Issue #706 (Bug F): same override-race guard as the
+                        # ACTIVE_FULL_GATE branch above.
                         _pre_paused_by_door = self._paused_by_door
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
                         self._paused_by_door = _pre_paused_by_door
                         await self._apply_nat_vent_hvac_state()
                         if self._emit_event_callback:
@@ -4026,14 +4038,18 @@ class AutomationEngine:
                         _to_state = NatVentLifecycleState.INACTIVE
 
                     if _to_state == NatVentLifecycleState.ACTIVE_FULL_GATE:
-                        await self._activate_fan(
+                        # Issue #706 (Bug F): route through
+                        # _apply_nat_vent_fsm_state_after_activation() — an override
+                        # arriving during the await below must not be silently
+                        # overwritten by this pre-await _to_state decision.
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"natural vent activated: outdoor {outdoor:.1f}°F"
                                 f" < indoor {indoor:.1f}°F − {hysteresis:.1f}°F hysteresis,"
                                 f" outdoor ≤ threshold {threshold:.1f}°F"
                             )
                         )
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
 
                         from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -4062,13 +4078,15 @@ class AutomationEngine:
                         )
                         await self._apply_nat_vent_hvac_state()
                     elif _to_state == NatVentLifecycleState.ACTIVE_SOFT_START:
-                        await self._activate_fan(
+                        # Issue #706 (Bug F): same override-race guard as the
+                        # ACTIVE_FULL_GATE branch above.
+                        _activation_result = await self._activate_fan(
                             reason=(
                                 f"nat-vent soft-start while paused: outdoor {outdoor:.1f}°F at/below"
                                 f" indoor {indoor:.1f}°F parity, past today's peak and declining"
                             )
                         )
-                        self._apply_nat_vent_fsm_state(_to_state)
+                        self._apply_nat_vent_fsm_state_after_activation(_to_state, _activation_result)
 
                         from .door_window_fsm import DoorWindowFsmEventKind
 
@@ -5685,10 +5703,16 @@ class AutomationEngine:
         (``_on_grace_expired()``'s 3 branches, ``_check_orphaned_grace()``), and reused
         unchanged by ``_cancel_grace_timers()`` itself for every other caller (``cleanup()``,
         the internal cancel-prior-timer call inside ``_start_grace_period_action()``, and
-        every door/window call site — none of those are override/grace FSM-modeled events;
-        door/window's own dispatcher independently derives and writes ``_grace_active`` from
-        its own FSM/legacy branch regardless of this method, same redundant-but-harmless
-        coexistence already proven safe for door/window's shipped authoritative switch).
+        every door/window call site — none of those are override/grace FSM-modeled events).
+
+        **Issue #709: door/window's dispatcher no longer writes ``_grace_active`` at all.**
+        Prior to #709 this method's docstring claimed the redundant door/window write was
+        "proven safe" as a same-value coexistence — that claim turned out to be false: the
+        two writers could disagree for real, transiently, whenever ``resume_from_pause()``/
+        ``handle_all_doors_windows_closed()`` ran the door/window dispatch before the real
+        grace-start action, with genuine ``await`` points in between. ``_apply_door_window_fsm_state()``
+        was fixed to stop writing this flag; this method (via ``_resolve_override_grace_fsm_state()``
+        and its paired ``legacy()`` closures) is now the flag's sole writer everywhere.
         """
         self._grace_active = False
         self._grace_protects_override = False
@@ -5736,13 +5760,56 @@ class AutomationEngine:
             comfort_heat = self._nat_vent_reactivation_floor()
             nat_vent_threshold = comfort_cool + nat_vent_delta
 
-            if self._doorwindow_fsm_authoritative:
+            # Issue #708: this reactivation decision was previously gated ONLY on
+            # _doorwindow_fsm_authoritative (reading a flag already written by the
+            # door/window FSM's own *nested* duplicate nat-vent-reactivation check) —
+            # _natvent_fsm_authoritative was never consulted at all, regardless of its
+            # own state. Checked first and independent of the door/window switch,
+            # matching every other wired nat-vent decision site
+            # (handle_door_window_open's idle-open re-entry, check_natural_vent_
+            # conditions's comfort-ceiling re-entry and paused-by-door reactivation,
+            # reconcile_fan_on_startup's adopt gate) — none of those gate on
+            # _doorwindow_fsm_authoritative either. This keeps the two concerns
+            # independent: door/window's switch only governs how its own pause/grace
+            # flags get derived (via _resolve_door_window_pause_flags() below, which
+            # is correct either way — PAUSED_NAT_VENT_REACTIVATED always transitions
+            # to NORMAL from any origin state, so it doesn't matter whether the flags
+            # it's dispatched against already agree with this decision); nat-vent's
+            # switch governs its own reactivation question.
+            if self._natvent_fsm_authoritative:
+                from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
+                from .nat_vent_fsm import transition as _nat_vent_transition
+
+                # The FSM's current_state is forced to INACTIVE, matching the other
+                # two "pure entry-gate question" sites (handle_door_window_open,
+                # reconcile_fan_on_startup) rather than read from
+                # self.nat_vent_lifecycle_state: this legacy call never consulted the
+                # reactivation lockout (unlike the paused-by-door reactivation site in
+                # check_natural_vent_conditions), and never modeled soft-start entry
+                # (no _nat_vent_may_soft_start() call at this site) — an
+                # FSM-produced ACTIVE_SOFT_START result is treated the same as "not
+                # eligible," matching this site's pre-existing scope exactly.
+                # hysteresis=0.0 and paused_by_door=False mirror the legacy call's own
+                # omissions below (see _nat_vent_may_reactivate()'s docstring: this is
+                # one of the 2-of-5 callers that never applied hysteresis, and this
+                # site never consulted _paused_by_door either).
+                _fsm_inputs = self._build_nat_vent_fsm_inputs(
+                    now=dt_util.now(), indoor=indoor, outdoor=outdoor, hysteresis=0.0, paused_by_door=False
+                )
+                _fsm_result = _nat_vent_transition(
+                    NatVentLifecycleState.INACTIVE,
+                    NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs),
+                )
+                _reactivates = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+            elif self._doorwindow_fsm_authoritative:
                 # Issue #660 Step 8: when authoritative, _on_grace_expired() already
                 # applied the FSM's RE_PAUSE outcome (including its own nested
                 # nat-vent reactivation gate check, identical to
                 # _nat_vent_may_reactivate() below) to _paused_by_door BEFORE
                 # scheduling this task — select the matching action by reading that
                 # already-applied flag instead of independently recomputing the gate.
+                # Only reached here when _natvent_fsm_authoritative is False — nat-vent's
+                # own switch takes priority above whenever it is on.
                 _reactivates = not self._paused_by_door
             else:
                 # Issue #411 (Pass 4): shared reactivation gate, previously hand-copied
@@ -5857,7 +5924,7 @@ class AutomationEngine:
                     notify_type="grace_repause",
                 )
                 # _paused_entity/_paused_since aren't part of
-                # _apply_door_window_fsm_state()'s 3-field derivation — direct writes
+                # _apply_door_window_fsm_state()'s 2-field derivation — direct writes
                 # here, matching what _set_door_window_pause_fields() would have
                 # written on the legacy path below.
                 self._paused_entity = "re-check"
@@ -6673,8 +6740,9 @@ class AutomationEngine:
             # equivalent to "already off" (PAUSED_IDLE), matching
             # decide_door_close_response()'s own truthiness test on pre_pause_mode.
             #
-            # Issue #660 Step 4: routed through the shared dispatcher for the 3 fields
-            # it derives (_paused_by_door/_paused_with_hvac_already_off/_grace_active).
+            # Issue #660 Step 4: routed through the shared dispatcher for the 2 fields
+            # it derives (_paused_by_door/_paused_with_hvac_already_off — Issue #709
+            # removed _grace_active from this derivation, see that method's docstring).
             # _paused_entity/_paused_since aren't part of that derivation (see
             # _apply_door_window_fsm_state()'s own docstring), so they stay direct
             # writes below regardless of which branch the dispatcher took — same
@@ -6788,6 +6856,16 @@ class AutomationEngine:
                 (every other caller) keeps this method's prior behavior
                 (``self._fan_active``) unchanged — harmless either way, since none of
                 those other call sites read ``NatVentTransition.fan_should_be_active``.
+
+        Issue #706 (Bug D): ``override_active``/``grace_active`` are now always read
+        live from engine state — ``bool(self._fan_override_active or
+        self._manual_override_active)`` and ``bool(self._grace_active)`` — the same
+        flags ``coordinator._evaluate_nat_vent_fsm()``'s shadow-diagnostic
+        construction already reads correctly. Before this fix, every real production
+        caller of this method left both fields at their dataclass default (``False``,
+        added for Issue #687/Phase 2a but never wired here), so the FSM was blind to
+        a real override/grace window and could disagree with what
+        ``_activate_fan()``'s own override guard actually did.
         """
         from .nat_vent_fsm import NatVentFsmInputs
 
@@ -6800,6 +6878,8 @@ class AutomationEngine:
         )
         _paused_by_door = paused_by_door if paused_by_door is not None else bool(self._paused_by_door)
         _fan_hardware_active = fan_hardware_active if fan_hardware_active is not None else bool(self._fan_active)
+        _override_active = bool(self._fan_override_active or self._manual_override_active)
+        _grace_active = bool(self._grace_active)
         return NatVentFsmInputs(
             indoor=indoor,
             outdoor=outdoor,
@@ -6824,6 +6904,8 @@ class AutomationEngine:
             ),
             now=now,
             fan_hardware_active=_fan_hardware_active,
+            override_active=_override_active,
+            grace_active=_grace_active,
         )
 
     @property
@@ -6881,6 +6963,38 @@ class AutomationEngine:
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
         self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
 
+    def _apply_nat_vent_fsm_state_after_activation(
+        self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
+    ) -> None:
+        """Apply an FSM decision computed BEFORE an ``await self._activate_fan(...)``
+        call, guarding against the Issue #706 Bug F race.
+
+        All 5 production call sites for ``_apply_nat_vent_fsm_state()`` share the
+        same shape: compute a ``to_state`` decision, then ``await
+        self._activate_fan(...)`` — a real event-loop yield point — under
+        ``_decision_lock``/``_decision_pass``, then apply that pre-await decision.
+        ``handle_fan_manual_override()``/``coordinator._async_fan_entity_changed()``
+        are NOT lock-protected and can run to completion during that await window,
+        setting ``_fan_override_active``/starting grace. When that happens,
+        ``_activate_fan()``'s own override guard rejects the real fan command and
+        returns ``FanCommandResult.OVERRIDDEN`` — the definitive, race-free signal
+        that the pre-await ``to_state`` is now stale. In that case, apply
+        ``INACTIVE`` instead of the stale decision so ``_natural_vent_active`` never
+        disagrees with the fact the real command was rejected. Every other
+        ``FanCommandResult`` (``EXECUTED``, ``ALREADY_IN_STATE``,
+        ``RATE_LIMITED_NEW``/``DUP``, ``DISABLED``) means no override intervened
+        mid-await, so the pre-await ``to_state`` is still correct to apply.
+        """
+        if activation_result is FanCommandResult.OVERRIDDEN:
+            _LOGGER.warning(
+                "Nat-vent FSM state application skipped: fan override became active"
+                " during activation — applying INACTIVE instead of stale %s decision",
+                to_state,
+            )
+            self._apply_nat_vent_fsm_state(NatVentLifecycleState.INACTIVE)
+        else:
+            self._apply_nat_vent_fsm_state(to_state)
+
     def _build_door_window_fsm_inputs(self, *, now: datetime):
         """Build the door/window FSM's input snapshot from current engine state
         (Issue #594 Phase R, Step 2).
@@ -6915,6 +7029,8 @@ class AutomationEngine:
             whf_owns_hvac=bool(self._whf_owns_hvac()),
             grace_active=bool(self._grace_active),
             pre_pause_mode_active=bool(self._pre_pause_mode),
+            manual_grace_would_start=self._grace_would_start("manual", now),
+            automation_grace_would_start=self._grace_would_start("automation", now),
             now=now,
         )
 
@@ -6945,8 +7061,8 @@ class AutomationEngine:
         )
 
     def _apply_door_window_fsm_state(self, state: DoorWindowLifecycleState) -> None:
-        """Write ``_paused_by_door``/``_paused_with_hvac_already_off``/``_grace_active``
-        from a ``door_window_fsm.transition()`` result (Issue #594 Phase R, Step 2).
+        """Write ``_paused_by_door``/``_paused_with_hvac_already_off`` from a
+        ``door_window_fsm.transition()`` result (Issue #594 Phase R, Step 2).
 
         The inverse of ``door_window_lifecycle_state``'s derivation — see
         ``door_window_lifecycle.py``'s state-to-flags table. Deliberately does NOT
@@ -6956,6 +7072,41 @@ class AutomationEngine:
         (the FSM's ``outcome``/``at`` fields don't carry entity labels or trigger
         names), so every caller keeps writing those itself, same as before this
         method existed.
+
+        **Issue #709: does NOT write ``_grace_active``.** Prior to #709 this method
+        also wrote ``_grace_active`` from the GRACE/PAUSED_DURING_GRACE members of
+        ``state`` — a second, independent writer of a flag ``override_grace_fsm.py``'s
+        own docstring already claims exclusive ownership of (see
+        ``_resolve_override_grace_fsm_state()``'s docstring: "Genuinely mutually
+        exclusive — exactly one of the FSM path or ``legacy()`` ever writes
+        ``_grace_active``"— a claim this method's now-removed write silently
+        falsified). The dual-write was reachable as a real race, not just a
+        theoretical layering violation: ``resume_from_pause()`` and
+        ``handle_all_doors_windows_closed()`` both call
+        ``_resolve_door_window_pause_flags()`` (which used to land here) BEFORE the
+        real grace-start action (``_start_grace_period_action()``), separated by
+        genuine ``await`` points (``_set_hvac_mode()``/``_set_temperature_for_mode()``)
+        that yield control back to the event loop. During that window, a concurrently
+        scheduled task (e.g. ``coordinator._check_orphaned_grace()``) could observe
+        ``_grace_active=True`` with no real timer scheduled and no override
+        protecting it — a phantom grace period this method's write created and only
+        the subsequent real action call (which unconditionally cancels any prior
+        timer via ``_cancel_grace_timers()``) happened to wash out. Now that this
+        method leaves ``_grace_active`` untouched, the ONLY writer is
+        ``_apply_override_grace_fsm_state()`` (FSM path) or the paired ``legacy()``
+        closures passed to ``_resolve_override_grace_fsm_state()`` — both already
+        correctly gated on ``_start_grace_period_action()``'s real return value, so
+        a phantom "grace active, no timer" combination can no longer occur. Door/
+        window's own FSM continues to READ ``_grace_active`` as a cross-lifecycle
+        input (``DoorWindowFsmInputs.grace_active``) — every call site re-derives
+        ``current_state`` from a live read of ``door_window_lifecycle_state`` (which
+        itself reads the live flag) rather than carrying a stale copy, so this
+        state machine self-heals against whatever the real flag is on every
+        subsequent transition; see ``door_window_fsm.py``'s own docstring for the
+        ``manual_grace_would_start``/``automation_grace_would_start`` inputs added in
+        the same fix, which keep the FSM's *own* ``to_state``/``outcome`` audit
+        trail accurate for the 3 transitions that used to unconditionally assume a
+        new grace period would start.
         """
         self._paused_by_door = state in (
             DoorWindowLifecycleState.PAUSED_ACTIVE,
@@ -6963,7 +7114,6 @@ class AutomationEngine:
             DoorWindowLifecycleState.PAUSED_DURING_GRACE,
         )
         self._paused_with_hvac_already_off = state == DoorWindowLifecycleState.PAUSED_IDLE
-        self._grace_active = state in (DoorWindowLifecycleState.GRACE, DoorWindowLifecycleState.PAUSED_DURING_GRACE)
 
     def _resolve_door_window_pause_flags(
         self,
@@ -7056,17 +7206,25 @@ class AutomationEngine:
             grace_would_start=self._manual_grace_would_start(now),
         )
 
-    def _manual_grace_would_start(self, now: datetime) -> bool:
-        """Whether manual grace is currently enabled (``CONF_MANUAL_GRACE_PERIOD`` > 0)
-        (Issue #664). Same ``decide_grace_start()`` call ``_start_grace_period_action()``
-        itself makes — every override/grace-modeled event that starts grace uses
-        ``source="manual"``, so this is always resolved against the manual duration,
-        never the automation one.
+    def _grace_would_start(self, source: str, now: datetime) -> bool:
+        """Whether a grace period for ``source`` ("manual" or "automation") is
+        currently enabled by config — i.e. whether ``_start_grace_period_action()``
+        would actually schedule a real timer for that source right now, without
+        actually starting one (Issue #664, generalized in #709).
+
+        Same ``decide_grace_start()`` call ``_start_grace_period_action()`` itself
+        makes. Both FSMs that model grace (``override_grace_fsm.py``,
+        ``door_window_fsm.py``) consult this — the SOLE computation of "would grace
+        start", never duplicated — since ``decide_grace_start()`` resolves duration/
+        should_notify for BOTH sources from a single call regardless of which one
+        is asked about, this passes the other source's live config values through
+        unconditionally; only the returned duration for ``source`` determines the
+        boolean result.
         """
         manual_duration = self.config.get(CONF_MANUAL_GRACE_PERIOD, DEFAULT_MANUAL_GRACE_SECONDS)
         return (
             decide_grace_start(
-                source="manual",
+                source=source,
                 manual_duration_seconds=manual_duration,
                 manual_should_notify=self.config.get(CONF_MANUAL_GRACE_NOTIFY, True),
                 automation_duration_seconds=self.config.get(
@@ -7077,6 +7235,16 @@ class AutomationEngine:
             )
             is not None
         )
+
+    def _manual_grace_would_start(self, now: datetime) -> bool:
+        """Whether manual grace is currently enabled (``CONF_MANUAL_GRACE_PERIOD`` > 0)
+        (Issue #664). Thin ``source="manual"`` wrapper over ``_grace_would_start()``
+        (Issue #709) — kept as a named method since ``override_grace_fsm.py``'s own
+        docstring documents "every override/grace-modeled event that starts grace
+        uses ``source='manual'``", so every real call site building
+        ``OverrideGraceFsmInputs`` always wants this specific source.
+        """
+        return self._grace_would_start("manual", now)
 
     @property
     def override_grace_lifecycle_state(self) -> OverrideGraceLifecycleState:

@@ -15,6 +15,14 @@ RELEASE_NOTES: dict[str, list[str]] = {
         " decision still comes from the same logic as before; this only makes the"
         " audit trail behind it real.",
     ],
+    "0.6.49": [
+        "Fix #716: no user-visible change. The internal shadow-engine diagnostic that"
+        " validates upcoming automation changes before they're allowed to affect real"
+        " HVAC behavior wasn't tracking whether the whole-house/HVAC fan was on — so a"
+        " related check could never meaningfully agree or disagree with production. It"
+        " now does, closing a gap in the safety net that gates future automation"
+        " changes; nothing about how the fan itself is controlled changed.",
+    ],
     "0.6.48": [
         "Fix #714: the whole-house fan and an active thermostat mode (cool/heat) can"
         " no longer run at the same time. If you manually change the thermostat mode"
@@ -2272,6 +2280,31 @@ KNOWN_FIXES: dict[int, dict] = {
             " attribute access can never actually go stale the way a genuine"
             " cross-instance mirror could). No decision logic, no authoritative"
             " switch, and no HA service call path changed."
+        ),
+    },
+    716: {
+        "version_fixed": "0.6.49",
+        "title": (
+            "Shadow engine's fan_thermostat_check() mirroring was inert — _fan_active,"
+            " the field the mirrored decision actually keys off, was never mirrored to"
+            " the shadow instance at all, and its two real writers (_activate_fan()/"
+            " _deactivate_fan()) both return early under dry_run before ever assigning"
+            " it, so a direct method-replay mirror could never have worked for them."
+        ),
+        "scope_covered": (
+            "coordinator.py: _sync_shadow_inputs() now raw-copies _fan_active from"
+            " production to shadow every cycle, same mechanism already used for the"
+            " nat-vent/grace/override fields (Issues #615/#631/#673) — sidesteps the"
+            " dry_run early-return entirely and transparently covers every writer of"
+            " the field, including the coordinator's own stale-flag correction in"
+            " _async_thermostat_changed. Also mirrors fan_thermostat_check() at its"
+            " two previously-unmirrored call sites (the dedicated indoor/outdoor temp"
+            " listeners) — only the thermostat-attribute-change dispatch path was"
+            " mirrored before. tests/test_shadow_engine_coverage.py: _fan_active added"
+            " to _TRACKED_FIELDS; _activate_fan/_deactivate_fan classified 'internal'"
+            " (reached via the raw copy, not a mirror call); new per-caller coverage"
+            " test for fan_thermostat_check(), matching the existing"
+            " handle_manual_override() precedent."
         ),
     },
     684: {

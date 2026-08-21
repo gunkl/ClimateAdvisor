@@ -998,6 +998,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         se._paused_by_door = ae._paused_by_door
         se._nat_vent_outdoor_exit_time = ae._nat_vent_outdoor_exit_time
 
+        # Issue #716: same gap class again. _fan_active is set by _activate_fan()/
+        # _deactivate_fan(), both of which `return` early under `self.dry_run` before
+        # ever assigning the flag — the shadow engine is permanently dry_run=True, so a
+        # _mirror_to_shadow(...) replay of either method can never work for this field.
+        # A raw copy is the only mechanism that reaches it, and it also transparently
+        # covers every other production-side writer of _fan_active (e.g. the stale-flag
+        # correction at the "Thermostat set to off" branch above in
+        # _async_thermostat_changed) without needing its own mirror call, since this
+        # function always re-reads production's current value regardless of which
+        # method last set it.
+        se._fan_active = ae._fan_active
+
     def _dispatch_fsm_evaluators(
         self,
         key: str,
@@ -1805,6 +1817,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             trigger="indoor",
                         )
                     )
+                    # Issue #716: this dedicated indoor-temp listener had no matching
+                    # _mirror_to_shadow — a second real fan_thermostat_check() call site
+                    # (alongside the outdoor listener below) missed by #613/#615's original
+                    # coverage, found by the same per-caller audit the shadow-gap fix required.
+                    self.hass.async_create_task(
+                        self._mirror_to_shadow(
+                            "fan_thermostat_check",
+                            indoor=self._get_indoor_temp(),
+                            outdoor=self._last_outdoor_temp,
+                            trigger="indoor",
+                        )
+                    )
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, _indoor_temp_entity, _async_indoor_temp_changed)
@@ -1835,6 +1859,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                             pass
                     self.hass.async_create_task(
                         ae.fan_thermostat_check(
+                            indoor=self._get_indoor_temp(),
+                            outdoor=self._last_outdoor_temp,
+                            trigger="outdoor",
+                        )
+                    )
+                    # Issue #716: matching fix for the outdoor-temp listener — see the indoor
+                    # listener above for the full rationale.
+                    self.hass.async_create_task(
+                        self._mirror_to_shadow(
+                            "fan_thermostat_check",
                             indoor=self._get_indoor_temp(),
                             outdoor=self._last_outdoor_temp,
                             trigger="outdoor",

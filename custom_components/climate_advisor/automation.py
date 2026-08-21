@@ -5736,13 +5736,56 @@ class AutomationEngine:
             comfort_heat = self._nat_vent_reactivation_floor()
             nat_vent_threshold = comfort_cool + nat_vent_delta
 
-            if self._doorwindow_fsm_authoritative:
+            # Issue #708: this reactivation decision was previously gated ONLY on
+            # _doorwindow_fsm_authoritative (reading a flag already written by the
+            # door/window FSM's own *nested* duplicate nat-vent-reactivation check) —
+            # _natvent_fsm_authoritative was never consulted at all, regardless of its
+            # own state. Checked first and independent of the door/window switch,
+            # matching every other wired nat-vent decision site
+            # (handle_door_window_open's idle-open re-entry, check_natural_vent_
+            # conditions's comfort-ceiling re-entry and paused-by-door reactivation,
+            # reconcile_fan_on_startup's adopt gate) — none of those gate on
+            # _doorwindow_fsm_authoritative either. This keeps the two concerns
+            # independent: door/window's switch only governs how its own pause/grace
+            # flags get derived (via _resolve_door_window_pause_flags() below, which
+            # is correct either way — PAUSED_NAT_VENT_REACTIVATED always transitions
+            # to NORMAL from any origin state, so it doesn't matter whether the flags
+            # it's dispatched against already agree with this decision); nat-vent's
+            # switch governs its own reactivation question.
+            if self._natvent_fsm_authoritative:
+                from .nat_vent_fsm import NatVentFsmEvent, NatVentFsmEventKind
+                from .nat_vent_fsm import transition as _nat_vent_transition
+
+                # The FSM's current_state is forced to INACTIVE, matching the other
+                # two "pure entry-gate question" sites (handle_door_window_open,
+                # reconcile_fan_on_startup) rather than read from
+                # self.nat_vent_lifecycle_state: this legacy call never consulted the
+                # reactivation lockout (unlike the paused-by-door reactivation site in
+                # check_natural_vent_conditions), and never modeled soft-start entry
+                # (no _nat_vent_may_soft_start() call at this site) — an
+                # FSM-produced ACTIVE_SOFT_START result is treated the same as "not
+                # eligible," matching this site's pre-existing scope exactly.
+                # hysteresis=0.0 and paused_by_door=False mirror the legacy call's own
+                # omissions below (see _nat_vent_may_reactivate()'s docstring: this is
+                # one of the 2-of-5 callers that never applied hysteresis, and this
+                # site never consulted _paused_by_door either).
+                _fsm_inputs = self._build_nat_vent_fsm_inputs(
+                    now=dt_util.now(), indoor=indoor, outdoor=outdoor, hysteresis=0.0, paused_by_door=False
+                )
+                _fsm_result = _nat_vent_transition(
+                    NatVentLifecycleState.INACTIVE,
+                    NatVentFsmEvent(kind=NatVentFsmEventKind.TICK, inputs=_fsm_inputs),
+                )
+                _reactivates = _fsm_result.to_state == NatVentLifecycleState.ACTIVE_FULL_GATE
+            elif self._doorwindow_fsm_authoritative:
                 # Issue #660 Step 8: when authoritative, _on_grace_expired() already
                 # applied the FSM's RE_PAUSE outcome (including its own nested
                 # nat-vent reactivation gate check, identical to
                 # _nat_vent_may_reactivate() below) to _paused_by_door BEFORE
                 # scheduling this task — select the matching action by reading that
                 # already-applied flag instead of independently recomputing the gate.
+                # Only reached here when _natvent_fsm_authoritative is False — nat-vent's
+                # own switch takes priority above whenever it is on.
                 _reactivates = not self._paused_by_door
             else:
                 # Issue #411 (Pass 4): shared reactivation gate, previously hand-copied

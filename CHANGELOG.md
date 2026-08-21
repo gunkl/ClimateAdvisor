@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.50] — 2026-08-21
+
+- Fix #717: no user-visible change. Wires the internal cross-check that lets the natural-ventilation, door/window, and manual-override safety logic confirm they're seeing the same events, into production for real — closes a piece of scaffolding that existed but was never connected. Every decision still comes from the same logic as before; this only makes the audit trail behind it real.
+
 ## [0.6.48] — 2026-08-21
 
 - Fix #714: the whole-house fan and an active thermostat mode (cool/heat) can no longer run at the same time. If you manually change the thermostat mode while free cooling is running, the fan now stops immediately instead of continuing to cycle in the background, and it won't silently turn your thermostat back off anymore if it happens to reactivate while your manual change is still in effect.

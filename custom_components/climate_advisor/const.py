@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.48"
+VERSION = "0.6.50"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.50": [
+        "Fix #717: no user-visible change. Wires the internal cross-check that lets"
+        " the natural-ventilation, door/window, and manual-override safety logic"
+        " confirm they're seeing the same events, into production for real — closes"
+        " a piece of scaffolding that existed but was never connected. Every"
+        " decision still comes from the same logic as before; this only makes the"
+        " audit trail behind it real.",
+    ],
     "0.6.48": [
         "Fix #714: the whole-house fan and an active thermostat mode (cool/heat) can"
         " no longer run at the same time. If you manually change the thermostat mode"
@@ -2224,6 +2232,46 @@ KNOWN_FIXES: dict[int, dict] = {
             " already-mirrored to the shadow engine via existing"
             " _sync_shadow_inputs() override-field sync from Issue #631 — no new"
             " wiring needed)."
+        ),
+    },
+    717: {
+        "version_fixed": "0.6.50",
+        "title": (
+            "lifecycle_dispatcher.py's pub/sub router (Issue #633) was built,"
+            " tested, and never wired into any real decision path — the three"
+            " lifecycle FSMs still cross-read each other's raw booleans by direct"
+            " same-object attribute access rather than through the dispatcher's"
+            " audited emit/consume contract."
+        ),
+        "scope_covered": (
+            "automation.py: AutomationEngine now owns its own LifecycleDispatcher"
+            " instance (never shared with the shadow engine's — structural"
+            " isolation, same precedent as AutomationEngineCallbacks/Issue #604)"
+            " and registers itself as a real controller for all 8 event types."
+            " Real emit() calls added at the 2 existing chokepoints every real"
+            " door/window and override/grace transition already funnels through"
+            " (_resolve_door_window_pause_flags(), _resolve_override_grace_fsm_state()),"
+            " keyed on a before/after diff of _paused_by_door/_grace_active rather"
+            " than a static kind-to-direction table (avoids mis-classifying"
+            " compound kinds like PAUSED_NAT_VENT_REACTIVATED). A second real"
+            " _paused_by_door writer, _apply_nat_vent_fsm_state() (the"
+            " nat-vent-FSM-authoritative path), gained its own matching diff/emit."
+            " _confirm_override_action()/_clear_manual_override_active() emit"
+            " OVERRIDE_CONFIRMED/CLEARED at their single real sites."
+            " lifecycle_events.py: added a NAT_VENT_SESSION_STARTED/ENDED pair,"
+            " emitted from a before/after diff wrapped around _decision_pass()"
+            " (the one point all ~18 scattered _natural_vent_active write sites"
+            " already funnel through under _decision_lock) rather than"
+            " instrumenting each site individually. An earlier version of this"
+            " change also routed _build_nat_vent_fsm_inputs()/"
+            " _build_door_window_fsm_inputs() through dispatcher-only mirror"
+            " attributes instead of the canonical flags — reverted after it broke"
+            " the established direct-attribute-assignment fixture convention"
+            " across 40+ existing test files, for no real safety benefit (this"
+            " engine both emits and consumes every event today, so same-object"
+            " attribute access can never actually go stale the way a genuine"
+            " cross-instance mirror could). No decision logic, no authoritative"
+            " switch, and no HA service call path changed."
         ),
     },
     684: {

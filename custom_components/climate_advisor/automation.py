@@ -121,6 +121,8 @@ from .fan_thermostat_decision import (
     is_outdoor_rise_exit,
     resolve_hard_exit_floor,
 )
+from .lifecycle_dispatcher import LifecycleDispatcher
+from .lifecycle_events import LifecycleEvent, LifecycleEventType
 from .nat_vent_cycling import NatVentCyclingInputs, decide_nat_vent_cycling
 from .nat_vent_exit import (
     NatVentExitInputs,
@@ -806,6 +808,81 @@ class AutomationEngine:
         # PR rather than the staged partial-scope rollout door/window used.
         self._override_grace_fsm_authoritative: bool = False
 
+        # Issue #717 (Block 5, epic #594): wire the previously-dormant
+        # lifecycle_dispatcher.py pub/sub router (Issue #633) into production so the
+        # three lifecycle FSMs stop cross-reading each other's raw booleans directly.
+        # Each AutomationEngine instance owns its own dispatcher — never shared with
+        # any diagnostic/shadow-only dispatcher — following the same structural
+        # isolation precedent as AutomationEngineCallbacks (Issue #604): nothing
+        # should be able to let a shadow-side consumer register on the registry
+        # production writes into. This engine registers as the sole controller of
+        # all six real event types today (it still owns all three lifecycles'
+        # state), so this is currently a same-instance emit/consume round-trip —
+        # the seam that lets a future genuinely separate controller take over one
+        # lifecycle without every consumer changing, not a behavior change today.
+        self._lifecycle_dispatcher = LifecycleDispatcher()
+        # Dispatcher-synced mirrors — populated ONLY by _on_lifecycle_event(), never
+        # written directly elsewhere. Observability/diagnostics only: an earlier
+        # version of this change also routed _build_nat_vent_fsm_inputs()/
+        # _build_door_window_fsm_inputs() through these instead of the canonical
+        # _paused_by_door/_grace_active/_manual_override_active/_natural_vent_active
+        # attributes, on the theory that the cross-read should "genuinely flow
+        # through the dispatcher." That was the wrong design for a same-instance
+        # emit/consume round-trip: this engine both emits and consumes every event
+        # today, so the canonical attributes can never actually go stale relative to
+        # a same-object mirror the way a genuine cross-instance mirror could (cf.
+        # coordinator.py's _sync_shadow_inputs(), which exists because production and
+        # shadow ARE separate instances). Routing the FSM builders through a
+        # dispatcher-only mirror broke the established direct-attribute-assignment
+        # test-fixture convention used across 40+ existing test files, for no real
+        # safety benefit — reverted. The FSM builders read the canonical attributes;
+        # these mirrors exist so a test (or a future diagnostic) can assert the
+        # dispatcher's own round-trip actually works, independent of production's
+        # real decision inputs.
+        self._dispatched_paused_by_door: bool = False
+        self._dispatched_grace_active: bool = False
+        self._dispatched_manual_override_active: bool = False
+        self._dispatched_natural_vent_active: bool = False
+        # Deliberately no _dispatched_whf_owns_hvac: _whf_owns_hvac() depends on
+        # _pre_fan_hvac_mode, a separate piece of state the NAT_VENT_SESSION_*
+        # before/after diff (keyed on _natural_vent_active alone) does not track —
+        # HVAC-fan-mode nat-vent leaves HVAC unsuppressed (whf_owns_hvac=False) even
+        # while a session is active, so deriving one from the other would be wrong,
+        # not just differently-sourced. door_window_fsm.py's read of whf_owns_hvac
+        # stays a direct _whf_owns_hvac() call — accurately modeling this cross-read
+        # would need its own _pre_fan_hvac_mode-keyed event pair, which is a real
+        # finding for a future issue, not something to invent speculatively here
+        # (Decision Point 6's precedent: don't build structure a concrete coupling
+        # hasn't actually justified).
+        self._lifecycle_dispatcher.register(
+            "automation_engine",
+            emits=frozenset(
+                {
+                    LifecycleEventType.DOOR_PAUSE_STARTED,
+                    LifecycleEventType.DOOR_PAUSE_ENDED,
+                    LifecycleEventType.GRACE_STARTED,
+                    LifecycleEventType.GRACE_ENDED,
+                    LifecycleEventType.OVERRIDE_CONFIRMED,
+                    LifecycleEventType.OVERRIDE_CLEARED,
+                    LifecycleEventType.NAT_VENT_SESSION_STARTED,
+                    LifecycleEventType.NAT_VENT_SESSION_ENDED,
+                }
+            ),
+            consumes=frozenset(
+                {
+                    LifecycleEventType.DOOR_PAUSE_STARTED,
+                    LifecycleEventType.DOOR_PAUSE_ENDED,
+                    LifecycleEventType.GRACE_STARTED,
+                    LifecycleEventType.GRACE_ENDED,
+                    LifecycleEventType.OVERRIDE_CONFIRMED,
+                    LifecycleEventType.OVERRIDE_CLEARED,
+                    LifecycleEventType.NAT_VENT_SESSION_STARTED,
+                    LifecycleEventType.NAT_VENT_SESSION_ENDED,
+                }
+            ),
+            on_event=self._on_lifecycle_event,
+        )
+
         # Override confirmation period (Issue #76) — pending window before override is formally accepted
         self._override_confirm_pending: bool = False
         self._override_confirm_cancel: Any | None = None
@@ -1094,6 +1171,19 @@ class AutomationEngine:
             self._manual_override_mode = None
             self._manual_override_source = None
             self._manual_override_time = None
+            # Issue #717: single real site, reusing this method's own existing
+            # idempotent "did it actually change" guard rather than duplicating it.
+            try:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.OVERRIDE_CLEARED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail=reason,
+                    )
+                )
+            except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real clear
+                _LOGGER.exception("_clear_manual_override_active: lifecycle event emit failed (isolated)")
         self._resumed_from_pause = False
         self.clear_fan_override()
 
@@ -1931,6 +2021,20 @@ class AutomationEngine:
             self._manual_override_mode,
             self._manual_override_source or "unknown",
         )
+        # Issue #717: single real, unconditional site — see _on_lifecycle_event()'s
+        # docstring for why this must never be able to delay the grace-start action
+        # that follows.
+        try:
+            self._lifecycle_dispatcher.emit(
+                LifecycleEvent(
+                    event_type=LifecycleEventType.OVERRIDE_CONFIRMED,
+                    source="automation_engine",
+                    at=dt_util.now(),
+                    detail=mode,
+                )
+            )
+        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real override
+            _LOGGER.exception("_confirm_override_action: lifecycle event emit failed (isolated)")
         return self._start_grace_period_action("manual", trigger="override_confirmed")
 
     def _confirm_override(self, mode: str, source: str | None = None) -> None:
@@ -1945,6 +2049,35 @@ class AutomationEngine:
         if self._confirm_override_action(mode, source=source):
             self._legacy_set_grace_flags("override_confirmed")
 
+    def _on_lifecycle_event(self, event: LifecycleEvent) -> None:
+        """Update the dispatcher-synced mirror attributes (Issue #717).
+
+        Trivial attribute assignment only — no I/O, no awaiting, no HA service
+        calls (Decision Point 5 of the approved plan): a slow or buggy handler
+        must never be able to delay a real HVAC command. Runs synchronously,
+        inline, at ``emit()`` time, so the mirror is always correct by the time
+        the same tick's ``_build_nat_vent_fsm_inputs()``/
+        ``_build_door_window_fsm_inputs()`` call reads it — deferred emission
+        would reopen exactly the "state not synced when read" gap Issue
+        #615/#631 each hit independently, just relocated to this new seam.
+        """
+        if event.event_type is LifecycleEventType.DOOR_PAUSE_STARTED:
+            self._dispatched_paused_by_door = True
+        elif event.event_type is LifecycleEventType.DOOR_PAUSE_ENDED:
+            self._dispatched_paused_by_door = False
+        elif event.event_type is LifecycleEventType.GRACE_STARTED:
+            self._dispatched_grace_active = True
+        elif event.event_type is LifecycleEventType.GRACE_ENDED:
+            self._dispatched_grace_active = False
+        elif event.event_type is LifecycleEventType.OVERRIDE_CONFIRMED:
+            self._dispatched_manual_override_active = True
+        elif event.event_type is LifecycleEventType.OVERRIDE_CLEARED:
+            self._dispatched_manual_override_active = False
+        elif event.event_type is LifecycleEventType.NAT_VENT_SESSION_STARTED:
+            self._dispatched_natural_vent_active = True
+        elif event.event_type is LifecycleEventType.NAT_VENT_SESSION_ENDED:
+            self._dispatched_natural_vent_active = False
+
     @contextlib.asynccontextmanager
     async def _decision_pass(self, method_name: str):
         """Acquire ``self._decision_lock`` with wait/hold instrumentation (Issue #396).
@@ -1953,6 +2086,15 @@ class AutomationEngine:
         acquired, and tracks who currently holds it (`_decision_lock_holder` /
         `_decision_lock_held_since`) so a stuck or slow lock is diagnosable from logs
         alone instead of requiring another multi-hour investigation.
+
+        Issue #717: also the single before/after diff point for
+        NAT_VENT_SESSION_STARTED/ENDED — nat-vent has no single real activation
+        chokepoint the way door/window and override/grace do (``_natural_vent_active``
+        is written at ~18 scattered call sites across the six methods that all funnel
+        through this context manager under ``_decision_lock``), so a before/after diff
+        wrapped around the SAME serialization point every one of those call sites
+        already passes through catches every write site in one change, rather than
+        eighteen.
         """
         _wait_start = dt_util.now()
         if self._decision_lock.locked():
@@ -1971,9 +2113,32 @@ class AutomationEngine:
                 method_name,
                 _wait_seconds,
             )
+            _nat_vent_before = bool(self._natural_vent_active)
             try:
                 yield
             finally:
+                try:
+                    _nat_vent_after = bool(self._natural_vent_active)
+                    if _nat_vent_after and not _nat_vent_before:
+                        self._lifecycle_dispatcher.emit(
+                            LifecycleEvent(
+                                event_type=LifecycleEventType.NAT_VENT_SESSION_STARTED,
+                                source="automation_engine",
+                                at=dt_util.now(),
+                                detail=method_name,
+                            )
+                        )
+                    elif _nat_vent_before and not _nat_vent_after:
+                        self._lifecycle_dispatcher.emit(
+                            LifecycleEvent(
+                                event_type=LifecycleEventType.NAT_VENT_SESSION_ENDED,
+                                source="automation_engine",
+                                at=dt_util.now(),
+                                detail=method_name,
+                            )
+                        )
+                except Exception:  # noqa: BLE001 — a dispatcher bug must never affect a real decision pass
+                    _LOGGER.exception("[decision-lock] %s: nat-vent session event emit failed (isolated)", method_name)
                 _held_seconds = (dt_util.now() - self._decision_lock_held_since).total_seconds()
                 _LOGGER.debug(
                     "[decision-lock] %s: releasing (held %.3fs)",
@@ -7031,6 +7196,18 @@ class AutomationEngine:
         added for Issue #687/Phase 2a but never wired here), so the FSM was blind to
         a real override/grace window and could disagree with what
         ``_activate_fan()``'s own override guard actually did.
+
+        Issue #717: ``paused_by_door``/``grace_active``/``manual_override_active`` are
+        still read directly off the canonical attributes here — see
+        ``_dispatched_paused_by_door``'s declaration comment in ``__init__`` for why a
+        same-instance mirror sourced *only* from dispatcher events turned out to be
+        the wrong design (it broke the established direct-attribute-assignment test
+        fixture convention across 40+ test files, for no real staleness benefit: this
+        engine both emits and consumes, so same-object attribute access can never go
+        stale the way a genuine cross-instance mirror could). The dispatcher's value
+        today is the real, tested emit/audit-trail wiring at every genuine transition
+        — proven by ``check_registry_completeness()`` and the dispatcher's own
+        ``event_log`` — not as the sole gate on these reads.
         """
         from .nat_vent_fsm import NatVentFsmInputs
 
@@ -7122,13 +7299,45 @@ class AutomationEngine:
         idle-open re-entry and reactivation-while-paused branches, and
         ``reconcile_fan_on_startup()``) whenever ``_natvent_fsm_authoritative``
         is enabled.
+
+        Issue #717: this is a SECOND real writer of ``_paused_by_door``, outside
+        ``_resolve_door_window_pause_flags()``'s own before/after diff — when
+        ``_natvent_fsm_authoritative`` is on (currently off by default, but the
+        furthest-along of the three switches per the Strangler Fig Atlas), the
+        nat-vent FSM can set this door/window-owned field directly. Needs its own
+        before/after diff so DOOR_PAUSE_STARTED/ENDED still fires correctly on this
+        path — found the same way Phase 1 found ``coordinator.py:5088``: a second
+        real writer of a field this issue is already instrumenting.
         """
+        _paused_before = bool(self._paused_by_door)
         self._natural_vent_active = state in (
             NatVentLifecycleState.ACTIVE_FULL_GATE,
             NatVentLifecycleState.ACTIVE_SOFT_START,
         )
         self._nat_vent_soft_start = state == NatVentLifecycleState.ACTIVE_SOFT_START
         self._paused_by_door = state == NatVentLifecycleState.PAUSED_REACTIVATION_LOCKOUT
+        try:
+            _paused_after = bool(self._paused_by_door)
+            if _paused_after and not _paused_before:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.DOOR_PAUSE_STARTED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail="nat_vent_fsm_authoritative",
+                    )
+                )
+            elif _paused_before and not _paused_after:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.DOOR_PAUSE_ENDED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail="nat_vent_fsm_authoritative",
+                    )
+                )
+        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real nat-vent decision
+            _LOGGER.exception("_apply_nat_vent_fsm_state: lifecycle event emit failed (isolated)")
 
     def _apply_nat_vent_fsm_state_after_activation(
         self, to_state: NatVentLifecycleState, activation_result: FanCommandResult
@@ -7173,6 +7382,14 @@ class AutomationEngine:
         was the same computation written twice, not two builders that happened
         to agree. Both coordinator call sites now call this method directly
         (``ae._build_door_window_fsm_inputs(now=now)``).
+
+        Issue #717: ``natural_vent_active``/``grace_active``/``whf_owns_hvac`` still
+        read the canonical attributes/method directly here — see
+        ``_dispatched_paused_by_door``'s declaration comment in ``__init__`` for why a
+        same-instance dispatcher-only mirror was the wrong design for these reads.
+        The dispatcher's real value is the emit/audit-trail wiring at every genuine
+        transition, proven by ``check_registry_completeness()`` and its own
+        ``event_log`` — not gating these already-fresh same-object reads.
         """
         from .door_window_fsm import DoorWindowFsmInputs
 
@@ -7299,7 +7516,17 @@ class AutomationEngine:
         state *before* ``_cancel_grace_timers()`` clears ``_grace_active`` and pass it
         explicitly here (grace has already been cleared by the time this function
         would otherwise read it live).
+
+        Issue #717: also the single emit point for DOOR_PAUSE_STARTED/ENDED — every
+        real door/window pause transition already funnels through here regardless of
+        which branch below actually decides the flag, so a before/after diff of
+        ``_paused_by_door`` around the branch catches every real occasion (the 8 kinds
+        this method is called with) without needing per-``kind`` special-casing, which
+        would have to guess at a static kind→direction mapping that doesn't hold for
+        compound kinds like ``PAUSED_NAT_VENT_REACTIVATED``/``GRACE_TIMER_EXPIRED``
+        (each can resolve to either direction depending on the real outcome).
         """
+        _paused_before = bool(self._paused_by_door)
         if self._doorwindow_fsm_authoritative:
             from .door_window_fsm import DoorWindowFsmEvent
             from .door_window_fsm import transition as _door_window_transition
@@ -7312,6 +7539,28 @@ class AutomationEngine:
             self._apply_door_window_fsm_state(result.to_state)
         else:
             legacy()
+        try:
+            _paused_after = bool(self._paused_by_door)
+            if _paused_after and not _paused_before:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.DOOR_PAUSE_STARTED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail=kind.value,
+                    )
+                )
+            elif _paused_before and not _paused_after:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.DOOR_PAUSE_ENDED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail=kind.value,
+                    )
+                )
+        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real pause decision
+            _LOGGER.exception("_resolve_door_window_pause_flags: lifecycle event emit failed (isolated)")
 
     def _build_override_grace_fsm_inputs(self):
         """Build the override/grace FSM's input snapshot from current engine state
@@ -7501,7 +7750,16 @@ class AutomationEngine:
         ``_on_grace_expired()``'s branches and ``_check_orphaned_grace()``, both of which
         must capture state *before* the real cancel action clears the flags being
         transitioned, and pass it explicitly here.
+
+        Issue #717: also the single emit point for GRACE_STARTED/ENDED, via a
+        before/after diff of ``_grace_active`` around the branch — same rationale as
+        the equivalent diff in ``_resolve_door_window_pause_flags()``. Deliberately
+        does NOT emit OVERRIDE_CONFIRMED/CLEARED here — those aren't part of this
+        dispatcher's 3-flag derivation (see ``_apply_override_grace_fsm_state()``'s own
+        docstring); they're emitted from ``_confirm_override_action()`` and
+        ``_clear_manual_override_active()``, each a single real unconditional site.
         """
+        _grace_before = bool(self._grace_active)
         if self._override_grace_fsm_authoritative:
             from .override_grace_fsm import OverrideGraceFsmEvent
             from .override_grace_fsm import transition as _override_grace_transition
@@ -7514,6 +7772,28 @@ class AutomationEngine:
             self._apply_override_grace_fsm_state(result.to_state)
         else:
             legacy()
+        try:
+            _grace_after = bool(self._grace_active)
+            if _grace_after and not _grace_before:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.GRACE_STARTED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail=kind.value,
+                    )
+                )
+            elif _grace_before and not _grace_after:
+                self._lifecycle_dispatcher.emit(
+                    LifecycleEvent(
+                        event_type=LifecycleEventType.GRACE_ENDED,
+                        source="automation_engine",
+                        at=dt_util.now(),
+                        detail=kind.value,
+                    )
+                )
+        except Exception:  # noqa: BLE001 — a dispatcher bug must never affect the real grace decision
+            _LOGGER.exception("_resolve_override_grace_fsm_state: lifecycle event emit failed (isolated)")
 
     def _nat_vent_may_reactivate(
         self,

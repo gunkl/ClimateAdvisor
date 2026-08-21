@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Patch dt_util.now to return a real datetime (needed for isoformat() calls)
 sys.modules["homeassistant.util.dt"].now = lambda: datetime(2026, 3, 19, 14, 30, 0)
 
-from custom_components.climate_advisor.automation import AutomationEngine  # noqa: E402
+from custom_components.climate_advisor.automation import AutomationEngine, FanCommandResult  # noqa: E402
 from custom_components.climate_advisor.classifier import DayClassification  # noqa: E402
 from custom_components.climate_advisor.const import (  # noqa: E402
     ATTR_FAN_OVERRIDE_SINCE,
@@ -684,6 +684,43 @@ class TestFanOverride:
         engine.hass.services.async_call.assert_not_called()
         assert engine._fan_active is False
 
+    def test_activate_fan_skips_when_manual_hvac_override_active(self):
+        """Issue #714/#705: _activate_fan must not start WHF while a manual override
+        to an active HVAC mode is in effect — starting it would call
+        _suppress_hvac_for_whf() -> _set_hvac_mode('off', ...) and silently force the
+        thermostat back to 'off', overriding the user's manual choice with no
+        override check at all (the entry-side half of the #705 bug)."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+            }
+        )
+        engine._manual_override_active = True
+        engine._manual_override_mode = "cool"
+
+        result = asyncio.run(engine._activate_fan(reason="test"))
+
+        engine.hass.services.async_call.assert_not_called()
+        assert engine._fan_active is False
+        assert result is FanCommandResult.OVERRIDDEN
+
+    def test_activate_fan_proceeds_when_manual_override_mode_is_off(self):
+        """A manual override that resolved to 'off' (or was cleared) must not block
+        activation — only an active mode (heat/cool/heat_cool) conflicts with WHF."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+            }
+        )
+        engine._manual_override_active = True
+        engine._manual_override_mode = "off"
+
+        asyncio.run(engine._activate_fan(reason="test"))
+
+        assert engine._fan_active is True
+
     def test_deactivate_fan_skips_when_override_active(self):
         """_deactivate_fan does nothing when _fan_override_active is True."""
         engine = _make_automation_engine(
@@ -714,6 +751,103 @@ class TestFanOverride:
         assert engine._manual_override_active is False
         assert engine._fan_override_active is False
         assert engine._fan_override_time is None
+
+
+class TestManualOverrideEndsNatVentImmediately:
+    """Issue #714/#705: reproduction of the live incident — WHF cycling, nat-vent
+    flagged active, HVAC shown "cool" and enabled, windows open, all at once.
+
+    A manual override to an active HVAC mode must end an already-running nat-vent/
+    WHF session the instant the mode change is detected (event-driven, same as
+    handle_all_doors_windows_closed() reacting to a sensor closing) — not on some
+    later tick.
+    """
+
+    def _engine_with_active_nat_vent(self) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+            }
+        )
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._pre_fan_hvac_mode = "off"  # captured before nat-vent started (stale by design)
+        state_mock = MagicMock()
+        state_mock.state = "cool"  # the user's just-set thermostat mode
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        return engine
+
+    def test_override_detection_clears_nat_vent_flag_synchronously(self):
+        """_natural_vent_active must flip False the instant the override is detected
+        — before the scheduled fan-off task has even run — mirroring how
+        _exit_nat_vent() itself clears the flag synchronously ahead of its own await."""
+        engine = self._engine_with_active_nat_vent()
+        engine.hass.async_create_task = MagicMock(side_effect=_consume_coroutine)
+
+        engine.handle_manual_override(source="normal", old_mode="off", new_mode="cool")
+
+        assert engine._natural_vent_active is False
+        engine.hass.async_create_task.assert_called_once()
+
+    def test_override_detection_turns_off_the_fan_without_restoring_stale_mode(self):
+        """The scheduled stand-down must turn off the fan but must NOT write any HVAC
+        mode — _pre_fan_hvac_mode ("off", captured before nat-vent started) must never
+        be written back over the user's just-set "cool", which is exactly the bug this
+        fix closes (_exit_nat_vent()'s default restore would do exactly that)."""
+        engine = self._engine_with_active_nat_vent()
+        scheduled: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+
+        engine.handle_manual_override(source="normal", old_mode="off", new_mode="cool")
+
+        assert scheduled, "Expected the stand-down coroutine to be scheduled"
+        for coro in scheduled:
+            asyncio.run(coro)
+
+        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
+        assert fan_calls, "Expected the fan to be turned off"
+        hvac_mode_calls = [
+            c for c in engine.hass.services.async_call.call_args_list if c.args[:2] == ("climate", "set_hvac_mode")
+        ]
+        assert not hvac_mode_calls, (
+            f"Must not write any HVAC mode — the thermostat already reads the user's chosen"
+            f" mode. Got: {hvac_mode_calls}"
+        )
+        assert engine._pre_fan_hvac_mode is None, "Suppression snapshot must be released, not left stranded"
+
+    def test_no_action_when_whf_not_currently_owning_hvac(self):
+        """A mode change with no active WHF suppression session must not touch
+        nat-vent bookkeeping — this is a targeted mutex fix, not a blanket override
+        reaction."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+            }
+        )
+        state_mock = MagicMock()
+        state_mock.state = "cool"
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        scheduled: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+
+        engine.handle_manual_override(source="normal", old_mode="off", new_mode="cool")
+
+        assert not scheduled, "No WHF suppression session active — nothing to stand down"
+
+    def test_override_to_off_does_not_trigger_standdown(self):
+        """Reverting to 'off' is never a conflict — the guard only fires for an
+        active mode, matching _whf_owns_hvac()'s own scope."""
+        engine = self._engine_with_active_nat_vent()
+        engine.hass.states.get.return_value.state = "off"
+        scheduled: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+
+        engine.handle_manual_override(source="normal", old_mode="cool", new_mode="off")
+
+        assert not scheduled
+        assert engine._natural_vent_active is True
 
 
 # ---------------------------------------------------------------------------

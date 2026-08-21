@@ -181,6 +181,15 @@ class NatVentFsmInputs:
     # ``_transition_from_active()`` below) -- those other call sites don't read
     # ``NatVentTransition.fan_should_be_active`` at all.
     fan_hardware_active: bool = False
+    # Issue #714: distinct from override_active above (which OR's in
+    # _fan_override_active and carries no mode information) -- this pair is
+    # specifically the HVAC-mode override the manual-override-vs-nat-vent mutex
+    # needs (NatVentExitInputs.manual_override_active/manual_override_mode). A
+    # bare fan-on override doesn't set an HVAC mode and must not trip this check.
+    # Default False/None mirrors this dataclass's own established non-breaking-
+    # default precedent for every field added after the original construction.
+    manual_override_active: bool = False
+    manual_override_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +232,8 @@ def _exit_inputs(inputs: NatVentFsmInputs) -> NatVentExitInputs:
         occupancy_mode=inputs.occupancy_mode,
         thermal_confidence=inputs.thermal_confidence,
         k_passive=inputs.k_passive,
+        manual_override_active=inputs.manual_override_active,
+        manual_override_mode=inputs.manual_override_mode,
     )
 
 

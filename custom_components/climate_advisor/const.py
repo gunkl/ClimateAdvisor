@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.47"
+VERSION = "0.6.48"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.48": [
+        "Fix #714: the whole-house fan and an active thermostat mode (cool/heat) can"
+        " no longer run at the same time. If you manually change the thermostat mode"
+        " while free cooling is running, the fan now stops immediately instead of"
+        " continuing to cycle in the background, and it won't silently turn your"
+        " thermostat back off anymore if it happens to reactivate while your manual"
+        " change is still in effect.",
+    ],
     "0.6.47": [
         "Fix #711: closes a gap where an active whole-house-fan free-cooling"
         " session that was already running when you wake up wasn't re-checked"
@@ -2190,6 +2198,32 @@ KNOWN_FIXES: dict[int, dict] = {
             " effect. Already mirrored to the shadow engine via the existing"
             " _mirror_to_shadow('handle_morning_wakeup', ...) call — no"
             " separate wiring needed."
+        ),
+    },
+    714: {
+        "version_fixed": "0.6.48",
+        "title": (
+            "The _whf_owns_hvac() mutex (Issue #392) only choked CA's own"
+            " automation-initiated HVAC writes; a manual override the user makes"
+            " directly at the thermostat never called _set_hvac_mode(), so nothing"
+            " ended an active nat-vent/WHF session — and worse, _activate_fan() would"
+            " silently force the thermostat back to 'off' on WHF reactivation even"
+            " over a live manual 'cool' override, with no override check at all (#705)"
+        ),
+        "scope_covered": (
+            "automation.py: start_override_confirmation() now ends an active"
+            " nat-vent/WHF session immediately the instant a mode change to an"
+            " active mode is detected (event-driven, same as"
+            " handle_all_doors_windows_closed()), not routed through"
+            " _exit_nat_vent() to avoid restoring a stale pre-fan HVAC mode over the"
+            " user's live override. _activate_fan() gained the same"
+            " override-respecting guard _fan_override_active already has."
+            " nat_vent_exit.py/fan_thermostat_decision.py: decide_nat_vent_exit()/"
+            " decide_fan_thermostat_check() gained a new highest-priority"
+            " manual-override-conflict check (defense-in-depth, tick-based,"
+            " already-mirrored to the shadow engine via existing"
+            " _sync_shadow_inputs() override-field sync from Issue #631 — no new"
+            " wiring needed)."
         ),
     },
     684: {

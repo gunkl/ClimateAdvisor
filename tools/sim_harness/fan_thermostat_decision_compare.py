@@ -57,6 +57,8 @@ def _reconstruct_inputs(self: Any, indoor: float | None, outdoor: float | None) 
         in_sleep_window=in_sleep_window,
         hysteresis=hysteresis,
         natural_vent_active=self._natural_vent_active,
+        manual_override_active=self._manual_override_active,
+        manual_override_mode=self._manual_override_mode,
     )
 
 
@@ -67,6 +69,8 @@ def _classify_observation(exit_called: bool, deactivate_reason: str | None) -> t
     if exit_called:
         return FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT, None
     if deactivate_reason is not None:
+        if "manual override to" in deactivate_reason:
+            return FanThermostatOutcome.STOP_MANUAL_OVERRIDE_CONFLICT, None
         if "free cooling gone" in deactivate_reason:
             return FanThermostatOutcome.STOP_DEACTIVATE, None
         if "cooled to floor" in deactivate_reason:

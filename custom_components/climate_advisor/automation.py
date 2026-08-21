@@ -6607,8 +6607,24 @@ class AutomationEngine:
         # The low-level _whf_owns_hvac() choke-point guard inside _set_temperature() (used
         # by _apply_comfort_band() below) silently no-ops the actual write for WHF/BOTH;
         # FAN_MODE_HVAC coexists with the compressor so its write goes through normally.
+        #
+        # Issue #711: "leaving fan alone" used to mean literally nothing re-checked the
+        # session until the next periodic/temp-change tick (up to 5 min later, via the
+        # backstop timer) — by which point indoor could already have drifted past the new,
+        # tighter daytime thresholds (this function has just armed a *new* comfort band
+        # above). A session that was healthily cycling under the looser sleep-window band
+        # could coast straight through the graceful daytime cycle-off point and hit the hard
+        # exit floor before daytime rules ever got a look at it (confirmed live, 2026-08-21).
+        # nat_vent_temperature_check() already contains the correct sleep-aware cycling/exit
+        # logic for exactly this situation — call it now, at the moment the new band takes
+        # effect, instead of waiting for an unrelated later tick. Guarded on indoor_temp not
+        # being None: that function's signature requires a real reading, and this same "guard
+        # not available" case already causes the morning pre-cool overshoot check above to
+        # skip entirely.
         if _gate == ScheduledBandGate.DEFER_NAT_VENT:
-            _LOGGER.info("Morning wakeup: nat-vent/WHF session active — leaving fan alone")
+            _LOGGER.info("Morning wakeup: nat-vent/WHF session active — re-checking against daytime band")
+            if indoor_temp is not None:
+                await self.nat_vent_temperature_check(indoor_temp, outdoor=self._last_outdoor_temp)
 
         # Arm the daytime comfort band — waking up exits the sleep window.
         _wakeup_band = select_comfort_band(

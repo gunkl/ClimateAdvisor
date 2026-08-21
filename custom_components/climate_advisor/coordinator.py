@@ -1010,6 +1010,21 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # method last set it.
         se._fan_active = ae._fan_active
 
+        # Issue #724: same gap class again, one field over. _whf_owns_hvac() (read by
+        # _sync_paused_by_door_with_live_sensors(), itself called from apply_classification/
+        # handle_bedtime/handle_morning_wakeup/handle_pre_cool — all 4 mirrored) depends on
+        # _pre_fan_hvac_mode, which was never added to this raw-copy block. Confirmed live-
+        # reachable, not dormant: with the shadow's copy permanently None, its
+        # _whf_owns_hvac() is always False, so _sync_paused_by_door_with_live_sensors()'s
+        # `... or self._whf_owns_hvac(): return` guard never protects the shadow the way it
+        # protects production during a genuine WHF session — the shadow can incorrectly call
+        # _pause_for_door_window() and set _paused_by_door=True while production correctly
+        # does not, producing a spurious door_window_mirror_agrees/mirror_agrees disagreement
+        # during ordinary WHF-with-windows-open operation (WHF's designed use case). A raw
+        # copy closes this and every other _whf_owns_hvac() read the same way the _fan_active
+        # copy above does for its own guards.
+        se._pre_fan_hvac_mode = ae._pre_fan_hvac_mode
+
     def _dispatch_fsm_evaluators(
         self,
         key: str,

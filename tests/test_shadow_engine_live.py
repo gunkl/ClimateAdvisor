@@ -470,6 +470,56 @@ class TestSyncShadowInputsNatVentDoorWindow:
         assert coordinator.shadow_automation_engine._paused_by_door is False
 
 
+class TestSyncShadowInputsFanActive:
+    """Issue #716: same gap class again, but with a mechanism twist the #615/#631/#673
+    precedents didn't have — _fan_active's real writers (_activate_fan()/
+    _deactivate_fan()) both `return` early under `self.dry_run` before ever assigning
+    the field, so a direct _mirror_to_shadow("_activate_fan"/"_deactivate_fan", ...)
+    replay could never have worked on the permanently-dry_run shadow instance, unlike
+    every other field in this file's raw-copy tests. The raw copy is the ONLY
+    mechanism that can reach this field on the shadow at all, not merely the simplest
+    one — this test proves it actually does, driving a real activate/check/deactivate
+    sequence on production and asserting the shadow's own view tracks it."""
+
+    def test_fan_active_parity_after_mirror_call(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._fan_active = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._fan_active is True
+
+    def test_fan_active_parity_flips_off_too(self) -> None:
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._fan_active = True
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._fan_active is True
+        coordinator.automation_engine._fan_active = False
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._fan_active is False
+
+    def test_positive_control_missing_sync_leaves_fan_active_stale(self) -> None:
+        """Without _fan_active in _sync_shadow_inputs(), the shadow's copy stays False
+        even after production genuinely activates the fan — the exact "mirror looks
+        wired but is inert" failure this issue closes, reproduced directly."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.automation_engine._fan_active = True
+        coordinator._sync_shadow_inputs = lambda: None  # type: ignore[method-assign]
+        _run(coordinator._mirror_to_shadow("apply_classification", None))
+        assert coordinator.shadow_automation_engine._fan_active is False
+
+    def test_dry_run_guard_would_defeat_a_direct_mirror_of_activate_fan(self) -> None:
+        """Documents WHY the raw copy is required, not just convenient: replaying
+        _activate_fan() itself on the shadow hits its own `if self.dry_run: return`
+        guard before _fan_active is ever assigned, so a naive
+        _mirror_to_shadow("_activate_fan", ...) call would leave the shadow's
+        _fan_active exactly as stale as no mirroring at all."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        shadow = coordinator.shadow_automation_engine
+        assert shadow.dry_run is True
+        shadow._fan_active = False
+        _run(shadow._activate_fan(reason="test"))
+        assert shadow._fan_active is False
+
+
 class TestNewlyMirroredDecisionMethods:
     """Representative coverage for Issue #615's 8 newly-mirrored entry points — not
     exhaustive per-method duplication, but the ones with the most real-world weight."""

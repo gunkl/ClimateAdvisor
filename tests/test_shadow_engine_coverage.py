@@ -48,6 +48,13 @@ _TRACKED_FIELDS = {
     # Issue #639: override/grace joint-lifecycle FSM's own reads — same raw-copy
     # discipline as the rest of the Issue #631 grace/override fields above.
     "_grace_protects_override",
+    # Issue #716: fan_thermostat_check()'s shadow mirroring was inert — _fan_active is
+    # the field it actually keys off, and its two real writers (_activate_fan(),
+    # _deactivate_fan()) both `return` early under `self.dry_run` before ever assigning
+    # it, so a direct _mirror_to_shadow(...) replay of either method can never reach the
+    # field on the permanently-dry_run shadow instance. Same raw-copy fix as the fields
+    # above — see _sync_shadow_inputs()'s docstring in coordinator.py.
+    "_fan_active",
 }
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -212,6 +219,22 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "internal: Issue #664 trivial 1-line flag-clear, passed as the non-authoritative "
         "'legacy' closure to _resolve_override_grace_fsm_state() wherever confirm is cleared, "
         "and reused by clear_manual_override()'s own thin wrapper"
+    ),
+    # Issue #716: _fan_active's two real writers. Deliberately NOT "mirrored" — a
+    # _mirror_to_shadow("_activate_fan"/"_deactivate_fan", ...) replay would hit each
+    # method's `if self.dry_run: return` guard before _fan_active is ever assigned on
+    # the permanently-dry_run shadow instance, so the mirror would look wired but stay
+    # inert. _fan_active is covered instead by _sync_shadow_inputs()'s raw copy, which
+    # reads production's current value every cycle regardless of which method (these
+    # two, or the coordinator's own stale-flag correction in _async_thermostat_changed)
+    # last set it.
+    "_activate_fan": (
+        "internal: real writer of _fan_active, but the field is covered by "
+        "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #716"
+    ),
+    "_deactivate_fan": (
+        "internal: real writer of _fan_active, but the field is covered by "
+        "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #716"
     ),
 }
 
@@ -466,6 +489,25 @@ class TestDoorWindowFsmEventCoverage:
 # but not its siblings (or drops the bedtime/morning-wakeup feed) fails loudly instead of
 # passing the coarser kind-level check above.
 class TestPerCallerFsmFeedCoverage:
+    def test_fan_thermostat_check_mirrored_at_all_three_call_sites(self) -> None:
+        """Issue #716: fan_thermostat_check() has 3 real production call sites in
+        coordinator.py (indoor-temp listener, outdoor-temp listener, thermostat
+        attribute-change dispatch) — only the third was mirrored originally. Each must
+        mirror, or a future new call site could silently ship the same per-caller gap."""
+        src = _COORDINATOR_PY.read_text(encoding="utf-8")
+        call_sites = len(re.findall(r"\.fan_thermostat_check\(", src))
+        mirror_sites = len(re.findall(r'_mirror_to_shadow\(\s*\n?\s*"fan_thermostat_check"', src))
+        assert call_sites >= 3, (
+            f"Expected at least 3 fan_thermostat_check() call sites in coordinator.py, "
+            f"found {call_sites} — if call sites were consolidated, lower this bound "
+            f"deliberately rather than letting the test rot."
+        )
+        assert mirror_sites == call_sites, (
+            f"fan_thermostat_check() has {call_sites} real call site(s) in coordinator.py "
+            f'but only {mirror_sites} have a matching _mirror_to_shadow("fan_thermostat_check", '
+            f"...) call — every call site must mirror (Issue #716)."
+        )
+
     def test_handle_manual_override_mirrored_at_all_three_call_sites(self) -> None:
         """handle_manual_override() has exactly 3 real production call sites
         (coordinator.py's _async_thermostat_changed: new-override-during-grace,

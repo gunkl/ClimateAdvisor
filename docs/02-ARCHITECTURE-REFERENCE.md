@@ -5,7 +5,8 @@
 ## Anchors
 | Question | Short answer | → Full answer |
 |---|---|---|
-| What are the 16 source files and what does each own? | Every module has a single responsibility: `coordinator.py` orchestrates, `classifier.py` classifies, `automation.py` executes HVAC calls, `learning.py` persists and analyses behavior, etc. | [§File Structure](02-ARCHITECTURE-REFERENCE.md#file-structure) |
+| What are the source files and what does each own? | 46 files total (2026-08-21). The original 16 own one responsibility each: `coordinator.py` orchestrates, `classifier.py` classifies, `automation.py` executes HVAC calls, `learning.py` persists and analyses behavior, etc. Block 5's FSM migration (epic #594) added 30 more — mostly small pure `decide_*()` decision-core modules plus the three lifecycle FSMs and the dispatcher pair. | [§File Structure](02-ARCHITECTURE-REFERENCE.md#file-structure) |
+| What is the FSM Decision Layer — the three lifecycle FSMs, and is anything actually driving HVAC through them? | `nat_vent_fsm.py`, `door_window_fsm.py`, `override_grace_fsm.py` each model one lifecycle's state as a named enum, each gated by its own `_*_fsm_authoritative` switch (default `False`, not persisted). `lifecycle_dispatcher.py` is wired into production as of Issue #717, but as a same-instance emit/consume audit trail, not a cross-instance mirror. | [§FSM Decision Layer](02-ARCHITECTURE-REFERENCE.md#fsm-decision-layer) |
 | How does data flow from the weather entity to an HVAC service call? | Weather entity → coordinator (every 30 min) → `classify_day()` → `DayClassification` → `apply_classification()` in the automation engine → `climate.set_temperature` / `climate.set_hvac_mode`. | [§Data Flow](02-ARCHITECTURE-REFERENCE.md#data-flow) |
 | What are the five coordinator-scheduled daily events and when do they fire? | Briefing (default 6:00 AM), morning wakeup (6:30 AM), bedtime setback (10:30 PM), end-of-day save (11:59 PM), and the 30-minute forecast refresh loop. | [§Coordinator Scheduled Events](02-ARCHITECTURE-REFERENCE.md#coordinator-scheduled-events) |
 | What is the debounce / grace period system and how do the three timers interact? | Debounce (default 10 min as of Issue #504) delays *any* reaction to a sensor state change until it holds steady for the configured time — pause/resume HVAC, and, since #504, nat-vent/WHF/HVAC-fan engage/exit. Manual grace (default 30 min) blocks new pauses after a user override. Automation grace (default 5 min) blocks re-pause after system resumes. Manual override always wins. | [§Debounce and Grace Period System](02-ARCHITECTURE-REFERENCE.md#debounce-and-grace-period-system) |
@@ -44,6 +45,43 @@ custom_components/climate_advisor/
 ├── repairs.py           # HA Repairs integration: surfaces actionable fix prompts when CA detects config or data problems.
 ├── ai_skills_investigator.py  # The sole registered AI skill ("investigator"): system prompt, response parser, deterministic fallback, thin context-assembly orchestrator. Serves both silent/scheduled narration and on-demand investigation — the former separate "Activity Report" skill (ai_skills_activity.py) was retired and merged into this one, Issue #563.
 ├── ai_skills_context.py  # ContextProviderRegistry + all 16 context providers the investigator's context is assembled from, including the event-timeline/renderer functions ported from the retired ai_skills_activity.py.
+├── api.py               # REST API views for the dashboard panel (19 views): GETs read from coordinator.data, POSTs delegate to the coordinator or automation engine.
+├── state.py              # Operational state persistence: climate_advisor_state.json, atomic write (.tmp + os.replace).
+├── temperature.py        # Temperature unit utilities: from_fahrenheit() (absolute, subtracts 32 then ×5/9) vs convert_delta() (differences/rates, ×5/9 only).
+│
+│                         # --- Block 5 FSM migration (epic #594) — 30 files below, all added after the original 16 above ---
+├── desired_state.py      # Shared pure decide_scheduled_band_gate() gate used by every scheduled/cyclical comfort-band call site (Issue #498) — replaced four independently hand-copied gate checks.
+├── lifecycle_dispatcher.py  # Generic cross-lifecycle pub/sub event dispatcher for the three FSMs below. Built Issue #633, wired into production Issue #717 — see §FSM Decision Layer.
+├── lifecycle_events.py   # Cross-lifecycle event vocabulary: LifecycleEventType (DOOR_PAUSE_*, GRACE_*, OVERRIDE_*, NAT_VENT_SESSION_*) + LifecycleEvent dataclass (Issue #633, extended #717).
+│
+├── nat_vent_fsm.py       # Nat-vent lifecycle FSM — unified (state, event) -> Transition table (Issue #633). Defines no state itself; drives NatVentLifecycleState from nat_vent_lifecycle.py.
+├── nat_vent_lifecycle.py # Pure session-state derivation for nat-vent: NatVentLifecycleState (4 states — INACTIVE, ACTIVE_FULL_GATE, ACTIVE_SOFT_START, PAUSED_REACTIVATION_LOCKOUT) (Issue #606).
+├── nat_vent_gate.py      # Pure decision core: the nat-vent reactivation gate (architecture-reset Step 2).
+├── nat_vent_exit.py      # Pure decision core: the nat-vent active-session exit chain, all 5 exit reasons in priority order (Issue #608).
+├── nat_vent_cycling.py   # Pure decision core: mid-session nat-vent fan cycling (Issue #698).
+├── nat_vent_reactivation_lockout.py  # Pure decision core: the 300s nat-vent reactivation lockout predicate.
+│
+├── door_window_fsm.py    # Door/window pause/grace lifecycle FSM — unified transition table (Issue #637). Drives DoorWindowLifecycleState from door_window_lifecycle.py.
+├── door_window_lifecycle.py  # Pure session-state derivation for door/window pause/grace: DoorWindowLifecycleState (5 states — NORMAL, PAUSED_ACTIVE, PAUSED_IDLE, GRACE, PAUSED_DURING_GRACE) (Issue #637).
+├── door_window_open_response.py   # Pure decision core: a fresh door/window open event (Issue #637).
+├── door_window_close_response.py  # Pure decision core: all-doors-windows-closed (Issue #637).
+├── door_window_pause_entry.py     # Pure decision core: entering a door/window pause (Issue #637).
+├── door_window_grace_expiry.py    # Pure decision core: grace-period expiry (Issue #637).
+│
+├── override_grace_fsm.py     # Override/grace joint lifecycle FSM — unified transition table (Issue #639). Drives the composite (OverrideConfirmState, GraceState) from override_grace_lifecycle.py.
+├── override_grace_lifecycle.py  # Pure session-state derivation for override/grace: OverrideConfirmState (IDLE/PENDING) × GraceState (NONE/ACTIVE_PROTECTING_OVERRIDE/ACTIVE_UNPROTECTED) (Issue #639).
+├── override_grace_start.py   # Pure predicate: does this grace trigger protect a real override? (Issue #639, generalizes the #530 _GRACE_TRIGGERS_PROTECTING_OVERRIDE fix).
+├── override_confirm_split.py # Pure decision core: override confirmation's PATH A (confirmed)/PATH B (self-resolved transient) split (Issue #639).
+├── override_cancel_outcome.py  # Pure outcome classification for cancel_override() (Issue #639).
+├── override_match.py     # Pure decision core: does the active override already match automation's current decision? (Issue #639).
+├── override_orphaned_grace.py  # Pure predicates for the two mirror-image grace/override watchdogs — Issue #508 (grace without override) and Issue #321 (override stuck past due grace-end) (Issue #639).
+├── override_supersession.py  # Pure decision core: override detection and Issue #201/#282's "second override during active grace" replace-not-stack behavior.
+│
+├── fan_thermostat_decision.py  # Pure decision core: the tick-level fan thermostatic stop check (architecture-reset Step 2).
+├── fan_drift_reconciliation.py # Pure decision core: fan physical-state drift reconciliation (Issue #423).
+├── fan_status.py          # Fan-status suppression predicate shared by the WHF/HVAC fan status cards (§ Fan Status Values, CLAUDE.md).
+├── setpoint_verify_decision.py  # Pure decision core: the post-fan setpoint verify check (architecture-reset Step 2).
+├── log_capture.py         # Real WARNING+/ERROR log-record capture for the AI Investigator (Issue #578).
 └── frontend/            # Dashboard panel (iframe): index.html + locally bundled Chart.js v4 + zoom plugin + HammerJS
 ```
 
@@ -124,6 +162,24 @@ These methods on `ClimateAdvisorCoordinator` implement the Issue #121 v3 concurr
 All six concurrent types are tracked in `_pending_observations: dict[str, PendingObservation]`. The pending HVAC event is serialised in `LearningState.pending_thermal_event` so a mid-event HA restart can recover the post-heat phase. See [Thermal Model v3 Spec](thermal-model-v3-spec.md) for the full observation-type matrix and lifecycle.
 
 > **v2 pipeline coexistence note:** The v2 HVAC-specific methods (`_start_thermal_event`, `_sample_thermal_event`, `_end_active_phase`, `_check_stabilization`, `_commit_thermal_event`, `_abandon_thermal_event`, `_update_pre_heat_buffer`) remain in the codebase as a **parallel, independent pipeline** — they are not internal helpers of the v3 methods. On every HVAC start, `_async_thermostat_changed` calls both `_start_thermal_event` and `_start_hvac_observation`, and the 30-minute tick calls both `_sample_thermal_event`/`_check_stabilization` (v2) and `_sample_all_observations`/`_check_hvac_stabilization` (v3). The v2 pipeline has not been retired. `_update_pre_heat_buffer` is shared infrastructure used by both paths.
+
+## FSM Decision Layer
+
+Block 5's FSM migration (epic #594) built three named-state finite state machines — one per lifecycle already governed by ad-hoc boolean flags — driven by Issue #633 (nat-vent), #637 (door/window pause), and #639 (override/grace). Each FSM's `transition()` calls the *same* pure `decide_*()` functions the legacy flag-mutating code already called directly, so no decision logic was duplicated when the FSMs were built — only the read/write of *state* was pulled into a named enum. All three are shadow-only by default: each has its own `_*_fsm_authoritative` switch, off by default and deliberately not persisted across HA restart, so a fresh boot always starts back on the legacy path until an owner explicitly flips it again.
+
+| FSM module | State type | Cutover switch | Authoritative today? |
+|---|---|---|---|
+| `nat_vent_fsm.py` (Issue #633) | `NatVentLifecycleState` (`nat_vent_lifecycle.py`) — `INACTIVE`, `ACTIVE_FULL_GATE`, `ACTIVE_SOFT_START`, `PAUSED_REACTIVATION_LOCKOUT` | `AutomationEngine._natvent_fsm_authoritative` | Off by default — furthest-along of the three per the Strangler Fig Atlas, proven behavior-identical to the legacy path by full-corpus decision-equivalence diffing, but not yet flipped in production |
+| `door_window_fsm.py` (Issue #637) | `DoorWindowLifecycleState` (`door_window_lifecycle.py`) — `NORMAL`, `PAUSED_ACTIVE`, `PAUSED_IDLE`, `GRACE`, `PAUSED_DURING_GRACE` | `AutomationEngine._doorwindow_fsm_authoritative` | Off by default |
+| `override_grace_fsm.py` (Issue #639) | Composite `(OverrideConfirmState, GraceState)` (`override_grace_lifecycle.py`) — `OverrideConfirmState`: `IDLE`/`PENDING`; `GraceState`: `NONE`/`ACTIVE_PROTECTING_OVERRIDE`/`ACTIVE_UNPROTECTED` (not one flat enum, since grace routinely runs with no override behind it) | `AutomationEngine._override_grace_fsm_authoritative` | Off by default |
+
+Each FSM is also shadow-mirrored the same way the whole-engine shadow (Issue #613) mirrors the rest of `AutomationEngine`: `coordinator.shadow_automation_engine` runs the identical FSM code against the same live inputs, and a diagnostic comparison (`ClimateAdvisorShadowEngineStatusSensor`) surfaces production/shadow/FSM agreement — pure observation, zero actuation surface, never wired into any occupant-facing Status-tab card. See [Nat-Vent Lifecycle Spec](nat-vent-lifecycle-spec.md), [Grace Periods Spec](grace-periods-spec.md), and each module's own docstring for the full transition tables and per-lifecycle scope boundaries.
+
+### Dispatcher Wiring (Issue #717)
+
+`lifecycle_dispatcher.py`'s generic pub/sub router (built Issue #633) was wired into a real production decision path by Issue #717/PR #720. `AutomationEngine` now owns its own `LifecycleDispatcher` instance — structurally isolated from the shadow engine's, same precedent as `AutomationEngineCallbacks` (Issue #604) — and registers as controller for all 8 event types (`DOOR_PAUSE_STARTED/ENDED`, `GRACE_STARTED/ENDED`, `OVERRIDE_CONFIRMED/CLEARED`, `NAT_VENT_SESSION_STARTED/ENDED`). Real `emit()` calls sit at the chokepoints every genuine transition already funnels through: `_resolve_door_window_pause_flags()` and `_resolve_override_grace_fsm_state()` (before/after diffs of `_paused_by_door`/`_grace_active`), `_apply_nat_vent_fsm_state()` (a second real `_paused_by_door` writer, active only when `_natvent_fsm_authoritative` is on), `_confirm_override_action()`/`_clear_manual_override_active()` (single unconditional sites for `OVERRIDE_CONFIRMED`/`CLEARED`), and a before/after diff of `_natural_vent_active` wrapped around `_decision_pass()` — the one serialization point all ~18 scattered nat-vent write sites already pass through, chosen instead of instrumenting each site individually.
+
+**This is a same-instance emit/consume round-trip today, not a cross-instance mirror — and that distinction is deliberate, not a shortcut.** An earlier draft of this change routed `_build_nat_vent_fsm_inputs()`/`_build_door_window_fsm_inputs()` through dispatcher-synced mirror attributes (`_dispatched_paused_by_door`, `_dispatched_grace_active`, etc.) instead of the canonical `_paused_by_door`/`_grace_active`/`_manual_override_active`/`_natural_vent_active` attributes. It was reverted: `AutomationEngine` both emits and consumes every one of these events on itself, so the canonical attributes can never actually go stale relative to a same-object mirror the way `coordinator.py`'s `_sync_shadow_inputs()` mirror genuinely can (that one exists precisely because production and shadow *are* separate instances). Routing the FSM builders through the dispatcher-only mirror also broke the established direct-attribute-assignment fixture convention used across 40+ existing test files, for no real staleness benefit. The dispatcher's mirror attributes (`_dispatched_*`) still exist and are still populated by `_on_lifecycle_event()` — they're an observability/diagnostic round-trip proof (exercised by `check_registry_completeness()` and the dispatcher's own `event_log`), not the FSM builders' source of truth. The FSM input builders read the canonical attributes directly, unchanged by this wiring. Zero decision logic, zero authoritative-switch behavior, and zero HA service call path changed — see PR #720's commit message for the full before/after reasoning.
 
 ## Coordinator Chart Helper Functions
 

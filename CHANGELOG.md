@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.47] — 2026-08-21
+
+- Fix #711: closes a gap where an active whole-house-fan free-cooling session that was already running when you wake up wasn't re-checked against the daytime comfort band until whatever the next unrelated check happened to be — up to 5 minutes later. If indoor drifted below the graceful cycle-off point in that window, the fan could end up cycling off and back on again shortly after, instead of cycling off smoothly right at wake-up.
+
 ## [0.6.46] — 2026-08-20
 
 - Fix #706: closes a gap where, if you opt into the nat-vent state-machine engine, it could lose track of an active manual override in two ways: not recognizing one was already in effect, and — in rare timing cases — briefly overwriting a fan override that started while a decision was in flight. Also teaches it the existing rule that free cooling should keep running during a protected period if the house is genuinely overheating. No change unless you've opted in.

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.46"
+VERSION = "0.6.47"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.47": [
+        "Fix #711: closes a gap where an active whole-house-fan free-cooling"
+        " session that was already running when you wake up wasn't re-checked"
+        " against the daytime comfort band until whatever the next unrelated"
+        " check happened to be — up to 5 minutes later. If indoor drifted"
+        " below the graceful cycle-off point in that window, the fan could"
+        " end up cycling off and back on again shortly after, instead of"
+        " cycling off smoothly right at wake-up.",
+    ],
     "0.6.46": [
         "Fix #707: no user-visible change. After certain restarts with an active"
         " whole-house-fan remote timer, a diagnostic comparison (not any real"
@@ -2160,6 +2169,27 @@ KNOWN_FIXES: dict[int, dict] = {
             " New tests/test_fsm_flag_ownership.py adds a generalized,"
             " AST-based 'exactly one writer' regression guard for all 3 FSMs'"
             " modeled flags."
+        ),
+    },
+    711: {
+        "version_fixed": "0.6.47",
+        "title": (
+            "handle_morning_wakeup()'s DEFER_NAT_VENT branch left an active"
+            " nat-vent/WHF session unchecked against the newly-armed daytime"
+            " comfort band, deferring re-evaluation to whatever the next"
+            " unrelated periodic/temp-change tick happened to be (up to 5 min"
+            " later via the backstop timer) — long enough for indoor to drift"
+            " past the graceful daytime cycle-off point into the hard exit"
+            " floor before daytime rules were ever applied (#705)"
+        ),
+        "scope_covered": (
+            "automation.py: handle_morning_wakeup()'s DEFER_NAT_VENT branch"
+            " now calls nat_vent_temperature_check() immediately with the live"
+            " indoor/outdoor reading, so an already-active session is"
+            " re-evaluated against the new band at the moment it takes"
+            " effect. Already mirrored to the shadow engine via the existing"
+            " _mirror_to_shadow('handle_morning_wakeup', ...) call — no"
+            " separate wiring needed."
         ),
     },
     684: {

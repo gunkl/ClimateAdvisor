@@ -789,6 +789,66 @@ class TestFanTransitions:
 
         assert engine._fan_override_active is False
 
+    def test_morning_wakeup_rechecks_active_nat_vent_session_against_new_band(self):
+        """Issue #711: an active nat-vent/WHF session must be re-checked against the
+        just-armed daytime band immediately at wake_time, not left running until
+        whatever the next unrelated tick happens to be (previously up to 5 minutes,
+        via the periodic backstop — long enough for indoor to drift straight through
+        the graceful daytime cycle-off point into the hard exit floor before daytime
+        rules ever got a look at the session; confirmed live, 2026-08-21).
+        """
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._current_classification = _make_hot_classification()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._last_outdoor_temp = 60.0
+        engine.nat_vent_temperature_check = AsyncMock()
+
+        asyncio.run(engine.handle_morning_wakeup(indoor_temp=69.0))
+
+        engine.nat_vent_temperature_check.assert_awaited_once_with(69.0, outdoor=60.0)
+
+    def test_morning_wakeup_skips_nat_vent_recheck_when_indoor_unavailable(self):
+        """indoor_temp=None (sensor unavailable) must not be passed through to
+        nat_vent_temperature_check(), which requires a real reading — mirrors the
+        existing None-guard already used by the morning pre-cool overshoot check."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE, CONF_FAN_ENTITY: "fan.attic"})
+        engine._current_classification = _make_hot_classification()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine.nat_vent_temperature_check = AsyncMock()
+
+        asyncio.run(engine.handle_morning_wakeup(indoor_temp=None))
+
+        engine.nat_vent_temperature_check.assert_not_awaited()
+
+    def test_morning_wakeup_cycles_fan_off_gracefully_instead_of_stale_hard_exit(self):
+        """End-to-end reproduction of the 2026-08-21 live incident, using the real
+        (unmocked) nat_vent_temperature_check(): comfort_heat=68/comfort_cool=74 ->
+        daytime cycling target=71, off_threshold=70, on_threshold=72. Indoor=69 sits
+        below the graceful cycle-off point but above the hard exit floor (68) — the
+        session must cycle the fan off and stay active, not wait for a later tick and
+        risk hard-exiting once indoor drifts further down.
+        """
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+                "comfort_heat": 68,
+                "comfort_cool": 74,
+            }
+        )
+        engine._current_classification = _make_hot_classification()
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._last_outdoor_temp = 56.0
+        engine._sensor_check_callback = lambda: True  # windows still open, matches live incident
+
+        asyncio.run(engine.handle_morning_wakeup(indoor_temp=69.0))
+
+        assert engine._fan_active is False, "Fan should cycle off at the graceful 70F threshold"
+        assert engine._natural_vent_active is True, "Session must stay active — this is a cycle, not an exit"
+
     def test_bedtime_preserves_fan_active_at_override_but_clears_override_bookkeeping(self):
         """Issue #498: a fan the user was actively overriding at bedtime must be left
         running — clear_manual_override()'s unconditional clear_fan_override() call

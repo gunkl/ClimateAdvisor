@@ -140,6 +140,13 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "internal: called only from on_fan_turned_off (mirrored) and _reconcile_fan_physical_drift (internal)"
     ),
     "_reconcile_fan_on_startup_locked": "internal: private impl of reconcile_fan_on_startup (mirrored)",
+    "_apply_ode_ceiling_guard_decision": (
+        "internal: Issue #742 side-effecting shell for the classification FSM's "
+        "ODE-ceiling-guard ESCALATE branch — called only from apply_classification "
+        "(mirrored), never a standalone entry point. Sets _natural_vent_active=False/"
+        "_nat_vent_soft_start=False on escalation, mirroring the legacy inline block "
+        "it replaces when self._classification_fsm_authoritative is True"
+    ),
     "_reconcile_fan_physical_drift": (
         "internal: self-scheduled 5-min thermo-backstop timer, runs independently per engine instance"
     ),

@@ -291,6 +291,18 @@ _SHADOW_DIAG_AXES = (
     "override_grace_mirror",
     "override_grace_fsm",
     "fan_mirror",
+    # Issue #742: "classification_mirror" adds an 8th axis, deliberately with no
+    # "classification_fsm" sibling — classification_fsm.py is genuinely stateless
+    # (see its own module docstring's five-whys), so there is no separate
+    # untethered FSM state object to compare production against, the same "no
+    # functional consumer" reasoning fan_mirror's own comment above documents for
+    # its own missing "fan_fsm" sibling. decide_scheduled_band_gate() is a
+    # pre-existing shared pure function BOTH engines already call unconditionally
+    # inside apply_classification() regardless of this phase's new flag — so
+    # comparing engine_a's and engine_b's live gate result is a meaningful mirror
+    # check even though the flag only governs the ceiling-guard half of this
+    # phase's extraction.
+    "classification_mirror",
 )
 
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
@@ -665,6 +677,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # of #729's pattern — _engine_a stays False for its whole lifetime, same as
         # the 3 flags above.
         self._engine_a._fan_fsm_authoritative = False
+        # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
+        # (classification/ODE ceiling guard), fixed at construction as of #729's
+        # pattern — _engine_a stays False for its whole lifetime, same as the 4
+        # flags above.
+        self._engine_a._classification_fsm_authoritative = False
         # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
         # computing decisions from the same inputs as production, permanently inert.
         # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
@@ -726,6 +743,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # of #729's pattern — _engine_b stays True for its whole lifetime, mirror of
         # _engine_a's fixed-legacy assignment above.
         self._engine_b._fan_fsm_authoritative = True
+        # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
+        # (classification/ODE ceiling guard), fixed at construction as of #729's
+        # pattern — _engine_b stays True for its whole lifetime, mirror of
+        # _engine_a's fixed-legacy assignment above.
+        self._engine_b._classification_fsm_authoritative = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1719,6 +1741,29 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         fan_shadow_state = _fan_state_str(self.shadow_automation_engine)
         fan_mirror_agrees = fan_production_state == fan_shadow_state
 
+        # Issue #742: classification's own production/shadow agreement. Same
+        # "no separate FSM axis" shape as fan/WHF above (see _SHADOW_DIAG_AXES'
+        # comment for the full five-whys) — decide_scheduled_band_gate() is a
+        # pre-existing pure function BOTH engines already call unconditionally
+        # every apply_classification() cycle, so comparing its live result on
+        # each engine's own flags is a meaningful mirror check independent of
+        # whether either engine's _classification_fsm_authoritative flag is set.
+        from .desired_state import decide_scheduled_band_gate
+
+        def _classification_gate_str(ae: AutomationEngine) -> str:
+            gate = decide_scheduled_band_gate(
+                occupancy_mode=ae._occupancy_mode,
+                manual_override_active=ae._manual_override_active,
+                paused_by_door=ae._paused_by_door,
+                natural_vent_active=ae._natural_vent_active,
+                whf_owns_hvac=ae._whf_owns_hvac(),
+            )
+            return gate.value
+
+        classification_production_state = _classification_gate_str(self.automation_engine)
+        classification_shadow_state = _classification_gate_str(self.shadow_automation_engine)
+        classification_mirror_agrees = classification_production_state == classification_shadow_state
+
         agrees = (
             mirror_agrees
             and fsm_agrees
@@ -1727,6 +1772,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and override_grace_mirror_agrees
             and override_grace_fsm_agrees
             and fan_mirror_agrees
+            and classification_mirror_agrees
         )
 
         # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
@@ -1746,6 +1792,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "override_grace_fsm", override_grace_fsm_agrees, now
         )
         fan_mirror_duration, fan_mirror_sustained = self._shadow_diag_update_axis("fan_mirror", fan_mirror_agrees, now)
+        classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
+            "classification_mirror", classification_mirror_agrees, now
+        )
 
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
@@ -1764,6 +1813,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "fan_production_state": fan_production_state,
             "fan_shadow_state": fan_shadow_state,
             "fan_mirror_agrees": fan_mirror_agrees,
+            "classification_production_state": classification_production_state,
+            "classification_shadow_state": classification_shadow_state,
+            "classification_mirror_agrees": classification_mirror_agrees,
             "agrees": agrees,
             "checked_at": now.isoformat(),
             "debounce": {
@@ -1801,6 +1853,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "disagreement_seconds": fan_mirror_duration,
                     "sustained": fan_mirror_sustained,
                     "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["fan_mirror"],
+                },
+                "classification_mirror": {
+                    "disagreement_seconds": classification_mirror_duration,
+                    "sustained": classification_mirror_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["classification_mirror"],
                 },
             },
             "cumulative_reset_date": self._shadow_diag_cumulative_date.isoformat(),
@@ -1907,6 +1964,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "fan_mirror", now, fan_production_state, fan_shadow_state, "shadow", fan_mirror_duration
                 )
                 self._shadow_diag_incident_emitted["fan_mirror"] = True
+        if classification_mirror_sustained:
+            _LOGGER.warning(
+                "Classification shadow engine disagreement (Issue #742): production=%s shadow=%s (sustained %.0fs)",
+                classification_production_state,
+                classification_shadow_state,
+                classification_mirror_duration,
+            )
+            if not self._shadow_diag_incident_emitted["classification_mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "classification_mirror",
+                    now,
+                    classification_production_state,
+                    classification_shadow_state,
+                    "shadow",
+                    classification_mirror_duration,
+                )
+                self._shadow_diag_incident_emitted["classification_mirror"] = True
 
     @property
     def shadow_engine_diagnostic(self) -> dict[str, Any] | None:

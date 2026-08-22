@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.63"
+VERSION = "0.6.64"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.64": [
+        "Feat #749: adds a hard-invariant watchdog that checks, every update cycle,"
+        " whether the AC and the whole-house fan are ever physically running at the"
+        " same time — a condition that should never happen. If it ever does, you'll"
+        " see an immediate notification and a warning on the Status tab, even if the"
+        " automation's own internal bookkeeping looks fine. Detects and alerts only —"
+        " it never takes any action on its own.",
+    ],
     "0.6.63": [
         "Fix #748: the AC and the whole-house fan could end up running at the same"
         " time when a WHF session had been started via an RF remote timer and you"
@@ -2231,6 +2239,34 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    749: {
+        "version_fixed": "0.6.64",
+        "title": (
+            "Added a hard-invariant watchdog module (invariant_watchdog.py), motivated"
+            " directly by the #739/#748 live incident where the AC and the whole-house"
+            " fan ran simultaneously while CA's own internal bookkeeping stayed"
+            " self-consistent throughout. Deliberately minimal — not a general"
+            " validation framework — it holds a small, explicit list of absolute system"
+            " states (currently one: AC and WHF must never both be physically active at"
+            " once), each checked by a pure function over ground-truth sensor/thermostat"
+            " reads only, never internal override/grace/session flags. Runs once per"
+            " coordinator update cycle via the new _run_invariant_watchdog() method,"
+            " reusing existing ground-truth readers (_get_fan_physical_state(),"
+            " hvac_action). Detect-and-alert only: a CRITICAL log line, an immediate"
+            " notify-domain push (deduped to once per 5 minutes for a persisting"
+            " violation), an event-log entry, and a Status-tab surface — never a"
+            " corrective command of its own, since the command-layer fix in"
+            " automation.py is the sole enforcement path. Changing the invariant set"
+            " later requires the same explicit human sign-off as this project's LOCKED"
+            " golden-scenario policy."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/invariant_watchdog.py (new);"
+            " coordinator.py _run_invariant_watchdog(), invariant_violations data field;"
+            " api.py invariant_violations field; frontend/index.html Status card"
+            " surface; ai_skills_context.py _render_invariant_violation()"
+        ),
+    },
     748: {
         "version_fixed": "0.6.63",
         "title": (

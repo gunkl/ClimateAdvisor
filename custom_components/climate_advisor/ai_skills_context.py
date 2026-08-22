@@ -2278,6 +2278,14 @@ def _render_state_contradiction_warning(p: dict, unit: str) -> tuple[str, str]:
     return f"State contradiction: mode={hvac_mode} but action={hvac_action}", ""
 
 
+def _render_invariant_violation(p: dict, unit: str) -> tuple[str, str]:
+    """Issue #749: a hard system invariant was violated (e.g. AC and the whole-house
+    fan both physically running at once)."""
+    invariant = p.get("invariant", "")
+    detail = p.get("detail", "")
+    return f"Hard invariant violated: {invariant}", detail
+
+
 def _render_thermal_learning_no_observations(p: dict, unit: str) -> tuple[str, str]:
     runtime = p.get("hvac_runtime_minutes", "")
     if runtime:
@@ -2423,6 +2431,7 @@ EVENT_RENDERERS: dict[str, Callable[[dict, str], tuple[str, str]]] = {
     "startup_coalesced": _render_startup_coalesced,
     "stuck_grace_recovered": _render_stuck_grace_recovered,
     "state_contradiction_warning": _render_state_contradiction_warning,
+    "invariant_violation": _render_invariant_violation,
     "thermal_learning_no_observations": _render_thermal_learning_no_observations,
     "incident_detected": _render_incident_detected,
     # Legacy warm_day events (pre-P3 persisted logs)

@@ -241,6 +241,7 @@ from .fan_status import (
     parse_remote_timer_event,
     resolve_untracked_fan_status,
 )
+from .invariant_watchdog import run_invariant_checks
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .nat_vent_lifecycle import NatVentLifecycleState
@@ -3992,6 +3993,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # hvac_mode/hvac_action, so safe to compute unconditionally here.
         _fan_status_uc = self._compute_fan_status()
 
+        # Issue #749: hard-invariant watchdog. Deliberately reads ground truth directly
+        # (hvac_action above, _get_fan_physical_state() below) rather than _fan_status_uc —
+        # that computed status blends in CA's own session/override bookkeeping, which is
+        # exactly what stayed self-consistent while reality diverged during the 2026-08-22
+        # incident (#739/#748) this module exists to catch.
+        _invariant_violations = self._run_invariant_watchdog(hvac_action=hvac_action)
+
         # Emit a structured warning event when the HVAC entity reports an active action
         # (heating/cooling/fan) while hvac_mode is "off".  This surfaces the contradiction
         # in the investigator event log so it is not invisible outside the AI narrative.
@@ -4244,6 +4252,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             ATTR_FAN_OVERRIDE_SINCE: self.automation_engine._fan_override_time,
             ATTR_FAN_RUNNING: fan_running,
             ATTR_HVAC_ACTION: hvac_action,
+            "invariant_violations": [{"invariant": v.name, "detail": v.detail} for v in _invariant_violations],
             "hvac_mode": hvac_mode,
             "target_temp": _target_temp,
             "target_temp_low": _target_temp_low,
@@ -6619,6 +6628,38 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             if fan_state is not None:
                 return fan_state.state.lower() in ("on", "true")
         return False
+
+    def _run_invariant_watchdog(self, *, hvac_action: str | None) -> list:
+        """Check hard system invariants and alert on any violation (Issue #749).
+
+        Detect-and-alert only — never issues a corrective command. The automation
+        engine's own command-layer fixes (e.g. ``_deactivate_fan()``) are the sole
+        enforcement path for the invariants checked here; see invariant_watchdog.py's
+        module docstring for the full rationale. Reads ground truth directly
+        (``hvac_action`` from the caller, ``_get_fan_physical_state()`` here) rather than
+        any derived/session-blended status — see Issue #739/#748.
+        """
+        violations = run_invariant_checks(
+            hvac_action=hvac_action,
+            whf_physically_on=self._get_fan_physical_state(),
+            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+        )
+        for violation in violations:
+            _LOGGER.critical("Hard invariant violated: %s — %s", violation.name, violation.detail)
+            if self.automation_engine is None or self.automation_engine._recent_duplicate(
+                "invariant_violation", (violation.name,), window_seconds=300
+            ):
+                continue
+            self._emit_event("invariant_violation", {"invariant": violation.name, "detail": violation.detail})
+            self.hass.async_create_task(
+                self.automation_engine._notify(
+                    f"{violation.detail} Climate Advisor is stepping in to prevent this, but"
+                    " flagging it because it should never happen.",
+                    "Climate Advisor — invariant violated",
+                    notification_type="invariant_violation",
+                )
+            )
+        return violations
 
     def _should_run_untracked_fan_backstop(self, is_untracked: bool) -> bool:
         """Whether the periodic ``backstop_30min`` untracked-fan reconcile should fire now.

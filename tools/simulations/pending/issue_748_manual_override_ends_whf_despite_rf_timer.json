@@ -1,0 +1,93 @@
+{
+  "name": "issue_748_manual_override_ends_whf_despite_rf_timer",
+  "description": "Issue #748 (live incident 2026-08-22, reported as #739): a whole-house-fan session started via a QuietCool RF remote 1-hour timer, followed by the user manually setting the thermostat to cool, left the AC and the WHF running simultaneously for 5+ minutes. Issue #714's manual-override-conflict stand-down correctly detected the conflict and called _deactivate_fan(), but Issue #486's earlier 'RF remote timer is absolute' guard inside _deactivate_fan() silently declined the fan-off request — the two features were never reconciled.",
+  "source": "production incident 2026-08-22",
+  "issue": 748,
+  "notes": [
+    "Occupant impact: the user runs the whole-house fan overnight via the RF remote's 1-hour timer button, then a few minutes later manually sets the thermostat to Cool at the wall. Without this fix, the AC and the whole-house fan both keep running — fighting each other, wasting energy, and violating the project's hard AC/WHF mutex invariant — for the rest of the RF timer's duration instead of the user's more recent action (the thermostat) winning immediately.",
+    "Fix (automation.py, Issue #748): added a bypass_absolute_override parameter to _deactivate_fan() that skips the Issue #486 RF-timer-absolute guard. Scoped to a single new shared helper, _stand_down_whf_for_override_conflict(), which replaced 4 previously-duplicated inline copies of the 'manual override conflicts with WHF -- stand it down' logic (immediate override detection, nat-vent-exit tick, nat-vent-temp-check tick, fan-thermostat-check tick). Only that helper passes bypass_absolute_override=True; every other _deactivate_fan() caller (routine automation shutoffs -- nat-vent cycling, bedtime, economizer-off, etc.) is untouched and still respects the RF-timer-absolute protection exactly as before.",
+    "(a) Scenario effectiveness: without the fix, _deactivate_fan() sees _fan_override_active=True and _fan_remote_timer_hours=1.0, logs 'Fan deactivation suppressed by active RF remote timer' and returns FanCommandResult.OVERRIDDEN without calling the fan-off service -- _fan_active stays True and this scenario's fan_not_active assertion fails, reproducing the exact live incident.",
+    "(b) Docs alignment: docs/grace-periods-spec.md documents the RF-remote-timer-absolute rule (Issue #486) and the manual-override-conflict stand-down rule (Issue #714) as separate sections; this fix's PR updates that doc to state the explicit precedence (hard AC/WHF mutex always wins over RF-timer-absolute protection) so the two sections no longer read as contradictory.",
+    "(c) User outcome if this scenario's assertion fails in the future: a WHF session started via an RF remote timer would once again be immune to the AC/WHF hard mutex for the remainder of the timer whenever the user manually changes the thermostat mode -- silently reverting to the Issue #739/#748 defect."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": true,
+    "fan_remote_entity": "event.quietcool_remote"
+  },
+  "use_coordinator": true,
+  "skip_startup_coalesce": true,
+  "events": [
+    {
+      "time": "2026-08-22T15:00:00",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "off",
+      "note": "Seeds a real prior state for fan.whf -- the fan-entity listener requires both old_state and new_state to be non-None to evaluate a transition."
+    },
+    {
+      "time": "2026-08-22T15:00:05",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Matches the live incident: warm day, classification currently wants HVAC off (free cooling preferred)."
+    },
+    {
+      "time": "2026-08-22T15:00:10",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 82.0,
+      "note": "Matches the live incident's indoor/outdoor readings at the time of the RF remote press."
+    },
+    {
+      "time": "2026-08-22T15:00:18",
+      "type": "external_fan_state_change",
+      "entity": "fan.whf",
+      "state": "on",
+      "note": "User turns the whole-house fan on via the QuietCool RF remote's 1-hour timer button, matching the live incident's 15:00:18 press."
+    },
+    {
+      "time": "2026-08-22T15:00:18",
+      "type": "external_entity_state_change",
+      "entity": "event.quietcool_remote",
+      "state": "2026-08-22T15:00:18+00:00",
+      "attributes": {"event_type": "timer_1h"},
+      "note": "The RF remote's decoded firmware event: state is the press timestamp, attributes.event_type carries the selected 1-hour timer token. Real coordinator listener processes this and calls handle_fan_manual_override(duration_override=3600, remote_timer_hours=1.0, is_remote_event=True) -- setting _fan_override_active=True and _fan_remote_timer_hours=1.0, matching the live incident's 'RF remote timer: 1.0h' grace-start log line."
+    },
+    {
+      "time": "2026-08-22T15:00:58",
+      "type": "thermostat_state_changed",
+      "hvac_mode": "cool",
+      "temperature": 72,
+      "note": "User manually sets the thermostat to Cool at the wall, matching the live incident's 15:00:58 override. Fires the real coordinator._async_thermostat_changed listener -> AutomationEngine.handle_manual_override() -> the WHF/nat-vent conflict stand-down."
+    },
+    {
+      "time": "2026-08-22T15:03:00",
+      "type": "temp_update",
+      "indoor_f": 74.0,
+      "outdoor_f": 82.0,
+      "note": "A few minutes later -- long enough that a silently-suppressed fan-off (the live bug) would still show the WHF running at this point, exactly as it did in production through at least 15:05:52."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-22T15:03:00",
+      "expect": "fan_not_active",
+      "track": "logic",
+      "simulator_support": true,
+      "reason": "The hard AC/WHF mutex must win over the RF-timer-absolute protection: once the user manually commands an active HVAC mode, the whole-house fan must be turned off immediately, even though its 1-hour RF remote timer has not expired. Reads the final _fan_active flag directly -- this is exactly the flag that stayed (wrongly) True in the live 2026-08-22 incident."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After the Issue #748 fix, a manual thermostat override to an active mode immediately turns off a whole-house-fan session even when that session was started via an RF remote timer -- the hard AC/WHF mutex takes precedence over the Issue #486 RF-timer-absolute protection, which continues to apply normally to every other (non-conflicting) automation-driven fan shutoff.",
+    "observed_behavior": "The WHF is commanded off immediately after the manual override to cool is detected, despite the active 1-hour RF remote timer -- _fan_active is False by 15:03:00.",
+    "expected_behavior": "A manual override to an active HVAC mode must end an active WHF session immediately, regardless of any RF remote timer protecting that session from routine automation second-guessing -- last setting placed wins."
+  }
+}

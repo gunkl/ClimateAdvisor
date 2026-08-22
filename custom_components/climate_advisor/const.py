@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.62"
+VERSION = "0.6.63"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.63": [
+        "Fix #748: the AC and the whole-house fan could end up running at the same"
+        " time when a WHF session had been started via an RF remote timer and you"
+        " then changed the thermostat mode by hand — the fan-off command silently"
+        " never happened. Your most recent action now always wins: setting the"
+        " thermostat while a remote-timer WHF session is active immediately turns"
+        " the fan off, no matter how much time is left on the timer.",
+    ],
     "0.6.62": [
         "Feat #746: no user-visible change. Strangler-fig completion program Phase 5"
         " (final subsystem extraction) — extracts the economizer's two-phase window-"
@@ -2223,6 +2231,37 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    748: {
+        "version_fixed": "0.6.63",
+        "title": (
+            "Fixed a hard AC/WHF mutex violation traced from a live 2026-08-22 incident"
+            " (#739): a WHF session started via a QuietCool RF remote timer, followed by"
+            " a manual thermostat mode change, left both the AC and the whole-house fan"
+            " running simultaneously for 5+ minutes. Root cause: Issue #714's manual-"
+            " override-conflict stand-down (which correctly detects the conflict and"
+            " calls _deactivate_fan()) was silently defeated by Issue #486's earlier"
+            " 'RF remote timer is absolute' guard inside _deactivate_fan() — the two"
+            " features were never reconciled. Five-whys traced the deeper cause to Issue"
+            " #714's stand-down logic being copy-pasted at 4 separate call sites"
+            " (immediate override detection, nat-vent-exit tick, nat-vent-temp-check"
+            " tick, fan-thermostat-check tick) instead of one shared helper, which is"
+            " why the conflict with Issue #486 wasn't caught. Fix: added a"
+            " bypass_absolute_override parameter to _deactivate_fan(), scoped to a new"
+            " single shared helper (_stand_down_whf_for_override_conflict()) that all 4"
+            " call sites now route through — routine automation-driven fan shutoffs"
+            " (nat-vent cycling, bedtime, economizer-off, etc.) still respect the RF-"
+            " timer-absolute protection exactly as before; only the hard mutex-"
+            " enforcement path bypasses it."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/automation.py"
+            " _deactivate_fan() (bypass_absolute_override parameter),"
+            " _stand_down_whf_for_override_conflict() (new shared helper),"
+            " 4 call sites in start_override_confirmation(),"
+            " check_natural_vent_conditions(), nat_vent_temperature_check(),"
+            " fan_thermostat_check()"
+        ),
+    },
     746: {
         "version_fixed": "0.6.62",
         "title": (

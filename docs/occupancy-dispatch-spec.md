@@ -1,4 +1,4 @@
-<!-- Nav: ← [Automation Flowchart](07-AUTOMATION-FLOWCHART.md) | → [automation.py#L308](../custom_components/climate_advisor/automation.py#L308) [coordinator.py#L777](../custom_components/climate_advisor/coordinator.py#L777) | ↔ [Grace Periods](grace-periods-spec.md) [Thermal Model v3](thermal-model-v3-spec.md) [State Persistence](state-persistence.md) -->
+<!-- Nav: ← [Automation Flowchart](07-AUTOMATION-FLOWCHART.md) | → [automation.py#L1082](../custom_components/climate_advisor/automation.py#L1082) [coordinator.py#L2662](../custom_components/climate_advisor/coordinator.py#L2662) | ↔ [Grace Periods](grace-periods-spec.md) [Thermal Model v3](thermal-model-v3-spec.md) [State Persistence](state-persistence.md) -->
 
 # Occupancy Dispatch — Territory Spec (Tier 3)
 
@@ -22,11 +22,11 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
   - `custom_components/climate_advisor/automation.py` — occupancy handlers, `_set_temperature_for_mode()` safety net, `apply_classification()` guards, bedtime/wakeup guards, `set_occupancy_mode()`
   - `custom_components/climate_advisor/const.py` — mode constants, `OCCUPANCY_SETBACK_MINUTES`, `VACATION_SETBACK_EXTRA`
   - `custom_components/climate_advisor/state.py` — `STATE_VERSION`, `StatePersistence` (state file I/O)
-- **Approximate line ranges:**
-  - `coordinator.py`: L763–L896 (toggle listener + priority resolver + away timer)
-  - `coordinator.py`: L287–L290 (instance variables), L525–L532 (state restore), L600–L601 (state persist)
-  - `automation.py`: L1432 (`apply_classification`, DEFER_OCCUPANCY guard ~L1513), L2249 (`_set_temperature_for_mode` safety net), L3852 (`handle_occupancy_away`), L3899 (`handle_occupancy_home`), L3951 (`handle_occupancy_vacation`), L4001 (`handle_bedtime`, DEFER_OCCUPANCY guard ~L4033), L4149 (`handle_pre_cool`, DEFER_OCCUPANCY guard ~L4199), L4324 (`handle_morning_wakeup`). Line numbers drift with unrelated commits — treat as approximate; verify with `grep -n "async def " automation.py` before citing.
-  - `const.py`: L130, L155–L161 (constants)
+- **Approximate line ranges** (re-verified 2026-08-22, Issue #735 — previous citations were ~5,000 lines stale; behavioral content below was checked against current code and remains accurate):
+  - `coordinator.py`: L2648–L2780 (toggle listener + priority resolver + away timer)
+  - `coordinator.py`: ~L1947 (instance variables), L2333–L2340 (state restore), L2470 (state persist)
+  - `automation.py`: L2432 (`apply_classification`, DEFER_OCCUPANCY guard ~L2518), L3305 (`_set_temperature_for_mode` safety net), L6655 (`handle_occupancy_away`), L6728 (`handle_occupancy_home`), L6780 (`handle_occupancy_vacation`), L6840 (`handle_bedtime`, DEFER_OCCUPANCY guard ~L6879), L7019 (`handle_pre_cool`, DEFER_OCCUPANCY guard ~L7068), L7195 (`handle_morning_wakeup`). Line numbers drift with unrelated commits — treat as approximate; verify with `grep -n "async def " automation.py` before citing.
+  - `const.py`: L8333 (`OCCUPANCY_SETBACK_MINUTES`), L8377–L8383 (mode constants + `VACATION_SETBACK_EXTRA`), L8485 (`STATE_FILE`)
 
 **Out of scope:**
 
@@ -53,7 +53,7 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
 
 ## Priority Resolution
 
-`_compute_occupancy_mode()` at `coordinator.py:L777`. Returns one of the four mode strings. Evaluated on every toggle state change (not cached between calls).
+`_compute_occupancy_mode()` at `coordinator.py:L2662`. Returns one of the four mode strings. Evaluated on every toggle state change (not cached between calls).
 
 **Algorithm (highest priority first):**
 
@@ -74,17 +74,17 @@ This spec covers the occupancy toggle listener, mode priority resolution, state-
 | `"vacation_toggle_entity"` | `CONF_VACATION_TOGGLE` | Vacation binary sensor | `CONF_VACATION_TOGGLE_INVERT` |
 | `"guest_toggle_entity"` | `CONF_GUEST_TOGGLE` | Guest binary sensor | `CONF_GUEST_TOGGLE_INVERT` |
 
-**`_is_toggle_on(entity_id, invert)` behavior** (`coordinator.py:L763`):
+**`_is_toggle_on(entity_id, invert)` behavior** (`coordinator.py:L2648`):
 
 - Reads entity state from `hass.states.get(entity_id)`.
 - States `"unavailable"` and `"unknown"` are treated as `False` (OFF). No exception is raised.
 - Invert is applied as a boolean XOR: `result = raw_state XOR invert`. A configured invert flag on an unavailable entity still resolves to `False` (unavailable is never treated as ON even after inversion).
 
-Toggle entities may be any binary sensor or input boolean. The integration subscribes to state-change events for each configured toggle entity at setup time (`coordinator.py:L810`).
+Toggle entities may be any binary sensor or input boolean. The integration subscribes to state-change events for each configured toggle entity at setup time (exact listener-registration call site not re-verified in this pass — search for the toggle config keys' entity-id reads during setup rather than trusting a specific line number here).
 
 ## State Transitions
 
-### Flow of `_async_occupancy_toggle_changed` (`coordinator.py:L827`)
+### Flow of `_async_occupancy_toggle_changed` (`coordinator.py:L2712`)
 
 Executes whenever any configured toggle entity fires a state-change event:
 
@@ -116,11 +116,11 @@ Executes whenever any configured toggle entity fires a state-change event:
 | Any | toggle → HOME | HOME | None | cancel away timer; `handle_occupancy_home()` |
 | Any | HA restart | (restored) | — | mode read from `climate_advisor_state.json`; engine synced; away timer NOT re-armed |
 
-`_cancel_occupancy_away_timer()` (`coordinator.py:L820`): calls the stored cancel handle and sets `_occupancy_away_timer_cancel = None`. Safe to call when no timer is running.
+`_cancel_occupancy_away_timer()` (`coordinator.py:L2705`): calls the stored cancel handle and sets `_occupancy_away_timer_cancel = None`. Safe to call when no timer is running.
 
 ## Handlers
 
-### `handle_occupancy_home()` (`automation.py:L1650`)
+### `handle_occupancy_home()` (`automation.py:L6728`)
 
 Invoked for both HOME and GUEST modes (coordinator routes GUEST through this same handler).
 
@@ -136,7 +136,7 @@ Invoked for both HOME and GUEST modes (coordinator routes GUEST through this sam
 
 **Does NOT clear `_manual_override_active`.** If a manual override is active when the user returns, comfort restore via `_set_temperature_for_mode()` still runs (override flag is only checked in `apply_classification()`).
 
-### `handle_occupancy_away()` (`automation.py:L1615`)
+### `handle_occupancy_away()` (`automation.py:L6655`)
 
 Invoked after the 15-minute grace timer expires, and also called by `apply_classification()` when occupancy is AWAY on the 30-minute poll cycle.
 
@@ -171,7 +171,7 @@ Invoked immediately (no grace) when VACATION mode is detected.
 | AWAY | `setback_heat + c.setback_modifier` | `setback_cool - c.setback_modifier` |
 | VACATION | `setback_heat + c.setback_modifier - 3` | `setback_cool - c.setback_modifier + 3` |
 
-`c.setback_modifier` comes from the `DayClassification` (e.g., trend days adjust the setback depth). `VACATION_SETBACK_EXTRA = 3` (°F, defined in `const.py:L161`).
+`c.setback_modifier` comes from the `DayClassification` (e.g., trend days adjust the setback depth). `VACATION_SETBACK_EXTRA = 3` (°F, defined in `const.py:L8383`).
 
 **Comfort-band definition:** `comfort_heat` is the lower bound; `comfort_cool` is the upper bound. In-band condition: `comfort_heat ≤ T ≤ comfort_cool`.
 
@@ -216,16 +216,16 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 
 ## Persistence
 
-**State file:** `climate_advisor_state.json` in the HA config root (constant `STATE_FILE` in `const.py:L199`). Written atomically via `StatePersistence` (`state.py`) using a `.tmp` file and `os.replace()`.
+**State file:** `climate_advisor_state.json` in the HA config root (constant `STATE_FILE` in `const.py:L8485`). Written atomically via `StatePersistence` (`state.py`) using a `.tmp` file and `os.replace()`.
 
-**Keys written (`coordinator.py:L600–L601`):**
+**Keys written (`coordinator.py:L2470`):**
 
 | Key | Type | Value when away timer pending |
 |---|---|---|
 | `"occupancy_mode"` | `str` | Current mode string (e.g., `"away"`) |
 | `"occupancy_away_since"` | `str` \| `null` | ISO datetime string of departure; `null` if home |
 
-**Restore sequence (`coordinator.py:L525–L532`):**
+**Restore sequence (`coordinator.py:L2333–L2340`):**
 
 1. Read `state.get("occupancy_mode", OCCUPANCY_HOME)` → `self._occupancy_mode`
 2. Call `automation_engine.set_occupancy_mode(self._occupancy_mode)` to sync engine
@@ -257,8 +257,8 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 
 ## Invariants
 
-1. `_occupancy_mode` always contains one of the four valid strings: `"home"`, `"away"`, `"vacation"`, `"guest"`. The `set_occupancy_mode()` validator (`automation.py:L308–L315`) enforces this — invalid values log a WARNING and default to `OCCUPANCY_HOME`.
-2. The coordinator's `self._occupancy_mode` and the engine's `_occupancy_mode` are always in sync at the end of any transition. `set_occupancy_mode()` is called in the same transaction as the coordinator's own assignment (`coordinator.py:L864–L867`).
+1. `_occupancy_mode` always contains one of the four valid strings: `"home"`, `"away"`, `"vacation"`, `"guest"`. The `set_occupancy_mode()` validator (`automation.py:L1082–L1086`) enforces this — invalid values log a WARNING and default to `OCCUPANCY_HOME`.
+2. The coordinator's `self._occupancy_mode` and the engine's `_occupancy_mode` are always in sync at the end of any transition. `set_occupancy_mode()` is called in the same transaction as the coordinator's own assignment (`coordinator.py:L2749`, alongside `_async_occupancy_toggle_changed()`'s own `self._occupancy_mode = new_mode`).
 3. At most one away timer is pending at any time. `_cancel_occupancy_away_timer()` is always called before starting a new timer, and before dispatching VACATION, HOME, or GUEST handlers.
 4. `handle_occupancy_away()` is never called directly by the coordinator — it is always routed through either the timer callback or `apply_classification()`. This preserves the 15-minute grace guarantee.
 5. `handle_occupancy_vacation()` is always called immediately on the vacation toggle (no grace). There is no equivalent grace timer for vacation mode. As of Issue #505, it is also called from `apply_classification()`/`handle_bedtime()`/`handle_pre_cool()`'s `DEFER_OCCUPANCY` branches on every subsequent cycle while vacation mode is active — not just once at toggle time.
@@ -272,24 +272,26 @@ The manual-override-first ordering means: if both `_manual_override_active` and 
 |---|---|---|
 | Toggle entity `unavailable` or `unknown` | `_is_toggle_on()` treats it as `False` (OFF); no exception raised | Entity effectively reads as "not toggled on"; may hold incorrect mode if the sensor is persistently unavailable |
 | HA restart while 15-minute away timer is pending | Timer callback lost; `occupancy_mode = "away"` and `occupancy_away_since` are restored from state file; timer is NOT re-armed | Setback does not fire automatically; fires on next `apply_classification()` 30-minute cycle or next toggle change |
-| `set_occupancy_mode()` receives an unrecognized mode string | Logs WARNING at `automation.py:L311`; defaults to `OCCUPANCY_HOME` | Engine remains in HOME mode; coordinator and engine may briefly be out of sync if coordinator accepted the invalid mode |
+| `set_occupancy_mode()` receives an unrecognized mode string | Logs WARNING at `automation.py:L1085`; defaults to `OCCUPANCY_HOME` | Engine remains in HOME mode; coordinator and engine may briefly be out of sync if coordinator accepted the invalid mode |
 | State file missing, corrupt, or wrong `STATE_VERSION` | `StatePersistence.load()` returns `{}` and logs WARNING; coordinator defaults to `OCCUPANCY_HOME` | Occupancy state is reset to HOME on restart; `_occupancy_away_since` is cleared |
 | No day classification available when handler fires | `handle_occupancy_away()` logs WARNING and returns; `handle_occupancy_home()` and `handle_occupancy_vacation()` return silently | No HVAC temperature change; setback or comfort restore is deferred until `apply_classification()` runs next |
 | Both `guest_toggle` and `vacation_toggle` entities ON simultaneously | `_compute_occupancy_mode()` returns `OCCUPANCY_GUEST` (GUEST has higher priority) | Full comfort applied; deep vacation setback is not used; intentional by design |
 
 ## Code Reference
 
-- [`set_occupancy_mode`](../custom_components/climate_advisor/automation.py#L308) — validates and sets engine's occupancy mode
-- [`apply_classification` (occupancy guards)](../custom_components/climate_advisor/automation.py#L653) — override-first, then vacation early return, then away redirect
-- [`_set_temperature_for_mode`](../custom_components/climate_advisor/automation.py#L925) — comfort-application safety net
-- [`handle_occupancy_away`](../custom_components/climate_advisor/automation.py#L1615) — away setback handler
-- [`handle_occupancy_home`](../custom_components/climate_advisor/automation.py#L1650) — home/guest comfort restore + notification
-- [`handle_occupancy_vacation`](../custom_components/climate_advisor/automation.py#L3951) — deep vacation setback handler
-- [`handle_bedtime` (occupancy guard)](../custom_components/climate_advisor/automation.py#L1727) — skips sleep setback when away/vacation
-- [`handle_morning_wakeup` (occupancy guard)](../custom_components/climate_advisor/automation.py#L1768) — skips comfort restore when not home/guest
-- [`_is_toggle_on`](../custom_components/climate_advisor/coordinator.py#L763) — reads toggle entity state with unavailable=OFF and XOR invert
-- [`_compute_occupancy_mode`](../custom_components/climate_advisor/coordinator.py#L777) — priority resolver (GUEST > VACATION > HOME/AWAY > default)
-- [`_cancel_occupancy_away_timer`](../custom_components/climate_advisor/coordinator.py#L820) — safe timer cancellation
-- [`_async_occupancy_toggle_changed`](../custom_components/climate_advisor/coordinator.py#L827) — toggle event listener and dispatch orchestrator
-- [`OCCUPANCY_HOME/AWAY/VACATION/GUEST`](../custom_components/climate_advisor/const.py#L155) — mode constants
-- [`OCCUPANCY_SETBACK_MINUTES`, `VACATION_SETBACK_EXTRA`](../custom_components/climate_advisor/const.py#L130) — timing and depth constants
+- [`set_occupancy_mode`](../custom_components/climate_advisor/automation.py#L1082) — validates and sets engine's occupancy mode
+- [`apply_classification` (occupancy guards)](../custom_components/climate_advisor/automation.py#L2456) — override-first (~L2456), then vacation early return (~L2519), then away redirect
+- [`_set_temperature_for_mode`](../custom_components/climate_advisor/automation.py#L3305) — comfort-application safety net
+- [`handle_occupancy_away`](../custom_components/climate_advisor/automation.py#L6655) — away setback handler
+- [`handle_occupancy_home`](../custom_components/climate_advisor/automation.py#L6728) — home/guest comfort restore + notification
+- [`handle_occupancy_vacation`](../custom_components/climate_advisor/automation.py#L6780) — deep vacation setback handler
+- [`handle_bedtime` (occupancy guard)](../custom_components/climate_advisor/automation.py#L6840) — skips sleep setback when away/vacation (DEFER_OCCUPANCY guard ~L6879)
+- [`handle_morning_wakeup` (occupancy guard)](../custom_components/climate_advisor/automation.py#L7195) — skips comfort restore when not home/guest (DEFER_OCCUPANCY guard ~L7219)
+- [`_is_toggle_on`](../custom_components/climate_advisor/coordinator.py#L2648) — reads toggle entity state with unavailable=OFF and XOR invert
+- [`_compute_occupancy_mode`](../custom_components/climate_advisor/coordinator.py#L2662) — priority resolver (GUEST > VACATION > HOME/AWAY > default)
+- [`_cancel_occupancy_away_timer`](../custom_components/climate_advisor/coordinator.py#L2705) — safe timer cancellation
+- [`_async_occupancy_toggle_changed`](../custom_components/climate_advisor/coordinator.py#L2712) — toggle event listener and dispatch orchestrator
+- [`OCCUPANCY_HOME/AWAY/VACATION/GUEST`](../custom_components/climate_advisor/const.py#L8377) — mode constants
+- [`OCCUPANCY_SETBACK_MINUTES`, `VACATION_SETBACK_EXTRA`](../custom_components/climate_advisor/const.py#L8333) — timing and depth constants
+
+_Line numbers re-verified 2026-08-22 (Issue #735) against the working tree; previous citations were ~5,000 lines stale. Verify with `grep -n` before citing in a future PR — these will drift again._

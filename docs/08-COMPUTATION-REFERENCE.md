@@ -1504,13 +1504,14 @@ is auto-suggested as `True` (user can override).
 
 ### 9d. Fan Status Sensor Values
 
-The `sensor.climate_advisor_fan_status` entity exposes one of six state strings:
+The `sensor.climate_advisor_fan_status` entity exposes one of seven state strings:
 
 | Sensor state | Meaning |
 |---|---|
 | `disabled` | Fan control is not configured (`fan_mode = disabled`) |
 | `inactive` | Fan is off; integration is in control |
-| `active` | Fan is on; integration activated it (nat-vent or economizer) |
+| `active` | Fan is on; integration activated it (nat-vent or economizer); physical state confirmed for WHF |
+| `active (unconfirmed)` | CA flag `_fan_active=True` but WHF physical state reads off — a stale flag left over after a manual stop. Logged at `WARNING` (Issue #374). `_reconcile_fan_physical_drift()` (the 5-min backstop) self-corrects the underlying `_fan_active` flag within 2 ticks (~10 min, Issue #423); since Issue #510 the *displayed* value resolves faster than that — it is only shown within the transient ~30s post-command window (`_is_recent_fan_command()`), and returns `"inactive"` directly past that window regardless of whether the backstop has ticked yet (ground truth wins). |
 | `running (manual override)` | Fan is physically on under manual override. Two sub-cases: (a) `_fan_active=True` (CA-owned flag set) — CA has a record of activating it; (b) `_fan_active=False` but physical state is on — user-owned run, CA recorded the override but did not adopt it as nat-vent. Both sub-cases report the same sensor value. *(Issue #365)* |
 | `off (manual override)` | `_fan_override_active=True` and `_fan_active=False` and physical state is off (or fan_mode is not WHF/BOTH). Override still in effect but the fan has been turned off before grace expired. *(Issue #365)* |
 | `running (untracked)` | Fan is physically running but `_fan_active=False`. Detection path depends on fan mode: **HVAC/Both** — thermostat reports `fan_mode=on` or `hvac_action=fan`; **WHF/Both** — `_get_fan_physical_state()` reads `fan_state_entity` (Type 2) or `fan_entity` (Type 1). Typical after HA restart or user-initiated run from thermostat/wall switch. Returns `"inactive"` instead when `fan_state_feedback=False` (command-only mode, no physical feedback sensor), or when the physical signal simply hasn't caught up yet to CA's own very-recent off-command (`_is_recent_fan_command(threshold_seconds=30.0)` — Issue #571, §9e-G). *(WHF fallback added Issue #363.)* |
@@ -1832,6 +1833,93 @@ See `_compute_automation_status()` in `coordinator.py`.
 **Test coverage:** `tests/test_nat_vent_activation.py::TestDecisionLockHolderTracking` — holder set
 during a pass and cleared after, cleared even when the pass body raises, and a second (waiting) pass
 can see the first pass's holder name while blocked.
+
+---
+
+### 9h. Fan/WHF FSM Extraction and Shadow-Diagnostic Coverage (Issue #731)
+
+Same "pull the decision logic out into a pure, independently-testable module, wire it in behind a
+per-engine authoritative flag, validate against a live shadow engine" pattern already applied to
+nat-vent (`nat_vent_fsm.py`, Issue #633), door/window pause/grace (`door_window_fsm.py`, Issue #637),
+and override/grace (`override_grace_fsm.py`, Issue #639) — see `docs/nat-vent-lifecycle-spec.md` for
+the fullest write-up of that shared shape. `fan_fsm.py` is the fan/WHF subsystem's version, built in
+9 phases across Issue #731. Full spec: `docs/fan-lifecycle-spec.md`.
+
+**Composed, not flat, state.** Unlike the other 3 lifecycles, the fan/WHF subsystem does not collapse
+to one enum. `fan_lifecycle.py`'s `FanLifecycleState` is a 5-axis composed dataclass — physical
+(off/on/on-drift-suspected), override (none/active/active-remote-timer), cycling
+(idle/active/suspended), HVAC ownership (none/suppressing), and toggle rate-limit
+(not-deferred/deferred-activate/deferred-deactivate) — because a WHF can genuinely occupy several of
+these independently at once (physically on, under manual override, owning HVAC suppression, AND
+rate-limited against its next toggle, simultaneously). `fan_fsm.py`'s `FanFsmEventKind` has 16
+members, one per real production entry point (`_activate_fan`, `_deactivate_fan`,
+`reconcile_fan_on_startup`, `handle_fan_manual_override`, `clear_fan_override`,
+`on_fan_turned_off`, its RF-timer-boundary coalesce branch, `_clear_fan_flags_and_start_grace`,
+`_fan_cycle_on`/`_fan_cycle_off`/`_stop_fan_min_runtime_cycles`, `_reconcile_fan_physical_drift`,
+the thermo-backstop trio, `fan_thermostat_check`, and the WHF-suppression/-release pair) — matching
+`override_grace_fsm.py`'s handler-triggered, dispatch-on-event-kind shape rather than nat-vent's
+periodic, dispatch-on-current-state shape (fan/WHF is not re-evaluated on a fixed tick the way
+nat-vent's gate/exit chain is).
+
+**Wiring differs structurally from the other 3.** Nat-vent/door-window/override-grace's pure FSM
+modules were never wired into either `AutomationEngine` instance — each stands apart as a third,
+independently-tracked coordinator-level computation (`self._nat_vent_fsm_state` etc.), compared
+against both the production and shadow engines' own legacy-derived states. `fan_fsm.py` is wired
+directly *inside* `AutomationEngine` instead, through a single dispatch chokepoint,
+`_resolve_fan_fsm_state()`, called from every one of the 16 real entry points. Which code path a
+given engine instance actually runs is gated by that engine's own `_fan_fsm_authoritative` boolean,
+fixed once at construction (never toggled at runtime, matching Issue #729's "engine identity, not a
+per-subsystem switch" simplification for the other 3 lifecycles): `False` for `_engine_a`/production
+(legacy body runs, FSM is evaluated in parallel for audit-trail purposes only, never applied) and
+`True` for `_engine_b`/shadow (the FSM's `to_state` is applied for real via `_apply_fan_fsm_state()`,
+writing back `_fan_active`/`_fan_override_active`/`_fan_min_runtime_active`/`_pre_fan_hvac_mode`).
+Both engines expose the same read-only `fan_lifecycle_state` property (`derive_fan_lifecycle_state()`
+over each engine's own live flags), so it is always safe to read either engine's current composed
+state regardless of which code path produced it.
+
+**Two intentionally-unreachable event kinds.** `fan_fsm.py`'s own module docstring documents that
+`THERMO_BACKSTOP_TICK` and `THERMOSTAT_CHECK_TICK` deliberately never move `to_state` away from
+`from_state` — both outcomes only inform a downstream routing decision (`_exit_nat_vent()` /
+`_deactivate_fan()` selection between several possible event types, HVAC-suppression-release
+decisions) that this FSM's 5 composed axes cannot represent without duplicating logic that belongs
+to those other functions — modeling a partial version of that routing here would risk exactly the
+"sibling threshold drift" failure mode this codebase has hit repeatedly (Issues #400/#402/#417/#456/
+#458). `thermostat_outcome`/`thermo_backstop_should_be_armed` are still populated on the returned
+`FanTransition` for a future wired caller to act on; the composed state simply doesn't change for
+these two kinds by design, not by omission.
+
+**Shadow-diagnostic coverage: `fan_mirror` axis (no `fan_fsm` sibling).** `coordinator.py`'s
+`_update_shadow_engine_diagnostic()` — the same wall-clock-debounced production/shadow comparison
+that already tracks `mirror`/`fsm` (nat-vent), `door_window_mirror`/`door_window_fsm`, and
+`override_grace_mirror`/`override_grace_fsm` — gained a 7th axis, `fan_mirror`, comparing
+`self.automation_engine.fan_lifecycle_state` against `self.shadow_automation_engine.fan_lifecycle_state`
+(joined into a single `"physical/override/cycling/hvac_ownership/rate_limit"` string, the same
+joint-string convention `override_grace`'s `"confirm/grace"` state already uses). There is
+deliberately **no** paired `fan_fsm` axis: for the other 3 lifecycles, that second axis compares
+production against a free-standing third FSM computation the coordinator tracks itself
+(`self._nat_vent_fsm_state` etc.) — a genuinely independent third opinion. Fan/WHF has no such
+free-standing computation to compare against, because `_engine_b`'s own `fan_lifecycle_state` IS the
+FSM-derived state already (via `_fan_fsm_authoritative=True`, above) — a hypothetical `fan_fsm` axis
+would always read identically to `fan_mirror` (both would be comparing production against the exact
+same shadow-engine-computed value), carrying zero independent signal. `sensor.climate_advisor_shadow_engine_status`'s
+`extra_state_attributes` exposes `fan_production_state`/`fan_shadow_state`/`fan_mirror_agrees`
+alongside the existing 3 lifecycles' fields, plus a `debounce.fan_mirror` sub-dict matching the
+existing per-axis shape (`disagreement_seconds`/`sustained`/`cumulative_seconds_today`).
+
+**`_activate_fan`/`_deactivate_fan` shadow-coverage classification.** Both remain classified
+`"internal"` (not `"mirrored"`) in `tests/test_shadow_engine_coverage.py`'s registry, same as before
+this issue — `_sync_shadow_inputs()`'s raw-copy mechanism (not a `_mirror_to_shadow()` replay call
+site) is the only coverage path for the flags these two methods write, because both are called from
+inside the shadow engine's own `_resolve_fan_fsm_state()` dispatch already (via
+`_fan_fsm_authoritative=True`), not replayed a second time from the coordinator the way nat-vent's
+mirrored methods are.
+
+**No behavior change to production in this phase.** `_fan_fsm_authoritative=False` for `_engine_a`
+for its whole lifetime — the legacy body of all 16 entry points still runs unconditionally and
+unchanged; `_resolve_fan_fsm_state()`'s FSM branch only ever executes for the shadow engine. Standalone
+comparator tests (`test_fan_fsm_authoritative_compare.py`) and the combined-lifecycle comparator
+(`test_combined_fsm_authoritative_compare.py`) both confirm zero divergence between legacy and FSM
+outputs across the shared golden/pending scenario corpus.
 
 ---
 

@@ -293,6 +293,18 @@ class TestTempCommandTimeIsSet:
         ae._write_seq = 0
         ae._pending_setpoint_single = None
         ae._record_action = MagicMock()
+        # Issue #731 Phase 4: _whf_owns_hvac() now reads the full composed
+        # fan_lifecycle_state property (via _set_temperature's WHF-ownership guard),
+        # not just config/_pre_fan_hvac_mode — stub the rest of the 5-axis fields
+        # to their real __init__ defaults so the property can be built.
+        ae._fan_active = False
+        ae._fan_drift_tick_count = 0
+        ae._fan_override_active = False
+        ae._fan_remote_timer_hours = None
+        ae._fan_min_runtime_active = False
+        ae._pre_fan_hvac_mode = None
+        ae._fan_rate_limited_until = None
+        ae._fan_rate_limited_direction = None
 
         # Bind the real method
         ae._set_temperature = types.MethodType(AutomationEngine._set_temperature, ae)

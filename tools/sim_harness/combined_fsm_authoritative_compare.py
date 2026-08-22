@@ -32,9 +32,12 @@ from typing import Any
 
 @contextmanager
 def fsm_authoritative_mutation() -> Iterator[None]:
-    """Force all three ``*_fsm_authoritative`` flags True together on every
+    """Force all four ``*_fsm_authoritative`` flags True together on every
     engine constructed while this context is active — the "run B" side of a
     combined diff_runs comparison.
+
+    Issue #731 added ``_fan_fsm_authoritative`` as the 4th flag alongside the
+    original three (nat-vent, door/window, override/grace) documented above.
     """
     from unittest.mock import patch
 
@@ -47,6 +50,7 @@ def fsm_authoritative_mutation() -> Iterator[None]:
         self._natvent_fsm_authoritative = True
         self._doorwindow_fsm_authoritative = True
         self._override_grace_fsm_authoritative = True
+        self._fan_fsm_authoritative = True
 
     with patch.object(AutomationEngine, "__init__", _wrapped_init):
         yield

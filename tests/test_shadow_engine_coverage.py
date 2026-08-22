@@ -62,6 +62,16 @@ _TRACKED_FIELDS = {
     # _pause_for_door_window(), which sets _paused_by_door — a tracked field feeding the
     # door_window/nat_vent diagnostic axes. Same raw-copy fix as _fan_active above.
     "_pre_fan_hvac_mode",
+    # Issue #731: fan/WHF FSM extraction. Same raw-copy gap class as #716/#724 above —
+    # fan_lifecycle.py's derivation and fan_fsm.py's dispatch (rate-limit/drift/cycling
+    # axes) read these as engine-instance state; _sync_shadow_inputs() raw-copies all 5
+    # for the same reason (dry_run means several of production's real setters never run
+    # on the shadow instance).
+    "_fan_on_since",
+    "_fan_min_runtime_active",
+    "_fan_rate_limited_until",
+    "_fan_rate_limited_direction",
+    "_fan_drift_tick_count",
 }
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -119,6 +129,12 @@ _COVERAGE_REGISTRY: dict[str, str] = {
         "has zero call sites as of Issue #691 (see that issue's own docstring). Same "
         "additive-first pattern as _apply_door_window_fsm_state above; will be reclassified "
         "when a future issue wires it into a real entry point"
+    ),
+    "_apply_fan_fsm_state": (
+        "internal: Issue #731 Phase 4 helper, added ahead of any production wiring — has "
+        "zero call sites until Phase 5 re-points the 16 real fan/WHF entry points at "
+        "_resolve_fan_fsm_state(). Same additive-first pattern as _apply_nat_vent_fsm_state "
+        "above; will be reclassified once wired"
     ),
     "_clear_fan_flags_and_start_grace": (
         "internal: called only from on_fan_turned_off (mirrored) and _reconcile_fan_physical_drift (internal)"
@@ -258,6 +274,29 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     "_release_whf_and_reclassify": (
         "internal: real writer of _pre_fan_hvac_mode, but the field is covered by "
         "_sync_shadow_inputs() raw copy, not a mirror call — see Issue #724"
+    ),
+    # Issue #731: fan/WHF FSM extraction's own real writers of the 5 newly-tracked fan
+    # fields above. All 4 follow the exact same shape _activate_fan/_deactivate_fan
+    # established for _fan_active (Issue #716) — a mirror replay would be inert on the
+    # permanently-dry_run shadow instance (min-runtime cycling schedules real HA timers;
+    # rate-limiting reads real wall-clock deferral windows), so raw-copy in
+    # _sync_shadow_inputs() is the correct — and only working — coverage mechanism.
+    "_stop_fan_min_runtime_cycles": (
+        "internal: real writer of _fan_min_runtime_active (clears it), but the field is "
+        "covered by _sync_shadow_inputs() raw copy, not a mirror call — see Issue #731"
+    ),
+    "_fan_cycle_on": (
+        "internal: real writer of _fan_min_runtime_active (sets it), but the field is "
+        "covered by _sync_shadow_inputs() raw copy, not a mirror call — see Issue #731"
+    ),
+    "_fan_cycle_off": (
+        "internal: real writer of _fan_min_runtime_active (clears it), but the field is "
+        "covered by _sync_shadow_inputs() raw copy, not a mirror call — see Issue #731"
+    ),
+    "_fan_toggle_rate_limited": (
+        "internal: real writer of _fan_rate_limited_until/_fan_rate_limited_direction, "
+        "but both fields are covered by _sync_shadow_inputs() raw copy, not a mirror "
+        "call — see Issue #731"
     ),
 }
 
@@ -568,3 +607,116 @@ class TestPerCallerFsmFeedCoverage:
             "_async_morning_wakeup() must call _feed_override_grace_fsm_if_cleared() after "
             "automation_engine.handle_morning_wakeup() (Issue #651)."
         )
+
+
+# Issue #731: same registry-enforcement shape as _OVERRIDE_GRACE_EVENT_KIND_REGISTRY/
+# _DOOR_WINDOW_EVENT_KIND_REGISTRY above, for FanFsmEventKind. Unlike those two, every
+# real fan/WHF dispatch site lives INSIDE AutomationEngine itself (automation.py), not
+# in coordinator.py/api.py — fan_fsm.py's own module docstring documents all 16 members
+# as "one per real call site read in full for this phase", each a method on
+# AutomationEngine. So this registry's scan target is automation.py, not coordinator.py.
+#
+# "unreachable: <reason>" is for FSM event kinds that exist in the enum but are
+# deliberately never dispatched from a real call site (documented, not silently missing).
+_FAN_FSM_EVENT_KIND_REGISTRY: dict[str, str] = {
+    "ACTIVATE_REQUESTED": "reachable",
+    "DEACTIVATE_REQUESTED": "reachable",
+    # Issue #731 Phase 5: reconcile_fan_on_startup()'s "fan is off" write group spans
+    # TWO independent lifecycles — _fan_active/_fan_on_since (fan-lifecycle, owned by
+    # _apply_fan_fsm_state()) and _natural_vent_active/_nat_vent_soft_start (nat-vent's
+    # own lifecycle, which _apply_fan_fsm_state() does not and should not own). Routing
+    # this write group through the dispatcher would silently drop the nat-vent-side flag
+    # changes once _fan_fsm_authoritative flips True (the FSM branch would apply only the
+    # fan-side quarter of this reconcile decision) — a correctness regression, not a gap
+    # in wiring effort. Stays a direct write; see automation.py's own comment at this
+    # call site for the full rationale.
+    "STARTUP_RECONCILE": (
+        "unreachable: reconcile_fan_on_startup()'s write group spans nat-vent's own "
+        "lifecycle fields, which _apply_fan_fsm_state() doesn't own — dispatching would "
+        "silently drop the nat-vent-side half of the decision"
+    ),
+    "MANUAL_OVERRIDE_DETECTED": "reachable",
+    "OVERRIDE_CLEARED": "reachable",
+    # Issue #731 Phase 5: on_fan_turned_off()'s normal fan-off path is deliberately left
+    # without its own USER_FAN_OFF dispatch — its entire flag-clearing effect IS
+    # _clear_fan_flags_and_start_grace() (FLAGS_CLEARED_FOR_GRACE's real dispatch site),
+    # so a second dispatch here would report the same net state change twice for one
+    # logical event (double-dispatch), not add real coverage.
+    "USER_FAN_OFF": (
+        "unreachable: fully delegated to FLAGS_CLEARED_FOR_GRACE to avoid "
+        "double-dispatching the same logical event — see fan_fsm.py's own "
+        "USER_FAN_OFF/FLAGS_CLEARED_FOR_GRACE docstring split"
+    ),
+    "TIMER_BOUNDARY_SETTLE": "reachable",
+    "FLAGS_CLEARED_FOR_GRACE": "reachable",
+    "MIN_RUNTIME_CYCLE_ON": "reachable",
+    "MIN_RUNTIME_CYCLE_OFF": "reachable",
+    "MIN_RUNTIME_CYCLE_STOPPED": "reachable",
+    "DRIFT_TICK": "reachable",
+    "THERMO_BACKSTOP_TICK": "reachable",
+    "THERMOSTAT_CHECK_TICK": "reachable",
+    "WHF_SUPPRESSION_REQUESTED": "reachable",
+    "WHF_RELEASE_REQUESTED": "reachable",
+}
+
+
+class TestFanFsmEventCoverage:
+    def test_every_event_kind_is_registered(self) -> None:
+        from custom_components.climate_advisor.fan_fsm import FanFsmEventKind
+
+        all_kinds = {member.name for member in FanFsmEventKind}
+        unregistered = all_kinds - set(_FAN_FSM_EVENT_KIND_REGISTRY)
+        assert not unregistered, (
+            f"New FanFsmEventKind member(s) aren't in _FAN_FSM_EVENT_KIND_REGISTRY: "
+            f'{sorted(unregistered)}. Classify each as "reachable" (and wire a real '
+            f'dispatch site in automation.py) or "unreachable: <reason>" — see Issue #731.'
+        )
+
+    def test_registry_entries_reference_real_members(self) -> None:
+        from custom_components.climate_advisor.fan_fsm import FanFsmEventKind
+
+        all_kinds = {member.name for member in FanFsmEventKind}
+        unknown = set(_FAN_FSM_EVENT_KIND_REGISTRY) - all_kinds
+        assert not unknown, (
+            f"Registry references FanFsmEventKind member(s) that no longer exist "
+            f"(renamed or removed?): {sorted(unknown)}. Update the registry."
+        )
+
+    def test_every_reachable_kind_has_a_real_dispatch_site(self) -> None:
+        """Positive control: every 'reachable' entry must appear as a direct
+        FanFsmEventKind.<X> reference in automation.py — unlike override/grace and
+        door/window (dispatched from coordinator.py/api.py via mirror-name-keyed
+        dicts), every real fan/WHF dispatch site is a method on AutomationEngine
+        itself, so automation.py is the correct — and only — scan target."""
+        src = _AUTOMATION_PY.read_text(encoding="utf-8")
+        for name, classification in _FAN_FSM_EVENT_KIND_REGISTRY.items():
+            if classification != "reachable":
+                continue
+            member_pattern = re.compile(r"\bFanFsmEventKind\." + re.escape(name) + r"\b")
+            assert member_pattern.search(src), (
+                f'{name} is marked "reachable" but no direct FanFsmEventKind.{name} '
+                f"reference was found in automation.py"
+            )
+
+    def test_every_unreachable_kind_has_no_real_dispatch_site(self) -> None:
+        """Inverse positive control: an 'unreachable' entry must NOT appear as a
+        direct FanFsmEventKind.<X> dispatch reference in automation.py — catches the
+        registry claiming a kind is deliberately unwired when a later phase actually
+        wired it (the classification going stale in the opposite direction)."""
+        src = _AUTOMATION_PY.read_text(encoding="utf-8")
+        for name, classification in _FAN_FSM_EVENT_KIND_REGISTRY.items():
+            if not classification.startswith("unreachable"):
+                continue
+            member_pattern = re.compile(r"\bFanFsmEventKind\." + re.escape(name) + r"\b")
+            assert not member_pattern.search(src), (
+                f'{name} is marked "unreachable" but a direct FanFsmEventKind.{name} '
+                f'reference now exists in automation.py — reclassify to "reachable" '
+                f"(Issue #731)."
+            )
+
+    def test_positive_control_unregistered_kind_is_caught(self) -> None:
+        """Proves test_every_event_kind_is_registered actually fails on a genuinely
+        unregistered member, not just passing vacuously."""
+        all_kinds = {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}
+        unregistered = all_kinds - set(_FAN_FSM_EVENT_KIND_REGISTRY)
+        assert unregistered == {"A_TOTALLY_NEW_KIND_NOT_IN_REGISTRY"}

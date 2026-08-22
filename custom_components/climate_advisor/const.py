@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.54"
+VERSION = "0.6.55"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.55": [
+        "Feat #731: no user-visible change. Continues the internal automation-engine"
+        " refactor (fan/whole-house-fan control) with the same extract-and-shadow-"
+        " validate pattern already applied to nat-vent, door/window, and override/"
+        " grace — adds a shadow-diagnostic comparison axis so the fan/WHF FSM's"
+        " agreement with production can be watched the same way the other three"
+        " already are; see #594/#727/#729 for background.",
+    ],
     "0.6.54": [
         "Feat #729: simplifies the Shadow Engine Primary switch added in 0.6.53 down"
         " to the single control you actually use — the 3 separate nat-vent/"
@@ -2159,6 +2167,44 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    731: {
+        "version_fixed": "0.6.55",
+        "title": (
+            "Fan/whole-house-fan control (12 real automation.py entry points) was"
+            " still ad-hoc boolean flags with no pure, independently-testable"
+            " decision layer and no shadow-diagnostic coverage — the same gap the"
+            " nat-vent (#633), door/window (#637), and override/grace (#639) FSM"
+            " extractions already closed for their own lifecycles."
+        ),
+        "scope_covered": (
+            "fan_lifecycle.py (new): pure 5-axis composed FanLifecycleState"
+            " derivation (physical/override/cycling/hvac_ownership/rate_limit)."
+            " fan_toggle_rate_limit.py (new): the rapid-cycling backstop decision,"
+            " delegated to from automation.py's _fan_toggle_rate_limited()."
+            " fan_fsm.py (new): the unified (state, event) -> Transition table —"
+            " 16 event kinds, one per real entry point, dispatched on event kind"
+            " (handler-triggered, same shape as override_grace_fsm.py); 2 kinds"
+            " (THERMO_BACKSTOP_TICK, THERMOSTAT_CHECK_TICK) deliberately never move"
+            " to_state, since their outcomes only inform routing this FSM's axes"
+            " can't represent without duplicating _exit_nat_vent()/_deactivate_fan()"
+            " logic. automation.py: _build_fan_fsm_inputs()/fan_lifecycle_state"
+            " property/_apply_fan_fsm_state()/_resolve_fan_fsm_state() — the single"
+            " dispatch chokepoint all 16 real entry points now route through, gated"
+            " by AutomationEngine._fan_fsm_authoritative (fixed at construction, off"
+            " for production/on for shadow — no production behavior change)."
+            " coordinator.py: the 4th fixed-per-engine-identity flag"
+            " (_engine_a._fan_fsm_authoritative=False, _engine_b's =True), plus a"
+            " new fan_mirror shadow-diagnostic axis in"
+            " _update_shadow_engine_diagnostic() comparing"
+            " automation_engine.fan_lifecycle_state against"
+            " shadow_automation_engine.fan_lifecycle_state (no paired fan_fsm axis"
+            " — the shadow engine's own fan_lifecycle_state already IS the"
+            " FSM-derived state, so a third comparison point would be tautological)."
+            " sensor.py: ClimateAdvisorShadowEngineStatusSensor exposes"
+            " fan_production_state/fan_shadow_state/fan_mirror_agrees and a"
+            " debounce.fan_mirror sub-dict. docs/fan-lifecycle-spec.md (new)."
+        ),
+    },
     706: {
         "version_fixed": "0.6.46",
         "title": (

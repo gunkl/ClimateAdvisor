@@ -89,6 +89,12 @@ def _minimal_engine() -> AutomationEngine:
             "_fan_command_pending": False,
             "_fan_on_since": None,
             "_pre_fan_hvac_mode": None,
+            # Issue #731 Phase 4: _whf_owns_hvac() now reads the full composed
+            # fan_lifecycle_state property, not just config/_pre_fan_hvac_mode.
+            "_fan_drift_tick_count": 0,
+            "_fan_remote_timer_hours": None,
+            "_fan_rate_limited_until": None,
+            "_fan_rate_limited_direction": None,
             "_hvac_command_pending": False,
             "_temp_command_pending": False,
             "_temp_command_time": None,

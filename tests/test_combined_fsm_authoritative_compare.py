@@ -3,6 +3,19 @@ equivalence and race-safety with ALL THREE FSM-authoritative switches
 (``natvent_fsm_authoritative``, ``doorwindow_fsm_authoritative``,
 ``override_grace_fsm_authoritative``) flipped True together.
 
+Issue #731 Phase 7 added a 4th flag (``fan_fsm_authoritative``) to
+``fsm_authoritative_mutation()`` in ``tools/sim_harness/combined_fsm_authoritative_compare.py``
+— this file's own scenarios/assertions were written and diagnosed against the
+original 3-switch combination only, before the 4th flag existed. The 4th flag's
+own compound-interaction diagnosis (in the fan FSM's own dispatch/derivation,
+not this file) is out of scope for the wiring phase that added it here — see
+Issue #731 Phase 7 notes for the 3 scenarios (``issue-392-natvent-ceiling-
+oscillation``, ``issue_637_paused_during_grace_nat_vent_exit``,
+``whole_house_fan_hvac_suppression``) newly diverging once the fan flag joined
+the other three, still pending root-cause diagnosis and either a fix or an
+explicit, diagnosed allowlist entry (never a silent one — see this file's own
+assertion message).
+
 Occupant-first framing: Phase V flips all three switches in one deploy rather
 than as two sequential live-verification windows. Before this file, nothing in
 the repo — no test, golden scenario, or differential harness — had ever

@@ -1,14 +1,15 @@
 """combined_fsm_authoritative_compare — all-switches-together equivalence
 proof (Epic #594 Phase R, Phase G's G-test deliverable; Issue #742 added the
-5th switch, Issue #744 the 6th).
+5th switch, Issue #744 the 6th, Issue #746 the 7th).
 
 The individual comparators (``nat_vent_fsm_authoritative_compare.py``,
 ``doorwindow_fsm_authoritative_compare.py``, ``override_grace_fsm_authoritative_
 compare.py``, ``fan_fsm_authoritative_compare.py``,
 ``classification_fsm_authoritative_compare.py``,
-``occupancy_fsm_authoritative_compare.py``) each flip exactly one switch
+``occupancy_fsm_authoritative_compare.py``,
+``economizer_fsm_authoritative_compare.py``) each flip exactly one switch
 in isolation. Nothing in the repo, before this module, ever flipped all three
-(now six) together — confirmed absent by a 2026-08-20 audit that specifically
+(now seven) together — confirmed absent by a 2026-08-20 audit that specifically
 searched for this and found none.
 
 This matters because the combined rollout (Phase V) flips
@@ -36,14 +37,16 @@ from typing import Any
 
 @contextmanager
 def fsm_authoritative_mutation() -> Iterator[None]:
-    """Force all six ``*_fsm_authoritative`` flags True together on every
+    """Force all seven ``*_fsm_authoritative`` flags True together on every
     engine constructed while this context is active — the "run B" side of a
     combined diff_runs comparison.
 
     Issue #731 added ``_fan_fsm_authoritative`` as the 4th flag alongside the
     original three (nat-vent, door/window, override/grace) documented above.
     Issue #742 added ``_classification_fsm_authoritative`` as the 5th. Issue
-    #744 added ``_occupancy_fsm_authoritative`` as the 6th.
+    #744 added ``_occupancy_fsm_authoritative`` as the 6th. Issue #746 added
+    ``_economizer_fsm_authoritative`` as the 7th (and final) — the strangler-fig
+    completion program's last subsystem extraction.
     """
     from unittest.mock import patch
 
@@ -59,6 +62,7 @@ def fsm_authoritative_mutation() -> Iterator[None]:
         self._fan_fsm_authoritative = True
         self._classification_fsm_authoritative = True
         self._occupancy_fsm_authoritative = True
+        self._economizer_fsm_authoritative = True
 
     with patch.object(AutomationEngine, "__init__", _wrapped_init):
         yield

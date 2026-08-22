@@ -320,6 +320,22 @@ _SHADOW_DIAG_AXES = (
     # project memory "shadow engine coverage gap" for the broader known limitation
     # this axis does not attempt to close.
     "occupancy_mirror",
+    # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
+    # extraction): "economizer_mirror" adds a 10th axis, deliberately with no
+    # "economizer_fsm" sibling — same "no separate third comparison point" shape
+    # as fan_mirror's own missing "fan_fsm" sibling above: each engine's
+    # `economizer_lifecycle_state` property already IS that engine's live,
+    # self-consistent composed state (derived straight from its own
+    # _economizer_active/_economizer_phase flags, which for the shadow engine are
+    # themselves written by economizer_fsm.py via
+    # _apply_economizer_fsm_state()/_check_window_cooling_opportunity_fsm() once
+    # _economizer_fsm_authoritative is set on that engine identity) — comparing a
+    # third, independently-tracked FSM replay object against production would
+    # always read identically to "economizer_mirror" (both would be comparing
+    # against the exact same shadow-engine-computed FSM state), carrying zero
+    # independent signal, the same "no functional consumer" trap fan_mirror's own
+    # comment documents.
+    "economizer_mirror",
 )
 
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
@@ -703,6 +719,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # (occupancy dispatch), fixed at construction as of #729's pattern —
         # _engine_a stays False for its whole lifetime, same as the 5 flags above.
         self._engine_a._occupancy_fsm_authoritative = False
+        # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
+        # extraction): 7th FSM-authoritative flag (economizer), fixed at construction
+        # as of #729's pattern — _engine_a stays False for its whole lifetime, same as
+        # the 6 flags above.
+        self._engine_a._economizer_fsm_authoritative = False
         # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
         # computing decisions from the same inputs as production, permanently inert.
         # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
@@ -774,6 +795,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # _engine_b stays True for its whole lifetime, mirror of _engine_a's
         # fixed-legacy assignment above.
         self._engine_b._occupancy_fsm_authoritative = True
+        # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
+        # extraction): 7th FSM-authoritative flag (economizer), fixed at construction
+        # as of #729's pattern — _engine_b stays True for its whole lifetime, mirror
+        # of _engine_a's fixed-legacy assignment above.
+        self._engine_b._economizer_fsm_authoritative = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1145,6 +1171,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         se._fan_rate_limited_until = ae._fan_rate_limited_until
         se._fan_rate_limited_direction = ae._fan_rate_limited_direction
         se._fan_drift_tick_count = ae._fan_drift_tick_count
+
+        # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
+        # extraction): economizer — same gap class as #613/#631/#673/#716/#724/#731
+        # above. check_window_cooling_opportunity() has exactly one real production
+        # call site (the 30-min regular cycle in _async_update_data()), never mirrored
+        # to the shadow engine, so a raw copy is the only mechanism that keeps
+        # economizer_lifecycle_state from permanently reading INACTIVE on the shadow
+        # engine while production is genuinely active.
+        #
+        # Deliberately NOT also raw-copying _current_classification here to make
+        # check_window_cooling_opportunity() itself invokable on the shadow engine:
+        # _current_classification is read by several OTHER already-mirrored handlers
+        # (bedtime/morning-wakeup/pre-cool/occupancy) whose shadow-side behavior this
+        # phase has not audited — populating it (permanently None on the shadow engine
+        # today, a pre-existing gap predating this issue; see project memory "shadow
+        # engine coverage gap") could shift those other axes' agreement in ways outside
+        # this phase's scope. economizer_mirror is therefore a same-field consistency
+        # check (same character as several fields above already raw-copied rather than
+        # independently re-derived) rather than proof the shadow engine can
+        # independently recompute the economizer decision from a live classification —
+        # the differential comparator (economizer_fsm_authoritative_compare.py) is the
+        # real regression proof for that, not this live diagnostic sensor.
+        se._economizer_active = ae._economizer_active
+        se._economizer_phase = ae._economizer_phase
 
     def _apply_engine_roles(self, primary: AutomationEngine, secondary: AutomationEngine) -> None:
         """Wire dry_run/callbacks/role so ``primary`` issues real commands and
@@ -1801,6 +1851,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         occupancy_shadow_state = _occupancy_defer_str(self.shadow_automation_engine)
         occupancy_mirror_agrees = occupancy_production_state == occupancy_shadow_state
 
+        # Issue #746: economizer's own production/shadow agreement. Same
+        # "no separate FSM axis" shape as fan/WHF above (see _SHADOW_DIAG_AXES'
+        # comment for the full rationale) — economizer_lifecycle_state is each
+        # engine's own live composed state, already self-consistent.
+        def _economizer_state_str(ae: AutomationEngine) -> str:
+            return ae.economizer_lifecycle_state.value
+
+        economizer_production_state = _economizer_state_str(self.automation_engine)
+        economizer_shadow_state = _economizer_state_str(self.shadow_automation_engine)
+        economizer_mirror_agrees = economizer_production_state == economizer_shadow_state
+
         agrees = (
             mirror_agrees
             and fsm_agrees
@@ -1811,6 +1872,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and fan_mirror_agrees
             and classification_mirror_agrees
             and occupancy_mirror_agrees
+            and economizer_mirror_agrees
         )
 
         # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
@@ -1836,6 +1898,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         occupancy_mirror_duration, occupancy_mirror_sustained = self._shadow_diag_update_axis(
             "occupancy_mirror", occupancy_mirror_agrees, now
         )
+        economizer_mirror_duration, economizer_mirror_sustained = self._shadow_diag_update_axis(
+            "economizer_mirror", economizer_mirror_agrees, now
+        )
 
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
@@ -1860,6 +1925,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "occupancy_production_state": occupancy_production_state,
             "occupancy_shadow_state": occupancy_shadow_state,
             "occupancy_mirror_agrees": occupancy_mirror_agrees,
+            "economizer_production_state": economizer_production_state,
+            "economizer_shadow_state": economizer_shadow_state,
+            "economizer_mirror_agrees": economizer_mirror_agrees,
             "agrees": agrees,
             "checked_at": now.isoformat(),
             "debounce": {
@@ -1907,6 +1975,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "disagreement_seconds": occupancy_mirror_duration,
                     "sustained": occupancy_mirror_sustained,
                     "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["occupancy_mirror"],
+                },
+                "economizer_mirror": {
+                    "disagreement_seconds": economizer_mirror_duration,
+                    "sustained": economizer_mirror_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["economizer_mirror"],
                 },
             },
             "cumulative_reset_date": self._shadow_diag_cumulative_date.isoformat(),
@@ -2047,6 +2120,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     occupancy_mirror_duration,
                 )
                 self._shadow_diag_incident_emitted["occupancy_mirror"] = True
+        if economizer_mirror_sustained:
+            _LOGGER.warning(
+                "Economizer shadow engine disagreement (Issue #746): production=%s shadow=%s (sustained %.0fs)",
+                economizer_production_state,
+                economizer_shadow_state,
+                economizer_mirror_duration,
+            )
+            if not self._shadow_diag_incident_emitted["economizer_mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "economizer_mirror",
+                    now,
+                    economizer_production_state,
+                    economizer_shadow_state,
+                    "shadow",
+                    economizer_mirror_duration,
+                )
+                self._shadow_diag_incident_emitted["economizer_mirror"] = True
 
     @property
     def shadow_engine_diagnostic(self) -> dict[str, Any] | None:

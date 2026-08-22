@@ -106,6 +106,7 @@ from .desired_state import (
 if TYPE_CHECKING:
     from .classification_fsm import ClassificationDecision
     from .door_window_fsm import DoorWindowFsmEventKind
+    from .economizer_fsm import EconomizerFsmInputs, EconomizerTransition
     from .fan_fsm import FanFsmEventKind, FanFsmInputs, FanTransition
     from .override_grace_fsm import OverrideGraceFsmEventKind
 
@@ -119,6 +120,11 @@ from .door_window_lifecycle import (
     DoorWindowLifecycleInputs,
     DoorWindowLifecycleState,
     derive_door_window_lifecycle_state,
+)
+from .economizer_lifecycle import (
+    EconomizerLifecycleInputs,
+    EconomizerLifecycleState,
+    derive_economizer_lifecycle_state,
 )
 from .fan_drift_reconciliation import FanDriftInputs, FanDriftOutcome, decide_fan_drift_reconciliation
 from .fan_lifecycle import (
@@ -883,6 +889,19 @@ class AutomationEngine:
         # construction by coordinator.py, never mutated afterward). Default False —
         # zero behavior change until wiring is verified live; deployed OFF initially.
         self._occupancy_fsm_authoritative: bool = False
+
+        # Issue #746 (strangler-fig completion program, Phase 5 — the final
+        # subsystem extraction): whether the economizer lifecycle FSM
+        # (economizer_fsm.py) is authoritative for check_window_cooling_opportunity()'s
+        # eligibility/phase-selection logic and _economizer_active/_economizer_phase
+        # writes, instead of the inline two-phase branch structure. Unlike
+        # classification/occupancy, the economizer genuinely has multi-tick session
+        # state (economizer_lifecycle.py's 3-state enum) — same shape as nat-vent/
+        # door-window/fan, not the two stateless FSMs. Fixed-per-engine-identity, same
+        # convention as the 6 flags above (set once at construction by coordinator.py,
+        # never mutated afterward). Default False — zero behavior change until wiring
+        # is verified live; deployed OFF initially.
+        self._economizer_fsm_authoritative: bool = False
 
         # Issue #717 (Block 5, epic #594): wire the previously-dormant
         # lifecycle_dispatcher.py pub/sub router (Issue #633) into production so the
@@ -10334,6 +10353,158 @@ class AutomationEngine:
             self._fan_command_pending = False
         return FanCommandResult.EXECUTED
 
+    @property
+    def economizer_lifecycle_state(self) -> EconomizerLifecycleState:
+        """Current economizer session state, derived from existing flags (Issue #746).
+
+        Purely a computed view of ``_economizer_active``/``_economizer_phase``, so it
+        cannot desync from the flags it reads. See ``economizer_lifecycle.py`` for the
+        pure derivation.
+        """
+        return derive_economizer_lifecycle_state(
+            EconomizerLifecycleInputs(
+                economizer_active=self._economizer_active,
+                economizer_phase=self._economizer_phase,
+            )
+        )
+
+    def _build_economizer_fsm_inputs(
+        self,
+        *,
+        outdoor_temp: float,
+        indoor_temp: float | None,
+        windows_physically_open: bool,
+        current_hour: int,
+    ) -> EconomizerFsmInputs:
+        """Build the FSM's input snapshot from current engine state + this call's
+        parameters (Issue #746). Mirrors ``_build_nat_vent_fsm_inputs()``'s role."""
+        from .economizer_fsm import EconomizerFsmInputs
+
+        c = self._current_classification
+        day_type = c.day_type if c else None
+
+        if current_hour < 0:
+            in_window = True
+        else:
+            in_window = (ECONOMIZER_MORNING_START_HOUR <= current_hour < ECONOMIZER_MORNING_END_HOUR) or (
+                ECONOMIZER_EVENING_START_HOUR <= current_hour < ECONOMIZER_EVENING_END_HOUR
+            )
+
+        return EconomizerFsmInputs(
+            day_type=day_type,
+            natural_vent_active=bool(self._natural_vent_active),
+            outdoor=outdoor_temp,
+            indoor=indoor_temp,
+            comfort_cool=float(self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)),
+            delta=float(self.config.get("economizer_temp_delta", ECONOMIZER_TEMP_DELTA)),
+            windows_physically_open=windows_physically_open,
+            in_window=in_window,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+            now=dt_util.now(),
+        )
+
+    def _apply_economizer_fsm_state(self, state: EconomizerLifecycleState) -> None:
+        """Write ``_economizer_active``/``_economizer_phase`` from an
+        ``economizer_fsm.transition()`` result (Issue #746).
+
+        Inverse of ``economizer_lifecycle_state``'s derivation — see
+        ``economizer_lifecycle.py``'s ``derive_economizer_lifecycle_state()``. Since
+        the two underlying flags are always set in lockstep in production (see that
+        module's docstring), this is a straight, unconditional write — matches legacy
+        setting both fields together on every real write site.
+        """
+        self._economizer_active = state != EconomizerLifecycleState.INACTIVE
+        self._economizer_phase = state.value
+
+    async def _check_window_cooling_opportunity_fsm(
+        self,
+        outdoor_temp: float,
+        indoor_temp: float | None,
+        windows_physically_open: bool,
+        current_hour: int,
+    ) -> bool:
+        """FSM-authoritative counterpart to ``check_window_cooling_opportunity()``'s
+        legacy body (Issue #746, strangler-fig completion program Phase 5).
+
+        Computes the same decision via ``economizer_fsm.transition()``, then applies
+        the identical side effects (fan activate/deactivate, HVAC resume, logging)
+        the legacy branch already produces. Only reached when
+        ``_economizer_fsm_authoritative`` is True — see that flag's own docstring for
+        the byte-identical-while-False parity contract this preserves.
+        """
+        from .economizer_fsm import EconomizerFsmEvent, EconomizerFsmEventKind
+        from .economizer_fsm import transition as _economizer_fsm_transition
+
+        unit = self.config.get("temp_unit", "fahrenheit")
+        comfort_cool = self.config.get("comfort_cool", DEFAULT_COMFORT_COOL)
+        aggressive_savings = self.config.get("aggressive_savings", False)
+
+        inputs = self._build_economizer_fsm_inputs(
+            outdoor_temp=outdoor_temp,
+            indoor_temp=indoor_temp,
+            windows_physically_open=windows_physically_open,
+            current_hour=current_hour,
+        )
+        current_state = self.economizer_lifecycle_state
+        event = EconomizerFsmEvent(kind=EconomizerFsmEventKind.TICK, inputs=inputs)
+        result: EconomizerTransition = _economizer_fsm_transition(current_state, event)
+
+        # Same direction-rejected debug log production emits before its eligibility
+        # check — only ever populated once the gate has actually been reached (not
+        # on the not-hot-day short-circuit), same reachability as legacy.
+        if result.direction_ok is False:
+            _LOGGER.debug(
+                "Economizer gate: direction rejected — outdoor %.1f°F >= indoor %.1f°F"
+                " (free-cooling direction required)",
+                outdoor_temp,
+                indoor_temp if indoor_temp is not None else 0.0,
+            )
+
+        # Nat-vent-active short-circuit: return False without touching state at all —
+        # the same asymmetry legacy's own `if self._natural_vent_active: return False`
+        # branch preserves (deliberately NOT deactivating even if already active).
+        if result.deferred:
+            return False
+
+        if result.to_state == EconomizerLifecycleState.INACTIVE:
+            if result.changed:
+                await self._deactivate_economizer(outdoor_temp)
+            return False
+
+        self._apply_economizer_fsm_state(result.to_state)
+
+        if not result.changed:
+            return True
+
+        if result.to_state == EconomizerLifecycleState.MAINTAIN:
+            await self._activate_fan(reason="economizer maintain — fan assists ventilation")
+            if aggressive_savings:
+                _LOGGER.info(
+                    "Economizer (savings): ventilation only, outdoor=%s, band stays armed",
+                    format_temp(outdoor_temp, unit),
+                )
+            else:
+                _LOGGER.info(
+                    "Economizer phase=maintain: indoor=%s, band armed, ventilation holding",
+                    format_temp(indoor_temp if indoor_temp is not None else 0, unit),
+                )
+        else:  # COOL_DOWN
+            await self._activate_fan(
+                reason=(
+                    f"economizer cool-down — fan assists the band's cooling: indoor"
+                    f" {format_temp(indoor_temp, unit)} > comfort {format_temp(comfort_cool, unit)},"
+                    f" outdoor {format_temp(outdoor_temp, unit)} assisting"
+                )
+            )
+            _LOGGER.info(
+                "Economizer phase=cool-down: indoor=%s, outdoor=%s — band holds comfort_cool=%s, fan assists",
+                format_temp(indoor_temp, unit),
+                format_temp(outdoor_temp, unit),
+                format_temp(comfort_cool, unit),
+            )
+
+        return True
+
     async def check_window_cooling_opportunity(
         self,
         outdoor_temp: float,
@@ -10355,7 +10526,20 @@ class AutomationEngine:
         ventilation only.
 
         Returns True if economizer is active (either phase), False otherwise.
+
+        Issue #746 (strangler-fig completion program, Phase 5): when
+        ``self._economizer_fsm_authoritative`` is True, the entire body below is
+        replaced by a call to the pure ``economizer_gate.py``/``economizer_fsm.py``
+        pair via ``_check_window_cooling_opportunity_fsm()`` — same logging, same
+        events, same fan/HVAC writes, driven by the returned transition instead of
+        re-derived inline. False (default) runs this legacy block byte-identical to
+        pre-Issue-#746 behavior.
         """
+        if self._economizer_fsm_authoritative:
+            return await self._check_window_cooling_opportunity_fsm(
+                outdoor_temp, indoor_temp, windows_physically_open, current_hour
+            )
+
         c = self._current_classification
         if not c or c.day_type != DAY_TYPE_HOT:
             if self._economizer_active:

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.62] — 2026-08-22
+
+- Feat #746: no user-visible change. Strangler-fig completion program Phase 5 (final subsystem extraction) — extracts the economizer's two-phase window-cooling logic into a differentially-validated lifecycle FSM. Zero divergence across the full 90-scenario test corpus and the 81-scenario golden suite. All 3 remaining monolithic subsystems named in the Strangler Fig Atlas are now extracted.
+
 ## [0.6.61] — 2026-08-22
 
 - Feat #744: no user-visible change. Strangler-fig completion program Phase 4 — extracts occupancy dispatch (away/vacation/home transitions) into a differentially-validated FSM plus a new pure priority resolver for guest/vacation/home/away toggle logic. Zero divergence across the full 90-scenario test corpus and the 81-scenario golden suite.

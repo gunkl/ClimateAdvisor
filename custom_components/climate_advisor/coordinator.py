@@ -682,6 +682,13 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._shadow_diag_disagreement_since: dict[str, datetime | None] = dict.fromkeys(_SHADOW_DIAG_AXES)
         self._shadow_diag_cumulative_seconds: dict[str, float] = dict.fromkeys(_SHADOW_DIAG_AXES, 0.0)
         self._shadow_diag_cumulative_date: date = dt_util.now().date()
+        # Issue #738: level-triggered guard so a sustained per-axis disagreement emits
+        # exactly one `shadow_disagreement` incident for its streak, not one per mirrored
+        # production call (this diagnostic recomputes on every mirrored decision method,
+        # far more often than the 30-min reactive incident cycle) — reset to False by
+        # _shadow_diag_update_axis() the moment that axis resolves back to agreement, so
+        # a later, distinct disagreement streak on the same axis emits its own incident.
+        self._shadow_diag_incident_emitted: dict[str, bool] = dict.fromkeys(_SHADOW_DIAG_AXES, False)
         # Issue #633: the unified nat-vent FSM's own independently-tracked state —
         # never written onto either engine, purely a third comparison point. Starts
         # INACTIVE unconditionally (same clean-slate convention as restore_state()'s
@@ -1569,7 +1576,51 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         if since is not None:
             self._shadow_diag_cumulative_seconds[axis] += (now - since).total_seconds()
             self._shadow_diag_disagreement_since[axis] = None
+            # Issue #738: axis resolved back to agreement — clear the incident-emitted
+            # guard so a future, distinct disagreement streak on this axis can emit its
+            # own shadow_disagreement incident again.
+            self._shadow_diag_incident_emitted[axis] = False
         return 0.0, False
+
+    def _emit_shadow_disagreement_incident(
+        self,
+        axis: str,
+        now: datetime,
+        production_state: str,
+        comparison_state: str,
+        comparison_kind: str,
+        duration_seconds: float,
+    ) -> None:
+        """Emit a ``shadow_disagreement`` incident for one sustained comparison-axis
+        disagreement (Issue #738).
+
+        Feeds the same simulation-feedback-loop pipeline the other 8 incident classes
+        already use (``docs/simulation-feedback-loop.md``) — a live shadow-engine A/B
+        catch becomes a permanent regression test candidate instead of a one-off WARNING
+        a human has to notice in the logs. Called once per sustained disagreement streak
+        (the `_shadow_diag_incident_emitted` level-trigger guard in
+        ``_update_shadow_engine_diagnostic()`` prevents re-emitting on every mirrored
+        production call while the streak continues).
+        """
+        current_data = self.data or {}
+        self._emit_incident(
+            "shadow_disagreement",
+            now.isoformat(),
+            extra={
+                "axis": axis,
+                "production_state": production_state,
+                "comparison_state": comparison_state,
+                "comparison_kind": comparison_kind,
+                "disagreement_seconds": round(duration_seconds),
+                "indoor_f": current_data.get("indoor_temp"),
+                "outdoor_f": current_data.get("outdoor_temp"),
+                "hvac_mode": current_data.get("hvac_mode"),
+                "nat_vent_active": (self.automation_engine._natural_vent_active if self.automation_engine else None),
+                "manual_override_active": (
+                    self.automation_engine._manual_override_active if self.automation_engine else None
+                ),
+            },
+        )
 
     def _update_shadow_engine_diagnostic(self) -> None:
         """Recompute production/shadow nat-vent lifecycle state agreement (Issue #613),
@@ -1761,6 +1812,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 shadow_state,
                 mirror_duration,
             )
+            if not self._shadow_diag_incident_emitted["mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "mirror", now, production_state, shadow_state, "shadow", mirror_duration
+                )
+                self._shadow_diag_incident_emitted["mirror"] = True
         if fsm_sustained:
             _LOGGER.warning(
                 "Nat-vent FSM disagreement (Issue #633): production=%s fsm=%s (sustained %.0fs)",
@@ -1768,6 +1824,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fsm_state,
                 fsm_duration,
             )
+            if not self._shadow_diag_incident_emitted["fsm"]:
+                self._emit_shadow_disagreement_incident("fsm", now, production_state, fsm_state, "fsm", fsm_duration)
+                self._shadow_diag_incident_emitted["fsm"] = True
         if door_window_mirror_sustained:
             _LOGGER.warning(
                 "Door/window shadow engine disagreement (Issue #637): production=%s shadow=%s (sustained %.0fs)",
@@ -1775,6 +1834,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 door_window_shadow_state,
                 door_window_mirror_duration,
             )
+            if not self._shadow_diag_incident_emitted["door_window_mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "door_window_mirror",
+                    now,
+                    door_window_production_state,
+                    door_window_shadow_state,
+                    "shadow",
+                    door_window_mirror_duration,
+                )
+                self._shadow_diag_incident_emitted["door_window_mirror"] = True
         if door_window_fsm_sustained:
             _LOGGER.warning(
                 "Door/window FSM disagreement (Issue #637): production=%s fsm=%s (sustained %.0fs)",
@@ -1782,6 +1851,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 door_window_fsm_state,
                 door_window_fsm_duration,
             )
+            if not self._shadow_diag_incident_emitted["door_window_fsm"]:
+                self._emit_shadow_disagreement_incident(
+                    "door_window_fsm",
+                    now,
+                    door_window_production_state,
+                    door_window_fsm_state,
+                    "fsm",
+                    door_window_fsm_duration,
+                )
+                self._shadow_diag_incident_emitted["door_window_fsm"] = True
         if override_grace_mirror_sustained:
             _LOGGER.warning(
                 "Override/grace shadow engine disagreement (Issue #639): production=%s shadow=%s (sustained %.0fs)",
@@ -1789,6 +1868,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 override_grace_shadow_state,
                 override_grace_mirror_duration,
             )
+            if not self._shadow_diag_incident_emitted["override_grace_mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "override_grace_mirror",
+                    now,
+                    override_grace_production_state,
+                    override_grace_shadow_state,
+                    "shadow",
+                    override_grace_mirror_duration,
+                )
+                self._shadow_diag_incident_emitted["override_grace_mirror"] = True
         if override_grace_fsm_sustained:
             _LOGGER.warning(
                 "Override/grace FSM disagreement (Issue #639): production=%s fsm=%s (sustained %.0fs)",
@@ -1796,6 +1885,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 override_grace_fsm_state,
                 override_grace_fsm_duration,
             )
+            if not self._shadow_diag_incident_emitted["override_grace_fsm"]:
+                self._emit_shadow_disagreement_incident(
+                    "override_grace_fsm",
+                    now,
+                    override_grace_production_state,
+                    override_grace_fsm_state,
+                    "fsm",
+                    override_grace_fsm_duration,
+                )
+                self._shadow_diag_incident_emitted["override_grace_fsm"] = True
         if fan_mirror_sustained:
             _LOGGER.warning(
                 "Fan/WHF shadow engine disagreement (Issue #731): production=%s shadow=%s (sustained %.0fs)",
@@ -1803,6 +1902,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 fan_shadow_state,
                 fan_mirror_duration,
             )
+            if not self._shadow_diag_incident_emitted["fan_mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "fan_mirror", now, fan_production_state, fan_shadow_state, "shadow", fan_mirror_duration
+                )
+                self._shadow_diag_incident_emitted["fan_mirror"] = True
 
     @property
     def shadow_engine_diagnostic(self) -> dict[str, Any] | None:

@@ -699,5 +699,128 @@ class TestNewlyMirroredDecisionMethods:
         assert called == [True]
 
 
+class TestShadowDisagreementIncident:
+    """Issue #738: a sustained per-axis shadow/production disagreement must emit a
+    ``shadow_disagreement`` incident_detected event, feeding the same simulation
+    feedback loop the other 8 incident classes already use
+    (docs/simulation-feedback-loop.md). Trigger is event-driven — wired directly
+    into ``_update_shadow_engine_diagnostic()`` (called from
+    ``_dispatch_shadow_mirror_call()``'s finally block on every mirrored production
+    call), NOT the 30-min ``_detect_and_emit_incidents()`` reactive cycle, since the
+    diagnostic itself never runs from that cycle.
+    """
+
+    def _shadow_disagreement_events(self, coordinator) -> list[dict]:
+        return [
+            e
+            for e in coordinator._event_log
+            if e.get("type") == "incident_detected" and e.get("incident_class") == "shadow_disagreement"
+        ]
+
+    def test_sustained_disagreement_emits_incident(self) -> None:
+        """A disagreement streak already past SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S
+        (same seeding pattern as test_disagreement_logs_warning) must emit exactly
+        one shadow_disagreement incident with axis='mirror' and the two disagreeing
+        state strings."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.data = {"indoor_temp": 72.0, "outdoor_temp": 68.0, "hvac_mode": "off"}
+        coordinator.shadow_automation_engine._natural_vent_active = True
+        coordinator.automation_engine._natural_vent_active = False
+        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+
+        incidents = self._shadow_disagreement_events(coordinator)
+        assert len(incidents) == 1
+        incident = incidents[0]
+        assert incident["axis"] == "mirror"
+        assert incident["comparison_kind"] == "shadow"
+        assert incident["production_state"] != incident["comparison_state"]
+        assert incident["indoor_f"] == 72.0
+        assert incident["outdoor_f"] == 68.0
+        assert incident["hvac_mode"] == "off"
+        assert incident["disagreement_seconds"] >= SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S
+
+    def test_fresh_disagreement_does_not_emit_incident(self) -> None:
+        """A single-tick, not-yet-sustained disagreement (the debounce window itself
+        exists to suppress cascade noise, Issue #685) must NOT emit an incident."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.shadow_automation_engine._natural_vent_active = True
+        coordinator.automation_engine._natural_vent_active = False
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+
+        assert self._shadow_disagreement_events(coordinator) == []
+
+    def test_incident_emitted_once_per_streak_not_per_mirrored_call(self) -> None:
+        """The diagnostic recomputes on every mirrored production call — far more
+        often than a 30-min cycle. A streak that stays sustained across multiple
+        recomputes must emit exactly one incident, not one per call."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.shadow_automation_engine._natural_vent_active = True
+        coordinator.automation_engine._natural_vent_active = False
+        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+            coordinator._update_shadow_engine_diagnostic()
+            coordinator._update_shadow_engine_diagnostic()
+
+        assert len(self._shadow_disagreement_events(coordinator)) == 1
+
+    def test_incident_emits_again_after_streak_resolves_and_recurs(self) -> None:
+        """Once the axis resolves back to agreement, the emitted-guard clears —
+        a later, distinct disagreement streak on the same axis emits its own
+        incident."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        coordinator.shadow_automation_engine._natural_vent_active = True
+        coordinator.automation_engine._natural_vent_active = False
+        coordinator._shadow_diag_disagreement_since["mirror"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+        assert len(self._shadow_disagreement_events(coordinator)) == 1
+
+        # Resolve: engines agree again.
+        coordinator.shadow_automation_engine._natural_vent_active = False
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+        assert coordinator._shadow_diag_incident_emitted["mirror"] is False
+
+        # New sustained streak on the same axis.
+        coordinator.shadow_automation_engine._natural_vent_active = True
+        later = _FIXED_NOW + timedelta(seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1)
+        coordinator._shadow_diag_disagreement_since["mirror"] = later - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=later):
+            coordinator._update_shadow_engine_diagnostic()
+
+        assert len(self._shadow_disagreement_events(coordinator)) == 2
+
+    def test_other_axes_stay_independent(self) -> None:
+        """A sustained disagreement on the door/window mirror axis must not emit
+        (or be blocked by) an incident on the unrelated nat-vent mirror axis."""
+        coordinator, _fake_hass, _scheduler, _event_log = build_headless_coordinator()
+        for ae in (coordinator.automation_engine, coordinator.shadow_automation_engine):
+            ae._natural_vent_active = False
+        coordinator.automation_engine._paused_by_door = False
+        coordinator.shadow_automation_engine._paused_by_door = True
+        coordinator._shadow_diag_disagreement_since["door_window_mirror"] = _FIXED_NOW - timedelta(
+            seconds=SHADOW_ENGINE_DIAGNOSTIC_DEBOUNCE_S + 1
+        )
+        with patch("custom_components.climate_advisor.coordinator.dt_util.now", return_value=_FIXED_NOW):
+            coordinator._update_shadow_engine_diagnostic()
+
+        incidents = self._shadow_disagreement_events(coordinator)
+        assert len(incidents) == 1
+        assert incidents[0]["axis"] == "door_window_mirror"
+        assert incidents[0]["comparison_kind"] == "shadow"
+
+
 def _run(coro):
     return run_coro(coro)

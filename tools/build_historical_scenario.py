@@ -7,12 +7,14 @@ scenario JSON files for pending simulation.
 
 Usage:
     python tools/build_historical_scenario.py [--hours 72] [--type comfort_violation|nat_vent|
-        occupancy_transition|setpoint_mode_inconsistency|rapid_override_after_automation]
+        occupancy_transition|setpoint_mode_inconsistency|rapid_override_after_automation|
+        shadow_disagreement]
     python tools/build_historical_scenario.py --hours 48 --type comfort_violation
     python tools/build_historical_scenario.py --hours 168 --type nat_vent --comfort-cool 76
     python tools/build_historical_scenario.py --hours 24 --type occupancy_transition
     python tools/build_historical_scenario.py --hours 72 --type setpoint_mode_inconsistency
     python tools/build_historical_scenario.py --hours 48 --type rapid_override_after_automation
+    python tools/build_historical_scenario.py --hours 72 --type shadow_disagreement --axis mirror
 
 Chart_log entries have fields: ts, hvac, fan, indoor, outdoor, windows_open
 """
@@ -550,6 +552,151 @@ def find_rapid_override_windows(
     return windows
 
 
+def _preceding_production_outcome(event_entries: list[dict], incident_ts: datetime) -> str | None:
+    """Return production's real, mapped decision outcome at/just before ``incident_ts``.
+
+    Issue #738 fix: the offline single-engine sim harness has no second "shadow"
+    engine to compare against (``coordinator.py``'s ``_engine_a``/``_engine_b`` A/B
+    pairing is a live-only construct — ``run_production_scenario()`` never builds
+    one), so a ``shadow_disagreement`` scenario cannot mechanically check "did
+    production and shadow agree" the way the live diagnostic does. What the
+    offline harness CAN evaluate is production's own real recorded decision —
+    same pattern as ``find_occupancy_transition_windows()``'s ``setback_applied``
+    assertion (checked via the exact same fallback path in
+    ``simulate.py``'s runner: ``_out.production_outcome_at(decisions, at)``).
+
+    Reuses ``tools/sim_harness/outcomes.py``'s ``_map_event_to_outcome()`` — the
+    SAME mapping ``simulate.py`` applies to the replayed run's own event_log at
+    validation time — against the raw event_log fetched at build time, rather
+    than inventing a second, parallel mapping here (CLAUDE.md doctrine: never
+    re-derive logic that already exists as a single source of truth).
+
+    Returns None if no mappable preceding event exists, in which case the
+    caller ships the scenario with no assertion — the same precedent
+    ``find_comfort_violations()``/``find_nat_vent_windows()`` already set for
+    incident types where "what should have happened" isn't derivable from the
+    window alone.
+    """
+    # Local import: keeps this module importable standalone (e.g. by tests that
+    # only need the SSH-independent pure functions) without requiring
+    # tools/sim_harness's own import chain unless this specific window type is
+    # actually built — same lazy-import convention build_historical_scenario.py
+    # has no precedent against (its own SSH/urllib imports are similarly scoped
+    # to the functions that need them).
+    from sim_harness.outcomes import _map_event_to_outcome
+
+    best_ts: datetime | None = None
+    best_outcome: str | None = None
+    for ev in event_entries:
+        ev_type = ev.get("type")
+        if not ev_type or ev_type == "incident_detected":
+            continue
+        ts_str = ev.get("time", "")
+        if not ts_str:
+            continue
+        try:
+            ev_ts = _parse_ts(ts_str)
+        except Exception:
+            continue
+        if ev_ts.tzinfo is None:
+            ev_ts = ev_ts.replace(tzinfo=UTC)
+        if ev_ts > incident_ts:
+            continue
+        mapped = _map_event_to_outcome(ev_type, ev, ts_str)
+        if mapped is None:
+            continue
+        if best_ts is None or ev_ts > best_ts:
+            best_ts = ev_ts
+            best_outcome = mapped.outcome
+
+    return best_outcome
+
+
+def find_shadow_disagreement_windows(
+    chart_entries: list[dict],
+    event_entries: list[dict],
+    hours: int,
+    axis: str | None = None,
+) -> list[dict]:
+    """Find windows around shadow_disagreement incidents from event_log (Issue #738).
+
+    Looks for incident_detected events with incident_class=shadow_disagreement —
+    emitted by coordinator._update_shadow_engine_diagnostic() once per sustained
+    per-axis disagreement streak between production and the shadow engine/FSM.
+    Extracts 30-min before, 15-min after for chart context, same convention as
+    find_setpoint_mode_inconsistency_windows()/find_rapid_override_windows().
+
+    Pass ``axis`` to filter to one of the 7 comparison axes (mirror, fsm,
+    door_window_mirror, door_window_fsm, override_grace_mirror,
+    override_grace_fsm, fan_mirror); omit to include all axes.
+    """
+    if not event_entries:
+        return []
+
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    windows = []
+
+    incident_events = [
+        e
+        for e in event_entries
+        if e.get("type") == "incident_detected"
+        and e.get("incident_class") == "shadow_disagreement"
+        and (axis is None or e.get("axis") == axis)
+    ]
+
+    for event in incident_events:
+        try:
+            event_ts = _parse_ts(event.get("time", ""))
+        except Exception:
+            continue
+
+        if event_ts.tzinfo is None:
+            event_ts = event_ts.replace(tzinfo=UTC)
+        if event_ts < cutoff:
+            continue
+
+        before_ts = event_ts - timedelta(minutes=30)
+        after_ts = event_ts + timedelta(minutes=15)
+
+        window_entries = [
+            e
+            for e in chart_entries
+            if (
+                e.get("ts")
+                and (lambda ts: before_ts <= ts <= after_ts)(
+                    _parse_ts(e["ts"]).replace(tzinfo=UTC) if _parse_ts(e["ts"]).tzinfo is None else _parse_ts(e["ts"])
+                )
+            )
+        ]
+
+        if not window_entries:
+            continue
+
+        evt_axis = event.get("axis", "unknown")
+        production_state = event.get("production_state", "unknown")
+        comparison_state = event.get("comparison_state", "unknown")
+        description = f"shadow_disagreement_{evt_axis}_{production_state}_vs_{comparison_state}"
+
+        windows.append(
+            {
+                "start_ts": before_ts.isoformat(),
+                "end_ts": after_ts.isoformat(),
+                "incident_ts": event_ts.isoformat(),
+                "axis": evt_axis,
+                "production_state": production_state,
+                "comparison_state": comparison_state,
+                "comparison_kind": event.get("comparison_kind", "unknown"),
+                "disagreement_seconds": event.get("disagreement_seconds"),
+                "preceding_production_outcome": _preceding_production_outcome(event_entries, event_ts),
+                "description": description,
+                "entries": window_entries,
+                "incident_source": event,
+            }
+        )
+
+    return windows
+
+
 def build_scenario_json(
     window: dict,
     window_type: str,
@@ -581,6 +728,20 @@ def build_scenario_json(
             events.append(event)
 
     # Add incident-specific event for new handlers
+    if window_type == "shadow_disagreement":
+        incident_source = window.get("incident_source", {})
+        events.append(
+            {
+                "time": window.get("incident_ts", ""),
+                "type": "incident_detected",
+                "incident_class": "shadow_disagreement",
+                "axis": window.get("axis", "unknown"),
+                "production_state": window.get("production_state", "unknown"),
+                "comparison_state": window.get("comparison_state", "unknown"),
+                "comparison_kind": window.get("comparison_kind", "unknown"),
+                "disagreement_seconds": incident_source.get("disagreement_seconds"),
+            }
+        )
     if window_type == "occupancy_transition":
         event_source = window.get("event_source", {})
         occ_event_type = event_source.get("type", "occupancy_change")
@@ -594,15 +755,31 @@ def build_scenario_json(
             }
         )
 
+    notes = [
+        "Generated from real climate_advisor_chart_log entries and event_log.",
+        "Manual review recommended before simulation.",
+    ]
+    if window_type == "shadow_disagreement":
+        # Issue #738 fix: the production-vs-shadow/FSM disagreement itself has no
+        # offline equivalent to mechanically check (the sim harness never builds a
+        # second "shadow" engine — see _preceding_production_outcome()'s docstring),
+        # so it is documented here for human review instead of asserted on.
+        notes.append(
+            f"Live shadow-engine disagreement: axis='{window.get('axis', 'unknown')}', "
+            f"production_state='{window.get('production_state', 'unknown')}', "
+            f"comparison_state='{window.get('comparison_state', 'unknown')}' "
+            f"({window.get('comparison_kind', 'unknown')}), "
+            f"sustained {window.get('incident_source', {}).get('disagreement_seconds', '?')}s "
+            "before the live diagnostic fired. Only production's own recorded outcome "
+            "is asserted below (the offline harness cannot re-check the disagreement)."
+        )
+
     scenario = {
         "name": f"{start_ts_str[:10]}-{window_type}-{window.get('description', 'scenario')}",
         "description": f"{window_type} window: {window.get('description', '')}",
         "source": "build_historical_scenario",
-        "issue": "#223",
-        "notes": [
-            "Generated from real climate_advisor_chart_log entries and event_log.",
-            "Manual review recommended before simulation.",
-        ],
+        "issue": "#738" if window_type == "shadow_disagreement" else "#223",
+        "notes": notes,
         "config": {
             "comfort_heat": comfort_heat_f,
             "comfort_cool": comfort_cool_f,
@@ -646,6 +823,40 @@ def build_scenario_json(
                 "reason": "Override detected after automation action within 60s gap",
             }
         ]
+    elif window_type == "shadow_disagreement":
+        # Issue #738 fix: "shadow_engine_agrees" was mechanically unevaluable —
+        # tools/simulate.py's runner has no check_assertion() branch for it, and
+        # more fundamentally the offline sim harness never constructs a second
+        # "shadow" AutomationEngine to compare against (that A/B pairing is a live
+        # coordinator.py-only construct). Every track:"integration" assertion with
+        # no matching branch either silently skips forever (use_coordinator=False,
+        # the default) or always fails (use_coordinator=True) — neither is a real
+        # check. Assert instead on production's own real recorded decision at the
+        # incident timestamp (see _preceding_production_outcome()) — genuinely
+        # evaluable via the existing production_outcome_at() fallback path, same
+        # mechanism occupancy_transition's "setback_applied" assertion already
+        # relies on. The disagreement itself (production_state vs comparison_state)
+        # is documented in `notes` above for human review, not checked here.
+        preceding_outcome = window.get("preceding_production_outcome")
+        if preceding_outcome:
+            scenario["assertions"] = [
+                {
+                    "at": window.get("incident_ts", ""),
+                    "expect": preceding_outcome,
+                    "track": "logic",
+                    "reason": (
+                        f"Production's own real recorded decision at the time of the "
+                        f"'{window.get('axis', 'unknown')}' shadow-disagreement incident "
+                        f"was '{preceding_outcome}' — pinned as a regression anchor for "
+                        "production's own behavior at this timestamp. This does NOT "
+                        "check the shadow/FSM disagreement (see notes)."
+                    ),
+                }
+            ]
+        # else: no mappable preceding production decision — ship with no
+        # assertion, same precedent find_comfort_violations()/find_nat_vent_windows()
+        # already set for incident types where nothing evaluable is derivable from
+        # the window alone. The notes field still documents the disagreement.
 
     return scenario
 
@@ -764,6 +975,7 @@ def main() -> None:
             "occupancy_transition",
             "setpoint_mode_inconsistency",
             "rapid_override_after_automation",
+            "shadow_disagreement",
         ],
         default="comfort_violation",
         help="Type of window to extract (default: comfort_violation)",
@@ -773,6 +985,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--comfort-heat", type=float, default=70.0, help="Comfort heat threshold in degrees F (default: 70.0)"
+    )
+    parser.add_argument(
+        "--axis",
+        type=str,
+        default=None,
+        help=(
+            "Filter --type shadow_disagreement to one comparison axis (mirror, fsm, "
+            "door_window_mirror, door_window_fsm, override_grace_mirror, override_grace_fsm, "
+            "fan_mirror). Omit to include all axes."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -810,7 +1032,12 @@ def main() -> None:
 
     # Fetch event_log for incident handlers
     event_entries = []
-    if args.type in ("occupancy_transition", "setpoint_mode_inconsistency", "rapid_override_after_automation"):
+    if args.type in (
+        "occupancy_transition",
+        "setpoint_mode_inconsistency",
+        "rapid_override_after_automation",
+        "shadow_disagreement",
+    ):
         try:
             config = load_config()
             event_entries = _fetch_event_log(config, args.hours)
@@ -846,6 +1073,9 @@ def main() -> None:
     elif args.type == "rapid_override_after_automation":
         windows = find_rapid_override_windows(entries, event_entries, args.hours)
         print(f"\nFound {len(windows)} rapid_override_after_automation window(s):\n")
+    elif args.type == "shadow_disagreement":
+        windows = find_shadow_disagreement_windows(entries, event_entries, args.hours, axis=args.axis)
+        print(f"\nFound {len(windows)} shadow_disagreement window(s):\n")
 
     if not windows:
         print(f"No {args.type} windows found in the last {args.hours} hours.")
@@ -869,7 +1099,7 @@ def main() -> None:
                 print("  Override active: True")
             if window.get("setpoint_at_transition") is not None:
                 print(f"  Setpoint: {window.get('setpoint_at_transition', '?'):.1f}F")
-        elif args.type in ("setpoint_mode_inconsistency", "rapid_override_after_automation"):
+        elif args.type in ("setpoint_mode_inconsistency", "rapid_override_after_automation", "shadow_disagreement"):
             print(f"  Description: {window.get('description', 'N/A')}")
         else:
             print(f"  HVAC during: {window.get('hvac_mode_during', '?')} (fan={window.get('fan_during', '?')})")

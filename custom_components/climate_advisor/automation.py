@@ -163,6 +163,16 @@ from .nat_vent_lifecycle import (
     derive_nat_vent_lifecycle_state,
 )
 from .nat_vent_reactivation_lockout import is_reactivation_locked_out
+from .occupancy_fsm import (
+    AwayVacationDecision,
+    AwayVacationInputs,
+    AwayVacationOutcome,
+    HomeDecision,
+    HomeInputs,
+    HomeNotifyOutcome,
+    decide_away_vacation_dispatch,
+    decide_home_dispatch,
+)
 from .ode_ceiling_guard import OdeCeilingGuardOutcome
 from .override_grace_lifecycle import (
     GraceState,
@@ -860,6 +870,19 @@ class AutomationEngine:
         # afterward). Default False — zero behavior change until wiring is verified
         # live; deployed OFF initially.
         self._classification_fsm_authoritative: bool = False
+
+        # Issue #744 (strangler-fig completion program, Phase 4): whether the
+        # occupancy dispatch FSM (occupancy_fsm.py) is authoritative for
+        # handle_occupancy_away()/handle_occupancy_home()/handle_occupancy_vacation()'s
+        # branch structure, instead of each handler's own inline early-return chain.
+        # Like _classification_fsm_authoritative, occupancy_fsm.py is deliberately
+        # STATELESS (see its own module docstring's five-whys) — self._occupancy_mode
+        # is data (set by set_occupancy_mode()), not a persisted lifecycle this flag
+        # governs; only which code path computes each transition's outcome. Fixed-
+        # per-engine-identity, same convention as the flags above (set once at
+        # construction by coordinator.py, never mutated afterward). Default False —
+        # zero behavior change until wiring is verified live; deployed OFF initially.
+        self._occupancy_fsm_authoritative: bool = False
 
         # Issue #717 (Block 5, epic #594): wire the previously-dormant
         # lifecycle_dispatcher.py pub/sub router (Issue #633) into production so the
@@ -6689,6 +6712,15 @@ class AutomationEngine:
     async def handle_occupancy_away(self) -> None:
         """Handle everyone leaving — apply setback."""
         self._occupancy_mode = OCCUPANCY_AWAY
+        # Issue #744: when self._occupancy_fsm_authoritative is True, the branch
+        # structure below is replaced by a call to the pure occupancy_fsm.py pair —
+        # same logging, same events, same HVAC writes, driven by the returned
+        # decision instead of re-derived inline. False (default) runs this legacy
+        # block byte-identical to pre-Issue-#744 behavior.
+        if self._occupancy_fsm_authoritative:
+            _av_decision = self._resolve_occupancy_away_vacation_fsm_state(mode="away")
+            await self._apply_occupancy_away_vacation_decision("away", _av_decision)
+            return
         if self._paused_by_door:
             _LOGGER.info(
                 "Occupancy away — door/window open (_paused_by_door=True), "
@@ -6762,6 +6794,11 @@ class AutomationEngine:
     async def handle_occupancy_home(self) -> None:
         """Handle someone returning — restore comfort."""
         self._occupancy_mode = OCCUPANCY_HOME
+        # Issue #744: see handle_occupancy_away()'s matching comment.
+        if self._occupancy_fsm_authoritative:
+            _home_decision = self._resolve_occupancy_home_fsm_state()
+            await self._apply_occupancy_home_decision(_home_decision)
+            return
         c = self._current_classification
         if not c:
             return
@@ -6814,6 +6851,11 @@ class AutomationEngine:
     async def handle_occupancy_vacation(self) -> None:
         """Handle vacation mode — apply deeper setback for extended away."""
         self._occupancy_mode = OCCUPANCY_VACATION
+        # Issue #744: see handle_occupancy_away()'s matching comment.
+        if self._occupancy_fsm_authoritative:
+            _vac_decision = self._resolve_occupancy_away_vacation_fsm_state(mode="vacation")
+            await self._apply_occupancy_away_vacation_decision("vacation", _vac_decision)
+            return
         if self._paused_by_door:
             _LOGGER.info(
                 "Occupancy vacation — door/window open (_paused_by_door=True), "
@@ -8532,6 +8574,184 @@ class AutomationEngine:
                     "new_setpoint_f": _comfort_cool_cg,
                     "old_setpoint_f": _old_setpoint_f_cg,
                 },
+            )
+
+    def _resolve_occupancy_away_vacation_fsm_state(self, *, mode: str) -> AwayVacationDecision:
+        """Single dispatch point for handle_occupancy_away()'s/
+        handle_occupancy_vacation()'s occupancy FSM (Issue #744). Builds one
+        ``AwayVacationInputs`` snapshot from live engine state and returns the
+        composed decision.
+
+        Read-only — this resolver never mutates engine state. The caller (either
+        handler, gated on ``self._occupancy_fsm_authoritative``) is responsible for
+        acting on the returned ``AwayVacationDecision`` via
+        ``_apply_occupancy_away_vacation_decision()``. ``mode`` ("away" or
+        "vacation") does not affect the pure decision itself (see
+        ``occupancy_fsm.py``'s module docstring) — it is threaded through only for
+        the apply-shell's logging/event-payload text.
+        """
+        inputs = AwayVacationInputs(
+            paused_by_door=self._paused_by_door,
+            manual_override_active=self._manual_override_active,
+            has_classification=self._current_classification is not None,
+        )
+        return decide_away_vacation_dispatch(inputs)
+
+    async def _apply_occupancy_away_vacation_decision(self, mode: str, decision: AwayVacationDecision) -> None:
+        """Side-effecting shell for the occupancy FSM's away/vacation-authoritative
+        branch (Issue #744). Byte-identical logging/event/HVAC-write behavior to the
+        legacy inline blocks in ``handle_occupancy_away()``/``handle_occupancy_vacation()``,
+        driven by ``decision`` instead of re-deriving the branch inline. Only called
+        when ``self._occupancy_fsm_authoritative`` is True — see each handler's own
+        call site. ``mode`` is ``"away"`` or ``"vacation"``.
+        """
+        if decision.outcome is AwayVacationOutcome.SUPPRESSED_PAUSED:
+            _LOGGER.info(
+                "Occupancy %s — door/window open (_paused_by_door=True), "
+                "skipping setback band; occupancy recorded, HVAC remains off",
+                mode,
+            )
+            if self._emit_event_callback and not self._recent_duplicate("occupancy_setback_suppressed_paused", (mode,)):
+                _pause_minutes = (
+                    (dt_util.now() - self._paused_since).total_seconds() / 60.0
+                    if self._paused_since is not None
+                    else None
+                )
+                self._emit_event_callback(
+                    "occupancy_setback_suppressed_paused",
+                    {
+                        "occupancy": mode,
+                        "reason": "paused_by_door",
+                        "paused_entity": self._paused_entity,
+                        "paused_minutes": round(_pause_minutes) if _pause_minutes is not None else None,
+                    },
+                )
+            return
+
+        if decision.clear_override:
+            _LOGGER.info(
+                "Occupancy transition to %s — clearing manual override (mode=%s since %s)",
+                mode,
+                self._manual_override_mode,
+                self._manual_override_time,
+            )
+            self.clear_manual_override(reason=f"occupancy_{mode}")
+
+        if decision.outcome is AwayVacationOutcome.NO_CLASSIFICATION:
+            if mode == "away":
+                _LOGGER.warning("Occupancy away handler skipped — no day classification available")
+            return
+
+        c = self._current_classification
+        _occ_mode_const = OCCUPANCY_AWAY if mode == "away" else OCCUPANCY_VACATION
+        _band = select_comfort_band(
+            c,
+            self.config,
+            occupancy_mode=_occ_mode_const,
+            in_sleep_window=False,
+            aggressive_savings=bool(self.config.get("aggressive_savings", False)),
+        )
+        # Issue #591: WINDOWED dedup — see handle_occupancy_away()'s original comment for
+        # the full rationale (repeated bands are often intentional re-confirmations, but
+        # an unguarded site reopens the #584 double-emit shape within seconds).
+        _sig = (mode, round(_band.floor, 2), round(_band.ceiling, 2))
+        if self._emit_event_callback and not self._recent_duplicate("occupancy_setback", _sig, window_seconds=600):
+            self._emit_event_callback(
+                "occupancy_setback",
+                {
+                    "mode": mode,
+                    "floor": _band.floor,
+                    "ceiling": _band.ceiling,
+                    "occupancy": mode,
+                    "indoor_f": self._indoor_f_for_event(),
+                },
+            )
+        await self._apply_comfort_band(_band, reason=f"occupancy {mode} — setback band")
+
+    def _resolve_occupancy_home_fsm_state(self) -> HomeDecision:
+        """Single dispatch point for handle_occupancy_home()'s occupancy FSM
+        (Issue #744). Builds one ``HomeInputs`` snapshot from live engine/config
+        state and returns the composed decision. Read-only — see
+        ``_resolve_occupancy_away_vacation_fsm_state()``'s matching docstring.
+        """
+        c = self._current_classification
+        indoor_temp = self._get_indoor_temp_f()
+        comfort_f: float | None = None
+        setback_f: float | None = None
+        if c is not None and c.hvac_mode in ("heat", "cool"):
+            comfort_f = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
+            setback_f = self.config["setback_heat"] if c.hvac_mode == "heat" else self.config["setback_cool"]
+        debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
+        seconds_since: float | None = None
+        if self._last_welcome_home_notified is not None:
+            seconds_since = (dt_util.now() - self._last_welcome_home_notified).total_seconds()
+        inputs = HomeInputs(
+            has_classification=c is not None,
+            hvac_mode=c.hvac_mode if c is not None else None,
+            indoor_temp_f=indoor_temp,
+            comfort_f=comfort_f,
+            setback_f=setback_f,
+            debounce_seconds=float(debounce_seconds),
+            seconds_since_last_notified=seconds_since,
+        )
+        return decide_home_dispatch(inputs)
+
+    async def _apply_occupancy_home_decision(self, decision: HomeDecision) -> None:
+        """Side-effecting shell for the occupancy FSM's home-authoritative branch
+        (Issue #744). Byte-identical logging/event/HVAC-write/notify behavior to the
+        legacy inline block in ``handle_occupancy_home()``, driven by ``decision``
+        instead of re-deriving the branch inline. Only called when
+        ``self._occupancy_fsm_authoritative`` is True — see
+        ``handle_occupancy_home()``'s own call site.
+        """
+        if not decision.restore and decision.notify is HomeNotifyOutcome.NONE:
+            return  # mirrors legacy's `if not c: return`
+
+        c = self._current_classification
+        if decision.restore:
+            await self._set_temperature_for_mode(c, reason=f"occupancy home — restoring {c.hvac_mode} comfort")
+            comfort = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "occupancy_comfort_restored",
+                    {"mode": c.hvac_mode, "target_f": comfort, "indoor_f": self._indoor_f_for_event()},
+                )
+
+        if decision.notify is HomeNotifyOutcome.SUPPRESSED_NEAR_COMFORT:
+            indoor_temp = self._get_indoor_temp_f()
+            comfort = self.config["comfort_heat"] if c.hvac_mode == "heat" else self.config["comfort_cool"]
+            setback = self.config["setback_heat"] if c.hvac_mode == "heat" else self.config["setback_cool"]
+            _LOGGER.info(
+                "Welcome home notification suppressed — indoor %.1f°F already near comfort %.1f°F"
+                " (dist_comfort=%.1f < dist_setback=%.1f)",
+                indoor_temp,
+                comfort,
+                abs(indoor_temp - comfort),
+                abs(indoor_temp - setback),
+            )
+            self._last_welcome_home_notified = dt_util.now()
+            return
+
+        if decision.notify is HomeNotifyOutcome.SUPPRESSED_DEBOUNCE:
+            debounce_seconds = self.config.get(CONF_WELCOME_HOME_DEBOUNCE, DEFAULT_WELCOME_HOME_DEBOUNCE_SECONDS)
+            elapsed = (
+                (dt_util.now() - self._last_welcome_home_notified).total_seconds()
+                if self._last_welcome_home_notified is not None
+                else 0.0
+            )
+            _LOGGER.info(
+                "Welcome home notification suppressed — debounce active (%.0fs elapsed, window=%ds)",
+                elapsed,
+                debounce_seconds,
+            )
+            return
+
+        if decision.notify is HomeNotifyOutcome.SEND:
+            self._last_welcome_home_notified = dt_util.now()
+            await self._notify(
+                "🏠 Welcome home! Restoring comfort temperature. Should feel normal in about 20–30 minutes.",
+                "Climate Advisor",
+                notification_type="occupancy_home",
             )
 
     def _build_fan_fsm_inputs(

@@ -543,6 +543,13 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "classification_production_state": diag.get("classification_production_state"),
             "classification_shadow_state": diag.get("classification_shadow_state"),
             "classification_mirror_agrees": diag.get("classification_mirror_agrees"),
+            # Issue #744: occupancy dispatch's own production/shadow agreement (the
+            # should_defer_to_occupancy_setback() result each engine computes from its
+            # own live _occupancy_mode). Same "no separate FSM axis" shape as
+            # classification above — occupancy_fsm.py is genuinely stateless.
+            "occupancy_production_state": diag.get("occupancy_production_state"),
+            "occupancy_shadow_state": diag.get("occupancy_shadow_state"),
+            "occupancy_mirror_agrees": diag.get("occupancy_mirror_agrees"),
             # Issue #685: cascade-noise wall-clock debounce state per comparison axis
             # (disagreement_seconds, sustained, cumulative_seconds_today), plus the
             # date the cumulative counters last reset. Additive only.

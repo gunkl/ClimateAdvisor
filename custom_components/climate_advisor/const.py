@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.60"
+VERSION = "0.6.61"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.61": [
+        "Feat #744: no user-visible change. Strangler-fig completion program Phase 4"
+        " — extracts occupancy dispatch (away/vacation/home transitions) into a pure,"
+        " differentially-validated FSM, plus a new pure priority-resolver for the"
+        " guest/vacation/home/away toggle logic. Zero divergence from current behavior"
+        " across the full 90-scenario test corpus and the 81-scenario golden suite.",
+    ],
     "0.6.60": [
         "Feat #742: no user-visible change. Strangler-fig completion program Phase 3"
         " — extracts the daily classification decision pipeline (the hub every other"
@@ -2207,6 +2214,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    744: {
+        "version_fixed": "0.6.61",
+        "title": (
+            "Phase 4 of the strangler-fig completion program: extracted occupancy"
+            " dispatch into occupancy_fsm.py — deliberately stateless, like Phase 3's"
+            " classification_fsm.py, since self._occupancy_mode is data set fresh by"
+            " the caller, not a persisted lifecycle; the AWAY-pending-vs-active split"
+            " is a plain coordinator-owned timer the engine never observes as a state."
+            " Uses two decision functions (decide_away_vacation_dispatch,"
+            " decide_home_dispatch) rather than one transition() since away/vacation"
+            " and home are genuinely different call shapes, not one entry point with"
+            " internal branching. Also extracted the guest>vacation>home/away priority"
+            " resolver into a new pure leaf, occupancy_priority.py (unconditional,"
+            " no flag — already effectively pure). Differential comparator: 90/90"
+            " golden+pending scenarios byte-identical, 92/92 in the 6-flag combined"
+            " comparator, 81/81 golden scenarios via tools/simulate.py. No latent bugs"
+            " found in the legacy code during extraction."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/occupancy_fsm.py,"
+            " occupancy_priority.py (new); automation.py handle_occupancy_away/home/"
+            "vacation(); coordinator.py 6th shadow-diagnostic axis"
+        ),
+    },
     742: {
         "version_fixed": "0.6.60",
         "title": (

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.61"
+VERSION = "0.6.62"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.62": [
+        "Feat #746: no user-visible change. Strangler-fig completion program Phase 5"
+        " (final subsystem extraction) — extracts the economizer's two-phase window-"
+        " cooling logic (cool-down/maintain) into a differentially-validated lifecycle"
+        " FSM, the same composed-session-state shape as nat-vent/door-window/fan."
+        " Zero divergence across the full 90-scenario test corpus and the 81-scenario"
+        " golden suite. All 3 remaining monolithic subsystems named in the Strangler"
+        " Fig Atlas are now extracted.",
+    ],
     "0.6.61": [
         "Feat #744: no user-visible change. Strangler-fig completion program Phase 4"
         " — extracts occupancy dispatch (away/vacation/home transitions) into a pure,"
@@ -2214,6 +2223,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    746: {
+        "version_fixed": "0.6.62",
+        "title": (
+            "Phase 5 (final subsystem extraction) of the strangler-fig completion"
+            " program: extracted the economizer's two-phase window-cooling logic into"
+            " economizer_lifecycle.py/economizer_fsm.py. Unlike Phase 3/4's classification"
+            " and occupancy (both stateless), economizer genuinely has multi-tick session"
+            " state (_economizer_active/_economizer_phase persist across cycles and gate"
+            " redundant fan-activation calls), so it follows nat-vent/door-window/fan's"
+            " composed-lifecycle-state shape instead: a single 3-value enum (INACTIVE/"
+            " COOL_DOWN/MAINTAIN). Preserves a real, intentional asymmetry: the nat-vent-"
+            " active short-circuit defers without deactivating even if the economizer was"
+            " already active, distinct from the not-a-hot-day short-circuit which does"
+            " deactivate. Differential comparator: 90/90 golden+pending scenarios"
+            " byte-identical, 92/92 in the 7-flag combined comparator, 81/81 golden"
+            " scenarios via tools/simulate.py. No latent bugs found in legacy code."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/economizer_gate.py,"
+            " economizer_lifecycle.py, economizer_fsm.py (new); automation.py"
+            " check_window_cooling_opportunity(); coordinator.py 7th shadow-diagnostic axis"
+        ),
+    },
     744: {
         "version_fixed": "0.6.61",
         "title": (

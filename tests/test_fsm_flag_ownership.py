@@ -98,6 +98,17 @@ _FLAG_OWNERS: dict[str, frozenset[str]] = {
     "_fan_rate_limited_direction": frozenset(),
     "_fan_on_since": frozenset(),
     "_fan_drift_tick_count": frozenset(),
+    # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
+    # extraction): economizer's own 2-flag derivation, same shape as nat-vent's
+    # 2-flag derivation above. Sole owner is _apply_economizer_fsm_state();
+    # _deactivate_economizer() also writes both fields directly on the legacy
+    # branch (and on the FSM-authoritative branch's INACTIVE-transition path,
+    # which calls it instead of _apply_economizer_fsm_state() — see
+    # _check_window_cooling_opportunity_fsm()) but that's a real caller's direct
+    # write, not a second _apply_*_fsm_state()-shaped method, so this test's AST
+    # scan correctly does not see it.
+    "_economizer_active": frozenset({"_apply_economizer_fsm_state"}),
+    "_economizer_phase": frozenset({"_apply_economizer_fsm_state"}),
 }
 
 

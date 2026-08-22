@@ -550,6 +550,15 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "occupancy_production_state": diag.get("occupancy_production_state"),
             "occupancy_shadow_state": diag.get("occupancy_shadow_state"),
             "occupancy_mirror_agrees": diag.get("occupancy_mirror_agrees"),
+            # Issue #746 (strangler-fig completion program, Phase 5 — final subsystem
+            # extraction): economizer's own production/shadow agreement (each engine's
+            # own economizer_lifecycle_state property, derived from its live
+            # _economizer_active/_economizer_phase flags). Same "no separate FSM axis"
+            # shape as fan/WHF above — economizer_fsm.py's transition state is not
+            # independently tracked as a third comparison point.
+            "economizer_production_state": diag.get("economizer_production_state"),
+            "economizer_shadow_state": diag.get("economizer_shadow_state"),
+            "economizer_mirror_agrees": diag.get("economizer_mirror_agrees"),
             # Issue #685: cascade-noise wall-clock debounce state per comparison axis
             # (disagreement_seconds, sustained, cumulative_seconds_today), plus the
             # date the cumulative counters last reset. Additive only.

@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.55"
+VERSION = "0.6.56"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.56": [
+        "Fix #733: after an HA restart, an already-favorable whole-house-fan"
+        " natural-ventilation session could be silently cancelled a moment after"
+        " Climate Advisor turned it on, leaving the fan running with no"
+        " thermostatic oversight until the next scheduled check the following"
+        " morning — the startup fan reconciliation now defers to a just-issued"
+        " fan command instead of overriding it, and any orphaned backstop timer"
+        " is cleaned up so oversight can never silently lapse.",
+    ],
     "0.6.55": [
         "Feat #731: no user-visible change. Continues the internal automation-engine"
         " refactor (fan/whole-house-fan control) with the same extract-and-shadow-"
@@ -2167,6 +2176,30 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    733: {
+        "version_fixed": "0.6.56",
+        "title": (
+            "An HA restart that landed while a window was open and nat-vent-eligible"
+            " conditions held could silently cancel the whole-house-fan session"
+            " _do_startup_coalesce() had just correctly activated, leaving the"
+            " physical fan running with no thermostatic oversight until the next"
+            " scheduled check the following morning."
+        ),
+        "scope_covered": (
+            "automation.py: _reconcile_fan_on_startup_locked()'s not-thermostat_"
+            "fan_running branch now checks _is_recent_fan_command_callback"
+            "(threshold_seconds=30.0) — the same recent-command guard"
+            " _reconcile_fan_physical_drift() already used for the identical class"
+            " of stale-read-vs-fresh-command race — before clobbering _fan_active/"
+            "_natural_vent_active/_nat_vent_soft_start, and defers to the fresh"
+            " in-pass command instead. _deactivate_fan()'s 'already inactive'"
+            " early-return path now always calls _cancel_fan_thermo_backstop(),"
+            " closing the general class of bug where a self-rescheduling"
+            " thermostatic backstop timer could be left orphaned (armed but"
+            " pointing at flags that already say nothing is active) by any path"
+            " that clears _fan_active outside the full deactivation flow."
+        ),
+    },
     731: {
         "version_fixed": "0.6.55",
         "title": (

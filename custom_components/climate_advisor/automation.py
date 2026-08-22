@@ -5665,6 +5665,26 @@ class AutomationEngine:
             return
 
         if not thermostat_fan_running:
+            # Issue #733: thermostat_fan_running is a live hass.states.get() read taken
+            # by the caller — if CA itself issued a fan command in the last 30s (e.g.
+            # _do_startup_coalesce() activating nat-vent for an open window a moment
+            # before calling reconcile in the same pass), the physical entity may not
+            # have reported the new state back to HA yet. Without this guard, that stale
+            # read looked identical to "the fan is genuinely off" and clobbered the
+            # just-made decision — the WHF kept running the physical relay while CA's own
+            # flags said inactive, so nothing thermostatically managed it afterward.
+            # Reuses the exact guard _reconcile_fan_physical_drift() already applies to
+            # the same class of stale-read-vs-fresh-command race (automation.py ~9319).
+            if self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0):
+                _LOGGER.info(
+                    "Fan reconcile: thermostat_fan_running=False but a fan command was issued"
+                    " in the last 30s — deferring to that fresh command instead of this stale"
+                    " physical read (archetype=%s, trigger=%s)",
+                    archetype,
+                    trigger,
+                )
+                return
+
             # Fan is off — ensure CA flags are clean (defence in depth), and release any
             # stranded WHF HVAC suppression left over from a session that ended without
             # a matching _deactivate_fan() call (Issue #405). Without this, a nat-vent
@@ -9629,6 +9649,15 @@ class AutomationEngine:
                     )
             else:
                 _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
+            # Issue #733: a backstop timer should never outlive _fan_active reading False —
+            # if something cleared _fan_active without going through the full deactivation
+            # path below (e.g. a reconcile branch's direct write), the self-rescheduling
+            # thermostatic backstop armed by the earlier _activate_fan() call is left
+            # running but orphaned, pointing at flags that now say nothing is active. Its
+            # one tick then no-ops (nat_vent_temperature_check exits immediately) and never
+            # reschedules again, silently ending thermostatic oversight for the rest of the
+            # session. Safe no-op when no timer is scheduled.
+            self._cancel_fan_thermo_backstop()
             return FanCommandResult.ALREADY_IN_STATE
 
         # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while

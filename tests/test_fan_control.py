@@ -286,6 +286,35 @@ class TestDeactivateFan:
 
         engine.hass.services.async_call.assert_not_called()
 
+    def test_already_inactive_cancels_orphaned_backstop_timer(self):
+        """Issue #733: if something cleared _fan_active without going through the full
+        deactivation path below (e.g. reconcile_fan_on_startup()'s no-fan branch), the
+        5-min self-rescheduling thermostatic backstop timer armed by an earlier
+        _activate_fan() call is left running but orphaned — pointing at flags that now
+        say nothing is active. Its one tick then no-ops and never reschedules again,
+        silently ending thermostatic oversight. The early-return "already inactive"
+        path must cancel any such timer, not just the full-deactivation path."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._fan_active = False  # already inactive → early-return path
+        cancel = MagicMock()
+        engine._fan_thermo_cancel = cancel
+
+        asyncio.run(engine._deactivate_fan(reason="test"))
+
+        cancel.assert_called_once()
+        assert engine._fan_thermo_cancel is None
+
+    def test_already_inactive_no_timer_is_still_a_noop(self):
+        """No spurious calls when nothing was scheduled — cancel is safe/idempotent."""
+        engine = _make_automation_engine({CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE})
+        engine._fan_active = False
+        engine._fan_thermo_cancel = None
+
+        result = asyncio.run(engine._deactivate_fan(reason="test"))
+
+        assert result == FanCommandResult.ALREADY_IN_STATE
+        assert engine._fan_thermo_cancel is None
+
 
 # ---------------------------------------------------------------------------
 # release_suppression (Issue #618)
@@ -2640,6 +2669,53 @@ class TestReconcileFanOnStartup:
 
         engine._set_hvac_mode.assert_not_awaited()
         assert engine._pre_fan_hvac_mode == "cool"
+
+    def test_recent_fan_command_defers_instead_of_clobbering(self):
+        """Issue #733: _do_startup_coalesce() can activate nat-vent (which stamps
+        _fan_command_time via _activate_fan()) and then call reconcile_fan_on_startup()
+        moments later in the same pass, before the physical WHF entity has reported
+        its new state back to HA. Without this guard, that stale
+        thermostat_fan_running=False read looked identical to a genuine "fan is off"
+        and clobbered _fan_active/_natural_vent_active right after they were correctly
+        set — leaving the physical fan running with no software oversight for the rest
+        of the night. When a fan command was issued in the last 30s, reconcile must
+        defer to it instead of the stale read."""
+        engine = self._engine()
+        engine._is_recent_fan_command_callback = MagicMock(return_value=True)
+        engine._fan_active = True
+        engine._natural_vent_active = True
+        engine._nat_vent_soft_start = True
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=70.0, outdoor=62.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._deactivate_fan.assert_not_awaited()
+        assert engine._fan_active is True
+        assert engine._natural_vent_active is True
+        assert engine._nat_vent_soft_start is True
+
+    def test_no_recent_fan_command_still_clobbers_stale_state(self):
+        """Companion to the #733 fix: when no fan command was issued recently, a
+        thermostat_fan_running=False read is genuine ground truth and must still
+        clear stale flags exactly as before — the guard must not become a blanket
+        bypass of the no-fan branch."""
+        engine = self._engine()
+        engine._is_recent_fan_command_callback = MagicMock(return_value=False)
+        engine._fan_active = True
+        engine._natural_vent_active = True
+
+        asyncio.run(
+            engine.reconcile_fan_on_startup(
+                indoor=70.0, outdoor=62.0, thermostat_fan_running=False, any_sensor_open=True
+            )
+        )
+
+        engine._deactivate_fan.assert_awaited_once()
+        assert engine._fan_active is False
+        assert engine._natural_vent_active is False
 
     def test_adopt_on_when_nat_vent_eligible(self):
         """Fan running + window open + outdoor cooler → adopt as CA nat-vent."""

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.56] — 2026-08-22
+
+- Fix #733: after an HA restart, an already-favorable whole-house-fan natural-ventilation session could be silently cancelled a moment after Climate Advisor turned it on, leaving the fan running with no thermostatic oversight until the next scheduled check the following morning — the startup fan reconciliation now defers to a just-issued fan command instead of overriding it, and any orphaned backstop timer is cleaned up so oversight can never silently lapse.
+
 ## [0.6.55] — 2026-08-21
 
 - Feat #731: no user-visible change. Continues the internal automation-engine refactor (fan/whole-house-fan control) with the same extract-and-shadow-validate pattern already applied to nat-vent, door/window, and override/grace — adds a shadow-diagnostic comparison axis so the fan/WHF FSM's agreement with production can be watched the same way the other three already are; see #594/#727/#729 for background.

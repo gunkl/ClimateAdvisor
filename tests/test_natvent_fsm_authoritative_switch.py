@@ -29,6 +29,8 @@ def _make_coordinator() -> ClimateAdvisorCoordinator:
     coord = object.__new__(ClimateAdvisorCoordinator)
     coord.automation_engine = MagicMock()
     coord.automation_engine._natvent_fsm_authoritative = False
+    coord.hass = MagicMock()
+    coord.hass.async_create_task = MagicMock(side_effect=lambda coro: coro.close())
     coord.set_natvent_fsm_authoritative = types.MethodType(
         ClimateAdvisorCoordinator.set_natvent_fsm_authoritative, coord
     )
@@ -53,10 +55,9 @@ class TestNatVentFsmAuthoritativeToggle:
         assert coord.automation_engine._natvent_fsm_authoritative is False
         assert coord.natvent_fsm_authoritative is False
 
-    def test_not_persisted_no_save_state_call(self):
-        """Deliberately does not call _async_save_state — see the method's own
-        docstring: a restart must always come back up on the legacy path."""
+    def test_persisted_save_state_called(self):
+        """Issue #727: this switch now persists across restart — flipping it
+        must trigger a state save, reversing the original Phase R design."""
         coord = _make_coordinator()
-        coord.hass = MagicMock()
         coord.set_natvent_fsm_authoritative(True)
-        coord.hass.async_create_task.assert_not_called()
+        coord.hass.async_create_task.assert_called_once()

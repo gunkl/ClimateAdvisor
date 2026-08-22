@@ -4,9 +4,18 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.52"
+VERSION = "0.6.53"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.53": [
+        "Feat #727: the 3 nat-vent/door-window/override-grace FSM-authoritative"
+        " switches now hold whatever state you last set them to across a Home"
+        " Assistant restart, instead of always reverting to off. Also adds a new"
+        " switch, Shadow Engine Primary, that lets you promote the diagnostic"
+        " shadow engine to be the one actually operating your thermostat/fan —"
+        " previously it could only compare its decisions against production, never"
+        " act on them. Also persisted across restart, and instantly reversible.",
+    ],
     "0.6.52": [
         "Fix #724: no user-visible change. Closes a gap in the internal diagnostic"
         " that shadows automation decisions to verify safety-logic correctness — its"
@@ -2393,6 +2402,37 @@ KNOWN_FIXES: dict[int, dict] = {
             " (parity, positive control, and a direct reproduction of the guard"
             " divergence with/without the fix). Zero production/HVAC impact — shadow"
             " engine is permanently dry_run=True."
+        ),
+    },
+    727: {
+        "version_fixed": "0.6.53",
+        "title": (
+            "The 3 FSM-authoritative switches reset to off on every restart by"
+            " deliberate Phase R design; the shadow engine could never issue real"
+            " commands, only compare against production forever."
+        ),
+        "scope_covered": (
+            "coordinator.py: switch.climate_advisor_nat_vent_fsm_authoritative /"
+            " _door_window_fsm_authoritative / _override_grace_fsm_authoritative now"
+            " persist across a restart (top-level 'fsm_authoritative' dict in the"
+            " state file, restored unconditionally in async_restore_state() before"
+            " the same-day gate — a deliberate departure from most of that dict,"
+            " which IS date-gated, since these are mode-like settings not daily"
+            " ephemeral state). New switch.climate_advisor_shadow_engine_primary"
+            " (also persisted) lets the shadow AutomationEngine be promoted to issue"
+            " real HVAC/fan commands, demoting the previous production engine to"
+            " diagnostic-only — implemented as a routing property"
+            " (coordinator.automation_engine / .shadow_automation_engine) over two"
+            " fixed engine handles (_engine_a/_engine_b) selected by"
+            " _shadow_is_primary, so every existing read call site (api.py,"
+            " sensor.py, coordinator.py itself) keeps working unchanged."
+            " async_set_shadow_engine_primary() carries over command-tracking/"
+            " echo-suppression fields and the 3 FSM flags (never covered by the"
+            " existing _sync_shadow_inputs() raw-copy) before flipping dry_run/"
+            " callback bundles/role on both engines. KNOWN LIMITATION, logged at"
+            " promotion time: the shadow engine's decision coverage is a strict"
+            " subset of production's (see coordinator.py's documented un-mirrored"
+            " entry-point list) — not gated on closing that gap for this pass."
         ),
     },
     684: {

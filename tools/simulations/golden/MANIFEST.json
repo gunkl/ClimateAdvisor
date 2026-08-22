@@ -407,5 +407,10 @@
     "sha256": "ff043f148f3afb8afd9f6181113ad15f6eb87c71893673bdfe4d794002a74183",
     "signed": "2026-08-14",
     "issue": 639
+  },
+  "issue_748_manual_override_ends_whf_despite_rf_timer": {
+    "sha256": "c53caa4ea01eb1603cfad989aa371b6cde312e72be788e9c4fc176111b103f22",
+    "signed": "2026-08-22",
+    "issue": 748
   }
 }

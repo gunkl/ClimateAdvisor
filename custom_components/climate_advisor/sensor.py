@@ -528,6 +528,13 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "override_grace_fsm_state": diag.get("override_grace_fsm_state"),
             "override_grace_mirror_agrees": diag.get("override_grace_mirror_agrees"),
             "override_grace_fsm_agrees": diag.get("override_grace_fsm_agrees"),
+            # Issue #731: fan/WHF's own production/shadow agreement. No "fan_fsm_state"/
+            # "fan_fsm_agrees" pair exists here (unlike the 3 lifecycles above) — see
+            # coordinator.py's _SHADOW_DIAG_AXES comment for why a third fan_fsm
+            # comparison point would carry zero independent signal for this subsystem.
+            "fan_production_state": diag.get("fan_production_state"),
+            "fan_shadow_state": diag.get("fan_shadow_state"),
+            "fan_mirror_agrees": diag.get("fan_mirror_agrees"),
             # Issue #685: cascade-noise wall-clock debounce state per comparison axis
             # (disagreement_seconds, sustained, cumulative_seconds_today), plus the
             # date the cumulative counters last reset. Additive only.

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.55] — 2026-08-21
+
+- Feat #731: no user-visible change. Continues the internal automation-engine refactor (fan/whole-house-fan control) with the same extract-and-shadow-validate pattern already applied to nat-vent, door/window, and override/grace — adds a shadow-diagnostic comparison axis so the fan/WHF FSM's agreement with production can be watched the same way the other three already are; see #594/#727/#729 for background.
+
 ## [0.6.54] — 2026-08-21
 
 - Feat #729: simplifies the Shadow Engine Primary switch added in 0.6.53 down to the single control you actually use — the 3 separate nat-vent/door-window/override-grace FSM toggles are gone, replaced by one choice (legacy engine or FSM engine). Promoting now reloads the integration instead of swapping live, which closes a real gap where an in-progress timer (a grace period, a pending setpoint retry) could keep running against the wrong engine after a switch. Logs now record which engine issued each command, so it's provable after the fact.

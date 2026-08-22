@@ -74,6 +74,30 @@ _FLAG_OWNERS: dict[str, frozenset[str]] = {
     # immediately flags it if a future refactor starts writing it from an apply
     # method without an explicit decision to allow that.
     "_manual_override_active": frozenset(),
+    # Issue #731 (Phase 4): fan/WHF's own 4-field derivation. _pre_fan_hvac_mode is
+    # only ever None-cleared here (see _apply_fan_fsm_state()'s own docstring) — the
+    # string value it's set TO on suppression entry remains a payload write owned by
+    # the real _suppress_hvac_for_whf() caller.
+    "_fan_active": frozenset({"_apply_fan_fsm_state"}),
+    "_fan_override_active": frozenset({"_apply_fan_fsm_state"}),
+    "_fan_min_runtime_active": frozenset({"_apply_fan_fsm_state"}),
+    "_pre_fan_hvac_mode": frozenset({"_apply_fan_fsm_state"}),
+    # Issue #731 Phase 7: NOT written by _apply_fan_fsm_state() — same "excluded field,
+    # real-caller direct write" category _apply_fan_fsm_state()'s own docstring lists
+    # (_fan_on_since, _fan_toggle_command_time, _fan_rate_limited_until/_direction,
+    # _fan_drift_tick_count, ...), not the multi-owner category _paused_by_door above
+    # uses. _activate_fan()/_deactivate_fan() write _fan_rate_limited_until/_direction
+    # directly on the FSM-authoritative branch (mirroring _fan_toggle_rate_limited()'s own
+    # DEFER_NEW-only write on the legacy branch) BEFORE/alongside calling
+    # _resolve_fan_fsm_state() — never from inside _apply_fan_fsm_state() itself, which
+    # this test's AST scan does not and should not see. Same empty-owner-set pattern as
+    # _manual_override_active above: listed here so this test immediately flags it if a
+    # future refactor starts writing either field from an apply method without an
+    # explicit decision to allow that.
+    "_fan_rate_limited_until": frozenset(),
+    "_fan_rate_limited_direction": frozenset(),
+    "_fan_on_since": frozenset(),
+    "_fan_drift_tick_count": frozenset(),
 }
 
 

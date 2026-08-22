@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Inject a real DataUpdateCoordinator base class into the mocked HA module
@@ -195,6 +196,14 @@ def _make_coordinator(
     coordinator.automation_engine._override_confirm_pending = False
     coordinator.automation_engine._manual_override_active = False
     coordinator.automation_engine._grace_end_time = None
+    # Issue #731: shadow_automation_engine is a real AutomationEngine (never mocked
+    # here), and its cleanup() now genuinely calls _is_recent_fan_command_callback
+    # (routed to coordinator._is_recent_fan_command()) once _fan_fsm_authoritative=True
+    # is wired onto _engine_b. That coordinator method reads
+    # self.automation_engine._fan_command_time — an unset MagicMock attribute is
+    # truthy/non-None by default (see CLAUDE.md async-mock guidance), so without this
+    # explicit None it crashes comparing a MagicMock against a float in async_shutdown().
+    coordinator.automation_engine._fan_command_time = None
     coordinator._startup_coalesce_active = False  # Bug 1 (Issue #321): suppress in unit tests
 
     return coordinator
@@ -1178,8 +1187,18 @@ class TestOccupancyAwayDelay:
         # learning.save_state() through the executor — needs an awaitable mock.
         coord.hass.async_add_executor_job = AsyncMock(side_effect=lambda fn, *a: fn(*a))
 
-        # Shutdown must cancel the timer
-        asyncio.run(coord.async_shutdown())
+        # Shutdown must cancel the timer.
+        # Issue #731: shadow_automation_engine.cleanup() -> _stop_fan_min_runtime_cycles()
+        # now genuinely dispatches through the fan FSM (_fan_fsm_authoritative=True on
+        # _engine_b), which reads dt_util.now() via _build_fan_fsm_inputs()/
+        # _in_sleep_window() — the module-level dt_util stub returns an unpatched
+        # MagicMock by default, so a real datetime must be supplied here the same way
+        # other fan-area tests do (see test_fan_control.py's `_DT_NOW_PATH` idiom).
+        with patch(
+            "custom_components.climate_advisor.automation.dt_util.now",
+            return_value=datetime(2026, 1, 1, 12, 0, 0),
+        ):
+            asyncio.run(coord.async_shutdown())
 
         cancel_mock.assert_called()
 

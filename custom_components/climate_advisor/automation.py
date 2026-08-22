@@ -105,6 +105,7 @@ from .desired_state import (
 
 if TYPE_CHECKING:
     from .door_window_fsm import DoorWindowFsmEventKind
+    from .fan_fsm import FanFsmEventKind, FanFsmInputs, FanTransition
     from .override_grace_fsm import OverrideGraceFsmEventKind
 
 from .door_window_lifecycle import (
@@ -113,6 +114,15 @@ from .door_window_lifecycle import (
     derive_door_window_lifecycle_state,
 )
 from .fan_drift_reconciliation import FanDriftInputs, FanDriftOutcome, decide_fan_drift_reconciliation
+from .fan_lifecycle import (
+    FanCyclingState,
+    FanLifecycleInputs,
+    FanLifecycleState,
+    FanOverrideState,
+    FanPhysicalState,
+    WhfHvacOwnership,
+    derive_fan_lifecycle_state,
+)
 from .fan_thermostat_decision import (
     FanThermostatInputs,
     FanThermostatOutcome,
@@ -120,6 +130,11 @@ from .fan_thermostat_decision import (
     decide_fan_thermostat_check,
     is_outdoor_rise_exit,
     resolve_hard_exit_floor,
+)
+from .fan_toggle_rate_limit import (
+    FanToggleRateLimitInputs,
+    FanToggleRateLimitOutcome,
+    decide_fan_toggle_rate_limit,
 )
 from .lifecycle_dispatcher import LifecycleDispatcher
 from .lifecycle_events import LifecycleEvent, LifecycleEventType
@@ -816,6 +831,15 @@ class AutomationEngine:
         # PR rather than the staged partial-scope rollout door/window used.
         self._override_grace_fsm_authoritative: bool = False
 
+        # Issue #731 (Block 5, epic #594), Phase 4: whether the fan/WHF lifecycle FSM
+        # (fan_fsm.py, Issue #731 Phase 3) is authoritative for the fan/WHF flags at
+        # the 16 real call sites, instead of each site's own inline flag write.
+        # Fixed-per-engine-identity as of Issue #729 — set once at construction by
+        # coordinator.py, never mutated afterward. Default False — zero behavior
+        # change until Phase 5 wires the real call sites and a switch flips it;
+        # deployed OFF, live switch-flip is a separate verification step.
+        self._fan_fsm_authoritative: bool = False
+
         # Issue #717 (Block 5, epic #594): wire the previously-dormant
         # lifecycle_dispatcher.py pub/sub router (Issue #633) into production so the
         # three lifecycle FSMs stop cross-reading each other's raw booleans directly.
@@ -1344,6 +1368,14 @@ class AutomationEngine:
                 ``remote_timer_hours`` below. None for a non-remote-triggered override, or a
                 remote press with no speed component (e.g. timer alone).
         """
+        # Issue #731 Phase 5: origin_state captured before any of this method's writes —
+        # routed through _resolve_fan_fsm_state() (dormant while _fan_fsm_authoritative
+        # is False — legacy always runs, byte-identical behavior). See the resolve call
+        # below (after all the real direct writes) for the "group 1" wiring shape.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _override_origin_state = self.fan_lifecycle_state
+
         was_override_active = self._fan_override_active
         self._stop_fan_min_runtime_cycles()
         self._fan_override_active = True
@@ -1365,6 +1397,25 @@ class AutomationEngine:
         # plain re-stamp doesn't clobber an already-known remote speed to None.
         if is_remote_event or remote_speed is not None or not was_override_active:
             self._fan_remote_speed = remote_speed
+
+        # Issue #731 Phase 5: real side effect (the writes above) already happened —
+        # this dispatch call is purely the group-1 mirror-sync/audit-trail step. The
+        # legacy closure has no other side effect since _fan_override_active is
+        # already correctly set.
+        def _legacy_manual_override_detected() -> FanTransition:
+            return FanTransition(
+                from_state=_override_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.MANUAL_OVERRIDE_DETECTED,
+                at=dt_util.now(),
+            )
+
+        self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.MANUAL_OVERRIDE_DETECTED,
+            legacy=_legacy_manual_override_detected,
+            origin_state=_override_origin_state,
+        )
+
         _LOGGER.info(
             "Fan override: set — manual fan change detected %s->%s, override active since %s,"
             " grace period starting%s%s",
@@ -1480,6 +1531,22 @@ class AutomationEngine:
                         "event_context_id": event_context_id,
                     },
                 )
+            # Issue #731 Phase 5: origin_state captured before this block's writes —
+            # routed through _resolve_fan_fsm_state() (dormant while
+            # _fan_fsm_authoritative is False — legacy always runs, byte-identical
+            # behavior). Group-1 wiring, kept distinct from USER_FAN_OFF per
+            # fan_fsm.py's own docstring (this settle branch deliberately does NOT
+            # start a fresh fan-off grace and may route through _exit_nat_vent()
+            # instead of _clear_fan_flags_and_start_grace()). The nat-vent-active
+            # branch's real flag change happens asynchronously inside the scheduled
+            # _exit_nat_vent() task (not captured synchronously here — this dispatch
+            # documents that the settle event itself fired); the else branch's
+            # _fan_active/_fan_on_since clear IS synchronous and is reflected in the
+            # post-state re-derivation below.
+            from .fan_fsm import FanFsmEventKind, FanTransition
+
+            _settle_origin_state = self.fan_lifecycle_state
+
             if self._natural_vent_active:
                 # The post-grace reconcile adopted this fan as a nat-vent session moments
                 # ago (it was still physically on when the grace's software clock
@@ -1494,6 +1561,20 @@ class AutomationEngine:
                 # to reconcile; just make sure the flags reflect reality.
                 self._fan_active = False
                 self._fan_on_since = None
+
+            def _legacy_timer_boundary_settle() -> FanTransition:
+                return FanTransition(
+                    from_state=_settle_origin_state,
+                    to_state=self.fan_lifecycle_state,
+                    event_kind=FanFsmEventKind.TIMER_BOUNDARY_SETTLE,
+                    at=dt_util.now(),
+                )
+
+            self._resolve_fan_fsm_state(
+                kind=FanFsmEventKind.TIMER_BOUNDARY_SETTLE,
+                legacy=_legacy_timer_boundary_settle,
+                origin_state=_settle_origin_state,
+            )
             return
 
         _LOGGER.info(
@@ -1506,6 +1587,18 @@ class AutomationEngine:
         # If it is somehow already True at this point that indicates a missed transition
         # elsewhere — clear it and warn so the inconsistency is visible in logs.
         if self._fan_override_active:
+            # Issue #731 Phase 5: origin_state captured before this block's writes —
+            # routed through _resolve_fan_fsm_state() (dormant while
+            # _fan_fsm_authoritative is False — legacy always runs, byte-identical
+            # behavior). Mirrors handle_fan_manual_override()/clear_fan_override()'s
+            # group-1 wiring shape. Only this stale-override-clear branch of
+            # on_fan_turned_off() is wired here — the settle/grace logic elsewhere in
+            # this method (USER_FAN_OFF/TIMER_BOUNDARY_SETTLE kinds) is left for a
+            # later sub-phase.
+            from .fan_fsm import FanFsmEventKind, FanTransition
+
+            _override_origin_state = self.fan_lifecycle_state
+
             _LOGGER.warning(
                 "Fan turned off but _fan_override_active was True (stale override) — clearing. "
                 "fan_before=%s fan_after=%s",
@@ -1516,6 +1609,20 @@ class AutomationEngine:
             self._fan_override_time = None
             self._fan_remote_timer_hours = None
             self._fan_remote_speed = None
+
+            def _legacy_override_cleared_stale() -> FanTransition:
+                return FanTransition(
+                    from_state=_override_origin_state,
+                    to_state=self.fan_lifecycle_state,
+                    event_kind=FanFsmEventKind.OVERRIDE_CLEARED,
+                    at=dt_util.now(),
+                )
+
+            self._resolve_fan_fsm_state(
+                kind=FanFsmEventKind.OVERRIDE_CLEARED,
+                legacy=_legacy_override_cleared_stale,
+                origin_state=_override_origin_state,
+            )
 
         if self._emit_event_callback:
             self._emit_event_callback(
@@ -1572,7 +1679,25 @@ class AutomationEngine:
                 "automation" for a CA-internal correction (Issue #446: the drift-correction
                 caller was previously hardcoded to "manual" here, making the Activity Report
                 claim the user turned the fan off when CA corrected itself).
+
+        Issue #731 Phase 5: the SINGLE dispatch site for ``FanFsmEventKind.FLAGS_CLEARED_FOR_GRACE``
+        — both real callers (``on_fan_turned_off()``'s genuine fan-off and
+        ``_reconcile_fan_physical_drift()``'s CORRECT branch) share this one dispatch rather
+        than each dispatching their own. ``on_fan_turned_off()``'s normal fan-off path is
+        deliberately left without its own ``USER_FAN_OFF`` dispatch for the same reason — its
+        entire flag-clearing effect IS this method, so a second dispatch there would just
+        report the same net state change twice for one logical event (see fan_fsm.py's own
+        USER_FAN_OFF/FLAGS_CLEARED_FOR_GRACE docstring split for why they're distinct kinds
+        in the first place).
         """
+        # routed through _resolve_fan_fsm_state() (dormant while _fan_fsm_authoritative is
+        # False — legacy always runs, byte-identical behavior). Group-1 wiring: the real
+        # work below (flag clear + grace-period start) is unchanged; the dispatch call is
+        # purely the mirror-sync/audit-trail step.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _clear_origin_state = self.fan_lifecycle_state
+
         self._fan_active = False
         self._fan_on_since = None
         if not preserve_nat_vent_session:
@@ -1594,6 +1719,20 @@ class AutomationEngine:
         # but with a distinct trigger string so logs/events are distinguishable.
         self._start_grace_period(source, trigger=trigger_label)
 
+        def _legacy_flags_cleared_for_grace() -> FanTransition:
+            return FanTransition(
+                from_state=_clear_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.FLAGS_CLEARED_FOR_GRACE,
+                at=dt_util.now(),
+            )
+
+        self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.FLAGS_CLEARED_FOR_GRACE,
+            legacy=_legacy_flags_cleared_for_grace,
+            origin_state=_clear_origin_state,
+        )
+
     def clear_fan_override(self) -> None:
         """Clear the fan override flag (called at transition points, Issue #327).
 
@@ -1602,6 +1741,14 @@ class AutomationEngine:
         override was set.
         """
         if self._fan_override_active:
+            # Issue #731 Phase 5: origin_state captured before this block's writes —
+            # routed through _resolve_fan_fsm_state() (dormant while
+            # _fan_fsm_authoritative is False — legacy always runs, byte-identical
+            # behavior). Mirrors handle_fan_manual_override()'s group-1 wiring shape.
+            from .fan_fsm import FanFsmEventKind, FanTransition
+
+            _override_origin_state = self.fan_lifecycle_state
+
             _LOGGER.info(
                 "Fan override: cleared — override active since %s, resuming CA fan control",
                 self._fan_override_time,
@@ -1610,6 +1757,21 @@ class AutomationEngine:
             self._fan_override_time = None
             self._fan_remote_timer_hours = None
             self._fan_remote_speed = None
+
+            def _legacy_override_cleared() -> FanTransition:
+                return FanTransition(
+                    from_state=_override_origin_state,
+                    to_state=self.fan_lifecycle_state,
+                    event_kind=FanFsmEventKind.OVERRIDE_CLEARED,
+                    at=dt_util.now(),
+                )
+
+            self._resolve_fan_fsm_state(
+                kind=FanFsmEventKind.OVERRIDE_CLEARED,
+                legacy=_legacy_override_cleared,
+                origin_state=_override_origin_state,
+            )
+
             # Restart the min-runtime cycle that was suspended when override was set
             self.hass.async_create_task(self.start_min_fan_runtime_cycles())
             # Issue #495: release any WHF HVAC suppression this override was holding.
@@ -1637,7 +1799,30 @@ class AutomationEngine:
         if self._fan_min_cycle_cancel:
             self._fan_min_cycle_cancel()
             self._fan_min_cycle_cancel = None
+
+        # Issue #731 Phase 5: origin_state captured before this method's write —
+        # routed through _resolve_fan_fsm_state() (dormant while _fan_fsm_authoritative
+        # is False — legacy always runs, byte-identical behavior). Group-1 wiring
+        # (caller-already-decided): the real write (below) is unchanged; the dispatch
+        # call is purely the mirror-sync/audit-trail step.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _stop_origin_state = self.fan_lifecycle_state
         self._fan_min_runtime_active = False
+
+        def _legacy_min_runtime_cycle_stopped() -> FanTransition:
+            return FanTransition(
+                from_state=_stop_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.MIN_RUNTIME_CYCLE_STOPPED,
+                at=dt_util.now(),
+            )
+
+        self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.MIN_RUNTIME_CYCLE_STOPPED,
+            legacy=_legacy_min_runtime_cycle_stopped,
+            origin_state=_stop_origin_state,
+        )
 
     async def _fan_cycle_on(self) -> None:
         """Fan 'on' phase: activate fan, schedule off after min_runtime minutes.
@@ -1647,12 +1832,40 @@ class AutomationEngine:
         _activate_fan() and scheduling the real async_call_later.
         """
         min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
-        outcome, delay = decide_fan_cycle_on(
-            min_runtime_minutes=min_runtime,
-            fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
-            fan_override_active=self._fan_override_active,
-            fan_active=self._fan_active,
+
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # The pure decide_fan_cycle_on() call moves into the sync legacy closure (mirrors
+        # _activate_fan()'s ACTIVATE_REQUESTED rate-limit wiring); the actual _activate_fan()
+        # await and the fan_min_runtime_active/timer writes stay in the shell below since
+        # _resolve_fan_fsm_state()'s legacy callable must be synchronous.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _cycle_on_origin_state = self.fan_lifecycle_state
+
+        def _legacy_min_runtime_cycle_on() -> FanTransition:
+            outcome, delay = decide_fan_cycle_on(
+                min_runtime_minutes=min_runtime,
+                fan_mode=self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED),
+                fan_override_active=self._fan_override_active,
+                fan_active=self._fan_active,
+            )
+            return FanTransition(
+                from_state=_cycle_on_origin_state,
+                to_state=_cycle_on_origin_state,
+                event_kind=FanFsmEventKind.MIN_RUNTIME_CYCLE_ON,
+                at=dt_util.now(),
+                cycle_outcome=outcome,
+                cycle_delay_seconds=delay,
+            )
+
+        _cycle_on_transition = self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.MIN_RUNTIME_CYCLE_ON,
+            legacy=_legacy_min_runtime_cycle_on,
+            origin_state=_cycle_on_origin_state,
         )
+        outcome = _cycle_on_transition.cycle_outcome
+        delay = _cycle_on_transition.cycle_delay_seconds
 
         if outcome in (FanCycleOutcome.DISABLED, FanCycleOutcome.OVERRIDE_SUSPENDED):
             return
@@ -1689,10 +1902,37 @@ class AutomationEngine:
         desired_state.decide_fan_cycle_off().
         """
         min_runtime = self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, DEFAULT_FAN_MIN_RUNTIME_PER_HOUR)
-        should_deactivate, wait_sec = decide_fan_cycle_off(
-            fan_min_runtime_active=self._fan_min_runtime_active,
-            min_runtime_minutes=min_runtime,
+
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # Same shape as _fan_cycle_on() above — the pure decide_fan_cycle_off() call
+        # moves into the sync legacy closure; the actual _deactivate_fan() await and
+        # timer scheduling stay in the shell.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _cycle_off_origin_state = self.fan_lifecycle_state
+
+        def _legacy_min_runtime_cycle_off() -> FanTransition:
+            should_deactivate, wait_seconds = decide_fan_cycle_off(
+                fan_min_runtime_active=self._fan_min_runtime_active,
+                min_runtime_minutes=min_runtime,
+            )
+            return FanTransition(
+                from_state=_cycle_off_origin_state,
+                to_state=_cycle_off_origin_state,
+                event_kind=FanFsmEventKind.MIN_RUNTIME_CYCLE_OFF,
+                at=dt_util.now(),
+                cycle_delay_seconds=wait_seconds,
+                cycle_should_deactivate=should_deactivate,
+            )
+
+        _cycle_off_transition = self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.MIN_RUNTIME_CYCLE_OFF,
+            legacy=_legacy_min_runtime_cycle_off,
+            origin_state=_cycle_off_origin_state,
         )
+        should_deactivate = _cycle_off_transition.cycle_should_deactivate
+        wait_sec = _cycle_off_transition.cycle_delay_seconds
 
         if should_deactivate:
             self._fan_min_runtime_active = False
@@ -5076,7 +5316,35 @@ class AutomationEngine:
             manual_override_active=self._manual_override_active,
             manual_override_mode=self._manual_override_mode,
         )
-        outcome = decide_fan_thermostat_check(inputs)
+
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # Only the decide_fan_thermostat_check() call moves into the legacy closure —
+        # per fan_fsm.py's own _transition_on_thermostat_check_tick() docstring, this
+        # kind deliberately never projects onto to_state (the real routing below —
+        # _exit_nat_vent()/_deactivate_fan() event-type selection, HVAC-restore-vs-pause
+        # decisions — stays entirely in the shell), now reading thermostat_outcome
+        # instead of the raw outcome.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _thermostat_check_origin_state = self.fan_lifecycle_state
+
+        def _legacy_thermostat_check_tick() -> FanTransition:
+            _outcome = decide_fan_thermostat_check(inputs)
+            return FanTransition(
+                from_state=_thermostat_check_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.THERMOSTAT_CHECK_TICK,
+                at=dt_util.now(),
+                thermostat_outcome=_outcome,
+            )
+
+        _thermostat_transition = self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.THERMOSTAT_CHECK_TICK,
+            legacy=_legacy_thermostat_check_tick,
+            origin_state=_thermostat_check_origin_state,
+        )
+        outcome = _thermostat_transition.thermostat_outcome
 
         if outcome is FanThermostatOutcome.KEEP:
             _LOGGER.debug(
@@ -5404,6 +5672,22 @@ class AutomationEngine:
             # that observes the fan already off would clear _natural_vent_active here but
             # leave _pre_fan_hvac_mode stranded non-None forever, permanently blocking
             # every future HVAC write via _whf_owns_hvac() with no recovery path.
+            #
+            # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state()
+            # (fan_fsm.py's STARTUP_RECONCILE event kind), even though this call site is
+            # STARTUP_RECONCILE's real production origin per fan_fsm.py's own docstring.
+            # This write group spans TWO independent lifecycles: _fan_active/_fan_on_since
+            # are fan-lifecycle fields, but _natural_vent_active/_nat_vent_soft_start belong
+            # to nat-vent's own lifecycle (fan_fsm.py's module docstring explicitly notes
+            # natural_vent_active is read here only as a cross-lifecycle boolean, not a
+            # field this FSM derives). _apply_fan_fsm_state() only ever writes
+            # _fan_active/_fan_override_active/_fan_min_runtime_active/_pre_fan_hvac_mode
+            # (None-clear) — it does not and should not own _natural_vent_active/
+            # _nat_vent_soft_start. Routing this write group through the dispatcher would
+            # silently drop the nat-vent-side flag changes once _fan_fsm_authoritative
+            # flips True (the FSM branch would apply only the fan-side quarter of this
+            # reconcile decision), a correctness regression waiting for a future phase.
+            # Stays a direct write.
             self._fan_active = False
             self._fan_on_since = None
             self._natural_vent_active = False
@@ -5515,6 +5799,10 @@ class AutomationEngine:
             # each redundantly re-adopt an already-owned session: duplicate "Fan activated"
             # Activity Record entries for one real event, and _fan_on_since silently
             # jumping forward each time, understating the displayed session duration.
+            # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state() —
+            # same cross-lifecycle reasoning as the no-fan branch above (this write group
+            # also sets _natural_vent_active, which _apply_fan_fsm_state() does not own).
+            # Stays a direct write.
             _already_adopted = self._natural_vent_active
             self._fan_active = True
             if self._fan_on_since is None:
@@ -5588,6 +5876,15 @@ class AutomationEngine:
 
             # Ensure flags are correct before deactivating — _exit_nat_vent()'s internal
             # _deactivate_fan() call is a no-op unless _fan_active reads True.
+            #
+            # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state().
+            # Unlike the two branches above, this IS a single raw fan-lifecycle flag (no
+            # cross-lifecycle field alongside it) — but it exists purely to make the
+            # immediately-following _exit_nat_vent()/_deactivate_fan() call see an owned
+            # fan; _deactivate_fan() itself already runs its own ACTIVATE/DEACTIVATE_REQUESTED
+            # dispatch (Site A) and owns the real hardware-confirmed _fan_active write (Site
+            # B). Wiring this transient pre-flag through the dispatcher too would just be a
+            # second, throwaway derivation of the same axis moments before the real one.
             self._fan_active = True  # let _deactivate_fan see an owned fan
             # Issue #417: route through the canonical _exit_nat_vent() choke point (Issue
             # #411) instead of hand-rolling the pause/grace decision here — this makes a
@@ -7971,6 +8268,129 @@ class AutomationEngine:
         aggressive = bool(self.config.get("aggressive_savings", False))
         return comfort_cool + CEILING_ESCALATION_SAVINGS_MARGIN_F if aggressive else comfort_cool
 
+    def _build_fan_fsm_inputs(
+        self,
+        *,
+        indoor: float | None = None,
+        outdoor: float | None = None,
+        hysteresis: float | None = None,
+        in_sleep_window: bool | None = None,
+        fan_min_runtime_minutes: float | None = None,
+        natural_vent_active: bool | None = None,
+    ) -> FanFsmInputs:
+        """Build the fan/WHF FSM's input snapshot from current engine state (Issue #731,
+        Phase 4).
+
+        Sole builder for ``FanFsmInputs`` — every field is read directly off ``self.*``,
+        never via a ``_dispatched_*`` mirror, same #717 revert rationale the other three
+        lifecycle builders (``_build_nat_vent_fsm_inputs()``, ``_build_door_window_fsm_inputs()``,
+        ``_build_override_grace_fsm_inputs()``) already follow.
+
+        The fields that are NOT attributes on ``self`` (``indoor``/``outdoor``/``hysteresis``/
+        ``in_sleep_window``/``fan_min_runtime_minutes``/``natural_vent_active``) are accepted
+        as optional keyword overrides — same "``None`` means fall back to a live-resolved
+        default" convention ``_build_nat_vent_fsm_inputs()`` documents for its own
+        per-call-site parameters (``hysteresis``, ``paused_by_door``, ``fan_hardware_active``).
+        Not yet consulted by any production call site — Phase 5 wires the 16 real callers and
+        decides which of these each one actually needs to pass.
+
+        ``physical_on`` is read LAZILY, replicating ``_reconcile_fan_physical_drift()``'s own
+        laziness guard exactly (fan active, WHF/BOTH archetype, no recent CA command echo,
+        physical-state callback configured) — this avoids an unconditional live state read on
+        every FSM build for the 14 of 16 event kinds that never consult it.
+        """
+        from .fan_fsm import FanFsmInputs
+
+        fan_mode = str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+        now = dt_util.now()
+
+        # Mirrors _reconcile_fan_physical_drift()'s own laziness guard exactly — only
+        # actually read live physical state once every cheaper guard has already passed.
+        recent_fan_command = bool(
+            self._is_recent_fan_command_callback and self._is_recent_fan_command_callback(threshold_seconds=30.0)
+        )
+        physical_state_available = bool(self._get_fan_physical_state_callback)
+        physical_on: bool | None = None
+        if (
+            self._fan_active
+            and fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH)
+            and not recent_fan_command
+            and physical_state_available
+        ):
+            physical_on = self._get_fan_physical_state_callback()
+
+        comfort_heat_raw = float(self.config.get("comfort_heat", DEFAULT_COMFORT_HEAT))
+
+        return FanFsmInputs(
+            fan_active=self._fan_active,
+            fan_drift_tick_count=self._fan_drift_tick_count,
+            fan_override_active=self._fan_override_active,
+            fan_remote_timer_hours=self._fan_remote_timer_hours,
+            fan_min_runtime_active=self._fan_min_runtime_active,
+            fan_mode=fan_mode,
+            pre_fan_hvac_mode=self._pre_fan_hvac_mode,
+            fan_rate_limited_until=self._fan_rate_limited_until,
+            fan_rate_limited_direction=self._fan_rate_limited_direction,
+            now=now,
+            natural_vent_active=(
+                natural_vent_active if natural_vent_active is not None else bool(self._natural_vent_active)
+            ),
+            last_toggle_command_time=self._fan_toggle_command_time,
+            toggle_min_interval_s=float(FAN_MIN_TOGGLE_INTERVAL_S),
+            recent_fan_command=recent_fan_command,
+            physical_state_available=physical_state_available,
+            physical_on=physical_on,
+            fan_min_runtime_minutes=(
+                fan_min_runtime_minutes
+                if fan_min_runtime_minutes is not None
+                else float(self.config.get(CONF_FAN_MIN_RUNTIME_PER_HOUR, 0.0))
+            ),
+            fan_running=bool(self._fan_running),
+            indoor=indoor,
+            outdoor=outdoor,
+            comfort_heat_raw=comfort_heat_raw,
+            sleep_heat=float(self.config.get(CONF_SLEEP_HEAT, comfort_heat_raw)),
+            in_sleep_window=(in_sleep_window if in_sleep_window is not None else _in_sleep_window(now, self.config)),
+            hysteresis=(
+                hysteresis
+                if hysteresis is not None
+                else float(self.config.get(CONF_NAT_VENT_HYSTERESIS_F, NAT_VENT_HYSTERESIS_F))
+            ),
+            manual_override_active=bool(self._manual_override_active),
+            manual_override_mode=self._manual_override_mode,
+        )
+
+    @property
+    def fan_lifecycle_state(self) -> FanLifecycleState:
+        """Current fan/WHF composed state, derived from existing flags (Issue #731,
+        Phase 4).
+
+        A lightweight, read-only counterpart to ``_build_fan_fsm_inputs()`` — this
+        property only needs the 5-axis-relevant subset of fields (no per-call-site
+        overrides), so it is callable at any time, from any context, without needing
+        a live ``indoor``/``outdoor``/``hysteresis`` reading the way the full FSM
+        builder does. Purely a computed view of ``_fan_active``/``_fan_drift_tick_count``/
+        ``_fan_override_active``/``_fan_remote_timer_hours``/``_fan_min_runtime_active``/
+        ``_pre_fan_hvac_mode``/``_fan_rate_limited_until``/``_fan_rate_limited_direction``,
+        so it cannot desync from the flags it reads. See ``fan_lifecycle.py`` for the pure
+        derivation.
+        """
+        fan_mode = str(self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED))
+        return derive_fan_lifecycle_state(
+            FanLifecycleInputs(
+                fan_active=self._fan_active,
+                fan_drift_tick_count=self._fan_drift_tick_count,
+                fan_override_active=self._fan_override_active,
+                fan_remote_timer_hours=self._fan_remote_timer_hours,
+                fan_min_runtime_active=self._fan_min_runtime_active,
+                fan_mode=fan_mode,
+                pre_fan_hvac_mode=self._pre_fan_hvac_mode,
+                fan_rate_limited_until=self._fan_rate_limited_until,
+                fan_rate_limited_direction=self._fan_rate_limited_direction,
+                now=dt_util.now(),
+            )
+        )
+
     def _whf_owns_hvac(self) -> bool:
         """Whether a whole-house-fan session currently owns (suppresses) the thermostat.
 
@@ -7982,37 +8402,148 @@ class AutomationEngine:
         Issue #392 Fix 1b: this is the seed of a future ``FanSession.may_run_hvac()`` object
         (see Issue #392 shaping analysis) — a single choke-point check standing in for the
         deferred `FanSession` extraction, not a permanent standalone guard.
+
+        Issue #731 (Phase 4): re-expressed in terms of ``fan_lifecycle_state`` — proven
+        exactly equivalent to the prior direct-flag-read body (both check the same two
+        conditions, ``fan_mode in (WHOLE_HOUSE, BOTH)`` and ``pre_fan_hvac_mode is not
+        None``; see ``fan_lifecycle._derive_hvac_ownership()``), so this is a pure
+        re-expression, not a behavior change.
         """
-        fan_mode = self.config.get(CONF_FAN_MODE, FAN_MODE_DISABLED)
-        return fan_mode in (FAN_MODE_WHOLE_HOUSE, FAN_MODE_BOTH) and self._pre_fan_hvac_mode is not None
+        return self.fan_lifecycle_state.hvac_ownership is WhfHvacOwnership.SUPPRESSING
 
-    def _resolve_whf_hvac_suppression(self, *, legacy: Callable[[], None]) -> None:
-        """Single dispatch point for every real ``_pre_fan_hvac_mode`` write site (Issue #722).
+    def _apply_fan_fsm_state(self, state: FanLifecycleState) -> None:
+        """Write ``_fan_active``/``_fan_override_active``/``_fan_min_runtime_active``/
+        ``_pre_fan_hvac_mode`` (None-clear only) from a ``fan_fsm.transition()`` result
+        (Issue #731, Phase 4).
 
-        There are 4 real writers: ``_suppress_hvac_for_whf()`` (sets it),
-        ``_release_whf_and_reclassify()`` (clears it), and ``_deactivate_fan()``'s two
-        release branches (both clear it — found during investigation; #722's original
-        text named only the first two). Each calls this with its own ``legacy``
-        closure wrapping its actual assignment; this function owns the before/after
-        diff and emit exactly once instead of once per site — same shape as
-        ``_resolve_door_window_pause_flags()``/``_resolve_override_grace_fsm_state()``,
-        applied here for the same reason (a real, previously-untracked cross-read:
-        ``door_window_fsm.py``'s ``whf_owns_hvac`` input).
+        The inverse of ``fan_lifecycle_state``'s derivation, for the 4 fields that
+        derivation composes. Deliberately does NOT touch — and Phase 5's real call
+        sites remain the sole owners of — every other fan/WHF-adjacent field:
+        ``_fan_on_since``, ``_fan_override_time``, ``_fan_remote_timer_hours``,
+        ``_fan_remote_speed``, ``_pre_fan_hvac_mode``'s string VALUE (only the
+        None-clear below is owned here — the string it's set TO on suppression entry
+        is a payload write owned by the real ``_suppress_hvac_for_whf()`` caller, not
+        this derivation), ``_fan_toggle_command_time``, ``_fan_rate_limited_until``,
+        ``_fan_rate_limited_direction``, ``_fan_drift_tick_count``, ``_fan_thermo_cancel``,
+        ``_fan_thermo_generation``, ``_fan_min_cycle_cancel``, ``_fan_command_time``,
+        ``_fan_command_pending``, ``_recent_fan_command_context_ids`` — none of those are
+        part of the 4-field derivation ``fan_lifecycle.derive_fan_lifecycle_state()``
+        composes (same "outside the N-field derivation stays a direct per-caller write"
+        rule ``_apply_override_grace_fsm_state()``'s own docstring documents). This is
+        safe because every excluded field is either a timestamp/payload/cancel-token
+        the real side-effecting method already sets before or alongside calling the
+        dispatcher, or (for ``_fan_rate_limited_until``/``_fan_rate_limited_direction``/
+        ``_fan_drift_tick_count``) a field this FSM's own ``rate_limit``/physical-drift
+        axes read but do not themselves persist — the real ``_resolve_fan_fsm_state()``
+        dispatcher call sites for ``ACTIVATE_REQUESTED``/``DEACTIVATE_REQUESTED``/
+        ``DRIFT_TICK`` are Phase 5's job to wire those specific writes alongside this
+        method's 4-field write, not this method's own responsibility.
 
-        No FSM-authoritative branch here (unlike the door/window and override/grace
-        dispatchers) — ``_whf_owns_hvac()`` has no companion FSM to switch to; this is
-        purely the mirror-sync half of the pattern, not an extraction of decision logic.
+        Called only from the authoritative branch of ``_resolve_fan_fsm_state()`` —
+        the real command/override/cycling primitives never write these 4 flags
+        themselves when the switch is on; only this method (FSM path) or the paired
+        legacy closure (non-authoritative path) does, exclusively, so the switch
+        genuinely governs which computation determines these flags rather than one
+        silently overwriting the other.
         """
-        _before = self._whf_owns_hvac()
-        legacy()
-        self._emit_boolean_transition(
-            before=_before,
-            after=self._whf_owns_hvac(),
-            started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
-            ended=LifecycleEventType.WHF_HVAC_RELEASED,
-            detail=None,
-            caller="_resolve_whf_hvac_suppression",
-        )
+        self._fan_active = state.physical in (FanPhysicalState.ON, FanPhysicalState.ON_DRIFT_SUSPECTED)
+        self._fan_override_active = state.override is not FanOverrideState.NONE
+        self._fan_min_runtime_active = state.cycling is FanCyclingState.ACTIVE
+        if state.hvac_ownership is WhfHvacOwnership.NONE:
+            self._pre_fan_hvac_mode = None
+        # deliberately NEVER sets _pre_fan_hvac_mode to a string value here — that's a
+        # payload write owned by the real _suppress_hvac_for_whf() caller, not this
+        # derivation (see docstring above for the full exclusion list and why it's safe)
+
+    def _resolve_fan_fsm_state(
+        self,
+        *,
+        kind: FanFsmEventKind,
+        legacy: Callable[[], FanTransition],
+        origin_state: FanLifecycleState | None = None,
+        **input_overrides: Any,
+    ) -> FanTransition:
+        """Single dispatch point for every fan/WHF flag-derivation call site (Issue #731,
+        Phase 4 — wiring the 16 real call sites themselves is Phase 5's job, out of
+        scope here).
+
+        **Genuinely mutually exclusive — exactly one of the FSM path or ``legacy()``
+        ever writes ``_fan_active``/``_fan_override_active``/``_fan_min_runtime_active``/
+        ``_pre_fan_hvac_mode`` (None-clear) for a given call, never both** — same
+        discipline ``_resolve_override_grace_fsm_state()``'s docstring establishes for
+        itself, for the same reason: a dispatcher that called ``legacy()``
+        unconditionally "for the real side effects" would make the switch behaviorally
+        inert (the unconditional legacy call would always overwrite whatever the FSM
+        branch just decided). Real side effects — hardware commands, timer scheduling,
+        grace periods, event emission the 6 imported pure decision functions'
+        ``fan_fsm.py`` module docstring documents as still shell-owned — are NOT owned
+        here or by ``legacy()``; callers must already have run (or still must run,
+        reading this transition's shell-directive fields) the real side-effecting half
+        of whichever handler this call site belongs to.
+
+        Unlike the other 3 dispatchers (which return ``None``), this one returns the
+        full ``FanTransition`` — the fan/WHF FSM's decision-bearing event kinds
+        (``ACTIVATE_REQUESTED``/``DEACTIVATE_REQUESTED``/``DRIFT_TICK``/
+        ``MIN_RUNTIME_CYCLE_ON``/``MIN_RUNTIME_CYCLE_OFF``/``THERMO_BACKSTOP_TICK``/
+        ``THERMOSTAT_CHECK_TICK``) carry shell-directive fields (e.g.
+        ``rate_limit_outcome``, ``drift_outcome``, ``cycle_should_deactivate``,
+        ``thermostat_outcome``) a Phase-5 caller needs to act on — a bare ``None``
+        return would discard exactly the information those callers exist to read. The
+        ``legacy`` callable's contract is therefore ``Callable[[], FanTransition]``,
+        not ``Callable[[], None]``: Phase 5's legacy closures wrap the same pure-fn
+        results the pre-extraction inline code was already computing into a
+        ``FanTransition`` shell (e.g. ``legacy=lambda: FanTransition(from_state=...,
+        to_state=self.fan_lifecycle_state, event_kind=kind, rate_limit_outcome=...)``)
+        so both branches of this dispatcher answer with the same shape regardless of
+        which one actually decided.
+
+        ``origin_state`` defaults to a live read of ``self.fan_lifecycle_state`` —
+        correct for every site except one whose real primitive already mutates a
+        flag this FSM composes before the dispatcher would otherwise read it live
+        (mirrors ``_resolve_override_grace_fsm_state()``'s own ``origin_state``
+        carve-out); Phase 5 identifies that site and passes it explicitly.
+
+        ``**input_overrides`` is forwarded verbatim to ``_build_fan_fsm_inputs()`` —
+        the per-call-site keyword overrides (``indoor``/``outdoor``/``hysteresis``/
+        ``in_sleep_window``/``fan_min_runtime_minutes``/``natural_vent_active``) that
+        builder documents.
+
+        Also the single emit point for WHF_HVAC_SUPPRESSED/RELEASED on the FSM branch
+        — a before/after diff of ``_whf_owns_hvac()`` around the ``transition()``
+        call, absorbing the responsibility the now-deleted ``_resolve_whf_hvac_suppression()``
+        used to own ("this is purely the mirror-sync half of the pattern...
+        `_whf_owns_hvac()` has no companion FSM to switch to" — this dispatcher IS
+        that companion now). Scoped to the FSM branch only, not ``legacy()`` — every
+        real ``legacy`` closure a Phase-5 call site supplies for
+        ``WHF_SUPPRESSION_REQUESTED``/``WHF_RELEASE_REQUESTED`` reproduces
+        ``_resolve_whf_hvac_suppression()``'s own before/after-diff emit verbatim
+        inline (see ``_suppress_hvac_for_whf()``/``_release_whf_and_reclassify()``/
+        ``_deactivate_fan()``'s matching comments), so emitting again here on the
+        legacy branch would double-fire. Phase 5 re-pointed all 4 of
+        ``_resolve_whf_hvac_suppression()``'s real call sites at this dispatcher and
+        deleted it — it no longer exists in this module.
+        """
+        if self._fan_fsm_authoritative:
+            from .fan_fsm import FanFsmEvent
+            from .fan_fsm import transition as _fan_transition
+
+            state = origin_state if origin_state is not None else self.fan_lifecycle_state
+            _whf_before = self._whf_owns_hvac()
+            result = _fan_transition(
+                state,
+                FanFsmEvent(kind=kind, inputs=self._build_fan_fsm_inputs(**input_overrides)),
+            )
+            self._apply_fan_fsm_state(result.to_state)
+            self._emit_boolean_transition(
+                before=_whf_before,
+                after=self._whf_owns_hvac(),
+                started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
+                ended=LifecycleEventType.WHF_HVAC_RELEASED,
+                detail=kind.value,
+                caller="_resolve_fan_fsm_state",
+            )
+            return result
+        return legacy()
 
     async def _suppress_hvac_for_whf(self, *, reason: str) -> None:
         """Capture current HVAC mode and turn it off for a whole-house-fan session (Issue #495).
@@ -8037,10 +8568,49 @@ class AutomationEngine:
         _cs = self.hass.states.get(self.climate_entity)
         prior_mode = _cs.state if _cs else None
 
-        def _legacy_capture() -> None:
-            self._pre_fan_hvac_mode = prior_mode
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        #
+        # Issue #731 Phase 7 fix: WHF_SUPPRESSION_REQUESTED/WHF_RELEASE_REQUESTED are
+        # Group-1 "caller-already-decided" kinds (fan_fsm.py's own module docstring:
+        # "re-derive composed state against the already-post-change snapshot the
+        # caller supplied"). That means the real ``_pre_fan_hvac_mode`` write MUST
+        # happen before the dispatch call — mirroring _stop_fan_min_runtime_cycles()'s
+        # reference pattern (write the real flag directly, then dispatch is purely
+        # mirror-sync). The write used to live only inside the legacy() closure, which
+        # never runs on the FSM-authoritative branch — so _pre_fan_hvac_mode was never
+        # set at all when _fan_fsm_authoritative=True, silently breaking every
+        # downstream _whf_owns_hvac() read for the rest of the WHF session (found via
+        # tests/test_combined_fsm_authoritative_compare.py). before/after diff capture
+        # is likewise hoisted so it observes the real transition regardless of which
+        # branch runs.
+        from .fan_fsm import FanFsmEventKind, FanTransition
 
-        self._resolve_whf_hvac_suppression(legacy=_legacy_capture)
+        _whf_origin_state = self.fan_lifecycle_state
+        _whf_before = self._whf_owns_hvac()
+        self._pre_fan_hvac_mode = prior_mode
+
+        def _legacy_capture() -> FanTransition:
+            return FanTransition(
+                from_state=_whf_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.WHF_SUPPRESSION_REQUESTED,
+                at=dt_util.now(),
+            )
+
+        self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.WHF_SUPPRESSION_REQUESTED,
+            legacy=_legacy_capture,
+            origin_state=_whf_origin_state,
+        )
+        self._emit_boolean_transition(
+            before=_whf_before,
+            after=self._whf_owns_hvac(),
+            started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
+            ended=LifecycleEventType.WHF_HVAC_RELEASED,
+            detail=None,
+            caller="_suppress_hvac_for_whf",
+        )
         await self._set_hvac_mode("off", reason=reason)
         if self._emit_event_callback:
             self._emit_event_callback("whf_hvac_suppressed", {"prior_mode": prior_mode, "reason": reason})
@@ -8087,11 +8657,41 @@ class AutomationEngine:
             _LOGGER.debug("WHF release-and-reclassify skipped (%s) — fan still physically on", reason)
             return
 
-        def _legacy_release() -> None:
-            self._pre_fan_hvac_mode = None
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        #
+        # Issue #731 Phase 7 fix: see _suppress_hvac_for_whf()'s matching comment —
+        # WHF_RELEASE_REQUESTED is also a Group-1 "caller-already-decided" kind, so the
+        # real _pre_fan_hvac_mode write (and the before/after diff it feeds) is hoisted
+        # above the dispatch call rather than living only inside legacy().
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _whf_origin_state = self.fan_lifecycle_state
+        _whf_before = self._whf_owns_hvac()
+        self._pre_fan_hvac_mode = None
+
+        def _legacy_release() -> FanTransition:
+            return FanTransition(
+                from_state=_whf_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.WHF_RELEASE_REQUESTED,
+                at=dt_util.now(),
+            )
 
         # release _whf_owns_hvac() BEFORE the reclassify write
-        self._resolve_whf_hvac_suppression(legacy=_legacy_release)
+        self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.WHF_RELEASE_REQUESTED,
+            legacy=_legacy_release,
+            origin_state=_whf_origin_state,
+        )
+        self._emit_boolean_transition(
+            before=_whf_before,
+            after=self._whf_owns_hvac(),
+            started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
+            ended=LifecycleEventType.WHF_HVAC_RELEASED,
+            detail=None,
+            caller="_release_whf_and_reclassify",
+        )
         _LOGGER.info("WHF session ended (%s) — releasing HVAC suppression, reclassifying current state", reason)
         if self._emit_event_callback:
             self._emit_event_callback("whf_hvac_released", {"reason": reason})
@@ -8342,18 +8942,25 @@ class AutomationEngine:
         (see ``_format_grace_remaining()``). Treat anything that isn't a real timestamp
         as "no prior command", never raise.
         """
-        if not isinstance(self._fan_toggle_command_time, datetime):
-            return None
-        elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
-        if elapsed >= FAN_MIN_TOGGLE_INTERVAL_S:
+        outcome, applies_at = decide_fan_toggle_rate_limit(
+            FanToggleRateLimitInputs(
+                last_toggle_command_time=self._fan_toggle_command_time,
+                action=action,
+                rate_limited_until=self._fan_rate_limited_until,
+                rate_limited_direction=self._fan_rate_limited_direction,
+                min_interval_s=FAN_MIN_TOGGLE_INTERVAL_S,
+                now=dt_util.now(),
+            )
+        )
+
+        if outcome is FanToggleRateLimitOutcome.ALLOW:
             return None
 
-        applies_at = self._fan_toggle_command_time + timedelta(seconds=FAN_MIN_TOGGLE_INTERVAL_S)
-        # Issue #649: a deferral window already has a WARNING/report on record if
-        # _fan_rate_limited_until already points at this exact applies_at moment for the
-        # same direction — every later call in that same window is a silent duplicate of
-        # already-known information.
-        if self._fan_rate_limited_until == applies_at and self._fan_rate_limited_direction == action:
+        if outcome is FanToggleRateLimitOutcome.DEFER_DUPLICATE:
+            # Issue #649: a deferral window already has a WARNING/report on record if
+            # _fan_rate_limited_until already points at this exact applies_at moment for
+            # the same direction — every later call in that same window is a silent
+            # duplicate of already-known information.
             _LOGGER.debug(
                 "Fan toggle already deferred until %s — skipping duplicate report (%s)",
                 applies_at.strftime("%H:%M:%S"),
@@ -8361,6 +8968,7 @@ class AutomationEngine:
             )
             return FanCommandResult.RATE_LIMITED_DUP
 
+        elapsed = (dt_util.now() - self._fan_toggle_command_time).total_seconds()
         _LOGGER.info(
             "Fan toggle deferred: rate limit (%.0fs since last change, min %ds) — %s (%s) — applies at %s",
             elapsed,
@@ -8418,9 +9026,50 @@ class AutomationEngine:
             _LOGGER.debug("_activate_fan: already active — no-op (%s)", reason)
             return FanCommandResult.ALREADY_IN_STATE
 
-        _rate_limit_result = self._fan_toggle_rate_limited(action="activate", reason=reason)
-        if _rate_limit_result is not None:
-            return _rate_limit_result
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # origin_state is captured BEFORE the legacy call since _fan_toggle_rate_limited()
+        # mutates the rate_limit axis (_fan_rate_limited_until/_direction) this FSM composes.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _rl_from_state = self.fan_lifecycle_state
+
+        def _legacy_activate_rate_limit() -> FanTransition:
+            _rl_result = self._fan_toggle_rate_limited(action="activate", reason=reason)
+            _rl_outcome_map = {
+                None: FanToggleRateLimitOutcome.ALLOW,
+                FanCommandResult.RATE_LIMITED_NEW: FanToggleRateLimitOutcome.DEFER_NEW,
+                FanCommandResult.RATE_LIMITED_DUP: FanToggleRateLimitOutcome.DEFER_DUPLICATE,
+            }
+            return FanTransition(
+                from_state=_rl_from_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.ACTIVATE_REQUESTED,
+                rate_limit_outcome=_rl_outcome_map[_rl_result],
+                rate_limit_applies_at=self._fan_rate_limited_until,
+            )
+
+        _rl_transition = self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.ACTIVATE_REQUESTED,
+            legacy=_legacy_activate_rate_limit,
+            origin_state=_rl_from_state,
+        )
+        # Issue #731 Phase 7 fix: on the legacy branch, _fan_toggle_rate_limited()
+        # (called inside legacy()) writes _fan_rate_limited_until/_direction as a real
+        # side effect. On the FSM-authoritative branch legacy() never runs, so the FSM's
+        # own computed rate_limit_applies_at (fan_fsm.py's _transition_on_activate_
+        # requested() already derives it correctly) must be written back here — mirrors
+        # _fan_toggle_rate_limited()'s own DEFER_NEW-only write (ALLOW/DEFER_DUPLICATE
+        # leave these fields untouched in the legacy implementation too).
+        if self._fan_fsm_authoritative and _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
+            self._fan_rate_limited_until = _rl_transition.rate_limit_applies_at
+            self._fan_rate_limited_direction = "activate"
+        if _rl_transition.rate_limit_outcome is not FanToggleRateLimitOutcome.ALLOW:
+            return (
+                FanCommandResult.RATE_LIMITED_NEW
+                if _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW
+                else FanCommandResult.RATE_LIMITED_DUP
+            )
 
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would activate fan — %s role=%s", reason, self.role)
@@ -8471,6 +9120,15 @@ class AutomationEngine:
                 )
                 _LOGGER.warning("Activated HVAC fan — %s role=%s", reason, self.role)
 
+            # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state().
+            # This is the raw hardware-activation write itself — the FSM's physical axis
+            # (fan_lifecycle.py's _derive_physical()) is DERIVED FROM _fan_active, so
+            # deciding what to write here based on a state that itself reads what's about
+            # to be written would be circular. The rate-limit decision immediately above
+            # (which genuinely IS FSM-dispatched) already gated whether we reach this line
+            # at all; by the time we're here the real command has already been issued and
+            # this write simply records ground truth. Stays a direct write in both
+            # _activate_fan() and _deactivate_fan(), same reasoning both places.
             self._fan_active = True
             self._fan_on_since = dt_util.now().isoformat()
             self._record_action("Fan activated", reason)
@@ -8587,7 +9245,36 @@ class AutomationEngine:
         # Step 2: the decision now lives in desired_state.decide_fan_thermo_backstop() —
         # this method still owns actually calling _start_fan_thermo_backstop() to
         # schedule the real timer.
-        if decide_fan_thermo_backstop(fan_running=self._fan_running, delay_seconds=5 * 60, now=dt_util.now()):
+        #
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # Only the decide_fan_thermo_backstop() call moves into the legacy closure —
+        # per fan_fsm.py's own _transition_on_thermo_backstop_tick() docstring, this
+        # kind never changes to_state (the timer-arm decision is not one of the 5
+        # composed axes); the real _start_fan_thermo_backstop() call stays in the shell,
+        # now reading thermo_backstop_should_be_armed instead of the raw boolean.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _backstop_origin_state = self.fan_lifecycle_state
+
+        def _legacy_thermo_backstop_tick() -> FanTransition:
+            _should_arm = decide_fan_thermo_backstop(
+                fan_running=self._fan_running, delay_seconds=5 * 60, now=dt_util.now()
+            )
+            return FanTransition(
+                from_state=_backstop_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.THERMO_BACKSTOP_TICK,
+                at=dt_util.now(),
+                thermo_backstop_should_be_armed=_should_arm is not None,
+            )
+
+        _backstop_transition = self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.THERMO_BACKSTOP_TICK,
+            legacy=_legacy_thermo_backstop_tick,
+            origin_state=_backstop_origin_state,
+        )
+        if _backstop_transition.thermo_backstop_should_be_armed:
             self._start_fan_thermo_backstop()
 
     def _cancel_fan_thermo_backstop(self) -> None:
@@ -8663,97 +9350,138 @@ class AutomationEngine:
             self._fan_drift_tick_count,
         )
 
-        inputs = FanDriftInputs(
-            fan_active=self._fan_active,
-            fan_mode=fan_mode,
-            recent_fan_command=recent_fan_command,
-            physical_state_available=physical_state_available,
-            physical_on=physical_on,
-            tick_count=self._fan_drift_tick_count,
-        )
-        outcome, next_tick_count = decide_fan_drift_reconciliation(inputs)
-        self._fan_drift_tick_count = next_tick_count
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # The whole branch (decision + logging + grace-start + release + async
+        # off-command scheduling) lives inside the sync legacy closure — none of it
+        # requires an `await` at this call site (the actual hardware I/O runs inside
+        # the scheduled `_do_drift_reconciliation_off_command()` task, not here), so it
+        # fits _resolve_fan_fsm_state()'s Callable[[], FanTransition] contract intact.
+        from .fan_fsm import FanFsmEventKind, FanTransition
 
-        if outcome in (FanDriftOutcome.RESET, FanDriftOutcome.NOOP):
-            return
+        _drift_origin_state = self.fan_lifecycle_state
 
-        if outcome is FanDriftOutcome.AWAITING:
-            _LOGGER.info(
-                "Fan physical-state drift detected (tick %d/2): _fan_active=True but physical"
-                " state=off — awaiting confirmation tick before correcting",
-                next_tick_count,
+        def _legacy_drift_tick() -> FanTransition:
+            inputs = FanDriftInputs(
+                fan_active=self._fan_active,
+                fan_mode=fan_mode,
+                recent_fan_command=recent_fan_command,
+                physical_state_available=physical_state_available,
+                physical_on=physical_on,
+                tick_count=self._fan_drift_tick_count,
             )
-            return
+            outcome, next_tick_count = decide_fan_drift_reconciliation(inputs)
+            self._fan_drift_tick_count = next_tick_count
 
-        # outcome is CORRECT
-        _LOGGER.warning(
-            "Fan physical-state drift confirmed over 2 backstop ticks: _fan_active=True but"
-            " physical state=off — self-correcting stale flag (Issue #423)"
-        )
-        if self._emit_event_callback:
-            self._emit_event_callback(
-                "fan_cancel",
-                {
-                    "trigger": "physical_drift_correction",
-                    "reason": "physical-state drift confirmed over 2 backstop ticks",
-                    "fan_device": _fan_device_label(self.config),
-                },
-            )
-        # Issue #561: preserving the nat-vent session across this correction (so
-        # nat_vent_temperature_check() can immediately re-fire below) is only correct if
-        # the session is still legitimately justified by an open sensor. Without this
-        # check, a session whose windows already closed while the physical-drift-confirm
-        # was pending (2 backstop ticks = ~10 min) would be preserved indefinitely — with
-        # no further log line — until temperature happened to cross a cycling threshold
-        # again, at which point the fan would reactivate against a sealed house. If the
-        # session is no longer justified, end it for real (preserve=False) and release any
-        # WHF HVAC suppression it was holding, mirroring on_fan_turned_off()'s genuine
-        # fan-off sequence.
-        _was_nat_vent_active = self._natural_vent_active
-        _preserve_session = _was_nat_vent_active and self._any_monitored_sensor_open()
-        if _was_nat_vent_active and not _preserve_session:
-            _LOGGER.warning(
-                "Nat-vent session force-closed during physical-drift correction — no"
-                " monitored sensor is open, so the session cannot legitimately still be"
-                " open (Issue #561)"
-            )
-        self._clear_fan_flags_and_start_grace(
-            reason="physical-state drift confirmed over 2 backstop ticks",
-            trigger_label="physical_drift_correction",
-            preserve_nat_vent_session=_preserve_session,
-            source="automation",
-        )
-        if _was_nat_vent_active and not _preserve_session:
-            self._release_whf_and_reclassify(
-                reason="physical-drift correction found the nat-vent session's sensors closed"
-            )
-        # Issue #449: the control entity's own HA-reported state can silently stay
-        # stuck "on" (a one-way transmitter has no feedback of its own) even though
-        # ground truth has just confirmed the fan is physically off — reconcile it now
-        # so the very next reactivation attempt (nat_vent_temperature_check()'s
-        # immediate same-tick re-fire, when the session was preserved above)
-        # starts from a control entity that genuinely reads "off".
-        #
-        # Issue #482: this off-command must set the same _fan_command_pending/
-        # _fan_command_time bookkeeping every other command site sets, so
-        # _async_fan_entity_changed() (coordinator.py) can suppress the resulting
-        # state-change event as CA-initiated instead of misclassifying it as manual
-        # (which would start a spurious grace period). The bookkeeping is stamped
-        # HERE, synchronously, before the task is scheduled — not inside the task body
-        # — so there is no window where the entity-changed listener could observe a
-        # stale/unset _fan_command_pending before the task actually runs.
-        self._fan_command_time = dt_util.now()
-        self._fan_command_pending = True
-
-        async def _do_drift_reconciliation_off_command() -> None:
-            try:
-                await self._command_whf_control_entity(
-                    False, reason="physical-state drift confirmed over 2 backstop ticks"
+            if outcome in (FanDriftOutcome.RESET, FanDriftOutcome.NOOP):
+                return FanTransition(
+                    from_state=_drift_origin_state,
+                    to_state=self.fan_lifecycle_state,
+                    event_kind=FanFsmEventKind.DRIFT_TICK,
+                    at=dt_util.now(),
+                    drift_outcome=outcome,
+                    next_drift_tick_count=next_tick_count,
                 )
-            finally:
-                self._fan_command_pending = False
 
-        self.hass.async_create_task(_do_drift_reconciliation_off_command())
+            if outcome is FanDriftOutcome.AWAITING:
+                _LOGGER.info(
+                    "Fan physical-state drift detected (tick %d/2): _fan_active=True but physical"
+                    " state=off — awaiting confirmation tick before correcting",
+                    next_tick_count,
+                )
+                return FanTransition(
+                    from_state=_drift_origin_state,
+                    to_state=self.fan_lifecycle_state,
+                    event_kind=FanFsmEventKind.DRIFT_TICK,
+                    at=dt_util.now(),
+                    drift_outcome=outcome,
+                    next_drift_tick_count=next_tick_count,
+                )
+
+            # outcome is CORRECT
+            _LOGGER.warning(
+                "Fan physical-state drift confirmed over 2 backstop ticks: _fan_active=True but"
+                " physical state=off — self-correcting stale flag (Issue #423)"
+            )
+            if self._emit_event_callback:
+                self._emit_event_callback(
+                    "fan_cancel",
+                    {
+                        "trigger": "physical_drift_correction",
+                        "reason": "physical-state drift confirmed over 2 backstop ticks",
+                        "fan_device": _fan_device_label(self.config),
+                    },
+                )
+            # Issue #561: preserving the nat-vent session across this correction (so
+            # nat_vent_temperature_check() can immediately re-fire below) is only correct if
+            # the session is still legitimately justified by an open sensor. Without this
+            # check, a session whose windows already closed while the physical-drift-confirm
+            # was pending (2 backstop ticks = ~10 min) would be preserved indefinitely — with
+            # no further log line — until temperature happened to cross a cycling threshold
+            # again, at which point the fan would reactivate against a sealed house. If the
+            # session is no longer justified, end it for real (preserve=False) and release any
+            # WHF HVAC suppression it was holding, mirroring on_fan_turned_off()'s genuine
+            # fan-off sequence.
+            _was_nat_vent_active = self._natural_vent_active
+            _preserve_session = _was_nat_vent_active and self._any_monitored_sensor_open()
+            if _was_nat_vent_active and not _preserve_session:
+                _LOGGER.warning(
+                    "Nat-vent session force-closed during physical-drift correction — no"
+                    " monitored sensor is open, so the session cannot legitimately still be"
+                    " open (Issue #561)"
+                )
+            self._clear_fan_flags_and_start_grace(
+                reason="physical-state drift confirmed over 2 backstop ticks",
+                trigger_label="physical_drift_correction",
+                preserve_nat_vent_session=_preserve_session,
+                source="automation",
+            )
+            if _was_nat_vent_active and not _preserve_session:
+                self._release_whf_and_reclassify(
+                    reason="physical-drift correction found the nat-vent session's sensors closed"
+                )
+            # Issue #449: the control entity's own HA-reported state can silently stay
+            # stuck "on" (a one-way transmitter has no feedback of its own) even though
+            # ground truth has just confirmed the fan is physically off — reconcile it now
+            # so the very next reactivation attempt (nat_vent_temperature_check()'s
+            # immediate same-tick re-fire, when the session was preserved above)
+            # starts from a control entity that genuinely reads "off".
+            #
+            # Issue #482: this off-command must set the same _fan_command_pending/
+            # _fan_command_time bookkeeping every other command site sets, so
+            # _async_fan_entity_changed() (coordinator.py) can suppress the resulting
+            # state-change event as CA-initiated instead of misclassifying it as manual
+            # (which would start a spurious grace period). The bookkeeping is stamped
+            # HERE, synchronously, before the task is scheduled — not inside the task body
+            # — so there is no window where the entity-changed listener could observe a
+            # stale/unset _fan_command_pending before the task actually runs.
+            self._fan_command_time = dt_util.now()
+            self._fan_command_pending = True
+
+            async def _do_drift_reconciliation_off_command() -> None:
+                try:
+                    await self._command_whf_control_entity(
+                        False, reason="physical-state drift confirmed over 2 backstop ticks"
+                    )
+                finally:
+                    self._fan_command_pending = False
+
+            self.hass.async_create_task(_do_drift_reconciliation_off_command())
+
+            return FanTransition(
+                from_state=_drift_origin_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.DRIFT_TICK,
+                at=dt_util.now(),
+                drift_outcome=outcome,
+                next_drift_tick_count=next_tick_count,
+            )
+
+        self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.DRIFT_TICK,
+            legacy=_legacy_drift_tick,
+            origin_state=_drift_origin_state,
+        )
 
     async def _deactivate_fan(
         self,
@@ -8832,10 +9560,42 @@ class AutomationEngine:
             if release_suppression and self._pre_fan_hvac_mode is not None:
                 _restore_mode = self._pre_fan_hvac_mode
 
-                def _legacy_release_already_inactive() -> None:
-                    self._pre_fan_hvac_mode = None
+                # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant
+                # while _fan_fsm_authoritative is False — legacy always runs,
+                # byte-identical behavior).
+                #
+                # Issue #731 Phase 7 fix: see _suppress_hvac_for_whf()'s matching
+                # comment — WHF_RELEASE_REQUESTED is a Group-1 "caller-already-decided"
+                # kind, so the real _pre_fan_hvac_mode write (and the before/after diff
+                # it feeds) is hoisted above the dispatch call rather than living only
+                # inside legacy(), which never runs when _fan_fsm_authoritative=True.
+                from .fan_fsm import FanFsmEventKind, FanTransition
 
-                self._resolve_whf_hvac_suppression(legacy=_legacy_release_already_inactive)
+                _whf_origin_state = self.fan_lifecycle_state
+                _whf_before = self._whf_owns_hvac()
+                self._pre_fan_hvac_mode = None
+
+                def _legacy_release_already_inactive() -> FanTransition:
+                    return FanTransition(
+                        from_state=_whf_origin_state,
+                        to_state=self.fan_lifecycle_state,
+                        event_kind=FanFsmEventKind.WHF_RELEASE_REQUESTED,
+                        at=dt_util.now(),
+                    )
+
+                self._resolve_fan_fsm_state(
+                    kind=FanFsmEventKind.WHF_RELEASE_REQUESTED,
+                    legacy=_legacy_release_already_inactive,
+                    origin_state=_whf_origin_state,
+                )
+                self._emit_boolean_transition(
+                    before=_whf_before,
+                    after=self._whf_owns_hvac(),
+                    started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
+                    ended=LifecycleEventType.WHF_HVAC_RELEASED,
+                    detail=None,
+                    caller="_deactivate_fan",
+                )
                 if restore_hvac:
                     _LOGGER.debug(
                         "_deactivate_fan: fan already inactive but restoring stranded HVAC suppression (%s)", reason
@@ -8871,9 +9631,47 @@ class AutomationEngine:
                 _LOGGER.debug("_deactivate_fan: already inactive — no-op (%s)", reason)
             return FanCommandResult.ALREADY_IN_STATE
 
-        _rate_limit_result = self._fan_toggle_rate_limited(action="deactivate", reason=reason)
-        if _rate_limit_result is not None:
-            return _rate_limit_result
+        # Issue #731 Phase 5: routed through _resolve_fan_fsm_state() (dormant while
+        # _fan_fsm_authoritative is False — legacy always runs, byte-identical behavior).
+        # See _activate_fan()'s matching comment for why origin_state is captured
+        # before the legacy call.
+        from .fan_fsm import FanFsmEventKind, FanTransition
+
+        _rl_from_state = self.fan_lifecycle_state
+
+        def _legacy_deactivate_rate_limit() -> FanTransition:
+            _rl_result = self._fan_toggle_rate_limited(action="deactivate", reason=reason)
+            _rl_outcome_map = {
+                None: FanToggleRateLimitOutcome.ALLOW,
+                FanCommandResult.RATE_LIMITED_NEW: FanToggleRateLimitOutcome.DEFER_NEW,
+                FanCommandResult.RATE_LIMITED_DUP: FanToggleRateLimitOutcome.DEFER_DUPLICATE,
+            }
+            return FanTransition(
+                from_state=_rl_from_state,
+                to_state=self.fan_lifecycle_state,
+                event_kind=FanFsmEventKind.DEACTIVATE_REQUESTED,
+                rate_limit_outcome=_rl_outcome_map[_rl_result],
+                rate_limit_applies_at=self._fan_rate_limited_until,
+            )
+
+        _rl_transition = self._resolve_fan_fsm_state(
+            kind=FanFsmEventKind.DEACTIVATE_REQUESTED,
+            legacy=_legacy_deactivate_rate_limit,
+            origin_state=_rl_from_state,
+        )
+        # Issue #731 Phase 7 fix: see _activate_fan()'s matching comment — the FSM-
+        # authoritative branch never runs legacy(), so _fan_toggle_rate_limited()'s own
+        # DEFER_NEW-only side effect on _fan_rate_limited_until/_direction must be
+        # replicated here from the FSM's own computed rate_limit_applies_at.
+        if self._fan_fsm_authoritative and _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW:
+            self._fan_rate_limited_until = _rl_transition.rate_limit_applies_at
+            self._fan_rate_limited_direction = "deactivate"
+        if _rl_transition.rate_limit_outcome is not FanToggleRateLimitOutcome.ALLOW:
+            return (
+                FanCommandResult.RATE_LIMITED_NEW
+                if _rl_transition.rate_limit_outcome is FanToggleRateLimitOutcome.DEFER_NEW
+                else FanCommandResult.RATE_LIMITED_DUP
+            )
 
         if self.dry_run:
             _LOGGER.info("[DRY RUN] Would deactivate fan — %s role=%s", reason, self.role)
@@ -8921,10 +9719,43 @@ class AutomationEngine:
                     # the restore write itself ends the suppression session, so ownership must be
                     # released before the write, or the guard self-blocks the very call that is
                     # supposed to un-suppress HVAC.
-                    def _legacy_release_active() -> None:
-                        self._pre_fan_hvac_mode = None
+                    # Issue #731 Phase 5: routed through _resolve_fan_fsm_state()
+                    # (dormant while _fan_fsm_authoritative is False — legacy always
+                    # runs, byte-identical behavior).
+                    #
+                    # Issue #731 Phase 7 fix: see _suppress_hvac_for_whf()'s matching
+                    # comment — WHF_RELEASE_REQUESTED is a Group-1 "caller-already-
+                    # decided" kind, so the real _pre_fan_hvac_mode write (and the
+                    # before/after diff it feeds) is hoisted above the dispatch call
+                    # rather than living only inside legacy(), which never runs when
+                    # _fan_fsm_authoritative=True.
+                    # FanFsmEventKind/FanTransition already imported earlier in this
+                    # method (see the rate-limit section above).
+                    _whf_origin_state_release = self.fan_lifecycle_state
+                    _whf_before_release = self._whf_owns_hvac()
+                    self._pre_fan_hvac_mode = None
 
-                    self._resolve_whf_hvac_suppression(legacy=_legacy_release_active)
+                    def _legacy_release_active() -> FanTransition:
+                        return FanTransition(
+                            from_state=_whf_origin_state_release,
+                            to_state=self.fan_lifecycle_state,
+                            event_kind=FanFsmEventKind.WHF_RELEASE_REQUESTED,
+                            at=dt_util.now(),
+                        )
+
+                    self._resolve_fan_fsm_state(
+                        kind=FanFsmEventKind.WHF_RELEASE_REQUESTED,
+                        legacy=_legacy_release_active,
+                        origin_state=_whf_origin_state_release,
+                    )
+                    self._emit_boolean_transition(
+                        before=_whf_before_release,
+                        after=self._whf_owns_hvac(),
+                        started=LifecycleEventType.WHF_HVAC_SUPPRESSED,
+                        ended=LifecycleEventType.WHF_HVAC_RELEASED,
+                        detail=None,
+                        caller="_deactivate_fan",
+                    )
                     if restore_hvac:
                         await self._set_hvac_mode(
                             _restore_mode,
@@ -8946,6 +9777,10 @@ class AutomationEngine:
                 )
                 _LOGGER.warning("Deactivated HVAC fan — %s role=%s", reason, self.role)
 
+            # Issue #731 Phase 5: deliberately NOT routed through _resolve_fan_fsm_state() —
+            # see _activate_fan()'s matching comment (raw hardware-deactivation write; the
+            # FSM's physical axis is derived FROM this flag, so wiring it here would be
+            # circular).
             self._fan_active = False
             self._fan_on_since = None
             # Issue #327: cancel the thermostatic backstop timer when fan deactivates.

@@ -412,5 +412,50 @@
     "sha256": "c53caa4ea01eb1603cfad989aa371b6cde312e72be788e9c4fc176111b103f22",
     "signed": "2026-08-22",
     "issue": 748
+  },
+  "733_restart_reconcile_clobbers_fresh_nat_vent": {
+    "sha256": "e3807262d4d298d9c09f5e7e5f5c65ed8f78d119c7da11a309637b7677d1bca5",
+    "signed": "2026-08-22",
+    "issue": 733
+  },
+  "bedtime_skipped_manual_override_active": {
+    "sha256": "683e39c777992920791f45ffaaca2ffdd54891854913ddd20f8bfb3c22718eb9",
+    "signed": "2026-08-22",
+    "issue": 229
+  },
+  "issue-641-whf-proactive-exit-reactivation-flip-flop": {
+    "sha256": "23326403855e8999833436f14383e01af2224c3390cad1989ce185d194567ef2",
+    "signed": "2026-08-22",
+    "issue": 641
+  },
+  "issue_645_restart_debounce_bypass_open_window": {
+    "sha256": "68e2645d488c985696c54f453d44e2d967c45bacef7dded3576a82348dc92386",
+    "signed": "2026-08-22",
+    "issue": 645
+  },
+  "issue_677_rf_timer_restart_resume": {
+    "sha256": "aa80d2ce1b9089551ce960ba7a8fe37c01339505ba22dbefb508758a1352aff1",
+    "signed": "2026-08-22",
+    "issue": 677
+  },
+  "restart_whf_ac_mutex_backstop_race": {
+    "sha256": "c87de8afe52d1be171e4c5f5b08f9cafddb65b96c2eb2d981131c805a0cd4229",
+    "signed": "2026-08-22",
+    "issue": 627
+  },
+  "startup_coalesce_sensor_open_nat_vent_gate_false": {
+    "sha256": "ba8399cd7476e5bc41095f53c68293d6ca5d81182f1fd539dbea1006b02fe832",
+    "signed": "2026-08-22",
+    "issue": 523
+  },
+  "vacation_occupancy_override_cleared": {
+    "sha256": "80c170fc5808de0c6f89088019f03c987587abee367ac2c867aeeea487799531",
+    "signed": "2026-08-22",
+    "issue": 505
+  },
+  "wakeup_preserves_whf_manual_override": {
+    "sha256": "3b37ff08a0e578265f122d9df9a2210e81c0237823b7f9f9d268811b2464bc98",
+    "signed": "2026-08-22",
+    "issue": 498
   }
 }

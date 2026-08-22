@@ -6,13 +6,12 @@ service calls are skipped and logged with a [DRY RUN] prefix.
 
 See: GitHub Issue #19
 
-Issue #594 Phase R, Step 4: also provides the per-lifecycle nat-vent and
-door/window FSM-authoritative toggles.
-
-Issue #727: also provides the shadow-engine-primary promotion toggle, and
-changes all 3 FSM-authoritative toggles plus the new one to persist across a
-Home Assistant restart (holding whatever state they were last set to) instead
-of the original Phase R design of always resetting to legacy/off.
+Issue #727/#729: also provides the shadow-engine-primary switch — the single
+control axis for choosing between the fixed-legacy and fixed-FSM
+``AutomationEngine`` identity, persisted across a Home Assistant restart. The
+3 independent per-subsystem FSM-authoritative switches from Issue #594 Phase
+R / #664 were retired in #729 — each engine's FSM-vs-legacy behavior is now
+fixed at construction, not independently runtime-toggleable.
 """
 
 from __future__ import annotations
@@ -42,9 +41,6 @@ async def async_setup_entry(
     async_add_entities(
         [
             ClimateAdvisorAutomationSwitch(coordinator, entry),
-            ClimateAdvisorNatVentFsmAuthoritativeSwitch(coordinator, entry),
-            ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(coordinator, entry),
-            ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(coordinator, entry),
             ClimateAdvisorShadowEnginePrimarySwitch(coordinator, entry),
         ]
     )
@@ -86,169 +82,31 @@ class ClimateAdvisorAutomationSwitch(CoordinatorEntity, SwitchEntity):
         self.async_write_ha_state()
 
 
-class ClimateAdvisorNatVentFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to make the nat-vent lifecycle FSM (Issue #633) authoritative for
-    the active-session soft-start-escalation + exit-chain decision, instead of
-    the legacy inline computation (Issue #594 Phase R, Step 4).
-
-    Default OFF. Persisted across a Home Assistant restart (Issue #727) —
-    holds whatever state it was last set to, same as the automation-enable
-    switch above. (Originally designed to always reset to legacy/off on
-    restart as a Block 5 rollout safety guarantee; the owner explicitly asked
-    for persistence instead — see
-    ``ClimateAdvisorCoordinator.set_natvent_fsm_authoritative()``'s
-    docstring.) This is the first switch in the Block 5 migration capable of
-    letting a bug in new code reach real HVAC/fan hardware (every prior
-    shadow-diagnostic phase was `dry_run=True` by construction) — still
-    instantly reversible via this same switch.
-    """
-
-    _attr_icon = "mdi:state-machine"
-    _attr_entity_category = None
-
-    def __init__(
-        self,
-        coordinator: ClimateAdvisorCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the nat-vent FSM-authoritative switch."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_natvent_fsm_authoritative"
-        self._attr_name = "Climate Advisor Nat-Vent FSM Authoritative"
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if the nat-vent FSM is authoritative for production decisions."""
-        return self.coordinator.natvent_fsm_authoritative
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Make the nat-vent FSM authoritative."""
-        self.coordinator.set_natvent_fsm_authoritative(True)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Revert to the legacy inline nat-vent computation."""
-        self.coordinator.set_natvent_fsm_authoritative(False)
-        self.async_write_ha_state()
-
-
-class ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to make the door/window lifecycle FSM (Issue #637) authoritative,
-    instead of the legacy inline flag writes (Issue #594 Phase R, Step 4).
-
-    **Partial authority** — unlike the nat-vent switch above, this one increment
-    only governs 2 of the door/window lifecycle's 7 methods
-    (``handle_manual_override_during_pause``, ``resume_from_pause``). The other 5
-    (``handle_door_window_open``, ``handle_all_doors_windows_closed``,
-    ``_re_pause_for_open_sensor``, ``_on_grace_expired``, ``_exit_nat_vent``'s
-    sensor-still-open branch) stay on the legacy path regardless of this switch's
-    position — each has its own documented blocker (see
-    ``AutomationEngine._doorwindow_fsm_authoritative``'s docstring in
-    automation.py) that must resolve before it can join a future increment.
-    Flipping this switch on does NOT mean "the FSM fully controls door/window."
-
-    Default OFF, persisted across a Home Assistant restart (Issue #727) — same
-    as the nat-vent switch's own docstring.
-    """
-
-    _attr_icon = "mdi:state-machine"
-    _attr_entity_category = None
-
-    def __init__(
-        self,
-        coordinator: ClimateAdvisorCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the door/window FSM-authoritative switch."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_doorwindow_fsm_authoritative"
-        self._attr_name = "Climate Advisor Door/Window FSM Authoritative"
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if the door/window FSM is authoritative for the 2
-        methods this increment covers."""
-        return self.coordinator.doorwindow_fsm_authoritative
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Make the door/window FSM authoritative (partial scope — see class docstring)."""
-        self.coordinator.set_doorwindow_fsm_authoritative(True)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Revert to the legacy inline door/window flag writes."""
-        self.coordinator.set_doorwindow_fsm_authoritative(False)
-        self.async_write_ha_state()
-
-
-class ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to make the override/grace lifecycle FSM (Issue #639) authoritative for
-    ``_override_confirm_pending``/``_grace_active``/``_grace_protects_override``,
-    instead of each real call site's own inline flag write (Issue #664).
-
-    **Full authority for all 8 real call sites, shipped in one increment** — unlike
-    door/window's staged partial-authority rollout, this switch does not need one.
-    Investigation for Issue #664 proved every flag value these primitives compute is a
-    pure function of their own call arguments (never of prior engine state), so the FSM
-    and the legacy inline computation are provably equivalent at every site — there was
-    no latent derivation ambiguity to discover and fix incrementally the way door/window's
-    11-step rollout did. The real timer-owning primitives (``_start_grace_period_action()``/
-    ``_cancel_grace_timers_action()``/etc.) are never gated by this switch — they always
-    run, unconditionally, exactly like ``_start_grace_period()``/``_cancel_grace_timers()``
-    are never gated by the door/window switch either; only which computation decides the
-    3 flag values is what this switch genuinely governs.
-
-    Default OFF, persisted across a Home Assistant restart (Issue #727) — same as the
-    nat-vent/door-window switches' own docstrings.
-    """
-
-    _attr_icon = "mdi:state-machine"
-    _attr_entity_category = None
-
-    def __init__(
-        self,
-        coordinator: ClimateAdvisorCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the override/grace FSM-authoritative switch."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_override_grace_fsm_authoritative"
-        self._attr_name = "Climate Advisor Override/Grace FSM Authoritative"
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if the override/grace FSM is authoritative for production decisions."""
-        return self.coordinator.override_grace_fsm_authoritative
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Make the override/grace FSM authoritative."""
-        self.coordinator.set_override_grace_fsm_authoritative(True)
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        """Revert to the legacy inline override/grace flag writes."""
-        self.coordinator.set_override_grace_fsm_authoritative(False)
-        self.async_write_ha_state()
-
-
 class ClimateAdvisorShadowEnginePrimarySwitch(CoordinatorEntity, SwitchEntity):
-    """Switch to promote the shadow ``AutomationEngine`` (Issue #613) to be the one
-    issuing real HVAC/fan commands, demoting the previously-primary engine to
-    diagnostic-only (Issue #727).
+    """Switch to promote the fixed-FSM ``AutomationEngine`` identity to be the one
+    issuing real HVAC/fan commands, demoting the fixed-legacy engine to
+    diagnostic-only (Issue #727, redesigned #729).
 
-    Unlike the 3 FSM-authoritative switches above, which each flip one decision
-    point *inside* the same production engine instance, this switch swaps which
-    *whole physical engine object* is production — the (former) shadow engine
-    starts issuing real ``climate.set_hvac_mode``/``set_temperature``/fan
-    service calls, and the demoted engine keeps running as the new diagnostic
-    twin (still fed live inputs every cycle, so the 6-axis comparison keeps
-    working in the other direction).
+    This is the single control axis for legacy-vs-FSM behavior. Each of the two
+    engine objects the coordinator builds has its FSM-authoritative flags fixed
+    at construction — one is always fully legacy, one is always fully FSM (see
+    ``ClimateAdvisorCoordinator.__init__``) — so choosing which one is primary
+    is now the only decision this integration exposes, replacing the 3
+    independent per-subsystem switches (nat-vent/door-window/override-grace,
+    Issue #594 Phase R / #664) that used to let each engine's flags vary
+    independently. Flipping this switch does NOT flip a flag in place —
+    ``async_set_shadow_engine_primary()`` persists the choice and reloads the
+    whole config entry (Issue #729), because the previous live in-process swap
+    couldn't migrate in-flight timers (grace, override-confirm, setpoint-retry,
+    etc.) to the newly-primary engine. A reload cleanly tears down and rebuilds
+    both engines instead, using the coordinator's existing, already-tested
+    startup/shutdown path.
 
-    Default OFF. Persisted across a Home Assistant restart (Issue #727) — holds
-    whichever engine was primary; a restart does not silently revert to the
-    original production engine.
+    Default OFF (legacy primary). Persisted across a Home Assistant restart —
+    holds whichever engine was primary; a restart does not silently revert to
+    the legacy engine.
 
-    KNOWN RISK: the shadow engine's decision coverage is a strict subset of
+    KNOWN RISK: the FSM engine's decision coverage is a strict subset of
     production's — some entry points have no ``_mirror_to_shadow()`` counterpart
     at all (see the documented list in ``coordinator.py``). Promoting while that
     gap exists means the newly-primary engine may not make every decision the

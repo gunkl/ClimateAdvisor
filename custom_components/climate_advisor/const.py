@@ -4,9 +4,19 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.53"
+VERSION = "0.6.54"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.54": [
+        "Feat #729: simplifies the Shadow Engine Primary switch added in 0.6.53 down"
+        " to the single control you actually use — the 3 separate nat-vent/"
+        " door-window/override-grace FSM toggles are gone, replaced by one choice"
+        " (legacy engine or FSM engine). Promoting now reloads the integration"
+        " instead of swapping live, which closes a real gap where an in-progress"
+        " timer (a grace period, a pending setpoint retry) could keep running"
+        " against the wrong engine after a switch. Logs now record which engine"
+        " issued each command, so it's provable after the fact.",
+    ],
     "0.6.53": [
         "Feat #727: the 3 nat-vent/door-window/override-grace FSM-authoritative"
         " switches now hold whatever state you last set them to across a Home"
@@ -2433,6 +2443,44 @@ KNOWN_FIXES: dict[int, dict] = {
             " promotion time: the shadow engine's decision coverage is a strict"
             " subset of production's (see coordinator.py's documented un-mirrored"
             " entry-point list) — not gated on closing that gap for this pass."
+        ),
+    },
+    729: {
+        "version_fixed": "0.6.54",
+        "title": (
+            "Issue #727's live in-process engine swap couldn't migrate in-flight"
+            " AutomationEngine timers to the newly-primary engine, and 5 of 13"
+            " internal timers (including one that issues a real _set_temperature()"
+            " call) were never cancellable by cleanup() at all — plus 4 switches"
+            " (3 FSM-authoritative + the promotion one) was more control surface"
+            " than the single legacy-vs-FSM choice actually used."
+        ),
+        "scope_covered": (
+            "coordinator.py: async_set_shadow_engine_primary() no longer swaps"
+            " engines live — it persists the choice and calls"
+            " hass.config_entries.async_reload() (fire-and-forget, matching the"
+            " same pattern repairs.py's own reload call uses for code belonging to"
+            " the entry being reloaded). The reload's existing, already-tested"
+            " teardown (async_shutdown() -> both engines' cleanup()) cancels every"
+            " internal timer as a side effect, closing the migration gap"
+            " structurally instead of hand-carrying fields across a live swap."
+            " _ENGINE_COMMAND_TRACKING_FIELDS/_ENGINE_FSM_AUTHORITATIVE_FIELDS and"
+            " the fsm_authoritative persisted-state dict are removed — no longer"
+            " needed. switch.py: the 3 per-subsystem FSM-authoritative switches"
+            " (ClimateAdvisorNatVentFsmAuthoritativeSwitch/DoorWindow.../"
+            "OverrideGrace...) are deleted; each engine's 3 FSM flags are now fixed"
+            " at construction (_engine_a always legacy, _engine_b always FSM) in"
+            " coordinator.py's __init__ — switch.climate_advisor_shadow_engine_primary"
+            " is the sole remaining control axis. automation.py: 3 new tracked"
+            " cancel-handle attributes (_setpoint_retry_cancel,"
+            " _fan_on_verify_cancel, _fan_off_verify_cancel) for the 5 previously-"
+            " uncovered timer sites, wired into cleanup(); role=<production|shadow>"
+            " added to the 5 real-command log chokepoints"
+            " (_set_hvac_mode/_set_temperature/_activate_fan/_deactivate_fan/"
+            "_notify), backed by a class-level AutomationEngine.role default so"
+            " partially-constructed test fixtures don't crash. sensor.py: the"
+            " shadow-engine-status sensor's 2 independent FSM-authoritative"
+            " attributes collapse into one fsm_engine_primary field."
         ),
     },
     684: {

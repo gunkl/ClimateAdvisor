@@ -511,16 +511,13 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "door_window_fsm_state": diag.get("door_window_fsm_state"),
             "door_window_mirror_agrees": diag.get("door_window_mirror_agrees"),
             "door_window_fsm_agrees": diag.get("door_window_fsm_agrees"),
-            # Issue #594 Phase R, Step 4: whether the nat-vent FSM is currently
-            # authoritative for production decisions (vs. the legacy inline
-            # computation). Surfaced here rather than a new card/sensor, same
-            # "extend an existing diagnostic" rule this sensor itself follows.
-            "natvent_fsm_authoritative": self.coordinator.natvent_fsm_authoritative,
-            # Issue #660: as of Phase R Step 8, this flag governs all 8 real
-            # door/window trigger sites (full parity — see
-            # AutomationEngine._doorwindow_fsm_authoritative's docstring), not a
-            # partial subset as previously documented here.
-            "doorwindow_fsm_authoritative": self.coordinator.doorwindow_fsm_authoritative,
+            # Issue #594 Phase R / #660 / #664 originally surfaced 2 independent
+            # per-subsystem authoritative flags here (nat-vent, door/window). Issue
+            # #729 retired the 3 independent FSM-authoritative switches — each
+            # engine's FSM-vs-legacy behavior is fixed at construction, and which
+            # whole engine is primary is the single remaining axis, so a single
+            # field replaces the 2 booleans that used to vary independently.
+            "fsm_engine_primary": self.coordinator.shadow_engine_primary,
             # Issue #661: override/grace's own production/shadow/FSM state fields were
             # already computed in coordinator.shadow_engine_diagnostic but never exposed
             # here — the same observability gap door/window had before #660, now closed

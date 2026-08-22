@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.53] — 2026-08-21
+
+- Feat #727: the 3 nat-vent/door-window/override-grace FSM-authoritative switches now hold whatever state you last set them to across a Home Assistant restart, instead of always reverting to off. Also adds a new switch, Shadow Engine Primary, that lets you promote the diagnostic shadow engine to be the one actually operating your thermostat/fan — previously it could only compare its decisions against production, never act on them. Also persisted across restart, and instantly reversible.
+
 ## [0.6.52] — 2026-08-21
 
 - Fix #724: no user-visible change. Closes a gap in the internal diagnostic that shadows automation decisions to verify safety-logic correctness — its copy of the whole-house-fan suppression state was never kept in sync, which could make the diagnostic falsely report a disagreement during completely normal overnight whole-house-fan use with a window open.

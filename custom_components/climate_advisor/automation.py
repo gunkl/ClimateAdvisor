@@ -974,15 +974,27 @@ class AutomationEngine:
         # dataclass existed. Applied last so it can't be shadowed by any of the plain
         # `self._x_callback: Any | None = None` assignments above.
         if callbacks is not None:
-            self._revisit_callback = callbacks.revisit
-            self._sensor_check_callback = callbacks.sensor_check
-            self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
-            self._emit_event_callback = callbacks.emit_event
-            self._request_refresh_callback = callbacks.request_refresh
-            self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
-            self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
-            self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
-            self._reclassify_callback = callbacks.reclassify
+            self.set_callbacks(callbacks)
+
+    def set_callbacks(self, callbacks: AutomationEngineCallbacks) -> None:
+        """(Re-)wire the 9 coordinator callback bundle onto this engine.
+
+        Extracted from ``__init__``'s original inline unpacking (Issue #604) so
+        it can also be called after construction — Issue #727's shadow-engine-
+        primary promotion swaps a production and shadow engine's callback
+        bundles (production's real callbacks must follow whichever physical
+        engine is currently primary; the demoted engine gets the isolated
+        shadow bundle instead), without duplicating this unpacking logic.
+        """
+        self._revisit_callback = callbacks.revisit
+        self._sensor_check_callback = callbacks.sensor_check
+        self._sensor_debounce_pending_callback = callbacks.sensor_debounce_pending
+        self._emit_event_callback = callbacks.emit_event
+        self._request_refresh_callback = callbacks.request_refresh
+        self._post_grace_fan_check_callback = callbacks.post_grace_fan_check
+        self._get_fan_physical_state_callback = callbacks.get_fan_physical_state
+        self._is_recent_fan_command_callback = callbacks.is_recent_fan_command
+        self._reclassify_callback = callbacks.reclassify
 
     async def _notify(self, message: str, title: str, notification_type: str) -> None:
         """Send a notification via configured channels, filtered by per-event preferences."""

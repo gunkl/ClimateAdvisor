@@ -8,6 +8,11 @@ See: GitHub Issue #19
 
 Issue #594 Phase R, Step 4: also provides the per-lifecycle nat-vent and
 door/window FSM-authoritative toggles.
+
+Issue #727: also provides the shadow-engine-primary promotion toggle, and
+changes all 3 FSM-authoritative toggles plus the new one to persist across a
+Home Assistant restart (holding whatever state they were last set to) instead
+of the original Phase R design of always resetting to legacy/off.
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ async def async_setup_entry(
             ClimateAdvisorNatVentFsmAuthoritativeSwitch(coordinator, entry),
             ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(coordinator, entry),
             ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(coordinator, entry),
+            ClimateAdvisorShadowEnginePrimarySwitch(coordinator, entry),
         ]
     )
 
@@ -85,15 +91,16 @@ class ClimateAdvisorNatVentFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEntit
     the active-session soft-start-escalation + exit-chain decision, instead of
     the legacy inline computation (Issue #594 Phase R, Step 4).
 
-    Default OFF. Unlike the automation-enable switch above, this is NOT
-    persisted across a Home Assistant restart — see
-    ``ClimateAdvisorCoordinator.set_natvent_fsm_authoritative()``'s docstring:
-    a restart always comes back up on the proven legacy path, and the owner
-    must explicitly re-enable this each time. This is the first switch in the
-    Block 5 migration capable of letting a bug in new code reach real
-    HVAC/fan hardware (every prior shadow-diagnostic phase was `dry_run=True`
-    by construction) — instantly reversible, but not something that should
-    silently persist through an unattended restart.
+    Default OFF. Persisted across a Home Assistant restart (Issue #727) —
+    holds whatever state it was last set to, same as the automation-enable
+    switch above. (Originally designed to always reset to legacy/off on
+    restart as a Block 5 rollout safety guarantee; the owner explicitly asked
+    for persistence instead — see
+    ``ClimateAdvisorCoordinator.set_natvent_fsm_authoritative()``'s
+    docstring.) This is the first switch in the Block 5 migration capable of
+    letting a bug in new code reach real HVAC/fan hardware (every prior
+    shadow-diagnostic phase was `dry_run=True` by construction) — still
+    instantly reversible via this same switch.
     """
 
     _attr_icon = "mdi:state-machine"
@@ -140,10 +147,8 @@ class ClimateAdvisorDoorWindowFsmAuthoritativeSwitch(CoordinatorEntity, SwitchEn
     automation.py) that must resolve before it can join a future increment.
     Flipping this switch on does NOT mean "the FSM fully controls door/window."
 
-    Default OFF, NOT persisted across a Home Assistant restart — same reasoning
-    as the nat-vent switch's own docstring: a restart always comes back up on
-    the proven legacy path, and the owner must explicitly re-enable this each
-    time.
+    Default OFF, persisted across a Home Assistant restart (Issue #727) — same
+    as the nat-vent switch's own docstring.
     """
 
     _attr_icon = "mdi:state-machine"
@@ -193,9 +198,8 @@ class ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(CoordinatorEntity, Switc
     are never gated by the door/window switch either; only which computation decides the
     3 flag values is what this switch genuinely governs.
 
-    Default OFF, NOT persisted across a Home Assistant restart — same reasoning as the
-    nat-vent/door-window switches' own docstrings: a restart always comes back up on the
-    proven legacy path, and the owner must explicitly re-enable this each time.
+    Default OFF, persisted across a Home Assistant restart (Issue #727) — same as the
+    nat-vent/door-window switches' own docstrings.
     """
 
     _attr_icon = "mdi:state-machine"
@@ -224,4 +228,58 @@ class ClimateAdvisorOverrideGraceFsmAuthoritativeSwitch(CoordinatorEntity, Switc
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Revert to the legacy inline override/grace flag writes."""
         self.coordinator.set_override_grace_fsm_authoritative(False)
+        self.async_write_ha_state()
+
+
+class ClimateAdvisorShadowEnginePrimarySwitch(CoordinatorEntity, SwitchEntity):
+    """Switch to promote the shadow ``AutomationEngine`` (Issue #613) to be the one
+    issuing real HVAC/fan commands, demoting the previously-primary engine to
+    diagnostic-only (Issue #727).
+
+    Unlike the 3 FSM-authoritative switches above, which each flip one decision
+    point *inside* the same production engine instance, this switch swaps which
+    *whole physical engine object* is production — the (former) shadow engine
+    starts issuing real ``climate.set_hvac_mode``/``set_temperature``/fan
+    service calls, and the demoted engine keeps running as the new diagnostic
+    twin (still fed live inputs every cycle, so the 6-axis comparison keeps
+    working in the other direction).
+
+    Default OFF. Persisted across a Home Assistant restart (Issue #727) — holds
+    whichever engine was primary; a restart does not silently revert to the
+    original production engine.
+
+    KNOWN RISK: the shadow engine's decision coverage is a strict subset of
+    production's — some entry points have no ``_mirror_to_shadow()`` counterpart
+    at all (see the documented list in ``coordinator.py``). Promoting while that
+    gap exists means the newly-primary engine may not make every decision the
+    demoted engine would have. This is accepted, not blocked, for this first
+    pass — logged loudly (WARNING) every time this switch changes state.
+    """
+
+    _attr_icon = "mdi:swap-horizontal-bold"
+    _attr_entity_category = None
+
+    def __init__(
+        self,
+        coordinator: ClimateAdvisorCoordinator,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the shadow-engine-primary switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_shadow_engine_primary"
+        self._attr_name = "Climate Advisor Shadow Engine Primary"
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if the shadow engine is currently primary (issuing real commands)."""
+        return self.coordinator.shadow_engine_primary
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Promote the shadow engine to primary."""
+        await self.coordinator.async_set_shadow_engine_primary(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Demote the shadow engine back to diagnostic-only."""
+        await self.coordinator.async_set_shadow_engine_primary(False)
         self.async_write_ha_state()

@@ -277,6 +277,35 @@ _SHADOW_DIAG_AXES = (
 # Matches the per-obs-type cap enforced by LearningState.rejection_log on load.
 _REJECTION_LOG_CAP: int = 100
 
+# Issue #727: command-tracking/echo-suppression fields _sync_shadow_inputs() never
+# copies (they're populated only inside the real, non-dry-run branches of
+# _set_hvac_mode()/_set_temperature()/_activate_fan()/_deactivate_fan(), so the
+# permanently-dry_run shadow engine has never had them). Copied once, explicitly,
+# at shadow-engine-primary promotion time (async_set_shadow_engine_primary()) so
+# the newly-primary engine doesn't immediately re-issue a command production just
+# issued, or miss echo-suppression on one already in flight.
+_ENGINE_COMMAND_TRACKING_FIELDS: tuple[str, ...] = (
+    "_hvac_command_pending",
+    "_fan_command_pending",
+    "_temp_command_pending",
+    "_temp_command_time",
+    "_pending_setpoint_single",
+    "_pending_setpoint_mode",
+    "_write_seq",
+    "_fan_command_time",
+    "_last_commanded_hvac_mode",
+)
+
+# Issue #727: the 3 FSM-authoritative flags are engine-instance attributes, not
+# input data _sync_shadow_inputs() tracks — copied alongside the command-tracking
+# fields above at promotion time so the newly-primary engine makes the same
+# legacy-vs-FSM decisions the demoted engine was making, not its own defaults.
+_ENGINE_FSM_AUTHORITATIVE_FIELDS: tuple[str, ...] = (
+    "_natvent_fsm_authoritative",
+    "_doorwindow_fsm_authoritative",
+    "_override_grace_fsm_authoritative",
+)
+
 # Issue #625: short, Fan(WHF)-card-style cause labels for AutomationEngine._last_grace_trigger,
 # shown on the Status card's grace branch instead of a free-text _last_action_reason sentence
 # (which duplicated the Fan (WHF) card for fan-triggered grace periods, and was blank/stale
@@ -613,7 +642,14 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # async_restore_state() where it can be awaited via the executor.
         self._chart_log = ChartStateLog(Path(hass.config.config_dir), max_days=CHART_LOG_MAX_DAYS)
         self.learning = LearningEngine(Path(hass.config.config_dir))
-        self.automation_engine = AutomationEngine(
+        # Issue #727: which of the two engines below is "production" is now a runtime-
+        # switchable routing choice (see the automation_engine/shadow_automation_engine
+        # properties), not a fixed identity — _engine_a/_engine_b are the two fixed
+        # physical engine handles; _shadow_is_primary selects which one the properties
+        # resolve to. Defaults False: _engine_a starts as production, exactly as before
+        # this issue (backward-compatible default).
+        self._shadow_is_primary: bool = False
+        self._engine_a = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
             weather_entity=config["weather_entity"],
@@ -655,7 +691,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # #633/#637 above. Starts (IDLE, NONE) unconditionally (no persisted
         # override/grace on a fresh coordinator).
         self._override_grace_fsm_state: OverrideGraceLifecycleState = (OverrideConfirmState.IDLE, GraceState.NONE)
-        self.shadow_automation_engine: AutomationEngine = AutomationEngine(
+        self._engine_b: AutomationEngine = AutomationEngine(
             hass=hass,
             climate_entity=config["climate_entity"],
             weather_entity=config["weather_entity"],
@@ -666,7 +702,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             callbacks=self._build_shadow_automation_callbacks(),
             role="shadow",
         )
-        self.shadow_automation_engine.dry_run = True
+        self._engine_b.dry_run = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1024,6 +1060,79 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # copy closes this and every other _whf_owns_hvac() read the same way the _fan_active
         # copy above does for its own guards.
         se._pre_fan_hvac_mode = ae._pre_fan_hvac_mode
+
+    def _apply_engine_roles(self, primary: AutomationEngine, secondary: AutomationEngine) -> None:
+        """Wire dry_run/callbacks/role so ``primary`` issues real commands and
+        ``secondary`` is diagnostic-only (Issue #727).
+
+        Shared by ``async_set_shadow_engine_primary()`` (a live runtime swap) and
+        ``async_restore_state()`` (re-establishing the correct wiring for a
+        restored routing choice at startup) — one place computes what "being
+        primary" means, so the two callers can't drift out of sync with each
+        other about it.
+        """
+        primary.dry_run = not self._automation_enabled
+        primary.set_callbacks(self._build_production_automation_callbacks())
+        primary.role = "production"
+        secondary.dry_run = True
+        secondary.set_callbacks(self._build_shadow_automation_callbacks())
+        secondary.role = "shadow"
+
+    async def async_set_shadow_engine_primary(self, enabled: bool) -> None:
+        """Promote the shadow engine to be the one issuing real HVAC/fan commands,
+        or demote it back to diagnostic-only (Issue #727).
+
+        This is the "just a switch between the coordinator and the engine" the
+        shadow-engine mechanism was missing: previously ``shadow_automation_engine``
+        was permanently ``dry_run=True`` and could never touch real hardware, no
+        matter how long its 6-axis diagnostic agreed with production. Flipping
+        this routes ``coordinator.automation_engine`` to the other physical engine
+        object — every existing read site (api.py, sensor.py, this class itself)
+        picks up the new primary automatically, since they all read the property
+        fresh rather than caching a reference.
+
+        Before flipping, does one more full input sync (the same fields
+        ``_mirror_to_shadow()`` copies every cycle, so the incoming engine should
+        already be near-current) plus an explicit copy of the command-tracking/
+        echo-suppression fields and FSM-authoritative flags that raw-copy has
+        never covered (see ``_ENGINE_COMMAND_TRACKING_FIELDS``/
+        ``_ENGINE_FSM_AUTHORITATIVE_FIELDS``), so the newly-primary engine starts
+        from a state as close to the demoted engine's as this mechanism reaches.
+
+        KNOWN RISK, accepted for this first pass rather than blocked on: the
+        shadow engine's decision coverage is a strict subset of production's —
+        some entry points have no ``_mirror_to_shadow()`` counterpart at all (see
+        the documented list earlier in this file). A decision only the demoted
+        engine's un-mirrored code path made may simply not fire the same way on
+        the newly-primary engine. Logged loudly below every time this is used.
+
+        Persisted across restart (same Issue #727 request as the 3 FSM-
+        authoritative switches) — a restart holds whichever engine was primary,
+        it does not silently revert to the original production engine.
+        """
+        if enabled == self._shadow_is_primary:
+            return
+
+        outgoing = self.automation_engine  # currently primary, about to be demoted
+        incoming = self.shadow_automation_engine  # currently shadow, about to be promoted
+
+        self._sync_shadow_inputs()
+        for field in _ENGINE_COMMAND_TRACKING_FIELDS + _ENGINE_FSM_AUTHORITATIVE_FIELDS:
+            setattr(incoming, field, getattr(outgoing, field))
+
+        self._apply_engine_roles(incoming, outgoing)
+        self._shadow_is_primary = enabled
+
+        _LOGGER.warning(
+            "Shadow engine %s (Issue #727) — real HVAC/fan commands now issued by the "
+            "%s engine object. KNOWN RISK: shadow's decision coverage is a strict subset "
+            "of production's (see coordinator.py's documented un-mirrored entry points) — "
+            "some decisions the demoted engine would have made may not fire identically on "
+            "the newly-primary engine until that coverage gap is closed.",
+            "promoted to primary" if enabled else "demoted back to diagnostic-only",
+            "former shadow" if enabled else "original production",
+        )
+        self.hass.async_create_task(self._async_save_state())
 
     def _dispatch_fsm_evaluators(
         self,
@@ -1603,6 +1712,52 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return self._shadow_engine_diagnostic
 
     @property
+    def automation_engine(self) -> AutomationEngine:
+        """The engine currently issuing real HVAC/fan commands.
+
+        Issue #727: used to be a plain instance attribute set once in __init__ and
+        never reassigned. It's now a routing property over two fixed engine handles
+        (``_engine_a``/``_engine_b``), selected by ``_shadow_is_primary``, so
+        ``switch.climate_advisor_shadow_engine_primary`` can swap which physical
+        engine object is "production" without touching any of the many existing
+        read call sites across ``api.py``/``sensor.py``/``coordinator.py`` itself —
+        they all just read ``coordinator.automation_engine`` fresh, same as before.
+        The setter exists only so the many existing test files that do
+        ``coord.automation_engine = MagicMock()`` keep working unmodified.
+        """
+        return self._engine_b if getattr(self, "_shadow_is_primary", False) else self._engine_a
+
+    @automation_engine.setter
+    def automation_engine(self, value: AutomationEngine) -> None:
+        if getattr(self, "_shadow_is_primary", False):
+            self._engine_b = value
+        else:
+            self._engine_a = value
+
+    @property
+    def shadow_automation_engine(self) -> AutomationEngine:
+        """The engine currently in diagnostic-only (permanently dry_run) role.
+
+        See ``automation_engine``'s docstring — same routing mechanism, opposite
+        selection.
+        """
+        return self._engine_a if getattr(self, "_shadow_is_primary", False) else self._engine_b
+
+    @shadow_automation_engine.setter
+    def shadow_automation_engine(self, value: AutomationEngine) -> None:
+        if getattr(self, "_shadow_is_primary", False):
+            self._engine_a = value
+        else:
+            self._engine_b = value
+
+    @property
+    def shadow_engine_primary(self) -> bool:
+        """Whether the (former) shadow engine is currently the one issuing real
+        HVAC/fan commands (Issue #727). False = original production engine still
+        primary (default)."""
+        return self._shadow_is_primary
+
+    @property
     def automation_enabled(self) -> bool:
         """Whether automation actions are enabled (False = observe-only)."""
         return self._automation_enabled
@@ -1627,18 +1782,18 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
     def set_natvent_fsm_authoritative(self, enabled: bool) -> None:
         """Flip nat-vent FSM authority — Step 2's read-authority swap, live.
 
-        Deliberately NOT persisted across restart (unlike ``automation_enabled``
-        above): this is the epic's first switch capable of letting a bug in new
-        code reach real hardware (see epic #594's Phase R risk framing), so a
-        restart always comes back up on the proven legacy path — the owner must
-        explicitly re-enable it each time, rather than an unattended restart
-        silently carrying the FSM-authoritative choice forward.
+        Persisted across restart (Issue #727 — reverses the original Phase R
+        framing, which deliberately reset this to legacy/off on every restart as
+        a rollout safety guarantee). The owner explicitly asked for this to hold
+        its last-set value instead: a restart no longer silently swaps out which
+        code is deciding nat-vent behavior.
         """
         self.automation_engine._natvent_fsm_authoritative = enabled
         _LOGGER.warning(
-            "Nat-vent FSM %s for production decisions (Issue #594 Phase R)",
+            "Nat-vent FSM %s for production decisions (Issue #594 Phase R / #727)",
             "made authoritative" if enabled else "reverted to legacy computation",
         )
+        self.hass.async_create_task(self._async_save_state())
 
     @property
     def doorwindow_fsm_authoritative(self) -> bool:
@@ -1652,14 +1807,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
 
     def set_doorwindow_fsm_authoritative(self, enabled: bool) -> None:
         """Flip door/window FSM authority — Step 2's partial read-authority
-        swap, live. Same NOT-persisted-across-restart reasoning as
-        ``set_natvent_fsm_authoritative()``'s own docstring.
+        swap, live. Same persisted-across-restart behavior as
+        ``set_natvent_fsm_authoritative()``'s own docstring (Issue #727).
         """
         self.automation_engine._doorwindow_fsm_authoritative = enabled
         _LOGGER.warning(
-            "Door/window FSM %s for production decisions (partial scope — Issue #594 Phase R)",
+            "Door/window FSM %s for production decisions (partial scope — Issue #594 Phase R / #727)",
             "made authoritative" if enabled else "reverted to legacy computation",
         )
+        self.hass.async_create_task(self._async_save_state())
 
     @property
     def override_grace_fsm_authoritative(self) -> bool:
@@ -1671,14 +1827,15 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return bool(self.automation_engine._override_grace_fsm_authoritative)
 
     def set_override_grace_fsm_authoritative(self, enabled: bool) -> None:
-        """Flip override/grace FSM authority, live. Same NOT-persisted-across-restart
-        reasoning as ``set_natvent_fsm_authoritative()``'s own docstring.
+        """Flip override/grace FSM authority, live. Same persisted-across-restart
+        behavior as ``set_natvent_fsm_authoritative()``'s own docstring (Issue #727).
         """
         self.automation_engine._override_grace_fsm_authoritative = enabled
         _LOGGER.warning(
-            "Override/grace FSM %s for production decisions (full authority — Issue #664)",
+            "Override/grace FSM %s for production decisions (full authority — Issue #664 / #727)",
             "made authoritative" if enabled else "reverted to legacy computation",
         )
+        self.hass.async_create_task(self._async_save_state())
 
     async def async_setup(self) -> None:
         """Set up scheduled events and state listeners."""
@@ -2029,6 +2186,33 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         except (TypeError, ValueError):
             self.consecutive_failure_count = 0
 
+        # Issue #727: FSM-authoritative switches + which physical engine is primary
+        # are mode-like settings, not daily ephemeral state — restored regardless of
+        # date boundary (same reasoning as ai_stats/coordinator health above), so
+        # they survive any restart, not just a same-day one. Routing is restored
+        # BEFORE the FSM flags below so the flags land on whichever engine is now
+        # correctly "production" post-restore, not on the pre-restore default.
+        restored_shadow_primary = bool(state.get("shadow_engine_primary", False))
+        if restored_shadow_primary:
+            self._shadow_is_primary = True
+            self._apply_engine_roles(self.automation_engine, self.shadow_automation_engine)
+            _LOGGER.warning(
+                "Restored shadow-engine-primary routing (Issue #727): the former shadow "
+                "engine is issuing real HVAC/fan commands, matching its state before this restart"
+            )
+
+        fsm_flags = state.get("fsm_authoritative")
+        if isinstance(fsm_flags, dict):
+            self.automation_engine._natvent_fsm_authoritative = bool(fsm_flags.get("nat_vent", False))
+            self.automation_engine._doorwindow_fsm_authoritative = bool(fsm_flags.get("door_window", False))
+            self.automation_engine._override_grace_fsm_authoritative = bool(fsm_flags.get("override_grace", False))
+            _LOGGER.info(
+                "Restored FSM-authoritative switches (Issue #727): nat_vent=%s, door_window=%s, override_grace=%s",
+                self.automation_engine._natvent_fsm_authoritative,
+                self.automation_engine._doorwindow_fsm_authoritative,
+                self.automation_engine._override_grace_fsm_authoritative,
+            )
+
         if state_date != today_str:
             _LOGGER.debug(
                 "Persisted state is from %s (today is %s) — starting fresh",
@@ -2247,6 +2431,16 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                 "briefing_day_type": self._briefing_day_type,
             },
             "automation_enabled": self._automation_enabled,
+            # Issue #727: mode-like settings the user wants to survive ANY restart,
+            # not just a same-day one — restored unconditionally, before the
+            # same-day gate in async_restore_state(), same as ai_stats/coordinator
+            # health below.
+            "fsm_authoritative": {
+                "nat_vent": bool(getattr(self.automation_engine, "_natvent_fsm_authoritative", False)),
+                "door_window": bool(getattr(self.automation_engine, "_doorwindow_fsm_authoritative", False)),
+                "override_grace": bool(getattr(self.automation_engine, "_override_grace_fsm_authoritative", False)),
+            },
+            "shadow_engine_primary": getattr(self, "_shadow_is_primary", False),
             "occupancy_mode": self._occupancy_mode,
             "occupancy_away_since": (self._occupancy_away_since.isoformat() if self._occupancy_away_since else None),
             "ai_stats": self.claude_client.get_persistent_stats() if self.claude_client else {},

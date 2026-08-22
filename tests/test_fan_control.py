@@ -879,6 +879,101 @@ class TestManualOverrideEndsNatVentImmediately:
         assert engine._natural_vent_active is True
 
 
+class TestManualOverrideEndsNatVentDespiteRfRemoteTimer:
+    """Issue #748: reproduction of the 2026-08-22 live incident — a WHF session
+    started via a QuietCool RF remote timer silently blocked the Issue #714
+    mutex stand-down, leaving AC and WHF running simultaneously for 5+ minutes.
+
+    Root cause: _deactivate_fan()'s Issue #486 "RF remote timer is absolute"
+    guard and Issue #714's "manual override conflict" stand-down both funnel
+    through the same early-return gate with no way to distinguish "routine
+    automation second-guessing a remote press" (must respect the timer) from
+    "a hard AC/WHF mutex violation" (must never respect it) — see this
+    project's docs/grace-periods-spec.md for the full precedence rule.
+    """
+
+    def _engine_with_active_nat_vent_and_rf_timer(self) -> AutomationEngine:
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+            }
+        )
+        engine._natural_vent_active = True
+        engine._fan_active = True
+        engine._fan_override_active = True
+        engine._fan_remote_timer_hours = 1.0
+        engine._pre_fan_hvac_mode = "off"
+        state_mock = MagicMock()
+        state_mock.state = "cool"  # the user's just-set thermostat mode
+        engine.hass.states.get = MagicMock(return_value=state_mock)
+        return engine
+
+    def test_stand_down_turns_off_fan_despite_active_rf_remote_timer(self):
+        """The one hard-mutex call path must bypass the RF-timer-absolute guard —
+        this is the exact defeat observed in production on 2026-08-22."""
+        engine = self._engine_with_active_nat_vent_and_rf_timer()
+        scheduled: list = []
+        engine.hass.async_create_task = MagicMock(side_effect=lambda coro: scheduled.append(coro))
+
+        engine.handle_manual_override(source="normal", old_mode="off", new_mode="cool")
+
+        assert scheduled, "Expected the stand-down coroutine to be scheduled"
+        for coro in scheduled:
+            asyncio.run(coro)
+
+        fan_calls = [c for c in engine.hass.services.async_call.call_args_list if c.args[0] == "fan"]
+        assert fan_calls, "WHF must be turned off even though an RF remote timer is active"
+
+    def test_routine_deactivation_still_respects_rf_remote_timer(self):
+        """Issue #486 must still hold for every other (non-mutex) shutoff path —
+        this fix is a narrow bypass for the hard mutex, not a removal of RF-timer
+        protection against routine automation second-guessing."""
+        engine = _make_automation_engine(
+            {
+                CONF_FAN_MODE: FAN_MODE_WHOLE_HOUSE,
+                CONF_FAN_ENTITY: "fan.attic",
+            }
+        )
+        engine._fan_active = True
+        engine._fan_override_active = True
+        engine._fan_remote_timer_hours = 2.0
+
+        result = asyncio.run(engine._deactivate_fan(reason="nat_vent_cycling_off"))
+
+        assert result is FanCommandResult.OVERRIDDEN
+        engine.hass.services.async_call.assert_not_called()
+        assert engine._fan_active is True  # unchanged
+
+    def test_all_four_manual_override_conflict_sites_route_through_shared_helper(self):
+        """Issue #748's five-whys found the bug's deepest root cause was four
+        near-identical inline copies of the "stand WHF down on override conflict"
+        logic, only one of which got fixed if patched by hand. Guard against a future
+        edit reintroducing a fifth inline duplicate (which would silently skip the
+        bypass_absolute_override fix) by asserting the source has exactly one call
+        site that constructs the 'ending free cooling' reason string directly —
+        inside the shared helper — and that every other reference to it is a call
+        into that helper.
+        """
+        import inspect
+
+        from custom_components.climate_advisor import automation as automation_module
+
+        source = inspect.getsource(automation_module)
+        inline_reason_constructions = source.count('f"manual override to {')
+        assert inline_reason_constructions == 1, (
+            "Expected exactly one inline construction of the override-conflict reason string "
+            "(inside _stand_down_whf_for_override_conflict) — found "
+            f"{inline_reason_constructions}. A new call site building this reason directly "
+            "(instead of calling the shared helper) would bypass the Issue #748 mutex fix."
+        )
+        helper_call_sites = source.count("self._stand_down_whf_for_override_conflict(")
+        assert helper_call_sites == 4, (
+            f"Expected all 4 known manual-override-conflict call sites to route through the "
+            f"shared helper, found {helper_call_sites} call(s)."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fan behavior at transitions (Issue #37)
 # ---------------------------------------------------------------------------

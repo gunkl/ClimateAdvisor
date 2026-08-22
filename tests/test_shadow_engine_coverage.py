@@ -110,6 +110,13 @@ _COVERAGE_REGISTRY: dict[str, str] = {
     "resume_from_pause": "mirrored",
     "handle_manual_override_during_pause": "mirrored",
     "_exit_nat_vent": ("internal: shared choke point, called only from already-mirrored entry points"),
+    "_stand_down_whf_for_override_conflict": (
+        "internal: Issue #748 shared choke point extracted from 4 previously-duplicated inline "
+        "blocks, called only from already-mirrored entry points (handle_manual_override, "
+        "check_natural_vent_conditions, nat_vent_temperature_check, fan_thermostat_check) — same "
+        "role as _exit_nat_vent above. Sets _natural_vent_active=False/_nat_vent_soft_start=False, "
+        "mirroring the legacy inline writes it replaces"
+    ),
     "_pause_for_door_window": (
         "internal: called only from handle_door_window_open (mirrored) and _re_pause_for_open_sensor (internal)"
     ),

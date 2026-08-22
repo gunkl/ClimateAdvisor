@@ -2047,6 +2047,54 @@ class AutomationEngine:
             new_setpoint_f=new_setpoint_f,
         )
 
+    async def _stand_down_whf_for_override_conflict(
+        self,
+        *,
+        mode: str | None,
+        indoor_temp: float | None,
+        event_source: str | None,
+    ) -> None:
+        """End an active WHF/nat-vent session because a manual HVAC-mode override just
+        physically conflicts with it (Issue #714/#748).
+
+        This is the single, shared implementation of the "manual override to an active mode
+        detected while WHF owns HVAC — stand the session down immediately" rule. It used to be
+        copy-pasted at four call sites (immediate override detection, nat-vent-exit tick,
+        nat-vent-temp-check tick, fan-thermostat-check tick) — Issue #748's investigation
+        found that duplication was the reason a later, unrelated fix (Issue #486's RF-remote-
+        timer-absolute guard) could silently defeat this rule at some call sites without being
+        caught: there was no single place to audit both behaviors together. Do not re-duplicate
+        this at a new call site — call this method instead.
+
+        Deliberately does NOT call ``_exit_nat_vent()``: that function's sensors-closed branch
+        restores ``_pre_fan_hvac_mode`` (the mode captured BEFORE nat-vent started) via
+        ``_set_hvac_mode()``, which has no override awareness of its own and would silently
+        overwrite the user's just-set mode right back — the exact bug this rule closes.
+
+        Passes ``bypass_absolute_override=True`` to ``_deactivate_fan()``: this is a hard
+        AC/WHF mutex, not routine automation second-guessing an RF remote timer — last setting
+        placed wins, unconditionally, no matter what mechanism is currently protecting the
+        losing device.
+        """
+        self._natural_vent_active = False
+        self._nat_vent_soft_start = False
+        await self._deactivate_fan(
+            reason=f"manual override to {mode} — ending free cooling",
+            restore_hvac=False,
+            release_suppression=True,
+            emit_event=False,
+            bypass_absolute_override=True,
+        )
+        if self._emit_event_callback:
+            payload = {
+                "indoor_temp": indoor_temp,
+                "override_mode": mode,
+                "fan_device": _fan_device_label(self.config),
+            }
+            if event_source is not None:
+                payload["source"] = event_source
+            self._emit_event_callback("nat_vent_manual_override_exit", payload)
+
     def start_override_confirmation(
         self,
         source: str,
@@ -2095,28 +2143,20 @@ class AutomationEngine:
                 "Manual override to %s detected while WHF owns HVAC — ending free cooling session immediately",
                 detected_mode,
             )
+            # Set synchronously (not inside the scheduled task below) so any code that reads
+            # these flags immediately after this call — still within the same tick — observes
+            # the session as already standing down. hass.async_create_task() defers the
+            # coroutine's body to the next event loop iteration; it does not run any of it
+            # synchronously the way a direct `await` would.
             self._natural_vent_active = False
             self._nat_vent_soft_start = False
-
-            async def _stand_down_nat_vent_for_override(_mode: str = detected_mode) -> None:
-                await self._deactivate_fan(
-                    reason=f"manual override to {_mode} detected — ending free cooling",
-                    restore_hvac=False,
-                    release_suppression=True,
-                    emit_event=False,
+            self.hass.async_create_task(
+                self._stand_down_whf_for_override_conflict(
+                    mode=detected_mode,
+                    indoor_temp=self._indoor_f_for_event(),
+                    event_source="override_detected",
                 )
-                if self._emit_event_callback:
-                    self._emit_event_callback(
-                        "nat_vent_manual_override_exit",
-                        {
-                            "indoor_temp": self._indoor_f_for_event(),
-                            "override_mode": _mode,
-                            "fan_device": _fan_device_label(self.config),
-                            "source": "override_detected",
-                        },
-                    )
-
-            self.hass.async_create_task(_stand_down_nat_vent_for_override())
+            )
 
         # Architecture-reset Step 2 (session state machine slice): the disabled-vs-pending
         # branch now lives in desired_state.decide_override_confirm() — this method still
@@ -4393,23 +4433,11 @@ class AutomationEngine:
                         self._manual_override_mode,
                         indoor if indoor is not None else 0.0,
                     )
-                    self._natural_vent_active = False
-                    self._nat_vent_soft_start = False
-                    await self._deactivate_fan(
-                        reason=f"manual override to {self._manual_override_mode} — ending free cooling",
-                        restore_hvac=False,
-                        release_suppression=True,
-                        emit_event=False,
+                    await self._stand_down_whf_for_override_conflict(
+                        mode=self._manual_override_mode,
+                        indoor_temp=indoor,
+                        event_source=None,
                     )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_manual_override_exit",
-                            {
-                                "indoor_temp": indoor,
-                                "override_mode": self._manual_override_mode,
-                                "fan_device": _fan_device_label(self.config),
-                            },
-                        )
                     return
 
                 if exit_decision.reason == NatVentExitReason.COMFORT_FLOOR:
@@ -5048,24 +5076,11 @@ class AutomationEngine:
                         self._manual_override_mode,
                         current_temp,
                     )
-                    self._natural_vent_active = False
-                    self._nat_vent_soft_start = False
-                    await self._deactivate_fan(
-                        reason=f"manual override to {self._manual_override_mode} — ending free cooling",
-                        restore_hvac=False,
-                        release_suppression=True,
-                        emit_event=False,
+                    await self._stand_down_whf_for_override_conflict(
+                        mode=self._manual_override_mode,
+                        indoor_temp=current_temp,
+                        event_source="temp_check",
                     )
-                    if self._emit_event_callback:
-                        self._emit_event_callback(
-                            "nat_vent_manual_override_exit",
-                            {
-                                "indoor_temp": current_temp,
-                                "override_mode": self._manual_override_mode,
-                                "fan_device": _fan_device_label(self.config),
-                                "source": "temp_check",
-                            },
-                        )
                     return
 
                 # Remaining 4 reasons all route through the canonical _exit_nat_vent() choke
@@ -5443,24 +5458,11 @@ class AutomationEngine:
                 self._manual_override_mode,
                 indoor if indoor is not None else 0.0,
             )
-            self._natural_vent_active = False
-            self._nat_vent_soft_start = False
-            await self._deactivate_fan(
-                reason=f"manual override to {self._manual_override_mode} — ending free cooling",
-                restore_hvac=False,
-                release_suppression=True,
-                emit_event=False,
+            await self._stand_down_whf_for_override_conflict(
+                mode=self._manual_override_mode,
+                indoor_temp=indoor,
+                event_source="fan_thermostat_check",
             )
-            if self._emit_event_callback:
-                self._emit_event_callback(
-                    "nat_vent_manual_override_exit",
-                    {
-                        "indoor_temp": indoor,
-                        "override_mode": self._manual_override_mode,
-                        "fan_device": _fan_device_label(self.config),
-                        "source": "fan_thermostat_check",
-                    },
-                )
             return
 
         if outcome is FanThermostatOutcome.STOP_VIA_NAT_VENT_EXIT:
@@ -9995,6 +9997,7 @@ class AutomationEngine:
         restore_hvac: bool = True,
         release_suppression: bool | None = None,
         emit_event: bool = True,
+        bypass_absolute_override: bool = False,
     ) -> FanCommandResult:
         """Deactivate fan based on configured fan_mode.
 
@@ -10018,6 +10021,14 @@ class AutomationEngine:
                 Report shows every CA fan-off with its source. Callers that already emit a
                 more specific event for the same transition (nat-vent cycler / exit paths)
                 pass False to avoid a duplicate row (Issue #331 follow-up).
+            bypass_absolute_override: Issue #748 — when True, skip the Issue #486
+                RF-remote-timer-absolute guard below entirely. Reserved for the single hard
+                AC/WHF mutex-enforcement path (``_stand_down_whf_for_override_conflict()``):
+                a manual HVAC-mode override physically conflicts with an active WHF session
+                right now, which is a hard invariant, not an automation preference Issue #486
+                was designed to protect against. Every other caller must leave this False so
+                Issue #486's "an RF remote timer is absolute against routine automation
+                second-guessing" behavior is unchanged.
 
         Returns:
             A ``FanCommandResult`` describing what actually happened (Issue #649) — see
@@ -10029,7 +10040,7 @@ class AutomationEngine:
         if fan_mode == FAN_MODE_DISABLED:
             return FanCommandResult.DISABLED
 
-        if self._fan_override_active:
+        if self._fan_override_active and not bypass_absolute_override:
             if self._fan_remote_timer_hours is not None:
                 # Issue #486: the override is absolute while an RF remote timer is active —
                 # this shutoff (nat-vent exit, comfort-floor breach, cycle-off, etc.) is
@@ -10043,6 +10054,18 @@ class AutomationEngine:
             else:
                 _LOGGER.info("Fan override active — skipping fan deactivation")
             return FanCommandResult.OVERRIDDEN
+
+        if self._fan_override_active and bypass_absolute_override and self._fan_remote_timer_hours is not None:
+            # Issue #748: the hard AC/WHF mutex overrides even an active RF remote timer —
+            # last setting placed wins. Logged at WARNING (not silently proceeding) so the
+            # remote-timer-overridden outcome stays observable, matching Issue #486's own
+            # observability bar for the opposite (suppressed) outcome above.
+            _LOGGER.warning(
+                "Fan deactivation forced despite active RF remote timer (%sh) — hard AC/WHF"
+                " mutex overrides remote-timer protection — reason: %s",
+                self._fan_remote_timer_hours,
+                reason,
+            )
 
         # Issue #392 Fix 1c: idempotency guard — collapse redundant re-decisions from
         # multiple gate sites into a single real state transition.

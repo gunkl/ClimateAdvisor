@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.63] — 2026-08-22
+
+- Fix #748: the AC and the whole-house fan could end up running at the same time when a WHF session had been started via an RF remote timer and you then changed the thermostat mode by hand — the fan-off command silently never happened. Your most recent action now always wins: setting the thermostat while a remote-timer WHF session is active immediately turns the fan off, no matter how much time is left on the timer.
+
 ## [0.6.62] — 2026-08-22
 
 - Feat #746: no user-visible change. Strangler-fig completion program Phase 5 (final subsystem extraction) — extracts the economizer's two-phase window-cooling logic into a differentially-validated lifecycle FSM. Zero divergence across the full 90-scenario test corpus and the 81-scenario golden suite. All 3 remaining monolithic subsystems named in the Strangler Fig Atlas are now extracted.

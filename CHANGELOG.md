@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.57] — 2026-08-22
+
+- Fix #735: no user-visible change. Documentation and internal-consistency hygiene pass ahead of the strangler-fig completion program's next phases (classification/occupancy/economizer FSM extraction, then legacy-engine retirement) — corrected a stale fan_fsm.py docstring, fixed ~5,000-line-stale citations in docs/occupancy-dispatch-spec.md, and documented (via five-whys) why fan/WHF control is deliberately not yet registered with lifecycle_dispatcher.py.
+
 ## [0.6.56] — 2026-08-22
 
 - Fix #733: after an HA restart, an already-favorable whole-house-fan natural-ventilation session could be silently cancelled a moment after Climate Advisor turned it on, leaving the fan running with no thermostatic oversight until the next scheduled check the following morning — the startup fan reconciliation now defers to a just-issued fan command instead of overriding it, and any orphaned backstop timer is cleaned up so oversight can never silently lapse.

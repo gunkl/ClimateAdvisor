@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.56"
+VERSION = "0.6.57"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.57": [
+        "Fix #735: no user-visible change. Documentation and internal-consistency"
+        " hygiene pass ahead of the next phase of automation-engine internals work"
+        " (strangler-fig completion program) — corrected a stale docstring in"
+        " fan_fsm.py, fixed ~5,000-line-stale code citations in the occupancy"
+        " dispatch spec, and recorded a documented decision on cross-lifecycle"
+        " event-dispatcher registration for fan/whole-house-fan control.",
+    ],
     "0.6.56": [
         "Fix #733: after an HA restart, an already-favorable whole-house-fan"
         " natural-ventilation session could be silently cancelled a moment after"
@@ -2176,6 +2184,21 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    735: {
+        "version_fixed": "0.6.57",
+        "title": (
+            "Phase 0 hygiene pass ahead of the strangler-fig completion program"
+            " (classification/occupancy/economizer FSM extraction + legacy-engine"
+            " retirement): fixed a stale fan_fsm.py docstring that a research agent"
+            " trusted over the real code, corrected ~5,000-line-stale citations in"
+            " docs/occupancy-dispatch-spec.md, and documented (via five-whys) why"
+            " fan/WHF is deliberately not yet registered with lifecycle_dispatcher.py."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/fan_fsm.py module docstring;"
+            " docs/occupancy-dispatch-spec.md line citations"
+        ),
+    },
     733: {
         "version_fixed": "0.6.56",
         "title": (

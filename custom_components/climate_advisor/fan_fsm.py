@@ -31,17 +31,41 @@ tests focus on wiring correctness, not re-proving decision logic already
 proven elsewhere (same scoping discipline ``nat_vent_fsm.py``'s test file
 documents for itself).
 
-**NOT wired into any production call site in this phase.** ``automation.py``'s
-12 real fan/WHF entry points (``_activate_fan``, ``_deactivate_fan``,
-``reconcile_fan_on_startup``, ``handle_fan_manual_override``,
+**Wired into production as of Issue #731 Phase 5.** ``automation.py``'s real
+fan/WHF entry points dispatch through ``_resolve_fan_fsm_state()`` — including
+``_activate_fan``, ``_deactivate_fan``, ``handle_fan_manual_override``,
 ``clear_fan_override``, ``on_fan_turned_off``,
-``_clear_fan_flags_and_start_grace``, ``_fan_cycle_on``/``_fan_cycle_off``/
-``_stop_fan_min_runtime_cycles``, ``_reconcile_fan_physical_drift``,
-``_thermo_backstop_task``/``_start_fan_thermo_backstop``/
-``_cancel_fan_thermo_backstop``, ``fan_thermostat_check``, ``_whf_owns_hvac``/
-``_resolve_whf_hvac_suppression``/``_release_whf_and_reclassify``) are
-unchanged by this phase — cutover to real call sites is a later phase in the
-Issue #731 plan.
+``_clear_fan_flags_and_start_grace``, ``_fan_cycle_on``/``_fan_cycle_off``,
+``_reconcile_fan_physical_drift``, ``_thermo_backstop_task``,
+``fan_thermostat_check``, and the former ``_resolve_whf_hvac_suppression()``
+call sites (that function was deleted and absorbed into the dispatcher).
+Gated by ``self._fan_fsm_authoritative`` — False runs the legacy closure
+byte-identical, True runs this module's ``transition()``. Two kinds
+(``STARTUP_RECONCILE``, ``USER_FAN_OFF``) are deliberately never dispatched;
+see their own inline comments in ``automation.py`` for why.
+
+**Deliberately not registered with ``lifecycle_dispatcher.py``, unlike
+nat-vent/door-window/override-grace (five-whys recorded here, Issue #735,
+so this isn't re-litigated as an oversight later).** (1) Why isn't fan/WHF
+registered? Registration was out of scope for Issue #731's wiring phase.
+(2) Why was it out of scope? The other 3 lifecycles register because
+``lifecycle_dispatcher.py`` gives them an audit trail and a seam for a future
+genuinely-separate controller; fan/WHF's FSM dispatch happens entirely inside
+the same ``AutomationEngine`` instance already, so the marginal value was
+judged lower at the time. (3) Why does it matter now? The classification
+pipeline (Issue #735's Phase 3, in the strangler-fig completion program) reads
+``_whf_owns_hvac()`` — if fan/WHF transitions never reach
+``lifecycle_dispatcher.event_log``, the cross-lifecycle audit trail is
+incomplete for exactly the subsystems most likely to interact. (4) Why not
+wire it now? Doing so needs new ``LifecycleEventType`` members (or a decision
+that the existing ``WHF_HVAC_SUPPRESSED``/``RELEASED`` pair already covers it)
+— real design work, not a hygiene fix. (5) Why defer rather than decide now?
+Because deciding it properly means following this codebase's own extraction
+playbook (design the event vocabulary, wire it, test it), which belongs in a
+dedicated phase, not mixed into an unrelated hygiene pass. **Revisit during
+Phase 3 (classification) or Phase 6 (graduation) of the strangler-fig
+completion program** — whichever phase first needs fan/WHF's transitions
+visible on the shared event log.
 
 **Dispatch direction is inverted from ``nat_vent_fsm.py``.** Nat-vent's
 ``transition()`` dispatches on *current state* (active vs. inactive) because

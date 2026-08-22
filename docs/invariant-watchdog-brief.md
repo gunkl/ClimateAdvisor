@@ -30,8 +30,12 @@
 ## Interfaces
 
 ```python
-def check_ac_whf_mutex(*, hvac_action: str | None, whf_physically_on: bool | None, fan_mode: str) -> InvariantViolation | None: ...
-def run_invariant_checks(*, hvac_action: str | None, whf_physically_on: bool | None, fan_mode: str) -> list[InvariantViolation]: ...
+def check_ac_whf_mutex(
+    *, hvac_action: str | None, whf_physically_on: bool | None, fan_mode: str
+) -> InvariantViolation | None: ...
+def run_invariant_checks(
+    *, hvac_action: str | None, whf_physically_on: bool | None, fan_mode: str
+) -> list[InvariantViolation]: ...
 ```
 
 | Symbol | Caller(s) | Purpose |
@@ -50,7 +54,7 @@ def run_invariant_checks(*, hvac_action: str | None, whf_physically_on: bool | N
 ```python
 @dataclass(frozen=True)
 class InvariantViolation:
-    name: str    # e.g. "ac_whf_mutex"
+    name: str  # e.g. "ac_whf_mutex"
     detail: str  # human-readable, occupant-first description
 ```
 

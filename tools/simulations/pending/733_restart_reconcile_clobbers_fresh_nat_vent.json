@@ -1,0 +1,67 @@
+{
+  "name": "733_restart_reconcile_clobbers_fresh_nat_vent",
+  "description": "Issue #733: within the same _do_startup_coalesce() pass, reconcile_fan_on_startup() re-reads a fan-running signal that a command-only (no fan_state_feedback) whole-house-fan archetype cannot yet reflect as on — since _activate_fan() only commands the WHF relay, never the thermostat's own fan_mode/hvac_action attributes reconcile falls back to reading in that archetype — and clobbers the nat-vent session handle_door_window_open() had just correctly activated a moment earlier.",
+  "source": "live-incident",
+  "issue": 733,
+  "notes": [
+    "Occupant impact: the person living in the home slept in a room that drifted from 70F down to 65F overnight -- 3F below their 68F comfort floor -- while the whole-house fan kept pulling in 62F outdoor air completely unmanaged for roughly 7 hours. Climate Advisor had already correctly decided to run nat-vent moments after an HA restart; it then silently threw that decision away one line later and never looked at the thermostat again until the next scheduled wake-up event caught the undertemp.",
+    "Five whys (full trace in PR for #733): (1) the WHF ran uncontrolled all night because _fan_active/_natural_vent_active were forced back to False moments after nat-vent turned the fan on; (2) they were cleared because _do_startup_coalesce() calls handle_door_window_open() (activates nat-vent) and then, unconditionally, reconcile_fan_on_startup(), which re-reads a fan-running signal and forces the flags off when that signal reads False; (3) in a command-only whole-house-fan archetype (fan_state_feedback=false), that signal is _derive_thermostat_fan_running_for_reconcile()'s thermostat-attribute fallback -- and _activate_fan() for FAN_MODE_WHOLE_HOUSE only ever commands the WHF relay entity, never the thermostat's own fan_mode/hvac_action attributes, so that fallback structurally reads False immediately after every WHF activation in this archetype, not just under real-world hardware propagation lag; (4) nothing caught this for ~7 hours because the no-fan branch's _deactivate_fan() call found _fan_active already False and took its early-return path, which (before this fix) never cancelled the 5-min self-rescheduling thermostatic backstop timer nat-vent's activation had just armed -- the timer was left running but orphaned, ticked once, no-opped because _natural_vent_active was already False, and never rescheduled again; (5) this shipped because tests/test_startup_coalesce.py mocked reconcile_fan_on_startup() as an AsyncMock, so the real reconcile body was never exercised against a real _activate_fan()-produced state in the same coalescing pass.",
+    "Fix: _reconcile_fan_on_startup_locked()'s not-thermostat_fan_running branch now checks the same recent-command guard _reconcile_fan_physical_drift() already uses elsewhere (_is_recent_fan_command_callback(threshold_seconds=30.0)) and defers to a just-issued CA command instead of clobbering it. _deactivate_fan()'s early-return path additionally now always cancels any orphaned backstop timer as defense in depth.",
+    "This scenario uses fan_state_feedback=false (command-only WHF) specifically because it reproduces the exact defect deterministically within this harness's fidelity model -- FakeHass's fan.turn_on writes through to entity state synchronously, so a fan_state_feedback=true archetype's physical read cannot model real hardware's reporting lag here. The command-only archetype's thermostat-attribute fallback is genuinely, structurally blind to a WHF command by construction (not a timing artifact), so it reproduces the same code defect without depending on any timing simulation the harness doesn't have.",
+    "(a) Scenario effectiveness: reverting the automation.py guard (removing the _is_recent_fan_command_callback check) makes _reconcile_fan_on_startup_locked() take the not-thermostat_fan_running branch unconditionally whenever the WHF is command-only, forcing _natural_vent_active=False moments after handle_door_window_open() set it True in the same startup_coalesce call -- nat_vent_still_active fails. The scenario fails without the fix.",
+    "(b) Docs-production alignment: docs/08-COMPUTATION-REFERENCE.md's coalescing/reconcile section is updated in this same PR to document this guard alongside the existing Issue #627 write-up, reviewed against current code before this scenario was authored.",
+    "(c) User outcome if this scenario's assertions fail in the future: any command-only whole-house-fan install would silently lose nat-vent thermostatic control on every restart that happens to coincide with an open window and nat-vent-eligible conditions -- the exact overnight comfort-floor breach this issue reports."
+  ],
+  "config": {
+    "comfort_heat": 68,
+    "comfort_cool": 74,
+    "natural_vent_delta": 3.0,
+    "door_window_sensors": ["binary_sensor.window"],
+    "fan_mode": "whole_house_fan",
+    "fan_entity": "fan.whf",
+    "fan_state_feedback": false
+  },
+  "use_coordinator": true,
+  "events": [
+    {
+      "time": "2026-08-21T23:15:00",
+      "type": "classification",
+      "day_type": "warm",
+      "hvac_mode": "off",
+      "windows_recommended": false,
+      "note": "Matches the incident's evening classification -- warm day, HVAC off, nat-vent expected to be doing the work."
+    },
+    {
+      "time": "2026-08-21T23:15:00",
+      "type": "temp_update",
+      "indoor_f": 70.0,
+      "outdoor_f": 62.0,
+      "note": "Matches the incident's real 23:19 numbers -- indoor 70F, outdoor 62F, well past the 3F natural_vent_delta gate."
+    },
+    {
+      "time": "2026-08-21T23:15:00",
+      "type": "sensor_open",
+      "entity": "binary_sensor.window",
+      "seed": true,
+      "note": "Window already open at boot -- only _do_startup_coalesce()'s raw sensor read observes this, same seeding technique as the #523 startup-coalesce scenario."
+    },
+    {
+      "time": "2026-08-21T23:19:00",
+      "type": "startup_coalesce",
+      "note": "Direct call to the real coordinator._do_startup_coalesce() entry point -- models the HA restart at 23:14 plus the 300s post-restart timer. Internally: handle_door_window_open() activates nat-vent for the open window (indoor 70F warmer than outdoor 62F), then reconcile_fan_on_startup() runs in the same pass and reads the command-only archetype's thermostat-attribute fallback, which is still False (the WHF command never touched the thermostat's own attributes)."
+    }
+  ],
+  "assertions": [
+    {
+      "at": "2026-08-21T23:19:00",
+      "expect": "nat_vent_still_active",
+      "reason": "Nat-vent must survive the same-pass reconcile call that immediately follows its activation -- reconcile's stale/structurally-blind fan-running read must defer to the fresh CA command instead of clobbering it. Before the fix, reconcile's not-thermostat_fan_running branch force-set _natural_vent_active=False here, exactly reproducing the incident's silent loss of thermostatic control."
+    }
+  ],
+  "verdict": {
+    "type": "positive",
+    "summary": "After the Issue #733 fix, a command-only whole-house fan's nat-vent activation survives the same-pass startup reconcile call instead of being silently clobbered one line later.",
+    "observed_behavior": "nat_vent_still_active holds immediately after startup_coalesce -- reconcile deferred to the just-issued CA command instead of forcing the session off.",
+    "expected_behavior": "Nat-vent activated by _do_startup_coalesce() must remain under CA's thermostatic control for the rest of the session, not be silently abandoned by the very same coalescing pass that started it."
+  }
+}

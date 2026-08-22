@@ -535,6 +535,14 @@ class ClimateAdvisorShadowEngineStatusSensor(ClimateAdvisorBaseSensor):
             "fan_production_state": diag.get("fan_production_state"),
             "fan_shadow_state": diag.get("fan_shadow_state"),
             "fan_mirror_agrees": diag.get("fan_mirror_agrees"),
+            # Issue #742: classification's own production/shadow agreement (the
+            # decide_scheduled_band_gate() result each engine computes from its own
+            # live flags). Same "no separate FSM axis" shape as fan/WHF above —
+            # classification_fsm.py is genuinely stateless (see its own module
+            # docstring's five-whys), so there is no third comparison point.
+            "classification_production_state": diag.get("classification_production_state"),
+            "classification_shadow_state": diag.get("classification_shadow_state"),
+            "classification_mirror_agrees": diag.get("classification_mirror_agrees"),
             # Issue #685: cascade-noise wall-clock debounce state per comparison axis
             # (disagreement_seconds, sustained, cumulative_seconds_today), plus the
             # date the cumulative counters last reset. Additive only.

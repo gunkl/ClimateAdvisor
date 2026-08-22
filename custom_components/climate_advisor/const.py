@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.59"
+VERSION = "0.6.60"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.60": [
+        "Feat #742: no user-visible change. Strangler-fig completion program Phase 3"
+        " — extracts the daily classification decision pipeline (the hub every other"
+        " automation subsystem's guard output flows through) into a pure, differentially-"
+        " validated FSM, including a ~190-line proactive-cooling escalation check that"
+        " had never been pulled out of the main decision loop before. Zero divergence"
+        " from current behavior across the full 90-scenario test corpus.",
+    ],
     "0.6.59": [
         "Feat #738: no user-visible change. Strangler-fig completion program Phase 2"
         " — a sustained live disagreement between the production automation engine and"
@@ -2199,6 +2207,29 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    742: {
+        "version_fixed": "0.6.60",
+        "title": (
+            "Phase 3 of the strangler-fig completion program: extracted the classification"
+            " decision pipeline into classification_fsm.py — the hub subsystem every other"
+            " lifecycle's DEFER_* gate output flows through via apply_classification()."
+            " Deliberately built as a STATELESS per-cycle FSM (no persisted lifecycle state,"
+            " unlike nat-vent/door-window/override-grace/fan) since apply_classification()"
+            " has no genuine multi-tick session — see classification_fsm.py's own module"
+            " docstring for the full five-whys reasoning. Also extracted the ~190-line"
+            " embedded ODE ceiling guard (proactive-cooling escalation) into a new pure"
+            " leaf, ode_ceiling_guard.py — the single largest never-extracted block in"
+            " automation.py before this phase. Differential comparator: 90/90 golden+pending"
+            " scenarios byte-identical, 92/92 in the 5-flag combined comparator, 81/81"
+            " golden scenarios via tools/simulate.py. No latent bugs found in the legacy"
+            " code during extraction (unlike fan/WHF's #731 and nat-vent's #608 precedents)."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/classification_fsm.py,"
+            " ode_ceiling_guard.py (new); automation.py apply_classification() ODE"
+            " ceiling guard section; coordinator.py 5th shadow-diagnostic axis"
+        ),
+    },
     738: {
         "version_fixed": "0.6.59",
         "title": (

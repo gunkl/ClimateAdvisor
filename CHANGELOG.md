@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.60] — 2026-08-22
+
+- Feat #742: no user-visible change. Strangler-fig completion program Phase 3 — extracts the daily classification decision pipeline (the hub every other automation subsystem's guard output flows through) into a differentially-validated FSM, including a ~190-line proactive-cooling escalation check that had never been pulled out of the main decision loop before. Zero divergence from current behavior across the full 90-scenario test corpus and the full 81-scenario golden suite.
+
 ## [0.6.59] — 2026-08-22
 
 - Feat #738: no user-visible change. Strangler-fig completion program Phase 2 — a sustained live disagreement between the production automation engine and its shadow-engine comparison now automatically becomes a candidate regression-test scenario via the existing pending/golden review pipeline, instead of only a WARNING log line a human has to notice.

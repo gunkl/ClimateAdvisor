@@ -1,11 +1,14 @@
-"""combined_fsm_authoritative_compare — all-three-switches-together equivalence
-proof (Epic #594 Phase R, Phase G's G-test deliverable).
+"""combined_fsm_authoritative_compare — all-switches-together equivalence
+proof (Epic #594 Phase R, Phase G's G-test deliverable; Issue #742 added the
+5th switch).
 
-The three individual comparators (``nat_vent_fsm_authoritative_compare.py``,
+The individual comparators (``nat_vent_fsm_authoritative_compare.py``,
 ``doorwindow_fsm_authoritative_compare.py``, ``override_grace_fsm_authoritative_
-compare.py``) each flip exactly one switch in isolation. Nothing in the repo,
-before this module, ever flipped all three together — confirmed absent by a
-2026-08-20 audit that specifically searched for this and found none.
+compare.py``, ``fan_fsm_authoritative_compare.py``,
+``classification_fsm_authoritative_compare.py``) each flip exactly one switch
+in isolation. Nothing in the repo, before this module, ever flipped all three
+(now five) together — confirmed absent by a 2026-08-20 audit that specifically
+searched for this and found none.
 
 This matters because the combined rollout (Phase V) flips
 ``natvent_fsm_authoritative``, ``doorwindow_fsm_authoritative``, and
@@ -32,12 +35,13 @@ from typing import Any
 
 @contextmanager
 def fsm_authoritative_mutation() -> Iterator[None]:
-    """Force all four ``*_fsm_authoritative`` flags True together on every
+    """Force all five ``*_fsm_authoritative`` flags True together on every
     engine constructed while this context is active — the "run B" side of a
     combined diff_runs comparison.
 
     Issue #731 added ``_fan_fsm_authoritative`` as the 4th flag alongside the
     original three (nat-vent, door/window, override/grace) documented above.
+    Issue #742 added ``_classification_fsm_authoritative`` as the 5th.
     """
     from unittest.mock import patch
 
@@ -51,6 +55,7 @@ def fsm_authoritative_mutation() -> Iterator[None]:
         self._doorwindow_fsm_authoritative = True
         self._override_grace_fsm_authoritative = True
         self._fan_fsm_authoritative = True
+        self._classification_fsm_authoritative = True
 
     with patch.object(AutomationEngine, "__init__", _wrapped_init):
         yield

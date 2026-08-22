@@ -561,6 +561,14 @@ class AutomationEngineCallbacks:
 class AutomationEngine:
     """Manages HVAC automations based on daily classification."""
 
+    # Issue #729: class-level default so a test fixture that partially constructs an
+    # engine via object.__new__(AutomationEngine) (skipping __init__ — an established
+    # pattern across many existing tests, see CLAUDE.md) still has a value for the
+    # role= tag now interpolated into the real-command log lines, instead of an
+    # AttributeError. Normal construction always overwrites this with an instance
+    # attribute in __init__ below.
+    role: str = "production"
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -892,6 +900,19 @@ class AutomationEngine:
         self._override_confirm_mode: str | None = None
         self._override_confirm_source: str | None = None  # "setpoint" or "normal"
 
+        # Issue #729: cancel handles for the 3 timer chains inside _set_temperature()'s
+        # rejection-handling path (_schedule_check -> _schedule_retry ->
+        # _schedule_real_target) and the two post-fan setpoint-verify timers — found
+        # during the reload-based-promotion redesign to be scheduled via
+        # async_call_later() but never tracked anywhere, so cleanup() had no way to
+        # reach them. One shared attribute for the 3-stage chain (only one stage is
+        # ever outstanding at a time — each stage replaces the prior); two separate
+        # attributes for the fan-on/fan-off verify timers since those run in
+        # independent contexts and could in principle overlap.
+        self._setpoint_retry_cancel: Any | None = None
+        self._fan_on_verify_cancel: Any | None = None
+        self._fan_off_verify_cancel: Any | None = None
+
         # Minimum fan runtime per hour — rolling cycle (Issue #77)
         self._fan_min_runtime_active: bool = False  # True if THIS feature activated the fan
         self._fan_min_cycle_cancel: Any | None = None  # cancel token for pending on/off timer
@@ -999,15 +1020,17 @@ class AutomationEngine:
     async def _notify(self, message: str, title: str, notification_type: str) -> None:
         """Send a notification via configured channels, filtered by per-event preferences."""
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would send notification: %s — %s", title, message)
+            _LOGGER.info("[DRY RUN] Would send notification: %s — %s role=%s", title, message, self.role)
             return
         push_key = f"push_{notification_type}"
         email_key = f"email_{notification_type}"
         service_name = self.notify_service.split(".")[-1] if "." in self.notify_service else self.notify_service
         if self.config.get(push_key, True):
             await self.hass.services.async_call("notify", service_name, {"message": message, "title": title})
+            _LOGGER.info("Notification sent: %s — %s role=%s", title, message, self.role)
         if self.config.get(email_key, True):
             await self.hass.services.async_call("notify", "send_email", {"message": message, "title": title})
+            _LOGGER.info("Email notification sent: %s — %s role=%s", title, message, self.role)
 
     @property
     def is_paused_by_door(self) -> bool:
@@ -2732,7 +2755,7 @@ class AutomationEngine:
                 )
             return
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would set HVAC mode to %s — %s", mode, reason)
+            _LOGGER.info("[DRY RUN] Would set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             return
         self._hvac_command_pending = True
         self._hvac_command_time = dt_util.now()
@@ -2747,7 +2770,7 @@ class AutomationEngine:
                 "set_hvac_mode",
                 {"entity_id": self.climate_entity, "hvac_mode": mode},
             )
-            _LOGGER.warning("Set HVAC mode to %s — %s", mode, reason)
+            _LOGGER.warning("Set HVAC mode to %s — %s role=%s", mode, reason, self.role)
             self._record_action(f"Set HVAC to {mode}", reason)
             # When taking HVAC offline, assert fan_mode=auto to clear any post-heat
             # blowdown state. Skip if nat-vent is active — clobbering fan_mode=on
@@ -2809,10 +2832,11 @@ class AutomationEngine:
         service_temp = from_fahrenheit(temperature, unit)
         if self.dry_run:
             _LOGGER.info(
-                "[DRY RUN] Would set temperature to %s (%s mode) — %s",
+                "[DRY RUN] Would set temperature to %s (%s mode) — %s role=%s",
                 format_temp(temperature, unit),
                 mode,
                 reason,
+                self.role,
             )
             return
         # Check setpoint is appropriate for commanded mode
@@ -3002,7 +3026,7 @@ class AutomationEngine:
                         def _schedule_real_target(_later: Any) -> None:
                             self.hass.async_create_task(_send_real_target(_later))
 
-                        async_call_later(self.hass, 30, _schedule_real_target)
+                        self._setpoint_retry_cancel = async_call_later(self.hass, 30, _schedule_real_target)
                     else:
                         _LOGGER.warning(
                             "Retrying setpoint write after rejection: %.0f°F %s",
@@ -3015,7 +3039,7 @@ class AutomationEngine:
                 def _schedule_retry(_now: Any) -> None:
                     self.hass.async_create_task(_retry_callback(_now))
 
-                async_call_later(self.hass, 900, _schedule_retry)
+                self._setpoint_retry_cancel = async_call_later(self.hass, 900, _schedule_retry)
             else:
                 self._setpoint_reject_streak = 0
                 _LOGGER.info(
@@ -3028,12 +3052,13 @@ class AutomationEngine:
         def _schedule_check(_now: Any) -> None:
             self.hass.async_create_task(_check_single_setpoint_accepted())
 
-        async_call_later(self.hass, 10, _schedule_check)
+        self._setpoint_retry_cancel = async_call_later(self.hass, 10, _schedule_check)
         _LOGGER.warning(
-            "Set temperature to %s (mode=%s) — %s",
+            "Set temperature to %s (mode=%s) — %s role=%s",
             format_temp(temperature, unit),
             mode,
             reason,
+            self.role,
         )
         self._record_action(f"Set temp to {format_temp(temperature, unit)} (mode={mode})", reason)
 
@@ -8398,7 +8423,7 @@ class AutomationEngine:
             return _rate_limit_result
 
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would activate fan — %s", reason)
+            _LOGGER.info("[DRY RUN] Would activate fan — %s role=%s", reason, self.role)
             return FanCommandResult.EXECUTED
 
         _was_deferred = (
@@ -8428,7 +8453,7 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]  # "fan" or "switch"
                     _commanded = await self._command_whf_control_entity(True, reason=reason)
                     if _commanded:
-                        _LOGGER.warning("Activated %s fan (%s) — %s", domain, fan_entity, reason)
+                        _LOGGER.warning("Activated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
             if fan_mode in (FAN_MODE_HVAC, FAN_MODE_BOTH):
                 hvac_state = self.hass.states.get(self.climate_entity)
@@ -8444,7 +8469,7 @@ class AutomationEngine:
                     "set_fan_mode",
                     {"entity_id": self.climate_entity, "fan_mode": "on"},
                 )
-                _LOGGER.warning("Activated HVAC fan — %s", reason)
+                _LOGGER.warning("Activated HVAC fan — %s role=%s", reason, self.role)
 
             self._fan_active = True
             self._fan_on_since = dt_util.now().isoformat()
@@ -8497,7 +8522,7 @@ class AutomationEngine:
             def _verify_setpoint_after_fan_on(_now: Any) -> None:
                 self.hass.async_create_task(_do_verify_after_fan_on())
 
-            async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_on)
+            self._fan_on_verify_cancel = async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_on)
 
             # Issue #327: thermostatic backstop timer — fires every 5 min while the fan
             # is CA-owned; calls fan_thermostat_check so a slow-updating outdoor sensor
@@ -8851,7 +8876,7 @@ class AutomationEngine:
             return _rate_limit_result
 
         if self.dry_run:
-            _LOGGER.info("[DRY RUN] Would deactivate fan — %s", reason)
+            _LOGGER.info("[DRY RUN] Would deactivate fan — %s role=%s", reason, self.role)
             return FanCommandResult.EXECUTED
 
         _was_deferred = (
@@ -8875,7 +8900,7 @@ class AutomationEngine:
                     domain = fan_entity.split(".")[0]
                     _commanded = await self._command_whf_control_entity(False, reason=reason)
                     if _commanded:
-                        _LOGGER.warning("Deactivated %s fan (%s) — %s", domain, fan_entity, reason)
+                        _LOGGER.warning("Deactivated %s fan (%s) — %s role=%s", domain, fan_entity, reason, self.role)
 
                 # Restore prior HVAC mode that was suppressed when the fan activated
                 # (Issue #277 Fix C). Only restore if we have a stored mode to go back to.
@@ -8919,7 +8944,7 @@ class AutomationEngine:
                     "set_fan_mode",
                     {"entity_id": self.climate_entity, "fan_mode": "auto"},
                 )
-                _LOGGER.warning("Deactivated HVAC fan — %s", reason)
+                _LOGGER.warning("Deactivated HVAC fan — %s role=%s", reason, self.role)
 
             self._fan_active = False
             self._fan_on_since = None
@@ -8974,7 +8999,7 @@ class AutomationEngine:
             def _verify_setpoint_after_fan_off(_now: Any) -> None:
                 self.hass.async_create_task(_do_verify_after_fan_off())
 
-            async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_off)
+            self._fan_off_verify_cancel = async_call_later(self.hass, 30.0, _verify_setpoint_after_fan_off)
         finally:
             self._fan_command_pending = False
         return FanCommandResult.EXECUTED
@@ -9379,6 +9404,20 @@ class AutomationEngine:
         if self._override_confirm_cancel:
             self._override_confirm_cancel()
             self._override_confirm_cancel = None
+        # Issue #729: found during the reload-based-promotion redesign — these 3 were
+        # scheduled via async_call_later() but never tracked/cancelled anywhere, so a
+        # config-entry reload (or any other cleanup()) left them running against a
+        # stale engine instance. _setpoint_retry_cancel's chain notably includes a
+        # real _set_temperature() call up to 15 minutes out.
+        if self._setpoint_retry_cancel:
+            self._setpoint_retry_cancel()
+            self._setpoint_retry_cancel = None
+        if self._fan_on_verify_cancel:
+            self._fan_on_verify_cancel()
+            self._fan_on_verify_cancel = None
+        if self._fan_off_verify_cancel:
+            self._fan_off_verify_cancel()
+            self._fan_off_verify_cancel = None
         for unsub in self._active_listeners:
             unsub()
         self._active_listeners.clear()

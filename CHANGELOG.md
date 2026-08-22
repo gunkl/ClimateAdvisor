@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.54] — 2026-08-21
+
+- Feat #729: simplifies the Shadow Engine Primary switch added in 0.6.53 down to the single control you actually use — the 3 separate nat-vent/door-window/override-grace FSM toggles are gone, replaced by one choice (legacy engine or FSM engine). Promoting now reloads the integration instead of swapping live, which closes a real gap where an in-progress timer (a grace period, a pending setpoint retry) could keep running against the wrong engine after a switch. Logs now record which engine issued each command, so it's provable after the fact.
+
 ## [0.6.53] — 2026-08-21
 
 - Feat #727: the 3 nat-vent/door-window/override-grace FSM-authoritative switches now hold whatever state you last set them to across a Home Assistant restart, instead of always reverting to off. Also adds a new switch, Shadow Engine Primary, that lets you promote the diagnostic shadow engine to be the one actually operating your thermostat/fan — previously it could only compare its decisions against production, never act on them. Also persisted across restart, and instantly reversible.

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.58] — 2026-08-22
+
+- Feat #737: no user-visible change. Strangler-fig completion program Phase 1 — adds an automated static check catching two or more functions that independently reimplement the same decision gate before they drift apart. Validated against Issue #608: found the duplication claim was 2/3 already fixed and corrected the stale doc; found 2 additional real duplicate-gate instances and tracked all of them in the checker's enforced registry.
+
 ## [0.6.57] — 2026-08-22
 
 - Fix #735: no user-visible change. Documentation and internal-consistency hygiene pass ahead of the strangler-fig completion program's next phases (classification/occupancy/economizer FSM extraction, then legacy-engine retirement) — corrected a stale fan_fsm.py docstring, fixed ~5,000-line-stale citations in docs/occupancy-dispatch-spec.md, and documented (via five-whys) why fan/WHF control is deliberately not yet registered with lifecycle_dispatcher.py.

@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.61] — 2026-08-22
+
+- Feat #744: no user-visible change. Strangler-fig completion program Phase 4 — extracts occupancy dispatch (away/vacation/home transitions) into a differentially-validated FSM plus a new pure priority resolver for guest/vacation/home/away toggle logic. Zero divergence across the full 90-scenario test corpus and the 81-scenario golden suite.
+
 ## [0.6.60] — 2026-08-22
 
 - Feat #742: no user-visible change. Strangler-fig completion program Phase 3 — extracts the daily classification decision pipeline (the hub every other automation subsystem's guard output flows through) into a differentially-validated FSM, including a ~190-line proactive-cooling escalation check that had never been pulled out of the main decision loop before. Zero divergence from current behavior across the full 90-scenario test corpus and the full 81-scenario golden suite.

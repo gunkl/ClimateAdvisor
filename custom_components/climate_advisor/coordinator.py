@@ -244,6 +244,7 @@ from .fan_status import (
 from .learning import DailyRecord, LearningEngine, compute_k_passive_blocks
 from .nat_vent_gate import NatVentGateInputs, decide_nat_vent_gate
 from .nat_vent_lifecycle import NatVentLifecycleState
+from .occupancy_priority import OccupancyPriorityInputs, decide_occupancy_priority
 from .override_grace_lifecycle import GraceState, OverrideConfirmState, OverrideGraceLifecycleState
 from .state import StatePersistence
 from .temperature import (
@@ -303,6 +304,22 @@ _SHADOW_DIAG_AXES = (
     # check even though the flag only governs the ceiling-guard half of this
     # phase's extraction.
     "classification_mirror",
+    # Issue #744: "occupancy_mirror" adds a 9th axis, deliberately with no
+    # "occupancy_fsm" sibling — occupancy_fsm.py is genuinely stateless (see its
+    # own module docstring's five-whys), same "no functional consumer" reasoning
+    # classification_mirror's own comment above documents for its own missing
+    # "classification_fsm" sibling. should_defer_to_occupancy_setback() is a
+    # pre-existing shared pure function (Issue #460) both engines' live
+    # _occupancy_mode already determines, unconditionally, regardless of this
+    # phase's new flag — _occupancy_mode itself is kept in sync from production to
+    # shadow every cycle by _sync_shadow_inputs() (`se.set_occupancy_mode(ae._occupancy_mode)`),
+    # so comparing this predicate is a meaningful mirror check even though neither
+    # engine's occupancy dispatch HANDLERS (handle_occupancy_away/home/vacation)
+    # are ever invoked on the shadow engine — only whichever engine is currently
+    # `self.automation_engine` (primary) receives those calls; see
+    # project memory "shadow engine coverage gap" for the broader known limitation
+    # this axis does not attempt to close.
+    "occupancy_mirror",
 )
 
 # Maximum rejection events retained per obs_type in the in-memory rejection log.
@@ -682,6 +699,10 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # pattern — _engine_a stays False for its whole lifetime, same as the 4
         # flags above.
         self._engine_a._classification_fsm_authoritative = False
+        # Issue #744 (strangler-fig completion Phase 4): 6th FSM-authoritative flag
+        # (occupancy dispatch), fixed at construction as of #729's pattern —
+        # _engine_a stays False for its whole lifetime, same as the 5 flags above.
+        self._engine_a._occupancy_fsm_authoritative = False
         # Issue #613 (Block 5, subtask Q): a real, live second AutomationEngine instance
         # computing decisions from the same inputs as production, permanently inert.
         # dry_run is set True immediately below and MUST NEVER be toggled elsewhere —
@@ -748,6 +769,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # pattern — _engine_b stays True for its whole lifetime, mirror of
         # _engine_a's fixed-legacy assignment above.
         self._engine_b._classification_fsm_authoritative = True
+        # Issue #744 (strangler-fig completion Phase 4): 6th FSM-authoritative flag
+        # (occupancy dispatch), fixed at construction as of #729's pattern —
+        # _engine_b stays True for its whole lifetime, mirror of _engine_a's
+        # fixed-legacy assignment above.
+        self._engine_b._occupancy_fsm_authoritative = True
         _LOGGER.debug(
             "Climate Advisor startup: temp_unit=%s, comfort_heat=%.1f, comfort_cool=%.1f",
             config.get("temp_unit", "fahrenheit"),
@@ -1764,6 +1790,17 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         classification_shadow_state = _classification_gate_str(self.shadow_automation_engine)
         classification_mirror_agrees = classification_production_state == classification_shadow_state
 
+        # Issue #744: occupancy dispatch's own production/shadow agreement. See
+        # _SHADOW_DIAG_AXES' comment above for the full rationale.
+        from .automation import should_defer_to_occupancy_setback
+
+        def _occupancy_defer_str(ae: AutomationEngine) -> str:
+            return str(should_defer_to_occupancy_setback(ae._occupancy_mode))
+
+        occupancy_production_state = _occupancy_defer_str(self.automation_engine)
+        occupancy_shadow_state = _occupancy_defer_str(self.shadow_automation_engine)
+        occupancy_mirror_agrees = occupancy_production_state == occupancy_shadow_state
+
         agrees = (
             mirror_agrees
             and fsm_agrees
@@ -1773,6 +1810,7 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and override_grace_fsm_agrees
             and fan_mirror_agrees
             and classification_mirror_agrees
+            and occupancy_mirror_agrees
         )
 
         # Issue #685: wall-clock debounce per axis — a WARNING only fires once a
@@ -1795,6 +1833,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
             "classification_mirror", classification_mirror_agrees, now
         )
+        occupancy_mirror_duration, occupancy_mirror_sustained = self._shadow_diag_update_axis(
+            "occupancy_mirror", occupancy_mirror_agrees, now
+        )
 
         self._shadow_engine_diagnostic = {
             "production_state": production_state,
@@ -1816,6 +1857,9 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "classification_production_state": classification_production_state,
             "classification_shadow_state": classification_shadow_state,
             "classification_mirror_agrees": classification_mirror_agrees,
+            "occupancy_production_state": occupancy_production_state,
+            "occupancy_shadow_state": occupancy_shadow_state,
+            "occupancy_mirror_agrees": occupancy_mirror_agrees,
             "agrees": agrees,
             "checked_at": now.isoformat(),
             "debounce": {
@@ -1858,6 +1902,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "disagreement_seconds": classification_mirror_duration,
                     "sustained": classification_mirror_sustained,
                     "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["classification_mirror"],
+                },
+                "occupancy_mirror": {
+                    "disagreement_seconds": occupancy_mirror_duration,
+                    "sustained": occupancy_mirror_sustained,
+                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["occupancy_mirror"],
                 },
             },
             "cumulative_reset_date": self._shadow_diag_cumulative_date.isoformat(),
@@ -1981,6 +2030,23 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     classification_mirror_duration,
                 )
                 self._shadow_diag_incident_emitted["classification_mirror"] = True
+        if occupancy_mirror_sustained:
+            _LOGGER.warning(
+                "Occupancy shadow engine disagreement (Issue #744): production=%s shadow=%s (sustained %.0fs)",
+                occupancy_production_state,
+                occupancy_shadow_state,
+                occupancy_mirror_duration,
+            )
+            if not self._shadow_diag_incident_emitted["occupancy_mirror"]:
+                self._emit_shadow_disagreement_incident(
+                    "occupancy_mirror",
+                    now,
+                    occupancy_production_state,
+                    occupancy_shadow_state,
+                    "shadow",
+                    occupancy_mirror_duration,
+                )
+                self._shadow_diag_incident_emitted["occupancy_mirror"] = True
 
     @property
     def shadow_engine_diagnostic(self) -> dict[str, Any] | None:
@@ -2838,28 +2904,30 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         return not raw_on if invert else raw_on
 
     def _compute_occupancy_mode(self) -> str:
-        """Compute effective occupancy mode from toggle entities (priority order)."""
+        """Compute effective occupancy mode from toggle entities (priority order).
+
+        Issue #744 (strangler-fig completion Phase 4): resolves each toggle's
+        effective boolean via ``self._is_toggle_on()`` (still the only HA-state
+        touchpoint — reads ``hass.states`` and applies the invert flag), then
+        delegates the guest > vacation > home/away priority decision itself to
+        ``occupancy_priority.decide_occupancy_priority()``, a pure leaf. Not flag-
+        gated — see that module's own docstring for why this extraction needed no
+        A/B shadow proof (it was already effectively pure).
+        """
         cfg = self.config
-
-        # Guest (highest priority)
         guest_entity = cfg.get(CONF_GUEST_TOGGLE)
-        if guest_entity and self._is_toggle_on(guest_entity, cfg.get(CONF_GUEST_TOGGLE_INVERT, False)):
-            return OCCUPANCY_GUEST
-
-        # Vacation
         vacation_entity = cfg.get(CONF_VACATION_TOGGLE)
-        if vacation_entity and self._is_toggle_on(vacation_entity, cfg.get(CONF_VACATION_TOGGLE_INVERT, False)):
-            return OCCUPANCY_VACATION
-
-        # Home/Away
         home_entity = cfg.get(CONF_HOME_TOGGLE)
-        if home_entity:
-            if self._is_toggle_on(home_entity, cfg.get(CONF_HOME_TOGGLE_INVERT, False)):
-                return OCCUPANCY_HOME
-            return OCCUPANCY_AWAY
-
-        # No toggles configured
-        return OCCUPANCY_HOME
+        inputs = OccupancyPriorityInputs(
+            guest_configured=bool(guest_entity),
+            guest_on=bool(guest_entity) and self._is_toggle_on(guest_entity, cfg.get(CONF_GUEST_TOGGLE_INVERT, False)),
+            vacation_configured=bool(vacation_entity),
+            vacation_on=bool(vacation_entity)
+            and self._is_toggle_on(vacation_entity, cfg.get(CONF_VACATION_TOGGLE_INVERT, False)),
+            home_configured=bool(home_entity),
+            home_on=bool(home_entity) and self._is_toggle_on(home_entity, cfg.get(CONF_HOME_TOGGLE_INVERT, False)),
+        )
+        return decide_occupancy_priority(inputs)
 
     def _subscribe_occupancy_listeners(self) -> None:
         """Subscribe to state changes for all configured occupancy toggles."""

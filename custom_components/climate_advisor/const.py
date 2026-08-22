@@ -4,9 +4,16 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.58"
+VERSION = "0.6.59"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.59": [
+        "Feat #738: no user-visible change. Strangler-fig completion program Phase 2"
+        " — a sustained live disagreement between the production automation engine and"
+        " its shadow-engine comparison now automatically becomes a candidate regression"
+        " test scenario (via the existing pending/golden review pipeline) instead of"
+        " only a WARNING log line a human has to notice and hand-convert.",
+    ],
     "0.6.58": [
         "Feat #737: no user-visible change. Strangler-fig completion program Phase 1"
         " — adds an automated static check that catches two or more functions"
@@ -2192,6 +2199,31 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    738: {
+        "version_fixed": "0.6.59",
+        "title": (
+            "Phase 2 of the strangler-fig completion program: a new shadow_disagreement"
+            " incident class fires (event-driven, per mirrored production call, guarded"
+            " by a level-trigger so one sustained streak emits exactly one incident) when"
+            " the live shadow-engine diagnostic sustains a real per-axis disagreement"
+            " between production and its comparison engine/FSM. A new"
+            " find_shadow_disagreement_windows() function in build_historical_scenario.py"
+            " feeds it into the existing incident-to-pending-scenario pipeline. The"
+            " scenario's assertion checks production's own real recorded decision at the"
+            " incident timestamp (reusing outcomes.py's existing event-to-outcome mapping)"
+            " rather than the disagreement itself, since the offline single-engine"
+            " harness has no second shadow engine to mechanically compare against — the"
+            " disagreement is documented in the scenario's notes field for human review."
+            " Scoped to the lifetime of the shadow-engine mechanism; a later graduation"
+            " phase will remove it along with the mechanism itself."
+        ),
+        "scope_covered": (
+            "custom_components/climate_advisor/coordinator.py"
+            " (_emit_shadow_disagreement_incident, _shadow_diag_incident_emitted);"
+            " tools/build_historical_scenario.py"
+            " (find_shadow_disagreement_windows, _preceding_production_outcome)"
+        ),
+    },
     737: {
         "version_fixed": "0.6.58",
         "title": (

@@ -218,6 +218,11 @@ class ClimateAdvisorStatusView(HomeAssistantView):
             "outdoor_temp": outdoor_temp_display,
             "unit": unit,
             "automation_status": data.get(ATTR_AUTOMATION_STATUS, "unknown"),
+            # Issue #749: hard-invariant watchdog violations (e.g. AC and WHF both
+            # physically on at once) — empty list when nothing is wrong. Surfaced on the
+            # Status card only, per this project's Status Card Ontology: it answers "what's
+            # happening right now, and why."
+            "invariant_violations": data.get("invariant_violations", []),
             "compliance_score": data.get(ATTR_COMPLIANCE_SCORE, 1.0),
             "next_action": data.get(ATTR_NEXT_ACTION, ""),
             "next_automation_action": data.get(ATTR_NEXT_AUTOMATION_ACTION, ""),

@@ -949,6 +949,7 @@
           <div class="label">Status</div>
           <div class="value">${data.automation_status || 'unknown'}</div>
           ${data.coordinator_healthy === false ? `<div class="value" style="color:var(--danger, #f44336)">⚠ Climate Advisor unavailable since ${data.stale_since ? new Date(data.stale_since).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : 'unknown'} — ${escapeHtml(data.last_error || 'unknown error')}</div>` : ''}
+          ${(data.invariant_violations || []).map(v => `<div class="value" style="color:var(--danger, #f44336)">⚠ ${escapeHtml(v.detail)}</div>`).join('')}
           ${data.pause_suppressed_classification_text ? `<div class="value">${escapeHtml(data.pause_suppressed_classification_text)}</div>` : ''}
           ${data.nat_vent_active && data.nat_vent_off_threshold != null && data.nat_vent_on_threshold != null ? `
           <div class="value" style="font-size:0.8rem;opacity:0.85">

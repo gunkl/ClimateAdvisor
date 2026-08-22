@@ -4,9 +4,17 @@ DOMAIN = "climate_advisor"
 
 # Integration version — MUST match manifest.json "version" field.
 # A test in tests/test_version_sync.py enforces this.
-VERSION = "0.6.57"
+VERSION = "0.6.58"
 
 RELEASE_NOTES: dict[str, list[str]] = {
+    "0.6.58": [
+        "Feat #737: no user-visible change. Strangler-fig completion program Phase 1"
+        " — adds an automated static check that catches two or more functions"
+        " independently reimplementing the same decision gate before they drift apart"
+        " (the exact bug class behind past nat-vent threshold inconsistencies)."
+        " Found and documented 3 real existing instances and corrected stale claims"
+        " in docs/nat-vent-lifecycle-spec.md along the way.",
+    ],
     "0.6.57": [
         "Fix #735: no user-visible change. Documentation and internal-consistency"
         " hygiene pass ahead of the next phase of automation-engine internals work"
@@ -2184,6 +2192,25 @@ RELEASE_NOTES: dict[str, list[str]] = {
 # GitHub issue instead — the Investigator already reads live open issues.
 # Add an entry here as part of the definition of done when closing any issue.
 KNOWN_FIXES: dict[int, dict] = {
+    737: {
+        "version_fixed": "0.6.58",
+        "title": (
+            "Phase 1 of the strangler-fig completion program: built an AST-based"
+            " static check (tests/test_duplicate_gate_detection.py) that flags 2+"
+            " functions independently reimplementing the same decision-gate condition"
+            " before their thresholds silently drift apart — the exact bug class"
+            " behind the historical nat-vent gate-logic drift (Issues #400/#402/#411)."
+            " Validated against Issue #608's documented duplication claim: found the"
+            " claim was 2/3 stale (fan_thermostat_check and check_natural_vent_"
+            " conditions were already unified via #435; only nat_vent_temperature_"
+            " check()'s legacy branch still hand-rolls a subset of decide_nat_vent_"
+            " exit()'s chain) and corrected docs/nat-vent-lifecycle-spec.md. Also found"
+            " 2 additional real duplicate-gate instances (a 4-way manual-override-"
+            " conflict check, and a copy-pasted fan physical-state-read guard) and one"
+            " reviewed false positive, all tracked in the new checker's registry."
+        ),
+        "scope_covered": ("tests/test_duplicate_gate_detection.py (new); docs/nat-vent-lifecycle-spec.md correction"),
+    },
     735: {
         "version_fixed": "0.6.57",
         "title": (

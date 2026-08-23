@@ -96,12 +96,12 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._pre_pause_mode = None
     ae._doorwindow_fsm_authoritative = False
     ae._natvent_fsm_authoritative = False
-    ae._override_grace_fsm_authoritative = False
     ae._grace_active = False
     ae._grace_protects_override = False
     ae._override_confirm_pending = False
     ae._grace_end_time = None
     ae._last_resume_source = None
+    ae._last_grace_trigger = None
     ae._last_outdoor_temp = 65.0
     ae._get_indoor_temp_f = MagicMock(return_value=75.0)
     ae._fan_active = False
@@ -110,6 +110,16 @@ def _make_ae_stub(**overrides) -> AutomationEngine:
     ae._automation_grace_cancel = None
     ae._sensor_check_callback = None
     ae._emit_event_callback = None
+    # Issue #757 Phase 6 Step 3: _resolve_override_grace_fsm_state() is now
+    # unconditionally FSM-authoritative, so _build_override_grace_fsm_inputs() always
+    # reads these fields — previously only exercised when a test explicitly set
+    # _override_grace_fsm_authoritative=True.
+    ae._override_confirm_source = None
+    ae._override_confirm_mode = None
+    ae._manual_override_active = False
+    ae._manual_override_mode = None
+    ae._manual_override_source = None
+    ae._fan_override_active = False
     ae._request_refresh_callback = None
     ae._post_grace_fan_check_callback = None
     ae.dry_run = False

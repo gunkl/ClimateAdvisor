@@ -3,6 +3,10 @@
 All notable changes to Climate Advisor are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) conventions.
 
+## [0.6.68] — 2026-08-23
+
+- Feat #757: no user-visible change. Strangler-fig graduation Phase 6 Step 3 — removes the legacy (pre-FSM) override/grace code path. The FSM-based override/grace dispatch has been production-authoritative for weeks with zero corpus divergence, so the old inline flag-write branch and its differential-comparator scaffolding are no longer needed.
+
 ## [0.6.67] — 2026-08-23
 
 - Feat #757: Strangler-fig graduation Phase 6 Step 2 — removes the legacy (pre-FSM) fan/whole-house-fan code path. The FSM-based fan/WHF dispatch has been production-authoritative since Phase 5, so the 17 legacy closures and their differential-comparator scaffolding are no longer needed.

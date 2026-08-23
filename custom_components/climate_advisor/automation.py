@@ -840,14 +840,13 @@ class AutomationEngine:
         # flips it; deployed OFF, live switch-flip is a separate verification step.
         self._doorwindow_fsm_authoritative: bool = False
 
-        # Issue #664 (Block 5 Phase 3, epic #594): whether the override/grace lifecycle FSM
-        # (override_grace_fsm.py, Issue #639) is authoritative for _override_confirm_pending/
-        # _grace_active/_grace_protects_override, instead of each real call site's own inline
-        # flag write. Default False — zero behavior change until the switch (switch.py) flips
-        # it; deployed OFF, live switch-flip is a separate verification step. See
-        # _resolve_override_grace_fsm_state()'s docstring for why full authority ships in one
-        # PR rather than the staged partial-scope rollout door/window used.
-        self._override_grace_fsm_authoritative: bool = False
+        # Issue #757 Phase 6 Step 3 correction: the override/grace lifecycle FSM
+        # (override_grace_fsm.py, Issue #639) is now unconditionally authoritative for
+        # _override_confirm_pending/_grace_active/_grace_protects_override —
+        # _override_grace_fsm_authoritative (Issue #664) has been removed. It was
+        # permanently True in production for weeks and proven behavior-equivalent via
+        # an offline differential comparator (zero divergence across the golden+pending
+        # corpus) before the legacy inline flag-write branch was deleted.
 
         # Issue #742 (strangler-fig completion program, Phase 3): whether the
         # classification decision FSM (classification_fsm.py) is authoritative for
@@ -1199,14 +1198,13 @@ class AutomationEngine:
 
     def _legacy_clear_confirm_flag(self) -> None:
         """The 1-line flag-clear ``clear_manual_override()`` always used to perform
-        inline (Issue #664) — extracted so it can be composed into the ``legacy``
-        closure passed to ``_resolve_override_grace_fsm_state()`` at the real
-        override/grace call sites (``cancel_override()``, ``_on_grace_expired()``'s 3
-        branches, coordinator's OVERRIDE_SUPERSEDED "Fix D" branch), and reused
-        unchanged by ``clear_manual_override()`` itself for every other caller
-        (``handle_occupancy_away/vacation``, ``handle_bedtime``,
-        ``handle_morning_wakeup``, the stuck-grace-recovery watchdog) — none of those
-        are override/grace FSM-modeled events.
+        inline (Issue #664). Issue #757 Phase 6 Step 3: no longer composed into a
+        ``legacy`` closure for ``_resolve_override_grace_fsm_state()`` — that dispatcher
+        is now unconditionally FSM-authoritative and never calls this method. Still used
+        directly, unchanged, by ``clear_manual_override()`` for every caller whose event
+        isn't override/grace FSM-modeled (``handle_occupancy_away/vacation``,
+        ``handle_bedtime``, ``handle_morning_wakeup``, the stuck-grace-recovery
+        watchdog) — kept as its own method (rather than inlined) for that reuse.
         """
         self._override_confirm_pending = False
 
@@ -1316,11 +1314,7 @@ class AutomationEngine:
             self._clear_override_confirm_action()
         self._cancel_grace_timers_action()
 
-        def _legacy_clear() -> None:
-            self._legacy_clear_confirm_flag()
-            self._legacy_clear_grace_flags()
-
-        self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED, legacy=_legacy_clear)
+        self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CANCELLED)
         self._clear_manual_override_active(reason)
 
         # clear_manual_override() only emits "override_cleared" when a thermostat-mode override
@@ -1467,10 +1461,7 @@ class AutomationEngine:
 
         _trigger = "fan_manual_override"
         if self._start_grace_period_action("manual", trigger=_trigger, duration_override=duration_override):
-            self._resolve_override_grace_fsm_state(
-                kind=_OGFEventKind.FAN_OVERRIDE_DETECTED,
-                legacy=lambda: self._legacy_set_grace_flags(_trigger),
-            )
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.FAN_OVERRIDE_DETECTED)
 
         # Issue #495: whole-house fan and HVAC are mutually exclusive — this was previously
         # only enforced for CA-initiated activation (_activate_fan()). A manually/remotely
@@ -2072,17 +2063,8 @@ class AutomationEngine:
         )
         if _override_pending is None:
             # Confirmation disabled — accept override immediately (legacy behaviour)
-            _grace_started = self._confirm_override_action(detected_mode, source=source)
-
-            def _legacy_immediate_accept() -> None:
-                # Manual grace can itself be disabled by config (manual_grace_seconds=0)
-                # — in that case _confirm_override_action() returned False and no grace
-                # timer actually started, so the flags must stay at NONE, not be forced
-                # to ACTIVE_PROTECTING_OVERRIDE (Issue #664).
-                if _grace_started:
-                    self._legacy_set_grace_flags("override_confirmed")
-
-            self._resolve_override_grace_fsm_state(kind=event_kind, legacy=_legacy_immediate_accept)
+            self._confirm_override_action(detected_mode, source=source)
+            self._resolve_override_grace_fsm_state(kind=event_kind)
             return
 
         # Cancel any existing pending confirmation (restart the window)
@@ -2093,10 +2075,7 @@ class AutomationEngine:
         self._override_confirm_time = dt_util.now().isoformat()
         self._override_confirm_mode = detected_mode
         self._override_confirm_source = source
-        self._resolve_override_grace_fsm_state(
-            kind=event_kind,
-            legacy=lambda: setattr(self, "_override_confirm_pending", True),
-        )
+        self._resolve_override_grace_fsm_state(kind=event_kind)
         _LOGGER.info(
             "Potential %s override detected (mode=%s) — confirming in %d minutes",
             source,
@@ -2151,19 +2130,8 @@ class AutomationEngine:
                     cls_mode,
                 )
                 self._clear_override_confirm_action()
-                _grace_started = self._confirm_override_action(current_mode, source=source)
-
-                def _legacy_path_a() -> None:
-                    self._legacy_clear_confirm_flag()
-                    # Issue #664: manual grace can be disabled by config — don't force
-                    # ACTIVE_PROTECTING_OVERRIDE when no grace timer actually started.
-                    if _grace_started:
-                        self._legacy_set_grace_flags("override_confirmed")
-
-                self._resolve_override_grace_fsm_state(
-                    kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED,
-                    legacy=_legacy_path_a,
-                )
+                self._confirm_override_action(current_mode, source=source)
+                self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED)
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_confirmed",
@@ -2182,10 +2150,7 @@ class AutomationEngine:
                     current_mode,
                 )
                 self._clear_override_confirm_action()
-                self._resolve_override_grace_fsm_state(
-                    kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED,
-                    legacy=self._legacy_clear_confirm_flag,
-                )
+                self._resolve_override_grace_fsm_state(kind=_OGFEventKind.OVERRIDE_CONFIRM_EXPIRED)
                 if self._emit_event_callback:
                     self._emit_event_callback(
                         "override_self_resolved",
@@ -2280,10 +2245,13 @@ class AutomationEngine:
         grace-start action. Deliberately does NOT write
         ``_grace_active``/``_grace_protects_override`` — callers
         (``start_override_confirmation()``, the confirm-expiry timer closure) must
-        follow with exactly one ``_resolve_override_grace_fsm_state()`` call, and MUST
-        only claim ``ACTIVE_PROTECTING_OVERRIDE`` in their ``legacy`` closure when this
-        method's return value is True — manual grace can be disabled by config
-        (``manual_grace_seconds=0``), in which case no grace timer actually starts.
+        follow with exactly one ``_resolve_override_grace_fsm_state()`` call. Its
+        return value doesn't need to be threaded through to that call — the FSM
+        independently re-derives whether grace would start via
+        ``_build_override_grace_fsm_inputs()``'s ``grace_would_start`` field (same
+        ``decide_grace_start()``-backed check), so it never wrongly claims
+        ``ACTIVE_PROTECTING_OVERRIDE`` when manual grace is disabled by config
+        (``manual_grace_seconds=0``) even though this method already ran.
 
         Args:
             mode: The confirmed HVAC mode string.
@@ -6041,20 +6009,16 @@ class AutomationEngine:
 
         _trigger = "dashboard_resume"
         if self._start_grace_period_action("manual", trigger=_trigger):
-            self._resolve_override_grace_fsm_state(
-                kind=_OGFEventKind.DASHBOARD_RESUME,
-                legacy=lambda: self._legacy_set_grace_flags(_trigger),
-            )
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.DASHBOARD_RESUME)
         return restore_mode
 
     def _legacy_set_grace_flags(self, trigger: str) -> None:
         """The 2-line flag computation ``_start_grace_period()`` always used to perform
-        inline (Issue #664) — extracted so it can be passed as the ``legacy`` closure to
-        ``_resolve_override_grace_fsm_state()`` at every real override/grace call site,
-        including (as of Issue #672) ``_start_grace_period()``'s own "every other
-        trigger" callers (fan-off, window-close, nat-vent-exit, drift-correction),
-        under the ``UNPROTECTED_GRACE_STARTED`` kind — this is the non-authoritative
-        branch's flag computation for all of them now, not a legacy-only path.
+        inline (Issue #664). Issue #757 Phase 6 Step 3: no longer passed as a ``legacy``
+        closure to ``_resolve_override_grace_fsm_state()`` — that dispatcher is now
+        unconditionally FSM-authoritative and never calls this method. Its only
+        remaining caller is the dead-but-kept-for-reference ``_confirm_override()``
+        (see its own docstring) — not called from any real production call site.
         """
         self._grace_active = True
         self._grace_protects_override = trigger in _GRACE_TRIGGERS_PROTECTING_OVERRIDE
@@ -6165,10 +6129,7 @@ class AutomationEngine:
         if self._start_grace_period_action(source, trigger, duration_override):
             from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
-            self._resolve_override_grace_fsm_state(
-                kind=_OGFEventKind.UNPROTECTED_GRACE_STARTED,
-                legacy=lambda: self._legacy_set_grace_flags(trigger),
-            )
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.UNPROTECTED_GRACE_STARTED)
             # Issue #672: a second, DISTINCT event from _start_grace_period_action()'s own
             # "grace_started" (which also fires for the 3 protecting triggers, via their
             # own direct dispatcher call sites — reusing it here would wrongly feed
@@ -6230,17 +6191,10 @@ class AutomationEngine:
             _override_confirm_pending/_grace_active/_grace_protects_override themselves,
             so a live read after them still reflects the correct pre-transition state.
             """
-            _was_confirm_pending = self._override_confirm_pending
-            if _was_confirm_pending:
+            if self._override_confirm_pending:
                 self._clear_override_confirm_action()
             self._cancel_grace_timers_action()
-
-            def _legacy_clear() -> None:
-                if _was_confirm_pending:
-                    self._legacy_clear_confirm_flag()
-                self._legacy_clear_grace_flags()
-
-            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED, legacy=_legacy_clear)
+            self._resolve_override_grace_fsm_state(kind=_OGFEventKind.GRACE_TIMER_EXPIRED)
 
         # If within planned window period, sensors open is expected — just clear grace
         if self._is_within_planned_window_period():
@@ -6393,12 +6347,12 @@ class AutomationEngine:
 
     def _legacy_clear_grace_flags(self) -> None:
         """The 2-line flag-clear ``_cancel_grace_timers()`` always used to perform inline
-        (Issue #664) — extracted so it can be passed as the ``legacy`` closure to
-        ``_resolve_override_grace_fsm_state()`` at the 4 real call sites
-        (``_on_grace_expired()``'s 3 branches, ``_check_orphaned_grace()``), and reused
-        unchanged by ``_cancel_grace_timers()`` itself for every other caller (``cleanup()``,
-        the internal cancel-prior-timer call inside ``_start_grace_period_action()``, and
-        every door/window call site — none of those are override/grace FSM-modeled events).
+        (Issue #664). Issue #757 Phase 6 Step 3: no longer passed as a ``legacy`` closure
+        to ``_resolve_override_grace_fsm_state()`` — that dispatcher is now unconditionally
+        FSM-authoritative and never calls this method. Still used directly, unchanged, by
+        ``_cancel_grace_timers()`` itself for every caller whose event isn't override/grace
+        FSM-modeled (``cleanup()``, the internal cancel-prior-timer call inside
+        ``_start_grace_period_action()``, and every door/window call site).
 
         **Issue #709: door/window's dispatcher no longer writes ``_grace_active`` at all.**
         Prior to #709 this method's docstring claimed the redundant door/window write was
@@ -6406,8 +6360,9 @@ class AutomationEngine:
         two writers could disagree for real, transiently, whenever ``resume_from_pause()``/
         ``handle_all_doors_windows_closed()`` ran the door/window dispatch before the real
         grace-start action, with genuine ``await`` points in between. ``_apply_door_window_fsm_state()``
-        was fixed to stop writing this flag; this method (via ``_resolve_override_grace_fsm_state()``
-        and its paired ``legacy()`` closures) is now the flag's sole writer everywhere.
+        was fixed to stop writing this flag; ``_resolve_override_grace_fsm_state()``'s FSM
+        write (or this method, for the non-FSM-modeled callers above) is the flag's sole
+        writer everywhere.
         """
         self._grace_active = False
         self._grace_protects_override = False
@@ -6431,8 +6386,8 @@ class AutomationEngine:
         """Cancel any active grace period timers.
 
         Issue #664: thin wrapper — real work lives in ``_cancel_grace_timers_action()``.
-        Used unconditionally by every caller EXCEPT the 4 real override/grace
-        GRACE_TIMER_EXPIRED/OVERRIDE_CANCELLED call sites, which call
+        Used unconditionally by every caller EXCEPT the real override/grace
+        GRACE_TIMER_EXPIRED/OVERRIDE_CANCELLED/OVERRIDE_SUPERSEDED call sites, which call
         ``_cancel_grace_timers_action()`` directly and route the flag-clear through
         ``_resolve_override_grace_fsm_state()`` instead — see ``_on_grace_expired()``,
         ``coordinator._check_orphaned_grace()``.
@@ -8028,6 +7983,14 @@ class AutomationEngine:
             tolerance_f=OVERRIDE_ADOPT_SETPOINT_TOLERANCE_F,
             within_planned_window=self._is_within_planned_window_period(),
             any_sensor_open=self._any_monitored_sensor_open(),
+            # Issue #757 Phase 6 Step 3 correction: for GRACE_TIMER_EXPIRED specifically,
+            # _cancel_grace_timers_action() already set _last_resume_source=None before
+            # this dispatch, so this read is always "automation" for that kind. Confirmed
+            # INERT — it only feeds the FSM transition's audit-only outcome string, which
+            # transition() never reads, and GRACE_TIMER_EXPIRED always lands on
+            # (IDLE, NONE) regardless of it. Both production and the (now-deleted) shadow
+            # comparator shared this exact staleness with zero divergence, so it's left
+            # as-is rather than "fixed."
             grace_source=self._last_resume_source or "automation",
             now=now,
             grace_would_start=self._manual_grace_would_start(now),
@@ -8081,8 +8044,8 @@ class AutomationEngine:
         Read-only observability by default — the value this property computes is
         also fed as the ``current_state`` argument to ``override_grace_fsm.transition()``
         by ``AutomationEngine._resolve_override_grace_fsm_state()``, the shared
-        dispatcher every real override/grace trigger site calls under
-        ``_override_grace_fsm_authoritative``. Purely a computed view of
+        dispatcher every real override/grace trigger site calls (unconditionally
+        authoritative as of Issue #757 Phase 6 Step 3). Purely a computed view of
         ``_override_confirm_pending``/``_grace_active``/``_grace_protects_override``,
         so it cannot desync from the flags it reads. See ``override_grace_lifecycle.py``
         for the pure derivation.
@@ -8112,15 +8075,13 @@ class AutomationEngine:
         per-caller write" rule ``_apply_door_window_fsm_state()``'s own docstring
         documents).
 
-        Called only from the authoritative branch of ``_resolve_override_grace_fsm_state()``
-        — the real timer/confirm-window primitives (``_start_grace_period_action()``,
+        Called only from ``_resolve_override_grace_fsm_state()`` — the real
+        timer/confirm-window primitives (``_start_grace_period_action()``,
         ``_start_override_confirmation_action()``, ``_cancel_grace_timers_action()``) never
-        write these 3 flags themselves; only this method (FSM path) or the paired legacy
-        closure (non-authoritative path) does, exclusively, so the switch genuinely governs
-        which computation determines these flags rather than one silently overwriting the
-        other. Proven behaviorally equivalent to the legacy closures by construction (see
-        the approved plan's H1) — that equivalence is what makes it safe to flip live, not
-        a reason the split is unnecessary.
+        write these 3 flags themselves; this method is their sole writer (Issue #757
+        Phase 6 Step 3 — the prior non-authoritative ``legacy()`` closure branch was
+        proven behaviorally equivalent by an offline differential comparator across the
+        golden+pending corpus, then deleted).
         """
         confirm, grace = state
         self._override_confirm_pending = confirm == OverrideConfirmState.PENDING
@@ -8131,39 +8092,30 @@ class AutomationEngine:
         self,
         *,
         kind: OverrideGraceFsmEventKind,
-        legacy: Callable[[], None],
         origin_state: OverrideGraceLifecycleState | None = None,
     ) -> None:
         """Single dispatch point for every override/grace flag-derivation call site
-        (Issue #664, full authority in one PR — see the approved plan's H1-H4 for why
-        this does not need door/window's staged partial-scope rollout).
+        (Issue #664). Unconditionally authoritative as of Issue #757 Phase 6 Step 3 —
+        ``override_grace_fsm.transition()`` is the sole computation of
+        ``_override_confirm_pending``/``_grace_active``/``_grace_protects_override``; the
+        prior non-authoritative ``legacy()`` closure branch (behind the now-removed
+        ``_override_grace_fsm_authoritative`` flag) was deleted after weeks of production
+        parity confirmed zero divergence via an offline differential comparator across
+        the golden+pending corpus.
 
-        **Genuinely mutually exclusive — exactly one of the FSM path or ``legacy()``
-        ever writes `_override_confirm_pending`/`_grace_active`/`_grace_protects_override`
-        for a given call, never both.** An earlier draft of this dispatcher called
-        ``legacy()`` unconditionally after the FSM write "for the real timer side
-        effects," mirroring what looked like door/window's own pattern — but door/window's
-        ``_grace_active`` write is the ONLY one of its 3 flags with that shape, and even
-        there it means the switch has zero real effect on that specific flag (the
-        unconditional real timer call always overwrites it right after). Doing that for
-        ALL THREE of override/grace's flags would make this switch behaviorally inert in
-        every case — not a genuine A/B mechanism, just a decorative toggle. Real timer/
-        confirm-window scheduling is NOT owned here or by ``legacy()`` — callers must
-        already have run the real side-effecting "_action" half of whichever primitive
+        Real timer/confirm-window scheduling is NOT owned here — callers must already
+        have run the real side-effecting "_action" half of whichever primitive
         (``_start_grace_period_action()``, ``_start_override_confirmation_action()``,
-        ``_cancel_grace_timers_action()``) *before* calling this dispatcher; both branches
-        below only ever decide the 3 flags, never timers.
+        ``_cancel_grace_timers_action()``) *before* calling this dispatcher; this method
+        only ever decides the 3 flags, never timers.
 
-        ``legacy`` is the SAME flag-computation the removed inline code used to perform
-        (e.g. ``lambda: self._legacy_set_grace_flags(trigger)``) — called only when NOT
-        authoritative. ``origin_state`` defaults to a live read of
-        ``self.override_grace_lifecycle_state`` — correct for every site except
-        ``_on_grace_expired()``'s branches and ``_check_orphaned_grace()``, both of which
-        must capture state *before* the real cancel action clears the flags being
-        transitioned, and pass it explicitly here.
+        ``origin_state`` defaults to a live read of ``self.override_grace_lifecycle_state``
+        — correct for every site except ``_on_grace_expired()``'s branches and
+        ``_check_orphaned_grace()``, both of which must capture state *before* the real
+        cancel action clears the flags being transitioned, and pass it explicitly here.
 
         Issue #717: also the single emit point for GRACE_STARTED/ENDED, via a
-        before/after diff of ``_grace_active`` around the branch — same rationale as
+        before/after diff of ``_grace_active`` around the transition — same rationale as
         the equivalent diff in ``_resolve_door_window_pause_flags()``. Deliberately
         does NOT emit OVERRIDE_CONFIRMED/CLEARED here — those aren't part of this
         dispatcher's 3-flag derivation (see ``_apply_override_grace_fsm_state()``'s own
@@ -8171,18 +8123,15 @@ class AutomationEngine:
         ``_clear_manual_override_active()``, each a single real unconditional site.
         """
         _grace_before = bool(self._grace_active)
-        if self._override_grace_fsm_authoritative:
-            from .override_grace_fsm import OverrideGraceFsmEvent
-            from .override_grace_fsm import transition as _override_grace_transition
+        from .override_grace_fsm import OverrideGraceFsmEvent
+        from .override_grace_fsm import transition as _override_grace_transition
 
-            state = origin_state if origin_state is not None else self.override_grace_lifecycle_state
-            result = _override_grace_transition(
-                state,
-                OverrideGraceFsmEvent(kind=kind, inputs=self._build_override_grace_fsm_inputs()),
-            )
-            self._apply_override_grace_fsm_state(result.to_state)
-        else:
-            legacy()
+        state = origin_state if origin_state is not None else self.override_grace_lifecycle_state
+        result = _override_grace_transition(
+            state,
+            OverrideGraceFsmEvent(kind=kind, inputs=self._build_override_grace_fsm_inputs()),
+        )
+        self._apply_override_grace_fsm_state(result.to_state)
         self._emit_boolean_transition(
             before=_grace_before,
             after=bool(self._grace_active),
@@ -10588,35 +10537,29 @@ class AutomationEngine:
         # Issue #680: route the 3 FSM-modeled flags (_override_confirm_pending /
         # _grace_active / _grace_protects_override) through
         # _resolve_override_grace_fsm_state() instead of assigning them directly. That
-        # dispatcher's own docstring (Issue #664) claims to be the single writer of these
-        # 3 flags across every real override/grace call site — this direct assignment was
-        # a third, ungoverned writer, bypassing it. Closest semantic match is
-        # GRACE_TIMER_EXPIRED (grace ending with nothing left to protect) — same reasoning
-        # coordinator._check_orphaned_grace() already uses for this event kind.
+        # dispatcher is now (Issue #757 Phase 6 Step 3) unconditionally the single writer
+        # of these 3 flags across every real override/grace call site — a direct
+        # assignment here would be a second, ungoverned writer, bypassing it. Closest
+        # semantic match is GRACE_TIMER_EXPIRED (grace ending with nothing left to
+        # protect) — same reasoning coordinator._check_orphaned_grace() already uses for
+        # this event kind.
         # origin_state is passed explicitly (unlike most real call sites, which default to
         # a live read) because there is no real prior FSM-tracked transition to read here —
         # nothing survives a restart — so the origin modeled is the synthetic "nothing was
         # running" state restart itself guarantees, not whichever residual value these
         # fields happened to carry from __init__.
         #
-        # Both branches land on the identical clean-slate result for this specific call:
-        # - FSM branch: transition((IDLE, NONE), GRACE_TIMER_EXPIRED) hits
-        #   _transition_from_no_grace()'s fallthrough ("unreachable_no_grace" — grace can't
-        #   expire with none active) and returns the origin state unchanged, i.e. (IDLE,
-        #   NONE) — which _apply_override_grace_fsm_state() writes back as
-        #   confirm_pending=False, grace_active=False, grace_protects_override=False.
-        # - legacy branch: clears all 3 flags directly to the same False/False/False.
-        # This is a pure "route through the dispatcher" change — the clean-slate restart
-        # POLICY is unchanged; override/grace/pause state is still always cleared on restart.
-        def _legacy_clear_all_override_grace_flags() -> None:
-            self._legacy_clear_confirm_flag()
-            self._legacy_clear_grace_flags()
-
+        # transition((IDLE, NONE), GRACE_TIMER_EXPIRED) hits
+        # _transition_from_no_grace()'s fallthrough ("unreachable_no_grace" — grace can't
+        # expire with none active) and returns the origin state unchanged, i.e. (IDLE,
+        # NONE) — which _apply_override_grace_fsm_state() writes back as
+        # confirm_pending=False, grace_active=False, grace_protects_override=False. This
+        # is the same clean-slate restart POLICY the legacy direct-assignment used to
+        # produce — only the writer changed.
         from .override_grace_fsm import OverrideGraceFsmEventKind as _OGFEventKind
 
         self._resolve_override_grace_fsm_state(
             kind=_OGFEventKind.GRACE_TIMER_EXPIRED,
-            legacy=_legacy_clear_all_override_grace_flags,
             origin_state=(OverrideConfirmState.IDLE, GraceState.NONE),
         )
         # Issue #327: fan override cleared on restart — no grace timer to reschedule.

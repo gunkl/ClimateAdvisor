@@ -132,10 +132,13 @@ class TestGraceEvents:
     def test_grace_starts_emits_grace_started(self) -> None:
         ae = _engine()
         ae._grace_active = False
-        ae._resolve_override_grace_fsm_state(
-            kind=OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED,
-            legacy=lambda: setattr(ae, "_grace_active", True),
-        )
+        # Issue #757 Phase 6 Step 3: _resolve_override_grace_fsm_state() is now
+        # unconditionally FSM-authoritative (no more legacy= closure) — the real
+        # transition() naturally lands UNPROTECTED_GRACE_STARTED on
+        # ACTIVE_UNPROTECTED (grace_active=True) given this engine's default config
+        # (manual/automation grace both enabled), which is exactly what this test
+        # needs for the before/after diff it's proving.
+        ae._resolve_override_grace_fsm_state(kind=OverrideGraceFsmEventKind.UNPROTECTED_GRACE_STARTED)
         events = _events_of(ae, LifecycleEventType.GRACE_STARTED)
         assert len(events) == 1
         assert ae._dispatched_grace_active is True
@@ -144,10 +147,10 @@ class TestGraceEvents:
         ae = _engine()
         ae._grace_active = True
         ae._dispatched_grace_active = True
-        ae._resolve_override_grace_fsm_state(
-            kind=OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED,
-            legacy=lambda: setattr(ae, "_grace_active", False),
-        )
+        # Issue #757 Phase 6 Step 3: no more legacy= closure — GRACE_TIMER_EXPIRED
+        # always lands the real transition() on (IDLE, NONE) i.e. grace_active=False,
+        # which is exactly what this test needs for the before/after diff it's proving.
+        ae._resolve_override_grace_fsm_state(kind=OverrideGraceFsmEventKind.GRACE_TIMER_EXPIRED)
         events = _events_of(ae, LifecycleEventType.GRACE_ENDED)
         assert len(events) == 1
         assert ae._dispatched_grace_active is False

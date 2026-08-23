@@ -266,25 +266,6 @@ _WINDOWS_EXTREME_COLD_MARGIN = 15.0
 # Issue #685: the comparison axes tracked by _update_shadow_engine_diagnostic()'s
 # wall-clock cascade-noise debounce (mirror + FSM comparisons for nat-vent,
 # door/window, and override/grace).
-#
-# Issue #731: "fan_mirror" adds a 7th axis, but deliberately has NO "fan_fsm"
-# sibling — unlike the other 3 lifecycles, fan_fsm.py was never built as a
-# free-standing third computation tracked at the coordinator level. Instead,
-# each AutomationEngine instance dispatches its OWN fan/WHF transitions
-# in-engine, through `_resolve_fan_fsm_state()`, gated by that engine's own
-# `_fan_fsm_authoritative` flag (fixed at construction — False for
-# `_engine_a`/production, True for `_engine_b`/shadow; see __init__ below).
-# That means `self.shadow_automation_engine.fan_lifecycle_state` already IS
-# the FSM-derived state — there is no separate untethered FSM object to
-# compare it against the way `self._nat_vent_fsm_state` stands apart from
-# both `automation_engine` and `shadow_automation_engine`. A "fan_fsm" axis
-# comparing production against a third fan_fsm.transition() replay would
-# always read identically to "fan_mirror" (both would be comparing against
-# the exact same shadow-engine-computed FSM state), so it would carry zero
-# independent signal — the same "no functional consumer" trap CLAUDE.md's
-# KNOWN_FIXES removal (Issue #563) warns about for diagnostic surfaces. See
-# `_update_shadow_engine_diagnostic()`'s fan block below for the comparison
-# itself.
 _SHADOW_DIAG_AXES = (
     "mirror",
     "fsm",
@@ -292,13 +273,12 @@ _SHADOW_DIAG_AXES = (
     "door_window_fsm",
     "override_grace_mirror",
     "override_grace_fsm",
-    "fan_mirror",
     # Issue #742: "classification_mirror" adds an 8th axis, deliberately with no
     # "classification_fsm" sibling — classification_fsm.py is genuinely stateless
     # (see its own module docstring's five-whys), so there is no separate
-    # untethered FSM state object to compare production against, the same "no
-    # functional consumer" reasoning fan_mirror's own comment above documents for
-    # its own missing "fan_fsm" sibling. decide_scheduled_band_gate() is a
+    # untethered FSM state object to compare production against — the same "no
+    # functional consumer" trap CLAUDE.md's KNOWN_FIXES removal (Issue #563) warns
+    # about for diagnostic surfaces. decide_scheduled_band_gate() is a
     # pre-existing shared pure function BOTH engines already call unconditionally
     # inside apply_classification() regardless of this phase's new flag — so
     # comparing engine_a's and engine_b's live gate result is a meaningful mirror
@@ -691,10 +671,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._engine_a._natvent_fsm_authoritative = False
         self._engine_a._doorwindow_fsm_authoritative = False
         self._engine_a._override_grace_fsm_authoritative = False
-        # Issue #731: 4th FSM-authoritative flag (fan/WHF), fixed at construction as
-        # of #729's pattern — _engine_a stays False for its whole lifetime, same as
-        # the 3 flags above.
-        self._engine_a._fan_fsm_authoritative = False
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_a stays False for its whole lifetime, same as the 4
@@ -761,10 +737,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         self._engine_b._natvent_fsm_authoritative = True
         self._engine_b._doorwindow_fsm_authoritative = True
         self._engine_b._override_grace_fsm_authoritative = True
-        # Issue #731: 4th FSM-authoritative flag (fan/WHF), fixed at construction as
-        # of #729's pattern — _engine_b stays True for its whole lifetime, mirror of
-        # _engine_a's fixed-legacy assignment above.
-        self._engine_b._fan_fsm_authoritative = True
         # Issue #742 (strangler-fig completion Phase 3): 5th FSM-authoritative flag
         # (classification/ODE ceiling guard), fixed at construction as of #729's
         # pattern — _engine_b stays True for its whole lifetime, mirror of
@@ -1132,20 +1104,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         # copy closes this and every other _whf_owns_hvac() read the same way the _fan_active
         # copy above does for its own guards.
         se._pre_fan_hvac_mode = ae._pre_fan_hvac_mode
-
-        # Issue #731: fan/WHF FSM extraction — same gap class as #613/#631/#673/#716/
-        # #724 above. fan_lifecycle.py's derivation and fan_fsm.py's dispatch read
-        # these 6 fields as engine-instance state; without a raw copy here they'd be
-        # permanently stuck at the shadow engine's __init__ defaults (dry_run=True
-        # means the production-side setters for several of these never execute on the
-        # shadow), producing the same class of permanent false shadow-engine
-        # disagreement documented above.
-        se._fan_on_since = ae._fan_on_since
-        se._fan_min_runtime_active = ae._fan_min_runtime_active
-        se._fan_toggle_command_time = ae._fan_toggle_command_time
-        se._fan_rate_limited_until = ae._fan_rate_limited_until
-        se._fan_rate_limited_direction = ae._fan_rate_limited_direction
-        se._fan_drift_tick_count = ae._fan_drift_tick_count
 
     def _apply_engine_roles(self, primary: AutomationEngine, secondary: AutomationEngine) -> None:
         """Wire dry_run/callbacks/role so ``primary`` issues real commands and
@@ -1747,30 +1705,11 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         override_grace_mirror_agrees = override_grace_production_state == override_grace_shadow_state
         override_grace_fsm_agrees = override_grace_production_state == override_grace_fsm_state
 
-        # Issue #731: fan/WHF's own production/shadow agreement. Unlike the 3 blocks
-        # above, there is no separate pure-derivation-from-inputs step here — each
-        # engine's `fan_lifecycle_state` property already IS that engine's live,
-        # self-consistent composed state (derived straight from its own flags,
-        # which for the shadow engine were themselves written by fan_fsm.py via
-        # `_resolve_fan_fsm_state()`/`_apply_fan_fsm_state()` — see
-        # `_SHADOW_DIAG_AXES`'s comment above for why no third "fan_fsm" axis
-        # exists). A joined-fields string (mirroring override/grace's own
-        # "confirm/grace" joint-string convention above) keeps the diagnostic
-        # dict's state values uniformly string-typed for the sensor/API layer.
-        def _fan_state_str(ae: AutomationEngine) -> str:
-            state = ae.fan_lifecycle_state
-            return (
-                f"{state.physical.value}/{state.override.value}/{state.cycling.value}/"
-                f"{state.hvac_ownership.value}/{state.rate_limit.value}"
-            )
-
-        fan_production_state = _fan_state_str(self.automation_engine)
-        fan_shadow_state = _fan_state_str(self.shadow_automation_engine)
-        fan_mirror_agrees = fan_production_state == fan_shadow_state
-
-        # Issue #742: classification's own production/shadow agreement. Same
-        # "no separate FSM axis" shape as fan/WHF above (see _SHADOW_DIAG_AXES'
-        # comment for the full five-whys) — decide_scheduled_band_gate() is a
+        # Issue #742: classification's own production/shadow agreement. Deliberately
+        # has no separate "classification_fsm" axis — classification_fsm.py is
+        # genuinely stateless (see its own module docstring's five-whys), so there is
+        # no separate untethered FSM state object to compare production against.
+        # decide_scheduled_band_gate() is a
         # pre-existing pure function BOTH engines already call unconditionally
         # every apply_classification() cycle, so comparing its live result on
         # each engine's own flags is a meaningful mirror check independent of
@@ -1809,7 +1748,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             and door_window_fsm_agrees
             and override_grace_mirror_agrees
             and override_grace_fsm_agrees
-            and fan_mirror_agrees
             and classification_mirror_agrees
             and occupancy_mirror_agrees
         )
@@ -1830,7 +1768,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
         override_grace_fsm_duration, override_grace_fsm_sustained = self._shadow_diag_update_axis(
             "override_grace_fsm", override_grace_fsm_agrees, now
         )
-        fan_mirror_duration, fan_mirror_sustained = self._shadow_diag_update_axis("fan_mirror", fan_mirror_agrees, now)
         classification_mirror_duration, classification_mirror_sustained = self._shadow_diag_update_axis(
             "classification_mirror", classification_mirror_agrees, now
         )
@@ -1852,9 +1789,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
             "override_grace_fsm_state": override_grace_fsm_state,
             "override_grace_mirror_agrees": override_grace_mirror_agrees,
             "override_grace_fsm_agrees": override_grace_fsm_agrees,
-            "fan_production_state": fan_production_state,
-            "fan_shadow_state": fan_shadow_state,
-            "fan_mirror_agrees": fan_mirror_agrees,
             "classification_production_state": classification_production_state,
             "classification_shadow_state": classification_shadow_state,
             "classification_mirror_agrees": classification_mirror_agrees,
@@ -1893,11 +1827,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     "disagreement_seconds": override_grace_fsm_duration,
                     "sustained": override_grace_fsm_sustained,
                     "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["override_grace_fsm"],
-                },
-                "fan_mirror": {
-                    "disagreement_seconds": fan_mirror_duration,
-                    "sustained": fan_mirror_sustained,
-                    "cumulative_seconds_today": self._shadow_diag_cumulative_seconds["fan_mirror"],
                 },
                 "classification_mirror": {
                     "disagreement_seconds": classification_mirror_duration,
@@ -2002,18 +1931,6 @@ class ClimateAdvisorCoordinator(DataUpdateCoordinator):
                     override_grace_fsm_duration,
                 )
                 self._shadow_diag_incident_emitted["override_grace_fsm"] = True
-        if fan_mirror_sustained:
-            _LOGGER.warning(
-                "Fan/WHF shadow engine disagreement (Issue #731): production=%s shadow=%s (sustained %.0fs)",
-                fan_production_state,
-                fan_shadow_state,
-                fan_mirror_duration,
-            )
-            if not self._shadow_diag_incident_emitted["fan_mirror"]:
-                self._emit_shadow_disagreement_incident(
-                    "fan_mirror", now, fan_production_state, fan_shadow_state, "shadow", fan_mirror_duration
-                )
-                self._shadow_diag_incident_emitted["fan_mirror"] = True
         if classification_mirror_sustained:
             _LOGGER.warning(
                 "Classification shadow engine disagreement (Issue #742): production=%s shadow=%s (sustained %.0fs)",

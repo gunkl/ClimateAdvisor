@@ -39,10 +39,14 @@ fan/WHF entry points dispatch through ``_resolve_fan_fsm_state()`` — including
 ``_reconcile_fan_physical_drift``, ``_thermo_backstop_task``,
 ``fan_thermostat_check``, and the former ``_resolve_whf_hvac_suppression()``
 call sites (that function was deleted and absorbed into the dispatcher).
-Gated by ``self._fan_fsm_authoritative`` — False runs the legacy closure
-byte-identical, True runs this module's ``transition()``. Two kinds
-(``STARTUP_RECONCILE``, ``USER_FAN_OFF``) are deliberately never dispatched;
-see their own inline comments in ``automation.py`` for why.
+**Graduated to sole implementation as of Issue #757 Step 2.** The legacy
+non-FSM closures at each of the 17 real call sites (and the
+``_fan_fsm_authoritative`` flag that gated between them) were removed once the
+FSM path had been production-authoritative since Phase 5 with zero divergence
+proven against the full golden+pending scenario corpus —
+``_resolve_fan_fsm_state()`` now always runs this module's ``transition()``.
+Two kinds (``STARTUP_RECONCILE``, ``USER_FAN_OFF``) are deliberately never
+dispatched; see their own inline comments in ``automation.py`` for why.
 
 **Deliberately not registered with ``lifecycle_dispatcher.py``, unlike
 nat-vent/door-window/override-grace (five-whys recorded here, Issue #735,
